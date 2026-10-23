@@ -1,4 +1,9 @@
-//! Typed application theme, resolved once. OKLCH source colors retain cached GPUI paint values.
+//! Typed application theme: fixed colour tokens for light and dark, resolved
+//! once per mode. OKLCH source colours retain cached GPUI paint values.
+//!
+//! Every colour the UI paints is a token from this module. Opacity never makes
+//! a new shade of a colour; it only serves the purposes named by [`Opacity`],
+//! plus animation fades ([`Oklch::fade`]).
 
 use std::sync::OnceLock;
 
@@ -20,17 +25,14 @@ pub struct SrgbComponents {
     pub a: f32,
 }
 
-/// An OKLCH source color with a cached GPUI paint conversion.
+/// An OKLCH token colour with a cached GPUI paint conversion. Only this
+/// module makes new colours; the rest of the app reads them from the theme.
 #[derive(Clone, Copy, Debug)]
 pub struct Oklch {
-    /// Perceptual lightness, `0..=1`.
-    pub l: f32,
-    /// Chroma, `>= 0`.
-    pub c: f32,
-    /// Hue angle in degrees.
-    pub h: f32,
-    /// Alpha, `0..=1`.
-    pub a: f32,
+    pub(crate) l: f32,
+    pub(crate) c: f32,
+    pub(crate) h: f32,
+    pub(crate) a: f32,
     paint: Option<([f32; 4], Hsla)>,
 }
 
@@ -40,10 +42,267 @@ impl PartialEq for Oklch {
     }
 }
 
+/// What opacity is for. Opacity never makes a lighter or darker shade of a
+/// colour; every shade is its own token.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Opacity {
+    /// A control, row or item that can't be used right now.
+    Disabled,
+    /// A material laid over content the app doesn't control (the composer).
+    Glass,
+    /// The stronger material of floating pickers, menus and tooltips.
+    GlassStrong,
+    /// Nothing: the far end of a fade.
+    Clear,
+    /// The near corner of the quiet glass face (composer, badges).
+    GlassFaceQuiet,
+    /// The far corner of the quiet glass face.
+    GlassFaceQuietFar,
+    /// The near corner of the strong glass face (pickers, tooltips).
+    GlassFaceStrong,
+    /// The far corner of the strong glass face.
+    GlassFaceStrongFar,
+    /// The faint text-coloured base laid under a glass face.
+    GlassBase,
+    /// The tabbed card's shell and strip panes over the transcript.
+    GlassPane,
+    /// The lit corner of the tabbed card's strip: a step-8 fill thinned to
+    /// the old S700 pane, so the strip stands a step above the shell.
+    GlassPaneLit,
+    /// The faintest top sheen on a glass pane (tab card faces).
+    SheenFaint,
+    /// A soft top sheen (tab card edge light).
+    SheenSoft,
+    /// The top sheen of quiet glass.
+    Sheen,
+    /// The top sheen of strong glass.
+    SheenStrong,
+    /// The bright outer top rim of a glass card.
+    RimLight,
+    /// The inner top rim light of a glass card.
+    RimInner,
+    /// The inner bottom rim shade of a glass card.
+    RimShade,
+    /// A hairline rule or ring drawn over glass or varying backdrops.
+    Hairline,
+    /// The faintest hairline ring (tab card edge).
+    HairlineFaint,
+    /// The top of the hover pill, laid over glass and varying surfaces.
+    HoverTop,
+    /// The bottom of the hover pill.
+    HoverBottom,
+    /// The hairline ring around the hover pill and chart hover bands.
+    HoverRing,
+    /// The border of a glass surface: a text-coloured edge over any backdrop.
+    GlassBorder,
+    /// The tinted fill behind a status chip or toned badge, in the tone's colour.
+    ToneTint,
+    /// An icon inside a coloured element: the element's text colour, slightly quieter.
+    ToneIcon,
+    /// Hairline rules, axes and outlines of rich content drawn over cards and data.
+    Rule,
+    /// A harness's colour laid over a message bubble its agent sent, leaning the fill toward it.
+    EngineLean,
+    /// The hairline edge in a harness's colour around a message its agent sent.
+    EngineEdge,
+    /// The unlit segments of a usage meter, drawn over a glass menu.
+    MeterTrack,
+    /// The unfilled track of a progress bar on a glass card.
+    ProgressTrack,
+    /// A picker tab whose engine needs installing or signing in first.
+    Unavailable,
+    /// The page-coloured backdrop a dialog lays over the app behind it.
+    Backdrop,
+    /// The black shade behind a bare dialog (image viewer), over any content.
+    Shade,
+    /// The near-opaque page backdrop behind the full-window image preview.
+    BackdropDense,
+    /// The hairline edge of a media frame, drawn against image content.
+    MediaEdge,
+    /// The focus halo around a focused control, over whatever surface holds it.
+    FocusRing,
+    /// The text-coloured edge around an inline colour swatch, against the swatch's own colour.
+    SwatchEdge,
+    /// Dim (SGR 2) terminal text in a colour the program chose: that colour, dimmed.
+    TerminalDim,
+    /// The icon glyph inside a mention pill, a touch quieter than the mention's text.
+    MentionGlyph,
+    /// The hover rule drawn across a chart's data.
+    ChartRule,
+    /// The drag-to-zoom selection band laid over a chart's data.
+    ChartSelection,
+    /// An annotation's rule over chart data, in the muted text colour.
+    AnnotationRule,
+    /// An event annotation's solid rule (and chart markers) over chart data.
+    EventRule,
+    /// An annotated range's band laid over chart data.
+    AnnotationBand,
+    /// A stacked area's fill, so the series beneath still reads.
+    AreaStacked,
+    /// An overlapping area's fill, so every series' area shows through the others.
+    Area,
+    /// A dashed reference line (equal share) drawn over a chart's fill, in the muted text colour.
+    ReferenceLine,
+    /// The quiet fill under a single curve, over the chart grid.
+    AreaQuiet,
+    /// Bars of several series overlaid in one bin, so each shows through the others.
+    Overlap,
+    /// A lone series' bars, a touch translucent over the grid.
+    BarSolo,
+    /// The box of a box plot, over its whisker and the grid.
+    BoxFill,
+    /// An outlier dot in a box plot, over the lane.
+    Outlier,
+    /// A legend entry whose series is hidden.
+    LegendHidden,
+    /// The page-coloured backing behind a label placed over chart data.
+    LabelBacking,
+    /// Chart items stepped back while another is hovered.
+    Dimmed,
+    /// A hierarchy leaf's fill in its branch colour.
+    TreemapLeaf,
+    /// A hovered hierarchy leaf's fill.
+    TreemapLeafHover,
+    /// A hierarchy group's faint fill in its branch colour.
+    TreemapGroup,
+    /// A hierarchy group's edge in its branch colour.
+    TreemapEdge,
+    /// A hierarchy group's header strip in its branch colour.
+    TreemapHeader,
+    /// A leaf of the focused node itself, in the text colour.
+    TreemapFocusLeaf,
+    /// A hovered leaf of the focused node itself.
+    TreemapFocusLeafHover,
+    /// The focused node's own group fill, in the text colour.
+    TreemapFocusGroup,
+    /// The focused node's own group edge.
+    TreemapFocusEdge,
+    /// The focused node's own header strip.
+    TreemapFocusHeader,
+    /// The readout swatch for the focused hierarchy node itself, in the text colour.
+    TreemapFocusSwatch,
+    /// A sankey node unrelated to the hovered one, stepped back.
+    NodeDimmed,
+    /// A sankey flow at rest, translucent so crossing flows show through.
+    Flow,
+    /// A sankey flow lit by the hover.
+    FlowLit,
+    /// A sankey flow unrelated to the hover, stepped back.
+    FlowDimmed,
+    /// A chart label unrelated to the hovered item, stepped back.
+    LabelDimmed,
+    /// A timeline span bar in its series colour, over the lane grid.
+    Span,
+    /// A hovered timeline span bar.
+    SpanHover,
+    /// A filled number badge in a tone's colour (the active annotation).
+    BadgeActive,
+    /// A number badge's tinted fill in a tone's colour at rest.
+    BadgeTint,
+    /// The left edge of a code line that owns an annotation, in the accent tone.
+    AnnotationEdge,
+    /// The tinted fill under a hovered annotation note.
+    NoteHover,
+    /// The tinted fill of a callout in its tone's colour.
+    CalloutTint,
+}
+
+impl Opacity {
+    /// The alpha this purpose paints at.
+    #[must_use]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "one arm per purpose so each alpha can be tuned on its own"
+    )]
+    pub const fn alpha(self) -> f32 {
+        match self {
+            Self::Disabled => 0.5,
+            Self::Glass => 0.72,
+            Self::GlassStrong => 0.86,
+            Self::Clear => 0.0,
+            Self::GlassFaceQuiet => 0.20,
+            Self::GlassFaceQuietFar => 0.14,
+            Self::GlassFaceStrong => 0.22,
+            Self::GlassFaceStrongFar => 0.16,
+            Self::GlassBase => 0.05,
+            Self::GlassPane => 0.62,
+            Self::GlassPaneLit => 0.30,
+            Self::SheenFaint => 0.035,
+            Self::SheenSoft => 0.04,
+            Self::Sheen => 0.05,
+            Self::SheenStrong => 0.08,
+            Self::RimLight => 0.14,
+            Self::RimInner => 0.10,
+            Self::RimShade => 0.22,
+            Self::Hairline => 0.08,
+            Self::HairlineFaint => 0.04,
+            Self::HoverTop => 0.16,
+            Self::HoverBottom => 0.07,
+            Self::HoverRing => 0.13,
+            Self::GlassBorder => 0.10,
+            Self::ToneTint => 0.10,
+            Self::ToneIcon => 0.8,
+            Self::Rule => 0.10,
+            Self::EngineLean => 0.14,
+            Self::EngineEdge => 0.35,
+            Self::MeterTrack => 0.11,
+            Self::ProgressTrack => 0.18,
+            Self::Unavailable => 0.35,
+            Self::Backdrop => 0.9,
+            Self::Shade => 0.45,
+            Self::BackdropDense => 0.97,
+            Self::MediaEdge => 0.12,
+            Self::FocusRing => 0.5,
+            Self::SwatchEdge => 0.22,
+            Self::TerminalDim => 0.6,
+            Self::MentionGlyph => 0.85,
+            Self::ChartRule => 0.3,
+            Self::ChartSelection => 0.08,
+            Self::AnnotationRule => 0.7,
+            Self::EventRule => 0.55,
+            Self::AnnotationBand => 0.06,
+            Self::AreaStacked => 0.55,
+            Self::Area => 0.22,
+            Self::ReferenceLine => 0.5,
+            Self::AreaQuiet => 0.14,
+            Self::Overlap => 0.5,
+            Self::BarSolo => 0.85,
+            Self::BoxFill => 0.25,
+            Self::Outlier => 0.8,
+            Self::LegendHidden => 0.35,
+            Self::LabelBacking => 0.7,
+            Self::Dimmed => 0.45,
+            Self::TreemapLeaf => 0.5,
+            Self::TreemapLeafHover => 0.72,
+            Self::TreemapGroup => 0.08,
+            Self::TreemapEdge => 0.35,
+            Self::TreemapHeader => 0.22,
+            Self::TreemapFocusLeaf => 0.1,
+            Self::TreemapFocusLeafHover => 0.144,
+            Self::TreemapFocusGroup => 0.016,
+            Self::TreemapFocusEdge => 0.07,
+            Self::TreemapFocusHeader => 0.044,
+            Self::TreemapFocusSwatch => 0.2,
+            Self::NodeDimmed => 0.3,
+            Self::Flow => 0.32,
+            Self::FlowLit => 0.6,
+            Self::FlowDimmed => 0.08,
+            Self::LabelDimmed => 0.4,
+            Self::Span => 0.55,
+            Self::SpanHover => 0.75,
+            Self::BadgeActive => 0.9,
+            Self::BadgeTint => 0.18,
+            Self::AnnotationEdge => 0.3,
+            Self::NoteHover => 0.08,
+            Self::CalloutTint => 0.07,
+        }
+    }
+}
+
 impl Oklch {
     /// Constructs an opaque OKLCH color.
     #[must_use]
-    pub const fn new(l: f32, c: f32, h: f32) -> Self {
+    pub(crate) const fn new(l: f32, c: f32, h: f32) -> Self {
         Self {
             l,
             c,
@@ -55,7 +314,7 @@ impl Oklch {
 
     /// The same color at an explicit alpha (`oklch(.. / A)`).
     #[must_use]
-    pub const fn with_alpha(mut self, a: f32) -> Self {
+    pub(crate) const fn with_alpha(mut self, a: f32) -> Self {
         self.a = a;
         if let Some((mut source, mut paint)) = self.paint {
             source[3] = a;
@@ -63,6 +322,60 @@ impl Oklch {
             self.paint = Some((source, paint));
         }
         self
+    }
+
+    /// This token painted for one of the purposes opacity serves.
+    #[must_use]
+    pub const fn at(self, purpose: Opacity) -> Self {
+        self.with_alpha(self.a * purpose.alpha())
+    }
+
+    /// This token's lightness and alpha in `family`'s hue. The family's
+    /// chroma comes along: a neutral token has none to carry a hue.
+    #[must_use]
+    pub const fn in_hue_of(self, family: Self) -> Self {
+        Self {
+            c: family.c,
+            h: family.h,
+            paint: None,
+            ..self
+        }
+    }
+
+    /// This token part-way through a fade in or out: `amount` is the
+    /// animation's current visibility, `0` gone and `1` fully shown. Only
+    /// for values that change over time, never a fixed shade.
+    #[must_use]
+    pub fn fade(self, amount: f32) -> Self {
+        self.with_alpha(self.a * amount.clamp(0.0, 1.0))
+    }
+
+    /// Part-way from this token to `to` while an animation moves between
+    /// them; `progress` runs `0..=1`. Never a resting colour.
+    #[must_use]
+    pub fn animate_to(self, to: Self, progress: f32) -> Self {
+        let t = progress.clamp(0.0, 1.0);
+        if t <= 0.0 {
+            return self;
+        }
+        if t >= 1.0 {
+            return to;
+        }
+        let from = if self.c < 1e-4 { to.h } else { self.h };
+        let target = if to.c < 1e-4 { from } else { to.h };
+        let delta = (target - from + 540.0) % 360.0 - 180.0;
+        Self::new(
+            (to.l - self.l).mul_add(t, self.l),
+            (to.c - self.c).mul_add(t, self.c),
+            (from + delta * t).rem_euclid(360.0),
+        )
+        .with_alpha((to.a - self.a).mul_add(t, self.a))
+    }
+
+    /// The token's alpha.
+    #[must_use]
+    pub const fn alpha(self) -> f32 {
+        self.a
     }
 
     /// Convert through the shared color library, clamping only display channels.
@@ -85,37 +398,14 @@ impl Oklch {
     /// that mapping is bijective for in-gamut colors, so GPUI's own paint-time
     /// HSL→RGB reproduces the pinned sRGB within float precision.
     #[must_use]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the cached paint is valid only for the exact source it was built from"
+    )]
     pub fn to_paint(self) -> Hsla {
         match self.paint {
             Some((source, paint)) if source == [self.l, self.c, self.h, self.a] => paint,
             _ => srgb_to_hsla(self.to_srgb()),
-        }
-    }
-
-    /// An opaque sRGB colour (`0xRRGGBB`) as its OKLCH source value. Paint
-    /// keeps the exact sRGB bytes, so native chrome renders the hex as given.
-    #[must_use]
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "each sRGB channel is a masked byte, so the conversion is exact"
-    )]
-    pub fn from_srgb_hex(hex: u32) -> Self {
-        let channel = |shift: u32| ((hex >> shift) & 0xff) as f32 / 255.0;
-        let srgb = SrgbComponents {
-            r: channel(16),
-            g: channel(8),
-            b: channel(0),
-            a: 1.0,
-        };
-        let oklch = color::AlphaColor::<color::Srgb>::new([srgb.r, srgb.g, srgb.b, srgb.a])
-            .convert::<color::Oklch>()
-            .components;
-        Self {
-            l: oklch[0],
-            c: oklch[1],
-            h: oklch[2],
-            a: oklch[3],
-            paint: Some((oklch, srgb_to_hsla(srgb))),
         }
     }
 
@@ -130,300 +420,587 @@ fn srgb_to_hsla(c: SrgbComponents) -> Hsla {
     gpui::rgb_to_hsla(gpui::Rgba::new(c.r, c.g, c.b, c.a))
 }
 
-/// Shared neutral surface ramp from white (S0) to black (S1000).
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum SurfaceStep {
-    /// `--surface-0` — `oklch(1 0 0)`.
-    S0,
-    /// `--surface-25` — `oklch(0.9925 0 0)`.
-    S25,
-    /// `--surface-50` — `oklch(0.985 0 0)`.
-    S50,
-    /// `--surface-75` — `oklch(0.976 0.0005 286.375)`.
-    S75,
-    /// `--surface-100` — `oklch(0.967 0.001 286.375)`.
-    S100,
-    /// `--surface-125` — `oklch(0.9552 0.0018 286.361)`.
-    S125,
-    /// `--surface-150` — `oklch(0.9435 0.0025 286.347)`.
-    S150,
-    /// `--surface-175` — `oklch(0.9318 0.0033 286.334)`.
-    S175,
-    /// `--surface-200` — `oklch(0.92 0.004 286.32)`.
-    S200,
-    /// `--surface-225` — `oklch(0.9078 0.0045 286.312)`.
-    S225,
-    /// `--surface-250` — `oklch(0.8955 0.005 286.303)`.
-    S250,
-    /// `--surface-275` — `oklch(0.8832 0.0055 286.294)`.
-    S275,
-    /// `--surface-300` — `oklch(0.871 0.006 286.286)`.
-    S300,
-    /// `--surface-325` — `oklch(0.8295 0.0083 286.231)`.
-    S325,
-    /// `--surface-350` — `oklch(0.788 0.0105 286.177)`.
-    S350,
-    /// `--surface-375` — `oklch(0.7465 0.0127 286.122)`.
-    S375,
-    /// `--surface-400` — `oklch(0.705 0.015 286.067)`.
-    S400,
-    /// `--surface-425` — `oklch(0.6667 0.0152 286.035)`.
-    S425,
-    /// `--surface-450` — `oklch(0.6285 0.0155 286.002)`.
-    S450,
-    /// `--surface-475` — `oklch(0.5903 0.0158 285.97)`.
-    S475,
-    /// `--surface-500` — `oklch(0.552 0.016 285.938)`.
-    S500,
-    /// `--surface-525` — `oklch(0.5245 0.0163 285.9)`.
-    S525,
-    /// `--surface-550` — `oklch(0.497 0.0165 285.862)`.
-    S550,
-    /// `--surface-575` — `oklch(0.4695 0.0168 285.824)`.
-    S575,
-    /// `--surface-600` — `oklch(0.442 0.017 285.786)`.
-    S600,
-    /// `--surface-625` — `oklch(0.424 0.016 285.791)`.
-    S625,
-    /// `--surface-650` — `oklch(0.406 0.015 285.796)`.
-    S650,
-    /// `--surface-675` — `oklch(0.388 0.014 285.8)`.
-    S675,
-    /// `--surface-700` — `oklch(0.37 0.013 285.805)`.
-    S700,
-    /// `--surface-725` — `oklch(0.346 0.0112 285.862)`.
-    S725,
-    /// `--surface-750` — `oklch(0.322 0.0095 285.919)`.
-    S750,
-    /// `--surface-775` — `oklch(0.298 0.0077 285.976)`.
-    S775,
-    /// `--surface-800` — `oklch(0.274 0.006 286.033)`.
-    S800,
-    /// `--surface-825` — `oklch(0.258 0.006 285.996)`.
-    S825,
-    /// `--surface-850` — `oklch(0.242 0.006 285.959)`.
-    S850,
-    /// `--surface-875` — `oklch(0.226 0.006 285.922)`.
-    S875,
-    /// `--surface-900` — `oklch(0.21 0.006 285.885)`.
-    S900,
-    /// `--surface-925` — `oklch(0.1755 0.0055 285.854)`.
-    S925,
-    /// `--surface-950` — `oklch(0.141 0.005 285.823)`.
-    S950,
-    /// `--surface-975` — `oklch(0.0705 0.0025 285.823)`.
-    S975,
-    /// `--surface-1000` — `oklch(0 0 0)`.
-    S1000,
+/// Light or dark.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ThemeMode {
+    /// Dark text on light surfaces.
+    Light,
+    /// Light text on dark surfaces.
+    #[default]
+    Dark,
 }
 
-impl SurfaceStep {
-    /// Every ramp step in ascending source order.
-    pub const ALL: [SurfaceStep; 41] = [
-        Self::S0,
-        Self::S25,
-        Self::S50,
-        Self::S75,
-        Self::S100,
-        Self::S125,
-        Self::S150,
-        Self::S175,
-        Self::S200,
-        Self::S225,
-        Self::S250,
-        Self::S275,
-        Self::S300,
-        Self::S325,
-        Self::S350,
-        Self::S375,
-        Self::S400,
-        Self::S425,
-        Self::S450,
-        Self::S475,
-        Self::S500,
-        Self::S525,
-        Self::S550,
-        Self::S575,
-        Self::S600,
-        Self::S625,
-        Self::S650,
-        Self::S675,
-        Self::S700,
-        Self::S725,
-        Self::S750,
-        Self::S775,
-        Self::S800,
-        Self::S825,
-        Self::S850,
-        Self::S875,
-        Self::S900,
-        Self::S925,
-        Self::S950,
-        Self::S975,
-        Self::S1000,
-    ];
-
-    /// The OKLCH source value for this surface step.
+impl ThemeMode {
+    /// The other mode.
     #[must_use]
-    pub fn oklch(self) -> Oklch {
-        static COLORS: OnceLock<[Oklch; 41]> = OnceLock::new();
-        COLORS.get_or_init(|| Self::ALL.map(|step| step.source().resolved()))[self as usize]
-    }
-
-    const fn source(self) -> Oklch {
+    pub const fn toggled(self) -> Self {
         match self {
-            Self::S0 => Oklch::new(1.0, 0.0, 0.0),
-            Self::S25 => Oklch::new(0.9925, 0.0, 0.0),
-            Self::S50 => Oklch::new(0.985, 0.0, 0.0),
-            Self::S75 => Oklch::new(0.976, 0.0005, 286.375),
-            Self::S100 => Oklch::new(0.967, 0.001, 286.375),
-            Self::S125 => Oklch::new(0.9552, 0.0018, 286.361),
-            Self::S150 => Oklch::new(0.9435, 0.0025, 286.347),
-            Self::S175 => Oklch::new(0.9318, 0.0033, 286.334),
-            Self::S200 => Oklch::new(0.92, 0.004, 286.32),
-            Self::S225 => Oklch::new(0.9078, 0.0045, 286.312),
-            Self::S250 => Oklch::new(0.8955, 0.005, 286.303),
-            Self::S275 => Oklch::new(0.8832, 0.0055, 286.294),
-            Self::S300 => Oklch::new(0.871, 0.006, 286.286),
-            Self::S325 => Oklch::new(0.8295, 0.0083, 286.231),
-            Self::S350 => Oklch::new(0.788, 0.0105, 286.177),
-            Self::S375 => Oklch::new(0.7465, 0.0127, 286.122),
-            Self::S400 => Oklch::new(0.705, 0.015, 286.067),
-            Self::S425 => Oklch::new(0.6667, 0.0152, 286.035),
-            Self::S450 => Oklch::new(0.6285, 0.0155, 286.002),
-            Self::S475 => Oklch::new(0.5903, 0.0158, 285.97),
-            Self::S500 => Oklch::new(0.552, 0.016, 285.938),
-            Self::S525 => Oklch::new(0.5245, 0.0163, 285.9),
-            Self::S550 => Oklch::new(0.497, 0.0165, 285.862),
-            Self::S575 => Oklch::new(0.4695, 0.0168, 285.824),
-            Self::S600 => Oklch::new(0.442, 0.017, 285.786),
-            Self::S625 => Oklch::new(0.424, 0.016, 285.791),
-            Self::S650 => Oklch::new(0.406, 0.015, 285.796),
-            Self::S675 => Oklch::new(0.388, 0.014, 285.8),
-            Self::S700 => Oklch::new(0.37, 0.013, 285.805),
-            Self::S725 => Oklch::new(0.346, 0.0112, 285.862),
-            Self::S750 => Oklch::new(0.322, 0.0095, 285.919),
-            Self::S775 => Oklch::new(0.298, 0.0077, 285.976),
-            Self::S800 => Oklch::new(0.274, 0.006, 286.033),
-            Self::S825 => Oklch::new(0.258, 0.006, 285.996),
-            Self::S850 => Oklch::new(0.242, 0.006, 285.959),
-            Self::S875 => Oklch::new(0.226, 0.006, 285.922),
-            Self::S900 => Oklch::new(0.21, 0.006, 285.885),
-            Self::S925 => Oklch::new(0.1755, 0.0055, 285.854),
-            Self::S950 => Oklch::new(0.141, 0.005, 285.823),
-            Self::S975 => Oklch::new(0.0705, 0.0025, 285.823),
-            Self::S1000 => Oklch::new(0.0, 0.0, 0.0),
+            Self::Light => Self::Dark,
+            Self::Dark => Self::Light,
         }
     }
+
+    /// Whether this is the dark mode.
+    #[must_use]
+    pub const fn is_dark(self) -> bool {
+        matches!(self, Self::Dark)
+    }
 }
 
-/// Semantic colors, including the native workspace chrome roles.
+/// A 12-step scale. Steps 1–2 are backgrounds, 3–5 component fills (rest,
+/// hover, pressed), 6–8 borders and focus rings, 9–10 solid fills and
+/// 11–12 text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scale([Oklch; 12]);
+
+impl Scale {
+    /// Step `n` of the scale, `1..=12`.
+    ///
+    /// # Panics
+    ///
+    /// `n` is outside `1..=12`.
+    #[must_use]
+    pub const fn step(&self, n: usize) -> Oklch {
+        assert!(n >= 1 && n <= 12, "scale steps run 1..=12");
+        self.0[n - 1]
+    }
+}
+
+/// A status hue: steps 3, 6, 9 and 11 of its scale plus the text colour
+/// that reads on its solid step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StatusScale {
+    /// Step 3: a tinted background (banners, badges, diff lines).
+    pub bg: Oklch,
+    /// Step 6: the border around that background.
+    pub border: Oklch,
+    /// Step 9: a solid fill (buttons, dots, bars).
+    pub solid: Oklch,
+    /// Step 11: text and icons in this hue.
+    pub text: Oklch,
+    /// Text and icons on [`Self::solid`].
+    pub contrast: Oklch,
+}
+
+/// A banner's three colours: background, border, and text and icons.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BannerColors {
+    /// `--banner-*-bg`.
+    pub bg: Oklch,
+    /// `--banner-*-border`.
+    pub border: Oklch,
+    /// `--banner-*-text`, also its icons.
+    pub text: Oklch,
+}
+
+/// Code highlighting roles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SyntaxColors {
+    /// `--syntax-comment`.
+    pub comment: Oklch,
+    /// `--syntax-string`.
+    pub string: Oklch,
+    /// `--syntax-number`.
+    pub number: Oklch,
+    /// `--syntax-keyword`.
+    pub keyword: Oklch,
+    /// `--syntax-type`.
+    pub r#type: Oklch,
+    /// `--syntax-function`.
+    pub function: Oklch,
+}
+
+/// The sixteen terminal colours, in ANSI order: black, red, green, yellow,
+/// blue, magenta, cyan, white, then the bright eight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnsiColors(pub [Oklch; 16]);
+
+/// Every colour token. The scales and fixed colours are the palette; the
+/// fields below them are named roles, each one of those tokens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorTokens {
-    /// `--background`.
+    /// Which mode these tokens belong to.
+    pub mode: ThemeMode,
+    /// `--gray-1` … `--gray-12`.
+    pub gray: Scale,
+    /// `--accent-1` … `--accent-12`.
+    pub accent: Scale,
+    /// `--accent-contrast`: text and icons on accent steps 9–10.
+    pub accent_contrast: Oklch,
+    /// `--red-*`.
+    pub red: StatusScale,
+    /// `--amber-*`.
+    pub amber: StatusScale,
+    /// `--green-*`.
+    pub green: StatusScale,
+    /// `--link`: links, and anything that reads as "open" or "chosen" text.
+    pub link: Oklch,
+    /// `--black`.
+    pub black: Oklch,
+    /// White: the light that catches glass and card edges (always white,
+    /// in both modes).
+    pub white: Oklch,
+    /// `--scrim`: the backdrop behind a modal dialog.
+    pub scrim: Oklch,
+    /// `--shadow-color`.
+    pub shadow: Oklch,
+    /// `--palette-1` … `--palette-8`: data colours (chart series, avatars),
+    /// never UI.
+    pub palette: [Oklch; 8],
+    /// Claude's clay: a brand colour the theme never changes.
+    pub claude: Oklch,
+    /// `--ansi-*`: terminal output.
+    pub ansi: AnsiColors,
+
+    /// The window frame around the content card: the titlebar and the
+    /// rail, darker than the card in both modes.
+    pub frame: Oklch,
+    /// The content card the screens draw on.
     pub background: Oklch,
-    /// `--foreground-base`, the pure ramp endpoint text color derives from.
-    pub foreground_base: Oklch,
-    /// `--foreground`: `color-mix(in oklch, base 90%, background)` resolved
-    /// per CSS Color 4 powerless-hue rules (see `ArtisanTheme::colors`).
-    pub foreground: Oklch,
-    /// `--foreground-extra`.
-    pub foreground_extra: Oklch,
-    /// `--highlight`, tint source of hairlines and inset edges.
-    pub highlight: Oklch,
-    /// `--card`.
-    pub card: Oklch,
-    /// `--card-foreground`.
-    pub card_foreground: Oklch,
-    /// `--popover`.
-    pub popover: Oklch,
-    /// `--popover-foreground`.
-    pub popover_foreground: Oklch,
-    /// `--primary`.
-    pub primary: Oklch,
-    /// `--primary-foreground`.
-    pub primary_foreground: Oklch,
-    /// `--secondary`.
-    pub secondary: Oklch,
-    /// `--secondary-foreground`.
-    pub secondary_foreground: Oklch,
-    /// `--muted`.
-    pub muted: Oklch,
-    /// `--muted-foreground`.
-    pub muted_foreground: Oklch,
-    /// `--accent`.
-    pub accent: Oklch,
-    /// `--accent-foreground`.
-    pub accent_foreground: Oklch,
-    /// `--destructive`.
-    pub destructive: Oklch,
-    /// `--banner-info`.
-    pub banner_info: Oklch,
-    /// `--banner-error`.
-    pub banner_error: Oklch,
-    /// `--banner-warning`.
-    pub banner_warning: Oklch,
-    /// `--banner-success`.
-    pub banner_success: Oklch,
-    /// `--favorite`: a star reads as gold, not warning.
-    pub favorite: Oklch,
-    /// `--unread`: sky reads as new, not alarm.
-    pub unread: Oklch,
-    /// `--question-from`: purple reads as "your turn".
-    pub question_from: Oklch,
-    /// `--question-to`.
-    pub question_to: Oklch,
-    /// A skill named in the composer: purple-pink, apart from links.
-    pub mention_skill: Oklch,
-    /// A connector (MCP server) named in the composer: link blue.
-    pub mention_connector: Oklch,
-    /// A command named in the composer: amber, read as an instruction.
-    pub mention_command: Oklch,
-    /// `--border`.
-    pub border: Oklch,
-    /// `--input`.
-    pub input: Oklch,
-    /// `--ring`.
-    pub ring: Oklch,
-    /// `--chart-1` … `--chart-5` (:44–48 / :295–299).
-    pub charts: [Oklch; 5],
-    /// Native titlebar and outer chrome background (`#0a0a0a`).
-    pub chrome: Oklch,
-    /// Main workspace background (`#0a0a0a`).
-    pub workspace: Oklch,
-    /// Sidebar and composer surface (`#111111`).
-    pub sidebar: Oklch,
-    /// Workspace hairline rules (`#292929`).
-    pub line: Oklch,
-    /// Workspace primary text (`#ededed`).
-    pub workspace_foreground: Oklch,
-    /// Workspace secondary text (`#a1a1a1`).
-    pub workspace_secondary: Oklch,
-    /// Selected row background (`#242424`).
+    /// Cards, fields and the composer.
+    pub surface: Oklch,
+    /// Popovers, menus, and a component's resting fill.
+    pub raised: Oklch,
+    /// What the pointer is over.
+    pub hover: Oklch,
+    /// The chosen row of a list or menu.
     pub selected: Oklch,
-    /// Primary action background (`#ededed`).
-    pub primary_action: Oklch,
-    /// Primary action foreground (`#0a0a0a`).
-    pub primary_action_foreground: Oklch,
-    /// Search and composer input surface (`#171717`).
-    pub field: Oklch,
-    /// Input border (`#333333`).
-    pub field_line: Oklch,
-    /// Search result surface border (`#383838`).
-    pub popover_line: Oklch,
-    /// Keyboard shortcut capsule border (`#3a3a3a`).
-    pub shortcut_line: Oklch,
+    /// A fill while pressed.
+    pub pressed: Oklch,
+    /// Hairlines, dividers and field borders.
+    pub line: Oklch,
+    /// Borders that must hold on any surface.
+    pub line_strong: Oklch,
+    /// Primary text and icons.
+    pub text: Oklch,
+    /// Secondary text and icons.
+    pub text_muted: Oklch,
+    /// Placeholders, comments and other faint text.
+    pub text_faint: Oklch,
+    /// Accent 8: the focus ring.
+    pub ring: Oklch,
+    /// Accent 6: selected text.
+    pub text_selection: Oklch,
+    /// Accent 9: the primary button.
+    pub primary: Oklch,
+    /// Accent 10: the primary button under the pointer.
+    pub primary_hover: Oklch,
+    /// `--accent-contrast`: text on the primary button.
+    pub primary_text: Oklch,
+    /// The accent button's fill, lit from above: lighter blue at the top,
+    /// darker at the foot.
+    pub action_top: Oklch,
+    pub action_bottom: Oklch,
+    /// The accent button under the pointer, a step lighter.
+    pub action_hover_top: Oklch,
+    pub action_hover_bottom: Oklch,
+    /// Text and icons on the accent button.
+    pub action_text: Oklch,
+    /// `--destructive`: red 9, solid fills.
+    pub destructive: Oklch,
+    /// `--destructive-text`: red 11, error text and icons.
+    pub destructive_text: Oklch,
+    /// `--destructive-contrast`: text on a destructive fill.
+    pub destructive_contrast: Oklch,
+    /// `--banner-info-*`.
+    pub banner_info: BannerColors,
+    /// `--banner-warning-*`.
+    pub banner_warning: BannerColors,
+    /// `--banner-success-*`.
+    pub banner_success: BannerColors,
+    /// `--banner-error-*`.
+    pub banner_error: BannerColors,
+    /// `--favourite`: a star.
+    pub favourite: Oklch,
+    /// `--unread`: a thread with news.
+    pub unread: Oklch,
+    /// `--question-tint`: a question waiting on the user.
+    pub question_tint: Oklch,
+    /// `--thread-title-active`: the open thread's title.
+    pub thread_title_active: Oklch,
+    /// `--mention-skill`.
+    pub mention_skill: Oklch,
+    /// `--mention-connector`.
+    pub mention_connector: Oklch,
+    /// `--mention-command`.
+    pub mention_command: Oklch,
+    /// `--syntax-*`.
+    pub syntax: SyntaxColors,
+}
+
+/// Polar's colour primitives, copied from polarsource/polar: the Orbit design
+/// system's value tier (`clients/packages/orbit/src/tokens/value.stylex.ts`),
+/// the web app's `@theme` (`clients/apps/web/src/styles/globals.css`) and the
+/// dashboard's chart colours. Tailwind values are its OKLCH source; the
+/// `polar` ramp and the chart hexes are converted from their sRGB.
+mod polar {
+    type Lch = (f32, f32, f32);
+
+    pub const WHITE: Lch = (1.0, 0.0, 0.0);
+    pub const BLACK: Lch = (0.0, 0.0, 0.0);
+
+    // Light-mode neutrals (cool gray ramp).
+    pub const GRAY_50: Lch = (0.985, 0.002, 247.839);
+    pub const GRAY_100: Lch = (0.967, 0.003, 264.542);
+    pub const GRAY_200: Lch = (0.928, 0.006, 264.531);
+    pub const GRAY_300: Lch = (0.872, 0.01, 258.338);
+    pub const GRAY_400: Lch = (0.707, 0.022, 261.325);
+    pub const GRAY_500: Lch = (0.551, 0.027, 264.364);
+    pub const GRAY_600: Lch = (0.446, 0.03, 256.802);
+    pub const GRAY_900: Lch = (0.21, 0.034, 264.665);
+
+    // Dark-mode neutrals: hsl(0, 0%, 85% … 3.5%).
+    pub const POLAR_50: Lch = (0.8845, 0.0, 0.0);
+    pub const POLAR_100: Lch = (0.8373, 0.0, 0.0);
+    // hsl(0, 0%, 63%): muted text, a step brighter than 400.
+    pub const POLAR_300: Lch = (0.7090, 0.0, 0.0);
+    pub const POLAR_400: Lch = (0.6154, 0.0, 0.0);
+    pub const POLAR_500: Lch = (0.5634, 0.0, 0.0);
+    pub const POLAR_600: Lch = (0.2801, 0.0, 0.0);
+    pub const POLAR_700: Lch = (0.2484, 0.0, 0.0);
+    pub const POLAR_800: Lch = (0.2100, 0.0, 0.0);
+    pub const POLAR_900: Lch = (0.1757, 0.0, 0.0);
+    pub const POLAR_950: Lch = (0.1394, 0.0, 0.0);
+
+    // Emerald: success.
+    pub const EMERALD_50: Lch = (0.979, 0.021, 166.113);
+    pub const EMERALD_300: Lch = (0.845, 0.143, 164.978);
+    pub const EMERALD_400: Lch = (0.765, 0.177, 163.223);
+    pub const EMERALD_500: Lch = (0.696, 0.17, 162.48);
+    pub const EMERALD_600: Lch = (0.596, 0.145, 163.225);
+    pub const EMERALD_700: Lch = (0.508, 0.118, 165.612);
+    pub const EMERALD_950: Lch = (0.262, 0.051, 172.552);
+
+    // Red: danger.
+    pub const RED_50: Lch = (0.971, 0.013, 17.38);
+    pub const RED_300: Lch = (0.808, 0.114, 19.571);
+    pub const RED_400: Lch = (0.704, 0.191, 22.216);
+    pub const RED_500: Lch = (0.637, 0.237, 25.331);
+    pub const RED_600: Lch = (0.577, 0.245, 27.325);
+    pub const RED_700: Lch = (0.505, 0.213, 27.518);
+    pub const RED_950: Lch = (0.258, 0.092, 26.042);
+
+    // Amber: warning.
+    pub const AMBER_50: Lch = (0.987, 0.022, 95.277);
+    pub const AMBER_300: Lch = (0.879, 0.169, 91.605);
+    pub const AMBER_400: Lch = (0.828, 0.189, 84.429);
+    pub const AMBER_500: Lch = (0.769, 0.188, 70.08);
+    pub const AMBER_600: Lch = (0.666, 0.179, 58.318);
+    pub const AMBER_700: Lch = (0.555, 0.163, 48.998);
+    pub const AMBER_950: Lch = (0.279, 0.077, 45.635);
+
+    // Indigo: accent, brand and info.
+    pub const INDIGO_50: Lch = (0.962, 0.018, 272.314);
+    pub const INDIGO_100: Lch = (0.93, 0.034, 272.788);
+    pub const INDIGO_200: Lch = (0.87, 0.065, 274.039);
+    pub const INDIGO_300: Lch = (0.785, 0.115, 274.713);
+    pub const INDIGO_400: Lch = (0.673, 0.182, 276.935);
+    pub const INDIGO_500: Lch = (0.585, 0.233, 277.117);
+    pub const INDIGO_600: Lch = (0.511, 0.262, 276.966);
+    pub const INDIGO_700: Lch = (0.457, 0.24, 277.023);
+    pub const INDIGO_800: Lch = (0.398, 0.195, 277.366);
+    pub const INDIGO_900: Lch = (0.359, 0.144, 278.697);
+    pub const INDIGO_950: Lch = (0.257, 0.09, 281.288);
+
+    // Blue: links, focus and the blue pill.
+    pub const BLUE_100: Lch = (0.932, 0.032, 255.585);
+    pub const BLUE_200: Lch = (0.882, 0.059, 254.128);
+    pub const BLUE_300: Lch = (0.809, 0.105, 251.813);
+    pub const BLUE_400: Lch = (0.707, 0.165, 254.624);
+    pub const BLUE_500: Lch = (0.623, 0.214, 259.815);
+    pub const BLUE_600: Lch = (0.546, 0.245, 262.881);
+    pub const BLUE_700: Lch = (0.488, 0.243, 264.376);
+    pub const BLUE_900: Lch = (0.379, 0.146, 265.522);
+
+    // Purple: the purple pill.
+    pub const PURPLE_300: Lch = (0.827, 0.119, 306.383);
+    pub const PURPLE_400: Lch = (0.714, 0.203, 305.504);
+    pub const PURPLE_600: Lch = (0.558, 0.288, 302.321);
+    pub const PURPLE_700: Lch = (0.496, 0.265, 301.924);
+
+    // Cyan: Tailwind's defaults, which Polar inherits but never overrides.
+    pub const CYAN_300: Lch = (0.865, 0.127, 207.078);
+    pub const CYAN_400: Lch = (0.789, 0.154, 211.53);
+    pub const CYAN_600: Lch = (0.609, 0.126, 221.723);
+    pub const CYAN_700: Lch = (0.52, 0.105, 223.128);
+
+    /// Claude's clay, #D97757: a brand colour, the same in both modes.
+    pub const CLAUDE_CLAY: Lch = (0.6724, 0.1308, 38.76);
+
+    /// The dashboard's categorical chart colours (cancellation reasons):
+    /// #EF765F, #F3AB71, #F0C289, #8ED6B9, #618BE6, #2A459D, #EF8EB0, #CEC7C7.
+    pub const CHART: [Lch; 8] = [
+        (0.7019, 0.1540, 32.23),
+        (0.7979, 0.1127, 59.06),
+        (0.8418, 0.0902, 72.08),
+        (0.8204, 0.0834, 167.10),
+        (0.6482, 0.1443, 264.09),
+        (0.4236, 0.1469, 266.98),
+        (0.7578, 0.1234, 357.99),
+        (0.8353, 0.0078, 17.31),
+    ];
+}
+
+/// The largest chroma up to `c` that sRGB shows at this lightness and hue.
+/// Tailwind's ramps reach into Display P3; a browser on an sRGB screen maps
+/// them back the same way rather than clipping channels.
+fn in_gamut((l, c, h): (f32, f32, f32)) -> (f32, f32, f32) {
+    let fits = |c: f32| {
+        color::AlphaColor::<color::Oklch>::new([l, c, h, 1.0])
+            .convert::<color::Srgb>()
+            .components[..3]
+            .iter()
+            .all(|channel| (-1e-4..=1.0 + 1e-4).contains(channel))
+    };
+    if fits(c) {
+        return (l, c, h);
+    }
+    let (mut low, mut high) = (0.0_f32, c);
+    for _ in 0..24 {
+        let mid = f32::midpoint(low, high);
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    (l, low, h)
+}
+
+fn token(lch: (f32, f32, f32)) -> Oklch {
+    let (l, c, h) = in_gamut(lch);
+    Oklch::new(l, c, h).resolved()
+}
+
+impl ColorTokens {
+    /// Polar's tokens in one mode.
+    ///
+    /// Where Orbit names the role (backgrounds,
+    /// text, borders, status) its semantic token is used as is; where only a
+    /// component shows it (hover, selected, focus, primary button) that
+    /// component's classes; and where Polar has nothing (pressed, terminal,
+    /// syntax, selection) the nearest Polar colour with the same intent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat table of every colour token reads best in one place"
+    )]
+    fn build(mode: ThemeMode) -> Self {
+        use polar::{
+            AMBER_50, AMBER_300, AMBER_400, AMBER_500, AMBER_600, AMBER_700, AMBER_950, BLACK,
+            BLUE_100, BLUE_200, BLUE_300, BLUE_400, BLUE_500, BLUE_600, BLUE_700, BLUE_900, CHART,
+            CLAUDE_CLAY, CYAN_300, CYAN_400, CYAN_600, CYAN_700, EMERALD_50, EMERALD_300,
+            EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700, EMERALD_950, GRAY_50, GRAY_100,
+            GRAY_200, GRAY_300, GRAY_400, GRAY_500, GRAY_600, GRAY_900, INDIGO_50, INDIGO_100,
+            INDIGO_200, INDIGO_300, INDIGO_400, INDIGO_500, INDIGO_600, INDIGO_700, INDIGO_800,
+            INDIGO_900, INDIGO_950, POLAR_50, POLAR_100, POLAR_300, POLAR_400, POLAR_500,
+            POLAR_600, POLAR_700, POLAR_800, POLAR_900, POLAR_950, PURPLE_300, PURPLE_400,
+            PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400, RED_500, RED_600, RED_700, RED_950,
+            WHITE,
+        };
+        let dark = mode.is_dark();
+        let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
+            token(if dark { dark_value } else { light })
+        };
+        let ramp = |light: [(f32, f32, f32); 12], dark_value: [(f32, f32, f32); 12]| {
+            Scale(if dark { dark_value } else { light }.map(token))
+        };
+        // Radix-style steps over Polar's ramps: 1–2 backgrounds, 3–5 fills,
+        // 6–8 borders, 9–10 solids, 11 secondary text, 12 primary text.
+        let gray = ramp(
+            [
+                WHITE, GRAY_50, GRAY_100, GRAY_200, GRAY_200, GRAY_200, GRAY_300, GRAY_400,
+                GRAY_500, GRAY_600, GRAY_500, GRAY_900,
+            ],
+            [
+                POLAR_950, POLAR_900, POLAR_800, POLAR_700, POLAR_600, POLAR_700, POLAR_600,
+                POLAR_500, POLAR_500, POLAR_400, POLAR_400, POLAR_50,
+            ],
+        );
+        // Indigo is Orbit's accent: background-accent at step 3, text-accent
+        // at step 11.
+        let accent = ramp(
+            [
+                INDIGO_50, INDIGO_50, INDIGO_50, INDIGO_100, INDIGO_100, INDIGO_200, INDIGO_300,
+                INDIGO_300, INDIGO_500, INDIGO_600, INDIGO_500, INDIGO_900,
+            ],
+            [
+                INDIGO_950, INDIGO_950, INDIGO_950, INDIGO_900, INDIGO_900, INDIGO_800, INDIGO_700,
+                INDIGO_700, INDIGO_500, INDIGO_400, INDIGO_500, INDIGO_100,
+            ],
+        );
+        let accent_contrast = token(WHITE);
+        // Orbit's background-*, text-* and (by border-warning's pattern)
+        // 300/700 borders; solids follow the destructive button, and amber
+        // and emerald fills take their 950 ink, since white doesn't read on them.
+        let red = StatusScale {
+            bg: pick(RED_50, RED_950),
+            border: pick(RED_300, RED_700),
+            solid: pick(RED_500, RED_600),
+            text: token(RED_500),
+            contrast: token(WHITE),
+        };
+        let amber = StatusScale {
+            bg: pick(AMBER_50, AMBER_950),
+            border: pick(AMBER_300, AMBER_700),
+            solid: token(AMBER_500),
+            text: token(AMBER_500),
+            contrast: token(AMBER_950),
+        };
+        let green = StatusScale {
+            bg: pick(EMERALD_50, EMERALD_950),
+            border: pick(EMERALD_300, EMERALD_700),
+            solid: pick(EMERALD_500, EMERALD_600),
+            text: token(EMERALD_500),
+            contrast: token(EMERALD_950),
+        };
+        // Orbit's link button.
+        let link = token(BLUE_400);
+        let black = token(BLACK);
+        let white = token(WHITE);
+        let banner = |scale: StatusScale| BannerColors {
+            bg: scale.bg,
+            border: scale.border,
+            text: scale.text,
+        };
+        let text_faint = pick(GRAY_400, POLAR_500);
+        let ansi = if dark {
+            [
+                POLAR_700,
+                RED_400,
+                EMERALD_400,
+                AMBER_400,
+                BLUE_400,
+                PURPLE_400,
+                CYAN_400,
+                POLAR_100,
+                POLAR_500,
+                RED_300,
+                EMERALD_300,
+                AMBER_300,
+                BLUE_300,
+                PURPLE_300,
+                CYAN_300,
+                WHITE,
+            ]
+        } else {
+            [
+                GRAY_900,
+                RED_600,
+                EMERALD_600,
+                AMBER_600,
+                BLUE_600,
+                PURPLE_600,
+                CYAN_600,
+                GRAY_200,
+                GRAY_500,
+                RED_700,
+                EMERALD_700,
+                AMBER_700,
+                BLUE_700,
+                PURPLE_700,
+                CYAN_700,
+                GRAY_50,
+            ]
+        };
+        Self {
+            mode,
+            gray,
+            accent,
+            accent_contrast,
+            red,
+            amber,
+            green,
+            link,
+            black,
+            white,
+            // The modal backdrop: bg-black/70.
+            scrim: black.with_alpha(0.7).resolved(),
+            // Orbit's shadow ink: rgba(0 0 0 / 0.06).
+            shadow: black.with_alpha(0.06).resolved(),
+            palette: CHART.map(token),
+            claude: token(CLAUDE_CLAY),
+            ansi: AnsiColors(ansi.map(token)),
+            // The dashboard: a gray-100 (dark: sidebar polar-950) frame around
+            // a white (dark: polar-900) content card.
+            frame: pick(GRAY_100, POLAR_950),
+            background: pick(WHITE, POLAR_900),
+            // Lists, segmented controls and fields on the card.
+            surface: pick(GRAY_50, POLAR_800),
+            // Secondary buttons at rest and menus.
+            raised: pick(GRAY_100, POLAR_800),
+            // Ghost and outline buttons under the pointer.
+            hover: pick(GRAY_200, POLAR_700),
+            // The active tab.
+            selected: pick(GRAY_100, POLAR_700),
+            // A secondary button under the pointer, the deepest fill Polar has.
+            pressed: pick(GRAY_200, POLAR_600),
+            // border-primary.
+            line: pick(GRAY_200, POLAR_700),
+            // Sidebar borders and checkbox edges.
+            line_strong: pick(GRAY_300, POLAR_600),
+            // text-primary, text-secondary, text-tertiary.
+            text: pick(BLACK, WHITE),
+            text_muted: pick(GRAY_500, POLAR_300),
+            text_faint,
+            // A focused input: blue-300 (dark: blue-700) around it.
+            ring: pick(BLUE_300, BLUE_700),
+            // The blue pill's tint behind text.
+            text_selection: pick(BLUE_100, BLUE_900),
+            // The default button: black on light, white on dark; it fades to
+            // 85% under the pointer, the polar step that blend lands on.
+            primary: pick(BLACK, WHITE),
+            primary_hover: pick(POLAR_600, POLAR_50),
+            primary_text: pick(WHITE, BLACK),
+            action_top: token(BLUE_500),
+            action_bottom: token(BLUE_700),
+            action_hover_top: token(BLUE_400),
+            action_hover_bottom: token(BLUE_600),
+            action_text: token(WHITE),
+            destructive: red.solid,
+            destructive_text: red.text,
+            destructive_contrast: red.contrast,
+            banner_info: BannerColors {
+                bg: pick(INDIGO_50, INDIGO_950),
+                border: pick(INDIGO_300, INDIGO_700),
+                text: token(INDIGO_500),
+            },
+            banner_warning: banner(amber),
+            banner_success: banner(green),
+            banner_error: banner(red),
+            favourite: amber.text,
+            unread: link,
+            question_tint: pick(INDIGO_50, INDIGO_950),
+            thread_title_active: link,
+            mention_skill: link,
+            mention_connector: pick(GRAY_500, POLAR_300),
+            mention_command: amber.text,
+            // Polar's pills' text colours, one hue per role.
+            syntax: SyntaxColors {
+                comment: text_faint,
+                string: pick(EMERALD_600, EMERALD_300),
+                number: pick(AMBER_600, AMBER_300),
+                keyword: pick(PURPLE_600, PURPLE_300),
+                r#type: pick(GRAY_900, POLAR_50),
+                function: pick(BLUE_600, BLUE_200),
+            },
+        }
+    }
 }
 
 /// Font families and text sizes shared by application components.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TypographyTokens {
+    /// The set the families below come from.
+    pub fonts: FontSet,
     /// `--font-sans`: `"Spline Sans"`, weights 300–700.
     pub sans: FontRole,
     /// `--font-mono`: `"Spline Sans Mono"`, weights 300–700.
     pub mono: FontRole,
     /// `--font-heading`: `"Spline Sans"` for headings.
     pub heading: FontRole,
+    /// Sans tracking in em: [`ProseTypography::TRACKING_EM`] for Spline,
+    /// which is drawn loose and tuned with it; none for system fonts.
+    pub tracking_em: f32,
     /// Control text, 14 px.
     pub control_text: Pixels,
     /// Editor text, 14 px.
@@ -479,10 +1056,68 @@ impl TypographyTokens {
     }
 }
 
-/// A bundled font family.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Which families the Editor draws text in: its bundled Spline faces or
+/// the platform's own UI and monospace fonts.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum FontSet {
+    /// Spline Sans and Spline Sans Mono.
+    #[default]
+    Spline,
+    /// The platform's UI font and its monospace font.
+    System,
+}
+
+impl FontSet {
+    pub const ALL: [Self; 2] = [Self::System, Self::Spline];
+
+    /// The value stored in `settings.json`.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Spline => "spline",
+            Self::System => "system",
+        }
+    }
+
+    /// The set stored as `key`; anything else reads as the default.
+    #[must_use]
+    pub fn from_key(key: Option<&str>) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|fonts| Some(fonts.key()) == key)
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Spline => "Spline",
+            Self::System => "System",
+        }
+    }
+
+    const fn sans(self) -> &'static str {
+        match self {
+            Self::Spline => "Spline Sans",
+            Self::System if cfg!(target_os = "windows") => "Segoe UI",
+            Self::System => ".SystemUIFont",
+        }
+    }
+
+    const fn mono(self) -> &'static str {
+        match self {
+            Self::Spline => "Spline Sans Mono",
+            Self::System if cfg!(target_os = "windows") => "Cascadia Mono",
+            Self::System if cfg!(target_os = "macos") => "Menlo",
+            Self::System => "DejaVu Sans Mono",
+        }
+    }
+}
+
+/// A font family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FontRole {
-    /// Bundled family name.
+    /// Family name.
     pub family: &'static str,
 }
 
@@ -516,9 +1151,10 @@ impl ProseTypography {
     pub const BODY_WEIGHT: FontWeight = FontWeight(410.0);
     /// Body tracking: −0.04 em at 16 px.
     pub const BODY_TRACKING_PX: f32 = -0.64;
-    /// The app's tracking: −0.04 em. The window root sets it once with
-    /// GPUI's `tracking`, so every sans text inherits it at its own size;
-    /// monospaced code opts out with `tracking(0.0)`.
+    /// Spline's tracking: −0.04 em. The window root sets
+    /// [`TypographyTokens::tracking_em`] once with GPUI's `tracking`, so
+    /// every sans text inherits it at its own size; monospaced code opts out
+    /// with `tracking(0.0)`.
     pub const TRACKING_EM: f32 = -0.04;
     /// Workspace tracking at any size: [`Self::TRACKING_EM`] resolved at
     /// `size_px`, so 14 px workspace text takes −0.56 px rather than the
@@ -614,7 +1250,7 @@ impl ProseTypography {
 }
 
 /// Spacing uses a 4 px base unit.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SpacingTokens;
 
 impl SpacingTokens {
@@ -663,7 +1299,7 @@ pub enum RadiusStep {
 }
 
 /// Marker holding ramp arithmetic shared across call sites.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RadiusTokens;
 
 impl RadiusTokens {
@@ -699,55 +1335,140 @@ impl RadiusTokens {
     }
 }
 
-/// One outer shadow layer, exactly what pinned GPUI can represent:
-/// `BoxShadow { color: Hsla, offset: Point<Pixels>, blur_radius: Pixels,
-/// spread_radius: Pixels, inset: bool }` (`artisanstreet/gpui-ce` crates/gpui/src/style.rs).
+/// One outer shadow layer, written the way CSS writes `box-shadow`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShadowLayer {
-    /// Shadow color including alpha.
-    pub color: SrgbComponents,
+    /// The shadow's ink at its strength.
+    pub color: Oklch,
     /// X offset (positive rightward).
     pub offset_x: Pixels,
     /// Y offset (positive downward).
     pub offset_y: Pixels,
-    /// Blur radius.
+    /// CSS blur radius: the shadow fades over this distance either side of
+    /// its edge.
     pub blur_radius: Pixels,
-    /// Spread radius (negative shrinks the shadow).
+    /// Spread radius (negative tucks the shadow under the element).
     pub spread_radius: Pixels,
 }
 
 impl ShadowLayer {
-    /// Maps onto GPUI's [`gpui::BoxShadow`] field-for-field as an outer
-    /// shadow (`inset: false`); no inset semantics are involved on either
-    /// side.
+    /// The GPUI outer shadow. GPUI takes the Gaussian's sigma as its blur
+    /// radius, where CSS takes twice the sigma, so a CSS blur is halved:
+    /// passed through unchanged, every shadow spreads twice as far.
     #[must_use]
     pub fn to_box_shadow(self) -> gpui::BoxShadow {
         gpui::BoxShadow {
-            color: srgb_to_hsla(self.color),
+            color: self.color.to_paint(),
             offset: gpui::Point {
                 x: self.offset_x,
                 y: self.offset_y,
             },
-            blur_radius: self.blur_radius,
+            blur_radius: self.blur_radius / 2.0,
             spread_radius: self.spread_radius,
             inset: false,
         }
     }
 }
 
-/// Theme-resolved card and floating-menu shadows.
+/// The shadows, one stack per height above the canvas.
+///
+/// Each stack is a
+/// hairline that draws the edge plus layered drops whose offset is half
+/// their blur and whose negative spread keeps them tucked under the
+/// element, so light falls from above and nothing haloes the sides. Light
+/// mode inks them faintly; dark mode needs far more to show at all.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ElevationTokens {
-    /// The four outer `@utility card` layers.
-    pub card_shadow: [ShadowLayer; 4],
-    /// The four outer `@utility card-lg` layers.
-    pub card_lg_shadow: [ShadowLayer; 4],
-    /// The single floating-menu layer (`shadow-2xl`).
-    pub menu_shadow: [ShadowLayer; 1],
+    /// The half-pixel ring that draws every elevated edge.
+    pub hairline: ShadowLayer,
+    /// Controls and small cards resting on a surface: select triggers,
+    /// attachments, chat bubbles, code cards, settings cards. Its first
+    /// layer is a white top sheen.
+    pub raised: [ShadowLayer; 3],
+    /// Glass cards floating over the canvas: the composer.
+    pub floating: [ShadowLayer; 3],
+    /// Menus, popovers, hover cards and dialogs over everything else.
+    pub overlay: [ShadowLayer; 4],
+}
+
+impl ElevationTokens {
+    /// GPUI shadows for some layers.
+    #[must_use]
+    pub fn box_shadows(layers: &[ShadowLayer]) -> Vec<gpui::BoxShadow> {
+        layers.iter().map(|layer| layer.to_box_shadow()).collect()
+    }
+
+    /// The drop layers of one height, without the hairline: for a surface
+    /// that draws its own edge.
+    #[must_use]
+    pub const fn drops(&self, elevation: Elevation) -> &[ShadowLayer] {
+        match elevation {
+            Elevation::Raised => &self.raised,
+            Elevation::Floating => &self.floating,
+            Elevation::Overlay => &self.overlay,
+        }
+    }
+
+    /// The GPUI shadows of one height: the hairline, then its drops.
+    #[must_use]
+    pub fn shadows(&self, elevation: Elevation) -> Vec<gpui::BoxShadow> {
+        let mut shadows = vec![self.hairline.to_box_shadow()];
+        shadows.extend(Self::box_shadows(self.drops(elevation)));
+        shadows
+    }
+
+    fn build(mode: ThemeMode, colors: &ColorTokens) -> Self {
+        let shadow = |color: Oklch, strength: f32, oy: f32, blur: f32, spread: f32| ShadowLayer {
+            color: color.with_alpha(strength).resolved(),
+            offset_x: px(0.0),
+            offset_y: px(oy),
+            blur_radius: px(blur),
+            spread_radius: px(spread),
+        };
+        // Light mode's ink is the darkest gray, carrying the palette's hue,
+        // so shadows read as shade rather than grey smudge.
+        let (ink, edge, drop) = match mode {
+            ThemeMode::Light => (colors.gray.step(12), 0.07, 1.0),
+            ThemeMode::Dark => (colors.black, 0.10, 5.0),
+        };
+        let d = |strength: f32, oy: f32, blur: f32, spread: f32| {
+            shadow(ink, (strength * drop).min(0.6), oy, blur, spread)
+        };
+        Self {
+            hairline: shadow(colors.gray.step(12), edge, 0.0, 0.0, 0.5),
+            raised: [
+                shadow(colors.white, 0.08, -0.5, 0.0, 0.0),
+                d(0.05, 1.0, 2.0, 0.0),
+                d(0.04, 2.0, 4.0, -1.0),
+            ],
+            floating: [
+                d(0.04, 1.0, 2.0, 0.0),
+                d(0.05, 4.0, 8.0, -2.0),
+                d(0.06, 12.0, 24.0, -8.0),
+            ],
+            overlay: [
+                d(0.05, 1.0, 2.0, 0.0),
+                d(0.06, 4.0, 8.0, -2.0),
+                d(0.07, 12.0, 24.0, -6.0),
+                d(0.07, 24.0, 48.0, -12.0),
+            ],
+        }
+    }
+}
+
+/// How far a surface sits above the canvas; picks its shadow stack.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Elevation {
+    /// Resting on a surface.
+    Raised,
+    /// Floating over the canvas.
+    Floating,
+    /// Over everything else.
+    Overlay,
 }
 
 /// Shared component dimensions.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DensityTokens {
     /// Standard segmented control height (`h-9` = 36 px).
     pub control_default: Pixels,
@@ -765,29 +1486,19 @@ pub struct DensityTokens {
     pub card_padding_compact: Pixels,
 }
 
-/// Shared focus rings, text selection and hover gradient colors.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Focus ring width; its colour is [`ColorTokens::ring`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InteractionTokens {
     /// Focus-ring width, 3 px.
     pub focus_ring_width: Pixels,
-    /// Focus-ring color at 50% alpha.
-    pub focus_ring_color: Oklch,
-    /// Invalid-state ring color at 20% alpha.
-    pub invalid_ring_color: Oklch,
-    /// Text-selection background: `#1967D2` (`oklch(0.5318 0.1807 258.26)`).
-    pub selection_background: Oklch,
-    /// Hover-pill gradient top stop: foreground at 16% alpha.
-    pub hover_fill_top: Oklch,
-    /// Hover-pill gradient bottom stop: foreground at 7% alpha.
-    pub hover_fill_bottom: Oklch,
 }
 
 /// The complete Artisan theme, composed from typed token groups. The app
-/// installs it once as a GPUI global ([`install`]); everything reads it
-/// through [`ActiveTheme::theme`].
+/// installs it as a GPUI global ([`install`], [`set_mode`]); everything reads
+/// it through [`ActiveTheme::theme`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArtisanTheme {
-    /// Semantic and workspace colors.
+    /// Colour tokens of the active mode.
     pub colors: ColorTokens,
     /// Font families and text sizes.
     pub typography: TypographyTokens,
@@ -795,19 +1506,81 @@ pub struct ArtisanTheme {
     pub spacing: SpacingTokens,
     /// The corner ramp and nested-radius arithmetic.
     pub radius: RadiusTokens,
-    /// Card and menu shadows.
+    /// Shadows.
     pub elevation: ElevationTokens,
     /// Shared control sizes.
     pub density: DensityTokens,
-    /// Focus, selection, and hover-fill treatments.
+    /// Focus treatment.
     pub interaction: InteractionTokens,
 }
 
 impl gpui::Global for ArtisanTheme {}
 
+impl TypographyTokens {
+    /// The tokens with `fonts`' families.
+    #[must_use]
+    pub const fn new(fonts: FontSet) -> Self {
+        Self {
+            fonts,
+            sans: FontRole {
+                family: fonts.sans(),
+            },
+            mono: FontRole {
+                family: fonts.mono(),
+            },
+            heading: FontRole {
+                family: fonts.sans(),
+            },
+            tracking_em: match fonts {
+                FontSet::Spline => ProseTypography::TRACKING_EM,
+                FontSet::System => 0.0,
+            },
+            control_text: px(14.0),
+            editor_text_desktop: px(14.0),
+            label_text: px(12.0),
+        }
+    }
+
+    /// `heading`'s tracking in pixels; Spline's only, like [`Self::tracking_em`].
+    #[must_use]
+    pub const fn heading_tracking_px(&self, heading: &ProseHeading) -> f32 {
+        match self.fonts {
+            FontSet::Spline => heading.tracking_px,
+            FontSet::System => 0.0,
+        }
+    }
+}
+
 /// Installs the application theme. The app calls this once at startup.
-pub fn install(cx: &mut gpui::App) {
-    cx.set_global(ArtisanTheme::resolved());
+pub fn install(mode: ThemeMode, cx: &mut gpui::App) {
+    cx.set_global(*ArtisanTheme::for_mode(mode));
+}
+
+/// Switches every window to `mode`, keeping the font set. Cached views
+/// re-render because the windows refresh.
+pub fn set_mode(mode: ThemeMode, cx: &mut gpui::App) {
+    if cx.theme().colors.mode == mode {
+        return;
+    }
+    let typography = cx.theme().typography;
+    cx.set_global(ArtisanTheme {
+        typography,
+        ..*ArtisanTheme::for_mode(mode)
+    });
+    cx.refresh_windows();
+}
+
+/// Switches every window to `fonts`' families.
+pub fn set_fonts(fonts: FontSet, cx: &mut gpui::App) {
+    if cx.theme().typography.fonts == fonts {
+        return;
+    }
+    let theme = ArtisanTheme {
+        typography: TypographyTokens::new(fonts),
+        ..*cx.theme()
+    };
+    cx.set_global(theme);
+    cx.refresh_windows();
 }
 
 /// Reads the installed application theme.
@@ -818,49 +1591,40 @@ pub trait ActiveTheme {
 
 impl ActiveTheme for gpui::App {
     /// The installed theme. A context nothing installed into (a component
-    /// test) reads the same resolved values.
+    /// test) reads the dark theme.
     fn theme(&self) -> &ArtisanTheme {
         self.try_global::<ArtisanTheme>()
-            .unwrap_or_else(|| ArtisanTheme::resolved_ref())
+            .unwrap_or_else(|| ArtisanTheme::for_mode(ThemeMode::Dark))
     }
 }
 
 impl ArtisanTheme {
-    /// The resolved theme values, built once. Production code reads the
-    /// installed global through [`ActiveTheme::theme`].
+    /// The dark values. Production code reads the installed global through
+    /// [`ActiveTheme::theme`], which follows the user's mode.
     #[must_use]
     pub fn resolved() -> Self {
-        *Self::resolved_ref()
+        *Self::for_mode(ThemeMode::Dark)
     }
 
-    fn resolved_ref() -> &'static Self {
-        static THEME: OnceLock<ArtisanTheme> = OnceLock::new();
-        THEME.get_or_init(Self::build)
+    /// The theme in one mode, built once.
+    #[must_use]
+    pub fn for_mode(mode: ThemeMode) -> &'static Self {
+        static LIGHT: OnceLock<ArtisanTheme> = OnceLock::new();
+        static DARK: OnceLock<ArtisanTheme> = OnceLock::new();
+        match mode {
+            ThemeMode::Light => LIGHT.get_or_init(|| Self::build(mode)),
+            ThemeMode::Dark => DARK.get_or_init(|| Self::build(mode)),
+        }
     }
 
-    fn build() -> Self {
-        let colors = Self::colors();
-        let highlight = SurfaceStep::S50.oklch();
-
-        let mut theme = Self {
+    fn build(mode: ThemeMode) -> Self {
+        let colors = ColorTokens::build(mode);
+        Self {
             colors,
-            typography: TypographyTokens {
-                sans: FontRole {
-                    family: "Spline Sans",
-                },
-                mono: FontRole {
-                    family: "Spline Sans Mono",
-                },
-                heading: FontRole {
-                    family: "Spline Sans",
-                },
-                control_text: px(14.0),
-                editor_text_desktop: px(14.0),
-                label_text: px(12.0),
-            },
+            typography: TypographyTokens::new(FontSet::Spline),
             spacing: SpacingTokens,
             radius: RadiusTokens,
-            elevation: Self::elevation(highlight),
+            elevation: ElevationTokens::build(mode, &colors),
             density: DensityTokens {
                 control_default: px(36.0),
                 command_list_max_height: px(288.0),
@@ -872,224 +1636,84 @@ impl ArtisanTheme {
             },
             interaction: InteractionTokens {
                 focus_ring_width: px(3.0),
-                focus_ring_color: colors.ring.with_alpha(0.5),
-                invalid_ring_color: colors.destructive.with_alpha(0.2),
-                selection_background: Oklch::new(0.5318, 0.1807, 258.26),
-                hover_fill_top: colors.foreground.with_alpha(0.16),
-                hover_fill_bottom: colors.foreground.with_alpha(0.07),
             },
-        };
-        theme.colors.background = theme.colors.background.resolved();
-        theme.colors.foreground_base = theme.colors.foreground_base.resolved();
-        theme.colors.foreground = theme.colors.foreground.resolved();
-        theme.colors.foreground_extra = theme.colors.foreground_extra.resolved();
-        theme.colors.highlight = theme.colors.highlight.resolved();
-        theme.colors.card = theme.colors.card.resolved();
-        theme.colors.card_foreground = theme.colors.card_foreground.resolved();
-        theme.colors.popover = theme.colors.popover.resolved();
-        theme.colors.popover_foreground = theme.colors.popover_foreground.resolved();
-        theme.colors.primary = theme.colors.primary.resolved();
-        theme.colors.primary_foreground = theme.colors.primary_foreground.resolved();
-        theme.colors.secondary = theme.colors.secondary.resolved();
-        theme.colors.secondary_foreground = theme.colors.secondary_foreground.resolved();
-        theme.colors.muted = theme.colors.muted.resolved();
-        theme.colors.muted_foreground = theme.colors.muted_foreground.resolved();
-        theme.colors.accent = theme.colors.accent.resolved();
-        theme.colors.accent_foreground = theme.colors.accent_foreground.resolved();
-        theme.colors.destructive = theme.colors.destructive.resolved();
-        theme.colors.banner_info = theme.colors.banner_info.resolved();
-        theme.colors.banner_error = theme.colors.banner_error.resolved();
-        theme.colors.banner_warning = theme.colors.banner_warning.resolved();
-        theme.colors.banner_success = theme.colors.banner_success.resolved();
-        theme.colors.favorite = theme.colors.favorite.resolved();
-        theme.colors.unread = theme.colors.unread.resolved();
-        theme.colors.question_from = theme.colors.question_from.resolved();
-        theme.colors.question_to = theme.colors.question_to.resolved();
-        theme.colors.mention_skill = theme.colors.mention_skill.resolved();
-        theme.colors.mention_connector = theme.colors.mention_connector.resolved();
-        theme.colors.mention_command = theme.colors.mention_command.resolved();
-        theme.colors.border = theme.colors.border.resolved();
-        theme.colors.input = theme.colors.input.resolved();
-        theme.colors.ring = theme.colors.ring.resolved();
-        theme.interaction.focus_ring_color = theme.interaction.focus_ring_color.resolved();
-        theme.interaction.invalid_ring_color = theme.interaction.invalid_ring_color.resolved();
-        theme.interaction.selection_background = theme.interaction.selection_background.resolved();
-        theme.interaction.hover_fill_top = theme.interaction.hover_fill_top.resolved();
-        theme.interaction.hover_fill_bottom = theme.interaction.hover_fill_bottom.resolved();
-        theme.colors.charts = theme.colors.charts.map(Oklch::resolved);
-        theme.colors.chrome = theme.colors.chrome.resolved();
-        theme.colors.workspace = theme.colors.workspace.resolved();
-        theme.colors.sidebar = theme.colors.sidebar.resolved();
-        theme.colors.line = theme.colors.line.resolved();
-        theme.colors.workspace_foreground = theme.colors.workspace_foreground.resolved();
-        theme.colors.workspace_secondary = theme.colors.workspace_secondary.resolved();
-        theme.colors.selected = theme.colors.selected.resolved();
-        theme.colors.primary_action = theme.colors.primary_action.resolved();
-        theme.colors.primary_action_foreground = theme.colors.primary_action_foreground.resolved();
-        theme.colors.field = theme.colors.field.resolved();
-        theme.colors.field_line = theme.colors.field_line.resolved();
-        theme.colors.popover_line = theme.colors.popover_line.resolved();
-        theme.colors.shortcut_line = theme.colors.shortcut_line.resolved();
-        theme
-    }
-
-    /// The semantic and workspace colors.
-    fn colors() -> ColorTokens {
-        ColorTokens {
-            background: SurfaceStep::S950.oklch(),
-            foreground_base: SurfaceStep::S50.oklch(),
-            foreground: Oklch::new(0.9006, 0.0005, 285.823),
-            foreground_extra: SurfaceStep::S50.oklch(),
-            highlight: SurfaceStep::S50.oklch(),
-            card: SurfaceStep::S900.oklch(),
-            card_foreground: SurfaceStep::S50.oklch(),
-            popover: SurfaceStep::S900.oklch(),
-            popover_foreground: SurfaceStep::S50.oklch(),
-            primary: SurfaceStep::S200.oklch(),
-            primary_foreground: SurfaceStep::S900.oklch(),
-            secondary: SurfaceStep::S800.oklch(),
-            secondary_foreground: SurfaceStep::S50.oklch(),
-            muted: SurfaceStep::S800.oklch(),
-            muted_foreground: SurfaceStep::S400.oklch(),
-            accent: SurfaceStep::S800.oklch(),
-            accent_foreground: SurfaceStep::S50.oklch(),
-            destructive: Oklch::new(0.704, 0.191, 22.216),
-            banner_info: Oklch::new(0.707, 0.165, 254.624),
-            banner_error: Oklch::new(0.704, 0.191, 22.216),
-            banner_warning: Oklch::new(0.795, 0.184, 86.047),
-            banner_success: Oklch::new(0.723, 0.219, 149.579),
-            favorite: Oklch::new(0.823, 0.158, 82.5),
-            unread: Oklch::new(0.828, 0.111, 230.318),
-            question_from: Oklch::new(0.627, 0.265, 303.9),
-            question_to: Oklch::new(0.827, 0.119, 306.383),
-            mention_skill: Oklch::new(0.746, 0.17, 328.0),
-            mention_connector: Oklch::new(0.707, 0.165, 254.624),
-            mention_command: Oklch::new(0.828, 0.152, 74.0),
-            border: Oklch::new(1.0, 0.0, 0.0).with_alpha(0.10),
-            input: Oklch::new(1.0, 0.0, 0.0).with_alpha(0.15),
-            ring: SurfaceStep::S500.oklch(),
-            charts: [
-                SurfaceStep::S300.oklch(),
-                SurfaceStep::S500.oklch(),
-                SurfaceStep::S600.oklch(),
-                SurfaceStep::S700.oklch(),
-                SurfaceStep::S800.oklch(),
-            ],
-            chrome: Oklch::from_srgb_hex(0x000a_0a0a),
-            workspace: Oklch::from_srgb_hex(0x000a_0a0a),
-            sidebar: Oklch::from_srgb_hex(0x0011_1111),
-            line: Oklch::from_srgb_hex(0x0029_2929),
-            workspace_foreground: Oklch::from_srgb_hex(0x00ed_eded),
-            workspace_secondary: Oklch::from_srgb_hex(0x00a1_a1a1),
-            selected: Oklch::from_srgb_hex(0x0024_2424),
-            primary_action: Oklch::from_srgb_hex(0x00ed_eded),
-            primary_action_foreground: Oklch::from_srgb_hex(0x000a_0a0a),
-            field: Oklch::from_srgb_hex(0x0017_1717),
-            field_line: Oklch::from_srgb_hex(0x0033_3333),
-            popover_line: Oklch::from_srgb_hex(0x0038_3838),
-            shortcut_line: Oklch::from_srgb_hex(0x003a_3a3a),
-        }
-    }
-
-    /// Elevation: the `card` utility stack with its
-    /// highlight-derived hairline resolved, the floating-menu `shadow-2xl`,
-    /// and both inset stacks as recorded-only layers.
-    fn elevation(highlight: Oklch) -> ElevationTokens {
-        let white = SrgbComponents {
-            r: 1.0,
-            g: 1.0,
-            b: 1.0,
-            a: 1.0,
-        };
-        let black = SrgbComponents {
-            r: 0.0,
-            g: 0.0,
-            b: 0.0,
-            a: 1.0,
-        };
-        let layer = |color: SrgbComponents, ox: f32, oy: f32, blur: f32, spread: f32| ShadowLayer {
-            color,
-            offset_x: px(ox),
-            offset_y: px(oy),
-            blur_radius: px(blur),
-            spread_radius: px(spread),
-        };
-        // Compact card shadows.
-        let card_shadow = [
-            layer(with_alpha(white, 0.08), 0.0, -0.5, 0.0, 0.0),
-            layer(with_alpha(black, 0.06), 0.0, 4.0, 8.0, 0.0),
-            layer(oklch_srgb(highlight.with_alpha(0.08)), 0.0, 0.0, 0.0, 0.5),
-            layer(black, 0.0, 1.0, 6.0, -4.0),
-        ];
-        // Large card shadows, used by code snippets.
-        let card_lg_shadow = [
-            layer(with_alpha(white, 0.12), 0.0, -0.5, 0.0, 0.0),
-            layer(with_alpha(black, 0.32), 0.0, 10.0, 24.0, -12.0),
-            layer(with_alpha(black, 0.2), 0.0, 4.0, 12.0, -8.0),
-            layer(oklch_srgb(highlight.with_alpha(0.12)), 0.0, 0.0, 0.0, 0.5),
-        ];
-        // Tailwind `--shadow-2xl` on dropdown/context/select content.
-        let menu_shadow = [layer(with_alpha(black, 0.25), 0.0, 25.0, 50.0, -12.0)];
-        ElevationTokens {
-            card_shadow,
-            card_lg_shadow,
-            menu_shadow,
         }
     }
 }
 
-/// Copies an [`Oklch`] value into sRGB component storage for shadow layers.
-fn oklch_srgb(color: Oklch) -> SrgbComponents {
-    color.to_srgb()
-}
+/// How long the diagonal sweep between modes takes.
+const MODE_TRANSITION: std::time::Duration = std::time::Duration::from_millis(700);
 
-/// An sRGB color with a new alpha.
-fn with_alpha(mut base: SrgbComponents, a: f32) -> SrgbComponents {
-    base.a = a;
-    base
+/// Starts the diagonal shimmer that carries the window into `next`.
+///
+/// The current mode's last frame sweeps away from the top-left corner to
+/// the bottom-right behind a band of `next`'s link colour. Call it right
+/// before switching, in the same update; with reduced motion the mode simply
+/// changes.
+pub fn begin_mode_transition(next: ThemeMode, window: &mut gpui::Window, cx: &gpui::App) {
+    if cx.reduce_motion() {
+        return;
+    }
+    window.begin_snapshot_transition(gpui::SnapshotTransition {
+        duration: MODE_TRANSITION,
+        band: 0.18,
+        shimmer: ArtisanTheme::for_mode(next)
+            .colors
+            .link
+            .fade(0.45)
+            .to_paint(),
+    });
 }
 
 #[cfg(test)]
-mod reform_tests {
+mod polar_tokens {
     use super::*;
+
+    /// Both modes keep text readable: body text far above the card,
+    /// secondary text dimmed but still readable on cards too, and the
+    /// primary button's label on its fill.
     #[test]
-    fn semantic_equality_ignores_paint_cache_and_tracks_public_changes() {
-        let source = Oklch::new(0.5, 0.03, 240.0);
-        let cached = source.resolved();
-        assert_eq!(source, cached);
-        assert_eq!(source.with_alpha(0.25), cached.with_alpha(0.25));
-        let theme = ArtisanTheme::resolved();
-        let mut uncached = theme;
-        let color = theme.colors.foreground;
-        uncached.colors.foreground = Oklch::new(color.l, color.c, color.h).with_alpha(color.a);
-        assert_eq!(theme, uncached);
-        assert_eq!(
-            theme.colors.foreground.to_paint(),
-            uncached.colors.foreground.to_paint()
-        );
-        uncached.colors.foreground.a = 0.25;
-        assert_ne!(theme, uncached);
-        assert_ne!(
-            theme.colors.foreground.to_paint(),
-            uncached.colors.foreground.to_paint()
-        );
-        uncached = theme;
-        uncached.colors.foreground.l = 0.2;
-        assert_ne!(theme, uncached);
-        assert_eq!(
-            uncached.colors.foreground.to_paint(),
-            Oklch::new(0.2, color.c, color.h)
-                .with_alpha(color.a)
-                .to_paint()
-        );
+    fn text_reads_in_both_modes() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let colors = &ArtisanTheme::for_mode(mode).colors;
+            assert_eq!(colors.mode, mode);
+            for (role, color, floor) in [
+                ("text", colors.text, 12.0),
+                ("secondary text", colors.text_muted, 4.5),
+            ] {
+                for (face, behind) in [("card", colors.background), ("surface", colors.surface)] {
+                    let ratio = contrast(color, behind);
+                    assert!(
+                        ratio >= floor,
+                        "{mode:?}: {role} on {face} contrast {ratio:.2}"
+                    );
+                }
+            }
+            let label = contrast(colors.primary_text, colors.primary);
+            assert!(
+                label >= 4.0,
+                "{mode:?}: primary button label contrast {label:.2}"
+            );
+        }
     }
-    #[test]
-    fn cached_paint_tracks_public_color_changes_and_alpha() {
-        let color = Oklch::new(0.5, 0.0, 0.0).resolved();
-        assert_eq!(color.with_alpha(0.25).to_paint().alpha, 0.25);
-        let mut changed = color;
-        changed.l = 0.7;
-        assert_eq!(changed.to_paint(), Oklch::new(0.7, 0.0, 0.0).to_paint());
-        assert_ne!(changed.to_paint(), color.to_paint());
+
+    /// WCAG 2 contrast ratio of two painted colours.
+    fn contrast(a: Oklch, b: Oklch) -> f32 {
+        let luminance = |color: Oklch| {
+            let rgb = color.to_srgb();
+            let linear = |channel: f32| {
+                if channel <= 0.040_45 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.0722f32.mul_add(
+                linear(rgb.b),
+                0.7152f32.mul_add(linear(rgb.g), 0.2126 * linear(rgb.r)),
+            )
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 }

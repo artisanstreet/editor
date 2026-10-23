@@ -2,13 +2,13 @@
 
 use crate::Settings;
 use crate::page;
+use crate::ui::{PageBlock, card, header, section_shell};
 use artisan_api::{
     EngineId, GlobalPrompt, PromptCandidate, PromptEngineState, PromptEngineStatus, ResolvePrompt,
     SavePrompt,
 };
 use editor_core::{HostData, HostId, SettingsPage};
 use editor_ui::button::ButtonVariant;
-use editor_ui::page::{PageBlock, card, header, section_shell};
 use editor_ui::status_chip::{ChipTone, chips_row, tone_color};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
 use editor_ui::theme::ArtisanTheme;
@@ -18,9 +18,9 @@ use gpui::{
 };
 
 #[cfg(test)]
-pub(crate) const GLOBAL_PROMPT_KEY: &str = "global_prompt";
+pub const GLOBAL_PROMPT_KEY: &str = "global_prompt";
 
-pub(crate) struct PromptForm {
+pub struct PromptForm {
     pub(crate) editor: Entity<TextEditor>,
     /// The host the page was loaded from.
     host: Option<HostId>,
@@ -148,7 +148,7 @@ impl Settings {
             if let Some(gate) = completion_gate {
                 gate.wait().await;
             }
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 let form = &mut this.prompt;
                 if form.host.as_ref() != Some(&host_id) || form.generation != generation {
                     return;
@@ -167,7 +167,8 @@ impl Settings {
                         } else if form.edit_revision == revision {
                             form.load(&prompt, true, cx);
                         } else {
-                            form.saved = prompt.text.clone();
+                            form.saved.clone_from(&prompt.text);
+
                             form.base_version = prompt.version;
                             form.newer = false;
                             form.loaded = true;
@@ -178,7 +179,8 @@ impl Settings {
                     }
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         })
         .detach();
     }
@@ -218,7 +220,7 @@ impl Settings {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = client.resolve_global_prompt(&resolution).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 let form = &mut this.prompt;
                 if form.host.as_ref() != Some(&host_id) || form.generation != generation {
                     return;
@@ -235,7 +237,8 @@ impl Settings {
                     Err(error) => form.error = Some(format!("{error:#}")),
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         })
         .detach();
     }
@@ -247,11 +250,11 @@ impl Settings {
         variant: ButtonVariant,
         disabled: bool,
         resolution: Option<ResolvePrompt>,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let selector = id.clone();
         div()
-            .debug_selector(move || selector.clone())
+            .debug_selector(move || selector)
             .child(self.button(
                 SharedString::from(id),
                 label,
@@ -267,7 +270,7 @@ impl Settings {
     }
 }
 
-pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> Div {
+pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> Div {
     let form = &settings.prompt;
     let mut page = div().flex().flex_col().child(header(
         theme,
@@ -314,7 +317,7 @@ fn choice_section(
     settings: &Settings,
     theme: &ArtisanTheme,
     candidates: &[PromptCandidate],
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> PageBlock {
     let rows = candidates
         .iter()
@@ -350,7 +353,7 @@ fn choice_section(
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(theme.colors.foreground.to_paint())
+                                .text_color(theme.colors.text.to_paint())
                                 .child(format!("From {}", engines.join(", "))),
                         )
                         .child(action),
@@ -392,11 +395,7 @@ impl Settings {
     }
 }
 
-fn editor_section(
-    settings: &Settings,
-    theme: &ArtisanTheme,
-    cx: &mut Context<Settings>,
-) -> PageBlock {
+fn editor_section(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> PageBlock {
     let form = &settings.prompt;
     let loaded = form.loaded;
     let dirty = form.dirty(cx);
@@ -437,12 +436,13 @@ fn editor_section(
             div()
                 .debug_selector(|| "settings-global-prompt-status".to_owned())
                 .text_xs()
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .child(status),
         )
         .child(actions);
     let editor = div()
-        .pt(px(14.0))
+        .pt(px(16.0))
+        .min_h(px(160.0))
         .debug_selector(|| "settings-global-prompt-editor".to_owned())
         .child(form.editor.clone());
     section_shell(
@@ -452,7 +452,7 @@ fn editor_section(
             "Engines read this before every conversation, after their own system prompt and before your project's AGENTS.md or CLAUDE.md.",
         ),
         None,
-        div().flex().flex_col().child(editor).child(footer),
+        card(theme, vec![editor.into_any_element(), footer.into_any_element()]),
     )
 .debug_selector("settings-section-prompt")
 }
@@ -461,7 +461,7 @@ fn engines_section(
     settings: &Settings,
     theme: &ArtisanTheme,
     engines: &[PromptEngineState],
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> PageBlock {
     let rows = engines
         .iter()
@@ -483,7 +483,7 @@ fn engine_row(
     settings: &Settings,
     theme: &ArtisanTheme,
     engine: &PromptEngineState,
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> Div {
     let name = page::engine_label(engine.engine);
     let mut row = div()
@@ -493,7 +493,7 @@ fn engine_row(
         .py(px(14.0))
         .debug_selector({
             let selector = format!("settings-global-prompt-engine-{}", engine.engine);
-            move || selector.clone()
+            move || selector
         })
         .child(
             div()
@@ -511,14 +511,14 @@ fn engine_row(
                         .child(
                             div()
                                 .text_sm()
-                                .text_color(theme.colors.foreground.to_paint())
+                                .text_color(theme.colors.text.to_paint())
                                 .child(name),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .truncate()
-                                .text_color(theme.colors.muted_foreground.to_paint())
+                                .text_color(theme.colors.text_muted.to_paint())
                                 .child(
                                     engine
                                         .reason
@@ -544,7 +544,7 @@ fn engine_row(
                     .text_color(tone_color(theme, ChipTone::Warning).to_paint())
                     .debug_selector({
                         let selector = format!("settings-global-prompt-drift-{}", engine.engine);
-                        move || selector.clone()
+                        move || selector
                     })
                     .child(format!("{name} was edited outside Artisan. It now says:")),
             )
@@ -554,7 +554,7 @@ fn engine_row(
     row
 }
 
-fn drift_actions(settings: &Settings, engine: EngineId, cx: &mut Context<Settings>) -> Div {
+fn drift_actions(settings: &Settings, engine: EngineId, cx: &Context<Settings>) -> Div {
     let pending = settings.prompt.pending;
     div()
         .flex()
@@ -645,14 +645,14 @@ mod delayed_save_tests {
         settings.update(cx, |settings, cx| {
             settings.completion_gate = Some(gate.clone());
             settings.prompt.editor.update(cx, |editor, cx| {
-                editor.replace(0..editor.text().len(), "first saved", cx)
+                editor.replace(0..editor.text().len(), "first saved", cx);
             });
             settings.save_prompt(cx);
         });
         wait_gate(cx, &gate);
         let editor = settings.read_with(cx, |settings, _| settings.prompt.editor.clone());
         editor.update(cx, |editor, cx| {
-            editor.replace(editor.text().len()..editor.text().len(), " second edit", cx)
+            editor.replace(editor.text().len()..editor.text().len(), " second edit", cx);
         });
         cx.run_until_parked();
         finish_gate(cx, &gate);
@@ -685,7 +685,7 @@ mod delayed_save_tests {
         settings.update(cx, |settings, cx| {
             settings.completion_gate = Some(gate.clone());
             settings.prompt.editor.update(cx, |editor, cx| {
-                editor.replace(0..editor.text().len(), "host A saved", cx)
+                editor.replace(0..editor.text().len(), "host A saved", cx);
             });
             settings.save_prompt(cx);
         });
@@ -696,7 +696,7 @@ mod delayed_save_tests {
         });
         settings.update(cx, |settings, cx| {
             settings.prompt.editor.update(cx, |editor, cx| {
-                editor.replace(0..editor.text().len(), "host B draft", cx)
+                editor.replace(0..editor.text().len(), "host B draft", cx);
             });
             settings.prompt.error = Some("B owns this notice".into());
         });

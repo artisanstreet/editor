@@ -1,9 +1,10 @@
 # Packages, checks and shells of the workspace.
 #
-# Two shipped binaries: `ae` (crates/ae: CLI, installer and Forge) and
-# `artisan-editor` (crates/editor), built for Linux and cross-built for
-# Windows (x86_64-pc-windows-gnu, MinGW-w64). `release` lays them out the way
-# `ae install` expects (nix/release.nix); signing is `scripts/release`.
+# Three shipped apps: `ae` (crates/ae: installs and manages the others),
+# `forge` (crates/forge) and `artisan-editor` (crates/editor), built for
+# Linux and cross-built for Windows (x86_64-pc-windows-gnu, MinGW-w64).
+# `release` lays them out the way `ae install` expects (nix/release.nix);
+# signing is `scripts/release`.
 {
   self,
   pkgs,
@@ -160,6 +161,8 @@ let
           TARGET_CC = "${cc}/bin/${cc.targetPrefix}cc";
           TARGET_CXX = "${cc}/bin/${cc.targetPrefix}c++";
           TARGET_AR = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
+          # The Editor's build script compiles its icon resource.
+          TARGET_WINDRES = "${cc.bintools.bintools}/bin/${cc.targetPrefix}windres";
           HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };
@@ -194,9 +197,7 @@ let
           cargoExtraArgs = "--locked --offline -p ${package} --bin ${name}";
           doCheck = false;
         };
-      profileDirectory = "target/${
-        lib.optionalString (platform == "windows") "${host.target}/"
-      }release";
+      profileDirectory = "target/${lib.optionalString (platform == "windows") "${host.target}/"}release";
     in
     host.build (
       common
@@ -214,7 +215,7 @@ let
         # (the Editor's peaks near 5.5 GB), so one job at a time.
         CARGO_BUILD_JOBS = 1;
         # Only here: in the dependency cache it would rebuild it per commit.
-        AE_COMMIT = commit;
+        ARTISAN_COMMIT = commit;
         doNotPostBuildInstallCargoBinaries = true;
         installPhaseCommand = ''
           mkdir -p "$out/bin"
@@ -228,6 +229,11 @@ let
     platform = "linux";
     package = "ae";
     name = "ae";
+  };
+  forge = binary {
+    platform = "linux";
+    package = "forge";
+    name = "forge";
   };
   editorUnwrapped = binary {
     platform = "linux";
@@ -254,6 +260,11 @@ let
       package = "ae";
       name = "ae";
     };
+    forge-windows = binary {
+      platform = "windows";
+      package = "forge";
+      name = "forge";
+    };
     artisan-editor-windows = binary {
       platform = "windows";
       package = "editor";
@@ -264,11 +275,12 @@ let
     release = import ./release.nix {
       inherit pkgs version;
       linux = {
-        inherit ae;
+        inherit ae forge;
         editor = editorUnwrapped;
       };
       windows = {
         ae = windows.ae-windows;
+        forge = windows.forge-windows;
         editor = windows.artisan-editor-windows;
       };
     };
@@ -385,7 +397,7 @@ in
   };
   packages = {
     default = ae;
-    inherit ae;
+    inherit ae forge;
     artisan-editor = editor;
   }
   // windows

@@ -23,7 +23,7 @@ pub(super) fn normal_matrix(world: Mat4) -> glam::DMat3 {
 pub(super) fn transform_normal(matrix: &glam::DMat3, normal: Vec3) -> Vec3 {
     (*matrix * normal.as_dvec3())
         .try_normalize()
-        .map_or(Vec3::ZERO, |normal| normal.as_vec3())
+        .map_or(Vec3::ZERO, glam::DVec3::as_vec3)
 }
 
 /// Which axis points up in a file.
@@ -65,7 +65,7 @@ pub(super) struct Mesh {
 }
 
 impl Mesh {
-    pub(super) fn triangles(&self) -> usize {
+    pub(super) const fn triangles(&self) -> usize {
         self.positions.len() / 3
     }
 
@@ -77,13 +77,15 @@ impl Mesh {
             .iter()
             .zip(&self.normals)
             .enumerate()
-            .map(|(index, (position, normal))| gpui::MeshVertex {
-                position: [position.x, position.y, position.z],
-                normal: [normal.x, normal.y, normal.z],
-                color: self.colors.as_ref().map_or([0.0; 4], |colors| {
-                    let color = colors[index];
-                    [color.x, color.y, color.z, 1.0]
-                }),
+            .map(|(index, (position, normal))| {
+                gpui::MeshVertex::new(
+                    [position.x, position.y, position.z],
+                    [normal.x, normal.y, normal.z],
+                    self.colors.as_ref().map(|colors| {
+                        let color = colors[index];
+                        [color.x, color.y, color.z]
+                    }),
+                )
             })
             .collect();
         gpui::Mesh::new(vertices)
@@ -117,10 +119,7 @@ impl MeshBuilder {
 
     pub(super) fn triangle(&mut self, corners: [Corner; 3]) -> Result<(), String> {
         if self.positions.len() / 3 >= MAX_TRIANGLES {
-            return Err(format!(
-                "the model has more than {} triangles",
-                MAX_TRIANGLES
-            ));
+            return Err(format!("the model has more than {MAX_TRIANGLES} triangles"));
         }
         if corners.iter().any(|corner| !corner.position.is_finite()) {
             self.skipped += 1;
@@ -137,12 +136,7 @@ impl MeshBuilder {
             let normal = corner
                 .normal
                 .filter(|normal| normal.is_finite())
-                .and_then(|normal| {
-                    normal
-                        .as_dvec3()
-                        .try_normalize()
-                        .map(|normal| normal.as_vec3())
-                })
+                .and_then(|normal| normal.as_dvec3().try_normalize().map(glam::DVec3::as_vec3))
                 .unwrap_or(face);
             self.normals.push(normal);
             let color = corner.color.filter(|color| color.is_finite()).map(|color| {

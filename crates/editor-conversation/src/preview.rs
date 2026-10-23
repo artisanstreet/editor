@@ -11,7 +11,7 @@ const MAX_MATCHES: usize = 200;
 
 /// The opened activity's markdown; `None` when it has nothing to show beyond
 /// its row, or its text is stored rather than inline.
-pub(crate) fn markdown(item: &Item) -> Option<String> {
+pub fn markdown(item: &Item) -> Option<String> {
     let ItemKind::Tool { tool, output, .. } = &item.kind else {
         return None;
     };
@@ -22,21 +22,12 @@ pub(crate) fn markdown(item: &Item) -> Option<String> {
         .filter(|output| !output.trim().is_empty());
     let mut text = String::new();
     match tool {
-        ToolKind::Shell { command, cwd, .. } => {
-            fence(&mut text, Some("bash"), command.inline()?);
-            if let Some(cwd) = cwd {
-                let _ = writeln!(text, "In `{cwd}`\n");
-            }
-            if let Some(output) = output {
-                fence(&mut text, None, &strip_ansi(output));
-            }
-        }
         ToolKind::Read { path, .. } => fence(&mut text, language(path), &unnumbered(output?)),
         ToolKind::Edit { changes } => {
             let changes = changes.inline()?;
             for change in changes {
                 if changes.len() > 1 || matches!(change.op, FileOp::Move { .. }) {
-                    let _ = writeln!(text, "{}\n", change_heading(&change.op, &change.path));
+                    writeln!(text, "{}\n", change_heading(&change.op, &change.path)).ok();
                 }
                 let Some(diff) = change.diff.as_ref().and_then(TextContent::inline) else {
                     continue;
@@ -52,23 +43,21 @@ pub(crate) fn markdown(item: &Item) -> Option<String> {
             SearchMode::Glob | SearchMode::List => paths(&mut text, output?),
         },
         ToolKind::WebFetch { url } => {
-            let _ = writeln!(text, "<{url}>\n");
+            writeln!(text, "<{url}>\n").ok();
             if let Some(output) = output {
                 text.push_str(output);
             }
         }
         ToolKind::WebSearch { .. } => text.push_str(output?),
-        ToolKind::Mcp { input, .. } | ToolKind::Other { input, .. } => {
-            if let Some(input) = input.as_ref().and_then(TextContent::inline) {
-                fields(&mut text, input);
-            }
-            if let Some(output) = output {
-                result(&mut text, output);
-            }
-        }
+        // The row already says what was asked; opened, a call shows what
+        // came back.
+        ToolKind::Mcp { .. } | ToolKind::Other { .. } => result(&mut text, output?),
         ToolKind::Agents { .. } => fence(&mut text, None, output?),
-        // A message opens on its own text; an image has no text.
-        ToolKind::AgentMessage { .. } | ToolKind::ViewImage { .. } => return None,
+        // A command opens on its terminal, a message on its own text; an
+        // image has no text.
+        ToolKind::Shell { .. } | ToolKind::AgentMessage { .. } | ToolKind::ViewImage { .. } => {
+            return None;
+        }
     }
     let text = text.trim_end().to_owned();
     (!text.is_empty()).then_some(text)
@@ -84,14 +73,14 @@ fn fence(text: &mut String, language: Option<&str>, code: &str) {
         .unwrap_or_default();
     let ticks = "`".repeat(longest.max(2) + 1);
     let total = code.lines().count();
-    let _ = writeln!(text, "{ticks}{}", language.unwrap_or_default());
+    writeln!(text, "{ticks}{}", language.unwrap_or_default()).ok();
     for line in code.lines().take(MAX_LINES) {
         text.push_str(line);
         text.push('\n');
     }
-    let _ = writeln!(text, "{ticks}\n");
+    writeln!(text, "{ticks}\n").ok();
     if total > MAX_LINES {
-        let _ = writeln!(text, "{} more lines\n", total - MAX_LINES);
+        writeln!(text, "{} more lines\n", total - MAX_LINES).ok();
     }
 }
 
@@ -186,11 +175,11 @@ fn grep(text: &mut String, output: &str) {
         }
     }
     for (path, lines) in files {
-        let _ = writeln!(text, "`{path}`\n");
+        writeln!(text, "`{path}`\n").ok();
         fence(text, language(path), &lines.join("\n"));
     }
     if found.len() > MAX_MATCHES {
-        let _ = writeln!(text, "{} more matches", found.len() - MAX_MATCHES);
+        writeln!(text, "{} more matches", found.len() - MAX_MATCHES).ok();
     }
 }
 
@@ -214,39 +203,10 @@ fn paths(text: &mut String, output: &str) {
         .filter(|line| !line.trim().is_empty())
         .collect();
     for line in lines.iter().take(MAX_MATCHES) {
-        let _ = writeln!(text, "- `{}`", line.trim());
+        writeln!(text, "- `{}`", line.trim()).ok();
     }
     if lines.len() > MAX_MATCHES {
-        let _ = writeln!(text, "\n{} more", lines.len() - MAX_MATCHES);
-    }
-    text.push('\n');
-}
-
-/// A tool's JSON input as one line per field; anything nested as JSON.
-fn fields(text: &mut String, input: &str) {
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(input)
-    else {
-        return fence(text, None, input);
-    };
-    for (key, value) in &map {
-        match value {
-            serde_json::Value::String(value) if !value.contains('\n') && value.len() <= 200 => {
-                let _ = writeln!(text, "**{key}** {value}  ");
-            }
-            serde_json::Value::String(value) => {
-                let _ = writeln!(text, "\n**{key}**\n");
-                fence(text, None, value);
-            }
-            serde_json::Value::Null => {}
-            serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-                let _ = writeln!(text, "**{key}** {value}  ");
-            }
-            _ => {
-                let _ = writeln!(text, "\n**{key}**\n");
-                let pretty = serde_json::to_string_pretty(value).unwrap_or_default();
-                fence(text, Some("json"), &pretty);
-            }
-        }
+        writeln!(text, "\n{} more", lines.len() - MAX_MATCHES).ok();
     }
     text.push('\n');
 }
@@ -262,24 +222,4 @@ fn result(text: &mut String, output: &str) {
         text.push_str(output);
         text.push('\n');
     }
-}
-
-/// Text without terminal colour and cursor escapes.
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        if chars.next_if_eq(&'[').is_some() {
-            for c in chars.by_ref() {
-                if ('@'..='~').contains(&c) {
-                    break;
-                }
-            }
-        }
-    }
-    out
 }

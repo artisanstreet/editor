@@ -25,8 +25,12 @@ pub(super) fn hover_band(theme: &crate::theme::ArtisanTheme, x0: f32, x1: f32) -
     Shape::HoverBand {
         x0,
         x1,
-        fill: crate::gradient::hover_fill_gradient(*theme),
-        ring: theme.colors.foreground.with_alpha(0.13).to_paint(),
+        fill: crate::gradient::hover_fill_gradient(theme),
+        ring: theme
+            .colors
+            .text
+            .at(crate::theme::Opacity::HoverRing)
+            .to_paint(),
     }
 }
 

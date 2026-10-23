@@ -93,9 +93,8 @@ impl Decoder {
             }
             return;
         }
-        match (request, scope) {
-            (Request::CommandApproval(request), Some(scope)) => {
-                let key = item.expect("checked above");
+        match (request, scope, item) {
+            (Request::CommandApproval(request), Some(scope), Some(key)) => {
                 let existing = match self.items.get(&key).map(|tracked| &tracked.kind) {
                     Some(ItemKind::Tool {
                         tool: ToolKind::Shell { command, cwd, .. },
@@ -145,17 +144,18 @@ impl Decoder {
                             .into(),
                     },
                 };
-                let host = match command {
-                    Some(command) => ToolKind::Shell {
-                        command,
-                        cwd,
-                        background: false,
-                    },
-                    None => ToolKind::Other {
+                let host = command.map_or_else(
+                    || ToolKind::Other {
                         name: "command".to_owned(),
                         input: None,
                     },
-                };
+                    |command| ToolKind::Shell {
+                        command,
+                        cwd,
+                        background: false,
+                        watch: false,
+                    },
+                );
                 self.ask(
                     &key,
                     scope,
@@ -167,8 +167,7 @@ impl Decoder {
                     out,
                 );
             }
-            (Request::FileChangeApproval(request), Some(scope)) => {
-                let key = item.expect("checked above");
+            (Request::FileChangeApproval(request), Some(scope), Some(key)) => {
                 let host = ToolKind::Edit {
                     changes: Vec::new().into(),
                 };
@@ -184,7 +183,7 @@ impl Decoder {
                     out,
                 );
             }
-            (Request::PermissionsApproval(request), Some(scope)) => {
+            (Request::PermissionsApproval(request), Some(scope), item) => {
                 let standalone = item.is_none();
                 let key = item.unwrap_or_else(|| format!("permissions:{rpc}"));
                 let description = request
@@ -204,8 +203,12 @@ impl Decoder {
                 };
                 self.ask(&key, scope, approval, request.reason, rpc, reply, host, out);
             }
-            (Request::UserInput(request), Some(scope)) => {
-                let key = item.expect("checked above");
+            (Request::UserInput(request), Some(scope), Some(key)) => {
+                // Nothing asked: answered as it is, nothing to show.
+                if request.questions.is_empty() {
+                    self.reply(rpc, json!({ "answers": {} }));
+                    return;
+                }
                 let Some(questions) = user_questions(request.questions) else {
                     let message = "Codex supplied malformed user-input prompts or options";
                     tracing::warn!(thread, item = key, request = %rpc, message);
@@ -239,7 +242,7 @@ impl Decoder {
                 out.push(self.event(&key));
                 self.questions.insert(key, Asking::Request { rpc, ids });
             }
-            (Request::Elicitation(request), scope) => {
+            (Request::Elicitation(request), scope, _) => {
                 // Artisan has no form for MCP elicitation yet; say so and
                 // let the server go on without the input.
                 let text = format!(
@@ -256,7 +259,7 @@ impl Decoder {
                     json!({ "action": "decline", "content": null, "_meta": null }),
                 );
             }
-            (_, _) => {
+            (_, _, _) => {
                 tracing::debug!(
                     method,
                     thread,
@@ -271,7 +274,10 @@ impl Decoder {
     /// Puts an approval on the item it gates, creating the item from the
     /// request when Codex asks before announcing it. A second request for
     /// the same item waits behind the first.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "an approval carries its item, request and reply"
+    )]
     fn ask(
         &mut self,
         key: &str,
@@ -351,7 +357,7 @@ impl Decoder {
             Answer::Question { answers } if self.questions.contains_key(key) => {
                 self.answer_questions(key, answers)
             }
-            _ => {
+            Answer::Approval { .. } | Answer::Question { .. } => {
                 tracing::debug!(key, "an answer for a Codex item that isn't waiting on one");
                 Vec::new()
             }
@@ -359,7 +365,9 @@ impl Decoder {
     }
 
     fn decide(&mut self, key: &str, decision: Decision) -> Vec<EngineEvent> {
-        let queue = self.approvals.get_mut(key).expect("checked by the caller");
+        let Some(queue) = self.approvals.get_mut(key) else {
+            return Vec::new();
+        };
         let Some(asked) = queue.pop_front() else {
             return Vec::new();
         };
@@ -377,7 +385,9 @@ impl Decoder {
             Reply::Permissions { requested, .. } => match decision {
                 Decision::AllowOnce => json!({ "permissions": requested, "scope": "turn" }),
                 Decision::AllowAlways => json!({ "permissions": requested, "scope": "session" }),
-                _ => json!({ "permissions": {}, "scope": "turn" }),
+                Decision::DenyOnce | Decision::DenyAlways | Decision::Cancelled => {
+                    json!({ "permissions": {}, "scope": "turn" })
+                }
             },
         };
         self.reply(asked.rpc, result);
@@ -419,7 +429,10 @@ impl Decoder {
             }
             _ => return Vec::new(),
         };
-        match self.questions.remove(key).expect("checked by the caller") {
+        let Some(asking) = self.questions.remove(key) else {
+            return Vec::new();
+        };
+        match asking {
             Asking::Request { rpc, ids } => {
                 let mut map = Map::new();
                 for (id, answer) in ids.iter().zip(&native) {
@@ -468,8 +481,9 @@ impl Decoder {
             let at = queue.iter().position(|asked| asked.rpc == *rpc)?;
             Some((key.clone(), at))
         });
-        if let Some((key, at)) = approval {
-            let queue = self.approvals.get_mut(&key).expect("found above");
+        if let Some((key, at)) = approval
+            && let Some(queue) = self.approvals.get_mut(&key)
+        {
             let standalone = queue.remove(at).is_some_and(|asked| asked.standalone);
             if at > 0 {
                 return;
@@ -499,7 +513,7 @@ impl Decoder {
             .iter()
             .find_map(|(key, asking)| match asking {
                 Asking::Request { rpc: id, .. } if id == rpc => Some(key.clone()),
-                _ => None,
+                Asking::Request { .. } | Asking::Message { .. } => None,
             });
         if let Some(key) = question {
             self.questions.remove(&key);
@@ -636,6 +650,10 @@ fn strip_nulls(value: &Value) -> Value {
                 .map(|(key, value)| (key.clone(), strip_nulls(value)))
                 .collect(),
         ),
-        other => other.clone(),
+        other @ (Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_)) => other.clone(),
     }
 }

@@ -173,6 +173,10 @@ pub(super) enum TurnStatus {
     Completed,
     Interrupted,
     Failed,
+    /// `inProgress`, or one Artisan doesn't know: `turn/completed` says the
+    /// turn ended, and that is how it reads.
+    #[serde(other)]
+    Ended,
 }
 
 /// Codex's error shape, on failed turns and `error` notifications.
@@ -191,6 +195,38 @@ impl CodexError {
             .as_ref()
             .and_then(Value::as_str)
             .is_some_and(|code| code.ends_with("Policy") || code.ends_with("PolicyViolation"))
+    }
+    /// Whether the failure passes by itself. Codex's own retries already
+    /// ran; what is left is capacity or connection trouble, or the plan's
+    /// usage running out (whose reset Codex doesn't say here).
+    pub(super) fn retry(&self) -> Option<crate::Retry> {
+        let transient = |status: &Value| {
+            status["httpStatusCode"]
+                .as_u64()
+                .is_none_or(|code| code == 429 || code >= 500)
+        };
+        match self.codex_error_info.as_ref()? {
+            Value::String(code) => match code.as_str() {
+                "usageLimitExceeded" => Some(crate::Retry::UsageLimit { resets_at: None }),
+                "serverOverloaded" | "internalServerError" | "rateLimitExceeded" => {
+                    Some(crate::Retry::Overloaded)
+                }
+                _ => None,
+            },
+            Value::Object(info) => {
+                let (kind, status) = info.iter().next()?;
+                matches!(
+                    kind.as_str(),
+                    "httpConnectionFailed"
+                        | "responseStreamConnectionFailed"
+                        | "responseStreamDisconnected"
+                        | "responseTooManyFailedAttempts"
+                )
+                .then_some(crate::Retry::Overloaded)
+                .filter(|_| transient(status))
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::Array(_) => None,
+        }
     }
 }
 
@@ -470,6 +506,8 @@ pub(super) struct TokenCounts {
     pub total_tokens: u64,
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
+    /// Left out by Codex versions that don't count cache writes.
+    #[serde(default)]
     pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_output_tokens: u64,
@@ -647,6 +685,7 @@ pub(super) struct Elicitation {
 #[derive(Deserialize)]
 pub(super) struct AsyncQuestion {
     pub title: String,
-    #[serde(default)]
+    /// `null` for a question answered in the user's own words.
+    #[serde(default, deserialize_with = "nullable")]
     pub options: Vec<String>,
 }

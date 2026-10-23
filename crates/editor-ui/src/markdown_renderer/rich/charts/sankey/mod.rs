@@ -138,7 +138,7 @@ impl Graph {
         self.inflow(node).max(self.outflow(node))
     }
 
-    pub(super) fn rank_count(&self) -> usize {
+    pub(super) const fn rank_count(&self) -> usize {
         self.rank_count
     }
 }

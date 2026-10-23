@@ -78,10 +78,12 @@ impl Render for Gallery {
                 .on_dismiss({
                     let owner = cx.entity().downgrade();
                     move |_, _, cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            this.dialog = false;
-                            cx.notify();
-                        });
+                        owner
+                            .update(cx, |this, cx| {
+                                this.dialog = false;
+                                cx.notify();
+                            })
+                            .ok();
                     }
                 }),
             );
@@ -169,9 +171,10 @@ fn actual_decoded_attachment_preserves_geometry_and_opens_by_keyboard(cx: &mut T
     let loading = cx.debug_bounds("actual-attachment").unwrap();
     gallery.update(cx, |this, cx| {
         this.image = Some(std::sync::Arc::new(gpui::RenderImage::new(vec![
+            // Taller than the preview box, so the preview scales it down.
             image::Frame::new(image::RgbaImage::from_pixel(
-                120,
-                80,
+                600,
+                1000,
                 image::Rgba([255, 0, 0, 255]),
             )),
         ])));
@@ -180,6 +183,23 @@ fn actual_decoded_attachment_preserves_geometry_and_opens_by_keyboard(cx: &mut T
     cx.run_until_parked();
     assert_eq!(loading, cx.debug_bounds("actual-attachment").unwrap());
     cx.simulate_click(loading.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("image-preview").is_some());
+    let picture = cx.debug_bounds("image-preview-image").unwrap();
+    let close = cx.debug_bounds("image-preview-close").unwrap();
+    assert!(
+        picture.size.height < px(420.) && picture.size.width < px(300.),
+        "the picture fits the window: {picture:?}"
+    );
+    assert_eq!(
+        (picture.right() - close.right(), close.top() - picture.top()),
+        (px(2.), px(2.)),
+        "the close card sits inside the picture's top-right corner, as on the tile"
+    );
+    cx.simulate_click(close.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("image-preview").is_none());
+    press_key(cx, "enter");
     cx.run_until_parked();
     assert!(cx.debug_bounds("image-preview").is_some());
     press_key(cx, "escape");
@@ -222,10 +242,12 @@ impl Render for KeyboardGallery {
                 .on_change({
                     let owner = cx.entity().downgrade();
                     move |checked, _, _, cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            this.checked = checked;
-                            cx.notify();
-                        });
+                        owner
+                            .update(cx, |this, cx| {
+                                this.checked = checked;
+                                cx.notify();
+                            })
+                            .ok();
                     }
                 }),
             )
@@ -244,10 +266,12 @@ impl Render for KeyboardGallery {
                 .on_change({
                     let owner = cx.entity().downgrade();
                     move |value, _, _, cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            this.selected = value;
-                            cx.notify();
-                        });
+                        owner
+                            .update(cx, |this, cx| {
+                                this.selected = value;
+                                cx.notify();
+                            })
+                            .ok();
                     }
                 }),
             )
@@ -270,7 +294,7 @@ fn switch_and_select_have_keyboard_equivalence_and_skip_disabled_options(cx: &mu
     assert!(cx.debug_bounds("keyboard-select-popup").is_some());
     press_key(cx, "down");
     press_key(cx, "enter");
-    cx.run_until_parked();
+    settle_menu(cx);
     gallery.read_with(cx, |this, _| assert_eq!(this.selected, 3));
     assert!(
         cx.debug_bounds("keyboard-select-popup").is_none(),
@@ -282,12 +306,24 @@ fn switch_and_select_have_keyboard_equivalence_and_skip_disabled_options(cx: &mu
     assert!(cx.debug_bounds("keyboard-select-popup").is_some());
     press_key(cx, "home");
     press_key(cx, "space");
+    settle_menu(cx);
     gallery.read_with(cx, |this, _| assert_eq!(this.selected, 1));
     assert!(cx.debug_bounds("keyboard-select-popup").is_none());
     press_key(cx, "space");
     assert!(cx.debug_bounds("keyboard-select-popup").is_some());
     press_key(cx, "escape");
+    settle_menu(cx);
     assert!(cx.debug_bounds("keyboard-select-popup").is_none());
+}
+
+/// Lets a closing menu finish its exit fade, then paints.
+fn settle_menu(cx: &mut gpui::VisualTestContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(200));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
 }
 
 struct NestedOverlays {
@@ -321,11 +357,13 @@ impl Render for NestedOverlays {
                 .on_dismiss({
                     let owner = cx.entity().downgrade();
                     move |_, _, cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            this.dialog = false;
-                            this.popup = false;
-                            cx.notify();
-                        });
+                        owner
+                            .update(cx, |this, cx| {
+                                this.dialog = false;
+                                this.popup = false;
+                                cx.notify();
+                            })
+                            .ok();
                     }
                 }),
             );
@@ -339,10 +377,12 @@ impl Render for NestedOverlays {
                 {
                     let owner = cx.entity().downgrade();
                     move |_, cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            this.popup = false;
-                            cx.notify();
-                        });
+                        owner
+                            .update(cx, |this, cx| {
+                                this.popup = false;
+                                cx.notify();
+                            })
+                            .ok();
                     }
                 },
             ));
@@ -458,16 +498,16 @@ fn replacing_and_closing_previews_release_reuploaded_textures(cx: &mut TestAppCo
     let first = image();
     let second = image();
     cx.update(|window, cx| {
-        crate::image_preview::open(first.clone(), window, cx);
+        crate::image_preview::open(std::sync::Arc::clone(&first), window, cx);
         window.draw(cx).clear(cx);
         assert!(window.has_image_atlas_entry(&first));
         // The owning cache evicts this image while the preview retains it.
-        window.drop_image(first.clone()).unwrap();
+        window.drop_image(std::sync::Arc::clone(&first)).unwrap();
         assert!(!window.has_image_atlas_entry(&first));
         window.refresh();
         window.draw(cx).clear(cx);
         assert!(window.has_image_atlas_entry(&first));
-        crate::image_preview::open(second.clone(), window, cx);
+        crate::image_preview::open(std::sync::Arc::clone(&second), window, cx);
     });
     cx.run_until_parked();
     cx.update(|window, cx| {
@@ -490,12 +530,12 @@ fn closing_a_preview_repaints_an_image_retained_by_another_window(cx: &mut TestA
     )]));
     let preview = cx.add_window(|_, _| PreviewOnly);
     let attachment = cx.add_window(|_, _| ImageGallery {
-        image: Some(image.clone()),
+        image: Some(std::sync::Arc::clone(&image)),
         error: false,
     });
     gpui::AnyWindowHandle::from(preview)
         .update(cx, |_, window, cx| {
-            crate::image_preview::open(image.clone(), window, cx);
+            crate::image_preview::open(std::sync::Arc::clone(&image), window, cx);
             window.draw(cx).clear(cx);
             assert!(window.has_image_atlas_entry(&image));
         })
@@ -542,6 +582,7 @@ impl Render for SliderGallery {
     }
 }
 #[gpui::test]
+#[expect(clippy::float_cmp, reason = "snapped slider values are exact")]
 fn slider_pointer_keyboard_and_disabled_keep_one_geometry(cx: &mut TestAppContext) {
     use gpui::AppContext as _;
     let (gallery, cx) = cx.add_window_view(|_, cx| SliderGallery {
@@ -559,11 +600,11 @@ fn slider_pointer_keyboard_and_disabled_keep_one_geometry(cx: &mut TestAppContex
     press_key(cx, "home");
     press_key(cx, "right");
     gallery.read_with(cx, |gallery, cx| {
-        assert_eq!(gallery.slider.read(cx).value(), 0.3)
+        assert_eq!(gallery.slider.read(cx).value(), 0.3);
     });
     press_key(cx, "end");
     gallery.read_with(cx, |gallery, cx| {
-        assert_eq!(gallery.slider.read(cx).value(), 1.0)
+        assert_eq!(gallery.slider.read(cx).value(), 1.0);
     });
     // Keyboard focus never changes track borders or its bounds.
     assert_eq!(bounds.size, cx.debug_bounds("gallery-slider").unwrap().size);
@@ -577,7 +618,7 @@ fn slider_pointer_keyboard_and_disabled_keep_one_geometry(cx: &mut TestAppContex
     cx.simulate_click(disabled.center(), gpui::Modifiers::none());
     press_key(cx, "home");
     gallery.read_with(cx, |gallery, cx| {
-        assert_eq!(gallery.slider.read(cx).value(), 1.0)
+        assert_eq!(gallery.slider.read(cx).value(), 1.0);
     });
 }
 
@@ -608,10 +649,12 @@ impl Render for SharedControlsGallery {
         .disabled(self.disabled)
         .debug_selector("gallery-mode")
         .on_change(move |selected, _, cx| {
-            let _ = owner.update(cx, |this, cx| {
-                this.selection = selected;
-                cx.notify();
-            });
+            owner
+                .update(cx, |this, cx| {
+                    this.selection = selected;
+                    cx.notify();
+                })
+                .ok();
         });
         let branch = TreeRow::branch(
             self.tree_focus.node("branch"),
@@ -620,10 +663,12 @@ impl Render for SharedControlsGallery {
             "Directory",
             self.expanded,
             move |expanded, _, cx| {
-                let _ = branches.update(cx, |this, cx| {
-                    this.expanded = expanded;
-                    cx.notify();
-                });
+                branches
+                    .update(cx, |this, cx| {
+                        this.expanded = expanded;
+                        cx.notify();
+                    })
+                    .ok();
             },
         )
         .debug_selector("gallery-branch");
@@ -634,10 +679,12 @@ impl Render for SharedControlsGallery {
             "File",
             "directory/file.rs",
             move |_, cx| {
-                let _ = leaves.update(cx, |this, cx| {
-                    this.opens += 1;
-                    cx.notify();
-                });
+                leaves
+                    .update(cx, |this, cx| {
+                        this.opens += 1;
+                        cx.notify();
+                    })
+                    .ok();
             },
         )
         .debug_selector("gallery-leaf");
@@ -657,7 +704,7 @@ fn segmented_controls_roving_focus_and_disabled_selection(cx: &mut TestAppContex
         disabled: false,
         expanded: false,
         opens: 0,
-        tree_focus: Default::default(),
+        tree_focus: crate::tree_row::TreeFocus::default(),
     });
     let first = cx.debug_bounds("gallery-mode-0").unwrap();
     cx.simulate_click(first.center(), gpui::Modifiers::none());
@@ -688,7 +735,7 @@ fn tree_disclosure_keys_and_activation_keep_row_pitch(cx: &mut TestAppContext) {
         disabled: false,
         expanded: false,
         opens: 0,
-        tree_focus: Default::default(),
+        tree_focus: crate::tree_row::TreeFocus::default(),
     });
     let branch = cx.debug_bounds("gallery-branch").unwrap();
     cx.simulate_click(branch.center(), gpui::Modifiers::none());
@@ -743,7 +790,7 @@ fn deliver_frame(cx: &mut gpui::VisualTestContext) -> bool {
     std::thread::sleep(std::time::Duration::from_millis(40));
     let delivered = std::rc::Rc::new(std::cell::Cell::new(false));
     let window = cx.update(|window, _| {
-        let delivered = delivered.clone();
+        let delivered = std::rc::Rc::clone(&delivered);
         window.on_next_frame(move |_, _| delivered.set(true));
         window.window_handle()
     });

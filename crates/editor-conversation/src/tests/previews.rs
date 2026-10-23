@@ -30,14 +30,7 @@ fn tool(tool: ToolKind, status: Status, output: Option<&str>) -> Item {
 
 fn row(item: &Item, agents: &HashMap<ItemId, String>) -> String {
     let line = crate::activity::line(item, agents);
-    let tail = match line.tail {
-        Some(crate::activity::Tail::Changed { added, removed }) => format!(" +{added} -{removed}"),
-        Some(crate::activity::Tail::Failed(why)) => format!(" ({why})"),
-        None => String::new(),
-    };
-    format!("{} {}{tail}", line.verb, line.object)
-        .trim()
-        .to_owned()
+    format!("{} {}", line.verb, line.object).trim().to_owned()
 }
 
 fn change(path: &str, op: FileOp, diff: &str) -> ToolKind {
@@ -76,6 +69,7 @@ fn rows_say_what_was_done_in_plain_words() {
                     command: "cargo test\n--lib".into(),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 done,
                 None,
@@ -88,6 +82,7 @@ fn rows_say_what_was_done_in_plain_words() {
                     command: "cargo test".into(),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 Status::Running,
                 None,
@@ -100,6 +95,7 @@ fn rows_say_what_was_done_in_plain_words() {
                     command: "tail -f log".into(),
                     cwd: None,
                     background: true,
+                    watch: false,
                 },
                 done,
                 None,
@@ -123,7 +119,7 @@ fn rows_say_what_was_done_in_plain_words() {
                 done,
                 None,
             ),
-            "Created src/new.rs +2 -0",
+            "Created src/new.rs",
         ),
         (
             tool(
@@ -135,7 +131,7 @@ fn rows_say_what_was_done_in_plain_words() {
                 done,
                 None,
             ),
-            "Edited src/old.rs +1 -1",
+            "Edited src/old.rs",
         ),
         (
             tool(
@@ -207,6 +203,63 @@ fn rows_say_what_was_done_in_plain_words() {
                 None,
             ),
             "Used Linear create issue",
+        ),
+        (
+            tool(
+                ToolKind::Mcp {
+                    server: "artisan".into(),
+                    tool: "threads_grep".into(),
+                    input: Some(r#"{"pattern":"zombie","ignore_case":true,"context":1}"#.into()),
+                },
+                done,
+                None,
+            ),
+            "Searched threads for zombie",
+        ),
+        (
+            {
+                let mut read = tool(
+                    ToolKind::Mcp {
+                        server: "artisan".into(),
+                        tool: "thread_read".into(),
+                        input: Some(r#"{"thread":"01a14d1d","item":"01a14d1e"}"#.into()),
+                    },
+                    Status::Running,
+                    None,
+                );
+                // Forge names the thread a call reads.
+                if let ItemKind::Tool { title, .. } = &mut read.kind {
+                    *title = Some("Connected MCP servers".into());
+                }
+                read
+            },
+            "Reading \u{201c}Connected MCP servers\u{201d}",
+        ),
+        (
+            tool(
+                ToolKind::Mcp {
+                    server: "artisan".into(),
+                    tool: "harnesses".into(),
+                    input: Some("{}".into()),
+                },
+                done,
+                None,
+            ),
+            "Listed harnesses",
+        ),
+        (
+            tool(
+                ToolKind::Other {
+                    name: "ToolSearch".into(),
+                    input: Some(
+                        r#"{"query":"select:mcp__artisan__agent_spawn,mcp__artisan__harnesses"}"#
+                            .into(),
+                    ),
+                },
+                done,
+                None,
+            ),
+            "Loaded tools agent spawn, harnesses",
         ),
         (
             tool(
@@ -305,7 +358,7 @@ fn rows_say_what_was_done_in_plain_words() {
                 done,
                 None,
             ),
-            "Tool search select:Read",
+            "Loaded tools Read",
         ),
         (
             tool(
@@ -313,11 +366,34 @@ fn rows_say_what_was_done_in_plain_words() {
                     command: "false".into(),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 Status::Failed,
                 None,
             ),
-            "Ran false (failed)",
+            "Ran false",
+        ),
+        (
+            // Forge delivered a background agent's result as a message.
+            {
+                let mut report = tool(
+                    ToolKind::Other {
+                        name: "x".into(),
+                        input: None,
+                    },
+                    done,
+                    None,
+                );
+                report.kind = ItemKind::UserMessage {
+                    text: "[Artisan] Agent finished.".into(),
+                    images: Vec::new(),
+                    steer: false,
+                    from_agent: Some(agent),
+                    sender: None,
+                };
+                report
+            },
+            "Reported back Finish conversation rework",
         ),
     ];
     for (item, expected) in cases {
@@ -325,14 +401,15 @@ fn rows_say_what_was_done_in_plain_words() {
     }
 }
 
-/// A shell that exits non-zero says its exit code where a failure would.
+/// Nothing follows a row's words: a failed command shows no exit code.
 #[test]
-fn a_failed_command_shows_its_exit_code() {
+fn rows_carry_nothing_after_their_words() {
     let mut item = tool(
         ToolKind::Shell {
             command: "cargo test".into(),
             cwd: None,
             background: false,
+            watch: false,
         },
         Status::Done,
         None,
@@ -340,7 +417,7 @@ fn a_failed_command_shows_its_exit_code() {
     if let ItemKind::Tool { exit_code, .. } = &mut item.kind {
         *exit_code = Some(101);
     }
-    assert_eq!(row(&item, &HashMap::new()), "Ran cargo test (exit 101)");
+    assert_eq!(row(&item, &HashMap::new()), "Ran cargo test");
 }
 
 /// A read opens on the file, highlighted by its extension and without the
@@ -412,28 +489,10 @@ fn grep_results_group_by_file() {
     );
 }
 
-/// A command opens on itself as highlighted shell, then its output without
-/// terminal escapes.
+/// An opened integration shows only what came back, JSON pretty-printed: its
+/// row already says what was asked.
 #[test]
-fn a_command_opens_on_itself_and_its_output() {
-    let item = tool(
-        ToolKind::Shell {
-            command: "ls".into(),
-            cwd: None,
-            background: false,
-        },
-        Status::Done,
-        Some("\u{1b}[34msrc\u{1b}[0m\nCargo.toml"),
-    );
-    assert_eq!(
-        crate::preview::markdown(&item).unwrap(),
-        "```bash\nls\n```\n\n```\nsrc\nCargo.toml\n```"
-    );
-}
-
-/// An integration's input reads as fields and its JSON result pretty-printed.
-#[test]
-fn an_integration_opens_on_its_fields_and_result() {
+fn an_integration_opens_on_its_result() {
     let item = tool(
         ToolKind::Mcp {
             server: "linear".into(),
@@ -445,6 +504,6 @@ fn an_integration_opens_on_its_fields_and_result() {
     );
     assert_eq!(
         crate::preview::markdown(&item).unwrap(),
-        "**title** Fix rows  \n**priority** 2  \n\n```json\n{\n  \"id\": \"LIN-1\"\n}\n```"
+        "```json\n{\n  \"id\": \"LIN-1\"\n}\n```"
     );
 }

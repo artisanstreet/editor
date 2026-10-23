@@ -79,7 +79,7 @@ impl TextContent {
             Self::Stored(_) => None,
         }
     }
-    pub fn byte_len(&self) -> u64 {
+    pub const fn byte_len(&self) -> u64 {
         match self {
             Self::Inline(text) => text.len() as u64,
             Self::Stored(source) => source.bytes,

@@ -23,24 +23,4 @@ expression: results
             ),
         ),
     ),
-    (
-        "grok",
-        (
-            Some(
-                "https://accounts.x.ai/oauth2/device?user_code=3XW5-WYV2",
-            ),
-            Some(
-                "3XW5-WYV2",
-            ),
-        ),
-    ),
-    (
-        "cursor",
-        (
-            Some(
-                "https://cursor.com/loginDeepControl?challenge=abc&uuid=def&mode=login",
-            ),
-            None,
-        ),
-    ),
 ]

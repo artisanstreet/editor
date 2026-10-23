@@ -6,18 +6,32 @@ impl Composer {
     /// The glass model menu: engine tabs over the model list and the
     /// previewed model's details and policy controls. It slides in, and
     /// out again before it unmounts.
-    pub(super) fn model_menu(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn model_menu(&self, theme: &ArtisanTheme, cx: &Context<Self>) -> AnyElement {
         let theme = *theme;
         let width = MENU_WIDTH_PX.min(self.viewport_width - MENU_VIEWPORT_INSET_X_PX);
+        let current = self.effective_config(cx);
+        // Only engines with models to pick get a tab; the thread's own
+        // engine stays so its sign-in or install prompt is reachable.
         let engines: Vec<EngineStatus> = self
             .host(cx)
-            .map(|host| host.read(cx).engines.values().cloned().collect())
+            .map(|host| {
+                host.read(cx)
+                    .engines
+                    .values()
+                    .filter(|status| {
+                        Gate::of(status).is_none()
+                            || current.as_ref().map(|config| config.engine) == Some(status.engine)
+                    })
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
-        let current = self.effective_config(cx);
         let browsing = self
             .browsing
-            .or(current.as_ref().map(|config| config.engine))
-            .or(engines.first().map(|status| status.engine));
+            .filter(|engine| engines.iter().any(|status| status.engine == *engine))
+            .or_else(|| current.as_ref().map(|config| config.engine))
+            .or_else(|| engines.first().map(|status| status.engine));
+        let preview = self.preview_config(cx);
         let closing = self.picker.menu.borrow().phase() == MenuPhase::Closing;
         let panel = glass_menu(
             "composer-model-menu",
@@ -44,7 +58,7 @@ impl Composer {
                 .flex_shrink_0()
                 .gap(px(8.0))
                 .child(self.model_list(&engines, browsing, current.as_ref(), &theme, cx))
-                .child(self.model_preview(&engines, current.as_ref(), &theme, cx)),
+                .child(self.model_preview(&engines, preview.as_ref(), &theme, cx)),
         );
         animate_menu(
             panel,
@@ -57,14 +71,14 @@ impl Composer {
     }
 
     /// The engine tabs, with the light under the active one sliding from
-    /// tab to tab. A tab that cannot offer models now is greyed and says
-    /// why on hover.
+    /// tab to tab. Only the thread's own engine can be without models; its
+    /// tab is greyed and says why on hover.
     pub(super) fn engine_tabs(
         &self,
         engines: &[EngineStatus],
         browsing: Option<EngineId>,
         theme: &ArtisanTheme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = *theme;
         let mut tabs = div()
@@ -79,7 +93,7 @@ impl Composer {
             .p(px(4.0))
             .rounded(RadiusTokens::value(RadiusStep::Lg))
             .overflow_hidden()
-            .bg(control_gradient())
+            .bg(control_gradient(&theme))
             .shadow(card_shadows(&theme))
             .child(self.picker.tabs_surface.track());
         // The light goes to the active tab once that tab has been measured:
@@ -120,8 +134,10 @@ impl Composer {
                     .flex_shrink_0()
                     .rounded(RadiusTokens::value(RadiusStep::Xl))
                     .cursor_pointer()
-                    .text_color(theme.colors.foreground.to_paint())
-                    .when(gate.is_some(), |tab| tab.opacity(0.35))
+                    .text_color(theme.colors.text.to_paint())
+                    .when(gate.is_some(), |tab| {
+                        tab.opacity(Opacity::Unavailable.alpha())
+                    })
                     .when(active, |tab| tab.child(self.picker.light_tab.track()))
                     .when(self.picker.tooltip.pending() == Some(key.as_str()), |tab| {
                         tab.child(self.picker.tooltip_anchor.track())
@@ -152,7 +168,7 @@ impl Composer {
                         }))
                     })
                     .child(
-                        asset_glyph(engine_icon(engine))
+                        asset_glyph(engine_icon(&theme, engine))
                             .size(px(16.0))
                             .flex_shrink_0(),
                     ),
@@ -161,11 +177,11 @@ impl Composer {
         tabs
     }
 
-    /// The model list: favourites first, then the chosen model, then the
+    /// The model list: the chosen model first, then the
     /// engine's order; the shared hover pill flies between the rows.
     #[expect(
         clippy::too_many_lines,
-        reason = "one GPUI list builder keeps the gate, rows, favourite stars and their wiring in visual order"
+        reason = "one GPUI list builder keeps the gate, rows and their wiring in visual order"
     )]
     pub(super) fn model_list(
         &self,
@@ -173,10 +189,10 @@ impl Composer {
         browsing: Option<EngineId>,
         _current: Option<&EngineConfig>,
         theme: &ArtisanTheme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = *theme;
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let mut list = div()
             .id("composer-model-list")
             .debug_selector(|| "composer-model-viewport".into())
@@ -238,9 +254,11 @@ impl Composer {
                                 .tab_index(0)
                                 .mt(px(8.0))
                                 .cursor_pointer()
-                                .text_color(theme.colors.foreground.to_paint())
+                                .text_color(theme.colors.text.to_paint())
                                 .child(action)
-                                .on_click(cx.listener(|this, _, _, cx| this.sign_in(cx))),
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.sign_in(engine, cx)),
+                                ),
                         ),
                 );
             }
@@ -249,157 +267,113 @@ impl Composer {
             }
             _ => {}
         }
-        let count = self.picker.models.len();
-        let rows = uniform_list(
-            "composer-model-rows",
-            count,
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                let Some(host) = this.host(cx) else {
-                    return Vec::new();
+        let scroll = self.picker.model_scroll.0.borrow().base_handle.clone();
+        // Rows differ in height (slim group headers), so a plain scroller on
+        // the list's handle rather than a uniform list; the menu holds tens.
+        let rows = div()
+            .id("composer-model-rows")
+            .flex()
+            .flex_col()
+            .h(px(MODEL_PANEL_HEIGHT_PX))
+            .overflow_y_scroll()
+            .track_scroll(&scroll)
+            .children(self.picker.models.iter().filter_map(|row| {
+                let (id, model_index) = match row {
+                    ModelRow::Model(id, model_index) => (id, model_index),
+                    ModelRow::Group { name, open } => {
+                        return Some(Self::group_row(engine, name, *open, &theme, cx));
+                    }
                 };
-                let Some(status) = host.read(cx).engines.get(&engine) else {
-                    return Vec::new();
-                };
-                range
-                    .filter_map(|index| {
-                        let (id, model_index) = this.picker.models.get(index)?;
-                        let model = status
-                            .models
-                            .get(*model_index)
-                            .filter(|model| &model.id == id)?;
-                        let favorite = this.picker.favorites.contains(&model.id);
-                        let model_id = model.id.clone();
-                        let hover_id = model.id.clone();
-                        let star_id = model.id.clone();
-                        Some(
+                let model = status
+                    .models
+                    .get(*model_index)
+                    .filter(|model| &model.id == id)?;
+                let model_id = model.id.clone();
+                let hover_id = model.id.clone();
+                Some(
+                    div()
+                        .pb(px(3.0))
+                        .child(
                             div()
-                                .pb(px(3.0))
+                                .id(SharedString::from(format!(
+                                    "composer-model-{engine}-{}",
+                                    model.id
+                                )))
+                                .role(gpui::Role::MenuItem)
+                                .aria_label(model.name.clone())
+                                .focusable()
+                                .tab_index(0)
+                                .debug_selector({
+                                    let id = model.id.clone();
+                                    move || format!("composer-model-row-{id}")
+                                })
+                                .relative()
+                                .flex()
+                                .flex_shrink_0()
+                                .items_center()
+                                .gap(px(8.0))
+                                .h(px(MODEL_ROW_HEIGHT_PX))
+                                .px(px(10.0))
+                                .rounded(RadiusTokens::value(RadiusStep::Xl))
+                                .cursor_pointer()
+                                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                    if *hovered
+                                        && this.menu == Some(Menu::Model)
+                                        && this.picker.shown_axis.is_none()
+                                    {
+                                        this.picker.preview_model =
+                                            Some((engine, hover_id.clone()));
+                                        this.picker.model_hover.set_active(hover_id.clone());
+                                        cx.notify();
+                                    }
+                                }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.choose_model(engine, &model_id, cx);
+                                }))
+                                .child(self.picker.model_hover.row_probe(model.id.clone()))
+                                .child(
+                                    asset_glyph(
+                                        model
+                                            .lab
+                                            .as_deref()
+                                            .and_then(editor_ui::lab_icon)
+                                            .unwrap_or_else(|| engine_icon(&theme, engine)),
+                                    )
+                                    .size(px(20.0))
+                                    .text_color(theme.colors.text.to_paint())
+                                    .flex_shrink_0(),
+                                )
                                 .child(
                                     div()
-                                        .id(SharedString::from(format!(
-                                            "composer-model-{engine}-{}",
-                                            model.id
-                                        )))
-                                        .role(gpui::Role::MenuItem)
-                                        .aria_label(model.name.clone())
-                                        .focusable()
-                                        .tab_index(0)
-                                        .debug_selector({
-                                            let id = model.id.clone();
-                                            move || format!("composer-model-row-{id}")
-                                        })
-                                        .relative()
                                         .flex()
-                                        .flex_shrink_0()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .h(px(MODEL_ROW_HEIGHT_PX))
-                                        .px(px(10.0))
-                                        .rounded(RadiusTokens::value(RadiusStep::Xl))
-                                        .cursor_pointer()
-                                        .on_hover(cx.listener(
-                                            move |this, hovered: &bool, _, cx| {
-                                                if *hovered && this.menu == Some(Menu::Model) {
-                                                    this.picker
-                                                        .model_hover
-                                                        .set_active(hover_id.clone());
-                                                    cx.notify();
-                                                }
-                                            },
-                                        ))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.choose_model(engine, &model_id, cx);
-                                        }))
-                                        .child(this.picker.model_hover.row_probe(model.id.clone()))
+                                        .flex_col()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
                                         .child(
-                                            asset_glyph(engine_icon(engine))
-                                                .size(px(20.0))
-                                                .text_color(theme.colors.foreground.to_paint())
-                                                .flex_shrink_0(),
+                                            div()
+                                                .truncate()
+                                                .text_size(TypographyTokens::size(TextStep::Sm))
+                                                .line_height(px(20.0))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child(model.name.clone()),
                                         )
                                         .child(
                                             div()
-                                                .flex()
-                                                .flex_col()
-                                                .flex_1()
-                                                .min_w(px(0.0))
-                                                .overflow_hidden()
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_size(TypographyTokens::size(
-                                                            TextStep::Sm,
-                                                        ))
-                                                        .line_height(px(20.0))
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .child(model.name.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_size(TypographyTokens::size(
-                                                            TextStep::Xs,
-                                                        ))
-                                                        .line_height(px(16.0))
-                                                        .text_color(muted)
-                                                        .child(engine_lab(engine)),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "composer-model-favorite-{engine}-{}",
-                                                    model.id
-                                                )))
-                                                .role(gpui::Role::Button)
-                                                .aria_label(if favorite {
-                                                    "Remove favorite"
-                                                } else {
-                                                    "Add favorite"
-                                                })
-                                                .focusable()
-                                                .tab_index(0)
-                                                .debug_selector({
-                                                    let id = model.id.clone();
-                                                    move || format!("composer-model-favorite-{id}")
-                                                })
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .size(px(28.0))
-                                                .flex_shrink_0()
-                                                .rounded_full()
-                                                .hover(move |style| {
-                                                    hover_fill(style, &theme, HoverFill::Plain)
-                                                })
-                                                .text_color(if favorite {
-                                                    theme.colors.favorite.to_paint()
-                                                } else {
-                                                    muted
-                                                })
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    this.toggle_favorite(engine, &star_id, cx);
-                                                }))
-                                                .child(
-                                                    asset_glyph(if favorite {
-                                                        AssetId::TABLER_STAR_FILLED
-                                                    } else {
-                                                        AssetId::TABLER_STAR
-                                                    })
-                                                    .size(px(16.0)),
-                                                ),
-                                        )
-                                        .into_any_element(),
+                                                .truncate()
+                                                .text_size(TypographyTokens::size(TextStep::Xs))
+                                                .line_height(px(16.0))
+                                                .text_color(muted)
+                                                .child(model.lab.clone().unwrap_or_else(|| {
+                                                    engine_lab(engine).to_owned()
+                                                })),
+                                        ),
                                 )
                                 .into_any_element(),
                         )
-                    })
-                    .collect()
-            }),
-        )
-        .track_scroll(&self.picker.model_scroll)
-        .h(px(MODEL_PANEL_HEIGHT_PX));
+                        .into_any_element(),
+                )
+            }));
         // Painted after the native list, matching transcript wheel routing.
         // This consumes wheel ticks before native scrolling applies them.
         list = list.child(rows).child(
@@ -411,13 +385,82 @@ impl Composer {
         list
     }
 
-    /// The chosen model's name, description and policy controls.
+    /// A gateway's header in the model list: a slim muted label with its
+    /// chevron at the far end that brightens on hover; a click opens or
+    /// closes its models.
+    fn group_row(
+        engine: EngineId,
+        name: &str,
+        open: bool,
+        theme: &ArtisanTheme,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let muted = theme.colors.text_muted.to_paint();
+        let foreground = theme.colors.text.to_paint();
+        let toggled = name.to_owned();
+        let label = if name.is_empty() { "Other" } else { name }.to_owned();
+        div()
+            .pb(px(3.0))
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "composer-model-group-{engine}-{name}"
+                    )))
+                    .role(gpui::Role::Button)
+                    .aria_label(label.clone())
+                    .aria_expanded(open)
+                    .focusable()
+                    .tab_index(0)
+                    .relative()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .h(px(GROUP_ROW_HEIGHT_PX))
+                    .px(px(10.0))
+                    .cursor_pointer()
+                    .text_color(muted)
+                    .hover(move |style| style.text_color(foreground))
+                    // No pill: the label brightens instead.
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.picker.model_hover.hide();
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_group(engine, toggled.clone(), open, cx);
+                    }))
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_size(TypographyTokens::size(TextStep::Xs))
+                            .line_height(px(16.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(label),
+                    )
+                    .child(
+                        asset_glyph(if open {
+                            AssetId::TABLER_CHEVRON_DOWN
+                        } else {
+                            AssetId::TABLER_CHEVRON_RIGHT
+                        })
+                        .size(px(14.0))
+                        .flex_shrink_0(),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The previewed model's name, description and policy controls.
     pub(super) fn model_preview(
         &self,
         engines: &[EngineStatus],
         current: Option<&EngineConfig>,
         theme: &ArtisanTheme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = *theme;
         let mut preview = div()
@@ -458,8 +501,12 @@ impl Composer {
             .unwrap_or_else(|| {
                 let mut facts = vec![format!(
                     "{} by {}",
-                    config.engine.display_name(),
-                    engine_lab(config.engine)
+                    model
+                        .and_then(|model| model.group.as_deref())
+                        .unwrap_or_else(|| config.engine.display_name()),
+                    model
+                        .and_then(|model| model.lab.as_deref())
+                        .unwrap_or_else(|| engine_lab(config.engine))
                 )];
                 if let Some(context) = model
                     .and_then(|model| config.context_window_override().or(model.context_window))
@@ -475,7 +522,7 @@ impl Composer {
             div()
                 .text_size(TypographyTokens::size(TextStep::Xs))
                 .line_height(px(16.0))
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .child(line),
         );
         preview = preview.child(summary);

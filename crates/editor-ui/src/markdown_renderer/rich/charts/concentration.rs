@@ -17,7 +17,7 @@ use super::super::{BlockContext, RichBlock, kit};
 use super::frame::{self, Frame, PlotLabel, ReadoutRow, Tick};
 use super::scale::{Domain, f32_of, f64_of, index_of, percent};
 use super::scene::{Probe, Shape, fractions, hrule, plot_canvas, probe, vrule};
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, Opacity};
 
 /// Most points drawn; larger inputs are sampled evenly along the curve.
 const MAX_POINTS: usize = 400;
@@ -45,7 +45,7 @@ pub(super) struct ConcentrationData {
     items: Option<String>,
     total: Option<String>,
     highlight: Option<f64>,
-    curve: Option<Arc<Vec<(f64, f64)>>>,
+    curve: Option<Arc<[(f64, f64)]>>,
 }
 impl std::ops::Deref for Concentration {
     type Target = ConcentrationData;
@@ -71,7 +71,7 @@ impl From<ConcentrationSpec> for Concentration {
                 running += value / scale;
                 points.push((f64_of(index + 1) / f64_of(values.len()), running / total));
             }
-            Some(Arc::new(points))
+            Some(Arc::from(points))
         } else {
             None
         };
@@ -101,7 +101,7 @@ impl Concentration {
 
     /// The curve: `(share of items, share of total)` from `(0, 0)` to
     /// `(1, 1)`, items ranked largest first. `None` without a positive total.
-    pub(super) fn curve(&self) -> Option<Arc<Vec<(f64, f64)>>> {
+    pub(super) fn curve(&self) -> Option<Arc<[(f64, f64)]>> {
         self.0.curve.clone()
     }
 
@@ -129,9 +129,9 @@ impl RichBlock for Concentration {
     fn resident_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + std::mem::size_of::<ConcentrationData>()
-            + budget::optional(&self.items)
-            + budget::optional(&self.total)
-            + self.curve.as_ref().map_or(0, |curve| budget::vector(curve))
+            + budget::optional(self.items.as_ref())
+            + budget::optional(self.total.as_ref())
+            + self.curve.as_deref().map_or(0, std::mem::size_of_val)
     }
 
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
@@ -171,7 +171,7 @@ impl RenderOnce for ConcentrationView {
         });
         let (hover, plot_probe) = {
             let current = state.read(cx);
-            (current.hover, current.probe.clone())
+            (current.hover, std::rc::Rc::clone(&current.probe))
         };
         let axis = Domain::new(0.0, 1.0);
         let quarters = [0.0, 0.25, 0.5, 0.75, 1.0];
@@ -205,14 +205,14 @@ impl RenderOnce for ConcentrationView {
                 f32_of(share),
                 Some(format!("Top {} of {}", percent(share), self.spec.items()).into()),
                 vec![ReadoutRow::new(
-                    Some(kit::series_color(0).to_paint()),
+                    Some(kit::series_color(&theme, 0).to_paint()),
                     format!("Share of {}", self.spec.total()),
                     percent(held),
                 )],
             )
         });
         let plot = self.plot(&state, shapes, labels, readout, plot_probe);
-        let keyboard = state.clone();
+        let keyboard = state;
         let mut navigation = crate::chart_navigation::ChartNavigation::new(
             ElementId::Name(format!("{}-navigation", self.id).into()),
             theme,
@@ -224,15 +224,15 @@ impl RenderOnce for ConcentrationView {
                     use crate::chart_navigation::ChartCommand;
                     state.hover = match command {
                         ChartCommand::Select(index) | ChartCommand::Activate(index) => {
-                            Some(index as f64 / 100.0)
+                            Some(f64_of(index) / 100.0)
                         }
                         ChartCommand::Parent | ChartCommand::Reset => None,
                     };
                     cx.notify();
-                })
+                });
             },
         )
-        .selected(hover.map(|share| (share * 100.0).round() as usize));
+        .selected(hover.map(|share| index_of((share * 100.0).round())));
         if let Some(label) = selection_label {
             navigation = navigation.selection_label(label);
         }
@@ -260,14 +260,18 @@ impl ConcentrationView {
         hover: Option<f64>,
     ) -> (Vec<Shape>, Vec<PlotLabel>) {
         let theme = &self.theme;
-        let color = kit::series_color(0);
+        let color = kit::series_color(theme, 0);
         let at = |(x, y): (f64, f64)| (f32_of(x), 1.0 - f32_of(y));
         let sampled = sample(curve, MAX_POINTS);
         let mut shapes = frame::grid(theme, y_ticks, &[]);
         shapes.push(Shape::Line {
             points: vec![(0.0, 1.0), (1.0, 0.0)],
             width: 1.0,
-            color: theme.colors.muted_foreground.with_alpha(0.5).to_paint(),
+            color: theme
+                .colors
+                .text_muted
+                .at(Opacity::ReferenceLine)
+                .to_paint(),
             dash: true,
         });
         let mut area: Vec<(f32, f32)> = sampled.iter().copied().map(at).collect();
@@ -275,7 +279,7 @@ impl ConcentrationView {
         area.push((0.0, 1.0));
         shapes.push(Shape::Area {
             points: area,
-            color: color.with_alpha(0.14).to_paint(),
+            color: color.at(Opacity::AreaQuiet).to_paint(),
         });
         shapes.push(Shape::Line {
             points: sampled.iter().copied().map(at).collect(),
@@ -286,14 +290,14 @@ impl ConcentrationView {
         let cutoff = self.spec.highlight();
         let held = Concentration::share_of_total(curve, cutoff);
         let (x, y) = at((cutoff, held));
-        let marker = theme.colors.foreground.with_alpha(0.55).to_paint();
+        let marker = theme.colors.text.at(Opacity::EventRule).to_paint();
         shapes.push(vrule(x, marker, true));
         shapes.push(hrule(y, marker, true));
         shapes.push(Shape::Dot {
             x,
             y,
             radius: 4.0,
-            color: theme.colors.foreground.to_paint(),
+            color: theme.colors.text.to_paint(),
         });
         let labels = vec![PlotLabel {
             x,
@@ -306,13 +310,13 @@ impl ConcentrationView {
                 percent(held),
                 self.spec.total()
             )),
-            color: theme.colors.foreground.to_paint(),
+            color: theme.colors.text.to_paint(),
         }];
         if let Some(share) = hover {
             let (hx, hy) = at((share, Concentration::share_of_total(curve, share)));
             shapes.push(vrule(
                 hx,
-                theme.colors.foreground.with_alpha(0.3).to_paint(),
+                theme.colors.text.at(Opacity::ChartRule).to_paint(),
                 false,
             ));
             shapes.push(Shape::Dot {
@@ -336,7 +340,7 @@ impl ConcentrationView {
     ) -> AnyElement {
         let moving = state.clone();
         let leaving = state.clone();
-        let move_probe = plot_probe.clone();
+        let move_probe = std::rc::Rc::clone(&plot_probe);
         div()
             .id(kit::part(&self.id, "plot"))
             .absolute()

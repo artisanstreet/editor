@@ -6,86 +6,49 @@
 
 use crate::Sidebar;
 use crate::list::{RowData, RowState};
+use editor_core::DraggedThread;
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
-use editor_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use editor_ui::measure::Measured;
 use editor_ui::picker_motion::HoverSurface;
-use editor_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
+use editor_ui::project_mark::project_mark;
+use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::RenderImage;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, MouseButton, ObjectFit,
+    AppContext as _, Context, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement as _, PulseExt as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, WeakEntity, Window, div, img, px,
+    Styled as _, WeakEntity, Window, div, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
 
 /// Height of one two-line thread row.
-pub(crate) const ROW_HEIGHT: f32 = 48.0;
+pub const ROW_HEIGHT: f32 = 48.0;
 /// The trailing state dot.
-const STATE_DOT: f32 = 6.0;
+pub const STATE_DOT: f32 = 6.0;
 /// One full fade of the working dot, out and back.
-const WORKING_PULSE: Duration = Duration::from_millis(1_600);
+pub const WORKING_PULSE: Duration = Duration::from_millis(1_600);
 /// The dimmest the working dot gets mid-pulse.
-const WORKING_PULSE_FLOOR: f32 = 0.4;
-
-/// The 14 px mark before a row's subtitle.
-pub(crate) fn project_mark(
-    image: Option<Arc<RenderImage>>,
-    host: Option<Option<String>>,
-    theme: &ArtisanTheme,
-) -> AnyElement {
-    let slot = div().size(px(14.0)).flex_shrink_0();
-    if let Some(image) = image {
-        slot.child(
-            img(image)
-                .size(px(14.0))
-                .rounded(RadiusTokens::value(RadiusStep::X2sMid))
-                .object_fit(ObjectFit::Contain),
-        )
-        .into_any_element()
-    } else if let Some(host) = host {
-        let (asset, monochrome) = host_mark(host.as_deref());
-        let mut glyph = asset_glyph(asset).size(px(14.0));
-        if monochrome {
-            glyph = glyph.text_color(theme.colors.muted_foreground.to_paint());
-        }
-        slot.child(glyph).into_any_element()
-    } else {
-        slot.child(icon(IconStyle::resolve(
-            *theme,
-            AssetId::TABLER_FOLDER,
-            IconSize::Compact,
-            IconTint::Muted,
-        )))
-        .into_any_element()
-    }
-}
-
-/// A repository host's mark, and whether it is one colour.
-pub(crate) fn host_mark(host: Option<&str>) -> (AssetId, bool) {
-    match host {
-        Some("github") => (AssetId::SVGL_GITHUB, true),
-        Some("gitlab") => (AssetId::SVGL_GITLAB, false),
-        Some("azure") => (AssetId::SVGL_MICROSOFT_AZURE, false),
-        Some("bitbucket") => (AssetId::SIMPLE_ICONS_BITBUCKET, false),
-        Some("codeberg") => (AssetId::SIMPLE_ICONS_CODEBERG, false),
-        Some("gitea") => (AssetId::SIMPLE_ICONS_GITEA, false),
-        Some("sourcehut") => (AssetId::SIMPLE_ICONS_SOURCEHUT, false),
-        _ => (AssetId::SVGL_GIT, false),
-    }
-}
+pub const WORKING_PULSE_FLOOR: f32 = 0.4;
 
 /// What one row draws. The sidebar sets it every time the row is laid out;
 /// an unchanged input leaves the cached paint alone.
 #[derive(Clone)]
-pub(crate) struct RowInputs {
+pub struct RowInputs {
     pub data: RowData,
     pub image: Option<Arc<RenderImage>>,
+    #[expect(
+        clippy::option_option,
+        reason = "editor_ui::project_mark takes this shape: no repository vs a repository without a known host"
+    )]
     pub host: Option<Option<String>>,
     pub reduced: bool,
+    /// The theme mode the row paints in: a flip re-renders the cached row.
+    pub mode: ThemeMode,
+    /// What dragging the row into a composer mentions; `None` for a thread
+    /// no `@title` can name.
+    pub drag: Option<DraggedThread>,
 }
 
 impl PartialEq for RowInputs {
@@ -93,6 +56,8 @@ impl PartialEq for RowInputs {
         self.data == other.data
             && self.host == other.host
             && self.reduced == other.reduced
+            && self.mode == other.mode
+            && self.drag == other.drag
             && match (&self.image, &other.image) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -101,9 +66,8 @@ impl PartialEq for RowInputs {
     }
 }
 
-pub(crate) struct ThreadRow {
+pub struct ThreadRow {
     inputs: RowInputs,
-    theme: ArtisanTheme,
     sidebar: WeakEntity<Sidebar>,
     /// The thread list's sliding pill.
     hover: HoverSurface,
@@ -113,16 +77,14 @@ pub(crate) struct ThreadRow {
 }
 
 impl ThreadRow {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         inputs: RowInputs,
-        theme: ArtisanTheme,
         sidebar: WeakEntity<Sidebar>,
         hover: HoverSurface,
         bounds: Measured,
     ) -> Self {
         Self {
             inputs,
-            theme,
             sidebar,
             hover,
             bounds,
@@ -138,30 +100,36 @@ impl ThreadRow {
 }
 
 impl Render for ThreadRow {
-    #[allow(clippy::too_many_lines)]
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the row is one element tree, ported from the old Editor"
+    )]
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let RowInputs {
             data,
             image,
             host,
             reduced,
+            mode: _,
+            drag,
         } = self.inputs.clone();
-        let theme = self.theme;
+        let theme = *cx.theme();
         let sidebar = self.sidebar.clone();
         let hover = self.hover.clone();
         let bounds = self.bounds.clone();
         let colors = &theme.colors;
         let title_color = if data.selected {
-            colors.banner_info.to_paint()
+            colors.thread_title_active.to_paint()
         } else {
-            colors.foreground.to_paint()
+            colors.text.to_paint()
         };
         let dot = match data.state {
             RowState::Idle => None,
-            RowState::Working => Some(colors.primary),
-            RowState::Waiting => Some(colors.question_from),
+            RowState::Working => Some(colors.text),
+            RowState::Waiting => Some(colors.primary),
             RowState::Unread => Some(colors.unread),
-            RowState::Failed => Some(colors.destructive),
+            RowState::Failed => Some(colors.red.solid),
+            RowState::Parked => Some(colors.amber.solid),
         };
         let selector = format!("sidebar-thread-{}", data.id);
         let title_selector = format!("{selector}-title");
@@ -173,12 +141,13 @@ impl Render for ThreadRow {
             RowState::Waiting => "Needs answer",
             RowState::Unread => "Unread",
             RowState::Failed => "Failed",
+            RowState::Parked => "Waiting to pick up",
         };
         let hover_id = selector.clone();
         let keyboard_menu = menu_id.clone();
         let keyboard_owner = sidebar.clone();
         div()
-            .id(SharedString::from(selector.clone()))
+            .id(SharedString::from(selector))
             .role(gpui::Role::Button).aria_label(data.title.clone()).aria_selected(data.selected)
             .aria_description(format!("{}; {state_label}; Thread actions: Shift+F10", data.subtitle))
             .focusable().tab_index(0)
@@ -186,7 +155,7 @@ impl Render for ThreadRow {
                 if matches!(event.keystroke.key.as_str(), "contextmenu" | "menu") || (event.keystroke.key == "f10" && event.keystroke.modifiers.shift) {
                     let bounds = bounds.get().unwrap_or_default();
                     cx.stop_propagation();
-                    let _ = keyboard_owner.update(cx, |sidebar, cx| sidebar.open_thread_menu(keyboard_menu.clone(), gpui::point(bounds.left(), bounds.bottom()), cx));
+                    keyboard_owner.update(cx, |sidebar, cx| sidebar.open_thread_menu(keyboard_menu.clone(), gpui::point(bounds.left(), bounds.bottom()), cx)).ok();
                 }
             })
             .relative()
@@ -198,7 +167,7 @@ impl Render for ThreadRow {
             .items_center()
             .gap(px(8.0))
             .px(px(8.0))
-            .rounded(RadiusTokens::value(RadiusStep::Sm))
+            .rounded(RadiusTokens::value(RadiusStep::Md))
             .cursor_pointer()
             // The list's one pill flies to the row under the pointer; the
             // list measures the row outside this cached view, whose paint
@@ -220,7 +189,7 @@ impl Render for ThreadRow {
                             .truncate()
                             .text_size(theme.typography.control_text)
                             .text_color(title_color)
-                            .debug_selector(move || title_selector.clone())
+                            .debug_selector(move || title_selector)
                             .child(data.title.clone()),
                     )
                     .child(
@@ -231,9 +200,14 @@ impl Render for ThreadRow {
                             .items_center()
                             .gap(px(5.0))
                             .text_size(theme.typography.label_text)
-                            .text_color(colors.muted_foreground.to_paint())
-                            .debug_selector(move || subtitle_selector.clone())
-                            .child(project_mark(image, host, &theme))
+                            .text_color(colors.text_muted.to_paint())
+                            .debug_selector(move || subtitle_selector)
+                            .child(project_mark(
+                                image,
+                                host,
+                                14.0,
+                                colors.text_muted.to_paint(),
+                            ))
                             .child(
                                 div()
                                     .flex_1()
@@ -244,7 +218,7 @@ impl Render for ThreadRow {
                     ),
             )
             // A thread that needs the user keeps its prominence without
-            // reordering: purple is the user's turn, live work breathes, an
+            // reordering: the accent is the user's turn, live work breathes, an
             // unread outcome holds still until the thread is opened.
             .when_some(dot, |row, tone| {
                 let dot = div()
@@ -260,6 +234,12 @@ impl Render for ThreadRow {
                     row.child(dot)
                 }
             })
+            .when_some(drag, |row, drag| {
+                row.on_drag(drag, |drag, _, _, cx| {
+                    let title = SharedString::from(drag.title.clone());
+                    cx.new(|_| DragPreview { title })
+                })
+            })
             .on_click({ let owner = sidebar.clone(); move |_, _, cx| {
                 owner.update(cx, |sidebar, cx| sidebar.open_thread(open_id.clone(), cx)).ok();
             }})
@@ -267,5 +247,40 @@ impl Render for ThreadRow {
                 cx.stop_propagation();
                 sidebar.update(cx, |sidebar, cx| sidebar.open_thread_menu(menu_id.clone(), event.position, cx)).ok();
             })
+    }
+}
+
+/// The pill that follows the pointer while a thread is dragged toward a
+/// composer.
+struct DragPreview {
+    title: SharedString,
+}
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *cx.theme();
+        editor_ui::popover::glass_menu(
+            "sidebar-thread-drag",
+            &theme,
+            RadiusTokens::value(RadiusStep::LgMid),
+        )
+        .child(
+            div()
+                .h(px(32.0))
+                .max_w(px(260.0))
+                .px(px(10.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .text_sm()
+                .text_color(theme.colors.text.to_paint())
+                .child(
+                    asset_glyph(AssetId::TABLER_MESSAGE_CIRCLE)
+                        .size(px(14.0))
+                        .flex_shrink_0()
+                        .text_color(theme.colors.text_muted.to_paint()),
+                )
+                .child(div().min_w_0().truncate().child(self.title.clone())),
+        )
     }
 }

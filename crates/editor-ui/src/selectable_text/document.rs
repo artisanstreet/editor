@@ -200,7 +200,7 @@ impl Document {
     pub(super) fn register_source(&mut self, source: &Rc<SelectionSource>, view: EntityId) {
         self.sources
             .retain(|_, (source, _)| source.strong_count() > 0);
-        let key = (source.scope.clone(), source.owner.clone());
+        let key = (source.scope.clone(), Rc::clone(&source.owner));
         let changed = self
             .sources
             .get(&key)
@@ -279,7 +279,7 @@ impl Document {
                 separator: leaf.separator,
                 text: leaf.text.clone(),
                 source_slice: None,
-                copies: leaf.copies.clone(),
+                copies: Rc::clone(&leaf.copies),
                 view,
                 bounds: Bounds::default(),
             })
@@ -327,10 +327,9 @@ impl Document {
         if has_source {
             return;
         }
-        let Some(first) = self.order.first().copied() else {
+        let (Some(&first), Some(&last)) = (self.order.first(), self.order.last()) else {
             return;
         };
-        let last = *self.order.last().unwrap();
         self.drag = None;
         self.anchor = Some(Position {
             leaf: first,
@@ -346,11 +345,11 @@ impl Document {
     }
 
     /// Whether a selection or a gesture is live, so leaves must report in.
-    pub(super) fn is_active(&self) -> bool {
+    pub(super) const fn is_active(&self) -> bool {
         self.whole_source || self.anchor.is_some() || self.drag.is_some()
     }
 
-    pub(super) fn is_dragging(&self) -> bool {
+    pub(super) const fn is_dragging(&self) -> bool {
         self.drag.is_some()
     }
 
@@ -465,10 +464,10 @@ impl Document {
                 self.leaves.insert(
                     observed.key,
                     Leaf {
-                        order: observed.order.clone(),
+                        order: Rc::clone(&observed.order),
                         words: None,
                         text: observed.text.clone(),
-                        copies: observed.copies.clone(),
+                        copies: Rc::clone(&observed.copies),
                         view: observed.view,
                         separator: observed.separator,
                         source_owner: source_owner.cloned(),
@@ -522,7 +521,7 @@ impl Document {
         if changed {
             leaf.words = None;
         }
-        leaf.order = observed.order.clone();
+        leaf.order = Rc::clone(&observed.order);
         leaf.text = observed.text.clone();
         leaf.copies = Rc::clone(&observed.copies);
         leaf.view = observed.view;
@@ -704,6 +703,7 @@ impl Document {
         self.whole_source || self.ordered().is_some_and(|(start, end)| start != end)
     }
 
+    #[expect(clippy::expect_used, reason = "only observed leaves take a selection")]
     fn unit_range(
         &mut self,
         key: LeafKey,
@@ -802,12 +802,12 @@ impl Document {
     }
 
     /// Remembers the press of the current gesture.
-    pub(super) fn set_pressed(&mut self, leaf: LeafKey, glyph: usize, click_count: usize) {
+    pub(super) const fn set_pressed(&mut self, leaf: LeafKey, glyph: usize, click_count: usize) {
         self.pressed = Some((leaf, glyph, click_count));
     }
 
     /// Takes the press of the gesture that is ending.
-    pub(super) fn take_pressed(&mut self) -> Option<(LeafKey, usize, usize)> {
+    pub(super) const fn take_pressed(&mut self) -> Option<(LeafKey, usize, usize)> {
         self.pressed.take()
     }
 
@@ -890,6 +890,12 @@ mod tests {
         LeafKey(hasher.finish())
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::float_cmp,
+        reason = "fixture tops are small whole numbers"
+    )]
     fn leaf(name: &str, text: &str, top: f32) -> Observed {
         Observed {
             key: key(name),
@@ -980,6 +986,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the flagged bindings are references or plain values, not guards"
+    )]
     fn click_without_movement_leaves_no_selection() {
         let mut document = Document::default();
         document.reset_to(&page());
@@ -1203,6 +1213,10 @@ mod source_tests {
         assert_eq!(doc.selected_text().as_deref(), Some("preview text"));
     }
     #[test]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the flagged bindings are references or plain values, not guards"
+    )]
     fn ctrl_a_survives_repainting_a_clipped_source_line() {
         let text = "long line ".repeat(4_000);
         let source = source("preview", &[&text]);

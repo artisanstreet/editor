@@ -6,6 +6,7 @@ use artisan_markdown_index::LeafRecord;
 use forge_store::{NewItem, Store};
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -24,6 +25,7 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
             config: EngineConfig::new(EngineId::Codex),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await
         .unwrap();
@@ -90,8 +92,8 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .unwrap()
         .unwrap();
     let record: LeafRecord = serde_json::from_str(
-        &metadata.text[(leaf.metadata_start - metadata.start) as usize
-            ..(leaf.metadata_end - metadata.start) as usize],
+        &metadata.text[usize::try_from(leaf.metadata_start - metadata.start).unwrap()
+            ..usize::try_from(leaf.metadata_end - metadata.start).unwrap()],
     )
     .unwrap();
     requests += 1;
@@ -106,9 +108,20 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .await
         .unwrap()
         .unwrap();
-    let events = record.replay(raw.start as usize, &raw.text).unwrap();
+    let events = record
+        .replay(usize::try_from(raw.start).unwrap(), &raw.text)
+        .unwrap();
     assert!(events.iter().any(|(event,_)|matches!(event,artisan_markdown_index::Event::Start(artisan_markdown_index::Tag::Link{dest_url,..}) if dest_url.as_ref()=="https://example.com")));
-    eprintln!("source_index_measurement source_bytes={} index_ms={} descriptor_bytes={} requested_source_bytes={} requested_metadata_bytes={} logical_leaves={} requests={}", source.bytes, index_elapsed.as_millis(), serde_json::to_vec(&page).unwrap().len(), raw.text.len(), metadata.text.len(), page.index.leaves, requests);
+    eprintln!(
+        "source_index_measurement source_bytes={} index_ms={} descriptor_bytes={} requested_source_bytes={} requested_metadata_bytes={} logical_leaves={} requests={}",
+        source.bytes,
+        index_elapsed.as_millis(),
+        serde_json::to_vec(&page).unwrap().len(),
+        raw.text.len(),
+        metadata.text.len(),
+        page.index.leaves,
+        requests
+    );
     assert_eq!(
         requests, 3,
         "source size must not multiply remote bootstrap requests"
@@ -224,6 +237,7 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
     use artisan_api::SourceIndexFormat;
     let dir = tempfile::tempdir().unwrap();
@@ -243,6 +257,7 @@ async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
             config: EngineConfig::new(EngineId::Codex),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await
         .unwrap();
@@ -325,7 +340,7 @@ async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
                 &first.index.metadata.id,
                 ContentQuery {
                     offset: leaf.metadata_start,
-                    limit: Some((leaf.metadata_end - leaf.metadata_start) as u32),
+                    limit: Some(u32::try_from(leaf.metadata_end - leaf.metadata_start).unwrap()),
                 },
             )
             .await
@@ -337,21 +352,24 @@ async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
                 &source.id,
                 ContentQuery {
                     offset: leaf.source_start,
-                    limit: Some((leaf.source_end - leaf.source_start).max(4) as u32),
+                    limit: Some(
+                        u32::try_from((leaf.source_end - leaf.source_start).max(4)).unwrap(),
+                    ),
                 },
             )
             .await
             .unwrap()
             .unwrap();
         let events = record
-            .replay(leaf.source_start as usize, &raw.text)
+            .replay(usize::try_from(leaf.source_start).unwrap(), &raw.text)
             .unwrap();
         let artisan_markdown_index::Event::Text(value) = &events[0].0 else {
             panic!("raw literal event")
         };
         assert_eq!(
             value.as_ref(),
-            &text[leaf.source_start as usize..leaf.source_end as usize]
+            &text[usize::try_from(leaf.source_start).unwrap()
+                ..usize::try_from(leaf.source_end).unwrap()]
         );
     }
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();

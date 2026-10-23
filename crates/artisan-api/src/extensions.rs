@@ -21,8 +21,9 @@ pub enum SkillOrigin {
     FirstParty,
     /// The user's own, in `<data>/extensions/skills`.
     User,
-    /// Found in an engine's own skills folder; Forge doesn't manage it
-    /// until the user adopts it.
+    /// Found in an engine's skills folder without Artisan installing it:
+    /// Forge quarantines it, out of every engine, until the user installs
+    /// (adopts) or discards it.
     Discovered,
 }
 
@@ -40,7 +41,7 @@ pub enum SkillEngineStatus {
     Unavailable,
     /// The engine has its own, different skill under the same name.
     Conflict,
-    /// A discovered skill this engine has on its own.
+    /// A discovered skill that came from this engine.
     Native,
     /// A discovered skill this engine doesn't have.
     NotPresent,
@@ -55,6 +56,25 @@ pub struct SkillEngineState {
     /// Why, for `Unavailable`, `Conflict` and `Failed`.
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// A skill another directory lists, found by the Marketplace's search.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listing {
+    /// `skills.sh:<owner>/<repo>/<skill>`; what [`InstallListing`] names.
+    pub id: String,
+    pub name: String,
+    /// The GitHub repository that publishes it, `<owner>/<repo>`.
+    pub publisher: String,
+    /// The directory that listed it, `skills.sh`.
+    pub source: String,
+    pub installs: u64,
+}
+
+/// Install a [`Listing`] into Artisan's own skills.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallListing {
+    pub id: String,
 }
 
 /// One skill and its state in every engine.
@@ -151,6 +171,8 @@ pub enum ResolvePrompt {
 }
 
 /// A stdio server (`command`, `args`, `env`) or, with `url`, an HTTP one.
+/// Values may hold `${VAR}` and `${VAR:-default}`, expanded from the
+/// environment when the server starts.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServer {
     pub name: String,
@@ -162,6 +184,59 @@ pub struct McpServer {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// HTTP headers sent with every request to a `url` server (an
+    /// `Authorization` token, an API key).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// With `url`: the legacy HTTP+SSE transport rather than Streamable HTTP.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sse: bool,
+}
+
+/// Forge's setting with the sign-in state of each HTTP MCP server that has
+/// one, by server name (a map of [`McpAuthStatus`]). Forge writes it.
+pub const MCP_AUTH_KEY: &str = "mcp_auth";
+
+/// Where an HTTP MCP server stands on signing in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAuthStatus {
+    /// It answers 401 and offers OAuth sign-in.
+    NeedsSignIn,
+    /// Artisan holds a token it accepts.
+    SignedIn,
+    /// It answers 401 but offers no OAuth sign-in: it needs a token in an
+    /// `Authorization` header.
+    NeedsToken,
+}
+
+/// Starts signing in an HTTP MCP server. `redirect_uri` is the loopback
+/// address where the Editor catches the browser's redirect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpSignInStart {
+    pub server: String,
+    pub redirect_uri: String,
+}
+
+/// The page the user approves the sign-in on, and the `state` its redirect
+/// carries back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpSignInStarted {
+    pub authorize_url: String,
+    pub state: String,
+}
+
+/// The authorization code the redirect brought back, for Forge to exchange.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpSignInFinish {
+    pub state: String,
+    pub code: String,
+}
+
+/// Forgets the tokens Artisan holds for a server.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpSignOut {
+    pub server: String,
 }
 
 /// Edits one server against its original value; concurrent unrelated edits survive.
@@ -183,13 +258,23 @@ pub enum EngineCommand {
     Install {},
     Update {},
     Rollback {},
-    Use { version: String },
+    Use {
+        version: String,
+    },
     Login {},
-    LoginCode { code: String },
+    LoginCode {
+        code: String,
+    },
     CancelLogin {},
     Logout {},
     Refresh {},
     Versions {},
+    /// Keep a claude.ai session a browser signed in to (Claude only).
+    ClaudeAiSignIn {
+        session: crate::ClaudeAiSession,
+    },
+    /// Forget the claude.ai session (Claude only).
+    ClaudeAiSignOut {},
 }
 impl EngineCommand {
     pub const fn as_str(&self) -> &'static str {
@@ -204,6 +289,8 @@ impl EngineCommand {
             Self::Logout {} => "logout",
             Self::Refresh {} => "refresh",
             Self::Versions {} => "versions",
+            Self::ClaudeAiSignIn { .. } => "claude-ai-sign-in",
+            Self::ClaudeAiSignOut {} => "claude-ai-sign-out",
         }
     }
 }
@@ -214,6 +301,8 @@ pub enum SkillAction {
     Enable,
     Disable,
     Adopt,
+    /// Delete a quarantined skill.
+    Discard,
 }
 impl SkillAction {
     pub const fn as_str(self) -> &'static str {
@@ -221,6 +310,7 @@ impl SkillAction {
             Self::Enable => "enable",
             Self::Disable => "disable",
             Self::Adopt => "adopt",
+            Self::Discard => "discard",
         }
     }
 }

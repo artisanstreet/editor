@@ -8,8 +8,13 @@ const WINDOW: usize = 600;
 const BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone, Copy)]
 pub enum ThreadPageDirection {
+    /// The newest page, replacing the window.
     Latest,
+    /// The page below the window's oldest thread.
     Older,
+    /// The page above the window's newest thread, after paging back
+    /// dropped the newest ones.
+    Newer,
 }
 #[derive(Default)]
 pub struct ThreadPage {
@@ -73,14 +78,24 @@ impl HostData {
         if page.loading {
             return;
         }
-        let older = matches!(direction, ThreadPageDirection::Older);
-        let cursor = if older {
-            let Some(cursor) = page.next.clone() else {
-                return;
-            };
-            Some(cursor)
-        } else {
-            None
+        let (cursor, after) = match direction {
+            ThreadPageDirection::Latest => (None, None),
+            ThreadPageDirection::Older => {
+                let Some(cursor) = page.next.clone() else {
+                    return;
+                };
+                (Some(cursor), None)
+            }
+            ThreadPageDirection::Newer => {
+                let Some(first) = page.ids.first().filter(|_| !page.at_latest) else {
+                    return;
+                };
+                let after = ThreadCursor {
+                    activity_seq: self.threads[first].activity_seq,
+                    id: first.clone(),
+                };
+                (None, Some(after))
+            }
         };
         page.loading = true;
         page.error = None;
@@ -96,80 +111,102 @@ impl HostData {
             archived,
             before_activity: cursor.as_ref().map(|cursor| cursor.activity_seq),
             before_id: cursor.map(|cursor| cursor.id),
+            after_activity: after.as_ref().map(|cursor| cursor.activity_seq),
+            after_id: after.map(|cursor| cursor.id),
             limit: Some(PAGE),
             query: None,
         };
         page.task = Some(cx.spawn(async move |this, cx| {
             let result = client.threads(&query).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 let page = &mut this.thread_pages.pages[index];
                 page.loading = false;
                 page.loaded = true;
                 page.task = None;
                 match result {
-                    Err(error) => page.error = Some(format!("Couldn't load threads: {error:#}")),
-                    Ok(result) => {
-                        if !older {
-                            page.ids.retain(|id| {
-                                this.threads
-                                    .get(id)
-                                    .is_some_and(|thread| thread.seq > started_seq)
-                            });
-                            page.at_latest = true;
-                        }
-                        page.next = result.next;
-                        for thread in result.threads {
-                            let id = thread.id.clone();
-                            if this
-                                .threads
-                                .get(&id)
-                                .is_none_or(|known| known.seq <= thread.seq)
-                            {
-                                this.threads.insert(id.clone(), thread);
-                            }
-                            if this.threads.get(&id).is_some_and(|thread| {
-                                thread.archived == archived && thread.parent_thread_id.is_none()
-                            }) && !page.ids.contains(&id)
-                            {
-                                page.ids.push(id);
-                            }
-                        }
-                        for run in result.runs {
-                            if this
-                                .runs
-                                .get(&run.thread_id)
-                                .is_none_or(|known| known.seq <= run.seq)
-                            {
-                                this.runs.insert(run.thread_id.clone(), run);
-                            }
-                        }
-                        if !older {
-                            for id in &page.changed {
-                                if this.threads.get(id).is_some_and(|thread| {
-                                    thread.archived == archived && thread.parent_thread_id.is_none()
-                                }) && !page.ids.contains(id)
-                                {
-                                    page.ids.push(id.clone());
-                                }
-                            }
-                        }
-                        page.ids.sort_by(|a, b| {
-                            this.threads[b]
-                                .activity_seq
-                                .cmp(&this.threads[a].activity_seq)
-                                .then_with(|| b.cmp(a))
-                        });
-                        trim_page(page, &this.threads, older);
+                    Err(error) => {
+                        page.error = Some(format!("Couldn't load threads: {error:#}"));
                     }
+                    Ok(result) => this.merge_thread_page(archived, direction, started_seq, result),
                 }
-                page.changed.clear();
+                this.thread_pages.pages[index].changed.clear();
+
                 this.prune_threads();
                 cx.emit(HostEvent::Changed);
                 cx.notify();
-            });
+            })
+            .ok();
         }));
         cx.emit(HostEvent::Changed);
         cx.notify();
+    }
+    /// Merges a fetched page of threads into the page window it was read for.
+    fn merge_thread_page(
+        &mut self,
+        archived: bool,
+        direction: ThreadPageDirection,
+        started_seq: artisan_api::Seq,
+        result: artisan_api::ThreadsPage,
+    ) {
+        let older = matches!(direction, ThreadPageDirection::Older);
+        let newer = matches!(direction, ThreadPageDirection::Newer);
+        let page = &mut self.thread_pages.pages[usize::from(archived)];
+        if newer {
+            // The window slid up; it keeps its older end.
+            page.at_latest = !result.newer;
+        } else {
+            if !older {
+                page.ids.retain(|id| {
+                    self.threads
+                        .get(id)
+                        .is_some_and(|thread| thread.seq > started_seq)
+                });
+                page.at_latest = true;
+            }
+            page.next = result.next;
+        }
+        for thread in result.threads {
+            let id = thread.id.clone();
+            if self
+                .threads
+                .get(&id)
+                .is_none_or(|known| known.seq <= thread.seq)
+            {
+                self.threads.insert(id.clone(), thread);
+            }
+            if self.threads.get(&id).is_some_and(|thread| {
+                thread.archived == archived && thread.parent_thread_id.is_none()
+            }) && !page.ids.contains(&id)
+            {
+                page.ids.push(id);
+            }
+        }
+        for run in result.runs {
+            if self
+                .runs
+                .get(&run.thread_id)
+                .is_none_or(|known| known.seq <= run.seq)
+            {
+                self.runs.insert(run.thread_id.clone(), run);
+            }
+        }
+        if page.at_latest {
+            for id in &page.changed {
+                if self.threads.get(id).is_some_and(|thread| {
+                    thread.archived == archived && thread.parent_thread_id.is_none()
+                }) && !page.ids.contains(id)
+                {
+                    page.ids.push(id.clone());
+                }
+            }
+        }
+        page.ids.sort_by(|a, b| {
+            self.threads[b]
+                .activity_seq
+                .cmp(&self.threads[a].activity_seq)
+                .then_with(|| b.cmp(a))
+        });
+        trim_page(page, &self.threads, older);
     }
     pub fn ensure_thread(&mut self, id: &ThreadId, cx: &mut Context<Self>) {
         self.thread_pages.recent.retain(|known| known != id);
@@ -188,7 +225,7 @@ impl HostData {
         }
         self.pump_thread_lookups(cx);
     }
-    fn pump_thread_lookups(&mut self, cx: &mut Context<Self>) {
+    fn pump_thread_lookups(&mut self, cx: &Context<Self>) {
         while self.thread_pages.direct.len() < 4 {
             let Some(id) = self.thread_pages.queued.pop_back() else {
                 break;
@@ -199,12 +236,12 @@ impl HostData {
             self.start_thread_lookup(id, cx);
         }
     }
-    fn start_thread_lookup(&mut self, id: ThreadId, cx: &mut Context<Self>) {
+    fn start_thread_lookup(&mut self, id: ThreadId, cx: &Context<Self>) {
         let key = id.clone();
         let client = self.client.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = client.thread(&id).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.thread_pages.direct.remove(&id);
                 match result {
                     Ok(thread) => {
@@ -226,7 +263,8 @@ impl HostData {
                 this.pump_thread_lookups(cx);
                 cx.emit(HostEvent::ThreadChanged { thread_id: id });
                 cx.notify();
-            });
+            })
+            .ok();
         });
         self.thread_pages.direct.insert(key, task);
     }
@@ -252,7 +290,7 @@ impl HostData {
                     page.loading = false;
                     page.loaded = true;
                     page.changed.clear();
-                    page.error = Some("The thread list changed while loading. Try again.".into());
+                    page.error = Some("The thread list changed while loading.".into());
                 }
             }
         }
@@ -316,7 +354,10 @@ fn trim_page(page: &mut ThreadPage, threads: &HashMap<ThreadId, Thread>, evict_n
             page.at_latest = false;
             page.ids.remove(0)
         } else {
-            page.ids.pop().unwrap()
+            let Some(id) = page.ids.pop() else {
+                break;
+            };
+            id
         };
         bytes = bytes.saturating_sub(thread_bytes(&threads[&id]));
         trimmed = true;
@@ -358,7 +399,9 @@ fn json_bytes(value: &serde_json::Value) -> usize {
                 .iter()
                 .map(|(key, value)| std::mem::size_of::<String>() + key.len() + json_bytes(value))
                 .sum(),
-            _ => 0,
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                0
+            }
         }
 }
 
@@ -388,7 +431,8 @@ mod tests {
                     title: None,
                     config,
                     activity_seq: index as u64,
-                    activity_at: index as i64,
+                    activity_at: i64::try_from(index).unwrap(),
+
                     read_seq: 0,
                     marked_unread: false,
                     settled_seq: 0,
@@ -397,6 +441,8 @@ mod tests {
                     updated_at: 0,
                     archived: false,
                     parent_thread_id: None,
+                    spawned_by: None,
+                    parked_until: None,
                 },
             );
             page.ids.push(id);

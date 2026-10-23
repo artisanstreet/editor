@@ -1,7 +1,7 @@
 # Architecture
 
 Artisan is two programs. **Forge** runs coding agents ("engines": Claude Code,
-Codex, OpenCode, Grok, Cursor) on a machine and keeps every thread in one
+Codex, OpenCode) on a machine and keeps every thread in one
 SQLite database. The **Editor** is a GPUI desktop app that shows and drives
 the threads of one or more Forges. They speak JSON over HTTPS with mutual
 TLS. `ae` is the host binary: installer, service manager, and Forge itself.
@@ -53,6 +53,24 @@ A `Run` is one engine process lifetime for a thread; `Thread` holds the
 title, `EngineConfig`, `activity_seq`/`read_seq` (unread), archive flag and
 `parent_thread_id` (handoffs).
 
+Portable handoffs summarize a disposable source-session fork with OpenCode's
+structured compaction template, then carry role-labelled recent exchanges
+(including tool calls and bounded results). OpenCode uses its native compaction
+endpoint on a fork; Claude Code and Codex use summary side queries. Native
+Claude summarizes from its saved message UUID in the existing conversation,
+retaining its model, effort and tool definitions. The summary is a sibling
+branch; Forge keeps the original continuation bookmark. Missing sessions and
+cross-thread forks use canonical history in a fresh temporary conversation. A
+failed summary fails the handoff without delivering the pending message. The summary
+is stored on the compaction item for recall. Runs retain their launch config so
+later forks can preserve cache-sensitive settings after a harness switch.
+
+The summarizer always inherits the source conversation's model and launch
+settings, including effort and permissions, to preserve prompt-cache reuse.
+Each summary attempt logs input, cached-input and output token usage. The
+harnesses still own their in-session automatic compaction.
+
+
 Text deltas, reasoning, shell output and progress are **live only**: sent as
 `Event::Live` with no seq, never stored. The stored item gets the final text.
 
@@ -70,7 +88,14 @@ takes the next seq in the writer thread and is published in commit order.
   stream subscribes before reading the backlog and dedups by seq, so nothing
   falls between. If the client is too far behind (or lags the broadcast), it
   gets `Reset` and refetches `/state`.
-- `GET /threads/:id/items?before|after|limit` → pages of a thread.
+- `GET /threads/:id/items?before|after|limit` → pages of a thread's items.
+- `GET /threads/:id/transcript?before|after|limit` → the transcript as the
+  reader sees it: `limit` counts rows (messages, replies, prompts, errors,
+  images, compactions), and the work between them comes as `WorkSpan`
+  summaries (`Item::folds_into_work`, stored as `items.work`). A live run's
+  newest work ships as items. A turn of any length is one page.
+- `GET /threads/:id/work?after&before&limit` → the work in a span, newest
+  first, for a work section that is open.
 
 The Editor's connection (`editor-core/src/connection.rs`) is a plain state
 enum: disconnected → connecting → live → backoff → retrying, resuming from
@@ -102,7 +127,6 @@ Each adapter is a pure decoder (lines in, events out) plus a thin driver:
 | Claude Code | `claude -p` stream-json over stdio; titles via `generate_session_title` |
 | Codex | `codex app-server` JSON-RPC over stdio |
 | OpenCode | `opencode serve` HTTP + global `/api/event` SSE |
-| Grok, Cursor | ACP JSON-RPC over stdio |
 
 An approval rides on the item it gates (`Tool`/`Plan`, `AwaitingUser`), keyed
 like that item, so an answer reaches the engine by the item's native id.
@@ -143,10 +167,15 @@ No central command enum; the binary only lays sections out.
 The conversation keeps one copy of the open thread: a window of items keyed
 by position, upserted from events; live text from `HostData`; UI state per
 item. The **Viewport** (Following ⇄ Reading → Jumping; inputs in, effects
-out) decides which range stays loaded and fetches pages at the edges. Body
-text is prepared by `Bodies`, which the conversation owns; rows draw a
-prepared `Body` set on them and are cached views. Render is a pure function
-of those. Run phase and disclosure are computed, not stored.
+out) decides which range stays loaded and fetches transcript pages at the
+edges. Work the window covers but has not loaded stays a `WorkSpan`: a
+closed section is drawn from it, an open one shows it as an earlier-work
+row that loads `/work` as it nears the view. Body text is prepared by
+`Bodies`, which the conversation owns; rows draw a prepared `Body` set on
+them and are cached views. Render is a pure function of those. Run phase
+and disclosure are computed, not stored. An opened thread stays hidden
+until its first screen is ready (its edges read, its text in view
+prepared), so nothing in view moves after it shows.
 
 ## State machines
 

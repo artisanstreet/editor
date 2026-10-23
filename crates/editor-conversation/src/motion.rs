@@ -28,11 +28,15 @@ const COMPACTION_SWAP_HALF: Duration = Duration::from_millis(150);
 const COMPACTION_PULSE: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
-pub(crate) struct WorkMotion {
+pub struct WorkMotion {
     live: bool,
     policy: Option<MotionPolicy>,
     animating: bool,
     settling: bool,
+    #[expect(
+        clippy::option_option,
+        reason = "outer: whether the entrance was decided; inner: when it began, None when shown at rest"
+    )]
     entrance: Option<Option<Instant>>,
     entrance_height: Rc<Cell<Pixels>>,
     compactions: HashMap<String, CompactionMotion>,
@@ -41,22 +45,22 @@ pub(crate) struct WorkMotion {
     chevrons: HashMap<String, ChevronMotion>,
 }
 impl WorkMotion {
-    pub(crate) fn begin_frame(&mut self, live: bool, policy: MotionPolicy) {
+    pub(crate) const fn begin_frame(&mut self, live: bool, policy: MotionPolicy) {
         self.live = live;
         self.policy = Some(policy);
         self.animating = false;
         self.settling = false;
     }
-    pub(crate) fn is_settling(&self) -> bool {
+    pub(crate) const fn is_settling(&self) -> bool {
         self.settling
     }
-    pub(crate) fn end_frame(&mut self) -> bool {
+    pub(crate) const fn end_frame(&self) -> bool {
         self.animating
     }
     fn policy(&self) -> MotionPolicy {
         self.policy.unwrap_or(MotionPolicy::Full)
     }
-    pub(crate) fn entrance_started(&self) -> bool {
+    pub(crate) const fn entrance_started(&self) -> bool {
         self.entrance.is_some()
     }
 
@@ -73,7 +77,7 @@ impl WorkMotion {
         self.settling |= elapsed < Duration::from_millis(205);
         Some(Entrance {
             grow: progress_of(elapsed, Duration::from_millis(250), MotionCurve::SmoothOut),
-            measured: self.entrance_height.clone(),
+            measured: Rc::clone(&self.entrance_height),
             reveal: progress_of(
                 elapsed.saturating_sub(Duration::from_millis(80)),
                 Duration::from_millis(250),
@@ -147,26 +151,29 @@ impl WorkMotion {
             return None;
         }
         self.animating = true;
-        Some(match elapsed.checked_sub(HEADER_HOLD) {
-            None => 0.0,
-            Some(run) => sample(MotionCurve::EaseInOut, run, animation.duration()),
-        })
+        Some(elapsed.checked_sub(HEADER_HOLD).map_or(0.0, |run| {
+            sample(MotionCurve::EaseInOut, run, animation.duration())
+        }))
     }
 
     /// Rotate from the fraction currently painted when a disclosure reverses.
+    #[expect(
+        clippy::float_cmp,
+        reason = "targets are exactly 0.0 or 1.0, so equality names the same disclosure state"
+    )]
     pub(crate) fn chevron(&mut self, key: &str, open: bool) -> f32 {
         let target = if open { 1.0 } else { 0.0 };
         let motion = self
             .chevrons
             .entry(key.to_owned())
-            .or_insert(ChevronMotion {
+            .or_insert_with(|| ChevronMotion {
                 from: target,
                 target,
                 started: Instant::now(),
             });
         let elapsed = motion.started.elapsed();
         let progress = progress_of(elapsed, Duration::from_millis(250), MotionCurve::SmoothOut);
-        let current = motion.from + (motion.target - motion.from) * progress;
+        let current = (motion.target - motion.from).mul_add(progress, motion.from);
         if motion.target != target {
             motion.from = current;
             motion.target = target;
@@ -196,7 +203,7 @@ impl WorkMotion {
         frame
     }
 }
-pub(crate) struct Entrance {
+pub struct Entrance {
     grow: f32,
     reveal: f32,
     measured: Rc<Cell<Pixels>>,
@@ -206,11 +213,7 @@ pub(crate) struct Entrance {
 /// what follows glides down) and the content fades in a beat later while it
 /// settles 4 px into place. `gap` is the space before the row, which closes
 /// with the height so no empty band shows first.
-pub(crate) fn with_entrance(
-    element: AnyElement,
-    entrance: Option<Entrance>,
-    gap: Pixels,
-) -> AnyElement {
+pub fn with_entrance(element: AnyElement, entrance: Option<Entrance>, gap: Pixels) -> AnyElement {
     let Some(Entrance {
         grow,
         reveal,
@@ -247,7 +250,7 @@ pub(crate) fn with_entrance(
 
 /// The header entrance at `progress`: fading in, rising 4 px and
 /// un-blurring from 2 px, all on one eased clock.
-pub(crate) fn header_entering(header: Div, progress: f32) -> Div {
+pub fn header_entering(header: Div, progress: f32) -> Div {
     header
         .opacity(progress)
         .top(px(-4.0 * (1.0 - progress)))
@@ -262,8 +265,8 @@ struct PhraseState {
 }
 
 /// How one word of a phrase moves this frame.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum WordMotion {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WordMotion {
     Still,
     /// A number rolling from `from`; `up` when the value grew.
     Roll {
@@ -280,7 +283,7 @@ pub(crate) enum WordMotion {
 
 /// One word of a phrase with its motion and elapsed time.
 #[derive(Clone, Debug)]
-pub(crate) struct PhraseWord {
+pub struct PhraseWord {
     text: String,
     motion: WordMotion,
     elapsed: Duration,
@@ -353,20 +356,20 @@ fn progress_of(elapsed: Duration, duration: Duration, curve: MotionCurve) -> f32
 
 /// Tabular figures (`tnum`): a counting number keeps its width as its
 /// digits change.
-pub(crate) fn tabular_figures() -> FontFeatures {
+pub fn tabular_figures() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
 }
 
 /// A phrase as plain text, or word by word while it moves.
-pub(crate) fn phrase_or_text(
+pub fn phrase_or_text(
     words: Option<Vec<PhraseWord>>,
     text: String,
     line_height: Pixels,
 ) -> AnyElement {
-    match words {
-        Some(words) => phrase_element(&words, line_height),
-        None => text.into_any_element(),
-    }
+    words.map_or_else(
+        || text.into_any_element(),
+        |words| phrase_element(&words, line_height),
+    )
 }
 
 /// Paints a changing phrase word by word on one line, in tabular figures.
@@ -533,7 +536,7 @@ fn reel(
 
 /// What a compaction separator says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CompactionPhase {
+pub enum CompactionPhase {
     Running,
     Done,
     Stopped,
@@ -561,7 +564,7 @@ struct CompactionMotion {
 
 /// One frame of a separator: every progress runs 0 to 1 and rests at 1.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CompactionFrame {
+pub struct CompactionFrame {
     /// Row height.
     pub open: f32,
     /// Rule length, from the label outward.
@@ -663,15 +666,18 @@ fn linear(elapsed: Duration, delay: Duration, duration: Duration) -> f32 {
 }
 
 #[expect(clippy::cast_possible_truncation, reason = "progress stays in 0..=1")]
-pub(crate) fn eased(curve: MotionCurve, value: f32) -> f32 {
+pub fn eased(curve: MotionCurve, value: f32) -> f32 {
     curve.sample(f64::from(value)) as f32
 }
 
 /// Only mounted native rows participate in the top-to-bottom reveal queue.
 /// Offscreen cached rows expire rather than keeping visible work waiting.
 #[derive(Default)]
-pub(crate) struct RevealQueue {
+pub struct RevealQueue {
     rows: HashMap<crate::fold::RowKey, RevealGate>,
+    /// Rows of items before this position show what they still hold at
+    /// once: the user sent the next message.
+    rushed_before: u64,
 }
 struct RevealGate {
     order: (u64, u8, usize),
@@ -724,6 +730,12 @@ impl RevealQueue {
     pub(crate) fn remove(&mut self, key: &crate::fold::RowKey) {
         self.rows.remove(key);
     }
+    pub(crate) fn rush(&mut self, before: u64) {
+        self.rushed_before = self.rushed_before.max(before);
+    }
+    pub(crate) const fn rushed(&self, position: u64) -> bool {
+        position < self.rushed_before
+    }
 }
 
 #[cfg(test)]
@@ -742,7 +754,8 @@ mod restored_motion_tests {
         queue.finish(&first, false);
         assert!(!queue.begin(next.clone(), (2, 1, 0), true));
         queue.finish(&first, true);
-        queue.rows.get_mut(&first).unwrap().seen = Instant::now() - Duration::from_secs(1);
+        queue.rows.get_mut(&first).unwrap().seen =
+            Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         assert!(!queue.begin(next, (2, 1, 0), true));
         assert!(!queue.rows.contains_key(&first));
     }
@@ -770,7 +783,7 @@ mod restored_motion_tests {
 /// First-seen live semantic ordinals. The loaded Item owns this record across
 /// native row eviction. Only observed visible source events admit fresh rows;
 /// page/index preparation alone establishes a history baseline.
-pub(crate) struct LiveBlockArrivals {
+pub struct LiveBlockArrivals {
     high_water: usize,
     pending: bool,
     fresh: HashMap<usize, Instant>,
@@ -799,8 +812,9 @@ impl LiveBlockArrivals {
             for block in self.high_water.max(blocks.saturating_sub(128))..blocks {
                 self.fresh.insert(block, now);
             }
-            while self.fresh.len() > 128 {
-                let oldest = *self.fresh.keys().min().unwrap();
+            while self.fresh.len() > 128
+                && let Some(oldest) = self.fresh.keys().min().copied()
+            {
                 self.fresh.remove(&oldest);
             }
         }

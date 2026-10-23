@@ -10,8 +10,11 @@ use std::sync::{Arc, Weak};
 
 /// At most this many decoded images are kept…
 const KEPT: usize = 32;
-/// …and at most this many pixel bytes.
-const KEPT_BYTES: usize = 64 * 1024 * 1024;
+/// …and at most this many pixel bytes, about one full-screen screenshot.
+/// Shown images stay alive through their rows whatever this says, and the
+/// GPU holds a second copy of every kept one, so this only bounds what
+/// scrolling back can show without decoding again.
+const KEPT_BYTES: usize = 16 * 1024 * 1024;
 /// Downloads and decodes at once.
 const LOADS: usize = 4;
 
@@ -96,7 +99,7 @@ impl ImageCache {
         hash: BlobHash,
         retry: bool,
         client: &ForgeClient,
-        cx: &mut Context<HostData>,
+        cx: &Context<HostData>,
     ) {
         self.retained.retain(|_, result| result.alive());
         if retry && matches!(self.get(&hash), Some(BlobImage::Failed(_))) {
@@ -134,11 +137,12 @@ impl ImageCache {
                 (Ok(_), None) => Err("This Editor can't decode images.".to_owned()),
                 (Err(error), _) => Err(format!("{error:#}")),
             };
-            let _ = this.update(cx, |host, cx| {
+            this.update(cx, |host, cx| {
                 host.images.finish(hash, result, cx);
                 cx.emit(HostEvent::ImagesChanged);
                 cx.notify();
-            });
+            })
+            .ok();
         });
         self.loads.insert(key, task);
     }
@@ -188,7 +192,7 @@ impl ImageCache {
             .values()
             .filter_map(|image| match image {
                 BlobImage::Ready(image) => Some(resident_bytes(image)),
-                _ => None,
+                BlobImage::Loading | BlobImage::Failed(_) => None,
             })
             .sum()
     }

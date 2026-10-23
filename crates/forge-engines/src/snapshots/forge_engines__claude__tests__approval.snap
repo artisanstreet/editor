@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/claude.rs
-assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -22,6 +21,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: Some(
                     "Create empty file created.txt",
@@ -42,6 +42,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: Some(
                     "Create empty file created.txt",
@@ -96,6 +97,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: Some(
                     "Create empty file created.txt",
@@ -212,6 +214,7 @@ expression: "(events, outcome)"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
 )

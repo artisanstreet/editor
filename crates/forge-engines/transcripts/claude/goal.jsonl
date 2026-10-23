@@ -1,0 +1,3 @@
+{"type": "assistant", "uuid": "e78141d3-0845-490d-b9fb-fa5664cd3082", "local_command_run": {"command": "goal"}, "message": {"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": "Goal set: Ship the main menu at visual parity."}]}}
+{"type": "assistant", "message": {"id": "msg-1", "content": [{"type": "text", "text": "Starting on the main menu."}]}}
+{"type": "assistant", "uuid": "f0000000-0000-0000-0000-000000000001", "local_command_run": {"command": "goal"}, "message": {"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": "No goal is set."}]}}

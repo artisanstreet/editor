@@ -84,7 +84,8 @@ impl HostData {
         let key = project.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = client.project_repository(&project).await;
-            let _ = this.update(cx, |host, cx| host.finish_repository(project, result, cx));
+            this.update(cx, |host, cx| host.finish_repository(project, result, cx))
+                .ok();
         });
         cache.reading.insert(key, task);
     }
@@ -132,7 +133,7 @@ impl HostData {
 mod tests {
     use crate::{ConnectionStatus, ForgeClient, HostData, HostId};
     use artisan_api::{Event, Project, ProjectId, ProjectRepository};
-    use gpui::{AppContext, Entity, Task, TestAppContext};
+    use gpui::{AppContext, Entity, TestAppContext};
     use std::time::{Duration, Instant};
 
     fn host(cx: &mut TestAppContext) -> Entity<HostData> {
@@ -143,8 +144,7 @@ mod tests {
         cx.new(|cx| {
             let mut host =
                 HostData::new(HostId("repository-test".into()), "Test".into(), client, cx);
-            host._connection.abort();
-            host._follow = Task::ready(());
+            host.stop_following();
             host.status = ConnectionStatus::Live;
             host
         })
@@ -206,7 +206,7 @@ mod tests {
                 "fresh observation avoids another read"
             );
             host.repositories.entries.get_mut(&id).unwrap().checked =
-                Instant::now() - Duration::from_secs(3);
+                Instant::now().checked_sub(Duration::from_secs(3)).unwrap();
             host.load_repository(&id, false, cx);
             host.load_repository(&id, false, cx);
             assert_eq!(host.repositories.reading.len(), 1);

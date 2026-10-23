@@ -30,7 +30,7 @@ pub enum ShimmerTiming {
     Progress,
 }
 impl ShimmerTiming {
-    fn durations(self) -> (Duration, Duration) {
+    const fn durations(self) -> (Duration, Duration) {
         match self {
             Self::Status => (SHIMMER_CYCLE, SHIMMER_DELAY),
             Self::Progress => (Duration::from_secs(2), Duration::ZERO),
@@ -69,22 +69,27 @@ impl ShimmerText {
             run_overrides: Vec::new(),
         }
     }
-    pub fn active(mut self, active: bool) -> Self {
+    #[must_use]
+    pub const fn active(mut self, active: bool) -> Self {
         self.active = active;
         self
     }
-    pub fn timing(mut self, timing: ShimmerTiming) -> Self {
+    #[must_use]
+    pub const fn timing(mut self, timing: ShimmerTiming) -> Self {
         self.timing = timing;
         self
     }
-    pub fn tone(mut self, tone: ShimmerTone) -> Self {
+    #[must_use]
+    pub const fn tone(mut self, tone: ShimmerTone) -> Self {
         self.tone = tone;
         self
     }
-    pub fn truncate(mut self) -> Self {
+    #[must_use]
+    pub const fn truncate(mut self) -> Self {
         self.truncate = true;
         self
     }
+    #[must_use]
     pub fn text_runs(
         mut self,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
@@ -98,8 +103,8 @@ impl ShimmerText {
 impl gpui::RenderOnce for ShimmerText {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let color = match self.tone {
-            ShimmerTone::Foreground => self.theme.colors.foreground.to_paint(),
-            ShimmerTone::Muted => self.theme.colors.muted_foreground.to_paint(),
+            ShimmerTone::Foreground => self.theme.colors.text.to_paint(),
+            ShimmerTone::Muted => self.theme.colors.text_muted.to_paint(),
         };
         let mut inherited = window.text_style();
         inherited.color = color;
@@ -121,8 +126,52 @@ impl gpui::RenderOnce for ShimmerText {
         }
         let (duration, delay) = self.timing.durations();
         let phase = crate::motion::repeating_phase(self.id, duration, delay, window, cx);
-        root.child(gradient_text(text, phase, 50.0))
+        let target = self.theme.colors.background.to_paint();
+        root.child(gradient_text(text, phase, 50.0, target))
             .into_any_element()
+    }
+}
+
+/// One band across a line of mixed content (text beside icons): the text
+/// the child paints shimmers as one run, the icons hold still under it.
+#[derive(IntoElement)]
+pub struct ShimmerLine {
+    id: ElementId,
+    child: AnyElement,
+    theme: ArtisanTheme,
+    timing: ShimmerTiming,
+    active: bool,
+}
+impl ShimmerLine {
+    pub fn new(id: impl Into<ElementId>, child: impl IntoElement, theme: ArtisanTheme) -> Self {
+        Self {
+            id: id.into(),
+            child: child.into_any_element(),
+            theme,
+            timing: ShimmerTiming::Status,
+            active: true,
+        }
+    }
+    #[must_use]
+    pub const fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+    #[must_use]
+    pub const fn timing(mut self, timing: ShimmerTiming) -> Self {
+        self.timing = timing;
+        self
+    }
+}
+impl gpui::RenderOnce for ShimmerLine {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if !self.active || MotionPolicy::current(cx) == MotionPolicy::Reduced {
+            return self.child;
+        }
+        let (duration, delay) = self.timing.durations();
+        let phase = crate::motion::repeating_phase(self.id, duration, delay, window, cx);
+        let target = self.theme.colors.background.to_paint();
+        gradient_text(self.child, phase, 50.0, target).into_any_element()
     }
 }
 
@@ -134,29 +183,37 @@ fn gradient_strength(position: f32, phase: f32, spread: f32) -> f32 {
     if width <= 0.0 || !position.is_finite() {
         return 0.0;
     }
-    let start = (1.0 - width) * (2.5 - 3.5 * normalize_phase(phase));
+    let start = (1.0 - width) * 3.5f32.mul_add(-normalize_phase(phase), 2.5);
     let offset = (position - start) / width;
     (offset / 0.4).min((1.0 - offset) / 0.4).clamp(0.0, 1.0)
 }
 
-/// Mixes contrast in sRGB while preserving the text alpha.
+/// Moves the painted text toward `target` (the theme's background) under the
+/// band, 55% at its peak, preserving the text alpha. This is the band's
+/// animation between two colours, never a resting shade; the painted runs
+/// arrive as paint colours, so the mix runs in sRGB.
 #[must_use]
-fn shimmer_color(base: Hsla, strength: f32) -> Hsla {
+fn shimmer_color(base: Hsla, target: Hsla, strength: f32) -> Hsla {
     if strength <= 0.0 {
         return base;
     }
-    let (target, mix) = (0.0, 0.55);
-    let amount = strength.clamp(0.0, 1.0) * mix;
+    let amount = strength.clamp(0.0, 1.0) * 0.55;
+    let target = hsla_to_rgba(target);
     let mut color = hsla_to_rgba(base);
-    color.red += (target - color.red) * amount;
-    color.green += (target - color.green) * amount;
-    color.blue += (target - color.blue) * amount;
+    color.red = (target.red - color.red).mul_add(amount, color.red);
+    color.green = (target.green - color.green).mul_add(amount, color.green);
+    color.blue = (target.blue - color.blue).mul_add(amount, color.blue);
     rgb_to_hsla(color)
 }
 
 /// Paints the text once, then recolours that paint under the band on every
 /// frame of a pass without rendering or laying it out again.
-fn gradient_text(text: AnyElement, phase: RepeatingPhase, spread: f32) -> AnimatedPaint {
+fn gradient_text(
+    text: AnyElement,
+    phase: RepeatingPhase,
+    spread: f32,
+    target: Hsla,
+) -> AnimatedPaint {
     AnimatedPaint::new(text, move |bounds, recording, window, cx| {
         let sampled = phase.sample(cx);
         let width = f32::from(bounds.size.width);
@@ -168,7 +225,7 @@ fn gradient_text(text: AnyElement, phase: RepeatingPhase, spread: f32) -> Animat
         window.with_text_color_map(
             Some(Rc::new(move |x, color| {
                 let position = f32::from(x - bounds.left()) / width;
-                shimmer_color(color, gradient_strength(position, phase, spread))
+                shimmer_color(color, target, gradient_strength(position, phase, spread))
             })),
             |window| window.paint_recording(recording),
         );
@@ -183,7 +240,7 @@ fn normalize_phase(phase: f32) -> f32 {
         0.0
     }
 }
-fn normalize_spread(spread: f32) -> f32 {
+const fn normalize_spread(spread: f32) -> f32 {
     if spread.is_finite() {
         spread.clamp(0.0, MAX_SPREAD)
     } else {

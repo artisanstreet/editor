@@ -11,46 +11,33 @@ const fn permissions_description(engine: EngineId, permissions: Permissions) -> 
         (EngineId::Claude, Permissions::Auto) => {
             "Claude's auto mode: safe actions run, risky ones are checked first."
         }
-        (EngineId::Grok, Permissions::Auto) => "Grok's auto mode decides what runs and what asks.",
-        (EngineId::Cursor | EngineId::OpenCode, Permissions::Auto) => {
-            "Edits run; it asks before terminal commands."
-        }
+        (EngineId::OpenCode, Permissions::Auto) => "Edits run; it asks before terminal commands.",
         (_, Permissions::Full) => "Everything runs, nothing asks. No sandbox.",
     }
 }
 
-/// The model's variants, the base model first as "Default"
-/// (`variants_for_model`).
+/// The model's variants; a config without one shows the model's default
+/// as chosen.
 fn variant_options(config: &EngineConfig, model: Option<&Model>) -> Vec<AxisOption> {
-    let variants = model
-        .map(|model| model.variants.as_slice())
-        .unwrap_or_default();
-    if variants.is_empty() {
+    let Some(model) = model else {
         return Vec::new();
-    }
-    std::iter::once(AxisOption {
-        special: false,
-        label: "Default".to_owned(),
-        description: None,
-        advisory: None,
-        selected: config.variant.is_none(),
-        apply: EngineConfig {
-            variant: None,
-            ..config.clone()
-        },
-    })
-    .chain(variants.iter().map(|variant| AxisOption {
-        special: false,
-        label: variant.label.clone(),
-        description: None,
-        advisory: None,
-        selected: config.variant.as_ref() == Some(&variant.id),
-        apply: EngineConfig {
-            variant: Some(variant.id.clone()),
-            ..config.clone()
-        },
-    }))
-    .collect()
+    };
+    let chosen = model.variant_for(config.variant.as_deref());
+    model
+        .variants
+        .iter()
+        .map(|variant| AxisOption {
+            special: false,
+            label: variant.label.clone(),
+            description: None,
+            advisory: None,
+            selected: chosen.as_ref() == Some(&variant.id),
+            apply: EngineConfig {
+                variant: Some(variant.id.clone()),
+                ..config.clone()
+            },
+        })
+        .collect()
 }
 
 /// The model's speed tiers; with none chosen, its default is.

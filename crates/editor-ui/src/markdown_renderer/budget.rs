@@ -48,11 +48,16 @@ pub(super) fn media_work() -> Arc<Semaphore> {
     MEDIA.clone()
 }
 
-pub(in crate::markdown_renderer) fn vector<T>(values: &Vec<T>) -> usize {
+/// `bytes` as semaphore permits; saturates, so an oversized charge never
+/// shrinks into a small one.
+pub(in crate::markdown_renderer) fn permits(bytes: usize) -> u32 {
+    u32::try_from(bytes).unwrap_or(u32::MAX)
+}
+pub(in crate::markdown_renderer) const fn vector<T>(values: &Vec<T>) -> usize {
     values.capacity() * std::mem::size_of::<T>()
 }
-pub(in crate::markdown_renderer) fn optional(value: &Option<String>) -> usize {
-    value.as_ref().map_or(0, String::capacity)
+pub(in crate::markdown_renderer) fn optional(value: Option<&String>) -> usize {
+    value.map_or(0, String::capacity)
 }
 pub(in crate::markdown_renderer) fn strings(values: &Vec<String>) -> usize {
     vector(values) + values.iter().map(String::capacity).sum::<usize>()

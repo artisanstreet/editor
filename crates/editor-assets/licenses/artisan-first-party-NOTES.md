@@ -23,6 +23,12 @@ These are first-party Artisan product graphics:
   the font itself is not vendored, only the outlined logo. Whether the
   typeface licence covers this logo use needs the same human attestation.
 
+- `rail-*.svg` (24×24 stroke paths): the sidebar rail's New thread,
+  Marketplace and Usage icons split into layers so they can animate on hover.
+  The pen, page, bag, handle and level-cell paths are cut unchanged from
+  Tabler Icons' `edit`, `shopping-bag` and `chart-column` (MIT, see the Tabler
+  notes); the bag's three items (dot, spark, gem) are first-party.
+
 These notes record historical source provenance. The current catalog is
 `crates/editor-assets/src/lib.rs`. First-party repository code and artwork are
 covered by the repository's Artisan Street Terms (AST) in `LICENSE.md`;

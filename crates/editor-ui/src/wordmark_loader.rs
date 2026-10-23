@@ -108,8 +108,18 @@ impl RenderOnce for WordmarkLoader {
                 canvas(
                     |_, _, _| {},
                     move |bounds, (), window, cx| {
-                        let color = theme.colors.foreground.to_paint();
-                        let _ = window.paint_svg(bounds, path, None, Default::default(), color, cx);
+                        let color = theme.colors.text.to_paint();
+                        // A failed paint leaves this element blank for one frame.
+                        window
+                            .paint_svg(
+                                bounds,
+                                path,
+                                None,
+                                gpui::TransformationMatrix::default(),
+                                color,
+                                cx,
+                            )
+                            .ok();
                     },
                 )
                 .size_full(),
@@ -163,24 +173,49 @@ fn paint_shimmer(
     window: &mut Window,
     cx: &App,
 ) {
-    let foreground = theme.colors.foreground.to_paint();
-    let mut color = theme.colors.muted_foreground.to_paint();
-    color.alpha *= opacity;
-    let _ = window.paint_svg(bounds, path.clone(), None, Default::default(), color, cx);
+    let foreground = theme.colors.text;
+    let color = theme.colors.text_muted.fade(opacity).to_paint();
+    // A failed paint leaves this element blank for one frame.
+    window
+        .paint_svg(
+            bounds,
+            path.clone(),
+            None,
+            gpui::TransformationMatrix::default(),
+            color,
+            cx,
+        )
+        .ok();
     let mark_width = f32::from(bounds.size.width);
     let band_width = mark_width * BAND_FRACTION;
-    let slice_width = band_width / BAND_SLICES as f32;
+    let slice_width = band_width / crate::f32_of_count(BAND_SLICES);
     let leading = band_left(progress, mark_width, band_width);
     for slice in 0..BAND_SLICES {
-        let left = leading + slice_width * slice as f32;
+        let left = slice_width.mul_add(crate::f32_of_count(slice), leading);
         let clip = Bounds::new(
             point(bounds.left() + px(left), bounds.top()),
             size(px(slice_width), bounds.size.height),
         );
-        let mut color = foreground;
-        color.alpha *= opacity * band_opacity((slice as f32 + 0.5) / BAND_SLICES as f32);
+        let color = foreground
+            .fade(
+                opacity
+                    * band_opacity(
+                        (crate::f32_of_count(slice) + 0.5) / crate::f32_of_count(BAND_SLICES),
+                    ),
+            )
+            .to_paint();
         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-            let _ = window.paint_svg(bounds, path.clone(), None, Default::default(), color, cx);
+            // A failed paint leaves this element blank for one frame.
+            window
+                .paint_svg(
+                    bounds,
+                    path.clone(),
+                    None,
+                    gpui::TransformationMatrix::default(),
+                    color,
+                    cx,
+                )
+                .ok();
         });
     }
 }

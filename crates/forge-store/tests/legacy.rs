@@ -387,6 +387,7 @@ async fn explicit_agent_message_repair_preserves_identity_and_is_idempotent() {
             config: EngineConfig::new(EngineId::Claude),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await
         .unwrap();

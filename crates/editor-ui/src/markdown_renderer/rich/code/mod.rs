@@ -63,7 +63,7 @@ fn code_panel(theme: &ArtisanTheme) -> Div {
         .tracking(0.0)
         .text_size(TypographyTokens::size(TextStep::XsMid))
         .line_height(px(LINE_PX))
-        .text_color(theme.colors.foreground.to_paint())
+        .text_color(theme.colors.text.to_paint())
 }
 
 /// The width of a number gutter that fits `largest`.
@@ -82,7 +82,7 @@ fn line_number(theme: &ArtisanTheme, number: Option<u32>, width: Pixels) -> Div 
         .flex()
         .justify_end()
         .pr(px(12.0))
-        .text_color(theme.colors.muted_foreground.with_alpha(0.7).to_paint())
+        .text_color(theme.colors.text_faint.to_paint())
         .children(number.map(|number| SharedString::from(number.to_string())))
 }
 
@@ -110,7 +110,7 @@ fn excerpt_width(lines: &[SharedString]) -> Pixels {
         .map(|line| unicode_width::UnicodeWidthStr::width(line.as_ref()))
         .max()
         .unwrap_or(0);
-    px(columns as f32 * 7.8 + 12.0)
+    px(crate::f32_of_count(columns).mul_add(7.8, 12.0))
 }
 
 /// A numbered excerpt: `text` with lines counted from `start`.
@@ -144,7 +144,7 @@ fn numbered(
     })
     .w_full()
     .min_w(natural_width + gutter)
-    .h(px(count.min(18) as f32 * LINE_PX));
+    .h(px(crate::f32_of_count(count.min(18)) * LINE_PX));
     code_panel(&theme)
         .id(panel_id)
         .overflow_x_scroll()

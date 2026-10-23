@@ -2,7 +2,7 @@
 Artisan Editor by Artisan Street
 
 Artisan Editor is an all-in-one orchestrator for managing agent harnesses.
-Run Claude Code, Codex, Cursor, Grok and OpenCode side by side in a single
+Run Claude Code, Codex and OpenCode side by side in a single
 desktop app, on your own machine or on any host you connect, and keep every
 conversation, model and usage limit in one place.
 
@@ -11,7 +11,7 @@ Features
 --------
 
 One home for every harness
-  Start threads on Claude Code, Codex, Cursor, Grok or OpenCode and switch
+  Start threads on Claude Code, Codex or OpenCode and switch
   between them without changing tools. Pick models from one selector, keep
   your favourites close, and see which engines are installed and signed in.
 

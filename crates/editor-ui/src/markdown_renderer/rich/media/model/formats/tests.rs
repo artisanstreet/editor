@@ -313,7 +313,9 @@ impl FbxWriter {
         all.extend(values.iter().map(|value| match value {
             Value::Int(v) => Value::Int(*v),
             Value::Double(v) => Value::Double(*v),
-            _ => unreachable!("properties hold numbers"),
+            Value::Long(_) | Value::Text(_) | Value::Doubles(_) | Value::Ints(_) => {
+                unreachable!("properties hold numbers")
+            }
         }));
         self.node("P", &all, |_| {});
     }
@@ -421,6 +423,10 @@ fn ascii_fbx_and_unknown_bytes_explain_themselves() {
 }
 
 #[test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "a cut file may fail or not; it must not panic"
+)]
 fn a_truncated_fbx_fails_without_panicking() {
     let bytes = fbx_quad();
     for cut in (27..bytes.len()).step_by(7) {

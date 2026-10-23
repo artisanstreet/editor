@@ -3,9 +3,10 @@
 //! Forge's data is the source of truth. [`materialize`] runs right before
 //! every engine spawn: it writes the prompt file, links each skill folder
 //! into the engine home, removes links Forge placed for skills that no
-//! longer exist, and returns the launch arguments that carry MCP servers.
+//! longer exist, moves every skill Artisan didn't install into the
+//! quarantine, and returns the launch arguments that carry MCP servers.
 //! It never edits files engines rewrite themselves (`.claude.json`,
-//! `config.toml`) and never touches a skill folder the user put there.
+//! `config.toml`).
 
 use crate::Launch;
 use anyhow::{Context, Result};
@@ -28,7 +29,7 @@ pub use prompt::{
     PromptApplied, PromptFile, apply_prompt, inspect_prompt, normalize_prompt, prompt_digest,
     read_prompt_file,
 };
-pub use skills::{adopt_skill, enabled_skills, skill_catalog};
+pub use skills::{adopt_skill, discard_skill, enabled_skills, install_skill, skill_catalog};
 
 /// Marks a skill folder Forge copied (where symlinks are unavailable).
 const COPY_MARKER: &str = ".artisan-skill";
@@ -58,13 +59,15 @@ struct Paths {
     skills: PathBuf,
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "None is an engine without a customisable home; every current engine has one"
+)]
 fn paths(engine: EngineId, home: &Path) -> Option<Paths> {
     let (config, prompt) = match engine {
         EngineId::Claude => (home.join(".claude"), "CLAUDE.md"),
         EngineId::Codex => (home.join(".codex"), "AGENTS.md"),
-        EngineId::Grok => (home.join(".grok"), "AGENTS.md"),
         EngineId::OpenCode => (home.join("config/opencode"), "AGENTS.md"),
-        EngineId::Cursor => return None,
     };
     let shadows = if engine == EngineId::Codex {
         vec![config.join("AGENTS.override.md")]
@@ -84,6 +87,7 @@ pub fn reconcile_skills(homes: &[(EngineId, Option<PathBuf>)], c: &Customisation
     let owned = skills::owned_roots(&c.skills_dir);
     for (engine, home) in homes {
         if let Some(paths) = home.as_deref().and_then(|home| paths(*engine, home)) {
+            skills::quarantine_foreign(*engine, &paths.skills, &c.skills_dir, &owned);
             sync_skills(&paths.skills, &wanted, &owned)
                 .with_context(|| format!("linking {engine} skills"))?;
         }
@@ -111,7 +115,10 @@ pub fn materialize(engine: EngineId, home: &Path, c: &Customisation) -> Result<L
         }
         let wanted =
             skills::wanted(c).with_context(|| format!("preparing the skills for {engine}"))?;
-        sync_skills(&paths.skills, &wanted, &skills::owned_roots(&c.skills_dir))
+        let owned = skills::owned_roots(&c.skills_dir);
+        // An engine only reads skills Artisan installed.
+        skills::quarantine_foreign(engine, &paths.skills, &c.skills_dir, &owned);
+        sync_skills(&paths.skills, &wanted, &owned)
             .with_context(|| format!("linking {engine} skills into {}", paths.skills.display()))?;
     }
     launch(engine, home, &c.mcp_servers).with_context(|| format!("passing MCP servers to {engine}"))
@@ -297,7 +304,10 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
 // --- launch channels -------------------------------------------------------
 
 fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch> {
-    let mut launch = Launch::default();
+    let mut launch = Launch {
+        mcp_servers: servers.to_vec(),
+        ..Launch::default()
+    };
     match engine {
         EngineId::Claude => {
             // A file, not an inline argument, so env values stay out of `ps`.
@@ -331,6 +341,20 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                 let mut entry = toml::Table::new();
                 if let Some(url) = &server.url {
                     entry.insert("url".into(), url.clone().into());
+                    if !server.headers.is_empty() {
+                        entry.insert(
+                            "http_headers".into(),
+                            toml::Value::Table(
+                                server
+                                    .headers
+                                    .iter()
+                                    .map(|(key, value)| {
+                                        (key.clone(), toml::Value::String(value.clone()))
+                                    })
+                                    .collect(),
+                            ),
+                        );
+                    }
                 } else {
                     entry.insert("command".into(), server.command.clone().into());
                     entry.insert(
@@ -370,19 +394,62 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
                     .push(("OPENCODE_CONFIG_CONTENT".to_owned(), config.to_string()));
             }
         }
-        EngineId::Grok | EngineId::Cursor => launch.mcp_servers = servers.to_vec(),
     }
     Ok(launch)
+}
+
+/// The MCP server name engines see the Artisan MCP under; its tools read
+/// `mcp__artisan__<tool>` in Claude.
+pub const ARTISAN_MCP: &str = "artisan";
+
+/// The MCP server name engines see computer use under.
+pub const COMPUTER_MCP: &str = "computer";
+
+/// Adds one of Forge's own servers for the thread (`name` at `url`, from
+/// Forge's gateway) to a launch. It is per thread, so it never goes into a
+/// file engines share.
+pub fn with_gateway_mcp(engine: EngineId, launch: &mut Launch, name: &str, url: &str) {
+    // The transport adapters read the servers off the launch; the gateway
+    // server is one of them, per thread.
+    launch.mcp_servers.push(McpServer {
+        name: name.to_owned(),
+        url: Some(url.to_owned()),
+        ..McpServer::default()
+    });
+    match engine {
+        EngineId::Claude => {
+            // `--mcp-config` takes files and JSON strings, several at once.
+            let inline =
+                json!({ "mcpServers": { name: { "type": "http", "url": url } } }).to_string();
+            match launch.args.iter().position(|arg| arg == "--mcp-config") {
+                Some(flag) => launch.args.insert(flag + 2, inline),
+                None => launch.args.extend(["--mcp-config".to_owned(), inline]),
+            }
+        }
+        // Codex's app-server is shared by threads; it takes the servers in
+        // each thread's own config.
+        EngineId::Codex => launch.gateway_mcp.push((name.to_owned(), url.to_owned())),
+        EngineId::OpenCode => merge_opencode_config(
+            launch,
+            &json!({ "mcp": { name: { "type": "remote", "url": url, "enabled": true } } }),
+        ),
+    }
 }
 
 fn claude_servers(servers: &[McpServer]) -> Map<String, Value> {
     servers
         .iter()
         .map(|server| {
-            let value = match &server.url {
-                Some(url) => json!({ "type": "http", "url": url }),
-                None => json!({ "type": "stdio", "command": server.command, "args": server.args, "env": server.env }),
-            };
+            let value = server.url.as_ref().map_or_else(
+                || json!({ "type": "stdio", "command": server.command, "args": server.args, "env": server.env }),
+                |url| {
+                    let mut value = json!({ "type": if server.sse { "sse" } else { "http" }, "url": url });
+                    if !server.headers.is_empty() {
+                        value["headers"] = json!(server.headers);
+                    }
+                    value
+                },
+            );
             (server.name.clone(), value)
         })
         .collect()
@@ -392,13 +459,21 @@ fn opencode_servers(servers: &[McpServer]) -> Map<String, Value> {
     servers
         .iter()
         .map(|server| {
-            let value = if let Some(url) = &server.url {
-                json!({ "type": "remote", "url": url, "enabled": true })
-            } else {
-                let command: Vec<&str> =
-                    std::iter::once(server.command.as_str()).chain(server.args.iter().map(String::as_str)).collect();
-                json!({ "type": "local", "command": command, "environment": server.env, "enabled": true })
-            };
+            let value = server.url.as_ref().map_or_else(
+                || {
+                    let command: Vec<&str> = std::iter::once(server.command.as_str())
+                        .chain(server.args.iter().map(String::as_str))
+                        .collect();
+                    json!({ "type": "local", "command": command, "environment": server.env, "enabled": true })
+                },
+                |url| {
+                    let mut value = json!({ "type": "remote", "url": url, "enabled": true });
+                    if !server.headers.is_empty() {
+                        value["headers"] = json!(server.headers);
+                    }
+                    value
+                },
+            );
             (server.name.clone(), value)
         })
         .collect()
@@ -418,7 +493,7 @@ pub fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
         for (key, value) in extra {
             match (config.get_mut(key), value) {
                 (Some(Value::Object(existing)), Value::Object(more)) => {
-                    existing.extend(more.clone())
+                    existing.extend(more.clone());
                 }
                 _ => {
                     config.insert(key.clone(), value.clone());
@@ -442,14 +517,19 @@ fn import_folder(from: &Path, skills_dir: &Path, name: &str) -> Result<bool> {
     }
     // Copy beside the destination, then rename, so a half copy never looks like a skill.
     let staging = skills_dir.join(format!(".import-{name}"));
-    let _ = fs::remove_dir_all(&staging);
+    // A leftover of an interrupted import, usually absent.
+    fs::remove_dir_all(&staging).ok();
     copy_dir(from, &staging)
         .with_context(|| format!("copying {} into {}", from.display(), skills_dir.display()))?;
     fs::rename(&staging, &to).with_context(|| format!("placing {}", to.display()))?;
     Ok(true)
 }
 
+/// A `SKILL.md`'s front matter as YAML, or, when it is not valid YAML
+/// (`description: Use when: X`), its top-level `key: value` lines, as
+/// Claude Code reads them.
 fn frontmatter(text: &str) -> Option<serde_yaml_ng::Value> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.lines();
     if lines.next()?.trim() != "---" {
         return None;
@@ -470,7 +550,35 @@ fn frontmatter(text: &str) -> Option<serde_yaml_ng::Value> {
     if !closed {
         return None;
     }
-    serde_yaml_ng::from_str(&yaml).ok()
+    serde_yaml_ng::from_str(&yaml)
+        .ok()
+        .or_else(|| lenient_frontmatter(&yaml))
+}
+
+/// Front matter YAML refuses, read as `key: value` lines: everything after
+/// a key's first `:`, unquoted.
+fn lenient_frontmatter(yaml: &str) -> Option<serde_yaml_ng::Value> {
+    let mut map = serde_yaml_ng::Mapping::new();
+    for line in yaml.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.is_empty() || key.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .or_else(|| {
+                value
+                    .strip_prefix('\'')
+                    .and_then(|value| value.strip_suffix('\''))
+            })
+            .unwrap_or(value);
+        map.entry(key.into()).or_insert_with(|| value.into());
+    }
+    (!map.is_empty()).then_some(serde_yaml_ng::Value::Mapping(map))
 }
 
 fn read_skill_header(path: &Path) -> io::Result<String> {
@@ -478,7 +586,9 @@ fn read_skill_header(path: &Path) -> io::Result<String> {
     let file = fs::File::open(path)?;
     let mut reader = io::BufReader::new(file).take(64 * 1024);
     let mut header = String::new();
-    if reader.read_line(&mut header)? == 0 || header.trim() != "---" {
+    if reader.read_line(&mut header)? == 0
+        || header.strip_prefix('\u{feff}').unwrap_or(&header).trim() != "---"
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "skill lacks YAML frontmatter",
@@ -498,7 +608,18 @@ fn read_skill_header(path: &Path) -> io::Result<String> {
     }
 }
 
+/// The `name` in a `SKILL.md`'s front matter.
+pub fn skill_name(text: &str) -> Option<String> {
+    skill_metadata(text).map(|(name, _)| name)
+}
+
 fn skill_metadata(text: &str) -> Option<(String, String)> {
+    skill_metadata_in(text, None)
+}
+
+/// A `SKILL.md`'s name and description; without a `name`, the skill takes
+/// its folder's, as Claude Code does.
+fn skill_metadata_in(text: &str, folder: Option<&str>) -> Option<(String, String)> {
     let data = frontmatter(text)?;
     let field = |key: &str| {
         data.get(key)?
@@ -507,7 +628,10 @@ fn skill_metadata(text: &str) -> Option<(String, String)> {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
     };
-    let name = field("name")?;
+    let name = match data.get("name") {
+        Some(_) => field("name")?,
+        None => folder?.to_owned(),
+    };
     if !artisan_mentions::valid_mention_name(&name) {
         return None;
     }
@@ -550,13 +674,15 @@ mod tests {
                     .map(|entry| {
                         let path = entry.path();
                         let name = entry.file_name().to_string_lossy().into_owned();
-                        match fs::read_link(&path) {
-                            Ok(target) => format!(
-                                "{name} -> {}",
-                                target.strip_prefix(root).unwrap_or(&target).display()
-                            ),
-                            Err(_) => format!("{name}/"),
-                        }
+                        fs::read_link(&path).map_or_else(
+                            |_| format!("{name}/"),
+                            |target| {
+                                format!(
+                                    "{name} -> {}",
+                                    target.strip_prefix(root).unwrap_or(&target).display()
+                                )
+                            },
+                        )
                     })
                     .collect()
             })
@@ -581,7 +707,7 @@ mod tests {
                     command: "npx".into(),
                     args: vec!["-y".into(), "@mcp/files".into()],
                     env: BTreeMap::from([("ROOT".into(), "/srv \"x\"".into())]),
-                    url: None,
+                    ..McpServer::default()
                 },
                 McpServer {
                     name: "docs.web".into(),
@@ -598,8 +724,9 @@ mod tests {
             let home = root.join(engine.as_str());
             let paths = paths(engine, &home);
             if let Some(paths) = &paths {
-                // A user's own folder, a stale Forge link, a link from the old store,
-                // and a Codex override that would shadow the prompt.
+                // Folders Artisan didn't install (quarantined, so `deploy`
+                // gets Artisan's link), a stale Forge link, a link from the old
+                // store, and a Codex override that would shadow the prompt.
                 skill(&paths.skills, "mine");
                 skill(&paths.skills, "deploy");
                 fs::create_dir_all(&paths.skills).unwrap();
@@ -634,14 +761,7 @@ mod tests {
                 .iter()
                 .map(|arg| arg.replace(&root.display().to_string(), "<root>"))
                 .collect();
-            report.push((
-                engine.as_str(),
-                files,
-                args,
-                launch.env,
-                launch.mcp_servers.len(),
-                mcp_file,
-            ));
+            report.push((engine.as_str(), files, args, launch.env, mcp_file));
         }
         insta::assert_debug_snapshot!(report);
 
@@ -658,7 +778,7 @@ mod tests {
         let launch = materialize(EngineId::Claude, &home, &cleared).unwrap();
         assert_eq!(
             listing(&home.join(".claude/skills"), root),
-            ["deploy/", "mine/"]
+            ["deploy -> data/extensions/skills/deploy"]
         );
         assert!(!home.join(".claude/CLAUDE.md").exists());
         assert!(launch.args.is_empty() && !home.join(".artisan/claude-mcp.json").exists());
@@ -720,6 +840,21 @@ mod reform_tests {
         assert_eq!(frontmatter_name("---\nname: '../outside'\n---"), None);
     }
     #[test]
+    fn a_bom_or_loose_yaml_does_not_hide_a_skill() {
+        assert_eq!(
+            skill_metadata("\u{feff}---\nname: review\ndescription: Saved by Notepad\n---\n"),
+            Some(("review".to_owned(), "Saved by Notepad".to_owned()))
+        );
+        assert_eq!(
+            skill_metadata("---\nname: review\ndescription: Use when: X\n---\n"),
+            Some(("review".to_owned(), "Use when: X".to_owned()))
+        );
+        assert_eq!(
+            skill_metadata_in("---\ndescription: Reviews code\n---\n", Some("review")),
+            Some(("review".to_owned(), "Reviews code".to_owned()))
+        );
+    }
+    #[test]
     fn codex_mcp_preserves_distinct_names_and_keeps_secrets_out_of_args() {
         let directory = tempfile::tempdir().unwrap();
         let server = |name: &str| McpServer {
@@ -727,7 +862,7 @@ mod reform_tests {
             command: "tool".into(),
             args: vec![],
             env: std::collections::BTreeMap::from([("TOKEN".into(), "private".into())]),
-            url: None,
+            ..McpServer::default()
         };
         let result = launch(
             EngineId::Codex,

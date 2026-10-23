@@ -8,7 +8,7 @@ use gpui::{
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-pub(crate) type SourceOwners = Rc<
+pub type SourceOwners = Rc<
     RefCell<
         HashMap<(ItemId, SourceField), (ArtisanTheme, gpui::Entity<editor_sources::ContentText>)>,
     >,
@@ -17,7 +17,7 @@ pub(crate) type SourceOwners = Rc<
 /// A source field has stable identity across Item revisions. Changes replace
 /// its Core source window immediately, cancelling old requests before repaint.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SourceField {
+pub enum SourceField {
     Plain(PlainSection),
     Text(TextSection),
     Prose,
@@ -26,7 +26,6 @@ pub(crate) enum SourceField {
     Output,
     Input,
     Diff(usize),
-    PlanStep(usize),
     Question(usize),
     AnswerText,
     ApprovalCommand,
@@ -34,7 +33,7 @@ pub(crate) enum SourceField {
     ApprovalReason,
 }
 impl SourceField {
-    pub(crate) fn of_slot(slot: crate::fold::Slot) -> Self {
+    pub(crate) const fn of_slot(slot: crate::fold::Slot) -> Self {
         match slot {
             crate::fold::Slot::Prose => Self::Prose,
             crate::fold::Slot::Plain(section) => Self::Plain(section),
@@ -43,67 +42,142 @@ impl SourceField {
             crate::fold::Slot::Answer => Self::AnswerText,
         }
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per content field and item kind reads as a table"
+    )]
     pub(crate) fn text<'a>(&self, item: &'a Item) -> Option<&'a TextContent> {
         match self {
             Self::Plain(section) => section.text(item),
             Self::Text(section) => section.text(item),
             Self::Prose => match &item.kind {
                 ItemKind::AssistantMessage { text, .. } => Some(text),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             Self::Notice => match &item.kind {
                 ItemKind::Notice { text, .. } => Some(text),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Error { .. } => None,
             },
             Self::Command => match &item.kind {
                 ItemKind::Tool {
                     tool: ToolKind::Shell { command, .. },
                     ..
                 } => Some(command),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             Self::Output => match &item.kind {
                 ItemKind::Tool {
                     output: Some(output),
                     ..
                 } => Some(&output.text),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             Self::Input => match &item.kind {
                 ItemKind::Tool {
                     tool: ToolKind::Mcp { input, .. } | ToolKind::Other { input, .. },
                     ..
                 } => input.as_ref(),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             Self::Diff(index) => match &item.kind {
                 ItemKind::Tool {
                     tool: ToolKind::Edit { changes },
                     ..
                 } => changes.inline()?.get(*index)?.diff.as_ref(),
-                _ => None,
-            },
-            Self::PlanStep(index) => match &item.kind {
-                ItemKind::Plan { steps, .. } => steps.inline()?.get(*index).map(|step| &step.text),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             Self::Question(index) => match &item.kind {
                 ItemKind::Question { questions, .. } => questions
                     .inline()?
                     .get(*index)
                     .map(|question| &question.text),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             Self::AnswerText => match &item.kind {
                 ItemKind::Question { answer_text, .. } => answer_text.as_ref(),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             Self::ApprovalCommand | Self::ApprovalDescription | Self::ApprovalReason => {
                 let approval = match &item.kind {
                     ItemKind::Tool { approval, .. } | ItemKind::Plan { approval, .. } => {
                         approval.as_ref()
                     }
-                    _ => None,
+                    ItemKind::UserMessage { .. }
+                    | ItemKind::AssistantMessage { .. }
+                    | ItemKind::Agent { .. }
+                    | ItemKind::Question { .. }
+                    | ItemKind::Image { .. }
+                    | ItemKind::Compaction { .. }
+                    | ItemKind::Notice { .. }
+                    | ItemKind::Error { .. } => None,
                 }?;
                 match (self, &approval.request) {
                     (Self::ApprovalReason, _) => approval.reason.as_ref(),
@@ -123,7 +197,7 @@ impl SourceField {
 /// One mounted authored field. The shared Core owner handles paging, cancellation,
 /// raw copy and export; the transcript never treats a source reference as empty text.
 #[derive(gpui::IntoElement)]
-pub(crate) struct StoredText {
+pub struct StoredText {
     pub(crate) host: Option<WeakEntity<editor_core::HostData>>,
     pub(crate) source: artisan_api::ContentRef,
     pub(crate) theme: ArtisanTheme,

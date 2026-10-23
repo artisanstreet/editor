@@ -8,7 +8,7 @@
 # never enters the Nix store. The output directory (default
 # target/dist/<version>) receives release.json, release.json.sig (base64
 # Ed25519 signature of release.json's exact bytes, what
-# crates/ae/src/install/release.rs verifies), the archives and the bootstrap
+# crates/ae/src/release.rs verifies), the archives and the bootstrap
 # installers: upload its files as the GitHub release's assets. The script
 # refuses a key whose public half is not the one `ae` is built with.
 # Needs nix and OpenSSL 3.
@@ -17,8 +17,8 @@ set -euo pipefail
 root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml")"
 out="${1:-$root/target/dist/$version}"
-anchor="$(sed -n 's/^ *None => "\([0-9a-f]\{64\}\)",$/\1/p' "$root/crates/ae/src/install/release.rs")"
-[[ -n "$anchor" ]] || { echo "release: can't find the release key in crates/ae/src/install/release.rs" >&2; exit 1; }
+anchor="$(sed -n 's/^ *None => "\([0-9a-f]\{64\}\)",$/\1/p' "$root/crates/ae/src/release.rs")"
+[[ -n "$anchor" ]] || { echo "release: can't find the release key in crates/ae/src/release.rs" >&2; exit 1; }
 
 secrets="$(mktemp -d)"
 trap 'rm -rf "$secrets"' EXIT
@@ -39,7 +39,7 @@ else
 fi
 public="$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')"
 if [[ "$public" != "$anchor" ]]; then
-    echo "release: the signing key's public key $public is not the release key $anchor in crates/ae/src/install/release.rs" >&2
+    echo "release: the signing key's public key $public is not the release key $anchor in crates/ae/src/release.rs" >&2
     exit 1
 fi
 

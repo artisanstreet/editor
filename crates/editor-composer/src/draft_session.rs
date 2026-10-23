@@ -14,13 +14,13 @@ use std::{
 };
 
 #[derive(Clone)]
-pub(crate) struct Submission {
+pub struct Submission {
     pub message: SendMessage,
     pub create: Option<CreateThread>,
     pub thread: ThreadId,
 }
 #[derive(Clone)]
-pub(crate) enum SessionEvent {
+pub enum SessionEvent {
     Changed,
     Reloaded,
     Accepted { thread: ThreadId, item: ItemId },
@@ -36,7 +36,11 @@ struct Outgoing {
     state: Sending,
 }
 
-pub(crate) struct DraftSession {
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent sync flags read together by pump, not a single state"
+)]
+pub struct DraftSession {
     client: ForgeClient,
     removed: bool,
     scope: String,
@@ -65,7 +69,7 @@ impl Global for Sessions {}
 
 /// The bounded cache retains active operations across view destruction. Only idle
 /// slots are evicted; unsaved values and request identities are never discarded.
-pub(crate) fn session(
+pub fn session(
     core: &Entity<Core>,
     host: HostId,
     scope: String,
@@ -181,10 +185,10 @@ impl DraftSession {
             .is_some_and(|outgoing| outgoing.state != Sending::Failed)
     }
     #[cfg(test)]
-    pub fn has_outgoing(&self) -> bool {
+    pub const fn has_outgoing(&self) -> bool {
         self.outgoing.is_some()
     }
-    pub fn queue(&mut self, body: Value, cx: &mut Context<Self>) {
+    pub fn queue(&mut self, body: Value, cx: &Context<Self>) {
         if self.removed || self.body == body {
             return;
         }
@@ -201,13 +205,14 @@ impl DraftSession {
             cx.background_executor()
                 .timer(Duration::from_millis(400))
                 .await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.timer = None;
                 this.pump(cx);
-            });
+            })
+            .ok();
         }));
     }
-    pub fn flush(&mut self, cx: &mut Context<Self>) {
+    pub fn flush(&mut self, cx: &Context<Self>) {
         self.timer = None;
         self.pump(cx);
     }
@@ -230,7 +235,7 @@ impl DraftSession {
         self.flush(cx);
         cx.emit(SessionEvent::Changed);
     }
-    pub fn retry(&mut self, cx: &mut Context<Self>) {
+    pub fn retry(&mut self, cx: &Context<Self>) {
         if self.removed {
             return;
         }
@@ -240,7 +245,7 @@ impl DraftSession {
         }
         self.flush(cx);
     }
-    pub fn keep_local(&mut self, cx: &mut Context<Self>) {
+    pub fn keep_local(&mut self, cx: &Context<Self>) {
         if self.removed {
             return;
         }
@@ -259,11 +264,11 @@ impl DraftSession {
         self.outgoing = None;
         cx.emit(SessionEvent::Reloaded);
     }
-    fn changed(&mut self, cx: &mut Context<Self>) {
+    fn changed(cx: &mut Context<Self>) {
         cx.emit(SessionEvent::Changed);
         cx.notify();
     }
-    fn pump(&mut self, cx: &mut Context<Self>) {
+    fn pump(&mut self, cx: &Context<Self>) {
         if self.removed || self.busy || self.conflict || self.error.is_some() {
             return;
         }
@@ -283,13 +288,13 @@ impl DraftSession {
             self.post(cx);
         }
     }
-    fn load(&mut self, cx: &mut Context<Self>) {
+    fn load(&mut self, cx: &Context<Self>) {
         self.busy = true;
         let client = self.client.clone();
         let scope = self.scope.clone();
         self.task = cx.spawn(async move |this, cx| {
             let result = client.draft(&scope).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
                     Ok(snapshot) => {
@@ -301,12 +306,13 @@ impl DraftSession {
                     }
                     Err(error) => this.error = Some(format!("Couldn't load the draft: {error:#}")),
                 }
-                this.changed(cx);
+                Self::changed(cx);
                 this.pump(cx);
-            });
+            })
+            .ok();
         });
     }
-    fn write(&mut self, cx: &mut Context<Self>) {
+    fn write(&mut self, cx: &Context<Self>) {
         self.busy = true;
         let client = self.client.clone();
         let scope = self.scope.clone();
@@ -317,7 +323,7 @@ impl DraftSession {
         };
         self.task = cx.spawn(async move |this, cx| {
             let result = client.set_draft(&scope, &write).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
                     Ok(result) => {
@@ -328,11 +334,11 @@ impl DraftSession {
                     }
                     Err(error) => this.error = Some(format!("Couldn't save the draft: {error:#}")),
                 }
-                this.changed(cx); this.pump(cx);
-            });
+                Self::changed(cx); this.pump(cx);
+            }).ok();
         });
     }
-    fn post(&mut self, cx: &mut Context<Self>) {
+    fn post(&mut self, cx: &Context<Self>) {
         let Some(outgoing) = &mut self.outgoing else {
             return;
         };
@@ -352,7 +358,7 @@ impl DraftSession {
                 client.send_message(&request.thread, &request.message).await
             }
             .await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
                     Ok(_) => {
@@ -376,9 +382,10 @@ impl DraftSession {
                         this.error = Some(format!("Couldn't send the message: {error:#}"));
                     }
                 }
-                this.changed(cx);
+                Self::changed(cx);
                 this.pump(cx);
-            });
+            })
+            .ok();
         });
     }
 }
@@ -425,7 +432,7 @@ mod removal_tests {
                 },
                 cx,
             )
-            .unwrap()
+            .unwrap();
         });
         let host = core.read_with(cx, |core, _| core.host(&host_id).unwrap().clone());
         let client = host.read_with(cx, |host, _| host.client.clone());
@@ -468,7 +475,7 @@ mod removal_tests {
                     .0
                     .keys()
                     .any(|(owner, host, _)| *owner == core.entity_id() && host == &host_id)
-            )
+            );
         });
         session.update(cx, |session, cx| {
             session.queue(serde_json::json!({"text":"Late view edit"}), cx);

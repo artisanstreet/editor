@@ -33,7 +33,7 @@ impl MarkdownIndex {
     pub fn context(&self, leaf: usize) -> Option<&LeafContext> {
         self.0.context(leaf)
     }
-    pub fn source_bytes(&self) -> usize {
+    pub const fn source_bytes(&self) -> usize {
         self.0.source_bytes()
     }
     pub fn resident_bytes(&self) -> usize {
@@ -78,7 +78,9 @@ pub fn normalize_record(
     if document.blocks.len() != 1 {
         return Err(MarkdownIndexError::InvalidShape);
     }
-    let block = document.blocks.pop().unwrap();
+    let Some(block) = document.blocks.pop() else {
+        return Err(MarkdownIndexError::InvalidShape);
+    };
     match (record.is_table_header(), block) {
         (Some(header), Block::Table(mut table)) => {
             let cells = if header {
@@ -87,7 +89,10 @@ pub fn normalize_record(
                 if table.rows.len() != 1 {
                     return Err(MarkdownIndexError::InvalidShape);
                 }
-                table.rows.pop().unwrap()
+                let Some(row) = table.rows.pop() else {
+                    return Err(MarkdownIndexError::InvalidShape);
+                };
+                row
             };
             Ok(IndexedLeafContent::TableRow {
                 header,

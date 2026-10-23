@@ -1,13 +1,13 @@
 //! Paired hosts and pairing new ones: local and WSL with no typing, remote
-//! by pasting what `ae forge pair` printed.
+//! by pasting what `ae pair` printed.
 
 use crate::Settings;
 use crate::page;
+use crate::ui::{card, error_text, header, row, section_shell};
 use anyhow::Result;
 use editor_core::hosts::{self, LocalTarget};
 use editor_core::{ConnectionStatus, HostConfig, HostId, HostKind, SettingsPage};
 use editor_ui::button::ButtonVariant;
-use editor_ui::page::{card, error_text, header, row, section_shell};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
@@ -15,7 +15,7 @@ use gpui::{
     SharedString, Styled as _, Subscription, div, px,
 };
 
-pub(crate) struct HostsForm {
+pub struct HostsForm {
     pub(crate) pairing: Entity<TextEditor>,
     /// What is being paired right now ("this computer", an address, …).
     pending: Option<String>,
@@ -44,7 +44,7 @@ impl HostsForm {
 }
 
 impl Settings {
-    pub(crate) fn discover_hosts(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn discover_hosts(&self, cx: &mut Context<Self>) {
         self.core
             .update(cx, |core, cx| core.load_pairing_targets(false, cx));
     }
@@ -57,7 +57,7 @@ impl Settings {
     /// Pairs with the Forge in the pasted `<host:port> <code> <fingerprint>`.
     pub(crate) fn pair_pasted(&mut self, cx: &mut Context<Self>) {
         let text = self.hosts.pairing.read(cx).text().trim().to_owned();
-        let (address, code, fingerprint) = match hosts::parse_pairing(&text) {
+        let (address, pairing_code, fingerprint) = match hosts::parse_pairing(&text) {
             Ok(parts) => parts,
             Err(error) => {
                 self.hosts.error = Some(format!("{error:#}"));
@@ -79,7 +79,7 @@ impl Settings {
         self.start_pairing(address.clone(), cx, async move {
             hosts::pair(
                 &address,
-                &code,
+                &pairing_code,
                 &fingerprint,
                 &identity,
                 &device,
@@ -121,7 +121,7 @@ impl Settings {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = pairing.await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.hosts.pending = None;
                 let added = result
                     .and_then(|config| this.core.update(cx, |core, cx| core.add_host(config, cx)));
@@ -136,7 +136,8 @@ impl Settings {
                     }
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         })
         .detach();
     }
@@ -149,16 +150,21 @@ impl Settings {
     }
 }
 
-/// A muted 14 px line.
+/// A muted 13 px line under a card.
 fn muted(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()
-        .text_sm()
-        .text_color(theme.colors.muted_foreground.to_paint())
+        .text_size(editor_ui::theme::TypographyTokens::size(
+            editor_ui::theme::TextStep::XsMid,
+        ))
+        .text_color(theme.colors.text_muted.to_paint())
         .child(text.into())
 }
 
-#[allow(clippy::too_many_lines)]
-pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> Div {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the whole Hosts page in reading order"
+)]
+pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> Div {
     let core = settings.core.read(cx);
     let paired: Vec<(HostConfig, ConnectionStatus, Option<String>)> = core
         .hosts()
@@ -174,12 +180,10 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
     let mut rows: Vec<AnyElement> = Vec::new();
     for (config, status, version) in &paired {
         let (state, colour) = match status {
-            ConnectionStatus::Live => ("Connected".to_owned(), theme.colors.banner_success),
-            ConnectionStatus::Connecting => {
-                ("Connecting…".to_owned(), theme.colors.muted_foreground)
-            }
+            ConnectionStatus::Live => ("Connected".to_owned(), theme.colors.green.solid),
+            ConnectionStatus::Connecting => ("Connecting…".to_owned(), theme.colors.text_muted),
             ConnectionStatus::Offline { reason, .. } => {
-                (format!("Offline: {reason}"), theme.colors.destructive)
+                (format!("Offline: {reason}"), theme.colors.red.solid)
             }
         };
         let mut detail = config.address.clone();
@@ -194,20 +198,38 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
             false,
             cx.listener(move |this, _, _, cx| this.remove_host(&id, cx)),
         );
+        // The connection beside the host, as a dot and its word.
+        let status = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .max_w(px(200.0))
+            .text_size(theme.typography.label_text)
+            .text_color(theme.colors.text_muted.to_paint())
+            .child(
+                div()
+                    .size(px(6.0))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(colour.to_paint()),
+            )
+            .child(div().truncate().child(state));
+        let controls = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(12.0))
+            .child(status)
+            .child(remove);
         rows.push(
-            div()
-                .flex()
-                .flex_col()
-                .child(row(theme, config.name.clone(), detail, Some(remove)))
-                .child(
-                    div()
-                        .pb(px(12.0))
-                        .mt(px(-8.0))
-                        .text_xs()
-                        .text_color(colour.to_paint())
-                        .child(state),
-                )
-                .into_any_element(),
+            row(
+                theme,
+                config.name.clone(),
+                detail,
+                Some(controls.into_any_element()),
+            )
+            .into_any_element(),
         );
     }
     if rows.is_empty() {
@@ -234,8 +256,15 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
             )
         };
     let has_kind = |kind: &HostKind| paired.iter().any(|(config, _, _)| &config.kind == kind);
-    let mut local = div().flex().flex_row().flex_wrap().gap(px(6.0));
+    let mut local = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .justify_end()
+        .gap(px(6.0));
+    let mut local_count = 0;
     if !has_kind(&HostKind::Local) {
+        local_count += 1;
         local = local.child(local_button(
             "pair-local".into(),
             "This computer".into(),
@@ -247,6 +276,7 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
         if !has_kind(&HostKind::Wsl {
             distro: distro.clone(),
         }) {
+            local_count += 1;
             local = local.child(local_button(
                 format!("pair-wsl-{distro}"),
                 format!("WSL: {distro}"),
@@ -263,18 +293,25 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
         pending || settings.hosts.pairing.read(cx).text().trim().is_empty(),
         cx.listener(|this, _, _, cx| this.pair_pasted(cx)),
     );
-    let mut add = div()
+    let has_local = local_count > 0;
+    let this_machine = row(
+        theme,
+        "This machine",
+        if has_local {
+            "Pair the Forge installed here with `ae install forge`."
+        } else {
+            "Every Forge on this machine is paired."
+        },
+        has_local.then(|| local.into_any_element()),
+    );
+    let remote = div()
         .flex()
         .flex_col()
-        .gap(px(12.0))
-        .child(muted(
+        .child(row(
             theme,
-            "On this machine (Forge must be installed with `ae install forge`):",
-        ))
-        .child(local)
-        .child(muted(
-            theme,
-            "Remote: run `ae forge pair` on the host and paste what it prints.",
+            "Remote host",
+            "Run `ae pair` on the host and paste what it prints.",
+            None,
         ))
         .child(
             div()
@@ -282,6 +319,7 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
+                .pb(px(16.0))
                 .child(
                     div()
                         .flex_1()
@@ -290,20 +328,26 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
                 )
                 .child(pair_button),
         );
+    let mut add = div().flex().flex_col().gap(px(10.0)).child(card(
+        theme,
+        vec![this_machine.into_any_element(), remote.into_any_element()],
+    ));
     if let Some(error) = settings.core.read(cx).pairing_targets().error.clone() {
-        add = add.child(error_text(theme, error)).child(settings.button(
-            "retry-local-targets",
-            "Retry WSL discovery",
-            ButtonVariant::Outline,
-            false,
-            cx.listener(|this, _, _, cx| {
-                this.core
-                    .update(cx, |core, cx| core.load_pairing_targets(true, cx))
-            }),
-        ));
+        add = add
+            .child(error_text(theme, error))
+            .child(div().child(settings.button(
+                "retry-local-targets",
+                "Retry WSL discovery",
+                ButtonVariant::Outline,
+                false,
+                cx.listener(|this, _, _, cx| {
+                    this.core
+                        .update(cx, |core, cx| core.load_pairing_targets(true, cx));
+                }),
+            )));
     }
     if let Some(label) = &settings.hosts.pending {
-        add = add.child(muted(theme, format!("Pairing with {label}…")));
+        add = add.child(muted(theme, format!("Pairing with {label}…")).px(px(4.0)));
     }
     if let Some(error) = &settings.hosts.error {
         add = add.child(error_text(theme, error.clone()));

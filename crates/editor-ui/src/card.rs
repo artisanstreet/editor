@@ -19,7 +19,7 @@ impl Card {
             divided: false,
         }
     }
-    pub fn bands(theme: ArtisanTheme, bands: Vec<AnyElement>) -> Self {
+    pub const fn bands(theme: ArtisanTheme, bands: Vec<AnyElement>) -> Self {
         Self {
             theme,
             bands,
@@ -40,17 +40,13 @@ impl RenderOnce for Card {
         for (index, band) in self.bands.into_iter().enumerate() {
             let mut band = div().w_full().px(padding).child(band);
             if self.divided && index > 0 {
-                band = band
-                    .border_t_1()
-                    .border_color(theme.colors.border.to_paint());
+                band = band.border_t_1().border_color(theme.colors.line.to_paint());
             }
             root = root.child(band);
         }
         root
     }
 }
-
-const RING_ALPHA: f32 = 0.10;
 
 /// Legacy `ring-1`: a one-pixel hairline around the card.
 const RING_WIDTH_PX: f32 = 1.0;
@@ -76,7 +72,7 @@ pub struct CardStyle {
     pub background: Hsla,
     /// Card foreground text color (`--card-foreground`) for the theme mode.
     pub foreground: Hsla,
-    /// Ring hairline color: the shared `--foreground` at 10% alpha.
+    /// Ring hairline color: the shared line token.
     pub ring_color: Hsla,
     /// Ring hairline thickness, painted as shadow spread: 1 px.
     pub ring_spread: Pixels,
@@ -93,9 +89,9 @@ impl CardStyle {
             content_horizontal_padding: compact_spacing,
             vertical_gap: compact_spacing,
             text_size: theme.typography.control_text,
-            background: theme.colors.card.to_paint(),
-            foreground: theme.colors.card_foreground.to_paint(),
-            ring_color: theme.colors.foreground.with_alpha(RING_ALPHA).to_paint(),
+            background: theme.colors.surface.to_paint(),
+            foreground: theme.colors.text.to_paint(),
+            ring_color: theme.colors.line.to_paint(),
             ring_spread: px(RING_WIDTH_PX),
         }
     }
@@ -103,7 +99,7 @@ impl CardStyle {
     /// Builds the legacy `ring-foreground/10` hairline as one layout-neutral
     /// zero-blur spread shadow (see the module-level limitation notes).
     #[must_use]
-    pub fn ring(&self) -> BoxShadow {
+    pub const fn ring(&self) -> BoxShadow {
         BoxShadow {
             color: self.ring_color,
             offset: point(px(0.0), px(0.0)),

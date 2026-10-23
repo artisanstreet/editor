@@ -2,7 +2,7 @@
 //! allocate a Vec of all row descriptors. Source and field identity fence actions.
 use crate::ContentText;
 use artisan_api::{CollectionRange, CollectionRef, TextContent};
-use editor_core::{CollectionWindow, HostData, RangeState, RangeWindowEvent};
+use editor_core::{CollectionWindow, HostData, RangeState, RangeWindow, RangeWindowEvent};
 use editor_ui::{
     action_row::ActionRow,
     button::Button,
@@ -116,6 +116,10 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         }
         cx.notify();
     }
+    #[expect(
+        clippy::suspicious_operation_groupings,
+        reason = "a page's total is checked against the source's count, the field CollectionRef carries"
+    )]
     fn valid_page(&self, page: &CollectionRange<T>, index: u64, cx: &App) -> bool {
         let source = self.source(cx);
         page.source == source.source
@@ -127,7 +131,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         if !self.valid_page(&page, index, cx) {
             return;
         }
-        let record = &page.records[(index - page.start) as usize];
+        let record = page_record(&page, index);
         if (self.present)(record, index, cx).disabled {
             return;
         }
@@ -142,7 +146,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         if !self.valid_page(&page, index, cx) {
             return;
         }
-        let preview = (self.present)(&page.records[(index - page.start) as usize], index, cx);
+        let preview = (self.present)(page_record(&page, index), index, cx);
         if preview.disabled {
             return;
         }
@@ -170,11 +174,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         self.selected = Some((index, page));
         cx.notify();
     }
-    fn rows(
-        &mut self,
-        range: std::ops::Range<usize>,
-        cx: &mut Context<Self>,
-    ) -> Vec<gpui::AnyElement> {
+    fn rows(&self, range: std::ops::Range<usize>, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
         range
             .map(|index| {
                 let index = index as u64;
@@ -192,20 +192,19 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
                                 move |_, _, cx| {
                                     let window = window.clone();
                                     cx.defer(move |cx| {
-                                        window.update(cx, |window, cx| window.request(index, cx))
+                                        window.update(cx, |window, cx| window.request(index, cx));
                                     });
                                 },
-                                |_, _, _, _| {},
+                                |_, (), _, _| {},
                             )
                             .absolute()
                             .inset_0(),
                         )
                         .into_any_element();
                 };
-                let preview =
-                    (self.present)(&page.records[(index - page.start) as usize], index, cx);
+                let preview = (self.present)(page_record(&page, index), index, cx);
                 let owner = cx.entity().downgrade();
-                let click_page = page.clone();
+                let click_page = Arc::clone(&page);
                 let mut row = ActionRow::new(
                     SharedString::from(format!("collection-entry-{index}")),
                     self.theme,
@@ -214,7 +213,12 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
                 .selected(preview.selected)
                 .disabled(preview.disabled)
                 .on_activate(move |_, _, cx| {
-                    let _ = owner.update(cx, |this, cx| this.choose(click_page.clone(), index, cx));
+                    // The browser may already be gone; the click has nothing left to do.
+                    owner
+                        .update(cx, |this, cx| {
+                            this.choose(Arc::clone(&click_page), index, cx);
+                        })
+                        .ok();
                 });
                 if self.activate.is_some() && preview.detail.is_some() {
                     let owner = cx.entity().downgrade();
@@ -227,8 +231,11 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
                         .disabled(preview.disabled)
                         .on_activate(move |_, _, cx| {
                             cx.stop_propagation();
-                            let _ = owner
-                                .update(cx, |this, cx| this.open_detail(page.clone(), index, cx));
+                            owner
+                                .update(cx, |this, cx| {
+                                    this.open_detail(Arc::clone(&page), index, cx);
+                                })
+                                .ok();
                         }),
                     );
                 }
@@ -240,7 +247,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
             })
             .collect()
     }
-    fn detail_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn detail_view(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let mut body = div()
             .flex()
             .flex_col()
@@ -292,6 +299,14 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         CodeCard::new(self.theme, body).into_any_element()
     }
 }
+/// The record at `index`, which `valid_page` or `page_for` placed inside `page`.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the offset is below records.len(), which is a usize"
+)]
+fn page_record<T>(page: &CollectionRange<T>, index: u64) -> &T {
+    &page.records[(index - page.start) as usize]
+}
 impl<T: serde::de::DeserializeOwned + Send + 'static> Render for CollectionBrowser<T> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.selected.is_some() {
@@ -322,9 +337,9 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> Render for CollectionBrows
         }
         if let RangeState::Failed(error) = self.window.read(cx).state() {
             body = body.child(error.clone()).child(
-                Button::text("collection-retry", self.theme, "Retry").on_activate(cx.listener(
-                    |this, _, _, cx| this.window.update(cx, |window, cx| window.retry(cx)),
-                )),
+                Button::text("collection-retry", self.theme, "Retry").on_activate(
+                    cx.listener(|this, _, _, cx| this.window.update(cx, RangeWindow::retry)),
+                ),
             );
         }
         CodeCard::new(self.theme, body).into_any_element()

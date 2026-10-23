@@ -35,7 +35,7 @@ impl Store {
         stamp: Stamp,
     ) -> Result<Option<Thread>> {
         let id = id.clone();
-        self.write(move |tx| tx.with_stamp(stamp, |tx| tx.update_thread(id, update)))
+        self.write(move |tx| tx.with_stamp(stamp, |tx| tx.update_thread(&id, update)))
             .await
     }
 

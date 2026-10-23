@@ -1,4 +1,8 @@
 //! Application-wide Tab traversal through GPUI's native tab stops.
+#![expect(
+    clippy::derive_partial_eq_without_eq,
+    reason = "gpui::actions! derives PartialEq without Eq for its unit actions"
+)]
 use gpui::{App, KeyBinding, Window};
 
 gpui::actions!(artisan_focus, [FocusNext, FocusPrevious]);

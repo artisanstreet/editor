@@ -10,13 +10,15 @@ use gpui::{
 
 use super::super::super::kit;
 use super::super::frame::{self, Frame, LegendEntry, PlotLabel, ReadoutRow, Tick};
-use super::super::scale::{Domain, f64_of, index_of, nice_ticks, percent, reading, ticks_within};
+use super::super::scale::{
+    Domain, f32_of_count, f64_of, index_of, nice_ticks, percent, reading, ticks_within,
+};
 use super::super::scene::{
     Probe, Shape, fractions, hover_band, plot_canvas, probe, probed_width, vrule,
 };
 use super::{Distribution, Mode, share_at_or_below};
 use crate::slider::{Slider, SliderRange, SliderState};
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, Opacity};
 
 #[derive(IntoElement)]
 pub(super) struct DistributionView {
@@ -46,6 +48,10 @@ struct Layout {
 }
 
 impl RenderOnce for DistributionView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; its parts share the mode, the hover and the state handle"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         if self.data.is_empty() {
@@ -54,7 +60,7 @@ impl RenderOnce for DistributionView {
         let state = kit::keyed(window, cx, ElementId::Name(self.id.clone()), || {
             let boxes = gpui::UniformListScrollHandle::new();
             DistributionState {
-                model: self.data.clone(),
+                model: Arc::clone(&self.data),
                 hover: None,
                 probe: probe(),
                 boxes,
@@ -65,7 +71,7 @@ impl RenderOnce for DistributionView {
                 false
             } else {
                 let changed = *state.model != *self.data;
-                state.model = self.data.clone();
+                state.model = Arc::clone(&self.data);
                 if changed {
                     state.hover = None;
                     state.boxes = gpui::UniformListScrollHandle::new();
@@ -87,12 +93,12 @@ impl RenderOnce for DistributionView {
         if replaced && let Some(slider) = &slider_state {
             let (range, step, start) = self.data.slider();
             slider.update(cx, |state, _| {
-                state.reset(SliderRange::new(range.lo, range.hi, Some(step)), start)
+                state.reset(SliderRange::new(range.lo, range.hi, Some(step)), start);
             });
         }
         let (hover, plot_probe) = {
             let current = state.read(cx);
-            (current.hover, current.probe.clone())
+            (current.hover, std::rc::Rc::clone(&current.probe))
         };
         let threshold = slider_state.as_ref().map(|slider| slider.read(cx).value());
         let width = probed_width(&plot_probe, 480.0);
@@ -112,9 +118,11 @@ impl RenderOnce for DistributionView {
             Mode::Box => self.data.samples.len(),
         };
         let selected = hover.map(|(x, y)| match mode {
-            Mode::Box => ((y * count as f32) as usize).min(count.saturating_sub(1)),
-            Mode::Histogram => ((x * count as f32) as usize).min(count.saturating_sub(1)),
-            Mode::Cdf => (x * 100.0).round() as usize,
+            Mode::Box => index_of(f64::from(y * f32_of_count(count))).min(count.saturating_sub(1)),
+            Mode::Histogram => {
+                index_of(f64::from(x * f32_of_count(count))).min(count.saturating_sub(1))
+            }
+            Mode::Cdf => index_of(f64::from((x * 100.0).round())),
         });
         let keyboard = state.clone();
         let mut navigation = crate::chart_navigation::ChartNavigation::new(
@@ -129,15 +137,19 @@ impl RenderOnce for DistributionView {
                     state.hover = match command {
                         ChartCommand::Select(index) | ChartCommand::Activate(index) => {
                             Some(match mode {
-                                Mode::Box => (0.5, (index as f32 + 0.5) / count as f32),
-                                Mode::Histogram => ((index as f32 + 0.5) / count as f32, 0.5),
-                                Mode::Cdf => (index as f32 / 100.0, 0.5),
+                                Mode::Box => {
+                                    (0.5, (f32_of_count(index) + 0.5) / f32_of_count(count))
+                                }
+                                Mode::Histogram => {
+                                    ((f32_of_count(index) + 0.5) / f32_of_count(count), 0.5)
+                                }
+                                Mode::Cdf => (f32_of_count(index) / 100.0, 0.5),
                             })
                         }
                         ChartCommand::Parent | ChartCommand::Reset => None,
                     };
                     cx.notify();
-                })
+                });
             },
         )
         .selected(selected);
@@ -166,7 +178,7 @@ impl RenderOnce for DistributionView {
                     } else {
                         sample.name.clone().into()
                     },
-                    color: kit::series_color(index).to_paint(),
+                    color: kit::series_color(&theme, index).to_paint(),
                     hidden: false,
                 })
                 .collect();
@@ -199,7 +211,7 @@ impl RenderOnce for DistributionView {
 
 impl DistributionView {
     fn color(&self, index: usize) -> Hsla {
-        kit::series_color(index).to_paint()
+        kit::series_color(&self.theme, index).to_paint()
     }
 
     /// The share of each series at or below `threshold`.
@@ -251,12 +263,13 @@ impl DistributionView {
             let (lo, hi) = bins.edges(bin);
             shapes.push(hover_band(&self.theme, x.fraction(lo), x.fraction(hi)));
         }
-        let alpha = if counts.len() > 1 { 0.5 } else { 0.85 };
+        let purpose = if counts.len() > 1 {
+            Opacity::Overlap
+        } else {
+            Opacity::BarSolo
+        };
         for (index, counts) in counts.iter().enumerate() {
-            let color = Hsla {
-                alpha,
-                ..self.color(index)
-            };
+            let color = kit::series_color(&self.theme, index).at(purpose).to_paint();
             for (bin, count) in counts.iter().enumerate().filter(|(_, count)| **count > 0) {
                 let (lo, hi) = bins.edges(bin);
                 let gap = bins.width() * 0.04;
@@ -326,7 +339,7 @@ impl DistributionView {
         if let Some(at) = hovered {
             shapes.push(vrule(
                 x.fraction(at),
-                self.theme.colors.foreground.with_alpha(0.3).to_paint(),
+                self.theme.colors.text.at(Opacity::ChartRule).to_paint(),
                 false,
             ));
         }
@@ -387,12 +400,16 @@ impl DistributionView {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; its parts share the rows, the hover and the state handle"
+    )]
     fn box_window(
         &self,
         state: Entity<DistributionState>,
         hover: Option<(f32, f32)>,
         plot_probe: Probe,
-        cx: &mut App,
+        cx: &App,
     ) -> AnyElement {
         let theme = self.theme;
         let count = self.data.samples.len();
@@ -406,7 +423,7 @@ impl DistributionView {
         let x = ticks.domain;
         let rows = state.read(cx).boxes.clone();
         let row_pitch = theme.density.control_sm;
-        let data = self.data.clone();
+        let data = Arc::clone(&self.data);
         let row_state = state.clone();
         let row_id = self.id.clone();
         let grid = frame::grid(&theme, &[], &frame::number_ticks(&ticks, None, false));
@@ -423,7 +440,10 @@ impl DistributionView {
                             x,
                             0.5,
                             1.0,
-                            kit::series_color(row).to_paint(),
+                            kit::series_color(&theme, row).to_paint(),
+                            kit::series_color(&theme, row)
+                                .at(Opacity::BoxFill)
+                                .to_paint(),
                             &mut shapes,
                         );
                     }
@@ -445,7 +465,7 @@ impl DistributionView {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(theme.typography.control_text)
-                                .text_color(theme.colors.muted_foreground.to_paint())
+                                .text_color(theme.colors.text_muted.to_paint())
                                 .child(sample.name.clone()),
                         )
                         .child(
@@ -462,14 +482,17 @@ impl DistributionView {
                                     index_of(f64::from(y) * f64_of(count)).min(count - 1)
                                 });
                                 if *over {
-                                    state.hover = Some((0.5, (row as f32 + 0.5) / count as f32));
+                                    state.hover = Some((
+                                        0.5,
+                                        (f32_of_count(row) + 0.5) / f32_of_count(count),
+                                    ));
                                 } else if index == Some(row) {
                                     state.hover = None;
                                 } else {
                                     return;
                                 }
                                 cx.notify();
-                            })
+                            });
                         })
                         .into_any_element()
                 })
@@ -477,7 +500,7 @@ impl DistributionView {
         })
         .track_scroll(&rows)
         .w_full()
-        .h(row_pitch * count.min(10) as f32);
+        .h(row_pitch * f32_of_count(count.min(10)));
         let reading = selected
             .and_then(|row| self.data.samples.get(row))
             .and_then(|sample| {
@@ -513,7 +536,7 @@ impl DistributionView {
                     .child(super::super::scene::plot_canvas(Vec::new(), plot_probe)),
             )
             .children(reading.map(|(card, _)| card));
-        let keyboard = state.clone();
+        let keyboard = state;
         let mut navigation = crate::chart_navigation::ChartNavigation::new(
             kit::part(&self.id, "navigation"),
             theme,
@@ -526,12 +549,12 @@ impl DistributionView {
                     state.hover = match command {
                         ChartCommand::Select(row) | ChartCommand::Activate(row) => {
                             rows.scroll_to_item(row, gpui::ScrollStrategy::Nearest);
-                            Some((0.5, (row as f32 + 0.5) / count as f32))
+                            Some((0.5, (f32_of_count(row) + 0.5) / f32_of_count(count)))
                         }
                         ChartCommand::Parent | ChartCommand::Reset => None,
                     };
                     cx.notify();
-                })
+                });
             },
         )
         .content_height()
@@ -545,7 +568,7 @@ impl DistributionView {
     fn threshold_rule(&self, threshold: f64, layout: &mut Layout) {
         let x = match self.data.mode {
             Mode::Histogram => self.data.bins.domain,
-            _ => self.data.domain(),
+            Mode::Cdf | Mode::Box => self.data.domain(),
         };
         let at = x.fraction(threshold);
         let warning = kit::Tone::Warning.color(&self.theme).to_paint();
@@ -572,7 +595,7 @@ impl DistributionView {
     ) -> AnyElement {
         let moving = state.clone();
         let leaving = state.clone();
-        let move_probe = probe.clone();
+        let move_probe = std::rc::Rc::clone(&probe);
         let labels = std::mem::take(&mut layout.labels)
             .into_iter()
             .map(|label| frame::plot_label(&self.theme, label));
@@ -615,12 +638,17 @@ fn value_ticks(domain: Domain, width: f32) -> Vec<Tick> {
 }
 
 /// A horizontal box with Tukey whiskers and outliers, centered on `cy`.
+#[expect(
+    clippy::float_cmp,
+    reason = "outliers repeat exact sample values; only identical ones share a mark"
+)]
 fn box_shapes(
     summary: &super::Summary,
     x: Domain,
     cy: f32,
     lane: f32,
     color: Hsla,
+    fill: Hsla,
     shapes: &mut Vec<Shape>,
 ) {
     let half = lane * 0.26;
@@ -649,10 +677,7 @@ fn box_shapes(
         y0: cy - half,
         x1: q3,
         y1: cy + half,
-        color: Hsla {
-            alpha: 0.25,
-            ..color
-        },
+        color: fill,
     });
     shapes.push(stroke(
         vec![
@@ -675,7 +700,7 @@ fn box_shapes(
             y: cy,
             radius: 3.0,
             color: Hsla {
-                alpha: 0.8,
+                alpha: color.alpha * Opacity::Outlier.alpha(),
                 ..color
             },
         });
@@ -686,6 +711,7 @@ fn box_shapes(
 mod regression_tests {
     use super::*;
     #[test]
+    #[expect(clippy::float_cmp, reason = "the curve width is an exact constant")]
     fn an_empty_series_has_no_cdf_curve() {
         let data = Arc::new(Distribution::from_spec(serde_json::from_value(serde_json::json!({"mode":"cdf","series":[{"name":"empty","values":[]},{"name":"present","values":[1,2]}]})).unwrap()));
         let view = DistributionView {
@@ -735,7 +761,7 @@ mod native_box_window_tests {
                 .child(DistributionView {
                     id: "native-box".into(),
                     theme: ArtisanTheme::resolved(),
-                    data: self.data.clone(),
+                    data: Arc::clone(&self.data),
                 })
         }
     }
@@ -810,7 +836,12 @@ mod outlier_mark_tests {
             data.domain(),
             0.5,
             1.0,
-            ArtisanTheme::resolved().colors.foreground.to_paint(),
+            ArtisanTheme::resolved().colors.text.to_paint(),
+            ArtisanTheme::resolved()
+                .colors
+                .text
+                .at(Opacity::BoxFill)
+                .to_paint(),
             &mut shapes,
         );
         assert_eq!(

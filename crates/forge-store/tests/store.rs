@@ -3,12 +3,16 @@ use artisan_api::{
     ItemsQuery, MessageDirection, Permissions, Phase, ProjectId, Question, Run, RunId, RunStatus,
     Status, ThreadId, ToolKind, Usage, now,
 };
-use forge_store::{BlobRejected, NewItem, Store};
+use forge_store::{Acceptance, BlobRejected, NewItem, Store};
 use std::path::{Path, PathBuf};
 
 struct TempDir(PathBuf);
 
 impl TempDir {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper; a failure fails the calling test"
+    )]
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("forge-store-test-{}", ItemId::new()));
         std::fs::create_dir_all(&path).unwrap();
@@ -18,10 +22,15 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        // Best effort: a leftover temp dir is harmless.
+        std::fs::remove_dir_all(&self.0).ok();
     }
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
 async fn add_thread(store: &Store) -> ThreadId {
     let project = store
         .create_project(CreateProject {
@@ -31,7 +40,10 @@ async fn add_thread(store: &Store) -> ThreadId {
         })
         .await
         .unwrap();
-    assert_eq!(project.name, "app");
+    assert_eq!(
+        project.name, "app",
+        "a project is named after its directory"
+    );
     store
         .create_thread(CreateThread {
             id: ThreadId::new(),
@@ -39,12 +51,17 @@ async fn add_thread(store: &Store) -> ThreadId {
             config: EngineConfig::new(EngineId::Claude),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await
         .unwrap()
         .id
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
 async fn test_store(dir: &Path) -> (Store, ThreadId) {
     let store = Store::open(dir).unwrap();
     let thread = add_thread(&store).await;
@@ -63,6 +80,8 @@ fn message(thread: &ThreadId, id: &str, text: &str) -> NewItem {
             text: text.into(),
             images: Vec::new(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     }
 }
@@ -84,6 +103,7 @@ fn reply(thread: &ThreadId, id: &str, run: Option<&RunId>, text: &str, status: S
 
 fn run(thread: &ThreadId, status: RunStatus) -> Run {
     Run {
+        config: None,
         id: RunId::new(),
         thread_id: thread.clone(),
         engine: EngineId::Claude,
@@ -96,14 +116,23 @@ fn run(thread: &ThreadId, status: RunStatus) -> Run {
         seq: 0,
         started_at: now(),
         ended_at: None,
+        continuation: None,
     }
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
 fn text(item: &Item) -> &str {
     item.preview().unwrap()
 }
 
 #[tokio::test]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "any other event fails the test"
+)]
 async fn a_client_resuming_after_a_seq_gets_every_later_change_in_order() {
     let dir = TempDir::new();
     let (store, thread) = test_store(&dir.0).await;
@@ -353,6 +382,7 @@ async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items()
                 command: "cargo test".into(),
                 cwd: None,
                 background: false,
+                watch: false,
             },
             title: None,
             output: None,
@@ -590,6 +620,7 @@ async fn thread_creation_rejects_a_missing_project_without_writes_and_replays_ex
         config: EngineConfig::new(EngineId::Claude),
         title: Some("must not be saved".into()),
         parent_thread_id: None,
+        spawned_by: None,
     };
     let head = store.head();
     let error = store.create_thread(request.clone()).await.unwrap_err();
@@ -753,6 +784,8 @@ async fn replaying_a_send_cannot_change_config_or_title() {
             forge_store::Acceptance {
                 title: Some("First title".into()),
                 remember_config: true,
+                from_agent: None,
+                sender: None,
             },
         )
         .await
@@ -769,6 +802,8 @@ async fn replaying_a_send_cannot_change_config_or_title() {
             forge_store::Acceptance {
                 title: Some("Replayed title".into()),
                 remember_config: true,
+                from_agent: None,
+                sender: None,
             },
         )
         .await
@@ -884,7 +919,12 @@ async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
         }),
     };
     store
-        .send_message(thread.clone(), command.clone(), false, Default::default())
+        .send_message(
+            thread.clone(),
+            command.clone(),
+            false,
+            Acceptance::default(),
+        )
         .await
         .unwrap();
     assert_eq!(store.draft("scope").await.unwrap(), newer.current);
@@ -892,7 +932,7 @@ async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
     accepted.id = ItemId::new();
     accepted.draft.as_mut().unwrap().revision = newer.current.revision;
     store
-        .send_message(thread, accepted, false, Default::default())
+        .send_message(thread, accepted, false, Acceptance::default())
         .await
         .unwrap();
     let cleared = store.draft("scope").await.unwrap();
@@ -936,6 +976,7 @@ async fn settlement_is_monotonic_and_cannot_acknowledge_future_activity() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist() {
     use artisan_api::{FileChange, FileOp, PlanStep, StepStatus};
     let dir = TempDir::new();
@@ -947,6 +988,7 @@ async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist(
             command: "long job".into(),
             cwd: Some("/work/app".into()),
             background: true,
+            watch: false,
         },
         title: None,
         output: None,
@@ -954,6 +996,38 @@ async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist(
         approval: None,
     };
     store.upsert_item(shell).await.unwrap();
+    let mut foreground = message(&thread, "foreground-shell", "");
+    foreground.status = Status::Running;
+    foreground.kind = ItemKind::Tool {
+        tool: ToolKind::Shell {
+            command: "cargo test".into(),
+            cwd: None,
+            background: false,
+            watch: false,
+        },
+        title: None,
+        output: None,
+        exit_code: None,
+        approval: None,
+    };
+    store.upsert_item(foreground).await.unwrap();
+    let mut workflow = message(&thread, "workflow", "");
+    workflow.status = Status::Running;
+    workflow.kind = ItemKind::Tool {
+        tool: ToolKind::Other {
+            name: "Workflow".into(),
+            input: Some(
+                serde_json::json!({"script": "export const meta = { name: 'review-changes' }"})
+                    .to_string()
+                    .into(),
+            ),
+        },
+        title: None,
+        output: None,
+        exit_code: None,
+        approval: None,
+    };
+    store.upsert_item(workflow).await.unwrap();
     let mut root = message(&thread, "root-plan", "");
     root.kind = ItemKind::Plan {
         steps: vec![PlanStep {
@@ -1020,7 +1094,17 @@ async fn inspector_controls_survive_history_paging_and_root_plan_owns_checklist(
             .any(|item| item.id.as_str() == "background-shell")
     );
     let summary = store.inspector(&thread).await.unwrap();
-    assert_eq!(summary.terminals[0].command, "long job".into());
+    // The panel splits what the turn waits on from what runs on without it.
+    let terminals: Vec<_> = summary
+        .terminals
+        .iter()
+        .map(|terminal| (terminal.command.clone(), terminal.background))
+        .collect();
+    assert_eq!(
+        terminals,
+        [("cargo test".into(), false), ("long job".into(), true)]
+    );
+    assert_eq!(summary.workflows[0].name.as_deref(), Some("review-changes"));
     assert_eq!(summary.plan.inline().unwrap()[0].text, "root task".into());
     assert_eq!(
         summary.edits.unwrap(),
@@ -1207,6 +1291,33 @@ async fn thread_controls_survive_window_eviction_and_goal_completion() {
     assert!(store.inspector(&thread).await.unwrap().goal.is_none());
 }
 
+/// The user clears the goal (a new notice), then the engine sets it again
+/// on its run's goal notice, which sits earlier: the goal is set.
+#[tokio::test]
+async fn a_goal_set_again_after_a_clear_shows_the_goal() {
+    let dir = TempDir::new();
+    let (store, thread) = test_store(&dir.0).await;
+    let goal = |id: &str, state: &str| {
+        let mut item = message(&thread, id, "");
+        item.kind = ItemKind::Notice {
+            kind: artisan_api::NoticeKind::Goal {
+                state: state.into(),
+            },
+            text: "ship the shooter".into(),
+        };
+        item
+    };
+    store
+        .upsert_item(goal("run-goal", "blocked"))
+        .await
+        .unwrap();
+    store.upsert_item(goal("cleared", "cleared")).await.unwrap();
+    assert!(store.inspector(&thread).await.unwrap().goal.is_none());
+    store.upsert_item(goal("run-goal", "active")).await.unwrap();
+    let shown = store.inspector(&thread).await.unwrap().goal.expect("goal");
+    assert_eq!(shown.state, artisan_api::ThreadGoalState::Active);
+}
+
 #[tokio::test]
 async fn edit_totals_replace_instead_of_double_counting_item_updates() {
     let dir = TempDir::new();
@@ -1258,6 +1369,8 @@ async fn canonical_agent_message_appears_in_both_pages_without_another_row() {
     let (store, thread) = test_store(&dir.0).await;
     let mut agent = message(&thread, "agent-owner", "");
     agent.kind = ItemKind::Agent {
+        engine: None,
+        thread: None,
         name: None,
         description: "task".into(),
         prompt: None,
@@ -1315,6 +1428,8 @@ async fn inline_metadata_pages_enforce_byte_budget_without_cursor_gaps() {
     for index in 0..200 {
         let mut item = message(&thread, &format!("metadata-{index}"), "");
         item.kind = ItemKind::Agent {
+            engine: None,
+            thread: None,
             name: Some(label.clone()),
             description: text.clone().into(),
             prompt: Some(text.clone().into()),
@@ -1404,4 +1519,241 @@ async fn inline_metadata_pages_enforce_byte_budget_without_cursor_gaps() {
             "both cursor directions must preserve every Item exactly once"
         );
     }
+}
+
+#[tokio::test]
+async fn a_settled_agent_leaves_the_inspector_at_once() {
+    let dir = TempDir::new();
+    let (store, thread) = test_store(&dir.0).await;
+    // The agents belong to the turn still in progress.
+    let turn = store
+        .upsert_run(run(&thread, RunStatus::Running))
+        .await
+        .unwrap();
+    let agent = |id: &str, status| {
+        let mut item = message(&thread, id, "");
+        item.run_id = Some(turn.id.clone());
+        item.status = status;
+        item.kind = ItemKind::Agent {
+            engine: None,
+            thread: None,
+            name: None,
+            description: format!("task {id}").into(),
+            prompt: None,
+            agent_id: None,
+            context_used: None,
+            model: None,
+            background: true,
+            result: None,
+            label: Some(id.into()),
+        };
+        item
+    };
+    for id in ["working", "finishing", "stopping"] {
+        store.upsert_item(agent(id, Status::Running)).await.unwrap();
+    }
+    let listed = |summary: artisan_api::InspectorSummary| -> Vec<String> {
+        summary
+            .agents
+            .into_iter()
+            .map(|agent| agent.label)
+            .collect()
+    };
+    assert_eq!(
+        listed(store.inspector(&thread).await.unwrap()),
+        ["stopping", "finishing", "working"]
+    );
+    // Done and cancelled agents go now, not when the next turn starts.
+    store
+        .upsert_item(agent("finishing", Status::Done))
+        .await
+        .unwrap();
+    store
+        .upsert_item(agent("stopping", Status::Cancelled))
+        .await
+        .unwrap();
+    assert_eq!(listed(store.inspector(&thread).await.unwrap()), ["working"]);
+}
+
+#[tokio::test]
+async fn an_engine_subagent_shows_the_threads_settings_with_its_own_model() {
+    let dir = TempDir::new();
+    let (store, thread) = test_store(&dir.0).await;
+    let mut item = message(&thread, "helper", "");
+    item.status = Status::Running;
+    item.kind = ItemKind::Agent {
+        engine: None,
+        thread: None,
+        name: None,
+        description: "Fix the laggy bottom bar".into(),
+        prompt: None,
+        agent_id: None,
+        context_used: None,
+        model: Some("claude-haiku-5-5".into()),
+        background: true,
+        result: None,
+        label: Some("Solveig".into()),
+    };
+    store.upsert_item(item).await.unwrap();
+    let summary = store.inspector(&thread).await.unwrap();
+    let config = summary.agents[0].config.clone().expect("agent settings");
+    assert_eq!(config.engine, EngineId::Claude);
+    assert_eq!(config.model.as_deref(), Some("claude-haiku-5-5"));
+    assert_eq!(config.permissions, artisan_api::Permissions::Auto);
+}
+
+#[tokio::test]
+async fn a_newer_thread_page_slides_back_up_from_its_cursor() {
+    let dir = TempDir::new();
+    let store = Store::open(&dir.0).unwrap();
+    for _ in 0..5 {
+        add_thread(&store).await;
+    }
+    let all = store
+        .threads_page(artisan_api::ThreadsQuery::default())
+        .await
+        .unwrap()
+        .threads;
+    assert_eq!(all.len(), 5);
+    let ids = |page: &artisan_api::ThreadsPage| -> Vec<ThreadId> {
+        page.threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect()
+    };
+    let after = |thread: &artisan_api::Thread, limit| artisan_api::ThreadsQuery {
+        after_activity: Some(thread.activity_seq),
+        after_id: Some(thread.id.clone()),
+        limit: Some(limit),
+        ..Default::default()
+    };
+    // The two just above the fourth newest, newest first; more above them.
+    let page = store.threads_page(after(&all[3], 2)).await.unwrap();
+    assert_eq!(ids(&page), [all[1].id.clone(), all[2].id.clone()]);
+    assert!(page.newer);
+    assert!(page.next.is_none());
+    // Up to the newest: nothing above it.
+    let page = store.threads_page(after(&all[1], 2)).await.unwrap();
+    assert_eq!(ids(&page), [all[0].id.clone()]);
+    assert!(!page.newer);
+}
+
+/// A run left live with an engine session, as a Forge that died mid-turn
+/// leaves it.
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
+async fn live_run_with_session(store: &Store, thread: &ThreadId) -> Run {
+    let mut live = run(thread, RunStatus::Running);
+    live.session_id = Some("session".into());
+    store.upsert_run(live).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_turn_a_restart_cut_short_carries_on_by_itself() {
+    let dir = TempDir::new();
+    let (thread, without_session, waiting) = {
+        let (store, thread) = test_store(&dir.0).await;
+        live_run_with_session(&store, &thread).await;
+        // The engine never named a session: nothing to resume.
+        let without_session = add_thread(&store).await;
+        store
+            .upsert_run(run(&without_session, RunStatus::Running))
+            .await
+            .unwrap();
+        // An undelivered message starts the next run anyway.
+        let waiting = add_thread(&store).await;
+        live_run_with_session(&store, &waiting).await;
+        let mut input = message(&waiting, "pending", "not delivered");
+        input.status = Status::Running;
+        store.insert_user_message(input).await.unwrap();
+        (thread, without_session, waiting)
+    };
+    let store = Store::open(&dir.0).unwrap();
+    assert!(store.continue_pending(&thread).await.unwrap());
+    assert!(!store.continue_pending(&without_session).await.unwrap());
+    assert!(!store.continue_pending(&waiting).await.unwrap());
+    let next = store.pending_threads(8, Vec::new()).await.unwrap();
+    assert!(next.contains(&thread));
+    assert!(next.contains(&waiting));
+    assert_eq!(
+        store.take_continue(thread.clone()).await.unwrap(),
+        Some(artisan_api::Continuation::Restart)
+    );
+    assert!(!store.continue_pending(&thread).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_turn_that_keeps_taking_forge_down_stops_carrying_on() {
+    let dir = TempDir::new();
+    let thread = {
+        let (store, thread) = test_store(&dir.0).await;
+        for _ in 0..forge_store::MAX_RESTART_CONTINUATIONS - 1 {
+            let mut continued = run(&thread, RunStatus::Interrupted);
+            continued.continuation = Some(artisan_api::Continuation::Restart);
+            store.upsert_run(continued).await.unwrap();
+        }
+        let mut live = live_run_with_session(&store, &thread).await;
+        live.continuation = Some(artisan_api::Continuation::Restart);
+        store.upsert_run(live).await.unwrap();
+        thread
+    };
+    let store = Store::open(&dir.0).unwrap();
+    assert!(!store.continue_pending(&thread).await.unwrap());
+}
+
+#[tokio::test]
+async fn turning_continue_after_restart_off_leaves_interrupted_turns_alone() {
+    let dir = TempDir::new();
+    let thread = {
+        let (store, thread) = test_store(&dir.0).await;
+        store
+            .set_setting(
+                forge_store::CONTINUE_AFTER_RESTART_KEY.into(),
+                serde_json::Value::Bool(false),
+            )
+            .await
+            .unwrap();
+        live_run_with_session(&store, &thread).await;
+        thread
+    };
+    let store = Store::open(&dir.0).unwrap();
+    assert_eq!(
+        store.latest_run(&thread).await.unwrap().unwrap().status,
+        RunStatus::Interrupted
+    );
+    assert!(!store.continue_pending(&thread).await.unwrap());
+}
+
+#[tokio::test]
+async fn an_agent_forge_started_keeps_working_through_a_restart() {
+    let dir = TempDir::new();
+    let (parent, child) = {
+        let (store, parent) = test_store(&dir.0).await;
+        let child = add_thread(&store).await;
+        let live = live_run_with_session(&store, &parent).await;
+        let mut agent = reply(&parent, "agent", Some(&live.id), "", Status::Running);
+        agent.kind = ItemKind::Agent {
+            name: None,
+            description: "Review the diff".into(),
+            prompt: None,
+            agent_id: None,
+            context_used: None,
+            model: None,
+            background: true,
+            result: None,
+            label: None,
+            engine: Some(EngineId::Codex),
+            thread: Some(child.clone()),
+        };
+        store.upsert_item(agent).await.unwrap();
+        live_run_with_session(&store, &child).await;
+        (parent, child)
+    };
+    let store = Store::open(&dir.0).unwrap();
+    let agent = store.item(&ItemId::from("agent")).await.unwrap().unwrap();
+    assert_eq!(agent.status, Status::Running);
+    assert!(store.continue_pending(&parent).await.unwrap());
+    assert!(store.continue_pending(&child).await.unwrap());
 }

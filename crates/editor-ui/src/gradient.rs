@@ -2,7 +2,7 @@
 
 use gpui::{Background, linear_color_stop, linear_gradient};
 
-use crate::theme::{ArtisanTheme, Oklch};
+use crate::theme::{ArtisanTheme, Oklch, Opacity};
 
 /// Top-to-bottom gradient angle.
 pub const VERTICAL_ANGLE_DEGREES: f32 = 180.0;
@@ -17,12 +17,25 @@ pub fn vertical_gradient(top: Oklch, bottom: Oklch) -> Background {
     )
 }
 
-/// Theme-resolved hover gradient. Elements take it through
+/// Theme-resolved hover gradient: the text colour, translucent because the
+/// pill sits over glass and varying surfaces. Elements take it through
 /// [`crate::hover_card::hover_fill`]; charts paint it directly.
 #[must_use]
-pub(crate) fn hover_fill_gradient(theme: ArtisanTheme) -> Background {
-    vertical_gradient(
-        theme.interaction.hover_fill_top,
-        theme.interaction.hover_fill_bottom,
-    )
+pub fn hover_fill_gradient(theme: &ArtisanTheme) -> Background {
+    let (top, bottom) = hover_fill_stops(theme, theme.colors.text);
+    vertical_gradient(top, bottom)
+}
+
+/// The hover gradient's top and bottom stops in `ink` (the text colour, or
+/// a tone of it in another hue).
+#[must_use]
+pub const fn hover_fill_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
+    let (strong, soft) = (ink.at(Opacity::HoverTop), ink.at(Opacity::HoverBottom));
+    // Light falls from above: in dark mode the light text tint is strongest
+    // at the top; in light mode the dark tint gathers at the bottom.
+    if theme.colors.mode.is_dark() {
+        (strong, soft)
+    } else {
+        (soft, strong)
+    }
 }

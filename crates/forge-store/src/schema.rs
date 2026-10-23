@@ -282,14 +282,125 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
          AND EXISTS(SELECT 1 FROM items c WHERE c.run_id=items.run_id AND c.kind_type='compaction'
            AND (json_extract(c.body,'$.kind.tokens_before') IS NOT NULL OR c.position<items.position));",
     )],
+    // Recall: every item's readable text under the item's rowid, ranked
+    // search over it, and tool output kept apart (see `recall`). The index is
+    // derived, so it is rebuilt whole from the items.
+    &[
+        Step::Sql(
+            r"DROP TRIGGER IF EXISTS item_text_owner_delete;
+       DROP TABLE IF EXISTS item_search;
+       DROP TABLE IF EXISTS item_text;
+       CREATE TABLE item_text(rowid INTEGER PRIMARY KEY, thread_id TEXT NOT NULL, item_id TEXT NOT NULL,
+         kind TEXT NOT NULL, created_at INTEGER NOT NULL, text TEXT NOT NULL, output TEXT NOT NULL, paths TEXT NOT NULL);
+       CREATE INDEX item_text_thread ON item_text(thread_id,rowid);
+       CREATE VIRTUAL TABLE item_search USING fts5(text,paths,content='item_text',content_rowid='rowid',tokenize='trigram');
+       CREATE TRIGGER item_text_owner_delete AFTER DELETE ON items BEGIN
+         INSERT INTO item_search(item_search,rowid,text,paths) SELECT 'delete',rowid,text,paths FROM item_text WHERE rowid=OLD.rowid;
+         DELETE FROM item_text WHERE rowid=OLD.rowid;
+       END;",
+        ),
+        Step::Rust(crate::recall::backfill),
+    ],
+    // Calls to Artisan's own tools leave recall: a search found its own query.
+    &[Step::Rust(crate::recall::forget_artisan_calls)],
+    // Threads whose stopped turn should carry on with no new message; the
+    // dispatcher starts them like threads with pending input.
+    &[Step::Sql(
+        "CREATE TABLE IF NOT EXISTS continues(thread_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, reason TEXT NOT NULL);",
+    )],
+    // Transcript pages count the rows a reader sees and summarise the work
+    // between them, so they need to know, by index, which items fold into
+    // work (`Item::folds_into_work`).
+    &[
+        Step::Sql("ALTER TABLE items ADD COLUMN work INTEGER NOT NULL DEFAULT 0;"),
+        Step::Rust(backfill_work),
+        Step::Sql(
+            "CREATE INDEX items_transcript_rows ON items(thread_id,position) WHERE parent_id IS NULL AND work=0;",
+        ),
+    ],
+    // A failed turn waits in `continues` until `due_at` (ms) when Forge
+    // picks it up again by itself (the provider was overloaded, or the
+    // usage limit resets); requests without one go at once.
+    &[Step::Sql(
+        "ALTER TABLE continues ADD COLUMN due_at INTEGER;",
+    )],
+    // Each model comes back with the config last chosen for it; the old
+    // Editor's entries still say access and approvals, which became one
+    // choice (see the default config's step above).
+    &[Step::Rust(migrate_model_permissions)],
 ];
+
+/// Gives every remembered model config the permissions its old access and
+/// approvals meant: what never asked stays Full, everything else is Auto.
+fn migrate_model_permissions(conn: &Connection) -> Result<()> {
+    use serde_json::Value;
+    let Some(text) = conn
+        .query_row(
+            "SELECT value FROM kv WHERE key=?1",
+            [artisan_api::MODEL_CONFIGS_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(());
+    };
+    let mut configs: Value = serde_json::from_str(&text).context("read the model configs")?;
+    let Some(configs_map) = configs.as_object_mut() else {
+        return Ok(());
+    };
+    for config in configs_map.values_mut() {
+        let Some(config) = config.as_object_mut() else {
+            continue;
+        };
+        if config.contains_key("permissions") {
+            continue;
+        }
+        let never_asks = config.get("approvals").and_then(Value::as_str) == Some("never")
+            || config
+                .get("options")
+                .and_then(|options| options.get("permission_mode"))
+                .and_then(Value::as_str)
+                == Some("bypassPermissions");
+        config.insert(
+            "permissions".into(),
+            Value::String(if never_asks { "full" } else { "auto" }.into()),
+        );
+        config.remove("access");
+        config.remove("approvals");
+        if let Some(options) = config.get_mut("options").and_then(Value::as_object_mut) {
+            options.remove("permission_mode");
+            options.remove("mode");
+        }
+    }
+    conn.execute(
+        "UPDATE kv SET value=?2 WHERE key=?1",
+        rusqlite::params![artisan_api::MODEL_CONFIGS_KEY, configs.to_string()],
+    )?;
+    Ok(())
+}
+
+/// Marks the root items that fold into work. An item whose body no longer
+/// parses ships as a row, where the fold still places it.
+fn backfill_work(conn: &Connection) -> Result<()> {
+    let mut select = conn.prepare("SELECT id,body FROM items WHERE parent_id IS NULL")?;
+    let mut rows = select.query([])?;
+    let mut update = conn.prepare("UPDATE items SET work=1 WHERE id=?1")?;
+    while let Some(row) = rows.next()? {
+        let body: String = row.get(1)?;
+        if serde_json::from_str::<artisan_api::Item>(&body).is_ok_and(|item| item.folds_into_work())
+        {
+            update.execute([row.get::<_, String>(0)?])?;
+        }
+    }
+    Ok(())
+}
 
 /// An approval stored as its own item (`{"type":"approval", target,
 /// approval}`, written by Codex and ACP runs before approvals moved onto the
 /// item they gate) as a standalone tool that carries it. Migration 17 first
 /// moves each one onto its target; this keeps the rest, and old databases
 /// whose earlier migrations read every item, loadable.
-pub(crate) fn legacy_approval(item: &mut serde_json::Value) {
+pub fn legacy_approval(item: &mut serde_json::Value) {
     let Some(kind) = item.get_mut("kind") else {
         return;
     };
@@ -414,7 +525,7 @@ CREATE TRIGGER source_index_delete AFTER DELETE ON content BEGIN
 END;
 ";
 
-pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
+pub fn migrate(conn: &mut Connection) -> Result<()> {
     migrate_to(conn, MIGRATIONS.len())
 }
 
@@ -430,6 +541,7 @@ fn migrate_to(conn: &mut Connection, target: usize) -> Result<()> {
     }
     for (index, steps) in MIGRATIONS.iter().enumerate().take(target).skip(version) {
         let next = index + 1;
+        tracing::info!("upgrading the database to schema {next} of {target}");
         let tx = conn.transaction()?;
         for step in *steps {
             match step {
@@ -572,11 +684,10 @@ fn canonical_question(body: &mut serde_json::Value) -> Result<()> {
                         .map(|option| option["id"].clone())
                 })
                 .collect();
-            *answer = if let Some(ids) = ids {
-                json!({"kind":"choices","ids":ids})
-            } else {
-                json!({"kind":"text","text":labels.join(", ")})
-            };
+            *answer = ids.map_or_else(
+                || json!({"kind":"text","text":labels.join(", ")}),
+                |ids| json!({"kind":"choices","ids":ids}),
+            );
         }
     }
     Ok(())
@@ -679,9 +790,10 @@ mod canonical_migration_tests {
             .unwrap();
         assert_eq!(settings[0].1, 18);
         assert_eq!(settings[1].1, 19);
-        let default: artisan_api::EngineConfig = serde_json::from_str(&settings[0].2).unwrap();
-        assert_eq!(default.speed.as_deref(), Some("fast"));
-        assert!(!default.options.contains_key("fast"));
+        // Cursor is retired; its old config is still translated, as JSON.
+        let default: Value = serde_json::from_str(&settings[0].2).unwrap();
+        assert_eq!(default["speed"], "fast");
+        assert!(default["options"].get("fast").is_none());
         let models: Value = serde_json::from_str(&settings[1].2).unwrap();
         assert_eq!(models["selected"]["variant"], "custom");
         assert!(models["selected"].get("effort").is_none());
@@ -716,6 +828,46 @@ mod canonical_migration_tests {
                 .unwrap(),
             17
         );
+    }
+
+    /// The old Editor's per-model choices keep their access: what never
+    /// asked comes back as Full access, the rest as Auto.
+    #[test]
+    fn remembered_model_configs_keep_full_access() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to(&mut conn, MIGRATIONS.len() - 1).unwrap();
+        let configs = json!({
+            "claude-opus-5-5": {"engine":"claude","model":"claude-opus-5-5","effort":"medium",
+                "access":"full","approvals":"never","options":{"permission_mode":"bypassPermissions"}},
+            "claude-sonnet-5-5": {"engine":"claude","model":"claude-sonnet-5-5","effort":"medium",
+                "access":"full","approvals":"on_request","options":{"permission_mode":"auto"}},
+        });
+        conn.execute(
+            "INSERT INTO kv VALUES ('model_engine_configs',7,?1)",
+            [configs.to_string()],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM kv WHERE key='model_engine_configs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&value).unwrap();
+        let config = |model: &str| {
+            artisan_api::saved_model_config(&value, artisan_api::EngineId::Claude, model).unwrap()
+        };
+        assert_eq!(
+            config("claude-opus-5-5").permissions,
+            artisan_api::Permissions::Full
+        );
+        assert_eq!(
+            config("claude-sonnet-5-5").permissions,
+            artisan_api::Permissions::Auto
+        );
+        assert!(config("claude-opus-5-5").options.is_empty());
     }
 }
 
@@ -826,6 +978,8 @@ mod item_column_migration_tests {
                     text: "pending".into(),
                     images: Vec::new(),
                     steer: false,
+                    from_agent: None,
+                    sender: None,
                 },
             ),
             item(

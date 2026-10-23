@@ -1,0 +1,26 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"text-without-body\")"
+---
+[
+    Event(
+        Item {
+            key: "error:evt_006",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Api,
+                message: Inline(
+                    "OpenCode completed a text without its required final body",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+    RunError(
+        "OpenCode completed a text without its required final body",
+    ),
+]

@@ -129,12 +129,12 @@ impl Distribution {
     }
 
     /// The extent of every value.
-    pub(super) fn domain(&self) -> Domain {
+    pub(super) const fn domain(&self) -> Domain {
         self.domain
     }
 
     /// The threshold slider's range, step, and starting value.
-    pub(super) fn slider(&self) -> (Domain, f64, f64) {
+    pub(super) const fn slider(&self) -> (Domain, f64, f64) {
         self.slider
     }
 }
@@ -151,10 +151,10 @@ impl Bins {
     /// when the spread is zero), capped.
     pub(super) fn new(pooled: &[f64], requested: Option<usize>) -> Self {
         let domain = Domain::of(pooled.iter().copied()).unwrap_or_else(|| Domain::new(0.0, 1.0));
-        let count = match requested {
-            Some(count) => count.clamp(1, MAX_BINS),
-            None => auto_bins(pooled, domain).clamp(1, MAX_AUTO_BINS),
-        };
+        let count = requested.map_or_else(
+            || auto_bins(pooled, domain).clamp(1, MAX_AUTO_BINS),
+            |count| count.clamp(1, MAX_BINS),
+        );
         Self { domain, count }
     }
 
@@ -169,7 +169,7 @@ impl Bins {
 
     /// Bin `index`'s edges.
     pub(super) fn edges(self, index: usize) -> (f64, f64) {
-        let lo = self.domain.lo + f64_of(index) * self.width();
+        let lo = f64_of(index).mul_add(self.width(), self.domain.lo);
         (lo, lo + self.width())
     }
 
@@ -273,7 +273,7 @@ impl RichBlock for Block {
     fn resident_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + std::mem::size_of::<Distribution>()
-            + budget::optional(&self.0.unit)
+            + budget::optional(self.0.unit.as_ref())
             + budget::vector(&self.0.samples)
             + self
                 .0

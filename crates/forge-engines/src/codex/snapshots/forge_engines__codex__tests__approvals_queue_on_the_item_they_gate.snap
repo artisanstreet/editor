@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 178
 expression: "replay(\"approval-queue\")"
 ---
 [
@@ -32,6 +31,7 @@ expression: "replay(\"approval-queue\")"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -52,6 +52,7 @@ expression: "replay(\"approval-queue\")"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -89,6 +90,7 @@ expression: "replay(\"approval-queue\")"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -134,6 +136,7 @@ expression: "replay(\"approval-queue\")"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -214,6 +217,7 @@ expression: "replay(\"approval-queue\")"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -250,6 +254,7 @@ expression: "replay(\"approval-queue\")"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -474,6 +479,7 @@ expression: "replay(\"approval-queue\")"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
     Event(

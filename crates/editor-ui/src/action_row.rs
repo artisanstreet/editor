@@ -54,12 +54,12 @@ impl ActionRow {
         self
     }
     #[must_use]
-    pub fn selected(mut self, selected: bool) -> Self {
+    pub const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
     }
     #[must_use]
-    pub fn disabled(mut self, disabled: bool) -> Self {
+    pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
@@ -90,10 +90,10 @@ impl RenderOnce for ActionRow {
             .rounded(RadiusTokens::value(RadiusStep::Md))
             .border_1()
             .border_color(gpui::transparent_black())
-            .text_color(theme.colors.foreground.to_paint())
+            .text_color(theme.colors.text.to_paint())
             .text_size(theme.typography.control_text)
             .line_height(theme.typography.control_text * 1.25)
-            .when(self.selected, |el| el.bg(theme.colors.muted.to_paint()))
+            .when(self.selected, |el| el.bg(theme.colors.selected.to_paint()))
             .child(
                 div()
                     .flex_1()
@@ -105,7 +105,7 @@ impl RenderOnce for ActionRow {
                         div()
                             .truncate()
                             .text_xs()
-                            .text_color(theme.colors.muted_foreground.to_paint())
+                            .text_color(theme.colors.text_muted.to_paint())
                             .child(text)
                     })),
             )
@@ -114,14 +114,16 @@ impl RenderOnce for ActionRow {
                     .map(|child| div().flex_shrink_0().child(child)),
             );
         if self.disabled {
-            return root.aria_description("Unavailable").opacity(0.5);
+            return root
+                .aria_description("Unavailable")
+                .opacity(crate::theme::Opacity::Disabled.alpha());
         }
         root = root
             .focusable()
             .tab_index(0)
             .cursor_pointer()
             .focus_visible(move |style| style.border_color(theme.colors.ring.to_paint()))
-            .hover(move |style| style.bg(theme.colors.muted.with_alpha(0.5).to_paint()));
+            .hover(move |style| style.bg(theme.colors.raised.to_paint()));
         if let Some(activate) = self.activate {
             root = root.on_click(activate);
         }

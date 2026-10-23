@@ -14,6 +14,10 @@ struct Record {
     indices: Option<Vec<u32>>,
 }
 impl Record {
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "x, y, z and r, g, b name the channels they hold"
+    )]
     fn corner(&self) -> Result<Corner, String> {
         let [Some(x), Some(y), Some(z)] = self.position else {
             return Err("a PLY vertex needs x, y, and z coordinates".into());

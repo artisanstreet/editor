@@ -1,0 +1,51 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Item {
+            key: "goal",
+            parent: None,
+            status: Done,
+            kind: Notice {
+                kind: Goal {
+                    state: "active",
+                },
+                text: Inline(
+                    "Ship the main menu at visual parity.",
+                ),
+            },
+        },
+        Item {
+            key: "msg-1:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg-1:0",
+            },
+            text: "Starting on the main menu.",
+            append: false,
+        },
+        Item {
+            key: "msg-1:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "Starting on the main menu.",
+                ),
+                phase: Commentary,
+            },
+        },
+    ],
+    None,
+)

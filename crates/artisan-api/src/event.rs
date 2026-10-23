@@ -55,6 +55,12 @@ pub enum Event {
         append: bool,
         coverage: LiveCoverage,
     },
+    /// Live: the engine's guess at the user's next message, offered in the
+    /// composer once a run ended; `None` withdraws it.
+    Suggestion {
+        thread_id: ThreadId,
+        text: Option<String>,
+    },
     /// Live: an engine's install, sign-in, models or usage changed.
     Engine {
         status: EngineStatus,
@@ -63,6 +69,12 @@ pub enum Event {
     EngineInstall {
         engine: crate::EngineId,
         install: crate::InstallState,
+    },
+    /// Live: Forge asks an Editor to act for an agent (hosts, device
+    /// settings, navigation); it answers at `POST /editor/calls/{id}`.
+    EditorCall {
+        id: String,
+        call: crate::EditorCall,
     },
     /// The client fell too far behind; refetch `GET /state`.
     Reset,
@@ -77,7 +89,7 @@ pub struct LiveCoverage {
 
 impl LiveCoverage {
     #[must_use]
-    pub fn is_complete(self, retained_bytes: usize) -> bool {
+    pub const fn is_complete(self, retained_bytes: usize) -> bool {
         self.start == 0 && self.total == retained_bytes as u64
     }
 }
@@ -99,13 +111,21 @@ pub enum LiveTarget {
 
 impl Event {
     #[must_use]
-    pub fn thread_id(&self) -> Option<&ThreadId> {
+    pub const fn thread_id(&self) -> Option<&ThreadId> {
         match self {
             Self::Thread { thread } => Some(&thread.id),
             Self::Item { item } => Some(&item.thread_id),
             Self::Run { run } => Some(&run.thread_id),
-            Self::Live { thread_id, .. } | Self::ItemState { thread_id, .. } => Some(thread_id),
-            _ => None,
+            Self::Live { thread_id, .. }
+            | Self::ItemState { thread_id, .. }
+            | Self::Suggestion { thread_id, .. } => Some(thread_id),
+            Self::Hello { .. }
+            | Self::Project { .. }
+            | Self::Setting { .. }
+            | Self::Engine { .. }
+            | Self::EngineInstall { .. }
+            | Self::EditorCall { .. }
+            | Self::Reset => None,
         }
     }
 }

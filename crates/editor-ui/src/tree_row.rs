@@ -43,7 +43,7 @@ impl TreeFocus {
             focus: self.clone(),
         }
     }
-    fn handle(&self, id: SharedString, cx: &mut App) -> FocusHandle {
+    fn handle(&self, id: SharedString, cx: &App) -> FocusHandle {
         self.0
             .borrow_mut()
             .entry(id)
@@ -101,7 +101,7 @@ pub struct TreeRow {
     debug_selector: Option<SharedString>,
 }
 impl TreeRow {
-    pub fn row_height() -> gpui::Pixels {
+    pub const fn row_height() -> gpui::Pixels {
         px(26.0)
     }
     pub fn branch(
@@ -162,7 +162,7 @@ impl TreeRow {
         self
     }
     #[must_use]
-    pub fn deleted(mut self, deleted: bool) -> Self {
+    pub const fn deleted(mut self, deleted: bool) -> Self {
         self.deleted = deleted;
         self
     }
@@ -191,6 +191,10 @@ impl TreeRow {
     }
 }
 impl RenderOnce for TreeRow {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let handle = self.node.focus.handle(self.node.id.clone(), cx);
@@ -203,7 +207,7 @@ impl RenderOnce for TreeRow {
                     AssetId::TABLER_FOLDER
                 })
                 .size(px(14.0))
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .into_any_element(),
                 None,
                 expand,
@@ -212,7 +216,7 @@ impl RenderOnce for TreeRow {
                 None,
                 asset_glyph(AssetId::TABLER_FILE_TEXT)
                     .size(px(14.0))
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .into_any_element(),
                 activate,
                 None,
@@ -227,7 +231,7 @@ impl RenderOnce for TreeRow {
             clippy::cast_precision_loss,
             reason = "indent is bounded to the supported tree depth"
         )]
-        let indent = px(4.0 + self.depth.min(32) as f32 * 16.0);
+        let indent = px((self.depth.min(32) as f32).mul_add(16.0, 4.0));
         let mut root = div()
             .id(self.node.id)
             .w_full()
@@ -272,7 +276,7 @@ impl RenderOnce for TreeRow {
                         AssetId::TABLER_CHEVRON_RIGHT
                     })
                     .size(px(12.0))
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                 })),
         )
         .child(
@@ -290,9 +294,9 @@ impl RenderOnce for TreeRow {
                 .truncate()
                 .text_size(TypographyTokens::size(TextStep::XsMid))
                 .text_color(if deleted {
-                    theme.colors.muted_foreground.to_paint()
+                    theme.colors.text_muted.to_paint()
                 } else {
-                    theme.colors.foreground.to_paint()
+                    theme.colors.text.to_paint()
                 })
                 .when(expanded.is_none(), |label| {
                     label
@@ -312,7 +316,7 @@ impl RenderOnce for TreeRow {
                 .min_w_0()
                 .truncate()
                 .text_size(TypographyTokens::size(TextStep::Xs))
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .child(description)
         }))
         .on_click(move |_, window, cx| {

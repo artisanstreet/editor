@@ -44,7 +44,7 @@ impl std::fmt::Debug for MediaFetcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MediaFetcher")
             .field("scope", &self.scope)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 impl PartialEq for MediaFetcher {
@@ -111,6 +111,7 @@ impl MediaFetcher {
         self.resources.clear(cx);
     }
 
+    #[must_use]
     pub fn reference_scope(mut self, scope: super::super::actions::ResourceScope) -> Self {
         self.reference_scope = Some(scope);
         self
@@ -123,7 +124,7 @@ impl MediaFetcher {
 
     /// The scope files are fetched for.
     #[must_use]
-    pub fn scope(&self) -> &SharedString {
+    pub const fn scope(&self) -> &SharedString {
         &self.scope
     }
 
@@ -145,7 +146,7 @@ impl std::fmt::Debug for MediaProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MediaProvider")
             .field("scope", &self.scope)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 impl PartialEq for MediaProvider {
@@ -170,7 +171,7 @@ impl MediaFetcher {
         MediaProvider {
             scope: self.scope.clone(),
             owner: self.resources.id(),
-            fetch: self.fetch.clone(),
+            fetch: Arc::clone(&self.fetch),
         }
     }
 }
@@ -317,15 +318,10 @@ fn home_relative(path: &str) -> Parsed {
     } else {
         path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
     };
-    match rest {
-        Some(rest) => Parsed::File {
-            path: rest.to_owned(),
-            from_home: true,
-        },
-        None => Parsed::File {
-            path: path.to_owned(),
-            from_home: false,
-        },
+    let (path, from_home) = rest.map_or((path, false), |rest| (rest, true));
+    Parsed::File {
+        path: path.to_owned(),
+        from_home,
     }
 }
 
@@ -340,10 +336,10 @@ thread_local! { static DATA_DECODES: std::cell::Cell<usize> = const { std::cell:
 
 /// Maintained WHATWG data URL decoding, bounded before each output append.
 fn data_url(source: &str) -> Option<Vec<u8>> {
-    #[cfg(test)]
-    DATA_DECODES.with(|count| count.set(count.get() + 1));
     const MAX_ENCODED: usize = 44 * 1024 * 1024;
     const MAX_DECODED: usize = 32 * 1024 * 1024;
+    #[cfg(test)]
+    DATA_DECODES.with(|count| count.set(count.get() + 1));
     if source.len() > MAX_ENCODED {
         return None;
     }
@@ -390,7 +386,7 @@ pub(super) fn locate(src: &MediaSource, fetcher: Option<&MediaFetcher>, _cx: &Ap
     match parsed {
         Parsed::Url(url) => Located::Url(url),
         Parsed::Data(bytes) => Located::Data(bytes),
-        _ => Located::Invalid,
+        Parsed::File { .. } | Parsed::Invalid => Located::Invalid,
     }
 }
 
@@ -451,6 +447,10 @@ mod prepared_source_tests {
     use super::*;
 
     #[gpui::test]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "gpui::test hands every test its context as &mut"
+    )]
     fn repaint_lookup_never_decodes_or_rehashes_prepared_data(cx: &mut gpui::TestAppContext) {
         DATA_DECODES.with(|count| count.set(0));
         let source = MediaSource::from("data:application/octet-stream;base64,aGVsbG8=".to_owned());
@@ -477,6 +477,10 @@ mod prepared_source_tests {
     }
 
     #[gpui::test]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "gpui::test hands every test its context as &mut"
+    )]
     fn unscoped_files_never_resolve_against_client_working_directory(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -510,7 +514,7 @@ mod sharing_tests {
         let first = provider.clone().owned_by(&[42], 1);
         let repeated = provider.clone().owned_by(&[42], 1);
         let changed = provider.clone().owned_by(&[42], 2);
-        let other_item = provider.clone().owned_by(&[43], 1);
+        let other_item = provider.owned_by(&[43], 1);
         let other_scope = MediaFetcher::new("other-forge/thread", |_| Box::pin(async { None }))
             .owned_by(&[42], 1);
         let left: SharedString = "left-block".into();

@@ -6,7 +6,7 @@ const MAX_RAW_BYTES: usize = 16 * 1024;
 const MAX_LABEL_CHARS: usize = 200;
 
 #[derive(Default)]
-pub(crate) struct Summary {
+pub struct Summary {
     raw: String,
     shown: String,
 }
@@ -77,6 +77,10 @@ impl Summary {
     }
 }
 
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "only text and breaks make plain text; every other markdown event is dropped"
+)]
 fn plain(markdown: &str) -> String {
     let mut text = String::new();
     let mut end = markdown.len().min(2048);
@@ -182,7 +186,7 @@ mod tests {
         summary.normalize(
             vec![EngineEvent::Live {
                 target: LiveKind::Reasoning,
-                text: "x".repeat(100000),
+                text: "x".repeat(100_000),
                 append: true,
             }],
             false,

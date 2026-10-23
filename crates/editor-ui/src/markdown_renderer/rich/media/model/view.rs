@@ -76,7 +76,7 @@ pub(super) enum Shading {
 impl Shading {
     const ALL: [Self; 2] = [Self::Shaded, Self::Wireframe];
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Shaded => "Shaded",
             Self::Wireframe => "Wireframe",
@@ -135,7 +135,7 @@ struct ViewerState {
 }
 
 impl ViewerState {
-    fn new(camera: Camera, shading: Shading, cx: &mut Context<Self>) -> Self {
+    fn new(camera: Camera, shading: Shading, cx: &Context<Self>) -> Self {
         // The frame's pixels live in each window's sprite atlas until dropped.
         cx.on_release(|state, cx| {
             if let Some((image, _)) = state.shown.take() {
@@ -157,7 +157,7 @@ impl ViewerState {
     }
 
     /// Starts rendering `key` unless it is on screen or a render is running.
-    fn request(&mut self, key: FrameKey, model: &Arc<Model>, cx: &mut Context<Self>) {
+    fn request(&mut self, key: FrameKey, model: &Arc<Model>, cx: &Context<Self>) {
         let current = self.shown.as_ref().is_some_and(|(_, shown)| *shown == key);
         if current || self.rendering.is_some() {
             return;
@@ -180,7 +180,8 @@ impl ViewerState {
                         .map(|buffer| Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
                 })
                 .await;
-            let _ = this.update(cx, |state, cx| {
+            // A released view has nothing left to update.
+            this.update(cx, |state, cx| {
                 state.rendering = None;
                 if let Some(image) = image
                     && let Some((old, _)) = state.shown.replace((image, key))
@@ -188,7 +189,8 @@ impl ViewerState {
                     cx.drop_image(old, None);
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         }));
     }
 
@@ -208,8 +210,8 @@ impl ViewerState {
             let per_pixel = self.camera.distance / focal;
             let (x, y) = self.camera.pan;
             self.camera.pan = (
-                (x - dx * per_pixel).clamp(-MAX_PAN, MAX_PAN),
-                (y + dy * per_pixel).clamp(-MAX_PAN, MAX_PAN),
+                dx.mul_add(-per_pixel, x).clamp(-MAX_PAN, MAX_PAN),
+                dy.mul_add(per_pixel, y).clamp(-MAX_PAN, MAX_PAN),
             );
         } else {
             self.orbit(dx * ORBIT_PER_PIXEL, dy * ORBIT_PER_PIXEL);
@@ -227,7 +229,7 @@ impl ViewerState {
             (self.camera.distance * factor).clamp(Camera::NEAREST, Camera::FARTHEST);
     }
 
-    fn reset(&mut self) {
+    const fn reset(&mut self) {
         self.camera = self.initial;
         self.drag = None;
     }

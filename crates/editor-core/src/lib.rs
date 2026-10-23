@@ -5,11 +5,13 @@
 //! stream. Sections read from these and call Forge through
 //! [`ForgeClient`]; nothing else is shared between sections.
 
+mod agent_calls;
 mod client;
 mod connection;
 mod host;
 pub mod hosts;
 pub mod media_http;
+mod mcp_sign_in;
 mod pairing_targets;
 mod range_window;
 mod resident;
@@ -19,17 +21,18 @@ pub use pairing_targets::PairingTargets;
 pub use resident::{CollectionBytes, ResidentBytes};
 
 pub use client::ForgeClient;
+pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
 pub use connection::ConnectionStatus;
 pub use host::{
-    BlobImage, HostData, HostEvent, ImageDecoder, LiveSnapshot, ProjectionLoad, ThreadPage,
-    ThreadPageDirection, ThreadSummary,
+    Attention, BlobImage, HostData, HostEvent, ImageDecoder, LiveSnapshot, ProjectionLoad,
+    ThreadPage, ThreadPageDirection, ThreadSummary,
 };
 pub use hosts::{EditorFiles, EditorSettings, HostConfig, HostId, HostKind, LocalTarget};
 pub use range_window::{
     CollectionWindow, ContentWindow, RangePage, RangeState, RangeWindow, RangeWindowEvent,
 };
 pub use ropey::Rope;
-pub use screen::{Screen, SettingsPage};
+pub use screen::{DraggedThread, Screen, SettingsPage};
 
 use anyhow::{Context as _, Result};
 use artisan_api::tls::Identity;
@@ -48,6 +51,8 @@ pub struct Core {
     back: Vec<Screen>,
     /// The device name sent when pairing.
     pub device_name: String,
+    /// MCP sign-ins this Editor catches the redirect for.
+    mcp_sign_ins: mcp_sign_in::McpSignIns,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +60,8 @@ pub enum CoreEvent {
     ScreenChanged,
     HostsChanged,
     SettingsChanged,
+    /// An MCP sign-in started, moved on, failed or finished.
+    McpSignInChanged,
 }
 
 impl EventEmitter<CoreEvent> for Core {}
@@ -78,6 +85,7 @@ impl Core {
             screen: Screen::Home,
             back: Vec::new(),
             device_name: device_name(),
+            mcp_sign_ins: mcp_sign_in::McpSignIns::default(),
         };
         for config in core.hosts_file.hosts.clone() {
             let client = ForgeClient::new(&config.address, &config.fingerprint, &identity);
@@ -92,6 +100,9 @@ impl Core {
         {
             cx.set_reduce_motion(reduced);
         }
+        editor_ui::theme::set_mode(theme_mode(&core.settings), cx);
+        editor_ui::theme::set_fonts(font_set(&core.settings), cx);
+        set_outline_text(outline_text(&core.settings), cx);
         Ok(core)
     }
 
@@ -102,9 +113,47 @@ impl Core {
         cx: &mut Context<Self>,
     ) -> Entity<HostData> {
         let (id, name) = (config.id.clone(), config.name.clone());
-        let host = cx.new(|cx| HostData::new(id, name, client, cx));
+        let host = cx.new(|cx| {
+            let mut host = HostData::new(id, name, client, cx);
+            host.set_pairing(&config.kind, &config.address);
+            host
+        });
+        cx.subscribe(&host, |core, host, event, cx| match event {
+            HostEvent::WslDistro { distro } => {
+                let id = host.read(cx).id.clone();
+                core.remember_wsl_distro(&id, distro);
+            }
+            HostEvent::EditorCall { id, call } => {
+                core.editor_call(&host, id.clone(), call.clone(), cx);
+            }
+            HostEvent::Reset
+            | HostEvent::ImagesChanged
+            | HostEvent::EngineInstall { .. }
+            | HostEvent::ThreadSummaryChanged { .. }
+            | HostEvent::Changed
+            | HostEvent::ThreadChanged { .. }
+            | HostEvent::Item(_)
+            | HostEvent::Live { .. } => {}
+        })
+        .detach();
         self.hosts.insert(config.id.clone(), host.clone());
         host
+    }
+
+    /// Saves that a host's Forge runs in WSL `distro`, so the Editor can
+    /// start it there when it is unreachable.
+    fn remember_wsl_distro(&mut self, id: &HostId, distro: &str) {
+        let mut file = self.hosts_file.clone();
+        let Some(config) = file.hosts.iter_mut().find(|config| &config.id == id) else {
+            return;
+        };
+        config.kind = HostKind::Wsl {
+            distro: distro.to_owned(),
+        };
+        match self.files.save_hosts(&file) {
+            Ok(()) => self.hosts_file = file,
+            Err(error) => tracing::warn!("couldn't save the host's WSL distribution: {error:#}"),
+        }
     }
 
     pub fn hosts(&self) -> impl Iterator<Item = (&HostConfig, &Entity<HostData>)> {
@@ -135,6 +184,10 @@ impl Core {
     }
 
     /// Saves a newly paired host and connects to it.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers hand over a freshly paired host; the saved copy is cloned from it"
+    )]
     pub fn add_host(&mut self, config: HostConfig, cx: &mut Context<Self>) -> Result<()> {
         let identity = self.identity.as_ref().context(
             "this device's identity could not be loaded; repair its configuration before pairing",
@@ -170,11 +223,23 @@ impl Core {
     }
 
     #[must_use]
-    pub fn screen(&self) -> &Screen {
+    pub const fn screen(&self) -> &Screen {
         &self.screen
     }
 
+    /// Home is only the pairing entry: with a host it is a new thread there.
+    fn landing(&self, screen: Screen, cx: &App) -> Screen {
+        match (screen, self.active_host()) {
+            (Screen::Home, Some(host)) => Screen::NewThread {
+                host: host.read(cx).id.clone(),
+                project: None,
+            },
+            (screen, _) => screen,
+        }
+    }
+
     pub fn navigate(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        let screen = self.landing(screen, cx);
         if let Screen::Thread { host, thread } = &screen
             && let Some(host) = self.host(host).cloned()
         {
@@ -202,8 +267,30 @@ impl Core {
         cx.notify();
     }
 
+    /// Returns to the screen Settings was opened from, past the settings
+    /// pages visited since; else to a new thread on the active host.
+    pub fn close_settings(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.screen, Screen::Settings(_)) {
+            return;
+        }
+        if let Some(index) = self
+            .back
+            .iter()
+            .rposition(|screen| !matches!(screen, Screen::Settings(_)))
+        {
+            self.back.truncate(index + 1);
+            self.go_back(cx);
+            return;
+        }
+        self.back.clear();
+        self.screen = self.landing(Screen::Home, cx);
+        cx.emit(CoreEvent::ScreenChanged);
+        cx.notify();
+    }
+
     pub fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(screen) = self.back.pop() {
+            let screen = self.landing(screen, cx);
             if let Screen::Thread { host, thread } = &screen
                 && let Some(host) = self.host(host).cloned()
             {
@@ -242,8 +329,81 @@ impl Core {
                     .unwrap_or(false),
             );
         }
+        if key == "dark_mode" {
+            editor_ui::theme::set_mode(theme_mode(&self.settings), cx);
+        }
+        if key == FONT_SET_KEY {
+            editor_ui::theme::set_fonts(font_set(&self.settings), cx);
+        }
+        if key == OUTLINE_TEXT_KEY {
+            set_outline_text(outline_text(&self.settings), cx);
+        }
         cx.emit(CoreEvent::SettingsChanged);
         cx.notify();
+    }
+
+    /// The theme mode this device's settings choose.
+    #[must_use]
+    pub fn theme_mode(&self) -> editor_ui::theme::ThemeMode {
+        theme_mode(&self.settings)
+    }
+
+    /// The font set this device's settings choose.
+    #[must_use]
+    pub fn font_set(&self) -> editor_ui::theme::FontSet {
+        font_set(&self.settings)
+    }
+
+    /// Whether this device draws text from its exact outline.
+    #[must_use]
+    pub fn outline_text(&self) -> bool {
+        outline_text(&self.settings)
+    }
+}
+
+/// `"spline"` or `"system"`: the families text is drawn in.
+pub const FONT_SET_KEY: &str = "font_set";
+/// Draw text from unhinted outlines in grayscale (`TextRenderingMode::Outline`).
+pub const OUTLINE_TEXT_KEY: &str = "outline_text";
+
+fn font_set(settings: &EditorSettings) -> editor_ui::theme::FontSet {
+    editor_ui::theme::FontSet::from_key(
+        settings
+            .get(FONT_SET_KEY)
+            .and_then(serde_json::Value::as_str),
+    )
+}
+
+fn outline_text(settings: &EditorSettings) -> bool {
+    settings
+        .get(OUTLINE_TEXT_KEY)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Glyphs already in the atlas are keyed by mode, so the refresh rasterizes
+/// every visible glyph again in the new one.
+fn set_outline_text(on: bool, cx: &mut App) {
+    let mode = if on {
+        gpui::TextRenderingMode::Outline
+    } else {
+        gpui::TextRenderingMode::PlatformDefault
+    };
+    if cx.text_rendering_mode() != mode {
+        cx.set_text_rendering_mode(mode);
+        cx.refresh_windows();
+    }
+}
+
+fn theme_mode(settings: &EditorSettings) -> editor_ui::theme::ThemeMode {
+    let dark = settings
+        .get("dark_mode")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    if dark {
+        editor_ui::theme::ThemeMode::Dark
+    } else {
+        editor_ui::theme::ThemeMode::Light
     }
 }
 
@@ -266,6 +426,7 @@ pub fn init(cx: &mut App) -> (Entity<Core>, Option<anyhow::Error>) {
                 screen: Screen::Home,
                 back: Vec::new(),
                 device_name: device_name(),
+                mcp_sign_ins: mcp_sign_in::McpSignIns::default(),
             }
         }
     });

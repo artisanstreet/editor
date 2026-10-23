@@ -16,9 +16,13 @@ windows-wgpu = ["gpui_platform/wgpu"]
 # `ARTISAN_EDITOR_CAPTURE=<png>` saves the window after a few seconds and
 # quits; for checking a build by eye without a screen.
 capture = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+# Records every heap allocation with its call stack and writes
+# logs/dhat-heap.json when the Editor quits; see src/heap_profile.rs.
+dhat-heap = ["dep:dhat"]
 
 [dependencies]
 image = { workspace = true, features = ["png"], optional = true }
+dhat = { workspace = true, optional = true }
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
 editor-ui = { path = "../editor-ui" }
@@ -33,7 +37,6 @@ editor-sidebar = { path = "../editor-sidebar" }
 gpui.workspace = true
 futures.workspace = true
 gpui_platform.workspace = true
-mimalloc.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 file-rotate = "0.8.0"

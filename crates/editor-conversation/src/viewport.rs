@@ -10,24 +10,27 @@ use artisan_api::Seq;
 
 /// What to fetch with `GET /threads/{id}/items`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Fetch {
+pub enum Fetch {
     /// The newest page.
     Tail,
     /// The page before `before` (a position).
     Older { before: Seq },
     /// The page after `after`, to close a gap below the window.
     Newer { after: Seq },
+    /// The page starting at `position`: a jump far from the window loads
+    /// there at once and replaces it.
+    At { position: Seq },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Jump {
+pub enum Jump {
     Latest,
     /// An item's position.
     To(Seq),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Effect {
+pub enum Effect {
     Fetch(Fetch),
     ScrollToEnd,
     /// Scroll so the item at this position is at the top.
@@ -35,7 +38,7 @@ pub(crate) enum Effect {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Input {
+pub enum Input {
     /// The thread was opened, or Forge reset the stream: load the tail.
     Open,
     /// The reader reached the top edge of the loaded window.
@@ -43,9 +46,10 @@ pub(crate) enum Input {
     /// The reader is at the bottom edge.
     BottomReached,
     /// The reader scrolled away from the tail; `anchor` is the position at
-    /// the top of the view.
+    /// the top of the view, `through` the newest position the view shows.
     ScrolledAway {
         anchor: Seq,
+        through: Seq,
     },
     Jump(Jump),
     /// A page arrived. `first`/`last` are its positions (none when empty).
@@ -74,7 +78,7 @@ pub(crate) enum Input {
 
 /// Lifecycle data only: the edges of the loaded window.
 #[derive(Debug, Default)]
-pub(crate) struct Viewport {
+pub struct Viewport {
     state: State,
     /// Position of the oldest loaded item.
     pub oldest: Option<Seq>,
@@ -82,14 +86,23 @@ pub(crate) struct Viewport {
     pub exhausted: bool,
     /// A page request is out.
     pub in_flight: bool,
+    /// The page asked for last; a page arriving for any other request is
+    /// stale and dropped.
+    pub requested: Option<Fetch>,
     /// The window stops at this position; newer items exist but are not
     /// shown until the gap is fetched.
     pub gap: Option<Seq>,
 }
 
 impl Viewport {
+    /// A page has arrived since the thread opened.
+    pub(crate) const fn loaded(&self) -> bool {
+        !self.in_flight && (self.oldest.is_some() || self.exhausted)
+    }
+
     fn note_loaded(&mut self, fetch: Fetch, first: Option<Seq>, last: Option<Seq>, more: bool) {
         self.in_flight = false;
+        self.requested = None;
         match fetch {
             Fetch::Tail => {
                 self.oldest = first;
@@ -105,6 +118,11 @@ impl Viewport {
             Fetch::Newer { .. } => {
                 self.gap = if more { last.or(self.gap) } else { None };
             }
+            Fetch::At { .. } => {
+                self.oldest = first;
+                self.exhausted = false;
+                self.gap = if more { last } else { None };
+            }
         }
     }
 
@@ -113,22 +131,29 @@ impl Viewport {
             return;
         }
         let Some(before) = self.oldest else { return };
-        self.in_flight = true;
-        effects.push(Effect::Fetch(Fetch::Older { before }));
+        self.fetch(Fetch::Older { before }, effects);
     }
 
     fn fetch(&mut self, fetch: Fetch, effects: &mut Vec<Effect>) {
         self.in_flight = true;
+        self.requested = Some(fetch);
         effects.push(Effect::Fetch(fetch));
     }
 }
 
 /// The reader's current mode; all page edges live on `Viewport`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum State {
+pub enum State {
     Following {},
-    Reading { anchor: Seq },
-    Jumping { target: Jump, loading: bool },
+    /// `anchor..=through` is on screen: the window never trims it.
+    Reading {
+        anchor: Seq,
+        through: Seq,
+    },
+    Jumping {
+        target: Jump,
+        loading: bool,
+    },
 }
 
 impl Default for State {
@@ -138,16 +163,25 @@ impl Default for State {
 }
 
 impl Viewport {
-    pub(crate) fn state(&self) -> &State {
+    pub(crate) const fn state(&self) -> &State {
         &self.state
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one state machine: every (state, input) transition sits in one match"
+    )]
     pub(crate) fn handle_with_context(&mut self, event: &Input, effects: &mut Vec<Effect>) {
         // Mode-specific events finish here. The rest share page bookkeeping.
         match (&mut self.state, event) {
-            (State::Following {}, Input::ScrolledAway { anchor })
-            | (State::Reading { .. }, Input::ScrolledAway { anchor }) => {
-                self.state = State::Reading { anchor: *anchor };
+            (
+                State::Following {} | State::Reading { .. } | State::Jumping { loading: false, .. },
+                Input::ScrolledAway { anchor, through },
+            ) => {
+                self.state = State::Reading {
+                    anchor: *anchor,
+                    through: *through,
+                };
                 return;
             }
             (
@@ -187,26 +221,41 @@ impl Viewport {
             (State::Jumping { loading, .. }, Input::Present { position, loaded }) => {
                 if *loaded {
                     effects.push(Effect::ScrollTo(*position));
-                    self.state = State::Reading { anchor: *position };
-                } else if self.exhausted || self.oldest.is_none_or(|oldest| oldest <= *position) {
                     self.state = State::Reading {
-                        anchor: self.oldest.unwrap_or(*position),
+                        anchor: *position,
+                        through: *position,
                     };
-                } else {
+                } else if self
+                    .oldest
+                    .is_some_and(|oldest| oldest <= *position || self.exhausted)
+                {
+                    // Inside the loaded stretch, or older than the thread's
+                    // first item, and still not there: nothing to go to.
+                    let anchor = self.oldest.unwrap_or(*position);
+                    self.state = State::Reading {
+                        anchor,
+                        through: anchor,
+                    };
+                } else if !*loading {
+                    // Far above the window: load where it is, in one page.
                     *loading = true;
-                    self.load_older(effects);
+                    self.fetch(
+                        Fetch::At {
+                            position: *position,
+                        },
+                        effects,
+                    );
                 }
                 return;
             }
             (State::Jumping { .. }, Input::LoadFailed) => {
                 self.in_flight = false;
+                self.requested = None;
+                let anchor = self.oldest.unwrap_or_default();
                 self.state = State::Reading {
-                    anchor: self.oldest.unwrap_or_default(),
+                    anchor,
+                    through: anchor,
                 };
-                return;
-            }
-            (State::Jumping { loading: false, .. }, Input::ScrolledAway { anchor }) => {
-                self.state = State::Reading { anchor: *anchor };
                 return;
             }
             _ => {}
@@ -226,7 +275,10 @@ impl Viewport {
             } => {
                 self.note_loaded(*fetch, *first, *last, *more);
             }
-            Input::LoadFailed => self.in_flight = false,
+            Input::LoadFailed => {
+                self.in_flight = false;
+                self.requested = None;
+            }
             Input::EvictedOlder { oldest } => {
                 self.oldest = Some(*oldest);
                 self.exhausted = false;
@@ -258,7 +310,7 @@ impl Viewport {
 
 impl State {
     #[must_use]
-    pub(crate) fn is_following(&self) -> bool {
+    pub(crate) const fn is_following(&self) -> bool {
         matches!(self, Self::Following { .. })
     }
 }
@@ -267,6 +319,10 @@ impl State {
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "tests read as a sequence of inputs handed to the viewport"
+    )]
     fn send(viewport: &mut Viewport, input: Input) -> Vec<Effect> {
         let mut effects = Vec::new();
         viewport.handle_with_context(&input, &mut effects);
@@ -292,7 +348,16 @@ mod tests {
             ),
             [Effect::ScrollToEnd]
         );
-        assert!(send(&mut viewport, Input::ScrolledAway { anchor: 150 }).is_empty());
+        assert!(
+            send(
+                &mut viewport,
+                Input::ScrolledAway {
+                    anchor: 150,
+                    through: 160
+                }
+            )
+            .is_empty()
+        );
         assert_eq!(
             send(&mut viewport, Input::TopReached),
             [Effect::Fetch(Fetch::Older { before: 100 })]
@@ -302,15 +367,22 @@ mod tests {
             send(
                 &mut viewport,
                 Input::Loaded {
-                    fetch: Fetch::Older { before: 100 },
-                    first: Some(50),
-                    last: Some(99),
-                    more: false,
+                    fetch: Fetch::At { position: 75 },
+                    first: Some(75),
+                    last: Some(174),
+                    more: true,
                 }
             )
             .is_empty()
         );
-        assert_eq!(viewport.state(), &State::Reading { anchor: 150 });
+        assert_eq!((viewport.oldest, viewport.gap), (Some(75), Some(174)));
+        assert_eq!(
+            viewport.state(),
+            &State::Reading {
+                anchor: 150,
+                through: 160
+            }
+        );
         assert!(send(&mut viewport, Input::EvictedNewer { last: 175 }).is_empty());
         assert_eq!(
             send(&mut viewport, Input::BottomReached),
@@ -334,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn a_jump_waits_for_its_page_then_scrolls_to_the_present_item() {
+    fn a_jump_loads_the_page_it_lands_on_then_scrolls_to_the_item() {
         let mut viewport = Viewport::default();
         send(
             &mut viewport,
@@ -354,9 +426,19 @@ mod tests {
                     loaded: false
                 }
             ),
-            [Effect::Fetch(Fetch::Older { before: 100 })]
+            [Effect::Fetch(Fetch::At { position: 75 })],
+            "the page it is on, at once"
         );
-        assert!(send(&mut viewport, Input::ScrolledAway { anchor: 150 }).is_empty());
+        assert!(
+            send(
+                &mut viewport,
+                Input::ScrolledAway {
+                    anchor: 150,
+                    through: 160
+                }
+            )
+            .is_empty()
+        );
         assert!(matches!(
             viewport.state(),
             State::Jumping { loading: true, .. }
@@ -365,14 +447,15 @@ mod tests {
             send(
                 &mut viewport,
                 Input::Loaded {
-                    fetch: Fetch::Older { before: 100 },
-                    first: Some(50),
-                    last: Some(99),
-                    more: false,
+                    fetch: Fetch::At { position: 75 },
+                    first: Some(75),
+                    last: Some(174),
+                    more: true,
                 }
             )
             .is_empty()
         );
+        assert_eq!((viewport.oldest, viewport.gap), (Some(75), Some(174)));
         assert_eq!(
             send(
                 &mut viewport,
@@ -383,7 +466,13 @@ mod tests {
             ),
             [Effect::ScrollTo(75)]
         );
-        assert_eq!(viewport.state(), &State::Reading { anchor: 75 });
+        assert_eq!(
+            viewport.state(),
+            &State::Reading {
+                anchor: 75,
+                through: 75
+            }
+        );
     }
 
     #[test]
@@ -404,7 +493,13 @@ mod tests {
             [Effect::Fetch(Fetch::Tail)]
         );
         assert!(send(&mut viewport, Input::LoadFailed).is_empty());
-        assert_eq!(viewport.state(), &State::Reading { anchor: 100 });
+        assert_eq!(
+            viewport.state(),
+            &State::Reading {
+                anchor: 100,
+                through: 100
+            }
+        );
         assert!(!viewport.in_flight);
         assert_eq!(
             send(&mut viewport, Input::Jump(Jump::Latest)),

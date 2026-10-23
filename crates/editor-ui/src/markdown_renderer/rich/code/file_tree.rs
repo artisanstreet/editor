@@ -48,7 +48,7 @@ enum Change {
 impl Change {
     const ALL: [Self; 4] = [Self::Added, Self::Modified, Self::Deleted, Self::Renamed];
 
-    fn tone(self) -> Tone {
+    const fn tone(self) -> Tone {
         match self {
             Self::Added => Tone::Success,
             Self::Modified => Tone::Warning,
@@ -58,7 +58,7 @@ impl Change {
         }
     }
 
-    fn word(self) -> &'static str {
+    const fn word(self) -> &'static str {
         match self {
             Self::Added => "added",
             Self::Modified => "modified",
@@ -68,7 +68,7 @@ impl Change {
         }
     }
 
-    fn letter(self) -> &'static str {
+    const fn letter(self) -> &'static str {
         match self {
             Self::Added => "A",
             Self::Modified => "M",
@@ -150,7 +150,7 @@ fn segments(path: &str) -> Vec<String> {
 #[derive(Default)]
 struct Dir {
     name: String,
-    dirs: Vec<Dir>,
+    dirs: Vec<Self>,
     indices: std::collections::HashMap<String, usize>,
     count: usize,
     files: Vec<(String, usize)>,
@@ -175,7 +175,7 @@ impl Dir {
         }
     }
 
-    fn file_count(&self) -> usize {
+    const fn file_count(&self) -> usize {
         self.count
     }
 
@@ -293,7 +293,9 @@ impl RichBlock for FileTree {
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         FileTreeView {
             key: cx.key("tree"),
-            scope: cx.media.and_then(|provider| provider.resource_scope()),
+            scope: cx
+                .media
+                .and_then(super::super::media::MediaFetcher::resource_scope),
             theme: *cx.theme,
             model: Arc::clone(&self.0),
         }
@@ -390,7 +392,7 @@ impl FileTreeView {
             },
             14.0,
             if tone == Tone::Neutral {
-                theme.colors.muted_foreground.to_paint()
+                theme.colors.text_muted.to_paint()
             } else {
                 tone.color(&theme).to_paint()
             },
@@ -439,6 +441,10 @@ fn navigation_target(
 }
 
 impl RenderOnce for FileTreeView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let model = Arc::clone(&self.model);
@@ -446,7 +452,7 @@ impl RenderOnce for FileTreeView {
         state.update(cx, |state, cx| {
             if !state.model.as_ref().is_some_and(|old| Arc::ptr_eq(old, &model)) {
                 state.focus.reset(window, cx);
-                state.model = Some(model.clone());
+                state.model = Some(Arc::clone(&model));
                 state.collapsed.retain(|key| model.rows.iter().any(|row| matches!(&row.kind, RowKind::Dir { key: current, .. } if current == key)));
                 state.scroll = gpui::UniformListScrollHandle::new();
             }
@@ -476,7 +482,7 @@ impl RenderOnce for FileTreeView {
         let row_count = visible.len();
         let list_id = self.id("rows");
         let tree_id = self.id("tree");
-        let row_model = model.clone();
+        let row_model = Arc::clone(&model);
         let list = uniform_list(list_id, row_count, move |range, window, _| {
             focus.retain_visible(
                 range
@@ -503,8 +509,8 @@ impl RenderOnce for FileTreeView {
                             self.file(index, row, &row_model.entries[*entry], &focus)
                         }
                     };
-                    let visible = visible.clone();
-                    let model = row_model.clone();
+                    let visible = Arc::clone(&visible);
+                    let model = Arc::clone(&row_model);
                     let key = self.key.clone();
                     let focus = focus.clone();
                     let scroll = navigation_scroll.clone();
@@ -520,7 +526,7 @@ impl RenderOnce for FileTreeView {
         })
         .track_scroll(&scroll)
         .w_full()
-        .h(TreeRow::row_height() * row_count.min(14) as f32);
+        .h(TreeRow::row_height() * crate::f32_of_count(row_count.min(14)));
 
         let summary = Change::ALL.into_iter().filter_map(|change| {
             let count = model

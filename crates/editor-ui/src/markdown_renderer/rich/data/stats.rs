@@ -141,7 +141,7 @@ impl RichBlock for Stats {
                         + figure(&tile.value)
                         + tile.delta.as_ref().map_or(0, figure)
                         + std::mem::size_of_val(tile.sparkline.0.as_ref())
-                        + budget::optional(&tile.hint)
+                        + budget::optional(tile.hint.as_ref())
                 })
                 .sum::<usize>()
     }
@@ -150,7 +150,7 @@ impl RichBlock for Stats {
         StatsView {
             id: cx.key("stats"),
             theme: *cx.theme,
-            tiles: self.tiles.clone(),
+            tiles: Arc::clone(&self.tiles),
         }
         .into_any_element()
     }
@@ -177,6 +177,10 @@ impl Sparkline {
         self.0.len()
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "0..=1 fractions fit an f32"
+    )]
     fn normalize(values: &[f64]) -> Self {
         let scale = values
             .iter()
@@ -223,18 +227,14 @@ impl<'de> Deserialize<'de> for Sparkline {
 }
 
 fn sparkline(values: &Sparkline, color: Hsla) -> AnyElement {
-    let values = values.0.clone();
+    let values = Arc::clone(&values.0);
     canvas(
         |_, _, _| {},
         move |bounds, (), window, _| {
             if values.len() < 2 {
                 return;
             }
-            #[expect(
-                clippy::cast_precision_loss,
-                clippy::cast_possible_truncation,
-                reason = "a sparkline needs no precision"
-            )]
+            #[expect(clippy::cast_precision_loss, reason = "a sparkline needs no precision")]
             let at = |index: usize, value: f32| {
                 let x = index as f32 / (values.len() - 1) as f32;
                 let y = value;
@@ -273,7 +273,7 @@ impl StatsView {
         let theme = &self.theme;
         let tone = tile.tone();
         let color = if tone == Tone::Neutral {
-            theme.colors.muted_foreground.to_paint()
+            theme.colors.text_muted.to_paint()
         } else {
             tone.color(theme).to_paint()
         };
@@ -291,7 +291,7 @@ impl StatsView {
                 .child(kit::label(theme, delta.text(true)).text_color(color))
         });
         let spark_color = if tone == Tone::Neutral {
-            kit::series_color(0).to_paint()
+            kit::series_color(theme, 0).to_paint()
         } else {
             color
         };
@@ -330,7 +330,7 @@ impl StatsView {
                     .text_size(TypographyTokens::size(TextStep::X2l))
                     .line_height(px(28.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.colors.foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child(tile.value.text(false)),
             )
             .child(kit::label(theme, tile.label.clone()))

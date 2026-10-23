@@ -70,13 +70,9 @@ impl ProjectionOwner {
     }
 
     pub fn retry(&self, key: &SharedString) {
-        if let Some(entry) = self
-            .cache
-            .borrow_mut()
-            .entries
-            .iter_mut()
-            .find(|entry| &entry.key == key)
-        {
+        let mut cache = self.cache.borrow_mut();
+        let entry = cache.entries.iter_mut().find(|entry| &entry.key == key);
+        if let Some(entry) = entry {
             entry.error = None;
         }
     }
@@ -103,6 +99,10 @@ impl ProjectionOwner {
         clippy::too_many_arguments,
         reason = "one preparation request: its key, source, typography, width, runs, window and the callback"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential pass; splitting it would only thread its locals through helpers"
+    )]
     pub fn prepare(
         &self,
         key: SharedString,
@@ -112,7 +112,7 @@ impl ProjectionOwner {
         runs: Arc<[TextRun]>,
         range: Range<usize>,
         worker: &Arc<super::async_preparation::Worker>,
-        cx: &mut App,
+        cx: &App,
         notify: impl Fn(&mut App) + 'static,
     ) -> NativePreparation {
         if !projection_worker::admits(&source, &runs) {
@@ -140,7 +140,7 @@ impl ProjectionOwner {
                     source: source.clone(),
                     font_size,
                     width,
-                    runs: runs.clone(),
+                    runs: Arc::clone(&runs),
                     generation: cache.generation,
                     pages: VecDeque::new(),
                     task: None,
@@ -148,13 +148,17 @@ impl ProjectionOwner {
                 }
             }
         };
-        if let Some(page) = entry.pages.iter().find(|page| {
-            page.start <= range.start
-                && page.start.saturating_add(page.rows.len()) >= range.end.min(page.row_count())
-        }) {
-            let result = NativePreparation::Ready(page.clone());
+        let ready = entry
+            .pages
+            .iter()
+            .find(|page| {
+                page.start <= range.start
+                    && page.start.saturating_add(page.rows.len()) >= range.end.min(page.row_count())
+            })
+            .map(Arc::clone);
+        if let Some(page) = ready {
             cache.push(entry);
-            return result;
+            return NativePreparation::Ready(page);
         }
         if entry.task.is_some() {
             cache.push(entry);

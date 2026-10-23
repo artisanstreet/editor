@@ -12,12 +12,16 @@ use image::{
 const QUALITY: f32 = 85.0;
 /// Engines downscale past this anyway, so extra pixels are never seen.
 const LONG_EDGE: u32 = 2576;
-pub(crate) const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PIXELS: u64 = 16_000_000;
 const MAX_FRAMES: usize = 120;
 const MAX_ANIMATION_BYTES: usize = 64 * 1024 * 1024;
 
 /// Converts JPEG, PNG, GIF, BMP or WebP bytes to the WebP Forge stores.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "image::ImageFormat is non-exhaustive; every other format is refused"
+)]
 pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>> {
     anyhow::ensure!(
         bytes.len() <= MAX_INPUT_BYTES,
@@ -67,6 +71,30 @@ pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>> {
         }
         other => bail!("{other:?} images aren't supported; use PNG, JPEG, GIF, BMP or WebP"),
     }
+}
+
+/// The long edge of the blurred stand-in shown while conversion runs.
+const PLACEHOLDER_EDGE: u32 = 144;
+
+/// A small BGRA still of the first frame, shown blurred until the WebP is
+/// ready. Cheap next to the encode it stands in for.
+pub fn placeholder(bytes: &[u8]) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    reader.limits(decode_limits());
+    let decoder = reader.into_decoder().ok()?;
+    check_dimensions(decoder.dimensions()).ok()?;
+    let mut still = DynamicImage::from_decoder(decoder)
+        .ok()?
+        .thumbnail(PLACEHOLDER_EDGE, PLACEHOLDER_EDGE)
+        .into_rgba8();
+    for pixel in still.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    Some(std::sync::Arc::new(gpui::RenderImage::new(vec![
+        image::Frame::new(still),
+    ])))
 }
 
 fn decode_limits() -> image::Limits {

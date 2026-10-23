@@ -48,9 +48,9 @@ impl Identity {
             return Ok(None);
         };
         let start = usize::try_from(descriptor.source_start)
-            .map_err(|_| "Literal source offset exceeds this platform")?;
+            .map_err(|_overflow| "Literal source offset exceeds this platform")?;
         let end = usize::try_from(descriptor.source_end)
-            .map_err(|_| "Literal source offset exceeds this platform")?;
+            .map_err(|_overflow| "Literal source offset exceeds this platform")?;
         if descriptor.ordinal != ordinal as u64
             || start > end
             || descriptor.source_end > source.source_ref().bytes
@@ -134,7 +134,7 @@ impl std::fmt::Debug for LiteralOwner {
                 "charged_bytes",
                 &(MAX_RAW_BYTES - self.bytes.available_permits()),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 impl LiteralOwner {
@@ -154,12 +154,20 @@ impl LiteralOwner {
             .iter()
             .any(|entry| &entry.key == key && entry.identity == identity && entry.ready.is_some())
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential pass; splitting it would only thread its locals through helpers"
+    )]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the cache borrow ends at its explicit drop"
+    )]
     pub fn prepare(
         &self,
         key: SharedString,
         source: &StoredSource,
         ordinal: usize,
-        cx: &mut App,
+        cx: &App,
         notify: impl Fn(&mut App) + 'static,
     ) -> LiteralPreparation {
         let identity = match Identity::from_source(source, ordinal) {
@@ -168,11 +176,13 @@ impl LiteralOwner {
             Err(error) => return LiteralPreparation::Failed(error),
         };
         let mut cache = self.cache.borrow_mut();
-        if let Some(position) = cache.entries.iter().position(|entry| entry.key == key) {
-            if cache.entries[position].identity == identity {
-                let entry = cache.entries.remove(position).expect("existing entry");
+        let position = cache.entries.iter().position(|entry| entry.key == key);
+        if let Some(position) = position {
+            if cache.entries[position].identity == identity
+                && let Some(entry) = cache.entries.remove(position)
+            {
                 let result = if let Some(ready) = &entry.ready {
-                    LiteralPreparation::Ready(ready.clone())
+                    LiteralPreparation::Ready(Arc::clone(ready))
                 } else if let Some(error) = &entry.error {
                     LiteralPreparation::Failed(error.clone())
                 } else {
@@ -186,13 +196,13 @@ impl LiteralOwner {
         }
         // No source-bearing task waits for admission. At most four fetches
         // own input references and permits; bounded weak callbacks retry later.
-        let Ok(fetch_capacity) = self.fetches.clone().try_acquire_owned() else {
+        let Ok(fetch_capacity) = Arc::clone(&self.fetches).try_acquire_owned() else {
             cache.wait(key, notify);
             return LiteralPreparation::Pending;
         };
-        let requested = identity.admission_bytes() as u32;
+        let requested = super::budget::permits(identity.admission_bytes());
         let mut capacity = loop {
-            if let Ok(capacity) = self.bytes.clone().try_acquire_many_owned(requested) {
+            if let Ok(capacity) = Arc::clone(&self.bytes).try_acquire_many_owned(requested) {
                 break capacity;
             }
             if !cache.evict_ready() {
@@ -213,7 +223,7 @@ impl LiteralOwner {
         }
         cache.generation = cache.generation.wrapping_add(1);
         let generation = cache.generation;
-        let fetcher = source.fetcher.clone();
+        let fetcher = Arc::clone(&source.fetcher);
         let job_identity = identity.clone();
         let job_key = key.clone();
         let weak = Rc::downgrade(&self.cache);
@@ -291,20 +301,21 @@ mod tests {
         let start = "prefix\n".len();
         let end = full.find("next").unwrap();
         let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let calls = requested.clone();
-        let original = full.clone();
+        let calls = Arc::clone(&requested);
+        let original = Arc::clone(&full);
         let fetcher: super::super::stored::ContentFetch =
             Arc::new(move |reference, offset, limit| {
                 calls.lock().unwrap().push((offset, limit));
-                let full = original.clone();
+                let full = Arc::clone(&original);
                 Box::pin(async move {
-                    let end = (offset as usize + limit as usize).min(full.len());
+                    let offset = usize::try_from(offset).unwrap();
+                    let end = (offset + limit as usize).min(full.len());
                     Ok(artisan_api::ContentRange {
                         id: reference.id,
                         total: reference.bytes,
-                        start: offset,
+                        start: offset as u64,
                         end: end as u64,
-                        text: full[offset as usize..end].to_owned(),
+                        text: full[offset..end].to_owned(),
                     })
                 })
             });
@@ -314,7 +325,7 @@ mod tests {
         assert_eq!(text, &full[start..end]);
         assert_eq!(
             *requested.lock().unwrap(),
-            vec![(start as u64, (end - start) as u32)]
+            vec![(start as u64, u32::try_from(end - start).unwrap())]
         );
     }
 }

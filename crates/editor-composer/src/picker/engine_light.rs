@@ -85,29 +85,41 @@ pub(super) fn engine_light(theme: &ArtisanTheme, light: &EngineLight) -> AnyElem
         .with_animation(
             ElementId::Name(format!("composer-engine-light-{generation}").into()),
             Animation::new(ENGINE_LIGHT_FLIGHT).with_easing(smooth_out),
-            move |image, progress| image.left(px(from_left + (to_left - from_left) * progress)),
+            move |image, progress| {
+                image.left(px((to_left - from_left).mul_add(progress, from_left)))
+            },
         )
         .into_any_element()
 }
 
 thread_local! {
-    static ENGINE_LIGHT_IMAGE: RefCell<Option<Arc<RenderImage>>> = const { RefCell::new(None) };
+    /// The baked light, per theme mode: its colour is the mode's text.
+    static ENGINE_LIGHT_IMAGE: RefCell<Option<(ThemeMode, Arc<RenderImage>)>> = const { RefCell::new(None) };
 }
 
 fn engine_light_image(theme: &ArtisanTheme) -> Arc<RenderImage> {
     ENGINE_LIGHT_IMAGE.with(|image| {
-        image
-            .borrow_mut()
-            .get_or_insert_with(|| Arc::new(RenderImage::new(vec![engine_light_frame(theme)])))
-            .clone()
+        let mut image = image.borrow_mut();
+        let mode = theme.colors.mode;
+        if let Some((baked, image)) = image.as_ref()
+            && *baked == mode
+        {
+            return std::sync::Arc::clone(image);
+        }
+        let baked = Arc::new(RenderImage::new(vec![engine_light_frame(theme)]));
+        *image = Some((mode, std::sync::Arc::clone(&baked)));
+        baked
     })
 }
 
-/// The light's raster: the foreground colour under a vertical alpha
+/// The light's raster: the text colour under a vertical alpha
 /// profile, blurred 2 px, then masked by a soft ellipse.
-#[allow(clippy::cast_precision_loss)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "raster coordinates are a few hundred pixels, exact in f32"
+)]
 fn engine_light_frame(theme: &ArtisanTheme) -> image::Frame {
-    let foreground = theme.colors.foreground.to_srgb();
+    let foreground = theme.colors.text.to_srgb();
     let red = color_channel_to_byte(foreground.r);
     let green = color_channel_to_byte(foreground.g);
     let blue = color_channel_to_byte(foreground.b);
@@ -140,7 +152,7 @@ fn engine_light_frame(theme: &ArtisanTheme) -> image::Frame {
         |x, y| {
             let nx = (x as f32 + 0.5) / ENGINE_LIGHT_RASTER_WIDTH as f32;
             let ny = (y as f32 + 0.5) / ENGINE_LIGHT_RASTER_HEIGHT as f32;
-            let distance = (((nx - 0.5) / 0.48).powi(2) + ((ny - 0.35) / 0.70).powi(2)).sqrt();
+            let distance = ((nx - 0.5) / 0.48).hypot((ny - 0.35) / 0.70);
             let mask = interpolate_profile(
                 distance,
                 &[(0.0, 1.0), (0.42, 0.5), (0.68, 0.1), (0.88, 0.0)],
@@ -176,7 +188,11 @@ fn interpolate_profile(value: f32, stops: &[(f32, f32)]) -> f32 {
     stops.last().map_or(0.0, |(_, alpha)| *alpha)
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is clamped to 0..=255 before the cast"
+)]
 fn color_channel_to_byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }

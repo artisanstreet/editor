@@ -1,8 +1,31 @@
-use crate::{BlobHash, Collection, ItemId, RunId, Seq, TextContent, ThreadId, Timestamp};
+use crate::{BlobHash, Collection, EngineId, ItemId, RunId, Seq, TextContent, ThreadId, Timestamp};
 use serde::{Deserialize, Serialize};
 
+/// The thread whose agent wrote a user message, as it was when it sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sender {
+    pub thread: ThreadId,
+    pub engine: EngineId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// The models a thread moved between, as named when it moved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSwitch {
+    pub from: NamedModel,
+    pub to: NamedModel,
+}
+
+/// A model and its engine, with the name its engine showed for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedModel {
+    pub engine: EngineId,
+    pub name: String,
+}
+
 /// Anything in a thread. Adapters map each engine's wiring onto these kinds.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub id: ItemId,
     pub thread_id: ThreadId,
@@ -47,7 +70,7 @@ impl Status {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemKind {
     UserMessage {
@@ -57,6 +80,16 @@ pub enum ItemKind {
         /// Sent while a run was active.
         #[serde(default)]
         steer: bool,
+        /// Forge delivered it for this agent (the parent's `Agent` item),
+        /// whose result wakes the thread; the Editor shows it as the
+        /// agent's report, not as the user's message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_agent: Option<ItemId>,
+        /// Another thread's agent wrote it (`thread_send`, a started thread's
+        /// or agent's first message, a follow-up). Forge sets it; the Editor
+        /// tints the bubble with the sender's harness and renders markdown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender: Option<Sender>,
     },
     AssistantMessage {
         text: TextContent,
@@ -98,6 +131,14 @@ pub enum ItemKind {
         /// stored before; read [`Item::agent_label`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// The harness it runs on, for an agent Forge started on any harness
+        /// (`agent_spawn`); `None` for the engine's own subagents, which run
+        /// on their thread's harness.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        engine: Option<EngineId>,
+        /// The thread a Forge-started agent runs in; its work lives there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<ThreadId>,
     },
     Question {
         /// The engine waits for the answer.
@@ -121,8 +162,15 @@ pub enum ItemKind {
         caption: Option<TextContent>,
     },
     Compaction {
+        /// Portable checkpoint text, retained for recall and subsequent handoffs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<TextContent>,
         tokens_before: Option<u64>,
         tokens_after: Option<u64>,
+        /// The thread moved to another engine or model here; the divider
+        /// names both while the history is handed over.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        switch: Option<ModelSwitch>,
     },
     Notice {
         kind: NoticeKind,
@@ -178,6 +226,10 @@ pub enum ToolKind {
         cwd: Option<String>,
         #[serde(default)]
         background: bool,
+        /// A watcher: it reports events as they happen instead of ending
+        /// with a result (Claude's `Monitor`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        watch: bool,
     },
     Read {
         path: String,
@@ -280,7 +332,7 @@ impl Output {
         }
     }
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.text.byte_len() == 0 && self.omitted_bytes == 0
     }
 }
@@ -354,14 +406,13 @@ impl Question {
         answer: &Option<QuestionAnswer>,
     ) -> Result<(), &'static str> {
         match answer {
-            None => Ok(()),
             Some(QuestionAnswer::Text { text }) if text.trim().is_empty() => {
                 Err("answer text is empty")
             }
             Some(QuestionAnswer::Text { text }) if text.len() > crate::INLINE_TEXT_BYTES => {
                 Err("answer text exceeds 16 KiB")
             }
-            Some(QuestionAnswer::Text { .. }) => Ok(()),
+            None | Some(QuestionAnswer::Text { .. }) => Ok(()),
             Some(QuestionAnswer::Choices { ids }) => {
                 let ids = ids.inline().ok_or("submitted choices must be inline")?;
                 if ids.is_empty() {
@@ -460,10 +511,22 @@ pub enum StepStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NoticeKind {
-    Goal { state: String },
+    Goal {
+        state: String,
+    },
     Safety,
-    Reroute { model: String },
+    Reroute {
+        model: String,
+    },
     Info,
+    /// Something from the work the user should know but might miss, found by
+    /// a side query after the turn: the notice's text, one or two sentences.
+    /// Notes stored with a title drop it when read.
+    YouShouldKnow {
+        /// A decision the agent made that the user may want to judge, rather
+        /// than something to understand.
+        heads_up: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,7 +542,7 @@ impl Item {
     /// Stateful plans, agents and questions can be explicitly reused by an adapter.
     /// Completed output and accepted input remain terminal.
     #[must_use]
-    pub fn next_status(&self, next: Status) -> Status {
+    pub const fn next_status(&self, next: Status) -> Status {
         if matches!(
             self.kind,
             ItemKind::Plan { .. } | ItemKind::Agent { .. } | ItemKind::Question { .. }
@@ -490,6 +553,37 @@ impl Item {
         }
     }
 
+    /// Whether the item folds into its run's work in the root transcript:
+    /// what the agent did between the rows a reader sees. Transcript pages
+    /// ship every other item and summarise these as [`crate::WorkSpan`]s,
+    /// so a turn of thousands of calls opens as one row. Forge stores it
+    /// per item; the Editor folds by it.
+    #[must_use]
+    pub fn folds_into_work(&self) -> bool {
+        match &self.kind {
+            // A steer belongs to the running turn, and an agent's delivered
+            // result reads as its report there.
+            ItemKind::UserMessage {
+                steer, from_agent, ..
+            } => (*steer && self.run_id.is_some()) || from_agent.is_some(),
+            ItemKind::AssistantMessage { phase, .. } => *phase != Phase::Final,
+            // Waiting on the user, it is a prompt of its own.
+            ItemKind::Tool { .. } | ItemKind::Plan { .. } => self.status != Status::AwaitingUser,
+            // The composer's strip reads these; the transcript skips them.
+            ItemKind::Notice { kind, .. } => !matches!(
+                kind,
+                NoticeKind::Goal { .. } | NoticeKind::YouShouldKnow { .. }
+            ),
+            ItemKind::Agent { .. } => true,
+            // A compaction is a divider, or an entry of the work it
+            // happened in; the fold decides, so it always ships.
+            ItemKind::Question { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Error { .. }
+            | ItemKind::Image { .. } => false,
+        }
+    }
+
     /// The text a reader sees first, for previews and titles.
     #[must_use]
     pub fn preview(&self) -> Option<&str> {
@@ -497,7 +591,14 @@ impl Item {
             ItemKind::UserMessage { text, .. } | ItemKind::AssistantMessage { text, .. } => {
                 text.inline()
             }
-            _ => None,
+            ItemKind::Tool { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => None,
         }
     }
 
@@ -578,6 +679,21 @@ mod question_identity_tests {
                     ids: vec!["a".into(), "a".into()].into()
                 }))
                 .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::NoticeKind;
+
+    /// Threads holding notes stored with a title still open.
+    #[test]
+    fn a_note_stored_with_a_title_still_reads() {
+        let stored = r#"{"type":"you_should_know","heads_up":true,"title":"Orders cascade"}"#;
+        assert_eq!(
+            serde_json::from_str::<NoticeKind>(stored).unwrap(),
+            NoticeKind::YouShouldKnow { heads_up: true }
         );
     }
 }

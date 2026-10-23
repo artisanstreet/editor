@@ -1,6 +1,6 @@
 //! Joined message segments keep one frame recipe while native rows own visibility.
 use crate::gradient::vertical_gradient;
-use crate::theme::{ArtisanTheme, Oklch, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep};
+use crate::theme::{ArtisanTheme, Oklch, Opacity, ProseTypography, RadiusStep, RadiusTokens};
 use gpui::InteractiveElement as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -16,7 +16,7 @@ pub enum SegmentPosition {
     Tail,
 }
 impl SegmentPosition {
-    pub fn for_index(index: usize, count: usize) -> Self {
+    pub const fn for_index(index: usize, count: usize) -> Self {
         match (index == 0, index + 1 >= count) {
             (true, true) => Self::Single,
             (true, false) => Self::Head,
@@ -24,10 +24,10 @@ impl SegmentPosition {
             (false, false) => Self::Body,
         }
     }
-    fn first(self) -> bool {
+    const fn first(self) -> bool {
         matches!(self, Self::Single | Self::Head)
     }
-    fn last(self) -> bool {
+    const fn last(self) -> bool {
         matches!(self, Self::Single | Self::Tail)
     }
 }
@@ -38,6 +38,8 @@ pub struct ChatBubbleSegment {
     position: SegmentPosition,
     content: AnyElement,
     selector: Option<SharedString>,
+    answer: bool,
+    tint: Option<Oklch>,
 }
 impl ChatBubbleSegment {
     /// Attachment placement shares the message's horizontal measure.
@@ -48,8 +50,25 @@ impl ChatBubbleSegment {
             position,
             content: content.into_any_element(),
             selector: None,
+            answer: false,
+            tint: None,
         }
     }
+    /// The user's answer to a question: their message, edged by a dashed
+    /// line so it reads as a reply to what was asked rather than a new ask.
+    #[must_use]
+    pub const fn answer(mut self) -> Self {
+        self.answer = true;
+        self
+    }
+    /// A message another thread's agent sent: the fill leans toward its
+    /// harness's colour and a hairline of it edges the bubble.
+    #[must_use]
+    pub const fn tinted(mut self, tint: Oklch) -> Self {
+        self.tint = Some(tint);
+        self
+    }
+    #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.selector = Some(selector.into());
         self
@@ -58,17 +77,35 @@ impl ChatBubbleSegment {
 impl ChatBubbleSegment {
     fn frame(self) -> gpui::Div {
         let position = self.position;
-        let (top, bottom) = (SurfaceStep::S775.oklch(), SurfaceStep::S850.oklch());
-        let middle = Oklch::new((top.l + bottom.l) * 0.5, 0.0, 0.0);
+        // Gray 4 at the top of the message to gray 3 at its foot (a step
+        // lighter on dark, where 3 sits too close to the card). Joined
+        // segments finish the fall in the head so every seam meets the foot.
+        let gray = &self.theme.colors.gray;
+        let foot = if self.theme.colors.mode.is_dark() {
+            4
+        } else {
+            3
+        };
         let (top, bottom) = match position {
-            SegmentPosition::Single => (top, bottom),
-            SegmentPosition::Head => (top, middle),
-            SegmentPosition::Body => (middle, middle),
-            SegmentPosition::Tail => (middle, bottom),
+            SegmentPosition::Single | SegmentPosition::Head => {
+                (gray.step(foot + 1), gray.step(foot))
+            }
+            SegmentPosition::Body | SegmentPosition::Tail => (gray.step(foot), gray.step(foot)),
+        };
+        let radius = RadiusTokens::value(RadiusStep::X2l);
+        let round = move |layer: gpui::Div| {
+            layer
+                .when(position.first(), |layer| {
+                    layer.rounded_tl(radius).rounded_tr(radius)
+                })
+                .when(position.last(), |layer| {
+                    layer.rounded_bl(radius).rounded_br(radius)
+                })
         };
         div()
+            .relative()
             .max_w(px(Self::MAX_WIDTH))
-            .when(position != SegmentPosition::Single, |frame| frame.w_full())
+            .when(position != SegmentPosition::Single, gpui::Styled::w_full)
             .when(position.first(), |frame| {
                 frame
                     .rounded_tl(RadiusTokens::value(RadiusStep::X2l))
@@ -83,17 +120,41 @@ impl ChatBubbleSegment {
             .when(position == SegmentPosition::Single, |frame| {
                 frame.shadow(crate::glass::card_shadows(&self.theme))
             })
+            .when_some(self.tint, |frame, tint| {
+                frame
+                    .border_l_1()
+                    .border_r_1()
+                    .when(position.first(), gpui::Styled::border_t_1)
+                    .when(position.last(), gpui::Styled::border_b_1)
+                    .border_color(tint.at(Opacity::EngineEdge).to_paint())
+            })
+            .when(self.answer, |frame| {
+                frame
+                    .border_1()
+                    .border_dashed()
+                    .border_color(self.theme.colors.gray.step(8).to_paint())
+            })
             .px(px(16.0))
             .pt(px(if position.first() { 12.0 } else { 0.0 }))
             .pb(px(if position.last() { 12.0 } else { 0.0 }))
-            .text_color(self.theme.colors.foreground.to_paint())
+            .text_color(self.theme.colors.text.to_paint())
             .text_size(px(ProseTypography::BODY_SIZE_PX))
             .line_height(px(ProseTypography::BODY_LINE_PX))
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .tracking(ProseTypography::TRACKING_EM)
+            .tracking(self.theme.typography.tracking_em)
             .whitespace_normal()
             .when_some(self.selector, |frame, selector| {
                 frame.debug_selector(move || selector.to_string())
+            })
+            .when_some(self.tint, |frame, tint| {
+                frame.child(round(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .bg(tint.at(Opacity::EngineLean).to_paint()),
+                ))
             })
             .child(self.content)
     }

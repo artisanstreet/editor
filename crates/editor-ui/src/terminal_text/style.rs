@@ -149,10 +149,9 @@ fn colon_color(sub: &[u32]) -> Option<TerminalColor> {
 fn semicolon_color(params: &Params, start: usize) -> (Option<TerminalColor>, usize) {
     let at = |offset: usize| params.group(start + offset).first().copied();
     match at(0) {
-        Some(5) => match at(1) {
-            Some(index) => (Some(TerminalColor::Indexed(channel(index))), 2),
-            None => (None, 1),
-        },
+        Some(5) => at(1).map_or((None, 1), |index| {
+            (Some(TerminalColor::Indexed(channel(index))), 2)
+        }),
         Some(2) => match (at(1), at(2), at(3)) {
             (Some(r), Some(g), Some(b)) => (
                 Some(TerminalColor::Rgb(channel(r), channel(g), channel(b))),

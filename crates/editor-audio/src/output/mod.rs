@@ -24,7 +24,7 @@ use crate::state::Shared;
 
 /// The layout of the decoded track the output streams.
 #[derive(Clone, Debug)]
-pub(crate) struct Format {
+pub struct Format {
     /// 1 or 2.
     #[cfg_attr(
         not(all(unix, not(target_os = "macos"))),
@@ -50,7 +50,7 @@ enum Command {
 }
 
 /// The handle to one track's output thread.
-pub(crate) struct Output {
+pub struct Output {
     commands: Sender<Command>,
 }
 
@@ -81,12 +81,13 @@ impl Output {
     /// Asks the thread to match the stream to the state.
     pub(crate) fn sync(&self) {
         // A send fails only once the thread has exited, when there is nothing to sync.
-        let _ = self.commands.send(Command::Sync);
+        self.commands.send(Command::Sync).ok();
     }
 
     /// Asks the thread to drop buffered audio after a seek.
     pub(crate) fn flush(&self) {
-        let _ = self.commands.send(Command::Flush);
+        // As with `sync`, only a thread that has exited refuses it.
+        self.commands.send(Command::Flush).ok();
     }
 }
 

@@ -24,7 +24,7 @@ pub fn start() -> Server {
     let address = server.local_addr().unwrap().to_string();
     let store = server.store().clone();
     runtime.spawn(async move {
-        let _ = server.run().await;
+        server.run().await.ok();
     });
     Server {
         store,

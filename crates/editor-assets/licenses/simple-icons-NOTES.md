@@ -15,3 +15,7 @@ The vendored artwork originates from the Simple Icons project
 waive trademark rights (section 4a); host names remain the trademarks of their
 owners and are used here to identify the corresponding repository hosts, exactly
 as in the legacy frontend.
+
+`meituan.svg` and `xiaomi.svg` (2026-10-20) come from the `simple-icons` npm package (CC0),
+with its `<title>` dropped and `fill="currentColor"` added; it identifies the
+lab of models in the model menu.

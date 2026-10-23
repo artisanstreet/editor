@@ -1,27 +1,27 @@
 //! The draft owns each conversion and upload until its blob is ready.
 use artisan_api::BlobHash;
-pub(crate) enum Input {
+pub enum Input {
     Encoded,
     Uploaded(BlobHash),
     Failed(String),
 }
-pub(crate) enum State {
+pub enum State {
     Encoding,
     Uploading,
     Ready(BlobHash),
     Failed(String),
 }
 impl State {
-    pub(crate) fn hash(&self) -> Option<&BlobHash> {
+    pub(crate) const fn hash(&self) -> Option<&BlobHash> {
         match self {
             Self::Ready(hash) => Some(hash),
-            _ => None,
+            Self::Encoding | Self::Uploading | Self::Failed(_) => None,
         }
     }
     pub(crate) fn failure(&self) -> Option<&str> {
         match self {
             Self::Failed(reason) => Some(reason),
-            _ => None,
+            Self::Encoding | Self::Uploading | Self::Ready(_) => None,
         }
     }
     /// Returns true only for the transition that starts the single upload.

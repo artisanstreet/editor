@@ -1,17 +1,21 @@
-//! A typed value picker. Opening, keyboard navigation and scrolling belong here.
+//! A typed value picker on the composer's dropdown recipe: a raised
+//! trigger, and a glass menu that fades in under it with the shared hover
+//! pill. Opening, keyboard navigation and scrolling belong here.
 
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep};
-use crate::{
-    AssetId,
-    icon::{IconSize, IconStyle, IconTint, icon},
-};
+use crate::AssetId;
+use crate::asset_seam::asset_glyph;
+use crate::glass::card_shadows;
+use crate::hover_card::highlight_fill;
+use crate::picker_motion::{HoverSurface, MenuEntrance, MenuMotion, animate_menu};
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnchoredPositionMode, App, BoxShadow, ClickEvent, ElementId, FocusHandle, InteractiveElement,
-    IntoElement, KeyDownEvent, MouseDownEvent, ParentElement, RenderOnce, Role, ScrollStrategy,
-    SharedString, StatefulInteractiveElement, Styled, UniformListScrollHandle, Window, anchored,
-    deferred, div, point, px, uniform_list,
+    AnchoredPositionMode, App, BoxShadow, ClickEvent, Context, ElementId, FocusHandle,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseDownEvent, ParentElement, RenderOnce, Role,
+    ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, UniformListScrollHandle,
+    Window, anchored, deferred, div, point, px, uniform_list,
 };
+use std::cell::RefCell;
 use std::{
     rc::Rc,
     time::{Duration, Instant},
@@ -32,19 +36,97 @@ impl<V> SelectEntry<V> {
         }
     }
     #[must_use]
-    pub fn disabled(mut self, disabled: bool) -> Self {
+    pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
 }
 
+/// The menu's fade, as the composer's dropdowns run it.
+const MENU_MOTION: Duration = Duration::from_millis(100);
+/// One option's height: 20 px of text in 8 px above and below.
+const OPTION_HEIGHT: f32 = 36.0;
+/// The menu's narrowest.
+const MENU_MIN_WIDTH: f32 = 160.0;
+
 struct State<V> {
     open: bool,
+    /// Painted: open, or playing its exit.
+    shown: bool,
+    motion: Rc<RefCell<MenuMotion>>,
+    hover: HoverSurface,
     highlighted: Option<V>,
+    /// The keys moved the highlight; it wears the highlight fill while the
+    /// pointer's row wears the pill.
+    keyed: bool,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
     query: String,
     typed_at: Instant,
+}
+
+impl<V: 'static> State<V> {
+    /// Opens or closes the menu; it fades in and out unless motion is
+    /// reduced.
+    fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.open == open {
+            return;
+        }
+        self.open = open;
+        let generation = {
+            let mut motion = self.motion.borrow_mut();
+            if open {
+                motion.begin_open()
+            } else {
+                motion.begin_close()
+            }
+        };
+        if open {
+            self.shown = true;
+        } else {
+            self.keyed = false;
+            self.query.clear();
+            self.hover.clear();
+        }
+        cx.notify();
+        let settle = move |state: &mut Self| {
+            let mut motion = state.motion.borrow_mut();
+            let settled = if open {
+                motion.finish_open(generation)
+            } else {
+                motion.finish_close(generation)
+            };
+            drop(motion);
+            if settled && !open {
+                state.shown = false;
+            }
+            settled
+        };
+        if cx.reduce_motion() {
+            settle(self);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MENU_MOTION).await;
+            // A released view has nothing left to update.
+            this.update(cx, |state, cx| {
+                if settle(state) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Drops the menu without its exit.
+    fn close_now(&mut self) {
+        self.open = false;
+        self.shown = false;
+        self.keyed = false;
+        self.motion.borrow_mut().hide();
+        self.hover.clear();
+    }
 }
 
 type Changed<V> = Rc<dyn Fn(V, Option<&ClickEvent>, &mut Window, &mut App)>;
@@ -85,7 +167,7 @@ impl<V: Clone + Eq + 'static> Select<V> {
         self
     }
     #[must_use]
-    pub fn disabled(mut self, disabled: bool) -> Self {
+    pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
@@ -137,12 +219,20 @@ fn reveal_highlighted<V: Eq>(state: &State<V>, entries: &[SelectEntry<V>]) {
 }
 
 impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let disabled = self.disabled || self.entries.iter().all(|entry| entry.disabled);
         let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| State {
             open: false,
+            shown: false,
+            motion: Rc::default(),
+            hover: HoverSurface::default(),
             highlighted: None,
+            keyed: false,
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             query: String::new(),
@@ -151,14 +241,23 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
         state.update(cx, |state, _| {
             reconcile(state, &self.entries, self.selected.as_ref());
             if disabled {
-                state.open = false;
+                state.close_now();
             }
         });
         let entries = Rc::new(self.entries);
-        let (open, focus, scroll) = {
+        let (open, shown, focus, scroll, hover, motion, keyed) = {
             let state = state.read(cx);
-            (state.open, state.focus.clone(), state.scroll.clone())
+            (
+                state.open,
+                state.shown,
+                state.focus.clone(),
+                state.scroll.clone(),
+                state.hover.clone(),
+                Rc::clone(&state.motion),
+                state.keyed,
+            )
         };
+        let muted = theme.colors.text_muted.to_paint();
         let display = entries
             .iter()
             .find(|entry| self.selected.as_ref() == Some(&entry.value))
@@ -171,17 +270,16 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
             .aria_expanded(open)
             .w_full()
             .h(theme.density.control_default)
-            .px(px(12.0))
-            .rounded(RadiusTokens::value(RadiusStep::X4l))
-            .border_1()
-            .border_color(theme.colors.input.to_paint())
-            .bg(SurfaceStep::S900.oklch().to_paint())
-            .text_color(theme.colors.foreground.to_paint())
-            .text_size(theme.typography.control_text)
+            .px(px(10.0))
+            .rounded(RadiusTokens::value(RadiusStep::Md))
+            .bg(theme.colors.raised.to_paint())
+            .shadow(card_shadows(&theme))
+            .text_color(theme.colors.text.to_paint())
+            .text_size(TypographyTokens::size(TextStep::Sm))
             .flex()
             .items_center()
             .justify_between()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .child(
                 div()
                     .min_w_0()
@@ -189,25 +287,26 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                     .whitespace_nowrap()
                     .child(display),
             )
-            .child(icon(IconStyle::resolve(
-                theme,
-                AssetId::TABLER_CHEVRON_DOWN,
-                IconSize::Compact,
-                IconTint::Muted,
-            )))
+            .child(
+                asset_glyph(AssetId::TABLER_SELECTOR)
+                    .size(px(14.0))
+                    .flex_shrink_0()
+                    .text_color(muted),
+            )
             .when_some(self.selector.clone(), |el, selector| {
                 el.debug_selector(move || format!("{selector}-trigger"))
             });
         if disabled {
-            return div()
-                .id(self.id.clone())
-                .w_full()
-                .child(trigger.aria_description("Unavailable").opacity(0.5));
+            return div().id(self.id.clone()).w_full().child(
+                trigger
+                    .aria_description("Unavailable")
+                    .opacity(crate::theme::Opacity::Disabled.alpha()),
+            );
         }
         let clicked = state.clone();
-        let click_entries = entries.clone();
+        let click_entries = Rc::clone(&entries);
         let key_state = state.clone();
-        let key_entries = entries.clone();
+        let key_entries = Rc::clone(&entries);
         let change = self.on_change.clone();
         trigger = trigger
             .track_focus(&focus)
@@ -217,7 +316,11 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                 style
                     .border_color(theme.colors.ring.to_paint())
                     .shadow(vec![BoxShadow {
-                        color: theme.interaction.focus_ring_color.to_paint(),
+                        color: theme
+                            .colors
+                            .ring
+                            .at(crate::theme::Opacity::FocusRing)
+                            .to_paint(),
                         offset: point(px(0.0), px(0.0)),
                         blur_radius: px(0.0),
                         spread_radius: theme.interaction.focus_ring_width,
@@ -233,14 +336,13 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                     return;
                 }
                 clicked.update(cx, |state, cx| {
-                    state.open = !state.open;
-                    state.query.clear();
-                    if state.open {
+                    let open = !state.open;
+                    state.set_open(open, cx);
+                    if open {
                         reveal_highlighted(state, &click_entries);
                     }
                     window.focus(&state.focus, cx);
-                    cx.notify();
-                })
+                });
             })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
                 let mut commit = None;
@@ -261,21 +363,19 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                         .unwrap_or(0);
                     let target = match event.keystroke.key.as_str() {
                         "escape" | "tab" => {
-                            state.open = false;
-                            state.query.clear();
-                            cx.notify();
-                            return event.keystroke.key != "tab";
+                            let was_open = state.open;
+                            state.set_open(false, cx);
+                            return was_open && event.keystroke.key != "tab";
                         }
                         "enter" | "space" if state.open => {
-                            commit = state.highlighted.clone();
-                            state.open = false;
-                            cx.notify();
+                            commit.clone_from(&state.highlighted);
+                            state.set_open(false, cx);
                             return true;
                         }
                         "enter" | "space" => {
-                            state.open = true;
+                            state.set_open(true, cx);
+                            state.keyed = true;
                             reveal_highlighted(state, &key_entries);
-                            cx.notify();
                             return true;
                         }
                         "down" => {
@@ -317,7 +417,8 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                         }
                         _ => return false,
                     };
-                    state.open = true;
+                    state.set_open(true, cx);
+                    state.keyed = true;
                     let index = enabled[target];
                     state.highlighted = Some(key_entries[index].value.clone());
                     state.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
@@ -335,35 +436,40 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                 }
             });
         let mut root = div().id(self.id.clone()).relative().w_full().child(trigger);
-        if open {
+        if shown {
             let popup_priority = crate::overlay::popup_priority(window, cx);
             let popup_height = (window.viewport_size().height - px(16.0)).max(px(1.0));
             let list_state = state.clone();
-            let list_entries = entries.clone();
+            let list_entries = Rc::clone(&entries);
+            let list_hover = hover.clone();
             let change = self.on_change;
             let selected = self.selected;
             let count = entries.len();
-            let row_height = window.line_height() + px(16.0);
             let list = uniform_list("select-options", count, move |range, _, cx| {
                 range
                     .map(|index| {
                         let entry = &list_entries[index];
-                        let hovered =
-                            list_state.read(cx).highlighted.as_ref() == Some(&entry.value);
+                        let chosen = selected.as_ref() == Some(&entry.value);
+                        let highlighted =
+                            keyed && list_state.read(cx).highlighted.as_ref() == Some(&entry.value);
+                        let hover_id = index.to_string();
                         let mut row = div()
                             .id(index)
                             .role(Role::ListBoxOption)
                             .aria_label(entry.label.clone())
-                            .aria_selected(selected.as_ref() == Some(&entry.value))
+                            .aria_selected(chosen)
                             .relative()
-                            .py(px(8.0))
-                            .px(px(12.0))
+                            // The menu's width, so the pill and highlight
+                            // span the row, not just its label.
+                            .w_full()
+                            .h(px(OPTION_HEIGHT))
+                            .pl(px(12.0))
                             .pr(px(32.0))
                             .flex()
                             .items_center()
                             .rounded(RadiusTokens::value(RadiusStep::Xl))
-                            .text_size(theme.typography.control_text)
-                            .text_color(theme.colors.popover_foreground.to_paint())
+                            .text_size(TypographyTokens::size(TextStep::Sm))
+                            .line_height(px(20.0))
                             .child(
                                 div()
                                     .min_w_0()
@@ -372,89 +478,111 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                                     .whitespace_nowrap()
                                     .child(entry.label.clone()),
                             )
-                            .when(selected.as_ref() == Some(&entry.value), |el| {
+                            .when(chosen, |el| {
                                 el.child(
                                     div()
                                         .absolute()
                                         .right(px(8.0))
-                                        .top(px(8.0))
-                                        .size(px(14.0))
-                                        .child(icon(IconStyle::resolve(
-                                            theme,
-                                            AssetId::TABLER_CHECK,
-                                            IconSize::Compact,
-                                            IconTint::Inherit,
-                                        ))),
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(px(14.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            asset_glyph(AssetId::TABLER_CHECK)
+                                                .size(px(14.0))
+                                                .text_color(muted),
+                                        ),
                                 )
                             })
-                            .when(hovered, |el| {
-                                el.bg(theme.colors.accent.to_paint())
-                                    .text_color(theme.colors.accent_foreground.to_paint())
-                            });
+                            .when(highlighted, |row| highlight_fill(row, &theme));
                         if entry.disabled {
-                            return row.opacity(0.5);
+                            return row.opacity(crate::theme::Opacity::Disabled.alpha());
                         }
                         let state = list_state.clone();
                         let value = entry.value.clone();
                         let change = change.clone();
-                        row = row.cursor_pointer().on_click(move |event, window, cx| {
-                            state.update(cx, |state, cx| {
-                                state.open = false;
-                                window.focus(&state.focus, cx);
-                                cx.notify();
+                        let (hover, hover_state) = (list_hover.clone(), list_state.clone());
+                        row = row
+                            .cursor_pointer()
+                            .child(list_hover.row_probe(hover_id.clone()))
+                            .on_hover(move |hovered: &bool, _, cx| {
+                                hover.hovered(&hover_id, *hovered);
+                                hover_state.update(cx, |state, cx| {
+                                    if *hovered {
+                                        state.keyed = false;
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .on_click(move |event, window, cx| {
+                                state.update(cx, |state, cx| {
+                                    state.set_open(false, cx);
+                                    window.focus(&state.focus, cx);
+                                });
+                                if let Some(change) = &change {
+                                    change(value.clone(), Some(event), window, cx);
+                                }
+                                cx.stop_propagation();
                             });
-                            if let Some(change) = &change {
-                                change(value.clone(), Some(event), window, cx);
-                            }
-                            cx.stop_propagation();
-                        });
                         row
                     })
                     .collect()
             })
-            .h((row_height * count.max(1) as f32)
+            .h((px(OPTION_HEIGHT) * crate::f32_of_count(count.max(1)))
                 .min(theme.density.command_list_max_height)
                 .min(popup_height))
             .track_scroll(&scroll);
             let outside = state.clone();
             let popup_bounds = crate::measure::Measured::default();
             let outside_bounds = popup_bounds.clone();
-            root = root
-                .on_mouse_down_out(move |event: &MouseDownEvent, _, cx| {
+            let radius = RadiusTokens::value(RadiusStep::X2l);
+            let panel = crate::popover::glass_menu("select-panel", &theme, radius)
+                .role(Role::ListBox)
+                .when_some(self.selector.clone(), |el, selector| {
+                    el.debug_selector(move || format!("{selector}-popup"))
+                })
+                .relative()
+                .min_w(px(MENU_MIN_WIDTH))
+                .max_w((window.viewport_size().width - px(16.0)).max(px(1.0)))
+                .p(px(4.0))
+                .child(popup_bounds.record())
+                .child(hover.surface_probe())
+                .child(hover.pill(
+                    "select-hover",
+                    &theme,
+                    RadiusTokens::value(RadiusStep::Xl),
+                    cx.reduce_motion(),
+                ))
+                .child(list);
+            if open {
+                root = root.on_mouse_down_out(move |event: &MouseDownEvent, _, cx| {
                     if outside_bounds.contains(&event.position) {
                         return;
                     }
-                    outside.update(cx, |state, cx| {
-                        state.open = false;
-                        cx.notify();
-                    });
-                })
-                .child(
-                    deferred(
-                        anchored()
-                            .position_mode(AnchoredPositionMode::Local)
-                            .snap_to_window_with_margin(px(8.0))
-                            .position(point(px(0.0), theme.density.control_default + px(4.0)))
-                            .child(
-                                div()
-                                    .id("select-listbox")
-                                    .role(Role::ListBox)
-                                    .when_some(self.selector.clone(), |el, selector| {
-                                        el.debug_selector(move || format!("{selector}-popup"))
-                                    })
-                                    .relative()
-                                    .w(px(144.0).min(
-                                        (window.viewport_size().width - px(16.0)).max(px(1.0)),
-                                    ))
-                                    .child(popup_bounds.record())
-                                    .child(
-                                        crate::popover::PopoverPanel::new("panel", theme, list)
-                                            .select_menu(),
-                                    ),
-                            ),
-                    )
-                    .with_priority(popup_priority),
-                );
+                    outside.update(cx, |state, cx| state.set_open(false, cx));
+                });
+            }
+            root = root.child(
+                deferred(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .snap_to_window_with_margin(px(8.0))
+                        .position(point(px(0.0), theme.density.control_default + px(6.0)))
+                        .child(div().id("select-listbox").child(animate_menu(
+                            panel,
+                            &motion,
+                            "select",
+                            MenuEntrance::Scale {
+                                origin: gpui::Point::new(0.0, 0.0),
+                            },
+                            MENU_MOTION,
+                            MENU_MOTION,
+                        ))),
+                )
+                .with_priority(popup_priority),
+            );
         }
         root
     }
@@ -464,13 +592,21 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
 mod tests {
     use super::*;
     #[gpui::test]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "gpui::test hands every test its context as &mut"
+    )]
     fn committed_values_and_reordered_options_keep_semantic_selection(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
             let mut state = State {
                 open: false,
+                shown: false,
+                motion: Rc::default(),
+                hover: HoverSurface::default(),
                 highlighted: Some(1),
+                keyed: false,
                 focus: cx.focus_handle(),
                 scroll: UniformListScrollHandle::new(),
                 query: String::new(),

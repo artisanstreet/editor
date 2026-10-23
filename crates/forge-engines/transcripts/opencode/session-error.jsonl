@@ -1,4 +1,0 @@
-{"id": "evt_016", "type": "session.next.prompt.admitted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_017", "type": "session.next.prompted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_018", "type": "session.error", "data": {"sessionID": "ses_root", "error": {"name": "ContextOverflowError", "data": {"message": "context full"}}}}
-{"id": "evt_019", "type": "session.error", "data": {"sessionID": "ses_root", "error": {"name": "APIError", "data": {"message": "denied"}}}}

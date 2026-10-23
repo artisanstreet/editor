@@ -29,7 +29,11 @@ struct ActiveLeaf {
     clippy::too_many_lines,
     reason = "one pass over the parser's events, keeping list, table and leaf state together"
 )]
-pub(super) fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "pulldown-cmark's events and tags: only the ones named here shape the index"
+)]
+pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
     if source.len() > SOURCE_BYTES {
         return Err(MarkdownIndexError::SourceBudget);
     }
@@ -76,8 +80,8 @@ pub(super) fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
                     | Tag::List(_)
             ) | Event::End(TagEnd::Item)
         );
-        if boundary && active.as_ref().is_some_and(|a| a.implicit) {
-            let mut leaf = active.take().unwrap().leaf;
+        if boundary && let Some(implicit) = active.take_if(|a| a.implicit) {
+            let mut leaf = implicit.leaf;
             leaf.events.push(IndexedEvent {
                 token: Token::Structural(Event::End(TagEnd::Paragraph)),
                 range: leaf.range.clone(),
@@ -90,9 +94,11 @@ pub(super) fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
 
         if active.is_none()
             && matches!(&event, Event::End(TagEnd::Item))
-            && items.last().is_some_and(|item| item.previous.is_none())
+            && let Some(source_start) = items
+                .last()
+                .filter(|item| item.previous.is_none())
+                .map(|item| item.source_start)
         {
-            let source_start = items.last().unwrap().source_start;
             let context = LeafContext {
                 lists: lists
                     .iter()
@@ -350,8 +356,8 @@ pub(super) fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
         if admission_bytes > INDEX_BYTES {
             return Err(MarkdownIndexError::IndexBudget);
         }
-        if finishes {
-            result.leaves.push(active.take().unwrap().leaf);
+        if finishes && let Some(done) = active.take() {
+            result.leaves.push(done.leaf);
             for item in &mut items {
                 item.first = false;
             }
@@ -425,13 +431,13 @@ fn intern_text(
         return Ok(Text::Range(start..start + text.len()));
     }
     if let Some(known) = decoded.get(text) {
-        return Ok(Text::Decoded(known.clone()));
+        return Ok(Text::Decoded(Arc::clone(known)));
     }
     if bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64) > INDEX_BYTES {
         return Err(MarkdownIndexError::IndexBudget);
     }
     let text: Arc<str> = Arc::from(text);
     *bytes = bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64);
-    decoded.insert(text.clone());
+    decoded.insert(Arc::clone(&text));
     Ok(Text::Decoded(text))
 }

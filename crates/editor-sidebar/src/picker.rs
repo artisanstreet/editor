@@ -1,12 +1,11 @@
 //! Forge-owned directory browsing is identical for every paired host.
 use artisan_api::{CreateProject, DirListing, Project, ProjectId};
 use editor_core::ForgeClient;
-use editor_ui::theme::{RadiusStep, RadiusTokens};
+use editor_ui::theme::{ActiveTheme as _, Opacity, RadiusStep, RadiusTokens};
 use editor_ui::{
     AssetId,
     asset_seam::asset_glyph,
     text_editor::{TextEditor, TextEditorEvent},
-    theme::ArtisanTheme,
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -15,12 +14,11 @@ use gpui::{
     Subscription, Task, Window, div, px, uniform_list,
 };
 
-pub(crate) enum PickerEvent {
+pub enum PickerEvent {
     Added(Project),
 }
-pub(crate) struct FolderPicker {
+pub struct FolderPicker {
     client: ForgeClient,
-    theme: ArtisanTheme,
     listing: Option<DirListing>,
     path: Entity<TextEditor>,
     hidden: bool,
@@ -44,7 +42,7 @@ pub(crate) struct FolderPicker {
 }
 impl EventEmitter<PickerEvent> for FolderPicker {}
 impl FolderPicker {
-    pub(crate) fn new(client: ForgeClient, theme: ArtisanTheme, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(client: ForgeClient, cx: &mut Context<Self>) -> Self {
         let path = cx.new(|cx| TextEditor::new("", "Path on Forge", cx).single_line());
         let submitted = cx.subscribe(&path, |this, path, event: &TextEditorEvent, cx| {
             if *event == TextEditorEvent::Submitted {
@@ -53,7 +51,6 @@ impl FolderPicker {
         });
         let mut picker = Self {
             client,
-            theme,
             listing: None,
             path,
             hidden: false,
@@ -75,7 +72,7 @@ impl FolderPicker {
         picker.browse(None, cx);
         picker
     }
-    pub(crate) fn creating(&self) -> bool {
+    pub(crate) const fn creating(&self) -> bool {
         self.creating
     }
     fn filter(&mut self) {
@@ -108,7 +105,7 @@ impl FolderPicker {
         let client = self.client.clone();
         self.browse = cx.spawn(async move |this, cx| {
             let result = client.list_dir(path.as_deref()).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.loading = false;
                 match result {
                     Ok(listing) => {
@@ -119,11 +116,12 @@ impl FolderPicker {
                         this.filter();
                     }
                     Err(error) => {
-                        this.error = Some(format!("Couldn't open this folder: {error:#}"))
+                        this.error = Some(format!("Couldn't open this folder: {error:#}"));
                     }
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         });
         cx.notify();
     }
@@ -164,7 +162,7 @@ impl FolderPicker {
             } else {
                 result
             };
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.creating = false;
                 this.path
                     .update(cx, |path, cx| path.set_disabled(false, cx));
@@ -173,14 +171,19 @@ impl FolderPicker {
                     Err(error) => this.error = Some(format!("Couldn't add this folder: {error:#}")),
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         });
         cx.notify();
     }
 }
 impl Render for FolderPicker {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the picker's root element tree, ported from the old Editor"
+    )]
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
+        let theme = *cx.theme();
         let busy = self.loading || self.creating;
         let parent = self
             .listing
@@ -222,20 +225,21 @@ impl Render for FolderPicker {
                                 .rounded(RadiusTokens::value(RadiusStep::Sm))
                                 .when(!busy, |row| {
                                     row.cursor_pointer()
-                                        .hover(move |style| style.bg(theme.colors.muted.to_paint()))
+                                        .hover(move |style| style.bg(theme.colors.hover.to_paint()))
                                 })
                                 .child(
                                     asset_glyph(icon)
                                         .size(px(15.0))
-                                        .text_color(theme.colors.muted_foreground.to_paint()),
+                                        .text_color(theme.colors.text_muted.to_paint()),
                                 )
                                 .child(div().flex_1().min_w_0().truncate().child(label))
                                 .on_click(move |_, _, cx| {
                                     if busy {
                                         return;
                                     }
-                                    let _ = owner
-                                        .update(cx, |this, cx| this.browse(Some(path.clone()), cx));
+                                    owner
+                                        .update(cx, |this, cx| this.browse(Some(path.clone()), cx))
+                                        .ok();
                                 }),
                         )
                     })
@@ -254,17 +258,17 @@ impl Render for FolderPicker {
             .flex_col()
             .gap(px(10.0))
             .text_size(theme.typography.control_text)
-            .text_color(theme.colors.foreground.to_paint())
+            .text_color(theme.colors.text.to_paint())
             .child(
                 div()
                     .truncate()
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .child(path),
             )
             .child(list)
             .children(self.error.clone().map(|error| {
                 div()
-                    .text_color(theme.colors.destructive.to_paint())
+                    .text_color(theme.colors.destructive_text.to_paint())
                     .child(error)
             }))
             .child(
@@ -280,8 +284,8 @@ impl Render for FolderPicker {
                         .items_center()
                         .rounded(RadiusTokens::value(RadiusStep::Md))
                         .bg(theme.colors.primary.to_paint())
-                        .text_color(theme.colors.primary_foreground.to_paint())
-                        .when(!can_add, |button| button.opacity(0.5))
+                        .text_color(theme.colors.primary_text.to_paint())
+                        .when(!can_add, |button| button.opacity(Opacity::Disabled.alpha()))
                         .when(can_add, |button| {
                             button
                                 .focusable()
@@ -330,10 +334,10 @@ mod request_tests {
         setup.wait(cx, "initial listing", |_, cx| {
             picker.read_with(cx, |picker, _| !picker.loading)
         });
-        let path = setup._dir.path().join("new-project");
+        let path = setup.dir.path().join("new-project");
         std::fs::create_dir(&path).unwrap();
         picker.update(cx, |picker, cx| {
-            picker.browse(Some(path.display().to_string()), cx)
+            picker.browse(Some(path.display().to_string()), cx);
         });
         setup.wait(cx, "project directory listing", |_, cx| {
             picker.read_with(cx, |picker, _| !picker.loading)
@@ -341,7 +345,7 @@ mod request_tests {
         let arrived = Arc::new(AtomicBool::new(false));
         let (release, receive) = tokio::sync::oneshot::channel();
         picker.update(cx, |picker, cx| {
-            picker.create_completion_gate = Some((arrived.clone(), receive));
+            picker.create_completion_gate = Some((Arc::clone(&arrived), receive));
             picker.add(cx);
         });
         setup.wait(cx, "server creation acknowledged but held", |_, _| {
@@ -416,10 +420,10 @@ mod request_tests {
         setup.wait(cx, "initial listing", |_, cx| {
             picker.read_with(cx, |picker, _| !picker.loading)
         });
-        let path = setup._dir.path().join("retry-project");
+        let path = setup.dir.path().join("retry-project");
         std::fs::create_dir(&path).unwrap();
         picker.update(cx, |picker, cx| {
-            picker.browse(Some(path.display().to_string()), cx)
+            picker.browse(Some(path.display().to_string()), cx);
         });
         setup.wait(cx, "project directory listing", |_, cx| {
             picker.read_with(cx, |picker, _| !picker.loading)
@@ -427,7 +431,7 @@ mod request_tests {
         let arrived = Arc::new(AtomicBool::new(false));
         let (release, receive) = tokio::sync::oneshot::channel();
         picker.update(cx, |picker, cx| {
-            picker.create_completion_gate = Some((arrived.clone(), receive));
+            picker.create_completion_gate = Some((Arc::clone(&arrived), receive));
             picker.add(cx);
         });
         setup.wait(cx, "held accepted creation", |_, _| {
@@ -448,7 +452,7 @@ mod request_tests {
             picker.read_with(cx, |picker, _| picker.request.as_ref().unwrap().id.clone()),
             id
         );
-        picker.update(cx, |picker, cx| picker.add(cx));
+        picker.update(cx, super::FolderPicker::add);
         setup.wait(cx, "idempotent retry selected project", |setup, cx| setup.core.read_with(cx, |core, _| matches!(core.screen(), editor_core::Screen::NewThread { project: Some(project), .. } if *project == id)));
         assert_eq!(
             picker.read_with(cx, |picker, _| picker
@@ -467,6 +471,10 @@ mod request_tests {
         );
     }
     #[gpui::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test sets up two Forge hosts and switches between them"
+    )]
     fn creation_acknowledgement_on_old_host_cannot_navigate_the_new_host(cx: &mut TestAppContext) {
         let setup = Setup::new(cx);
         setup.wait(cx, "paired host", |setup, cx| {
@@ -486,10 +494,10 @@ mod request_tests {
         setup.wait(cx, "initial listing", |_, cx| {
             picker.read_with(cx, |picker, _| !picker.loading)
         });
-        let path = setup._dir.path().join("old-host-project");
+        let path = setup.dir.path().join("old-host-project");
         std::fs::create_dir(&path).unwrap();
         picker.update(cx, |picker, cx| {
-            picker.browse(Some(path.display().to_string()), cx)
+            picker.browse(Some(path.display().to_string()), cx);
         });
         setup.wait(cx, "project directory", |_, cx| {
             picker.read_with(cx, |picker, _| !picker.loading)
@@ -497,7 +505,7 @@ mod request_tests {
         let arrived = Arc::new(AtomicBool::new(false));
         let (release, receive) = tokio::sync::oneshot::channel();
         picker.update(cx, |picker, cx| {
-            picker.create_completion_gate = Some((arrived.clone(), receive));
+            picker.create_completion_gate = Some((Arc::clone(&arrived), receive));
             picker.add(cx);
         });
         setup.wait(cx, "held creation acknowledgement", |_, _| {
@@ -507,7 +515,7 @@ mod request_tests {
         let server = setup
             .forge
             .block_on(forge_http::start(forge_http::ServeConfig {
-                data_dir: setup._dir.path().join("second-forge"),
+                data_dir: setup.dir.path().join("second-forge"),
                 listen: "127.0.0.1:0".parse().unwrap(),
             }))
             .unwrap();
@@ -518,7 +526,7 @@ mod request_tests {
             &store,
             &setup.forge,
             &address,
-            &setup._dir.path().join("editor"),
+            &setup.dir.path().join("editor"),
         );
         let baseline = editor_core::Screen::NewThread {
             host: host.id.clone(),
@@ -542,7 +550,7 @@ mod request_tests {
         setup
             .window
             .update(cx, |sidebar, _, _| {
-                sidebar.error = Some("new host error".into())
+                sidebar.error = Some("new host error".into());
             })
             .unwrap();
         release.send(false).unwrap();

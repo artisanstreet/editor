@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gpui::{FontWeight, HighlightStyle, hsla};
+use gpui::{FontWeight, HighlightStyle};
 
 use super::{
     TerminalColor, TerminalLine, TerminalPalette, TerminalScreen, TerminalStyle, highlights,
@@ -283,6 +283,10 @@ fn cursor_moves_tabs_and_erases() {
 }
 
 #[test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "reading the screen must not panic; what it reads is random"
+)]
 fn random_bytes_never_panic() {
     let mut state = 0x2545_f491_4f6c_dd1d_u64;
     let mut next = || {
@@ -316,9 +320,10 @@ fn random_bytes_never_panic() {
 
 #[test]
 fn highlights_map_styles() {
-    let dark = TerminalPalette::for_theme(&ArtisanTheme::resolved());
-    let foreground = hsla(0.0, 0.0, 0.9, 1.0);
-    let background = hsla(0.0, 0.0, 0.1, 1.0);
+    let theme = ArtisanTheme::resolved();
+    let dark = TerminalPalette::for_theme(&theme);
+    let foreground = theme.colors.text.to_paint();
+    let background = theme.colors.surface.to_paint();
     let screen = screen(
         "\x1b[1;31mE\x1b[0m \x1b[2mD\x1b[0m \x1b[7mI\x1b[0m \x1b[30mK\x1b[0m \x1b[3;9mS\x1b[0m \
          \x1b]8;;https://x.dev\x07L\x1b]8;;\x07 plain",
@@ -335,16 +340,14 @@ fn highlights_map_styles() {
     let error = at("E");
     assert_eq!(error.font_weight, Some(FontWeight::BOLD));
     assert_eq!(error.color, Some(dark.base[1]));
-    let dim = at("D").color.expect("dim colour");
-    assert!((dim.alpha - 0.6).abs() < 1e-6);
+    assert_eq!(at("D").color, Some(dark.dim));
     let inverse = at("I");
     assert_eq!(
         (inverse.color, inverse.background_color),
         (Some(background), Some(foreground))
     );
-    // Black text on the dark background is lifted until it reads.
-    let black = at("K").color.expect("black");
-    assert!(black.lightness >= 0.25, "{black:?}");
+    // Black text on the dark background falls back to the default text.
+    assert_eq!(at("K").color, Some(foreground));
     let struck = at("S");
     assert!(struck.strikethrough.is_some() && struck.font_style.is_some());
     assert!(at("L").underline.is_some());
@@ -379,6 +382,10 @@ fn combining_marks_do_not_advance_the_terminal_cursor() {
 }
 
 #[test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the read materializes the screen; its value doesn't matter"
+)]
 fn dirty_rows_include_cursor_writes_above_the_tail_and_survive_materialization() {
     let mut screen = TerminalScreen::new();
     screen.feed(b"first\nsecond\nthird");

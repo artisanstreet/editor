@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use super::super::{BlockContext, RichBlock, kit};
 use super::frame::{self, ReadoutRow, Tick};
-use super::scale::{Domain, f32_of, f64_of, index_of, reading};
+use super::scale::{Domain, f32_of, f32_of_count, f64_of, index_of, reading};
 use super::scene::{Probe, Shape, fractions, plot_canvas, probe, probed_width};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -145,11 +145,11 @@ impl Heatmap {
         }
     }
 
-    fn color(&self, value: f64) -> gpui::Hsla {
+    fn color(&self, theme: &ArtisanTheme, value: f64) -> gpui::Hsla {
         let t = self.position(value);
         match self.scale {
-            Scale::Sequential => kit::sequential_color(t),
-            Scale::Diverging => kit::diverging_color(t),
+            Scale::Sequential => kit::sequential_color(theme, t),
+            Scale::Diverging => kit::diverging_color(theme, t),
         }
         .to_paint()
     }
@@ -163,7 +163,7 @@ impl RichBlock for Heatmap {
             + budget::strings(&self.y)
             + budget::vector(&self.values)
             + self.values.iter().map(budget::vector).sum::<usize>()
-            + budget::optional(&self.unit)
+            + budget::optional(self.unit.as_ref())
     }
 
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
@@ -191,6 +191,10 @@ struct HeatmapState {
 }
 
 impl RenderOnce for HeatmapView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let spec = &self.spec;
@@ -201,7 +205,7 @@ impl RenderOnce for HeatmapView {
         let state = kit::keyed(window, cx, ElementId::Name(self.id.clone()), || {
             let list = gpui::UniformListScrollHandle::new();
             HeatmapState {
-                model: spec.0.clone(),
+                model: Arc::clone(&spec.0),
                 hover: None,
                 probe: probe(),
                 rows: list,
@@ -210,7 +214,7 @@ impl RenderOnce for HeatmapView {
         state.update(cx, |state, _| {
             if !Arc::ptr_eq(&state.model, &spec.0) {
                 let changed = *state.model != *spec.0;
-                state.model = spec.0.clone();
+                state.model = Arc::clone(&spec.0);
                 if changed {
                     state.hover = None;
                     state.rows = gpui::UniformListScrollHandle::new();
@@ -219,7 +223,7 @@ impl RenderOnce for HeatmapView {
         });
         let (hover, plot_probe) = {
             let current = state.read(cx);
-            (current.hover, current.probe.clone())
+            (current.hover, std::rc::Rc::clone(&current.probe))
         };
         let column_count = f64_of(columns);
         let center = |index: usize, count: f64| f32_of((f64_of(index) + 0.5) / count);
@@ -257,7 +261,7 @@ impl RenderOnce for HeatmapView {
             range
                 .map(|row| {
                     let row_probe = probe();
-                    let moving_probe = row_probe.clone();
+                    let moving_probe = std::rc::Rc::clone(&row_probe);
                     let moving = row_state.clone();
                     let id = row_id.clone();
                     div()
@@ -275,7 +279,7 @@ impl RenderOnce for HeatmapView {
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .text_size(theme.typography.control_text)
-                                .text_color(theme.colors.muted_foreground.to_paint())
+                                .text_color(theme.colors.text_muted.to_paint())
                                 .child(row_model.y_label(row)),
                         )
                         .child(
@@ -314,7 +318,7 @@ impl RenderOnce for HeatmapView {
         })
         .track_scroll(&list_state)
         .w_full()
-        .h(theme.density.control_sm * rows.min(10) as f32);
+        .h(theme.density.control_sm * f32_of_count(rows.min(10)));
         let plot = div()
             .relative()
             .w_full()
@@ -373,14 +377,18 @@ impl HeatmapView {
         let theme = &self.theme;
         let spec = &self.spec;
         let unit = spec.unit.as_deref();
-        let stop_count = 9;
+        // One stop per discrete step of the ramp.
+        let stop_count = match spec.scale {
+            Scale::Sequential => kit::SEQUENTIAL_STEPS.len(),
+            Scale::Diverging => 9,
+        };
         let (stops, ends): (Vec<gpui::Hsla>, [String; 2]) = match spec.scale {
             // A sequential ramp reads as amount, like a contribution calendar;
             // the exact values are on hover.
             Scale::Sequential => (
                 (0..stop_count)
                     .map(|step| {
-                        kit::sequential_color(f32_of(f64_of(step) / f64_of(stop_count - 1)))
+                        kit::sequential_color(theme, f32_of(f64_of(step) / f64_of(stop_count - 1)))
                             .to_paint()
                     })
                     .collect(),
@@ -392,7 +400,7 @@ impl HeatmapView {
                     (0..stop_count)
                         .map(|step| {
                             let t = f32_of(f64_of(step) / f64_of(stop_count - 1)) * 2.0 - 1.0;
-                            kit::diverging_color(t).to_paint()
+                            kit::diverging_color(theme, t).to_paint()
                         })
                         .collect(),
                     [reading(-reach, unit), reading(reach, unit)],
@@ -427,7 +435,7 @@ fn row_shapes(
     row: usize,
     hover: Option<(usize, usize)>,
 ) -> Vec<Shape> {
-    let columns = spec.columns() as f64;
+    let columns = f64_of(spec.columns());
     let mut shapes = Vec::new();
     if let Some(cells) = spec.values.get(row) {
         for column in 0..cells.len() {
@@ -435,8 +443,8 @@ fn row_shapes(
                 continue;
             };
             let (x0, x1) = (
-                f32_of(column as f64 / columns),
-                f32_of((column + 1) as f64 / columns),
+                f32_of(f64_of(column) / columns),
+                f32_of(f64_of(column + 1) / columns),
             );
             let inset = (x1 - x0) * 0.05;
             shapes.push(Shape::Rect {
@@ -444,19 +452,19 @@ fn row_shapes(
                 x1: x1 - inset,
                 y0: 0.05,
                 y1: 0.95,
-                color: spec.color(value),
+                color: spec.color(theme, value),
             });
         }
     }
     if let Some((_, column)) = hover.filter(|(selected, _)| *selected == row) {
         let (x0, x1) = (
-            f32_of(column as f64 / columns),
-            f32_of((column + 1) as f64 / columns),
+            f32_of(f64_of(column) / columns),
+            f32_of(f64_of(column + 1) / columns),
         );
         shapes.push(Shape::Line {
             points: vec![(x0, 0.0), (x1, 0.0), (x1, 1.0), (x0, 1.0), (x0, 0.0)],
             width: 2.0,
-            color: theme.colors.foreground.to_paint(),
+            color: theme.colors.text.to_paint(),
             dash: false,
         });
     }
@@ -495,7 +503,7 @@ mod native_window_tests {
                 x: vec!["first".into(), "last".into()],
                 y: Vec::new(),
                 values: (0..1000)
-                    .map(|row| vec![Some(row as f64), Some(1.0)])
+                    .map(|row| vec![Some(f64::from(row)), Some(1.0)])
                     .collect(),
                 unit: None,
                 scale: Scale::Sequential,

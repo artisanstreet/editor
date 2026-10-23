@@ -4,6 +4,10 @@ use super::super::mesh::{Corner, MAX_TRIANGLES, MeshBuilder, Up, Vec3, srgb_to_l
 const MAX_FACE_CORNERS: u32 = 4096;
 const MAX_SCENE_BYTES: usize = 64 * 1024 * 1024;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one sequential pass; splitting it would only thread its locals through helpers"
+)]
 pub(super) fn parse(
     bytes: &[u8],
     format: ufbx::FileFormat,
@@ -14,12 +18,12 @@ pub(super) fn parse(
         file_format: format,
         temp_allocator: ufbx::AllocatorOpts {
             memory_limit: MAX_SCENE_BYTES,
-            allocation_limit: 262144,
+            allocation_limit: 262_144,
             ..Default::default()
         },
         result_allocator: ufbx::AllocatorOpts {
             memory_limit: MAX_SCENE_BYTES,
-            allocation_limit: 262144,
+            allocation_limit: 262_144,
             ..Default::default()
         },
         node_depth_limit: 64,
@@ -50,7 +54,7 @@ pub(super) fn parse(
     // Only diagnostics scan record locations; the maintained reader owns all OBJ grammar.
     let face_lines: Vec<_> = if format == ufbx::FileFormat::Obj {
         std::str::from_utf8(bytes)
-            .map_err(|_| "the OBJ is not text")?
+            .map_err(|_not_utf8| "the OBJ is not text")?
             .lines()
             .enumerate()
             .filter_map(|(line, text)| {
@@ -131,7 +135,11 @@ pub(super) fn parse(
     }
     Ok(match scene.settings.axes.up {
         ufbx::CoordinateAxis::PositiveZ | ufbx::CoordinateAxis::NegativeZ => Up::Z,
-        _ => Up::Y,
+        ufbx::CoordinateAxis::PositiveX
+        | ufbx::CoordinateAxis::NegativeX
+        | ufbx::CoordinateAxis::PositiveY
+        | ufbx::CoordinateAxis::NegativeY
+        | ufbx::CoordinateAxis::Unknown => Up::Y,
     })
 }
 fn attribute3(values: &ufbx::VertexVec3, corner: usize) -> Option<ufbx::Vec3> {
@@ -158,9 +166,14 @@ fn attribute4(values: &ufbx::VertexVec4, corner: usize) -> Option<ufbx::Vec4> {
         })
         .flatten()
 }
-fn vec3(v: ufbx::Vec3) -> Vec3 {
+#[expect(clippy::cast_possible_truncation, reason = "models render in f32")]
+const fn vec3(v: ufbx::Vec3) -> Vec3 {
     Vec3::new(v.x as f32, v.y as f32, v.z as f32)
 }
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "clamped colour channels fit an f32"
+)]
 fn rgb(v: ufbx::Vec4) -> Vec3 {
     Vec3::new(
         srgb_to_linear((v.x as f32).clamp(0.0, 1.0)),

@@ -11,8 +11,7 @@ expression: report
                 "Be brief.",
                 true,
                 [
-                    "deploy/",
-                    "mine/",
+                    "deploy -> data/extensions/skills/deploy",
                     "review -> data/extensions/skills/review",
                 ],
             ),
@@ -22,7 +21,6 @@ expression: report
             "<root>/claude/.artisan/claude-mcp.json",
         ],
         [],
-        0,
         Some(
             "{\n  \"mcpServers\": {\n    \"files\": {\n      \"type\": \"stdio\",\n      \"command\": \"npx\",\n      \"args\": [\n        \"-y\",\n        \"@mcp/files\"\n      ],\n      \"env\": {\n        \"ROOT\": \"/srv \\\"x\\\"\"\n      }\n    },\n    \"docs.web\": {\n      \"type\": \"http\",\n      \"url\": \"https://mcp.example/docs\"\n    }\n  }\n}",
         ),
@@ -35,15 +33,13 @@ expression: report
                 "Be brief.",
                 true,
                 [
-                    "deploy/",
-                    "mine/",
+                    "deploy -> data/extensions/skills/deploy",
                     "review -> data/extensions/skills/review",
                 ],
             ),
         ),
         [],
         [],
-        0,
         None,
     ),
     (
@@ -54,8 +50,7 @@ expression: report
                 "Be brief.",
                 true,
                 [
-                    "deploy/",
-                    "mine/",
+                    "deploy -> data/extensions/skills/deploy",
                     "review -> data/extensions/skills/review",
                 ],
             ),
@@ -67,34 +62,6 @@ expression: report
                 "{\"mcp\":{\"files\":{\"type\":\"local\",\"command\":[\"npx\",\"-y\",\"@mcp/files\"],\"environment\":{\"ROOT\":\"/srv \\\"x\\\"\"},\"enabled\":true},\"docs.web\":{\"type\":\"remote\",\"url\":\"https://mcp.example/docs\",\"enabled\":true}}}",
             ),
         ],
-        0,
-        None,
-    ),
-    (
-        "grok",
-        Some(
-            (
-                ".grok/AGENTS.md",
-                "Be brief.",
-                true,
-                [
-                    "deploy/",
-                    "mine/",
-                    "review -> data/extensions/skills/review",
-                ],
-            ),
-        ),
-        [],
-        [],
-        2,
-        None,
-    ),
-    (
-        "cursor",
-        None,
-        [],
-        [],
-        2,
         None,
     ),
 ]

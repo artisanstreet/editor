@@ -1,3 +1,5 @@
-{"id": "evt_003", "type": "session.next.prompt.admitted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_004", "type": "session.next.prompted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_005", "type": "session.next.text.ended", "data": {"sessionID": "ses_root", "assistantMessageID": "m1", "textID": "part1"}}
+{"id": "evt_003", "type": "session.inbox.enqueued", "data": {"sessionID": "ses_root", "inboxID": "msg_1", "item": {"type": "user"}}}
+{"id": "evt_004", "type": "session.execution.started", "data": {"sessionID": "ses_root"}}
+{"id": "evt_005", "type": "session.inbox.delivered", "data": {"sessionID": "ses_root", "inboxID": "msg_1"}}
+{"id": "evt_006", "type": "session.text.ended", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "ordinal": 0}}
+{"id": "evt_007", "type": "session.execution.succeeded", "data": {"sessionID": "ses_root"}}

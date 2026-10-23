@@ -124,10 +124,13 @@ pub fn bundled_fonts() -> Vec<Cow<'static, [u8]>> {
 ///
 /// Returns [`UnknownFont`] when `family` names no vendored face.
 pub fn lookup_family(family: &str) -> Result<&'static BundledFont, UnknownFont> {
-    match ALL.binary_search_by(|probe| probe.family.cmp(family)) {
-        Ok(index) => Ok(&ALL[index]),
-        Err(_) => Err(UnknownFont {
-            id: String::from(family),
-        }),
-    }
+    ALL.binary_search_by(|probe| probe.family.cmp(family))
+        .map_or_else(
+            |_| {
+                Err(UnknownFont {
+                    id: String::from(family),
+                })
+            },
+            |index| Ok(&ALL[index]),
+        )
 }

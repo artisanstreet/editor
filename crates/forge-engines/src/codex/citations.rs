@@ -17,6 +17,10 @@ struct Stream {
     escaped: bool,
 }
 impl Citations {
+    #[expect(
+        clippy::expect_used,
+        reason = "the adapter emits inline text; storage happens after normalising"
+    )]
     pub(super) fn normalize(&mut self, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
         events
             .into_iter()
@@ -53,7 +57,16 @@ impl Citations {
                     EngineEvent::Status { key, status } if status.is_terminal() => {
                         self.streams.remove(key);
                     }
-                    _ => {}
+                    EngineEvent::Session { .. }
+                    | EngineEvent::Model { .. }
+                    | EngineEvent::Title { .. }
+                    | EngineEvent::Item { .. }
+                    | EngineEvent::Image { .. }
+                    | EngineEvent::Status { .. }
+                    | EngineEvent::Live { .. }
+                    | EngineEvent::Usage(_)
+                    | EngineEvent::Commands(_)
+                    | EngineEvent::InputAccepted { .. } => {}
                 }
                 Some(event)
             })
@@ -64,20 +77,7 @@ impl Stream {
     fn push(&mut self, delta: &str) -> String {
         let mut output = String::with_capacity(delta.len());
         for character in delta.chars() {
-            if !self.pending.is_empty() {
-                self.pending.push(character);
-                if character == '\u{e201}' {
-                    if self.pending.starts_with("\u{e200}cite\u{e202}") {
-                        output.push_str(" [source unavailable]");
-                    } else {
-                        output.push_str(&self.pending);
-                    }
-                    self.pending.clear();
-                } else if self.pending.len() > 4096 {
-                    output.push_str(" [invalid provider citation]");
-                    self.pending.clear();
-                }
-            } else {
+            if self.pending.is_empty() {
                 if character == '`' && !self.escaped {
                     self.backticks += 1;
                     output.push(character);
@@ -97,6 +97,19 @@ impl Stream {
                     output.push(character);
                 }
                 self.escaped = character == '\\' && !self.escaped;
+            } else {
+                self.pending.push(character);
+                if character == '\u{e201}' {
+                    if self.pending.starts_with("\u{e200}cite\u{e202}") {
+                        output.push_str(" [source unavailable]");
+                    } else {
+                        output.push_str(&self.pending);
+                    }
+                    self.pending.clear();
+                } else if self.pending.len() > 4096 {
+                    output.push_str(" [invalid provider citation]");
+                    self.pending.clear();
+                }
             }
         }
         output

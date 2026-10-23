@@ -79,7 +79,7 @@ pub fn dismiss(id: &str, window: &mut Window, cx: &mut App) {
     let removed = stack.remove(index);
     // Closing a parent under a child must not leave the child restoring dead parent focus.
     if let Some(child) = stack.get_mut(index) {
-        child.opener = removed.opener.clone();
+        child.opener.clone_from(&removed.opener);
     }
     if stack.is_empty() {
         host.windows.remove(&window_id);
@@ -181,7 +181,7 @@ pub fn retain(id: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
     if !*lease.read(cx) {
         lease.update(cx, |registered, _| *registered = true);
         cx.observe_release_in(&lease, window, move |_, window, cx| {
-            dismiss(&id, window, cx)
+            dismiss(&id, window, cx);
         })
         .detach();
     }

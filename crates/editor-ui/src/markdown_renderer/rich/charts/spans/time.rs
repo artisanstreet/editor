@@ -29,19 +29,18 @@ impl Time {
                 }
                 let date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?;
                 let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?;
-                Some(Self::Date(
-                    date.signed_duration_since(epoch).num_days() as f64
-                ))
+                let days = i32::try_from(date.signed_duration_since(epoch).num_days()).ok()?;
+                Some(Self::Date(f64::from(days)))
             }
-            _ => None,
+            Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
         }
     }
 
-    pub(in super::super) fn is_date(self) -> bool {
+    pub(in super::super) const fn is_date(self) -> bool {
         matches!(self, Self::Date(_))
     }
 
-    pub(in super::super) fn value(self) -> f64 {
+    pub(in super::super) const fn value(self) -> f64 {
         match self {
             Self::Number(value) | Self::Date(value) => value,
         }
@@ -54,9 +53,14 @@ impl fmt::Display for Time {
         match *self {
             Self::Number(value) => write!(f, "{value}"),
             Self::Date(days) => {
-                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch");
+                let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).ok_or(fmt::Error)?;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "dates hold whole day counts parsed from an i32; the cast saturates"
+                )]
+                let days = days.round() as i64;
                 let date = epoch
-                    .checked_add_signed(chrono::Duration::days(days.round() as i64))
+                    .checked_add_signed(chrono::Duration::days(days))
                     .ok_or(fmt::Error)?;
                 write!(f, "{}", date.format("%b %-d, %Y"))
             }

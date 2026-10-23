@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/claude.rs
-assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -31,6 +30,8 @@ expression: "(events, outcome)"
                 background: true,
                 result: None,
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
         Item {
@@ -55,6 +56,8 @@ expression: "(events, outcome)"
                 background: true,
                 result: None,
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
         Item {
@@ -130,6 +133,8 @@ expression: "(events, outcome)"
                 background: true,
                 result: None,
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
         Item {
@@ -145,6 +150,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: Some(
                     "Sleep 60 seconds then echo finished",
@@ -167,6 +173,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: Some(
                     "Sleep 60 seconds then echo finished",
@@ -209,6 +216,8 @@ expression: "(events, outcome)"
                 background: true,
                 result: None,
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
         Item {
@@ -257,6 +266,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: true,
+                    watch: false,
                 },
                 title: Some(
                     "Sleep 60 seconds then echo finished",
@@ -279,6 +289,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: true,
+                    watch: false,
                 },
                 title: Some(
                     "Sleep 60 seconds then echo finished",
@@ -321,6 +332,8 @@ expression: "(events, outcome)"
                 background: true,
                 result: None,
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
         Item {
@@ -416,6 +429,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: true,
+                    watch: false,
                 },
                 title: Some(
                     "Sleep 60 seconds then echo finished",
@@ -458,6 +472,8 @@ expression: "(events, outcome)"
                 background: true,
                 result: None,
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
         Item {
@@ -523,6 +539,8 @@ expression: "(events, outcome)"
                     ),
                 ),
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
         Item {
@@ -577,6 +595,7 @@ expression: "(events, outcome)"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
 )

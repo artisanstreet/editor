@@ -21,34 +21,42 @@ pub struct EngineProcess {
     line: Vec<u8>,
     oversized: bool,
     trace: Trace,
-    _stderr_task: Option<tokio_util::task::AbortOnDropHandle<()>>,
+    stderr_task: Option<tokio_util::task::AbortOnDropHandle<()>>,
 }
 
 /// Starts `turn.binary` with `args` in `turn.cwd`, `HOME` set to the
 /// engine home and the launch environment applied. The process dies with
 /// the returned value.
 pub fn spawn(turn: &Turn, args: &[String]) -> Result<EngineProcess> {
+    spawn_in(
+        turn,
+        args,
+        &turn.cwd,
+        &format!("{}-{}", turn.engine, turn.thread_id),
+    )
+}
+
+/// [`spawn`] for a process that outlives `turn`: it starts in `cwd` and
+/// traces under `name` rather than the turn's project and thread.
+pub(crate) fn spawn_in(
+    turn: &Turn,
+    args: &[String],
+    cwd: &std::path::Path,
+    name: &str,
+) -> Result<EngineProcess> {
     let mut command = crate::account::engine_command(turn.engine, &turn.binary, &turn.home);
     command
         .args(args)
         .args(&turn.launch.args)
-        .current_dir(&turn.cwd)
+        .current_dir(cwd)
         .envs(turn.launch.env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let trace = Trace::start(
-        turn.trace_dir.as_deref(),
-        &format!("{}-{}", turn.engine, turn.thread_id),
-    );
-    spawn_command(command, trace).with_context(|| {
-        format!(
-            "starting {} in {}",
-            turn.binary.display(),
-            turn.cwd.display()
-        )
-    })
+    let trace = Trace::start(turn.trace_dir.as_deref(), name);
+    spawn_command(command, trace)
+        .with_context(|| format!("starting {} in {}", turn.binary.display(), cwd.display()))
 }
 
 pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess> {
@@ -73,7 +81,8 @@ impl std::ops::DerefMut for OwnedChild {
 impl OwnedChild {
     pub(crate) fn shutdown(&mut self) {
         if self.armed {
-            let _ = self.child.start_kill();
+            // A child that already exited has nothing to kill.
+            self.child.start_kill().ok();
             self.armed = false;
         }
     }
@@ -103,36 +112,32 @@ fn spawn_command(command: Command, trace: Trace) -> Result<EngineProcess> {
     let stdin = child.stdin().take();
     let stdout = BufReader::new(child.stdout().take().context("engine stdout")?);
     let stderr_tail = Arc::new(Mutex::new(String::new()));
-    let stderr_task = if let Some(mut stderr) = child.stderr().take() {
+    let stderr_task = child.stderr().take().map(|mut stderr| {
         let tail = Arc::clone(&stderr_tail);
         let stderr_trace = trace.clone();
-        Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
-            async move {
-                let mut buffer = vec![0_u8; 4096];
-                while let Ok(read) = stderr.read(&mut buffer).await {
-                    if read == 0 {
-                        break;
-                    }
-                    let text = String::from_utf8_lossy(&buffer[..read]);
-                    tracing::debug!(target: "engine_stderr", "{}", text.trim_end());
-                    stderr_trace.record(Kind::Stderr, &text);
-                    let mut tail = tail
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    tail.push_str(&text);
-                    if tail.len() > STDERR_TAIL_BYTES {
-                        let mut cut = tail.len() - STDERR_TAIL_BYTES;
-                        while !tail.is_char_boundary(cut) {
-                            cut += 1;
-                        }
-                        tail.drain(..cut);
-                    }
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut buffer = vec![0_u8; 4096];
+            while let Ok(read) = stderr.read(&mut buffer).await {
+                if read == 0 {
+                    break;
                 }
-            },
-        )))
-    } else {
-        None
-    };
+                let text = String::from_utf8_lossy(&buffer[..read]);
+                tracing::debug!(target: "engine_stderr", "{}", text.trim_end());
+                stderr_trace.record(Kind::Stderr, &text);
+                let mut tail = tail
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                tail.push_str(&text);
+                if tail.len() > STDERR_TAIL_BYTES {
+                    let mut cut = tail.len() - STDERR_TAIL_BYTES;
+                    while !tail.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    tail.drain(..cut);
+                }
+            }
+        }))
+    });
     Ok(EngineProcess {
         child,
         stdin,
@@ -141,7 +146,7 @@ fn spawn_command(command: Command, trace: Trace) -> Result<EngineProcess> {
         line: Vec::new(),
         oversized: false,
         trace,
-        _stderr_task: stderr_task,
+        stderr_task,
     })
 }
 
@@ -162,7 +167,7 @@ impl EngineProcess {
     }
 
     #[must_use]
-    pub fn stdin_open(&self) -> bool {
+    pub const fn stdin_open(&self) -> bool {
         self.stdin.is_some()
     }
 
@@ -197,10 +202,10 @@ impl EngineProcess {
                     }
                     break;
                 }
-                let (chunk, found) = match available.iter().position(|byte| *byte == b'\n') {
-                    Some(index) => (&available[..=index], true),
-                    None => (available, false),
-                };
+                let (chunk, found) = available
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or((available, false), |index| (&available[..=index], true));
                 let used = chunk.len();
                 if !self.oversized && self.line.len() + used <= MAX_LINE_BYTES {
                     self.line.extend_from_slice(chunk);
@@ -241,7 +246,8 @@ impl EngineProcess {
     pub async fn kill(&mut self) {
         self.trace.record(Kind::Note, "killing the process");
         self.child.shutdown();
-        let _ = self.child.wait().await;
+        // Only reaps it; how it ended doesn't matter once killed.
+        self.child.wait().await.ok();
     }
 
     /// Waits for the process to exit and returns its exit code.
@@ -278,8 +284,9 @@ pub async fn probe(
         );
         let status = process.child.wait().await?;
         process.child.shutdown();
-        if let Some(stderr) = process._stderr_task.take() {
-            let _ = stderr.await;
+        if let Some(stderr) = process.stderr_task.take() {
+            // Its tail is what matters; a reader that failed left it as is.
+            stderr.await.ok();
         }
         Ok::<_, anyhow::Error>(std::process::Output {
             stdout,
@@ -295,7 +302,8 @@ pub async fn probe(
     result
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod reform_tests {
     use super::*;
     #[tokio::test]
@@ -359,7 +367,8 @@ mod reform_tests {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
+#[cfg(windows)]
 mod windows_owner_tests {
     use super::*;
     #[tokio::test]

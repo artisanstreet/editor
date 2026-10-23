@@ -20,7 +20,11 @@ impl Engines {
     /// models and usage. Done at startup and after installs.
     pub async fn refresh(&self, engine: EngineId) {
         let engines = self.clone();
-        let _ = tokio::task::spawn_blocking(move || engines.reconcile_install(engine)).await;
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || engines.reconcile_install(engine)).await
+        {
+            tracing::warn!(%engine, %error, "reconciling an engine's install");
+        }
         if self.binary(engine).is_none() {
             return;
         }
@@ -136,7 +140,7 @@ impl Engines {
                 while changes.changed().await.is_ok() {
                     let state = changes.borrow_and_update().clone();
                     let Some(inner) = weak.upgrade() else { break };
-                    let engines = Engines { inner };
+                    let engines = Self { inner };
                     engines.publish(engine);
                     if matches!(
                         state,
@@ -145,7 +149,11 @@ impl Engines {
                             | SignInState::Failed { .. }
                     ) {
                         engines.inner.usage.invalidate(engine);
-                        if matches!(state, SignInState::SignedIn { .. }) {
+                        // OpenCode's free models need no account.
+                        if matches!(state, SignInState::SignedIn { .. })
+                            || (engine == EngineId::OpenCode
+                                && matches!(state, SignInState::SignedOut))
+                        {
                             if let Err(error) = engines.refresh_models(engine).await {
                                 tracing::info!(%engine, "couldn't refresh models after sign-in: {error:#}");
                             }

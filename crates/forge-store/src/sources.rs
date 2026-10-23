@@ -14,7 +14,7 @@ impl Store {
         query: artisan_api::ContentQuery,
     ) -> Result<Option<artisan_api::ContentRange>> {
         let id = id.clone();
-        self.read(move |conn| content::range(conn, &id, query))
+        self.read(move |conn| content::range(conn, &id, &query))
             .await
     }
 
@@ -33,7 +33,7 @@ impl Store {
         );
         let (read_id, read_query) = (id.clone(), query.clone());
         if let Some(range) = self
-            .read(move |conn| source_index::range(conn, &read_id, read_query))
+            .read(move |conn| source_index::range(conn, &read_id, &read_query))
             .await?
         {
             return Ok(Some(range));
@@ -41,8 +41,8 @@ impl Store {
         // One build at a time: a build holds a whole source in memory. The
         // permit travels with the work, so a dropped request cannot let a
         // second build start while the first still runs.
-        let permit = Arc::new(self.inner.index_build.clone().acquire_owned().await?);
-        let (read_id, worker) = (id.clone(), permit.clone());
+        let permit = Arc::new(Arc::clone(&self.inner.index_build).acquire_owned().await?);
+        let (read_id, worker) = (id.clone(), Arc::clone(&permit));
         let format = query.format;
         let built = self
             .read(move |conn| {
@@ -62,7 +62,7 @@ impl Store {
             }
         }
         let id = id.clone();
-        self.read(move |conn| source_index::range(conn, &id, query))
+        self.read(move |conn| source_index::range(conn, &id, &query))
             .await
     }
 

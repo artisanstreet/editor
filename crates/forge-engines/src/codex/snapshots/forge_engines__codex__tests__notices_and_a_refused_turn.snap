@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 202
 expression: "replay(\"notices\")"
 ---
 [
@@ -141,6 +140,7 @@ expression: "replay(\"notices\")"
             error: Some(
                 "Blocked by policy",
             ),
+            retry: None,
         },
     ),
 ]

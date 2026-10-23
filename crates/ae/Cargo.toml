@@ -3,7 +3,7 @@ name = "ae"
 edition.workspace = true
 license-file.workspace = true
 version.workspace = true
-description = "Artisan's host binary: CLI, installer and Forge (`ae forge serve`)."
+description = "Installs and manages Artisan's apps (Forge, the Editor) and Forge's devices and engines."
 
 [[bin]]
 name = "ae"
@@ -14,14 +14,18 @@ test = true
 [dependencies]
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
+artisan-paths = { path = "../artisan-paths" }
 base64.workspace = true
 clap.workspace = true
+cliclack = "=0.5.6"
 ed25519-dalek.workspace = true
 flate2.workspace = true
-forge-engines = { path = "../forge-engines", features = ["legacy-import"] }
+forge-engines = { path = "../forge-engines" }
+claude-ai-browser = { path = "../claude-ai-browser" }
 forge-http = { path = "../forge-http" }
-forge-store = { path = "../forge-store", features = ["legacy-import"] }
+forge-store = { path = "../forge-store" }
 reqwest.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

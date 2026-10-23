@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 928
 expression: "(events, outcome)"
 ---
 (
@@ -97,6 +98,7 @@ expression: "(events, outcome)"
                     ),
                     cwd: None,
                     background: true,
+                    watch: true,
                 },
                 title: Some(
                     "Watch the build",

@@ -7,11 +7,11 @@ use crossbeam_channel::{Receiver, Sender, bounded, select};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) enum PcmEvent {
+pub enum PcmEvent {
     Data { epoch: u64, samples: Vec<f32> },
     End { epoch: u64 },
 }
-pub(crate) struct StreamState {
+pub struct StreamState {
     pub(crate) pcm: Receiver<PcmEvent>,
     pub(crate) signal: Sender<()>,
     pub(crate) epoch: u64,
@@ -21,7 +21,7 @@ pub(crate) struct StreamState {
     pub(crate) ended: bool,
 }
 impl StreamState {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         pcm: Receiver<PcmEvent>,
         signal: Sender<()>,
         duration: Option<Duration>,
@@ -39,7 +39,7 @@ impl StreamState {
 }
 const QUEUE_CHUNKS: usize = 8;
 
-pub(crate) fn play(shared: Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
+pub fn play(shared: &Arc<Shared>, generation: u64, mut decoder: StreamDecoder) {
     let first = match decoder.chunk() {
         Ok(samples) if !samples.is_empty() => decoder.audio(samples),
         Ok(_) => {
@@ -62,23 +62,24 @@ pub(crate) fn play(shared: Arc<Shared>, generation: u64, mut decoder: StreamDeco
         let Some(format) = inner.stream_ready(generation, first, state) else {
             return;
         };
-        match Output::open(shared.clone(), generation, format) {
+        match Output::open(Arc::clone(shared), generation, format) {
             Ok(output) => inner.attach(output),
             Err(error) => {
                 inner.fail(generation, error);
                 return;
             }
         }
+        drop(inner);
     }
-    produce(&shared, generation, &mut decoder, pcm, commands);
+    produce(shared, generation, &mut decoder, &pcm, &commands);
 }
 
 fn produce(
     shared: &Shared,
     generation: u64,
     decoder: &mut StreamDecoder,
-    pcm: Sender<PcmEvent>,
-    commands: Receiver<()>,
+    pcm: &Sender<PcmEvent>,
+    commands: &Receiver<()>,
 ) {
     let mut epoch = 0;
     let mut ended = false;

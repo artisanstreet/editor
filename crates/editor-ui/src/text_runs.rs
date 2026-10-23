@@ -1,4 +1,5 @@
 //! Compiles highlight and font-override ranges into exact-coverage text runs.
+//!
 //! Selectable prose and status text use the same boundary and shaping rules.
 //! The compiler preserves inherited text style outside explicit overrides.
 
@@ -16,7 +17,7 @@ use gpui::{HighlightStyle, Pixels, SharedString, TextRun, TextStyle, combine_hig
 /// highlight ranges and the body weight stays inherited, so neither lives
 /// here. There is deliberately no per-range font size: GPUI `TextLayout`
 /// lays out at one uniform size.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextRunOverride {
     /// Byte range addressed against the rendered text.
     pub range: Range<usize>,
@@ -124,10 +125,10 @@ pub fn compile_text_runs(
             }
             _ => (None, None),
         };
-        let mut style = match active_highlight {
-            Some(highlight) => default.clone().highlight(highlight),
-            None => default.clone(),
-        };
+        let mut style = active_highlight.map_or_else(
+            || default.clone(),
+            |highlight| default.clone().highlight(highlight),
+        );
         if let Some(family) = active_family {
             style.font_family = family;
         }
@@ -187,7 +188,7 @@ fn disjoint_overrides(
 /// Ordered, fully in-bounds, with both endpoints on character
 /// boundaries. Anything else is dropped entirely by the caller — never
 /// clamped — so invalid ranges cannot shift surviving text.
-fn is_usable_range(text: &str, range: &Range<usize>) -> bool {
+const fn is_usable_range(text: &str, range: &Range<usize>) -> bool {
     range.start < range.end
         && range.end <= text.len()
         && text.is_char_boundary(range.start)

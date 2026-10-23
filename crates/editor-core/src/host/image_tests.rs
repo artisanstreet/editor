@@ -27,7 +27,7 @@ fn bytes(index: u32) -> Vec<u8> {
     bytes.extend_from_slice(b"JUNK");
     bytes.extend_from_slice(&4u32.to_le_bytes());
     bytes.extend_from_slice(&index.to_le_bytes());
-    let length = (bytes.len() - 8) as u32;
+    let length = u32::try_from(bytes.len() - 8).unwrap();
     bytes[4..8].copy_from_slice(&length.to_le_bytes());
     bytes
 }
@@ -75,7 +75,7 @@ fn ready(
     });
     cx.read(|cx| match host.read(cx).image(hash).unwrap() {
         BlobImage::Ready(image) => image,
-        _ => unreachable!(),
+        BlobImage::Loading | BlobImage::Failed(_) => unreachable!(),
     })
 }
 fn failed(host: &Entity<HostData>, hash: &BlobHash, cx: &mut VisualTestContext) -> Arc<str> {
@@ -84,7 +84,7 @@ fn failed(host: &Entity<HostData>, hash: &BlobHash, cx: &mut VisualTestContext) 
     });
     cx.read(|cx| match host.read(cx).image(hash).unwrap() {
         BlobImage::Failed(error) => error,
-        _ => unreachable!(),
+        BlobImage::Loading | BlobImage::Ready(_) => unreachable!(),
     })
 }
 fn cached_bytes(host: &HostData) -> usize {
@@ -92,6 +92,10 @@ fn cached_bytes(host: &HostData) -> usize {
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end scenario across two paired hosts"
+)]
 fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external_pixels(
     cx: &mut TestAppContext,
 ) {
@@ -134,7 +138,7 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     cx.update(|cx| {
         cx.set_global(ImageDecoder(Arc::new(
             editor_ui::markdown_renderer::decode_image_bytes,
-        )))
+        )));
     });
     let core = cx.new(|cx| Core::new(files, cx).unwrap());
     let a = cx.read(|cx| core.read(cx).host(&configs[0].id).unwrap().clone());
@@ -168,8 +172,7 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     // notifications cannot account for the independent scene refresh below.
     for host in [&a, &b] {
         host.update(cx, |host, _| {
-            host._connection.abort();
-            host._follow = Task::ready(());
+            host.stop_following();
         });
     }
     a.update(cx, |host, cx| {
@@ -208,7 +211,7 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     );
     // A failure belongs to its host and only an explicit retry refetches it.
     b.update(cx, |host, cx| {
-        host.load_image(blobs[1].hash.clone(), false, cx)
+        host.load_image(blobs[1].hash.clone(), false, cx);
     });
     wait(cx, "host-local missing image failure", |cx| {
         cx.read(|cx| matches!(b.read(cx).image(&blobs[1].hash), Some(BlobImage::Failed(_))))
@@ -239,13 +242,13 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
         ready(&a, &blob.hash, cx);
     }
     a.update(cx, |host, cx| {
-        host.load_image(blobs[0].hash.clone(), false, cx)
+        host.load_image(blobs[0].hash.clone(), false, cx);
     });
     assert!(Arc::ptr_eq(&external, &ready(&a, &blobs[0].hash, cx)));
     let oldest = cx.read(|cx| a.read(cx).images.order.front().unwrap().clone());
     assert_ne!(oldest, blobs[0].hash, "touched entry must not be oldest");
     scene.update(cx, |scene, cx| {
-        scene.image = Some(external.clone());
+        scene.image = Some(std::sync::Arc::clone(&external));
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -261,7 +264,7 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
         "unchanged cached scene reuses its existing draw"
     );
     a.update(cx, |host, cx| {
-        host.load_image(blobs[32].hash.clone(), false, cx)
+        host.load_image(blobs[32].hash.clone(), false, cx);
     });
     ready(&a, &blobs[32].hash, cx);
     cx.update(|window, cx| {
@@ -389,7 +392,11 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
         .unwrap();
     let supplied = servers[1]
         .1
-        .block_on(servers[1].0.put_blob(bytes(source_index as u32)))
+        .block_on(
+            servers[1]
+                .0
+                .put_blob(bytes(u32::try_from(source_index).unwrap())),
+        )
         .unwrap();
     assert_eq!(supplied.hash, retry_hash);
     b.update(cx, |host, cx| {
@@ -428,21 +435,22 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     // even though another owner deliberately retains its CPU pixel Arc.
     let large = cx.update(|_, cx| editor_ui::markdown_renderer::decode_image_bytes(
         br#"<svg xmlns="http://www.w3.org/2000/svg" width="2048" height="2048"><rect width="2048" height="2048" fill="red"/></svg>"#,
-        cx.svg_renderer().clone(),
+        cx.svg_renderer(),
     ).unwrap());
     let large_hash = BlobHash("external-budget-fixture".into());
     a.update(cx, |host, cx| {
         for image in host.images.kept.values() {
             if let BlobImage::Ready(image) = image {
-                cx.drop_image(image.clone(), None);
+                cx.drop_image(std::sync::Arc::clone(image), None);
             }
         }
         host.images.kept.clear();
         host.images.order.clear();
         host.images.retained.clear();
-        host.images
-            .kept
-            .insert(large_hash.clone(), BlobImage::Ready(large.clone()));
+        host.images.kept.insert(
+            large_hash.clone(),
+            BlobImage::Ready(std::sync::Arc::clone(&large)),
+        );
         host.images.order.push_back(large_hash.clone());
         host.load_image(blobs[2].hash.clone(), false, cx);
     });

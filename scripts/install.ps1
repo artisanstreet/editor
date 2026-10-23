@@ -1,13 +1,13 @@
 # Installs Artisan on Windows:
 #
 #   irm https://github.com/sandersonstabo/artisan-editor/releases/latest/download/install.ps1 | iex
-#   & ([scriptblock]::Create((irm …/install.ps1))) forge --wsl Ubuntu     (arguments go to `ae install`)
+#   & ([scriptblock]::Create((irm …/install.ps1))) --forge wsl:Ubuntu     (arguments go to `ae install`)
 #
-# Downloads release.json and the Windows archive, checks the archive's
-# SHA-256 against release.json, and runs the `ae.exe` inside with `install`.
-# `ae install` reuses these files and verifies release.json's
-# Ed25519 signature before installing anything. $env:ARTISAN_RELEASES
-# overrides the feed (a release.json URL or a directory holding a release).
+# Downloads release.json and the Windows `ae.exe`, checks it against the
+# SHA-256 in release.json, and runs `ae install`, which verifies
+# release.json's Ed25519 signature before installing anything and asks what
+# goes where. $env:ARTISAN_RELEASES overrides the feed (a release.json URL
+# or a directory holding a release).
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -30,12 +30,11 @@ function Get-ReleaseFile([string] $Source, [string] $Destination) {
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('artisan-install-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
-$previousCache = $env:ARTISAN_RELEASE_CACHE
 try {
     Get-ReleaseFile $feed (Join-Path $tmp 'release.json')
     Get-ReleaseFile "$feed.sig" (Join-Path $tmp 'release.json.sig')
     $release = Get-Content -Raw -LiteralPath (Join-Path $tmp 'release.json') | ConvertFrom-Json
-    $artifact = $release.artifacts | Where-Object { $_.os -eq 'windows' -and $_.arch -eq $arch } | Select-Object -First 1
+    $artifact = $release.artifacts | Where-Object { $_.app -eq 'ae' -and $_.os -eq 'windows' -and $_.arch -eq $arch } | Select-Object -First 1
     if (-not $artifact) { throw "Release $($release.version) has no build for Windows $arch." }
     if ($artifact.file -notmatch '^[A-Za-z0-9_+-][A-Za-z0-9._+-]*$') { throw "Unusable archive name '$($artifact.file)'." }
 
@@ -47,10 +46,8 @@ try {
 
     $unpacked = Join-Path $tmp 'unpacked'
     Expand-Archive -LiteralPath $archive -DestinationPath $unpacked
-    $env:ARTISAN_RELEASE_CACHE = $tmp
     & (Join-Path $unpacked 'ae.exe') install --from $source @args
     if ($LASTEXITCODE -ne 0) { throw "ae install failed (exit code $LASTEXITCODE)." }
 } finally {
-    $env:ARTISAN_RELEASE_CACHE = $previousCache
     Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
 }

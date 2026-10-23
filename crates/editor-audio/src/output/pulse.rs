@@ -44,7 +44,7 @@ pub(super) fn run(
 ) -> Result<(), String> {
     let client = connect()?;
     let channels = u8::try_from(format.channels)
-        .map_err(|_| format!("No audio output: {} channels", format.channels))?;
+        .map_err(|_too_many| format!("No audio output: {} channels", format.channels))?;
     let frame_bytes = format.channels * SAMPLE_BYTES;
     let target = format.rate.saturating_mul(u32::from(channels) * 4) / BUFFER_DIVISOR;
     let mut params = PlaybackStreamParams {

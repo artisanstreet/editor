@@ -10,50 +10,32 @@ use gpui::{
 use super::style::{TerminalColor, TerminalLine};
 use crate::theme::ArtisanTheme;
 
-/// Alpha applied to dim (SGR 2) text.
-const DIM_ALPHA: f32 = 0.6;
-/// WCAG contrast below which a foreground on the default background is
-/// nudged toward readable.
+/// WCAG contrast below which a foreground on the default background falls
+/// back to the surface's default text.
 const MIN_CONTRAST: f32 = 2.0;
-/// Lightness step of that nudge.
-const NUDGE_STEP: f32 = 0.05;
-
-/// Base colours, after the VS Code dark terminal: saturated enough
-/// to read as the program meant on the `S900` popover surface.
-const DARK_BASE: [u32; 16] = [
-    0x0000_0000,
-    0x00cd_3131,
-    0x000d_bc79,
-    0x00e5_e510,
-    0x0024_72c8,
-    0x00bc_3fbc,
-    0x0011_a8cd,
-    0x00e5_e5e5,
-    0x0066_6666,
-    0x00f1_4c4c,
-    0x0023_d18b,
-    0x00f5_f543,
-    0x003b_8eea,
-    0x00d6_70d6,
-    0x0029_b8db,
-    0x00e5_e5e5,
-];
 
 /// The 16 themed base colours terminal indices 0–15 resolve through.
-/// Indices 16–255 and truecolor are fixed and need no palette.
+/// Indices 16–255 and truecolor are the program's own data, as sent.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalPalette {
     /// Black, red, green, yellow, blue, magenta, cyan, white, then the
     /// bright variants in the same order.
     pub base: [Hsla; 16],
+    /// Dim (SGR 2) text that names no colour of its own.
+    pub dim: Hsla,
 }
 
 impl TerminalPalette {
-    /// The palette the theme's terminal surfaces use.
+    /// The palette of the theme's mode.
     #[must_use]
-    pub fn for_theme(_theme: &ArtisanTheme) -> Self {
+    pub fn for_theme(theme: &ArtisanTheme) -> Self {
         Self {
-            base: DARK_BASE.map(|hex| rgb_to_hsla(rgb(hex))),
+            base: theme
+                .colors
+                .ansi
+                .0
+                .map(super::super::theme::Oklch::to_paint),
+            dim: theme.colors.text_muted.to_paint(),
         }
     }
 
@@ -92,7 +74,10 @@ fn relative_luminance(color: Hsla) -> f32 {
             ((value + 0.055) / 1.055).powf(2.4)
         }
     };
-    0.2126 * linear(rgba.red) + 0.7152 * linear(rgba.green) + 0.0722 * linear(rgba.blue)
+    0.0722f32.mul_add(
+        linear(rgba.blue),
+        0.7152f32.mul_add(linear(rgba.green), 0.2126 * linear(rgba.red)),
+    )
 }
 
 /// WCAG contrast ratio between two colours, `1..=21`.
@@ -101,25 +86,14 @@ fn contrast(a: Hsla, b: Hsla) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-/// `color` unchanged when it reads on `background`; otherwise its lightness
-/// is stepped away from the background until it does (or hits the end).
-fn readable(color: Hsla, background: Hsla) -> Hsla {
+/// `color` unchanged when it reads on `background`; otherwise the surface's
+/// default text, so no colour is ever made up.
+fn readable(color: Hsla, background: Hsla, foreground: Hsla) -> Hsla {
     if contrast(color, background) >= MIN_CONTRAST {
-        return color;
-    }
-    let step = if relative_luminance(background) < 0.18 {
-        NUDGE_STEP
+        color
     } else {
-        -NUDGE_STEP
-    };
-    let mut adjusted = color;
-    while (0.0..=1.0).contains(&(adjusted.lightness + step)) {
-        adjusted.lightness += step;
-        if contrast(adjusted, background) >= MIN_CONTRAST {
-            break;
-        }
+        foreground
     }
-    adjusted
 }
 
 /// Highlight runs for one line, for `StyledText::with_highlights`.
@@ -127,9 +101,12 @@ fn readable(color: Hsla, background: Hsla) -> Hsla {
 /// `foreground` and `background` are the surface's default text and fill;
 /// inverse swaps against them when a colour is unset. A foreground drawn
 /// straight on `background` (no explicit background colour) whose WCAG
-/// contrast is below 2.0 is nudged toward readable, so black-on-dark or
+/// contrast is below 2.0 takes `foreground` instead, so black-on-dark or
 /// low-contrast truecolor stays legible. Bold maps to `FontWeight::BOLD`, dim
-/// to 60% alpha, and links are underlined.
+/// text in the program's colour to that colour at
+/// [`crate::theme::Opacity::TerminalDim`], dim text without a colour of its
+/// own to the palette's dim colour, and links
+/// are underlined.
 #[must_use]
 pub fn highlights(
     line: &TerminalLine,
@@ -149,12 +126,13 @@ pub fn highlights(
             );
         }
         if bg.is_none() {
-            fg = fg.map(|color| readable(color, background));
+            fg = fg.map(|color| readable(color, background, foreground));
         }
         if style.dim {
-            let mut color = fg.unwrap_or(foreground);
-            color.alpha *= DIM_ALPHA;
-            fg = Some(color);
+            fg = Some(fg.map_or(palette.dim, |mut color| {
+                color.alpha *= crate::theme::Opacity::TerminalDim.alpha();
+                color
+            }));
         }
         let highlight = HighlightStyle {
             color: fg,

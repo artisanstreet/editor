@@ -32,13 +32,13 @@ impl<T> From<Vec<T>> for Collection<T> {
     }
 }
 impl<T> Collection<T> {
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         match self {
             Self::Inline(records) => records.len() as u64,
             Self::Stored(reference) => reference.count,
         }
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
     pub fn inline(&self) -> Option<&[T]> {
@@ -47,13 +47,13 @@ impl<T> Collection<T> {
             Self::Stored(_) => None,
         }
     }
-    pub fn inline_mut(&mut self) -> Option<&mut Vec<T>> {
+    pub const fn inline_mut(&mut self) -> Option<&mut Vec<T>> {
         match self {
             Self::Inline(records) => Some(records),
             Self::Stored(_) => None,
         }
     }
-    pub fn stored(&self) -> Option<&CollectionRef> {
+    pub const fn stored(&self) -> Option<&CollectionRef> {
         match self {
             Self::Inline(_) => None,
             Self::Stored(reference) => Some(reference),

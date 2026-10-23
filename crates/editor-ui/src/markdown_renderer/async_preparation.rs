@@ -44,13 +44,13 @@ pub struct PreparedSource {
 }
 impl PreparedSource {
     /// Renderer job revision; independent of allocation reuse.
-    pub fn revision(&self) -> u64 {
+    pub const fn revision(&self) -> u64 {
         self.revision
     }
     pub fn block_count(&self) -> usize {
         self.presentation.block_count()
     }
-    pub fn is_preview(&self) -> bool {
+    pub const fn is_preview(&self) -> bool {
         self.preview
     }
     pub fn resident_bytes(&self) -> usize {
@@ -72,22 +72,23 @@ pub(super) enum Source {
         reference: ContentRef,
         descriptor: artisan_api::SourceLeafDescriptor,
         metadata_json: String,
-        source: Arc<String>,
+        source: Arc<str>,
     },
 }
 impl Source {
     fn len(&self) -> usize {
         match self {
             Self::Remote { descriptor, .. } => {
-                (descriptor.source_end - descriptor.source_start + descriptor.metadata_end
-                    - descriptor.metadata_start) as usize
-                    + 65536
+                super::wire_index(
+                    descriptor.source_end - descriptor.source_start + descriptor.metadata_end
+                        - descriptor.metadata_start,
+                ) + 65536
             }
             Self::RemoteResolved {
                 descriptor, source, ..
             } => {
                 source.len()
-                    + (descriptor.metadata_end - descriptor.metadata_start) as usize
+                    + super::wire_index(descriptor.metadata_end - descriptor.metadata_start)
                     + 65536
             }
             Self::Text(text) => text.len(),
@@ -105,7 +106,7 @@ impl Source {
                 reference,
                 descriptor,
                 ..
-            } => SourceIdentity::Remote(reference.clone(), descriptor.ordinal as usize),
+            } => SourceIdentity::Remote(reference.clone(), super::wire_index(descriptor.ordinal)),
             Self::Text(text) => SourceIdentity::Text(Arc::downgrade(text)),
             Self::Rope(text) => SourceIdentity::Rope(Arc::downgrade(text)),
         }
@@ -120,13 +121,15 @@ impl Source {
             } => {
                 let json = fetch_complete_range(
                     &metadata,
-                    descriptor.metadata_start as usize..descriptor.metadata_end as usize,
+                    super::wire_index(descriptor.metadata_start)
+                        ..super::wire_index(descriptor.metadata_end),
                     &fetcher,
                 )
                 .await?;
                 let source = fetch_complete_range(
                     &reference,
-                    descriptor.source_start as usize..descriptor.source_end as usize,
+                    super::wire_index(descriptor.source_start)
+                        ..super::wire_index(descriptor.source_end),
                     &fetcher,
                 )
                 .await?;
@@ -134,10 +137,10 @@ impl Source {
                     reference,
                     descriptor,
                     metadata_json: json,
-                    source: Arc::new(source),
+                    source: Arc::from(source),
                 })
             }
-            source => Ok(source),
+            source @ (Self::Text(_) | Self::Rope(_) | Self::RemoteResolved { .. }) => Ok(source),
         }
     }
     fn previewed(&self) -> bool {
@@ -159,7 +162,8 @@ impl Source {
                 let record: artisan_markdown_index::LeafRecord =
                     serde_json::from_str(metadata_json).map_err(|error| error.to_string())?;
                 if record.leaf.source_range()
-                    != (descriptor.source_start as usize..descriptor.source_end as usize)
+                    != (super::wire_index(descriptor.source_start)
+                        ..super::wire_index(descriptor.source_end))
                 {
                     return Err("Markdown metadata does not match its descriptor".into());
                 }
@@ -170,17 +174,17 @@ impl Source {
                 });
                 let content = crate::markdown::normalize_record(
                     &record,
-                    descriptor.source_start as usize,
+                    super::wire_index(descriptor.source_start),
                     source,
                     engine,
                 )
                 .map_err(|error| error.to_string())?;
-                Self::document_from_content(content, source, style)
+                Ok(Self::document_from_content(content, source, style))
             }
             Self::Remote { .. } => {
                 Err("Markdown range was not fetched before worker admission".into())
             }
-            _ => engine
+            Self::Text(_) | Self::Rope(_) => engine
                 .parse_document_with_fence_memo(&self.preview(), fences)
                 .map(|document| (document, None))
                 .map_err(|error| error.to_string()),
@@ -190,7 +194,7 @@ impl Source {
         content: IndexedLeafContent,
         source: &str,
         style: Option<IndexedStyle>,
-    ) -> Result<(MarkdownDocument, Option<IndexedStyle>), String> {
+    ) -> (MarkdownDocument, Option<IndexedStyle>) {
         let mut style = style;
         let block = match content {
             IndexedLeafContent::Block(block) => block,
@@ -210,12 +214,12 @@ impl Source {
                 })
             }
         };
-        Ok((
+        (
             MarkdownDocument {
                 blocks: vec![block],
             },
             style,
-        ))
+        )
     }
     /// Flatten only the bounded preview on the preparation worker.
     fn preview(&self) -> Cow<'_, str> {
@@ -228,6 +232,10 @@ impl Source {
                 Cow::Borrowed(&text[..end])
             }
             Self::RemoteResolved { source, .. } => Cow::Borrowed(source),
+            #[expect(
+                clippy::panic,
+                reason = "the worker only receives sources resolved before admission"
+            )]
             Self::Remote { .. } => {
                 panic!("Stored source must resolve before Markdown worker execution")
             }
@@ -265,6 +273,8 @@ pub(super) struct DocumentJob {
     // Canceling a view cannot release this until the worker drops the job.
     _source_capacity: tokio::sync::OwnedSemaphorePermit,
     source: Source,
+    /// A message's leading `/command`, marked once parsed.
+    command: Option<String>,
     renderer: gpui::SvgRenderer,
     result: oneshot::Sender<DocumentResult>,
 }
@@ -286,6 +296,10 @@ pub(super) struct Worker {
     source_capacity: Arc<tokio::sync::Semaphore>,
 }
 impl Worker {
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the worker thread owns its queues for its whole life"
+    )]
     fn new() -> Result<Self, String> {
         let (queue, mut receiver) = mpsc::channel::<Job>(QUEUE_DEPTH);
         std::thread::Builder::new()
@@ -309,7 +323,8 @@ impl Worker {
                     if let Some(job) = shapes.pop_front() {
                         let ShapeJob { work, result } = job;
                         if !result.is_canceled() {
-                            let _ = result.send(work());
+                            // The requester may be gone; its shapes are then unwanted.
+                            result.send(work()).ok();
                         }
                     } else if let Some(job) = documents.pop_front() {
                         parse(job, engine.as_ref(), &mut diagrams, &mut fences);
@@ -345,6 +360,9 @@ fn parse(
         .map_err(ToString::to_string)
         .and_then(|engine| job.source.parse(engine, fences))
         .map(|(mut document, style)| {
+            if let Some(command) = &job.command {
+                document.mark_command(command);
+            }
             if !job.result.is_canceled() {
                 diagrams.prepare(&mut document);
             }
@@ -366,7 +384,8 @@ fn parse(
             }
             Ok((document, parts, style))
         });
-    let _ = job.result.send(document);
+    // The requester may be gone; its document is then unwanted.
+    job.result.send(document).ok();
 }
 
 struct Entry {
@@ -454,7 +473,7 @@ impl std::fmt::Debug for PreparationOwner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparationOwner")
             .field("entries", &self.cache.borrow().entries.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 impl Default for PreparationOwner {
@@ -467,11 +486,12 @@ impl Default for PreparationOwner {
 }
 impl PreparationOwner {
     pub(super) fn worker(&self) -> Result<Arc<Worker>, String> {
-        if let Some(worker) = self.worker.borrow().clone() {
+        let worker = self.worker.borrow().clone();
+        if let Some(worker) = worker {
             return Ok(worker);
         }
         let worker = Arc::new(Worker::new()?);
-        *self.worker.borrow_mut() = Some(worker.clone());
+        *self.worker.borrow_mut() = Some(Arc::clone(&worker));
         Ok(worker)
     }
     pub(super) fn is_remote_prepared(
@@ -515,10 +535,15 @@ impl PreparationOwner {
             .find(|entry| &entry.key == key)
             .and_then(|entry| entry.prepared.clone())
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential pass; splitting it would only thread its locals through helpers"
+    )]
     pub(super) fn prepare(
         &self,
         key: SharedString,
         source: Source,
+        command: Option<String>,
         cx: &mut App,
         notify: impl Fn(&mut App) + 'static,
     ) -> MarkdownPreparation {
@@ -533,30 +558,28 @@ impl PreparationOwner {
             .iter()
             .position(|entry| entry.key == key)
             .and_then(|index| cache.entries.remove(index));
-        if let Some(entry) = old
-            .as_ref()
-            .filter(|entry| entry.source.same(&source_identity))
-        {
-            let result = if entry.task.is_some() {
-                MarkdownPreparation::Pending
-            } else {
-                entry.prepared.as_ref().map_or_else(
-                    || {
-                        entry
-                            .error
-                            .as_ref()
-                            .map_or(MarkdownPreparation::Pending, |error| {
-                                MarkdownPreparation::Failed(error.clone())
-                            })
-                    },
-                    |source| MarkdownPreparation::Ready(source.clone()),
-                )
-            };
-            cache
-                .entries
-                .push_back(old.expect("matching revision exists"));
-            return result;
-        }
+        let old = match old {
+            Some(entry) if entry.source.same(&source_identity) => {
+                let result = if entry.task.is_some() {
+                    MarkdownPreparation::Pending
+                } else {
+                    entry.prepared.as_ref().map_or_else(
+                        || {
+                            entry
+                                .error
+                                .as_ref()
+                                .map_or(MarkdownPreparation::Pending, |error| {
+                                    MarkdownPreparation::Failed(error.clone())
+                                })
+                        },
+                        |source| MarkdownPreparation::Ready(Rc::clone(source)),
+                    )
+                };
+                cache.entries.push_back(entry);
+                return result;
+            }
+            old => old,
+        };
         // A queued job owns the complete immutable snapshot until completion.
         // Rope snapshots may share chunks; charging all bytes is conservative
         // and prevents repeated resets from pinning unbounded former versions.
@@ -590,11 +613,11 @@ impl PreparationOwner {
         let task = cx.spawn(async move |cx| {
             // Waiting tasks remain charged in the renderer cache. Admitted
             // jobs have a separate bound, including canceled queue entries.
-            let Ok(source_capacity) = worker.source_capacity.clone().acquire_many_owned(pending_bytes as u32).await else { return; };
+            let Ok(source_capacity) = Arc::clone(&worker.source_capacity).acquire_many_owned(super::budget::permits(pending_bytes)).await else { return; };
             let document=match source.resolve().await {
                 Ok(source)=> {
                     let (result,response)=oneshot::channel();
-                    let job=DocumentJob { _source_capacity:source_capacity,source,renderer,result };
+                    let job=DocumentJob { _source_capacity:source_capacity,source,command,renderer,result };
                     if worker.queue.send(Job::Document(job)).await.is_err() { Err("Markdown worker closed".to_owned()) }
                     else { response.await.unwrap_or_else(|_|Err("Markdown worker stopped before publication".to_owned())) }
                 }
@@ -666,15 +689,15 @@ mod tests {
     fn rope_preview_is_utf8_bounded_and_identity_tracks_snapshot_not_content() {
         let full = format!("A{}", "🙂".repeat(MAX_MARKDOWN_SOURCE_BYTES / 4 + 2));
         let mut rope = Arc::new(Rope::from_str(&full));
-        let old = rope.clone();
-        let source = Source::Rope(old.clone());
+        let old = Arc::clone(&rope);
+        let source = Source::Rope(Arc::clone(&old));
         assert_eq!(source.len(), full.len());
         let prefix = source.preview();
         assert!(prefix.len() <= MAX_MARKDOWN_SOURCE_BYTES);
         assert!(prefix.starts_with('A') && prefix.ends_with('🙂'));
         assert!(full.starts_with(prefix.as_ref()));
         let identity = source.identity();
-        assert!(identity.same(&Source::Rope(old.clone()).identity()));
+        assert!(identity.same(&Source::Rope(old).identity()));
         let end = rope.len_chars();
         Arc::make_mut(&mut rope).insert(end, "tail");
         assert!(!identity.same(&Source::Rope(rope).identity()));

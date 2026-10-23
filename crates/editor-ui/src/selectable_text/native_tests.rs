@@ -4,6 +4,11 @@ use crate::markdown_renderer::native_projection::ParagraphWrapIndex;
 use gpui::{EntityId, WindowTextSystem, WrappedLineLayout, point, px, size};
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "one scenario, step by step")]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the flagged bindings are references or plain values, not guards"
+)]
 fn native_row_window_drag_bounds_copy_original_utf8_without_hidden_prefix_or_tail() {
     let platform = gpui_platform::current_platform(true);
     let system = Arc::new(gpui::TextSystem::new(platform.text_system()));
@@ -28,7 +33,7 @@ fn native_row_window_drag_bounds_copy_original_utf8_without_hidden_prefix_or_tai
         .iter()
         .map(|line| {
             Arc::new(WrappedLineLayout {
-                unwrapped_layout: line.unwrapped_layout.clone(),
+                unwrapped_layout: std::sync::Arc::clone(&line.unwrapped_layout),
                 wrap_boundaries: line.wrap_boundaries.clone(),
                 wrap_width: line.wrap_width,
             })
@@ -44,7 +49,7 @@ fn native_row_window_drag_bounds_copy_original_utf8_without_hidden_prefix_or_tai
         .enumerate()
         .map(|(ordinal, row)| {
             let bounds = Bounds::new(
-                point(px(0.0), px(ordinal as f32 * 28.0)),
+                point(px(0.0), px(crate::f32_of_count(ordinal) * 28.0)),
                 size(px(140.0), px(28.0)),
             );
             LiveLeaf {

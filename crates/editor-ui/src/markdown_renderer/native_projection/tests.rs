@@ -35,7 +35,7 @@ fn shape(system: &WindowTextSystem, text: &str, width: f32) -> Vec<Arc<WrappedLi
         .iter()
         .map(|line| {
             Arc::new(WrappedLineLayout {
-                unwrapped_layout: line.unwrapped_layout.clone(),
+                unwrapped_layout: std::sync::Arc::clone(&line.unwrapped_layout),
                 wrap_boundaries: line.wrap_boundaries.clone(),
                 wrap_width: line.wrap_width,
             })
@@ -154,6 +154,10 @@ fn native_wrap_index_keeps_only_requested_hot_glyphs() {
 }
 
 #[test]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the flagged bindings are references or plain values, not guards"
+)]
 fn projected_source_offsets_remain_global_across_unequal_physical_lines() {
     let system = native();
     let text = "first line\nβ\nA much longer third physical line with ffi";

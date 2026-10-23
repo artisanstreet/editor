@@ -88,18 +88,18 @@ pub(in super::super) fn parse(bytes: &[u8], mesh: &mut MeshBuilder) -> Result<()
     let mut visits = 0;
     if let Some(scene) = file.default_scene().or_else(|| file.scenes().next()) {
         for root in scene.nodes() {
-            node(root, Mat4::IDENTITY, 0, &mut visits, &buffers, mesh)?;
+            node(&root, Mat4::IDENTITY, 0, &mut visits, &buffers, mesh)?;
         }
     } else {
         for entry in file.meshes() {
-            primitive_mesh(entry, Mat4::IDENTITY, &buffers, mesh)?;
+            primitive_mesh(&entry, Mat4::IDENTITY, &buffers, mesh)?;
         }
     }
     Ok(())
 }
 
 fn node(
-    node: gltf::Node<'_>,
+    node: &gltf::Node<'_>,
     parent: Mat4,
     depth: usize,
     visits: &mut usize,
@@ -114,16 +114,20 @@ fn node(
     let flat = std::array::from_fn(|index| matrix[index / 4][index % 4]);
     let world = parent * Mat4::from_cols_array(&flat.map(f64::from));
     if let Some(entry) = node.mesh() {
-        primitive_mesh(entry, world, buffers, mesh)?;
+        primitive_mesh(&entry, world, buffers, mesh)?;
     }
     for child in node.children() {
-        self::node(child, world, depth + 1, visits, buffers, mesh)?;
+        self::node(&child, world, depth + 1, visits, buffers, mesh)?;
     }
     Ok(())
 }
 
+#[expect(
+    clippy::many_single_char_names,
+    reason = "x, y, z and r, g, b name the channels they hold"
+)]
 fn primitive_mesh(
-    entry: gltf::Mesh<'_>,
+    entry: &gltf::Mesh<'_>,
     world: Mat4,
     buffers: &[Cow<'_, [u8]>],
     mesh: &mut MeshBuilder,
@@ -134,20 +138,20 @@ fn primitive_mesh(
             Mode::Triangles => 4,
             Mode::TriangleStrip => 5,
             Mode::TriangleFan => 6,
-            _ => continue,
+            Mode::Points | Mode::Lines | Mode::LineLoop | Mode::LineStrip => continue,
         };
         if primitive.get(&Semantic::Positions).is_none() {
             continue;
         }
         let reader =
-            primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| data.as_ref()));
+            primitive.reader(|buffer| buffers.get(buffer.index()).map(std::convert::AsRef::as_ref));
         let positions: Vec<_> = reader
             .read_positions()
             .ok_or("glTF positions cannot be read")?
             .collect();
         let normals = reader
             .read_normals()
-            .map(|normals| normals.collect::<Vec<_>>());
+            .map(std::iter::Iterator::collect::<Vec<_>>);
         let colors = reader
             .read_colors(0)
             .map(|colors| colors.into_rgba_f32().collect::<Vec<_>>());

@@ -10,7 +10,7 @@ use crate::activity;
 use crate::body::{Body, Full, Markdown, Plain, TextBody};
 use crate::content::{SourceOwners, StoredText};
 use crate::disclosure::RowDisclosure;
-use crate::fold::{PlainSection, Row, RunSummary, Slot};
+use crate::fold::{PlainSection, Row, RunSummary, Slot, TextSection};
 use crate::motion::{
     CompactionPhase, RevealQueue, WorkMotion, eased, header_entering, phrase_or_text,
     tabular_figures, with_entrance,
@@ -18,16 +18,23 @@ use crate::motion::{
 use crate::phase::{self, Phase};
 use crate::source_actions::copy_action;
 use crate::thread::ItemUi;
-use artisan_api::{BlobHash, Item, ItemId, ItemKind, LiveTarget, RunId, Status, Timestamp};
+use artisan_api::{
+    BlobHash, Item, ItemId, ItemKind, LiveTarget, ModelSwitch, NamedModel, NoticeKind, RunId,
+    Status, Timestamp,
+};
 use editor_ui::AssetId;
+use editor_ui::asset_seam::asset_glyph;
 use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::chat_bubble::{ChatBubbleSegment, SegmentPosition};
+use editor_ui::code_card::CodeCard;
 use editor_ui::inline_code_text::inline_runs;
 use editor_ui::markdown_renderer::{MarkdownRenderer, PreparedReveal};
 use editor_ui::motion::{MotionCurve, MotionPolicy};
 use editor_ui::selectable_text::{SelectableText, register_selection_source};
-use editor_ui::shimmer_text::{ShimmerText, ShimmerTiming, ShimmerTone};
-use editor_ui::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens};
+use editor_ui::shimmer_text::{ShimmerLine, ShimmerText, ShimmerTiming, ShimmerTone};
+use editor_ui::theme::{
+    ActiveTheme as _, ArtisanTheme, Oklch, Opacity, ProseTypography, RadiusStep, RadiusTokens,
+};
 use gpui::{
     AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -39,23 +46,23 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// The turn column, gutter included (`TRANSCRIPT_PROSE_WIDTH_PX`).
-pub(crate) const COLUMN: f32 = 768.0;
+pub const COLUMN: f32 = 768.0;
 /// The gutter either side of the column (`TRANSCRIPT_GUTTER_PX`).
-pub(crate) const GUTTER: f32 = 24.0;
+pub const GUTTER: f32 = 24.0;
 /// The prose measure inside the column (`TRANSCRIPT_PROSE_BODY_WIDTH_PX`).
-pub(crate) const PROSE_MEASURE: f32 = 672.0;
+pub const PROSE_MEASURE: f32 = 672.0;
 /// One body line inside work sections and chains (`steps(6)`).
 const LINE: f32 = 24.0;
 /// Shown live output keeps this many trailing bytes.
 const LIVE_OUTPUT_TAIL: usize = 8 * 1024;
 
-pub(crate) use editor_core::BlobImage as Blob;
+pub use editor_core::BlobImage as Blob;
 
 /// What a row is drawn with, fixed when it is made: the theme, where its
 /// actions go, the renderer that draws prepared text, and the reveal order
 /// rows take turns in.
 #[derive(Clone)]
-pub(crate) struct RowEnv {
+pub struct RowEnv {
     pub theme: ArtisanTheme,
     pub conversation: WeakEntity<Conversation>,
     pub markdown: Rc<MarkdownRenderer>,
@@ -69,7 +76,7 @@ pub(crate) struct RowEnv {
     pub host: Option<WeakEntity<editor_core::HostData>>,
 }
 
-pub(crate) struct RowModel {
+pub struct RowModel {
     pub row: Row,
     /// The row's items and their subagent output.
     pub items: HashMap<ItemId, Arc<Item>>,
@@ -88,7 +95,7 @@ pub(crate) struct RowModel {
     pub text: Option<TextBody>,
 }
 
-pub(crate) struct RowView {
+pub struct RowView {
     model: RowModel,
     version: u64,
     env: RowEnv,
@@ -119,6 +126,17 @@ impl Drop for RowView {
 }
 
 impl RowView {
+    /// Its text is still preparing: the placeholder shows, at another height.
+    pub(crate) const fn preparing(&self) -> bool {
+        matches!(
+            self.model.text,
+            Some(TextBody {
+                body: Body::Loading(_),
+                ..
+            })
+        )
+    }
+
     pub(crate) fn awaiting_reveal_admission(&self) -> bool {
         match self.model.row.semantic() {
             Row::Text {
@@ -132,7 +150,15 @@ impl RowView {
                         .anchor()
                         .is_some_and(|id| self.ui(id).is_some_and(ItemUi::fresh))
             }
-            _ => false,
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::EarlierWork { .. }
+            | Row::Text { .. }
+            | Row::Compaction(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => false,
         }
     }
 
@@ -216,8 +242,9 @@ impl RowView {
             return;
         }
         let clip_changed = self.disclosure.clip != disclosure.clip;
+        let gap_changed = self.disclosure.gap != disclosure.gap;
         self.disclosure = disclosure;
-        if clip_changed {
+        if clip_changed || gap_changed {
             self.animating =
                 self.motion.end_frame() || self.prose_reveal.is_animating() || self.queue_held;
             self.refresh(cx);
@@ -227,7 +254,7 @@ impl RowView {
     }
 
     /// What it shows changed: draw it fresh, and measure it again.
-    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh(&self, cx: &mut Context<Self>) {
         // The last height stays, so a new one reaches the conversation.
         self.remeasure.set(true);
         cx.notify();
@@ -245,7 +272,7 @@ impl RowView {
         !self.queue_held && !self.prose_reveal.is_animating() && !self.disclosure.hidden
     }
 
-    pub(crate) fn version(&self) -> u64 {
+    pub(crate) const fn version(&self) -> u64 {
         self.version
     }
 
@@ -299,7 +326,7 @@ impl RowView {
             _ => {}
         }
         if let Some(text) = text {
-            self.model.live.insert(target.clone(), text.clone());
+            self.model.live.insert(target.clone(), Arc::clone(text));
         } else {
             self.model.live.remove(target);
         }
@@ -333,13 +360,19 @@ impl RowView {
         self.model.ui.get(id)
     }
 
-    fn theme(&self) -> ArtisanTheme {
+    const fn theme(&self) -> ArtisanTheme {
         self.env.theme
     }
 
     /// Newly observed compact content fades in without changing its measured height.
     fn entering(&mut self, id: &ItemId, element: AnyElement) -> AnyElement {
-        if self.queue_held || self.disclosure.clip.is_some() {
+        if self.disclosure.clip.is_some() {
+            // Unfolded by the reader, it is history: it has entered, so it
+            // neither holds the rows after it nor enters once the slide ends.
+            let _ = self.motion.entrance(id.as_str(), false);
+            return element;
+        }
+        if self.queue_held {
             return element;
         }
         let fresh = self.ui(id).is_some_and(ItemUi::fresh);
@@ -352,7 +385,7 @@ impl RowView {
         &mut self,
         body: &Body,
         reveal: bool,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.theme();
@@ -371,7 +404,7 @@ impl RowView {
             Body::Failed { error, full } => div()
                 .child(error.clone())
                 .child(match full {
-                    Full::Copy(key, source) => copy_action(key.to_string(), theme, source.clone()),
+                    Full::Copy(key, source) => copy_action(key.to_string(), &theme, source.clone()),
                     Full::Stored(source, field) => {
                         let id = self.model.row.anchor().cloned().unwrap_or_default();
                         StoredText {
@@ -379,14 +412,14 @@ impl RowView {
                             source: source.clone(),
                             theme,
                             key: (id, field.clone()),
-                            owners: self.stored.clone(),
+                            owners: Rc::clone(&self.stored),
                         }
                         .into_any_element()
                     }
                 })
                 .into_any_element(),
             Body::NativeFailed { error, key, row } => {
-                let renderer = self.env.markdown.clone();
+                let renderer = Rc::clone(&self.env.markdown);
                 let owner = self.env.conversation.clone();
                 let (retry_row, source_key) = (row.clone(), key.clone());
                 div()
@@ -399,8 +432,9 @@ impl RowView {
                         )
                         .on_activate(move |_, _, cx| {
                             renderer.retry_native_window(&source_key);
-                            let _ =
-                                owner.update(cx, |this, cx| this.retry_native_body(&retry_row, cx));
+                            owner
+                                .update(cx, |this, cx| this.retry_native_body(&retry_row, cx))
+                                .ok();
                         }),
                     )
                     .into_any_element()
@@ -410,7 +444,7 @@ impl RowView {
         }
     }
 
-    fn markdown(&mut self, body: &Markdown, reveal: bool, window: &mut Window) -> AnyElement {
+    fn markdown(&mut self, body: &Markdown, reveal: bool, window: &Window) -> AnyElement {
         let theme = self.theme();
         let renderer = &self.env.markdown;
         renderer.set_selection_prefix(body.order.clone());
@@ -428,8 +462,16 @@ impl RowView {
                 window.request_animation_frame();
             }
             content
-        } else {
+        } else if body.code_copy {
             renderer.render_prepared_range(
+                &body.prepared,
+                body.range.clone(),
+                theme,
+                body.selector.clone(),
+                body.tone,
+            )
+        } else {
+            renderer.render_preview_range(
                 &body.prepared,
                 body.range.clone(),
                 theme,
@@ -448,19 +490,20 @@ impl RowView {
                     .children(test_mark("live-preview"))
             })
             .when_some(body.copy.clone(), |root, (key, source)| {
-                root.child(copy_action(key.to_string(), theme, source))
+                root.child(copy_action(key.to_string(), &theme, source))
             })
             .into_any_element()
     }
 
-    fn plain(&self, body: &Plain, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "false positive: the text and owners move into the returned element"
+    )]
+    fn plain(&self, body: &Plain, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         register_selection_source(&body.source, window, cx);
-        let mut text = SelectableText::retained(
-            body.key.clone(),
-            body.text.clone(),
-            self.theme(),
-            Vec::new(),
-        );
+        let theme = self.theme();
+        let mut text =
+            SelectableText::retained(body.key.clone(), body.text.clone(), theme, Vec::new());
         if body.slice {
             text = text.source_slice(0..body.text.len());
         }
@@ -479,51 +522,71 @@ impl RowView {
             native.base.clone(),
         );
         let (layout_leaf, paint_leaf, failed_leaf) = (
-            native.leaf.clone(),
-            native.leaf.clone(),
-            native.leaf.clone(),
+            Arc::clone(&native.leaf),
+            Arc::clone(&native.leaf),
+            Arc::clone(&native.leaf),
         );
         let notify_base = native.base.clone();
         text.native_window(
-            self.env.markdown.clone(),
+            Rc::clone(&self.env.markdown),
             native.key.clone(),
             native.visual,
             native.window.clone(),
             editor_ui::selectable_text::NativeWindowEvents {
                 notify: Rc::new(move |cx| {
-                    let _ = notify_owner.update(cx, |this, cx| {
-                        if let Row::Text { id, slot, .. } = &notify_base {
-                            this.body_ready(id, *slot, cx);
-                        }
-                    });
+                    notify_owner
+                        .update(cx, |this, cx| {
+                            if let Row::Text { id, slot, .. } = &notify_base {
+                                this.body_ready(id, *slot, cx);
+                            }
+                        })
+                        .ok();
                 }),
                 layout_ready: Rc::new(move |ready, cx| {
-                    let _ = layout_owner.update(cx, |this, cx| {
-                        this.native_body_ready(&layout_base, &layout_leaf, ready, false, cx);
-                    });
+                    layout_owner
+                        .update(cx, |this, cx| {
+                            this.native_body_ready(&layout_base, &layout_leaf, &ready, false, cx);
+                        })
+                        .ok();
                 }),
                 ready: Rc::new(move |ready, cx| {
-                    let _ = paint_owner.update(cx, |this, cx| {
-                        this.native_body_ready(&paint_base, &paint_leaf, ready, true, cx);
-                    });
+                    paint_owner
+                        .update(cx, |this, cx| {
+                            this.native_body_ready(&paint_base, &paint_leaf, &ready, true, cx);
+                        })
+                        .ok();
                 }),
             },
         )
         .native_failure_handler(Rc::new(move |error, cx| {
-            let _ = failure_owner.update(cx, |this, cx| {
-                this.native_body_failed(&failed_base, &failed_leaf, error, cx);
-            });
+            failure_owner
+                .update(cx, |this, cx| {
+                    this.native_body_failed(&failed_base, &failed_leaf, error, cx);
+                })
+                .ok();
         }))
         .into_any_element()
     }
 
     /// A text row: a reply's prose, a formatted section, or a literal
     /// body in its bubble, error card or caption.
-    fn text_row(&mut self, slot: Slot, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn text_row(&mut self, slot: Slot, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(text) = self.model.text.clone() else {
             return div().into_any_element();
         };
         let Slot::Plain(section) = slot else {
+            if slot == Slot::Text(TextSection::Note) {
+                let content = self.body(&text.body, false, window, cx);
+                return self.note_body(content, text.first, text.last);
+            }
+            if slot == Slot::Text(TextSection::User) {
+                let content = self.body(&text.body, false, window, cx);
+                return self.user_body(content, text.first, text.last);
+            }
+            if slot.is_card() {
+                let content = self.body(&text.body, false, window, cx);
+                return CodeCard::new(self.theme(), content).into_any_element();
+            }
             if slot == Slot::Prose {
                 let running = self
                     .model
@@ -540,48 +603,29 @@ impl RowView {
         let theme = self.theme();
         let (first, last) = (text.first, text.last);
         match section {
+            PlainSection::User => return self.user_body(content, first, last),
             PlainSection::Error => return self.error_body(content, first, last),
             PlainSection::ImageCaption => {
                 return div()
                     .w_full()
                     .text_size(theme.typography.control_text)
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .child(content)
                     .into_any_element();
             }
-            _ => {}
+            PlainSection::AgentTask | PlainSection::AgentMessage => {}
         }
-        let attachments = (first && section == PlainSection::User)
-            .then(|| {
-                self.model
-                    .row
-                    .anchor()
-                    .and_then(|id| self.item(id))
-                    .and_then(|item| self.media().user_attachments(item))
-            })
-            .flatten();
-        let root = div()
+        div()
             .w_full()
             .flex()
             .flex_col()
             .items_end()
-            .gap(px(8.0))
-            .children(attachments);
-        let empty = matches!(&text.body, Body::Plain(plain) if plain.text.is_empty());
-        if !text.stored && section == PlainSection::User && empty {
-            return root.into_any_element();
-        }
-        root.child(ChatBubbleSegment::new(
-            theme,
-            match (first, last) {
-                (true, true) => SegmentPosition::Single,
-                (true, false) => SegmentPosition::Head,
-                (false, true) => SegmentPosition::Tail,
-                (false, false) => SegmentPosition::Body,
-            },
-            content,
-        ))
-        .into_any_element()
+            .child(ChatBubbleSegment::new(
+                theme,
+                segment_position(first, last),
+                content,
+            ))
+            .into_any_element()
     }
 
     /// Only the header lives here. Expanded descendants are independent native rows.
@@ -589,7 +633,7 @@ impl RowView {
         &mut self,
         run: Option<&RunId>,
         segment: usize,
-        entries: &[ItemId],
+        has_work: bool,
         _cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if segment != 0 {
@@ -598,9 +642,9 @@ impl RowView {
         let summary = self.model.run.as_ref()?;
         let label = self.section_title(summary);
         let open = summary.open;
-        let controlled = !summary.live() && run.is_some() && !entries.is_empty();
+        let controlled = !summary.live() && run.is_some() && has_work;
         let theme = self.theme();
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let key = format!("work-{}", run.map_or_else(String::new, ToString::to_string));
         let words = self.motion.phrase(&format!("{key}-label"), &label);
         let label = phrase_or_text(words, label, px(LINE));
@@ -629,7 +673,7 @@ impl RowView {
             .text_size(px(ProseTypography::BODY_SIZE_PX))
             .line_height(px(LINE))
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .tracking(ProseTypography::TRACKING_EM)
+            .tracking(theme.typography.tracking_em)
             .text_color(muted)
             .font_features(tabular_figures())
             .pb(theme.spacing.steps(2.0))
@@ -642,7 +686,7 @@ impl RowView {
                     .left_0()
                     .w_full()
                     .h(px(1.0))
-                    .bg(theme.colors.border.to_paint()),
+                    .bg(theme.colors.line.to_paint()),
             );
         if let Some(progress) = self.motion.header_entrance() {
             header = header_entering(header, progress);
@@ -688,9 +732,9 @@ impl RowView {
         let icon = activity::chain_icon(categories.iter().copied());
         let theme = self.theme();
         let color = if open {
-            theme.colors.foreground.to_paint()
+            theme.colors.text.to_paint()
         } else {
-            theme.colors.muted_foreground.to_paint()
+            theme.colors.text_muted.to_paint()
         };
         let key = format!("chain-{first}");
         let words = self.motion.phrase(&format!("{key}-clause"), &clause);
@@ -726,7 +770,7 @@ impl RowView {
                     .truncate()
                     .text_size(px(ProseTypography::BODY_SIZE_PX))
                     .font_weight(ProseTypography::BODY_WEIGHT)
-                    .tracking(ProseTypography::TRACKING_EM)
+                    .tracking(theme.typography.tracking_em)
                     .line_height(px(LINE))
                     .text_color(color)
                     .font_features(tabular_figures())
@@ -737,9 +781,13 @@ impl RowView {
     }
 
     /// A non-activity row inside the work: plan, notice, nested messages.
-    fn entry(&mut self, item: &Item, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn entry(&mut self, item: &Item, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         match &item.kind {
-            ItemKind::Tool { .. } => {
+            ItemKind::Tool { .. }
+            | ItemKind::UserMessage {
+                from_agent: Some(_),
+                ..
+            } => {
                 let live = self.live_text(&LiveTarget::Shell {
                     item_id: item.id.clone(),
                 });
@@ -770,9 +818,9 @@ impl RowView {
             ItemKind::Plan { .. } => self.tools().plan_entry(item),
             ItemKind::Notice { .. } => self.text().notice(item),
             ItemKind::Question { .. } => self.requests().question_card(item),
-            ItemKind::Compaction { .. } => self.tools().compaction_entry(item),
             // These have rows of their own.
-            ItemKind::AssistantMessage { .. }
+            ItemKind::Compaction { .. }
+            | ItemKind::AssistantMessage { .. }
             | ItemKind::UserMessage { .. }
             | ItemKind::Error { .. }
             | ItemKind::Image { .. } => div().into_any_element(),
@@ -793,15 +841,47 @@ impl RowView {
         let phase = match item.status {
             Status::Running => CompactionPhase::Running,
             Status::Done => CompactionPhase::Done,
-            _ => CompactionPhase::Stopped,
+            Status::AwaitingUser | Status::Failed | Status::Declined | Status::Cancelled => {
+                CompactionPhase::Stopped
+            }
+        };
+        let switch = match &item.kind {
+            ItemKind::Compaction { switch, .. } => switch.clone(),
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Tool { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => None,
         };
         let fresh = self.ui(id).is_some_and(ItemUi::fresh);
         let frame = self.motion.compaction(id.as_str(), phase, fresh);
         // The slot keeps the widest word it can show in flow, invisibly; the
         // visible words sit centred over it, so the rules keep their length.
+        // A switch says the same line in every phase.
         let widest = match phase {
             CompactionPhase::Stopped => CompactionPhase::Stopped.label(),
             CompactionPhase::Running | CompactionPhase::Done => CompactionPhase::Running.label(),
+        };
+        let label = |phase: CompactionPhase| {
+            switch.as_ref().map_or_else(
+                || {
+                    ShimmerText::new("compaction-status", phase.label(), theme)
+                        .active(phase == CompactionPhase::Running)
+                        .timing(ShimmerTiming::Progress)
+                        .tone(ShimmerTone::Muted)
+                        .into_any_element()
+                },
+                |switch| {
+                    ShimmerLine::new("compaction-status", switch_line(switch, &theme), theme)
+                        .active(phase == CompactionPhase::Running)
+                        .timing(ShimmerTiming::Progress)
+                        .into_any_element()
+                },
+            )
         };
         let word = |phase: CompactionPhase| {
             div()
@@ -811,18 +891,18 @@ impl RowView {
                 .right(px(0.0))
                 .flex()
                 .justify_center()
-                .child(
-                    ShimmerText::new("compaction-status", phase.label(), theme)
-                        .active(phase == CompactionPhase::Running)
-                        .timing(ShimmerTiming::Progress)
-                        .tone(ShimmerTone::Muted),
-                )
+                .child(label(phase))
         };
+        let placeholder = switch.as_ref().map_or_else(
+            || div().child(widest).into_any_element(),
+            |switch| switch_line(switch, &theme),
+        );
         let mut slot = div()
             .relative()
             .flex_shrink_0()
-            .child(div().opacity(0.0).child(widest));
-        slot = match frame.swap {
+            .child(div().opacity(0.0).child(placeholder));
+        // A switch's line doesn't change as it settles; only the highlight runs.
+        slot = match frame.swap.filter(|_| switch.is_none()) {
             Some((from, swap)) if swap < 0.5 => {
                 let out = eased(MotionCurve::EaseInOut, swap * 2.0);
                 slot.child(
@@ -833,7 +913,7 @@ impl RowView {
                 )
             }
             Some((_, swap)) => {
-                let enter = eased(MotionCurve::EaseInOut, swap * 2.0 - 1.0);
+                let enter = eased(MotionCurve::EaseInOut, swap.mul_add(2.0, -1.0));
                 slot.child(
                     word(phase)
                         .opacity(enter)
@@ -859,8 +939,8 @@ impl RowView {
         let Some((frame, slot)) = self.compaction_status(id) else {
             return div().into_any_element();
         };
-        let muted = theme.colors.muted_foreground.to_paint();
-        let rule_color = theme.colors.border.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
+        let rule_color = theme.colors.line.to_paint();
         // Each rule grows from the label outward; the highlight runs the
         // same way and fades as it goes.
         let rule = |outward_left: bool| {
@@ -880,7 +960,7 @@ impl RowView {
                     .top(px(0.0))
                     .h_full()
                     .w(px(PULSE_LENGTH_PX))
-                    .bg(fade(theme.colors.foreground.to_paint(), alpha));
+                    .bg(theme.colors.text.fade(alpha).to_paint());
                 // A lane one highlight shorter than the rule: it starts at
                 // the label and ends flush with the end.
                 let lane = div().absolute().top(px(0.0)).h_full();
@@ -908,7 +988,7 @@ impl RowView {
             .text_size(px(ProseTypography::BODY_SIZE_PX))
             .line_height(px(LINE))
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .tracking(ProseTypography::TRACKING_EM)
+            .tracking(theme.typography.tracking_em)
             .text_color(muted)
             .debug_selector(|| "compaction".to_owned())
             .child(rule(true))
@@ -927,9 +1007,9 @@ impl RowView {
             .pt(px(if first { 12.0 } else { 0.0 }))
             .pb(px(if last { 12.0 } else { 0.0 }))
             .border_x_1()
-            .border_color(theme.colors.destructive.with_alpha(0.25).to_paint())
-            .bg(theme.colors.destructive.with_alpha(0.05).to_paint())
-            .text_color(theme.colors.muted_foreground.to_paint())
+            .border_color(theme.colors.red.border.to_paint())
+            .bg(theme.colors.red.bg.to_paint())
+            .text_color(theme.colors.text_muted.to_paint())
             .text_size(theme.typography.control_text)
             .when(first, |root| {
                 root.border_t_1()
@@ -945,8 +1025,124 @@ impl RowView {
             root = root.child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.colors.destructive.to_paint())
+                    .text_color(theme.colors.destructive_text.to_paint())
                     .child("Error"),
+            );
+        }
+        root.child(content).into_any_element()
+    }
+
+    /// A user message: its attachments over its first block, its markdown
+    /// in the bubble. One another thread's agent sent is tinted with the
+    /// sender's harness.
+    fn user_body(&self, content: AnyElement, first: bool, last: bool) -> AnyElement {
+        let item = self.model.row.anchor().and_then(|id| self.item(id));
+        let (engine, empty) = match item.map(|item| &item.kind) {
+            Some(ItemKind::UserMessage { sender, text, .. }) => (
+                sender.as_ref().map(|sender| sender.engine),
+                matches!(text, artisan_api::TextContent::Inline(text) if text.is_empty()),
+            ),
+            _ => (None, false),
+        };
+        let attachments = first
+            .then(|| item.and_then(|item| self.media().user_attachments(item)))
+            .flatten();
+        let root = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(8.0))
+            .children(attachments);
+        if empty {
+            return root.into_any_element();
+        }
+        let position = segment_position(first, last);
+        let bubble = ChatBubbleSegment::new(self.theme(), position, content);
+        let Some(engine) = engine else {
+            return root.child(bubble).into_any_element();
+        };
+        let block = match self.model.row.semantic() {
+            Row::Text { block, .. } => *block,
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Chain { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => 0,
+        };
+        root.child(bubble.tinted(editor_ui::engine_accent(&self.theme(), engine)))
+            .children(test_mark(format!("sent-by:{engine}:{block}:{position:?}")))
+            .into_any_element()
+    }
+
+    /// A "You should know" note: a tinted card headed by its tag, the note
+    /// below. "Heads up" (a decision to judge) is tinted as
+    /// a warning, "You should know" as information.
+    fn note_body(&self, content: AnyElement, first: bool, last: bool) -> AnyElement {
+        let theme = self.theme();
+        let heads_up = matches!(
+            self.model
+                .row
+                .anchor()
+                .and_then(|id| self.item(id))
+                .map(|item| &item.kind),
+            Some(ItemKind::Notice {
+                kind: NoticeKind::YouShouldKnow { heads_up: true },
+                ..
+            })
+        );
+        let (tint, asset, tag) = if heads_up {
+            (
+                theme.colors.banner_warning,
+                AssetId::TABLER_ALERT_TRIANGLE,
+                "Heads up",
+            )
+        } else {
+            (
+                theme.colors.banner_info,
+                AssetId::TABLER_SPARKLES,
+                "You should know",
+            )
+        };
+        let mut root = div()
+            .w_full()
+            .min_w_0()
+            .px(theme.spacing.steps(3.5))
+            .pt(px(if first { 12.0 } else { 0.0 }))
+            .pb(px(if last { 12.0 } else { 0.0 }))
+            .border_x_1()
+            .border_color(tint.border.to_paint())
+            .bg(tint.bg.to_paint())
+            .when(first, |root| {
+                root.border_t_1()
+                    .rounded_tl(RadiusTokens::value(RadiusStep::Xl))
+                    .rounded_tr(RadiusTokens::value(RadiusStep::Xl))
+            })
+            .when(last, |root| {
+                root.border_b_1()
+                    .rounded_bl(RadiusTokens::value(RadiusStep::Xl))
+                    .rounded_br(RadiusTokens::value(RadiusStep::Xl))
+            });
+        if first {
+            let color = tint.text;
+            root = root.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(theme.spacing.steps(1.0))
+                    .text_size(theme.typography.control_text)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color.to_paint())
+                    .child(icon(asset, color))
+                    .child(tag),
             );
         }
         root.child(content).into_any_element()
@@ -955,9 +1151,13 @@ impl RowView {
     /// Adapters supply canonical status and reasoning copy. The row shows a bounded snippet.
     fn status_row(&self, run: &RunId) -> Option<AnyElement> {
         let theme = self.theme();
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let summary = self.model.run.as_ref();
         let phase = summary.map_or(Phase::Thinking, |summary| summary.phase);
+        // The compaction divider is the live line while the engine compacts.
+        if phase == Phase::Compacting {
+            return None;
+        }
         let reduced = self
             .live_text(&LiveTarget::Reasoning {
                 run_id: run.clone(),
@@ -997,7 +1197,7 @@ impl RowView {
                 .text_size(px(ProseTypography::BODY_SIZE_PX))
                 .line_height(px(ProseTypography::BODY_LINE_PX))
                 .font_weight(ProseTypography::BODY_WEIGHT)
-                .tracking(ProseTypography::TRACKING_EM)
+                .tracking(theme.typography.tracking_em)
                 .text_color(muted)
                 .child(content)
                 .into_any_element(),
@@ -1011,6 +1211,8 @@ impl Render for RowView {
         reason = "the row's one render dispatches its kind, runs its motion frame and lays out the column"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The mode can flip while the row is cached; draw with the current one.
+        self.env.theme = *cx.theme();
         self.animating = false;
         let policy = if cx.reduce_motion() {
             MotionPolicy::Reduced
@@ -1025,7 +1227,7 @@ impl Render for RowView {
             row.semantic(),
             Row::Work { .. }
                 | Row::Text {
-                    slot: Slot::Plain(PlainSection::User),
+                    slot: Slot::Plain(PlainSection::User) | Slot::Text(TextSection::User),
                     ..
                 }
         );
@@ -1040,16 +1242,30 @@ impl Render for RowView {
                 block,
                 ..
             } => (2, *block),
-            Row::PlanStep { step, .. } => (2, *step),
-            _ => (1, 0),
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Text { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => (1, 0),
         };
+        let rushed = self.env.reveal.borrow().rushed(position);
         self.queue_held = self.env.reveal.borrow_mut().begin(
             key.clone(),
             (position, part, ordinal),
-            !bypass && policy == MotionPolicy::Full,
+            !bypass && !rushed && policy == MotionPolicy::Full,
         );
         self.prose_reveal.set_paused(self.queue_held);
+        self.prose_reveal.set_rushed(rushed);
         let clip = self.disclosure.clip;
+        // A disclosure in flight eases the space above the row after it.
+        let gap = self.disclosure.gap.unwrap_or(self.model.gap);
         let deferred_by_group =
             clip.is_none() && self.disclosure.fraction.is_none() && self.disclosure.hidden;
         let content: Option<AnyElement> = if self.queue_held || deferred_by_group {
@@ -1061,10 +1277,42 @@ impl Render for RowView {
                     run,
                     segment,
                     entries,
-                } => self.work_row(run.as_ref(), *segment, entries, cx),
+                    unloaded,
+                } => self.work_row(
+                    run.as_ref(),
+                    *segment,
+                    !entries.is_empty() || !unloaded.is_empty(),
+                    cx,
+                ),
+                Row::EarlierWork { first, .. } => Some(
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(self.actions().button(
+                            &self.theme(),
+                            SharedString::from(format!("earlier-work-{first}")),
+                            "Load earlier work",
+                            ButtonVariant::Secondary,
+                            false,
+                            Action::LoadEarlierWork(*first),
+                        ))
+                        .into_any_element(),
+                ),
                 Row::Projected { row, .. } => match row.as_ref() {
                     Row::Text { slot, .. } => Some(self.text_row(*slot, window, cx)),
-                    _ => None,
+                    Row::Projected { .. }
+                    | Row::Work { .. }
+                    | Row::EarlierWork { .. }
+                    | Row::WorkEntry { .. }
+                    | Row::Chain { .. }
+                    | Row::Prompt(_)
+                    | Row::Compaction(_)
+                    | Row::Image(_)
+                    | Row::Gap
+                    | Row::Status(_)
+                    | Row::AgentResult(_)
+                    | Row::AgentStatus(..) => None,
                 },
                 Row::WorkEntry { id, .. } => {
                     let content = self.model.items.get(id).cloned().map_or_else(
@@ -1081,23 +1329,16 @@ impl Render for RowView {
                         content
                     })
                 }
-                Row::PlanStep { id, step, .. } => Some(self.item(id).map_or_else(
-                    || div().into_any_element(),
-                    |item| self.tools().plan_step(item, *step),
-                )),
                 Row::Prompt(id) => {
                     let card = match self.model.items.get(id).cloned() {
                         Some(item) if matches!(item.kind, ItemKind::Question { .. }) => {
                             self.requests().question_card(&item)
                         }
                         Some(item) => {
-                            match self
+                            let card = self
                                 .requests()
-                                .approval_card(&item, self.answer_state(&item.id))
-                            {
-                                Some(card) => card,
-                                None => self.entry(&item, window, cx),
-                            }
+                                .approval_card(&item, self.answer_state(&item.id));
+                            card.unwrap_or_else(|| self.entry(&item, window, cx))
                         }
                         None => div().into_any_element(),
                     };
@@ -1117,7 +1358,7 @@ impl Render for RowView {
                         .flex()
                         .justify_center()
                         .child(self.actions().button(
-                            self.theme(),
+                            &self.theme(),
                             "load-newer",
                             "Load newer messages",
                             ButtonVariant::Secondary,
@@ -1145,7 +1386,7 @@ impl Render for RowView {
             .mx_auto()
             .px(px(GUTTER))
             .min_w_0()
-            .text_color(theme.colors.foreground.to_paint());
+            .text_color(theme.colors.text.to_paint());
         let moving = self.motion.end_frame();
         self.animating |= moving || clip.is_some();
         let animating = moving || self.prose_reveal.is_animating() || self.queue_held;
@@ -1156,6 +1397,7 @@ impl Render for RowView {
         self.env.reveal.borrow_mut().finish(
             &key,
             !bypass
+                && !rushed
                 && (self.queue_held
                     || self.motion.is_settling()
                     || self.prose_reveal.is_settling()),
@@ -1165,7 +1407,7 @@ impl Render for RowView {
             // render without it.
             let owner = self.env.conversation.clone();
             cx.defer(move |cx| {
-                let _ = owner.update(cx, |_, cx| cx.notify());
+                owner.update(cx, |_, cx| cx.notify()).ok();
             });
         }
         self.animating |= self.queue_held;
@@ -1182,11 +1424,18 @@ impl Render for RowView {
                 Row::WorkEntry { id, .. } => self
                     .item(id)
                     .is_some_and(|item| activity::category(item).is_some()),
-                Row::Text {
-                    slot: Slot::Text(crate::fold::TextSection::Message),
-                    ..
-                } => true,
-                _ => false,
+                Row::Text { slot, .. } => slot.is_card(),
+                Row::Projected { .. }
+                | Row::Work { .. }
+                | Row::EarlierWork { .. }
+                | Row::Chain { .. }
+                | Row::Prompt(_)
+                | Row::Compaction(_)
+                | Row::Image(_)
+                | Row::Gap
+                | Row::Status(_)
+                | Row::AgentResult(_)
+                | Row::AgentStatus(..) => false,
             };
             if chained {
                 div()
@@ -1197,11 +1446,11 @@ impl Render for RowView {
                     .child(
                         div()
                             .absolute()
-                            .top(px(-self.model.gap))
+                            .top(px(-gap))
                             .bottom_0()
                             .left(theme.spacing.steps(1.75))
                             .w(px(2.0))
-                            .bg(theme.colors.border.with_alpha(0.6).to_paint()),
+                            .bg(theme.colors.line.to_paint()),
                     )
                     .child(content)
                     .into_any_element()
@@ -1214,16 +1463,16 @@ impl Render for RowView {
                 .pt(px(if self.queue_held || deferred_by_group {
                     0.0
                 } else {
-                    self.model.gap
+                    gap
                 }))
                 .pb(below)
                 .child(content),
             // Nothing to show: the row keeps only the end space.
             None => column,
         };
-        let measured = self.reported_height.clone();
-        let remeasure = self.remeasure.clone();
-        let reported_body = self.reported_body.clone();
+        let measured = Rc::clone(&self.reported_height);
+        let remeasure = Rc::clone(&self.remeasure);
+        let reported_body = Rc::clone(&self.reported_body);
         let clipped = clip.is_some();
         let owner = self.env.conversation.clone();
         let (body_owner, body_key) = (owner.clone(), key.clone());
@@ -1248,9 +1497,11 @@ impl Render for RowView {
                     let (owner, key, height) =
                         (body_owner.clone(), body_key.clone(), bounds.size.height);
                     cx.defer(move |cx| {
-                        let _ = owner.update(cx, |this, _| {
-                            this.row_heights.insert(key, height);
-                        });
+                        owner
+                            .update(cx, |this, _| {
+                                this.row_heights.insert(key, height);
+                            })
+                            .ok();
                     });
                 }
             });
@@ -1275,7 +1526,9 @@ impl Render for RowView {
                         let owner = owner.clone();
                         let key = key.clone();
                         cx.defer(move |cx| {
-                            let _ = owner.update(cx, |this, cx| this.row_height_changed(&key, cx));
+                            owner
+                                .update(cx, |this, cx| this.row_height_changed(&key, cx))
+                                .ok();
                         });
                     }
                 }
@@ -1285,7 +1538,18 @@ impl Render for RowView {
 
 /// A zero-size marker naming a state of what shows, for tests; nothing
 /// outside them.
-pub(crate) fn test_mark(name: impl Into<String>) -> Option<AnyElement> {
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::needless_pass_by_value,
+        reason = "test builds take the name for the mark"
+    )
+)]
+#[cfg_attr(
+    test,
+    expect(clippy::unnecessary_wraps, reason = "other builds return no mark")
+)]
+pub fn test_mark(name: impl Into<String>) -> Option<AnyElement> {
     #[cfg(test)]
     {
         let name = name.into();
@@ -1299,7 +1563,7 @@ pub(crate) fn test_mark(name: impl Into<String>) -> Option<AnyElement> {
 }
 
 /// Adapter reasoning is already the canonical status copy.
-pub(crate) fn summary_copy(summary: &str) -> Option<String> {
+pub fn summary_copy(summary: &str) -> Option<String> {
     let summary = summary.trim();
     (!summary.is_empty()).then(|| summary.to_owned())
 }
@@ -1334,20 +1598,53 @@ fn body_line(element: Div, theme: &ArtisanTheme) -> Div {
         .text_size(px(ProseTypography::BODY_SIZE_PX))
         .line_height(theme.spacing.steps(6.0))
         .font_weight(ProseTypography::BODY_WEIGHT)
-        .tracking(ProseTypography::TRACKING_EM)
+        .tracking(theme.typography.tracking_em)
 }
 
 /// Icons in tinted text take that colour, slightly muted.
-fn icon(asset: AssetId, color: Hsla) -> gpui::Svg {
+fn icon(asset: AssetId, color: Oklch) -> gpui::Svg {
     svg()
         .path(asset.as_str())
         .size(px(16.0))
         .flex_shrink_0()
-        .text_color(fade(color, 0.8))
+        .text_color(color.at(Opacity::ToneIcon).to_paint())
 }
 
-/// `color` with its alpha scaled.
-fn fade(mut color: Hsla, amount: f32) -> Hsla {
-    color.alpha *= amount;
-    color
+/// Where a block sits in its message's bubble.
+const fn segment_position(first: bool, last: bool) -> SegmentPosition {
+    match (first, last) {
+        (true, true) => SegmentPosition::Single,
+        (true, false) => SegmentPosition::Head,
+        (false, true) => SegmentPosition::Tail,
+        (false, false) => SegmentPosition::Body,
+    }
+}
+
+/// "Changed from <logo> Opus 5.5 to <logo> GPT-6 Astra": the compaction
+/// divider's words when the thread moved to another engine.
+fn switch_line(switch: &ModelSwitch, theme: &ArtisanTheme) -> AnyElement {
+    let color = theme.colors.text_muted.to_paint();
+    let model = |model: &NamedModel| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                asset_glyph(editor_ui::engine_icon(theme, model.engine))
+                    .size(px(14.0))
+                    .flex_shrink_0(),
+            )
+            .child(model.name.clone())
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .whitespace_nowrap()
+        .text_color(color)
+        .child("Changed from")
+        .child(model(&switch.from))
+        .child("to")
+        .child(model(&switch.to))
+        .into_any_element()
 }

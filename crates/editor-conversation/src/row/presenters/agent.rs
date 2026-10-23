@@ -19,7 +19,7 @@ pub(in crate::row) struct AgentPresenter {
 impl AgentPresenter {
     pub(in crate::row) fn agent_status_row(&self, working: bool) -> Option<AnyElement> {
         let theme = self.theme;
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let copy = phase::status_copy(if working {
             Phase::Working
         } else {
@@ -35,7 +35,7 @@ impl AgentPresenter {
                 .text_size(px(ProseTypography::BODY_SIZE_PX))
                 .line_height(px(ProseTypography::BODY_LINE_PX))
                 .font_weight(ProseTypography::BODY_WEIGHT)
-                .tracking(ProseTypography::TRACKING_EM)
+                .tracking(theme.typography.tracking_em)
                 .text_color(muted)
                 .child(
                     ShimmerText::new("agent-status", copy, theme)
@@ -53,7 +53,7 @@ impl AgentPresenter {
         let ItemKind::Agent { description, .. } = &item.kind else {
             return div().into_any_element();
         };
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let task: SharedString = match description {
             TextContent::Inline(text) => text.lines().next().unwrap_or_default().to_owned().into(),
             TextContent::Stored(_) => "Stored task. Open the agent to read it.".into(),
@@ -74,12 +74,12 @@ impl AgentPresenter {
             .text_size(px(ProseTypography::BODY_SIZE_PX))
             .line_height(px(LINE))
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .tracking(ProseTypography::TRACKING_EM)
+            .tracking(theme.typography.tracking_em)
             .text_color(muted)
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(theme.colors.foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child("Delegated"),
             )
             .child(div().flex_1().min_w_0().truncate().child(task.clone()))

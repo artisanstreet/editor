@@ -8,13 +8,13 @@ use forge_content::ItemTexts as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeSet;
 
-pub(crate) const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 /// Stored sources are split into chunks of this many bytes.
-pub(crate) const CHUNK_BYTES: usize = 32 * 1024;
+pub const CHUNK_BYTES: usize = 32 * 1024;
 const MAX_ITEM_BYTES: usize = 512 * 1024;
 const GRACE_MILLIS: i64 = 24 * 60 * 60 * 1000;
 
-pub(crate) fn normalize(conn: &Connection, item: &mut Item, previous: Option<&Item>) -> Result<()> {
+pub fn normalize(conn: &Connection, item: &mut Item, previous: Option<&Item>) -> Result<()> {
     let mut bytes = 0u64;
     item.kind.try_visit_texts_mut(|text| {
         bytes = bytes.saturating_add(text.byte_len());
@@ -88,7 +88,7 @@ fn json_len(value: &serde_json::Value) -> Result<u64> {
     Ok(count.0)
 }
 
-pub(crate) fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<()> {
+pub fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<()> {
     use serde_json::Value;
     match value {
         Value::String(text)
@@ -105,6 +105,7 @@ pub(crate) fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<
                     | "input"
                     | "diff"
                     | "reason"
+                    | "summary"
             ) =>
         {
             ensure!(
@@ -126,12 +127,12 @@ pub(crate) fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<
                 validate_metadata(value, key)?;
             }
         }
-        _ => {}
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
     Ok(())
 }
 
-pub(crate) fn normalize_text(conn: &Connection, text: &mut TextContent) -> Result<()> {
+pub fn normalize_text(conn: &Connection, text: &mut TextContent) -> Result<()> {
     match text {
         TextContent::Inline(value) if value.len() > artisan_api::INLINE_TEXT_BYTES => {
             ensure!(
@@ -155,7 +156,7 @@ pub(crate) fn normalize_text(conn: &Connection, text: &mut TextContent) -> Resul
     Ok(())
 }
 
-pub(crate) fn own(conn: &Connection, item: &Item) -> Result<()> {
+pub fn own(conn: &Connection, item: &Item) -> Result<()> {
     let mut next = BTreeSet::new();
     item.kind.try_visit_texts(|text| {
         if let TextContent::Stored(source) = text {
@@ -186,10 +187,10 @@ pub(crate) fn own(conn: &Connection, item: &Item) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn range(
+pub fn range(
     conn: &Connection,
     id: &ContentId,
-    query: ContentQuery,
+    query: &ContentQuery,
 ) -> Result<Option<ContentRange>> {
     ensure!(id.is_valid(), "invalid content identity");
     let limit = query.limit.unwrap_or(artisan_api::CONTENT_RANGE_BYTES);
@@ -275,9 +276,10 @@ pub(crate) fn range(
     }))
 }
 
-pub(crate) fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
-    let TextContent::Stored(source) = text else {
-        return Ok(text.inline().expect("inline variant").to_owned());
+pub fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
+    let source = match text {
+        TextContent::Inline(text) => return Ok(text.clone()),
+        TextContent::Stored(source) => source,
     };
     ensure!(
         source.bytes <= MAX_SOURCE_BYTES,
@@ -289,7 +291,7 @@ pub(crate) fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
         let part = range(
             conn,
             &source.id,
-            ContentQuery {
+            &ContentQuery {
                 offset,
                 limit: None,
             },
@@ -307,7 +309,7 @@ pub(crate) fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
 
 /// Counts authored unified-diff operations. Forge stores this derivation
 /// beside immutable source bytes, so status-only updates do not reload diffs.
-pub(crate) fn diff_totals(diff: &str) -> EditTotals {
+pub fn diff_totals(diff: &str) -> EditTotals {
     let mut totals = EditTotals::default();
     let mut in_hunk = false;
     for line in diff.lines() {
@@ -333,7 +335,7 @@ pub(crate) fn diff_totals(diff: &str) -> EditTotals {
 
 /// Edit totals of a tool's changes as they stand in memory, for items
 /// written before the content table existed.
-pub(crate) fn inline_edit_totals(tool: &ToolKind) -> Option<EditTotals> {
+pub fn inline_edit_totals(tool: &ToolKind) -> Option<EditTotals> {
     let ToolKind::Edit { changes } = tool else {
         return None;
     };
@@ -349,7 +351,7 @@ pub(crate) fn inline_edit_totals(tool: &ToolKind) -> Option<EditTotals> {
     Some(totals)
 }
 
-pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTotals>> {
+pub fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTotals>> {
     let ToolKind::Edit { changes } = tool else {
         return Ok(None);
     };
@@ -397,13 +399,15 @@ pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<E
         match changes {
             artisan_api::Collection::Inline(_) => break,
             artisan_api::Collection::Stored(reference) if offset >= reference.count => break,
-            _ => ensure!(!slice.is_empty(), "edit collection page did not advance"),
+            artisan_api::Collection::Stored(_) => {
+                ensure!(!slice.is_empty(), "edit collection page did not advance");
+            }
         }
     }
     Ok(Some(total))
 }
 
-pub(crate) fn collect(conn: &Connection, now: i64) -> Result<usize> {
+pub fn collect(conn: &Connection, now: i64) -> Result<usize> {
     // Superseded sources remain readable for a full day for in-flight windows and
     // exports. Current owners never expire. A failed old request gets an explicit 404.
     const BATCH_BYTES: u64 = 16 * 1024 * 1024;
@@ -434,7 +438,7 @@ pub(crate) fn collect(conn: &Connection, now: i64) -> Result<usize> {
 
 /// A one-time conversion preserves Item IDs, positions and revisions. It never
 /// emits events or rewrites an Item repeatedly for its individual payload fields.
-pub(crate) fn migrate(conn: &Connection, collections: bool) -> Result<()> {
+pub fn migrate(conn: &Connection, collections: bool) -> Result<()> {
     let mut select = conn.prepare("SELECT id,body FROM items ORDER BY rowid")?;
     let mut rows = select.query([])?;
     while let Some(row) = rows.next()? {
@@ -490,7 +494,7 @@ pub(crate) fn migrate(conn: &Connection, collections: bool) -> Result<()> {
 }
 
 /// The one immutable source insertion path, also used for derived parser metadata.
-pub(crate) fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
+pub fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
     ensure!(
         value.len() as u64 <= MAX_SOURCE_BYTES,
         "source exceeds 64 MiB"
@@ -556,7 +560,7 @@ mod tests {
             let part = range(
                 &conn,
                 &source.id,
-                ContentQuery {
+                &ContentQuery {
                     offset,
                     limit: Some(65536),
                 },
@@ -574,7 +578,7 @@ mod tests {
             let part = range(
                 &conn,
                 &source.id,
-                ContentQuery {
+                &ContentQuery {
                     offset,
                     limit: Some(19),
                 },
@@ -582,13 +586,16 @@ mod tests {
             .unwrap()
             .unwrap();
             assert!(part.start <= offset && offset - part.start <= 3);
-            assert_eq!(part.text, text[part.start as usize..part.end as usize]);
+            assert_eq!(
+                part.text,
+                text[usize::try_from(part.start).unwrap()..usize::try_from(part.end).unwrap()]
+            );
         }
         assert!(
             range(
                 &conn,
                 &source.id,
-                ContentQuery {
+                &ContentQuery {
                     offset: source.bytes + 1,
                     limit: None
                 }
@@ -599,7 +606,7 @@ mod tests {
             range(
                 &conn,
                 &source.id,
-                ContentQuery {
+                &ContentQuery {
                     offset: 0,
                     limit: Some(65537)
                 }
@@ -682,7 +689,7 @@ mod tests {
             range(
                 &conn,
                 &source.id,
-                ContentQuery {
+                &ContentQuery {
                     offset: 0,
                     limit: None
                 }

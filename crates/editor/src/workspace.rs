@@ -7,32 +7,33 @@ use crate::notifications::Notifications;
 use crate::palette::{Palette, PaletteEvent};
 use crate::{GoBack, NewThread, OpenPalette, OpenSettings, ToggleInspector, ToggleSidebar};
 use editor_conversation::{Conversation, ConversationEvent};
-use editor_core::{ConnectionStatus, Core, CoreEvent, HostData, HostEvent, Screen, SettingsPage};
+use editor_core::{
+    Attention, ConnectionStatus, Core, CoreEvent, HostData, HostEvent, Screen, SettingsPage,
+};
 use editor_inspector::Inspector;
 use editor_marketplace::Marketplace;
 use editor_settings::NOTIFICATIONS_KEY;
 use editor_settings::{BuildInfo, Settings};
-use editor_sidebar::Sidebar;
+use editor_sidebar::{RAIL_WIDTH, Sidebar, UsagePage};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
 use editor_ui::button::{Button, ButtonVariant};
-use editor_ui::glass::glass_badge;
-use editor_ui::theme::{ActiveTheme as _, ArtisanTheme, ColorTokens, ProseTypography, SurfaceStep};
+use editor_ui::theme::{ActiveTheme as _, ArtisanTheme, ColorTokens, Elevation};
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window,
-    WindowControlArea, div, px,
+    AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, Subscription, Window, WindowControlArea, div,
+    prelude::FluentBuilder as _, px,
 };
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
 /// Titlebar height.
 const TITLEBAR_HEIGHT: f32 = 48.0;
-/// Horizontal inset of the titlebar's content section, matching the
-/// wordmark section's padding.
-const TITLEBAR_CONTENT_INSET: f32 = 14.0;
-/// The left sidebar's width, and the thread inspector's, so the two ruled
+/// The content card's one rounded corner, its top left, where the page's
+/// header and sidebar meet around it.
+const CARD_RADIUS: f32 = 12.0;
+/// The left sidebar's width, and the thread inspector's, so the two
 /// columns read as a pair.
 pub const COLUMN_WIDTH: f32 = 327.0;
 /// The narrowest either ruled column shrinks to before it hides.
@@ -40,14 +41,14 @@ const COLUMN_MIN_WIDTH: f32 = 240.0;
 /// The chat's comfortable minimum: the 768 px reading column plus 48 px of
 /// rail clearance each side. Columns shrink, then hide, before it does.
 pub const CHAT_MIN_WIDTH: f32 = 768.0 + 2.0 * 48.0;
+/// The settings column's comfortable minimum beside the sidebar.
+const SETTINGS_MIN_WIDTH: f32 = 520.0;
 /// A caption button's width.
 use editor_ui::window_controls::CONTROL_WIDTH;
 /// Gap between the context ring and the rule or controls to its right.
-const CONTEXT_METER_GAP: f32 = 16.0;
+const CONTEXT_METER_GAP: f32 = 12.0;
 /// The ring's slot width.
 const CONTEXT_METER_WIDTH: f32 = 24.0;
-/// The shell's one face: true black behind every column.
-const SHELL_BLACK: u32 = 0x0000_0000;
 
 /// The sidebar's width for a window, `None` while it is hidden: the chat
 /// keeps its minimum first and the sidebar takes what remains, up to
@@ -57,22 +58,17 @@ fn sidebar_width(window_width: f32) -> Option<f32> {
     (room >= COLUMN_MIN_WIDTH).then(|| room.min(COLUMN_WIDTH))
 }
 
+/// The sidebar's width on the Settings screen, where it is the page list
+/// and always shows: the settings column needs less room than the chat.
+fn settings_sidebar_width(window_width: f32) -> f32 {
+    (window_width - SETTINGS_MIN_WIDTH).clamp(COLUMN_MIN_WIDTH, COLUMN_WIDTH)
+}
+
 /// The inspector's width for the content width beside the sidebar, `None`
 /// while it does not fit.
 fn inspector_width(content_width: f32) -> Option<f32> {
     let room = content_width - CHAT_MIN_WIDTH;
     (room >= COLUMN_MIN_WIDTH).then(|| room.min(COLUMN_WIDTH))
-}
-
-/// The build badge: `D` and the commit's first seven characters.
-fn build_badge() -> Option<String> {
-    let commit = env!("EDITOR_COMMIT");
-    (!commit.is_empty()).then(|| {
-        format!(
-            "D{}",
-            commit.get(..7).unwrap_or(commit).to_ascii_uppercase()
-        )
-    })
 }
 
 pub struct Workspace {
@@ -84,9 +80,11 @@ pub struct Workspace {
     build: BuildInfo,
     marketplace: Option<Entity<Marketplace>>,
     home: Option<Entity<Home>>,
+    usage: Option<Entity<UsagePage>>,
     palette: Option<Entity<Palette>>,
     resource_preview: Option<Entity<crate::resource_preview::ResourcePreview>>,
     copy_menu: Option<editor_ui::markdown_renderer::ShowCopyMenu>,
+    copy_menu_hover: editor_ui::picker_motion::HoverSurface,
     show_sidebar: bool,
     show_inspector: bool,
     _repository: Entity<crate::repository_context::RepositoryContext>,
@@ -110,7 +108,11 @@ impl Workspace {
             let core = core.read(cx);
             match core.screen() {
                 Screen::Home => core.active_host().map(|host| host.read(cx).id.clone()),
-                _ => None,
+                Screen::Thread { .. }
+                | Screen::NewThread { .. }
+                | Screen::Settings(_)
+                | Screen::Marketplace
+                | Screen::Usage => None,
             }
         };
         if let Some(host) = start {
@@ -177,9 +179,11 @@ impl Workspace {
             build,
             marketplace: None,
             home: None,
+            usage: None,
             palette: None,
             resource_preview: None,
             copy_menu: None,
+            copy_menu_hover: editor_ui::picker_motion::HoverSurface::default(),
             show_sidebar: true,
             show_inspector: true,
             _repository: repository,
@@ -206,37 +210,54 @@ impl Workspace {
             Screen::Marketplace if self.marketplace.is_none() => {
                 self.marketplace = Some(cx.new(|cx| Marketplace::new(self.core.clone(), cx)));
             }
+            Screen::Usage if self.usage.is_none() => {
+                self.usage = Some(cx.new(|cx| UsagePage::new(self.core.clone(), cx)));
+            }
             Screen::Home if self.home.is_none() => {
                 self.home = Some(cx.new(|cx| Home::new(self.core.clone(), cx)));
             }
-            _ => {}
+            Screen::Home
+            | Screen::Thread { .. }
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => {}
         }
     }
 
     /// Re-renders the connection notice when a host's status moves, and
     /// posts notifications for threads that finished or ask for an answer.
-    fn follow_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn follow_hosts(&mut self, window: &Window, cx: &mut Context<Self>) {
         let hosts: Vec<_> = self
             .core
             .read(cx)
             .hosts()
             .map(|(_, host)| host.clone())
             .collect();
-        self.notifications.retain_hosts(
+        let removed = self.notifications.retain_hosts(
             &hosts
                 .iter()
                 .map(|host| host.read(cx).id.clone())
                 .collect::<Vec<_>>(),
         );
+        for tag in removed {
+            cx.dismiss_system_notification(&tag);
+        }
         for host in &hosts {
             self.notifications.reset(host.read(cx));
         }
+        self.update_badge(window, cx);
         self.host_subscriptions = hosts
             .into_iter()
             .map(|host| {
                 cx.subscribe_in(&host, window, |this, host, event, window, cx| match event {
                     HostEvent::ThreadChanged { thread_id } => {
+                        // Before posting: a thread's Run and Thread events
+                        // can land in either order, so a fresh notification
+                        // is only judged read by a later event.
+                        this.withdraw_notifications(host, cx);
                         this.notify_changes(host, thread_id, window, cx);
+                        this.update_badge(window, cx);
                         if this
                             .open_thread(cx)
                             .is_some_and(|open| open.thread == *thread_id && open.host == *host)
@@ -246,16 +267,54 @@ impl Workspace {
                     }
                     HostEvent::Reset => {
                         this.notifications.reset(host.read(cx));
+                        this.withdraw_notifications(host, cx);
+                        this.update_badge(window, cx);
                         cx.notify();
                     }
                     HostEvent::Changed => {
                         this.notifications.sync_connection(host.read(cx));
+                        // Thread pages and project removals change the count
+                        // without a thread event.
+                        this.update_badge(window, cx);
                         cx.notify();
                     }
-                    _ => {}
+                    HostEvent::ImagesChanged
+                    | HostEvent::EngineInstall { .. }
+                    | HostEvent::ThreadSummaryChanged { .. }
+                    | HostEvent::WslDistro { .. }
+                    | HostEvent::Item(_)
+                    | HostEvent::Live { .. }
+                    | HostEvent::EditorCall { .. } => {}
                 })
             })
             .collect();
+    }
+
+    /// Takes read and answered threads' notifications out of the system's
+    /// notification list, which badges the taskbar button separately.
+    fn withdraw_notifications(&mut self, host: &Entity<HostData>, cx: &Context<Self>) {
+        for tag in self.notifications.withdraw(host.read(cx)) {
+            cx.dismiss_system_notification(&tag);
+        }
+    }
+
+    /// Counts stopped threads across hosts on the taskbar button or dock
+    /// icon, in the accent like the sidebar's question dot while any asks a
+    /// question.
+    fn update_badge(&self, window: &Window, cx: &Context<Self>) {
+        let attention = self
+            .core
+            .read(cx)
+            .hosts()
+            .map(|(_, host)| host.read(cx).attention())
+            .fold(Attention::default(), |total, host| total + host);
+        let colors = &cx.theme().colors;
+        let color = if attention.waiting > 0 {
+            colors.primary
+        } else {
+            colors.red.solid
+        };
+        window.set_badge(attention.waiting + attention.stopped, color.to_paint());
     }
 
     fn notify_changes(
@@ -263,7 +322,7 @@ impl Workspace {
         host: &Entity<HostData>,
         thread: &artisan_api::ThreadId,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) {
         let core = self.core.read(cx);
         let enabled = core
@@ -278,7 +337,12 @@ impl Workspace {
             {
                 Some(thread)
             }
-            _ => None,
+            Screen::Home
+            | Screen::Thread { .. }
+            | Screen::NewThread { .. }
+            | Screen::Settings(_)
+            | Screen::Marketplace
+            | Screen::Usage => None,
         };
         let posted = self.notifications.observe(host, thread, watching);
         if enabled && let Some(notification) = posted {
@@ -320,39 +384,62 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         editor_ui::overlay::begin("copy-menu", window, cx);
+        self.copy_menu_hover.clear();
         self.copy_menu = Some(menu.clone());
         cx.notify();
     }
 
-    fn render_copy_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_copy_menu(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let menu = self.copy_menu.as_ref()?;
         let theme = *cx.theme();
-        let rows = menu.entries.iter().enumerate().map(|(index, entry)| {
+        let mut rows =
+            editor_ui::popover::menu_rows(&self.copy_menu_hover, &theme, cx.reduce_motion())
+                .min_w(px(160.0));
+        for (index, entry) in menu.entries.iter().enumerate() {
+            let primary = entry.kind == editor_ui::markdown_renderer::CopyKind::Primary;
+            // The value as written leads with the copy icon; its other
+            // notations follow past one separator, indented under it.
+            if !primary
+                && index > 0
+                && menu.entries[index - 1].kind == editor_ui::markdown_renderer::CopyKind::Primary
+            {
+                rows = rows.child(editor_ui::glass::glass_menu_separator(&theme));
+            }
             let text = entry.text.clone();
-            editor_ui::button::Button::text(("copy-value", index), theme, entry.label.clone())
-                .debug_selector(format!("copy-value-{index}"))
-                .variant(editor_ui::button::ButtonVariant::Ghost)
-                .on_activate(cx.listener(move |this, _, window, cx| {
+            rows = rows.child(
+                editor_ui::popover::menu_item(
+                    format!("copy-value-{index}"),
+                    &theme,
+                    &self.copy_menu_hover,
+                    primary.then_some(editor_ui::AssetId::TABLER_COPY),
+                    entry.label.clone(),
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
                     this.copy_menu = None;
                     editor_ui::overlay::dismiss("copy-menu", window, cx);
                     cx.notify();
-                }))
-        });
+                })),
+            );
+        }
         let this = cx.entity().downgrade();
         Some(
             editor_ui::popover::Popover::new(
                 "copy-menu",
                 "Copy value",
                 menu.position,
-                div().flex().flex_col().gap(px(4.0)).children(rows),
+                rows,
                 move |_, cx| {
-                    let _ = this.update(cx, |this, cx| {
+                    this.update(cx, |this, cx| {
                         this.copy_menu = None;
                         cx.notify();
-                    });
+                    })
+                    .ok();
                 },
             )
+            .menu_padding(px(4.0))
+            .quiet_glass_menu()
             .into_any_element(),
         )
     }
@@ -416,61 +503,13 @@ impl Workspace {
         })
     }
 
-    /// The titlebar's leading section above the sidebar: the `Artisan
-    /// Editor` wordmark, which goes home, and the build badge.
-    fn brand(theme: &ArtisanTheme, desktop: &ColorTokens, cx: &Context<Self>) -> Div {
-        div()
-            .w_full()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap(px(8.0))
-            .min_w(px(0.0))
-            .overflow_hidden()
-            .child(
-                div()
-                    .id("artisan-brand-home")
-                    .focusable().tab_index(0).role(gpui::Role::Button).aria_label("Artisan Editor home")
-                    .debug_selector(|| "artisan-brand-home".to_owned())
-                    .block_mouse_except_scroll()
-                    .line_height(px(28.0))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let host = this
-                            .core
-                            .read(cx)
-                            .active_host()
-                            .map(|host| host.read(cx).id.clone());
-                        match host {
-                            Some(host) => this.navigate(
-                                Screen::NewThread {
-                                    host,
-                                    project: None,
-                                },
-                                cx,
-                            ),
-                            None => this.navigate(Screen::Home, cx),
-                        }
-                    }))
-                    .flex_shrink_0()
-                    .text_size(px(26.0))
-                    .font_family("Test Founders Grotesk")
-                    .font_weight(FontWeight::SEMIBOLD)
-                    // -0.025em tracking matches the Founders specimen.
-                    .letter_spacing(px(-0.65))
-                    .text_color(desktop.workspace_foreground.to_paint())
-                    .child("Artisan Editor"),
-            )
-            .children(
-                build_badge()
-                    .map(|badge| glass_badge(theme, badge).debug_selector("artisan-brand-build")),
-            )
-    }
-
     /// The workspace header on a thread: the repository's host mark and
     /// `owner/repository` link (else the project folder), a darker `/`, and
     /// the thread's title, which alone truncates.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the header's marks, link and title build one element tree"
+    )]
     fn header(&self, theme: &ArtisanTheme, cx: &Context<Self>) -> Option<AnyElement> {
         let open = self.open_thread(cx)?;
         let host = open.host.read(cx);
@@ -483,7 +522,7 @@ impl Workspace {
             .as_ref()
             .and_then(|project| host.repository(project))
             .filter(|repository| repository.web_url.is_some());
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let mut cluster = div()
             .flex()
             .items_center()
@@ -498,7 +537,7 @@ impl Workspace {
                 let mark = repository_mark(repository.host.as_deref());
                 let mut glyph = asset_glyph(mark.asset).size(px(14.0));
                 if mark.monochrome {
-                    glyph = glyph.text_color(theme.colors.foreground.to_paint());
+                    glyph = glyph.text_color(theme.colors.text.to_paint());
                 }
                 let destination = SharedString::from(web_url.clone());
                 cluster = cluster.child(div().flex_shrink_0().child(glyph)).child(
@@ -510,7 +549,7 @@ impl Workspace {
                         .aria_label(format!("Open {}", qualified_label(&web_url)))
                         .cursor_pointer()
                         .flex_shrink_0()
-                        .text_color(theme.colors.banner_info.to_paint())
+                        .text_color(theme.colors.link.to_paint())
                         .on_click(move |_, _, cx| cx.open_url(destination.as_ref()))
                         .child(qualified_label(&web_url)),
                 );
@@ -521,7 +560,7 @@ impl Workspace {
                         .items_center()
                         .gap(px(6.0))
                         .flex_shrink_0()
-                        .text_color(theme.colors.foreground.to_paint())
+                        .text_color(theme.colors.text.to_paint())
                         .child(
                             asset_glyph(AssetId::TABLER_FOLDER)
                                 .size(px(14.0))
@@ -535,7 +574,7 @@ impl Workspace {
                 div()
                     .flex_shrink_0()
                     // Two ramp steps below the muted line around it.
-                    .text_color(SurfaceStep::S600.oklch().to_paint())
+                    .text_color(theme.colors.gray.step(7).to_paint())
                     .child("/"),
             );
         }
@@ -545,7 +584,7 @@ impl Workspace {
         let separator = || {
             div()
                 .flex_shrink_0()
-                .text_color(SurfaceStep::S600.oklch().to_paint())
+                .text_color(theme.colors.gray.step(7).to_paint())
                 .child("/")
         };
         let conversation = self.conversation.clone();
@@ -565,7 +604,7 @@ impl Workspace {
                 .aria_label("Open parent thread")
                 .flex_shrink(1.0)
                 .cursor_pointer()
-                .hover(|style| style.text_color(theme.colors.foreground.to_paint()))
+                .hover(|style| style.text_color(theme.colors.text.to_paint()))
                 .on_click(move |_, _, cx| {
                     conversation.update(cx, |conversation, cx| conversation.open_agent(None, cx));
                 });
@@ -580,7 +619,7 @@ impl Workspace {
                 .flex_shrink_0()
                 .child(name);
             if index == last {
-                crumb = crumb.text_color(theme.colors.foreground.to_paint());
+                crumb = crumb.text_color(theme.colors.text.to_paint());
             } else {
                 let conversation = self.conversation.clone();
                 crumb = crumb
@@ -589,11 +628,11 @@ impl Workspace {
                     .role(gpui::Role::Button)
                     .aria_label("Open parent agent")
                     .cursor_pointer()
-                    .hover(|style| style.text_color(theme.colors.foreground.to_paint()))
+                    .hover(|style| style.text_color(theme.colors.text.to_paint()))
                     .on_click(move |_, _, cx| {
                         let agent = agent.clone();
                         conversation.update(cx, |conversation, cx| {
-                            conversation.open_agent(Some(agent), cx)
+                            conversation.open_agent(Some(agent), cx);
                         });
                     });
             }
@@ -629,48 +668,33 @@ impl Workspace {
         ContextReading::new(name, used, window)
     }
 
-    /// The titlebar across the window: the brand above the sidebar, the
-    /// workspace header, the context ring, the caption buttons, and the
-    /// sidebar's and inspector's rules continued through it.
-    #[allow(clippy::too_many_lines)]
+    /// The titlebar across the window, on the page above the content card:
+    /// the workspace header from the rail's edge, the context ring and the
+    /// caption buttons.
     fn titlebar(
         &self,
-        sidebar: Option<Pixels>,
         inspector: Option<Pixels>,
-        rule: Pixels,
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = *cx.theme();
-        let desktop = cx.theme().colors;
         let reading = self.context_reading(cx);
         let controls_width = px(CONTROL_WIDTH * 3.0);
         let meter_right = inspector.unwrap_or(px(0.0)).max(controls_width) + px(CONTEXT_METER_GAP);
+        // Over the rail, so the header starts where the card does; still
+        // the window's drag area.
+        let lead = div()
+            .w(px(RAIL_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .window_control_area(WindowControlArea::Drag);
+        // No horizontal padding: the header starts at the card's edge and
+        // only stops short of the context meter.
         let content_inset = if reading.is_some() {
-            (meter_right + px(CONTEXT_METER_WIDTH + 24.0) - controls_width).max(px(24.0))
+            (meter_right + px(CONTEXT_METER_WIDTH) - controls_width).max(px(0.0))
         } else {
-            px(24.0)
+            px(0.0)
         };
-        let brand = sidebar.map(|width| {
-            div()
-                .w(width)
-                .h_full()
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .px(px(14.0))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .window_control_area(WindowControlArea::Drag)
-                        .child(Self::brand(&theme, &desktop, cx)),
-                )
-        });
         let content = div()
             .flex_1()
             .min_w(px(0.0))
@@ -685,7 +709,6 @@ impl Workspace {
                     .h_full()
                     .flex()
                     .items_center()
-                    .pl(px(TITLEBAR_CONTENT_INSET))
                     .pr(content_inset)
                     .overflow_hidden()
                     .children(self.header(&theme, cx))
@@ -707,7 +730,17 @@ impl Workspace {
                 .h(px(TITLEBAR_HEIGHT))
                 .flex()
                 .items_center()
-                .child(ContextMeter::new(reading, theme))
+                .child(ContextMeter::new(reading, &theme))
+        });
+        // The inspector's rule carries on up to the window's top edge.
+        let rule = inspector.map(|width| {
+            div()
+                .absolute()
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .right(width - px(1.0))
+                .w(px(1.0))
+                .bg(theme.colors.line.to_paint())
         });
         div()
             .relative()
@@ -716,54 +749,79 @@ impl Workspace {
             .flex_shrink_0()
             .flex()
             .items_center()
-            .border_b_1()
-            .border_color(desktop.line.to_paint())
             .debug_selector(|| "artisan-desktop-titlebar".to_owned())
-            .children(brand)
+            .child(lead)
             .child(content)
             .child(controls)
-            .children(sidebar.map(|width| {
-                // The sidebar's right rule, continued through the bar.
-                div()
-                    .absolute()
-                    .left(width - rule)
-                    .top(px(0.0))
-                    .w(rule)
-                    .h(px(TITLEBAR_HEIGHT))
-                    .bg(desktop.line.to_paint())
-            }))
-            .children(inspector.map(|width| {
-                // The inspector's left rule, continued through the bar.
-                div()
-                    .absolute()
-                    .right(width - rule)
-                    .top(px(0.0))
-                    .w(rule)
-                    .h(px(TITLEBAR_HEIGHT))
-                    .bg(desktop.line.to_paint())
-                    .debug_selector(|| "artisan-desktop-inspector-titlebar-divider".to_owned())
-            }))
             .children(meter)
+            .children(rule)
             .into_any_element()
     }
 
-    /// The active host's connection, when it isn't live.
+    /// The active host when it is offline, on screens without the
+    /// new-thread connection card. Why it failed lives on that card.
     fn connection_notice(&self, desktop: &ColorTokens, cx: &Context<Self>) -> Option<AnyElement> {
-        let host = self.core.read(cx).active_host()?.read(cx);
-        let text = match &host.status {
-            ConnectionStatus::Live => return None,
-            ConnectionStatus::Connecting => format!("Connecting to {}…", host.name),
-            ConnectionStatus::Offline {
-                attempt, reason, ..
-            } => {
-                format!(
-                    "{} is unreachable ({reason}). Retrying, attempt {attempt}.",
-                    host.name
+        let core = self.core.read(cx);
+        // The pairing screen has no host to be offline.
+        if matches!(core.screen(), Screen::NewThread { .. }) {
+            return None;
+        }
+        let entity = core.active_host()?.clone();
+        let host = entity.read(cx);
+        if !matches!(host.status, ConnectionStatus::Offline { .. }) {
+            return None;
+        }
+        let theme = *cx.theme();
+        let (text, action) = host.wsl.as_ref().map_or_else(
+            || {
+                (
+                    format!("{} is offline. Reconnecting when it's back.", host.name),
+                    None,
                 )
-            }
-        };
-        Some(notice(desktop, text, None))
+            },
+            |wsl| {
+                let (text, label) = if wsl.running {
+                    (
+                        format!("Forge isn't running in {}.", wsl.distro),
+                        "Start Forge".to_owned(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "WSL isn't running, so Forge in {} can't be reached.",
+                            wsl.distro
+                        ),
+                        format!("Start {}", wsl.distro),
+                    )
+                };
+                let action = editor_ui::button::Button::text("notice-start-wsl", theme, label)
+                    .variant(editor_ui::button::ButtonVariant::Outline)
+                    .disabled(wsl.starting)
+                    .on_activate(move |_, _, cx| entity.update(cx, HostData::start_wsl))
+                    .into_any_element();
+                (text, Some(action))
+            },
+        );
+        Some(notice(desktop, text, action))
     }
+}
+
+/// The content card's face: mounted in the window's bottom-right, flush
+/// with both edges, the titlebar above it and the rail beside it on the
+/// frame. The sidebar column, the conversation and the inspector paint
+/// over it, ruled apart. Its colour and the raised stack's hairline lift it
+/// off the frame; the hairline shows only along the top and left.
+fn card_face(theme: &ArtisanTheme) -> Div {
+    div()
+        .absolute()
+        .left(px(RAIL_WIDTH))
+        .top(px(0.0))
+        .right(px(0.0))
+        .bottom(px(0.0))
+        .rounded_tl(px(CARD_RADIUS))
+        .bg(theme.colors.background.to_paint())
+        .shadow(theme.elevation.shadows(Elevation::Raised))
+        .debug_selector(|| "artisan-desktop-content-card".to_owned())
 }
 
 fn notice(desktop: &ColorTokens, text: String, dismiss: Option<AnyElement>) -> AnyElement {
@@ -774,30 +832,44 @@ fn notice(desktop: &ColorTokens, text: String, dismiss: Option<AnyElement>) -> A
         .flex()
         .items_center()
         .gap(px(8.0))
-        .bg(desktop.field.to_paint())
+        .bg(desktop.surface.to_paint())
         .border_b_1()
         .border_color(desktop.line.to_paint())
         .text_sm()
-        .text_color(desktop.workspace_foreground.to_paint())
+        .text_color(desktop.text.to_paint())
         .child(div().flex_1().child(text))
         .children(dismiss)
         .into_any_element()
 }
 
 impl Render for Workspace {
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the window's frame, columns and overlays build one element tree"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "navigation mounts each page before its screen shows"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
         let desktop = theme.colors;
         let screen = self.core.read(cx).screen().clone();
-        let rule = px(1.0 / window.scale_factor().max(0.5));
         let window_width = f32::from(window.viewport_size().width);
-        // Settings keeps the sidebar, as before.
-        let sidebar_width = self
-            .show_sidebar
-            .then(|| sidebar_width(window_width))
-            .flatten();
-        let content_width = window_width - sidebar_width.unwrap_or(0.0);
+        // Settings lists its pages in the sidebar, so the sidebar stays.
+        let sidebar_width = if matches!(screen, Screen::Settings(_)) {
+            Some(settings_sidebar_width(window_width))
+        } else if matches!(screen, Screen::Home) {
+            // Pairing has no threads to list: only the rail stays.
+            None
+        } else {
+            self.show_sidebar
+                .then(|| sidebar_width(window_width))
+                .flatten()
+        };
+        // The rail always shows: it carries the profile.
+        let frame_width = RAIL_WIDTH + sidebar_width.unwrap_or(0.0);
+        let content_width = window_width - frame_width;
         // The new-thread screen paints the same column, empty, so its
         // composer sits where a thread's does.
         let inspector_width = (self.show_inspector
@@ -823,28 +895,27 @@ impl Render for Workspace {
                 .expect("marketplace mounted on navigation")
                 .clone()
                 .into_any_element(),
+            Screen::Usage => self
+                .usage
+                .as_ref()
+                .expect("usage mounted on navigation")
+                .clone()
+                .into_any_element(),
             Screen::Thread { .. } | Screen::NewThread { .. } => {
                 self.conversation.clone().into_any_element()
             }
         };
         let inspector = inspector_width.map(|width| {
+            // Inside the card, a hairline from the conversation.
             let column = div()
                 .relative()
                 .w(px(width))
                 .h_full()
                 .min_h(px(0.0))
                 .flex_shrink_0()
-                .bg(gpui::rgb(SHELL_BLACK))
-                .debug_selector(|| "artisan-thread-screen-inspector".to_owned())
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(0.0))
-                        .bottom(px(0.0))
-                        .w(rule)
-                        .bg(desktop.line.to_paint()),
-                );
+                .border_l_1()
+                .border_color(desktop.line.to_paint())
+                .debug_selector(|| "artisan-thread-screen-inspector".to_owned());
             if matches!(screen, Screen::Thread { .. }) {
                 // Cached: it notifies itself, so a frame drawn for anything
                 // else reuses it.
@@ -857,16 +928,15 @@ impl Render for Workspace {
                 column
             }
         });
-        let sidebar = sidebar_width.map(|width| {
-            div()
-                .w(px(width))
-                .h_full()
-                .flex_shrink_0()
-                .border_r_1()
-                .border_color(desktop.line.to_paint())
-                .debug_selector(|| "artisan-desktop-sidebar".to_owned())
-                .child(self.sidebar.clone())
-        });
+        // The rail on the frame, then the sidebar column in the card; a
+        // hidden sidebar leaves the rail.
+        let sidebar = div()
+            .w(px(frame_width))
+            .h_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .debug_selector(|| "artisan-desktop-sidebar".to_owned())
+            .child(self.sidebar.clone());
         let failure = self.failure.clone().map(|text| {
             let dismiss = Button::text("dismiss-failure", *cx.theme(), "Dismiss")
                 .variant(ButtonVariant::Ghost)
@@ -877,13 +947,7 @@ impl Render for Workspace {
                 .into_any_element();
             notice(&desktop, text, Some(dismiss))
         });
-        let titlebar = self.titlebar(
-            sidebar_width.map(px),
-            inspector_width.map(px),
-            rule,
-            window,
-            cx,
-        );
+        let titlebar = self.titlebar(inspector_width.map(px), window, cx);
 
         div()
             .id("workspace")
@@ -907,24 +971,22 @@ impl Render for Workspace {
                 this.core.update(cx, editor_core::Core::go_back);
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
-                this.navigate(Screen::Settings(SettingsPage::Models), cx);
+                this.navigate(Screen::Settings(SettingsPage::General), cx);
             }))
             .relative()
             .size_full()
             .flex()
             .flex_col()
-            // One continuous true-black face; cards and popovers paint their
-            // own surfaces above it.
-            .bg(gpui::rgb(SHELL_BLACK))
-            .text_color(desktop.workspace_foreground.to_paint())
+            // The frame; the content card and popovers paint their own
+            // faces above it.
+            .bg(desktop.frame.to_paint())
+            .text_color(desktop.text.to_paint())
             .font_family(cx.theme().typography.sans.family)
             .text_size(px(14.0))
             // One tracking for every text in the window, at its own size.
-            .tracking(ProseTypography::TRACKING_EM)
+            .tracking(cx.theme().typography.tracking_em)
             .debug_selector(|| "artisan-desktop-workspace".to_owned())
             .child(titlebar)
-            .children(failure)
-            .children(self.connection_notice(&desktop, cx))
             .child(
                 div()
                     .relative()
@@ -933,8 +995,29 @@ impl Render for Workspace {
                     .min_h(px(0.0))
                     .flex()
                     .flex_row()
-                    .children(sidebar)
-                    .child(div().flex_1().min_w(px(0.0)).h_full().child(center))
+                    .child(card_face(&theme))
+                    .child(sidebar)
+                    .child(
+                        // The conversation's column, ruled off the sidebar.
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .when(sidebar_width.is_some(), |column| {
+                                column.border_l_1().border_color(desktop.line.to_paint())
+                            })
+                            .children(failure)
+                            .children(self.connection_notice(&desktop, cx))
+                            // Pinned to the space the notices leave, so the
+                            // screen's own scrolling owns any overflow.
+                            .child(
+                                div().relative().flex_1().min_h(px(0.0)).child(
+                                    div().absolute().inset_0().child(center),
+                                ),
+                            ),
+                    )
                     .children(inspector),
             )
             // Cached like the inspector: the dialog notifies itself as its
@@ -1043,10 +1126,10 @@ mod rich_action_tests {
             )
             .unwrap()
         });
-        // Appearance needs no host or pairing discovery. This fixture cannot
+        // General needs no host or pairing discovery. This fixture cannot
         // launch, stop, install, pair with, or mutate the running application.
         core.update(cx, |core, cx| {
-            core.navigate(Screen::Settings(editor_core::SettingsPage::Appearance), cx)
+            core.navigate(Screen::Settings(editor_core::SettingsPage::General), cx)
         });
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::new(core.clone(), None, window, cx));
@@ -1238,7 +1321,7 @@ mod rich_action_tests {
         let core = cx.new(|cx| Core::new(files, cx).unwrap());
         // Appearance leaves only HostData's normal state fetch in flight.
         core.update(cx, |core, cx| {
-            core.navigate(Screen::Settings(editor_core::SettingsPage::Appearance), cx)
+            core.navigate(Screen::Settings(editor_core::SettingsPage::General), cx)
         });
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::new(core.clone(), None, window, cx));

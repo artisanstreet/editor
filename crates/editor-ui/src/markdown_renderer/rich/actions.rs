@@ -43,7 +43,7 @@ pub(super) fn open_reference(
 
 /// Shows a menu at the pointer whose items copy one value each: a color as
 /// written and in each notation, an image's path.
-#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[derive(Clone, Debug, PartialEq, Eq, gpui::Action)]
 #[action(no_json, namespace = rich_blocks, name = "ShowCopyMenu")]
 pub struct ShowCopyMenu {
     /// Where the pointer pressed, in window coordinates.

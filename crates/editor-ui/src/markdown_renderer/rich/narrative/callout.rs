@@ -25,7 +25,7 @@ enum Kind {
 }
 
 impl Kind {
-    fn tone(self) -> Tone {
+    const fn tone(self) -> Tone {
         match self {
             Self::Note => Tone::Info,
             Self::Tip => Tone::Success,
@@ -36,7 +36,7 @@ impl Kind {
         }
     }
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Note => "Note",
             Self::Tip => "Tip",
@@ -47,7 +47,7 @@ impl Kind {
         }
     }
 
-    fn icon(self) -> AssetId {
+    const fn icon(self) -> AssetId {
         match self {
             Self::Note => AssetId::TABLER_MESSAGE_CIRCLE,
             Self::Tip => AssetId::TABLER_SPARKLES,
@@ -73,7 +73,7 @@ pub(super) struct Callout {
 
 impl RichBlock for Callout {
     fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + budget::optional(&self.title) + self.body.capacity()
+        std::mem::size_of::<Self>() + budget::optional(self.title.as_ref()) + self.body.capacity()
     }
 
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
@@ -143,7 +143,7 @@ impl RenderOnce for CalloutView {
                         AssetId::TABLER_CHEVRON_DOWN
                     },
                     14.0,
-                    theme.colors.muted_foreground.to_paint(),
+                    theme.colors.text_muted.to_paint(),
                 ))
             });
         let head = div()
@@ -171,7 +171,7 @@ impl RenderOnce for CalloutView {
             .rounded(kit::inner_radius())
             .border_l_2()
             .border_color(color.to_paint())
-            .bg(color.with_alpha(0.07).to_paint())
+            .bg(color.at(crate::theme::Opacity::CalloutTint).to_paint())
             .child(head)
             .when(open, |callout| {
                 callout.child(kit::paragraphs(&theme, &self.body))

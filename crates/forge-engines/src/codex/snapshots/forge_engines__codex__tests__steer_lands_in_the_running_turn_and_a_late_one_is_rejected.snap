@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 160
 expression: "replay(\"steer\")"
 ---
 [
@@ -89,6 +88,7 @@ expression: "replay(\"steer\")"
                         "/work",
                     ),
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -137,6 +137,7 @@ expression: "replay(\"steer\")"
                         "/work",
                     ),
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -226,6 +227,7 @@ expression: "replay(\"steer\")"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
     Response {

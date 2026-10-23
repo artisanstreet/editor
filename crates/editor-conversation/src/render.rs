@@ -18,13 +18,13 @@ use editor_ui::hover_card::{glass_handle, glass_navigator_card};
 use editor_ui::motion::MotionDuration;
 use editor_ui::motion::smooth_out;
 use editor_ui::picker_motion::{HoverRect, sliding_hover_pill};
-use editor_ui::theme::{Oklch, RadiusStep, RadiusTokens};
+use editor_ui::theme::{RadiusStep, RadiusTokens};
 use editor_ui::wordmark_loader::WordmarkLoader;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, FontWeight, InteractiveElement as _,
     IntoElement, MouseMoveEvent, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, canvas, div, list,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    prelude::FluentBuilder as _, px,
 };
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -32,15 +32,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The composer's bottom inset (`pb-4`).
-pub(crate) const COMPOSER_BOTTOM: f32 = 16.0;
+pub const COMPOSER_BOTTOM: f32 = 16.0;
 /// The composer's bottom inset once the window is wide (`sm:pb-6`).
 const COMPOSER_BOTTOM_WIDE: f32 = 24.0;
 /// The width from which the wider inset applies (`sm`).
 const WIDE_FROM: f32 = 640.0;
 /// The air between the latest words and the composer card.
-pub(crate) const COMPOSER_GAP: f32 = 24.0;
-/// The shell under the transcript (`SHELL_BLACK`).
-const SHELL_BLACK: u32 = 0x0000_0000;
+pub const COMPOSER_GAP: f32 = 24.0;
 
 const NAVIGATOR_RAIL_WIDTH_PX: f32 = 40.0;
 const NAVIGATOR_RAIL_INSET_PX: f32 = 8.0;
@@ -59,6 +57,13 @@ const LOADING_MARK_DELAY: std::time::Duration = std::time::Duration::from_millis
 const SLOW_FRAME_MS: u128 = 50;
 /// The rail and menu never exceed this share of the transcript's height.
 const NAVIGATOR_HEIGHT_CAP: f32 = 0.7;
+/// Earlier work this many rows above the view loads before the reader
+/// reaches it.
+const EARLIER_WORK_ROWS: usize = 8;
+
+/// The least air between the navigator and the transcript's top edge or
+/// the composer card's top.
+const NAVIGATOR_EDGE_PX: f32 = 8.0;
 
 impl Render for Conversation {
     #[expect(
@@ -71,6 +76,8 @@ impl Render for Conversation {
         if self.advance_disclosures(cx) {
             window.request_animation_frame();
         }
+        // The mode can flip between frames: rows and overlays read this.
+        self.theme = *cx.theme();
         // Judged on last frame's layout; the wordmark stays until it holds.
         let theme = self.theme;
         let screen = self.core.read(cx).screen().clone();
@@ -85,8 +92,7 @@ impl Render for Conversation {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(SHELL_BLACK))
-            .text_color(theme.colors.foreground.to_paint())
+            .text_color(theme.colors.text.to_paint())
             .font_family(theme.typography.sans.family);
         let mut following = true;
         let body: AnyElement = match (&screen, &self.view) {
@@ -94,25 +100,23 @@ impl Render for Conversation {
             (Screen::NewThread { .. }, _) => div().size_full().into_any_element(),
             (Screen::Thread { .. }, Some(view)) if self.rows.is_empty() => {
                 let window_state = view.window();
-                if let Some(error) = &self.load_error {
-                    centered(
+                let loading = window_state.in_flight
+                    || window_state.oldest.is_none() && !window_state.exhausted;
+                match &self.load_error {
+                    Some(error) => centered(
                         div()
-                            .text_color(theme.colors.destructive.to_paint())
+                            .text_color(theme.colors.destructive_text.to_paint())
                             .child(error.clone()),
-                    )
-                } else if window_state.in_flight
-                    || window_state.oldest.is_none() && !window_state.exhausted
-                {
-                    centered(
+                    ),
+                    None if loading => centered(
                         WordmarkLoader::new("conversation-loading", theme)
                             .appear_after(LOADING_MARK_DELAY),
-                    )
-                } else {
-                    centered(
+                    ),
+                    None => centered(
                         div()
-                            .text_color(theme.colors.muted_foreground.to_paint())
+                            .text_color(theme.colors.text_muted.to_paint())
                             .child("No messages yet."),
-                    )
+                    ),
                 }
             }
             (Screen::Thread { .. }, Some(view)) => {
@@ -122,11 +126,8 @@ impl Render for Conversation {
                 if arrival != 0.0 {
                     window.request_animation_frame();
                 }
-                let transcript = list(
-                    self.list.clone(),
-                    cx.processor(|this, index, window, cx| this.row_element(index, window, cx)),
-                )
-                .size_full();
+                let transcript =
+                    list(self.list.clone(), cx.processor(Self::row_element)).size_full();
                 div()
                     .relative()
                     .size_full()
@@ -156,6 +157,7 @@ impl Render for Conversation {
                             .on_scroll_wheel(cx.listener(Self::transcript_wheel)),
                     )
                     .child(self.transcript_observer(following, cx))
+                    .children(self.scroll_edges())
                     .when_some(self.load_error.clone(), |this, error| {
                         this.child(
                             div()
@@ -164,11 +166,11 @@ impl Render for Conversation {
                                 .w_full()
                                 .flex()
                                 .justify_center()
-                                .text_color(theme.colors.destructive.to_paint())
+                                .text_color(theme.colors.destructive_text.to_paint())
                                 .child(error),
                         )
                     })
-                    .children(self.navigator(window, cx))
+                    .children(self.navigator(bottom, window, cx))
                     .into_any_element()
             }
             _ => div().flex_1().into_any_element(),
@@ -182,9 +184,10 @@ impl Render for Conversation {
             let measure = canvas(
                 move |bounds, _, cx| {
                     let height = f32::from(bounds.size.height);
-                    let this = this.clone();
+                    let this = this;
                     cx.defer(move |cx| {
-                        let _ = this.update(cx, |this, cx| this.composer_measured(height, cx));
+                        this.update(cx, |this, cx| this.composer_measured(height, cx))
+                            .ok();
                     });
                 },
                 |_, (), _, _| {},
@@ -211,10 +214,12 @@ impl Render for Conversation {
             if let Some(view) = &self.view {
                 let thread = view.thread.clone();
                 if let Some(host) = self.host(cx) {
+                    // Offline, the connection notice says why.
                     let error = host
                         .read(cx)
                         .thread_summary(&thread)
-                        .and_then(|summary| summary.error.clone());
+                        .and_then(|summary| summary.error.clone())
+                        .filter(|_| host.read(cx).is_live());
                     if let Some(error) = error {
                         shell = shell.child(
                             editor_ui::page::notice(
@@ -226,7 +231,7 @@ impl Render for Conversation {
                                     .variant(ButtonVariant::Ghost)
                                     .on_activate(move |_, _, cx| {
                                         host.update(cx, |host, cx| {
-                                            host.load_thread_summary(&thread, true, cx)
+                                            host.load_thread_summary(&thread, true, cx);
                                         });
                                     }),
                             ),
@@ -244,23 +249,16 @@ impl Render for Conversation {
             if let Screen::NewThread { host, .. } = &screen {
                 // The new-thread composer card is centred in
                 // the column, any connection status above it.
+                // Until Forge is live the wordmark stands alone: a composer
+                // that can't load a draft or a model only adds errors.
                 let status = self.new_thread_status(host, cx);
                 let card = div()
                     .relative()
                     .w_full()
                     .max_w(px(COLUMN))
-                    .child(shell)
-                    .when_some(status, |card, status| {
-                        card.child(
-                            div()
-                                .absolute()
-                                .bottom_full()
-                                .left_0()
-                                .right_0()
-                                .flex()
-                                .justify_center()
-                                .child(status),
-                        )
+                    .map(|card| match status {
+                        Some(status) => card.child(status),
+                        None => card.child(shell),
                     });
                 root = root.child(
                     div()
@@ -308,115 +306,216 @@ fn centered(child: impl IntoElement) -> AnyElement {
 
 /// One user message on the turn navigator.
 #[derive(Clone)]
-pub(crate) struct Marker {
-    index: usize,
-    id: ItemId,
-    label: SharedString,
+pub struct Marker {
+    pub(crate) position: artisan_api::Seq,
+    pub(crate) id: ItemId,
+    pub(crate) label: SharedString,
 }
 
+/// How long one connection phase lasts before the line under the wordmark
+/// fades in, as the Electron app did.
+const REASSURANCE_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+/// The line's fade-in.
+const REASSURANCE_FADE: std::time::Duration = std::time::Duration::from_millis(500);
 /// New-thread heading size.
 const HOME_HEADLINE_TEXT_PX: f32 = 28.0;
-/// New-thread emblem size.
-const HOME_EMBLEM_SIZE_PX: f32 = 30.0;
 
 impl Conversation {
-    /// The heading above the new-thread composer (the
-    /// `new_thread_surface_section`): nothing while Forge is reachable;
-    /// otherwise the emblem, a heading and what to do.
+    /// What stands in for the new-thread composer while Forge isn't live: the
+    /// shimmering wordmark, and after [`REASSURANCE_DELAY`] in one phase a
+    /// quiet line under it (with a way to start WSL when that's the cause).
+    /// A rejected pairing or a version mismatch says so in words instead.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI builder keeps each connection phase's wordmark and words in visual order"
+    )]
     fn new_thread_status(
-        &self,
+        &mut self,
         host: &editor_core::HostId,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let host = self.core.read(cx).host(host)?.clone();
-        let status = host.read(cx).status.clone();
-        let desktop = cx.theme().colors;
-        let section = div()
+        let (status, wsl, reached) = {
+            let host = host.read(cx);
+            (
+                host.status.clone(),
+                host.wsl.clone(),
+                host.forge_version.is_some(),
+            )
+        };
+        let theme = *cx.theme();
+        let desktop = theme.colors;
+        let code = match &status {
+            ConnectionStatus::Live => {
+                self.waiting = None;
+                return None;
+            }
+            ConnectionStatus::Connecting => None,
+            ConnectionStatus::Offline { code, .. } => *code,
+        };
+        let failure = match code {
+            Some(artisan_api::ErrorCode::Unauthorized) => Some((
+                "Could not authenticate with Forge",
+                "The paired credential was rejected. Add a fresh Forge invitation to pair this client again.",
+            )),
+            Some(artisan_api::ErrorCode::VersionMismatch) => Some((
+                "Forge and Editor versions differ",
+                "Update Forge or the Editor so both use the same protocol.",
+            )),
+            _ => None,
+        };
+        if let Some((title, detail)) = failure {
+            self.waiting = None;
+            return Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .text_center()
+                    .debug_selector(|| "new-thread-status".to_owned())
+                    .child(
+                        div()
+                            .text_size(px(HOME_HEADLINE_TEXT_PX))
+                            .text_color(desktop.text.to_paint())
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .mt(px(8.0))
+                            .max_w(px(440.0))
+                            .text_size(px(15.0))
+                            .text_color(desktop.text_muted.to_paint())
+                            .child(detail),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        // Re-entering a phase restarts the delay; WSL's state doesn't.
+        let since = match &self.waiting {
+            Some((phase, since)) if *phase == reached => *since,
+            _ => {
+                let since = std::time::Instant::now();
+                self.waiting = Some((reached, since));
+                self.waiting_generation = self.waiting_generation.wrapping_add(1);
+                self.waiting_timer = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(REASSURANCE_DELAY).await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                }));
+                since
+            }
+        };
+        let mark = WordmarkLoader::new("forge-connecting", theme).appear_after(LOADING_MARK_DELAY);
+        let mut section = div()
             .flex()
             .flex_col()
             .items_center()
             .text_center()
-            .pb(px(32.0))
+            .gap(px(40.0))
             .debug_selector(|| "new-thread-status".to_owned())
-            .child(
-                div().mb(px(16.0)).child(
-                    svg()
-                        .path(AssetId::TABLER_TERMINAL_2.as_str())
-                        .size(px(HOME_EMBLEM_SIZE_PX))
-                        .text_color(desktop.workspace_secondary.to_paint()),
-                ),
-            );
-        let heading = |text: &'static str| {
-            div()
-                .text_size(px(HOME_HEADLINE_TEXT_PX))
-                .font_weight(FontWeight::NORMAL)
-                .text_color(desktop.workspace_foreground.to_paint())
-                .child(text)
-        };
-        let (reason, code) = match status {
-            ConnectionStatus::Live => return None,
-            ConnectionStatus::Connecting => {
-                return Some(
-                    section
-                        .child(heading("Reconnecting to Forge…"))
-                        .into_any_element(),
-                );
+            .child(mark);
+        if since.elapsed() < REASSURANCE_DELAY {
+            return Some(section.into_any_element());
+        }
+
+        let (detail, action): (String, Option<Button>) = match &wsl {
+            Some(wsl) => {
+                let start = {
+                    let host = host;
+                    move |_: &_, _: &mut Window, cx: &mut gpui::App| {
+                        host.update(cx, editor_core::HostData::start_wsl);
+                    }
+                };
+                let (detail, label) = if wsl.running {
+                    (
+                        format!("Forge isn't running in {}.", wsl.distro),
+                        if wsl.starting {
+                            "Starting Forge…".to_owned()
+                        } else {
+                            "Start Forge".to_owned()
+                        },
+                    )
+                } else {
+                    (
+                        format!(
+                            "WSL isn't running, so Forge in {} can't be reached.",
+                            wsl.distro
+                        ),
+                        if wsl.starting {
+                            format!("Starting {}…", wsl.distro)
+                        } else {
+                            format!("Start {}", wsl.distro)
+                        },
+                    )
+                };
+                (
+                    detail,
+                    Some(
+                        Button::text("start-wsl-forge", theme, label)
+                            .disabled(wsl.starting)
+                            .debug_selector("start-wsl-forge")
+                            .on_activate(start),
+                    ),
+                )
             }
-            ConnectionStatus::Offline { reason, code, .. } => (reason, code),
+            None if reached => ("Connection dropped — getting you back…".to_owned(), None),
+            None => ("Connecting to Artisan Forge…".to_owned(), None),
         };
-        let refused = code == Some(artisan_api::ErrorCode::Unauthorized);
-        let (title, detail) = if refused {
-            (
-                "Could not authenticate with Forge",
-                "The paired credential was rejected. Add a fresh Forge invitation to pair this client again.",
+        let start_error = wsl.and_then(|wsl| wsl.error);
+        let line = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(12.0))
+            .max_w(px(440.0))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(desktop.text_muted.to_paint())
+                    .child(
+                        gpui::StyledText::new(format!(
+                            "This is taking more time than expected… {detail}"
+                        ))
+                        .with_highlights([(
+                            0.."This is taking more time than expected…".len(),
+                            gpui::HighlightStyle {
+                                font_weight: Some(FontWeight::MEDIUM),
+                                ..Default::default()
+                            },
+                        )]),
+                    ),
             )
-        } else if code == Some(artisan_api::ErrorCode::VersionMismatch) {
-            (
-                "Forge and Editor versions differ",
-                "Update Forge or the Editor so both use the same protocol.",
-            )
+            .children(start_error.map(|error| {
+                div()
+                    .text_sm()
+                    .text_color(desktop.destructive_text.to_paint())
+                    .child(format!("Couldn't start it: {error}"))
+            }))
+            .children(action);
+        let line = if cx.reduce_motion() {
+            line.into_any_element()
         } else {
-            (
-                "Forge is offline",
-                "The editor could not connect to Forge. Existing project and task data will remain available when it reconnects.",
+            line.with_animation(
+                ("reassurance", self.waiting_generation),
+                Animation::new(REASSURANCE_FADE).with_easing(gpui::ease_in_out),
+                gpui::Styled::opacity,
             )
+            .into_any_element()
         };
-        Some(
-            section
-                .child(heading(title))
-                .child(
-                    div()
-                        .mt(px(8.0))
-                        .max_w(px(440.0))
-                        .text_size(px(15.0))
-                        .text_color(desktop.workspace_secondary.to_paint())
-                        .child(detail)
-                        .child(div().mt(px(8.0)).text_size(px(12.0)).child(reason)),
-                )
-                .child(
-                    div()
-                        .id("retry-forge-connection")
-                        .debug_selector(|| "retry-forge-connection".to_owned())
-                        .cursor_pointer()
-                        .mt(px(16.0))
-                        .px(px(16.0))
-                        .py(px(8.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(desktop.line.to_paint())
-                        .text_color(desktop.workspace_foreground.to_paint())
-                        .child("Retry connection")
-                        .on_click(move |_, _, cx| host.read(cx).retry_now()),
-                )
-                .into_any_element(),
-        )
+        section = section.child(line);
+        Some(section.into_any_element())
     }
 
-    /// Read-ahead and frame timing run after native list layout.
-    fn transcript_observer(&self, following: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Read-ahead, earlier work, landing and frame timing run after native
+    /// list layout: pages are rows now, so the transcript reads on until
+    /// the view and the read-ahead above it are filled, wherever it is.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one observer runs the post-layout steps in the order they must happen"
+    )]
+    fn transcript_observer(&self, following: bool, cx: &Context<Self>) -> impl IntoElement {
         let list = self.list.clone();
-        // A collapsed latest page can be shorter than the native viewport.
-        // Admit one bounded page of initial leeway before the reader scrolls.
+        // Bodies above the tail measure before more loads above them.
         let last_body_ready = self
             .revealed_rows()
             .iter()
@@ -425,19 +524,58 @@ impl Conversation {
                 matches!(row, Row::Text { .. }).then(|| self.read_evidence(row, cx).is_some())
             })
             .unwrap_or(false);
-        let initial_leeway = following
-            && last_body_ready
-            && self
-                .view
-                .as_ref()
-                .is_some_and(|view| view.items.len() < crate::thread::PAGE as usize * 2);
-        let more = (!following || initial_leeway)
+        let more = (!following || last_body_ready)
             && self
                 .view
                 .as_ref()
                 .is_some_and(|view| !view.window().exhausted && !view.window().in_flight)
             // A failed page waits for the reader to scroll again.
             && self.load_error.is_none();
+        // Open sections' unloaded work, by row, and whether a read is out.
+        let earlier: Vec<(usize, artisan_api::Seq)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (row, _))| match row {
+                Row::EarlierWork { first, .. } => Some((index, *first)),
+                Row::Projected { .. }
+                | Row::Work { .. }
+                | Row::WorkEntry { .. }
+                | Row::Chain { .. }
+                | Row::Text { .. }
+                | Row::Prompt(_)
+                | Row::Compaction(_)
+                | Row::Image(_)
+                | Row::Gap
+                | Row::Status(_)
+                | Row::AgentResult(_)
+                | Row::AgentStatus(..) => None,
+            })
+            .collect();
+        let work_idle = self.work_reading.is_none() && self.load_error.is_none();
+        let landing = self.landing.is_some();
+        let settled = self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.window().loaded());
+        // Rows not drawn yet, or whose text is still preparing: they must
+        // not show at the placeholder's height.
+        let preparing: Vec<usize> = if landing {
+            (0..self.rows.len())
+                .filter(|index| {
+                    self.row_views
+                        .get(*index)
+                        .and_then(Option::as_ref)
+                        .is_none_or(|view| view.read(cx).preparing())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let exhausted = self
+            .view
+            .as_ref()
+            .is_none_or(|view| view.window().exhausted);
         let this = cx.entity().downgrade();
         let frame_started = Rc::clone(&self.frame_started);
         let rows = self.rows.len();
@@ -451,15 +589,48 @@ impl Conversation {
                         tracing::info!(ms, rows, "slow transcript frame");
                     }
                 }
-                if more
-                    && ((!following && wants_older(&list))
-                        || (initial_leeway && list.max_offset_for_scrollbar().y <= px(0.0)))
-                {
+                let viewport = list.viewport_bounds();
+                let near = |index: usize, reach: f32| {
+                    list.bounds_for_item(index).is_some_and(|bounds| {
+                        bounds.bottom() > viewport.top() - px(reach)
+                            && bounds.top() < viewport.bottom() + px(reach)
+                    })
+                };
+                let older = more && wants_older(&list);
+                // The nearest earlier work under the view loads first: it
+                // is what the reader meets scrolling up. The list places
+                // only rows from its top one down, so work just above the
+                // view counts by rows; it loads before it shows, and what
+                // it loads goes in above the top row, which keeps its place.
+                let top = list.logical_scroll_top().item_ix;
+                let work = earlier
+                    .iter()
+                    .rev()
+                    .find(|(index, _)| {
+                        (*index < top && top - index <= EARLIER_WORK_ROWS)
+                            || near(*index, crate::READ_AHEAD_PX)
+                    })
+                    .map(|(_, first)| *first);
+                let ready = settled
+                    && work_idle
+                    && work.is_none()
+                    && (exhausted || !wants_older(&list))
+                    && !preparing.iter().any(|index| near(*index, 0.0));
+                if older || (work_idle && work.is_some()) || (landing && ready) {
                     let this = this.clone();
                     cx.defer(move |cx| {
-                        let _ = this.update(cx, |this, cx| {
-                            this.viewport(vec![Input::TopReached], cx);
-                        });
+                        this.update(cx, |this, cx| {
+                            if older {
+                                this.viewport(vec![Input::TopReached], cx);
+                            }
+                            if let Some(first) = work.filter(|_| work_idle) {
+                                this.load_work(first, cx);
+                            }
+                            if landing && ready {
+                                this.landed(cx);
+                            }
+                        })
+                        .ok();
                     });
                 }
             },
@@ -469,6 +640,10 @@ impl Conversation {
     }
 
     /// One visible native list entry. ListState alone owns its geometry.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one row builder handles every row kind the list can show"
+    )]
     pub(super) fn row_element(
         &mut self,
         index: usize,
@@ -537,35 +712,37 @@ impl Conversation {
                         {
                             let owner = this.clone();
                             cx.defer(move |cx| {
-                                let _ = owner.update(cx, |this, cx| {
-                                    // Native ListState holds its mutable layout borrow while
-                                    // building rows. Read its scroll state only after paint.
-                                    if let Some((key, start)) =
-                                        this.native_window_prefetch(&source_row)
-                                    {
-                                        let place = this.reader_place();
-                                        if let Some(state) = this.bodies.native.get_mut(&key) {
-                                            state.frontier =
-                                                Some((place, start > state.window.start));
+                                owner
+                                    .update(cx, |this, cx| {
+                                        // Native ListState holds its mutable layout borrow while
+                                        // building rows. Read its scroll state only after paint.
+                                        if let Some((key, start)) =
+                                            this.native_window_prefetch(&source_row)
+                                        {
+                                            let place = this.reader_place();
+                                            if let Some(state) = this.bodies.native.get_mut(&key) {
+                                                state.frontier =
+                                                    Some((place, start > state.window.start));
+                                            }
+                                            this.native_window_edge(&key, start, cx);
+                                        } else if let Some((id, slot, revision, offset)) =
+                                            this.source_window_prefetch(&source_row)
+                                        {
+                                            let source = &this.bodies.stored[&(id.clone(), slot)];
+                                            let (reference, newer) = (
+                                                source.source_ref().clone(),
+                                                offset > source.loaded_range().start,
+                                            );
+                                            this.bodies.frontiers.insert(
+                                                (id.clone(), slot),
+                                                (reference, this.reader_place(), newer),
+                                            );
+                                            this.source_window_edge(
+                                                &id, slot, revision, offset, true, cx,
+                                            );
                                         }
-                                        this.native_window_edge(key, start, cx);
-                                    } else if let Some((id, slot, revision, offset)) =
-                                        this.source_window_prefetch(&source_row)
-                                    {
-                                        let source = &this.bodies.stored[&(id.clone(), slot)];
-                                        let (reference, newer) = (
-                                            source.source_ref().clone(),
-                                            offset > source.loaded_range().start,
-                                        );
-                                        this.bodies.frontiers.insert(
-                                            (id.clone(), slot),
-                                            (reference, this.reader_place(), newer),
-                                        );
-                                        this.source_window_edge(
-                                            id, slot, revision, offset, true, cx,
-                                        );
-                                    }
-                                });
+                                    })
+                                    .ok();
                             });
                         }
                         // The final line must actually paint inside the transcript's native clip.
@@ -580,7 +757,7 @@ impl Conversation {
                         }
                         if let Some((target, key, seq)) = observed {
                             cx.defer(move |cx| {
-                                let _ = this.update(cx, |this, cx| {
+                                this.update(cx, |this, cx| {
                                     if this.open != target {
                                         return;
                                     }
@@ -596,10 +773,11 @@ impl Conversation {
                                             (this.host(cx), target)
                                     {
                                         host.update(cx, |host, cx| {
-                                            host.acknowledge_read(thread, seq, cx)
+                                            host.acknowledge_read(thread, seq, cx);
                                         });
                                     }
-                                });
+                                })
+                                .ok();
                             });
                         }
                     },
@@ -726,6 +904,10 @@ impl Conversation {
         Some((id.clone(), slot, source.revision(), offset))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per row kind decides what reading it proves"
+    )]
     pub(crate) fn read_evidence(&self, row: &Row, cx: &gpui::App) -> Option<artisan_api::Seq> {
         let visual = row.visual();
         let Row::Text {
@@ -740,9 +922,21 @@ impl Conversation {
         let text = match slot {
             Slot::Prose => match &item.kind {
                 ItemKind::AssistantMessage { text, .. } => Some(text),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
-            slot => slot.text(item),
+            slot @ (Slot::Plain(_)
+            | Slot::Text(_)
+            | Slot::Output
+            | Slot::Answer
+            | Slot::Preview) => slot.text(item),
         };
         let target = artisan_api::LiveTarget::Text {
             item_id: id.clone(),
@@ -834,7 +1028,7 @@ impl Conversation {
     }
 
     /// The round glass chip with a chevron, above the composer.
-    fn jump_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn jump_button(&self, cx: &Context<Self>) -> AnyElement {
         let theme = self.theme;
         let this = cx.entity().downgrade();
         let button = Button::icon(
@@ -847,105 +1041,139 @@ impl Conversation {
         glass_handle(
             &theme,
             button.on_activate(move |_, _, cx| {
-                let _ = this.update(cx, Conversation::jump_to_latest);
+                this.update(cx, Self::jump_to_latest).ok();
             }),
         )
         .into_any_element()
     }
 
-    /// The user messages in the window, in order, as navigator markers.
-    fn markers(&mut self) -> Arc<[Marker]> {
-        if let Some(markers) = &self.navigator_markers {
-            return markers.clone();
-        }
-        let Some(view) = self.view.as_ref() else {
+    /// The user's messages in the whole thread, in order, as Forge lists
+    /// them: the navigator is a map of the thread, not of what is loaded.
+    pub(crate) fn markers(&mut self, cx: &gpui::App) -> Arc<[Marker]> {
+        let Some(summary) = self.host(cx).and_then(|host| {
+            let thread = &self.view.as_ref()?.thread;
+            host.read(cx).thread_summary(thread)?.value.clone()
+        }) else {
             return Arc::from([]);
         };
-        let mut ids = HashSet::new();
-        let mut markers = Vec::new();
-        for (index, (row, _)) in self.rows.iter().enumerate() {
-            let id = match row.semantic() {
-                Row::Text {
-                    id,
-                    slot: Slot::Plain(crate::fold::PlainSection::User),
-                    ..
-                } => id,
-                _ => continue,
-            };
-            let Some(item) = view.item(id) else { continue };
-            let ItemKind::UserMessage { text, .. } = &item.kind else {
-                continue;
-            };
-            if !ids.insert(id.clone()) {
-                continue;
-            }
-            let label = self.navigator_labels.entry(id.clone()).or_insert_with(|| {
-                (
-                    item.seq,
-                    match text {
-                        artisan_api::TextContent::Inline(text) => navigator_label(text),
-                        artisan_api::TextContent::Stored(_) => "Stored message".into(),
-                    },
-                )
-            });
-            if label.0 != item.seq {
-                *label = (
-                    item.seq,
-                    match text {
-                        artisan_api::TextContent::Inline(text) => navigator_label(text),
-                        artisan_api::TextContent::Stored(_) => "Stored message".into(),
-                    },
-                );
-            }
-            markers.push(Marker {
-                index,
-                id: id.clone(),
-                label: label.1.clone(),
-            });
+        let source = Arc::as_ptr(&summary) as usize;
+        if let Some((cached, markers)) = &self.navigator_markers
+            && *cached == source
+        {
+            return Arc::clone(markers);
         }
-        self.navigator_labels.retain(|id, _| ids.contains(id));
-        let markers: Arc<[Marker]> = markers.into();
-        self.navigator_markers = Some(markers.clone());
+        let markers: Arc<[Marker]> = summary
+            .outline
+            .iter()
+            .map(|entry| Marker {
+                position: entry.position,
+                id: entry.id.clone(),
+                label: entry.label.clone().into(),
+            })
+            .collect();
+        self.navigator_markers = Some((source, Arc::clone(&markers)));
         markers
+    }
+
+    /// Where the reader is: the position of the item the top row shows, or
+    /// of the nearest row above it that shows one.
+    fn reading_position(&self) -> Option<artisan_api::Seq> {
+        let view = self.view.as_ref()?;
+        let top = self.list.logical_scroll_top().item_ix;
+        self.rows
+            .iter()
+            .take(top + 1)
+            .rev()
+            .find_map(|(row, _)| view.item(row.anchor()?))
+            .map(|item| item.position)
+    }
+
+    /// The transcript's scroll edges: one under the header, shown as the
+    /// transcript scrolls away from its start, and one on the window's
+    /// bottom edge, shown while later content runs past it.
+    fn scroll_edges(&self) -> [AnyElement; 2] {
+        use editor_ui::scroll_edge::{Edge, hidden_above, hidden_below, scroll_edge};
+        let color = self.theme.colors.background;
+        let (above, below) = (self.list.clone(), self.list.clone());
+        [
+            scroll_edge(Edge::Top, color, &self.edges[0], move || {
+                hidden_above(&above)
+            })
+            .top_0()
+            .into_any_element(),
+            scroll_edge(Edge::Bottom, color, &self.edges[1], move || {
+                hidden_below(&below)
+            })
+            .bottom_0()
+            .into_any_element(),
+        ]
     }
 
     /// The turn navigator (`render_turn_navigator`): one tick per user
     /// message on the right edge, the one in view drawn long and bright;
     /// hovering opens the glass menu of their first lines.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a thread's turn count is far inside f32's exact integer range"
+    )]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the tick slot count saturates: a rail shorter than its padding fits none"
+    )]
     #[expect(
         clippy::too_many_lines,
         reason = "one GPUI builder keeps the rail, its ticks and their tick motion in visual order"
     )]
-    fn navigator(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let markers = self.markers();
+    fn navigator(
+        &mut self,
+        composer_bottom: f32,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let markers = self.markers(cx);
         if markers.len() < 2 {
             self.navigator_hovered = false;
             return None;
         }
         let theme = self.theme;
-        let top = self.list.logical_scroll_top().item_ix;
+        let reading = self.reading_position();
         let active = markers
             .iter()
             .rev()
-            .find(|marker| marker.index <= top)
-            .or(markers.first())
-            .map(|marker| marker.index);
+            .find(|marker| reading.is_some_and(|reading| marker.position <= reading))
+            .or_else(|| markers.first())
+            .map(|marker| marker.position);
         let viewport_height = f32::from(self.list.viewport_bounds().size.height)
             .max(f32::from(window.viewport_size().height) * 0.5);
+        // Centred in the stretch above the floating composer card, never
+        // reaching under it.
+        let above = if self.composer.is_some() && self.agent.is_none() {
+            self.composer_height + composer_bottom
+        } else {
+            0.0
+        } + NAVIGATOR_EDGE_PX;
+        let room = (viewport_height - above - NAVIGATOR_EDGE_PX).max(NAVIGATOR_MENU_ROW_PX);
+        let max_height = room.min(viewport_height * NAVIGATOR_HEIGHT_CAP);
         let count = markers.len() as f32;
-        let capped = |content: f32| content.min(viewport_height * NAVIGATOR_HEIGHT_CAP);
-        let rail_height = capped(NAVIGATOR_PAD_PX * 2.0 + count * NAVIGATOR_TICK_PITCH_PX);
+        let capped = |content: f32| content.min(max_height);
+        let rail_height = capped(count.mul_add(NAVIGATOR_TICK_PITCH_PX, NAVIGATOR_PAD_PX * 2.0));
         let reduce_motion = cx.reduce_motion();
         // A tick entering or leaving the active range eases between the two
         // looks; one seen for the first time starts at rest.
         let animate_ticks = !reduce_motion && self.navigator_had_active;
         self.navigator_had_active = active.is_some();
         let now = Instant::now();
+        let active_index = active.and_then(|position| {
+            markers
+                .iter()
+                .position(|marker| marker.position == position)
+        });
         let tick_indices = navigator_tick_indices(
             markers.len(),
-            ((rail_height - NAVIGATOR_PAD_PX * 2.0) / NAVIGATOR_TICK_PITCH_PX).floor() as usize,
-            active.and_then(|index| markers.iter().position(|marker| marker.index == index)),
+            (NAVIGATOR_PAD_PX.mul_add(-2.0, rail_height) / NAVIGATOR_TICK_PITCH_PX).floor()
+                as usize,
+            active_index,
         );
         let tick_ids: HashSet<_> = tick_indices
             .iter()
@@ -963,7 +1191,7 @@ impl Conversation {
             .overflow_hidden();
         for tick_index in tick_indices {
             let marker = &markers[tick_index];
-            let current = active == Some(marker.index);
+            let current = active == Some(marker.position);
             let entry = self
                 .navigator_ticks
                 .entry(marker.id.clone())
@@ -978,18 +1206,20 @@ impl Conversation {
             });
             ticks_moving |= toward < 1.0;
             let presence = if current { toward } else { 1.0 - toward };
-            let paint = blend_oklch(
-                theme.colors.muted_foreground.with_alpha(0.5),
-                theme.colors.foreground,
-                presence,
-            )
-            .to_paint();
-            let tick_width = 16.0 + 8.0 * presence;
-            let index = marker.index;
+            // At rest the tick is the old muted foreground at half alpha
+            // over the transcript: gray 7.
+            let paint = theme
+                .colors
+                .gray
+                .step(7)
+                .animate_to(theme.colors.text, presence)
+                .to_paint();
+            let tick_width = 8.0f32.mul_add(presence, 16.0);
+            let position = marker.position;
             let this = cx.entity().downgrade();
             ticks = ticks.child(
                 div()
-                    .id(SharedString::from(format!("navigator-tick-{index}")))
+                    .id(SharedString::from(format!("navigator-tick-{}", marker.id)))
                     .cursor_pointer()
                     .w_full()
                     .h(px(NAVIGATOR_TICK_PITCH_PX))
@@ -999,7 +1229,7 @@ impl Conversation {
                     .items_center()
                     .justify_end()
                     .on_click(move |_, _, cx| {
-                        let _ = this.update(cx, |this, cx| this.navigate(index, cx));
+                        this.update(cx, |this, cx| this.navigate(position, cx)).ok();
                     })
                     .child(div().h(px(1.0)).w(px(tick_width)).rounded_full().bg(paint)),
             );
@@ -1012,10 +1242,17 @@ impl Conversation {
             .flex()
             .flex_row()
             .items_center()
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if this.navigator_hovered != *hovered {
                     this.navigator_hovered = *hovered;
-                    if !*hovered {
+                    if *hovered {
+                        // A fresh handle: the menu opens on the turn in view.
+                        this.navigator_scroll = gpui::UniformListScrollHandle::new();
+                        if let Some(index) = active_index {
+                            this.navigator_scroll
+                                .scroll_to_item(index, gpui::ScrollStrategy::Center);
+                        }
+                    } else {
                         this.navigator_hover.borrow_mut().hide();
                     }
                     cx.notify();
@@ -1025,21 +1262,15 @@ impl Conversation {
             region = region.child(
                 div()
                     .pr(px(NAVIGATOR_MENU_GAP_PX))
-                    .child(self.navigator_menu(
-                        markers.clone(),
-                        active,
-                        viewport_height,
-                        reduce_motion,
-                        cx,
-                    )),
+                    .child(self.navigator_menu(markers, active, max_height, reduce_motion, cx)),
             );
         }
         region = region.child(ticks);
         Some(
             div()
                 .absolute()
-                .top_0()
-                .bottom_0()
+                .top(px(NAVIGATOR_EDGE_PX))
+                .bottom(px(above))
                 .right(px(NAVIGATOR_RAIL_INSET_PX))
                 .flex()
                 .flex_col()
@@ -1050,34 +1281,44 @@ impl Conversation {
     }
 
     /// Only visible native menu rows are constructed; the original shared
-    /// hover pill flies behind their labels.
+    /// hover pill flies behind their labels. Taller than `max_height`, the
+    /// rows scroll inside the card.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI builder keeps the menu, its rows and the hover pill in visual order"
+    )]
     fn navigator_menu(
         &self,
         markers: Arc<[Marker]>,
-        active: Option<usize>,
-        viewport_height: f32,
+        active: Option<artisan_api::Seq>,
+        max_height: f32,
         reduce_motion: bool,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let theme = self.theme;
         let pitch = NAVIGATOR_MENU_ROW_PX + 4.0;
-        let content_height = markers.len() as f32 * pitch - 4.0;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a thread's turn count is far inside f32's exact integer range"
+        )]
+        let content_height = (markers.len() as f32).mul_add(pitch, -4.0);
         let height = content_height.min(
-            (viewport_height * NAVIGATOR_HEIGHT_CAP - NAVIGATOR_PAD_PX * 2.0)
+            NAVIGATOR_PAD_PX
+                .mul_add(-2.0, max_height)
                 .max(NAVIGATOR_MENU_ROW_PX),
         );
         let this = cx.entity().downgrade();
-        let hover = self.navigator_hover.clone();
+        let hover = Rc::clone(&self.navigator_hover);
         let surface = self.navigator_hover_surface.clone();
         let rows = gpui::uniform_list("turn-navigator-list", markers.len(), move |range, _, _| {
             range
                 .map(|position| {
                     let marker = &markers[position];
-                    let index = marker.index;
+                    let index = marker.position;
                     let this = this.clone();
-                    let move_hover = hover.clone();
+                    let move_hover = Rc::clone(&hover);
                     let move_id = marker.id.to_string();
-                    let probe_hover = hover.clone();
+                    let probe_hover = Rc::clone(&hover);
                     let probe_surface = surface.clone();
                     let probe_id = move_id.clone();
                     div().h(px(pitch)).w_full().child(
@@ -1097,7 +1338,7 @@ impl Conversation {
                                 window.refresh();
                             })
                             .on_click(move |_, _, cx| {
-                                let _ = this.update(cx, |this, cx| this.navigate(index, cx));
+                                this.update(cx, |this, cx| this.navigate(index, cx)).ok();
                             })
                             .child(
                                 div()
@@ -1105,7 +1346,7 @@ impl Conversation {
                                     .flex_1()
                                     .truncate()
                                     .text_size(theme.typography.control_text)
-                                    .text_color(theme.colors.foreground.to_paint())
+                                    .text_color(theme.colors.text.to_paint())
                                     .when(active == Some(index), |label| {
                                         label.font_weight(FontWeight::MEDIUM)
                                     })
@@ -1132,6 +1373,7 @@ impl Conversation {
                 })
                 .collect()
         })
+        .track_scroll(&self.navigator_scroll)
         .h(px(height))
         .w_full();
         let content = div()
@@ -1167,43 +1409,11 @@ impl Conversation {
             .into_any_element()
     }
 
-    /// Scrolls the transcript to a user message picked on the navigator.
-    fn navigate(&mut self, index: usize, cx: &mut Context<Self>) {
-        let item = self
-            .rows
-            .get(index)
-            .and_then(|(row, _)| row.anchor().cloned())
-            .and_then(|id| self.view.as_ref()?.item(&id).cloned());
-        if let Some(item) = item {
-            self.jump_to(&item, cx);
-        }
+    /// Scrolls the transcript to a user message picked on the navigator,
+    /// loading the stretch around it when it isn't.
+    pub(crate) fn navigate(&mut self, position: artisan_api::Seq, cx: &mut Context<Self>) {
+        self.jump_to_position(position, cx);
     }
-}
-
-/// The colour `fraction` of the way from `from` to `to`, blended in OKLCH
-/// so the step looks even.
-fn blend_oklch(from: Oklch, to: Oklch, fraction: f32) -> Oklch {
-    Oklch::new(
-        from.l + (to.l - from.l) * fraction,
-        from.c + (to.c - from.c) * fraction,
-        from.h + (to.h - from.h) * fraction,
-    )
-    .with_alpha(from.a + (to.a - from.a) * fraction)
-}
-
-/// Scan a bounded prefix and retain a bounded label, even for a giant unbroken message.
-fn navigator_label(text: &str) -> SharedString {
-    let prefix: String = text.chars().take(1024).collect();
-    let line = prefix
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("Image");
-    let mut label: String = line.chars().take(160).collect();
-    if line.chars().nth(160).is_some() {
-        label.push('…');
-    }
-    label.into()
 }
 
 /// Sample the entire window into the available pixels, retaining the active turn.
@@ -1226,13 +1436,11 @@ fn navigator_tick_indices(count: usize, slots: usize, active: Option<usize>) -> 
         .collect();
     if let Some(active) = active.filter(|active| *active < count)
         && !indices.contains(&active)
-    {
-        let nearest = indices
+        && let Some((nearest, _)) = indices
             .iter()
             .enumerate()
             .min_by_key(|(_, index)| index.abs_diff(active))
-            .unwrap()
-            .0;
+    {
         indices[nearest] = active;
         indices.sort_unstable();
     }
@@ -1254,7 +1462,7 @@ fn reverses_in_place(
 
 #[cfg(test)]
 mod navigator_tests {
-    use super::{navigator_label, navigator_tick_indices};
+    use super::navigator_tick_indices;
     #[test]
     fn rail_samples_entire_history_instead_of_clipping_tail_and_keeps_active() {
         let indices = navigator_tick_indices(10_000, 50, Some(6234));
@@ -1264,12 +1472,5 @@ mod navigator_tests {
         assert!(indices.contains(&6234));
         assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(navigator_tick_indices(0, 0, None).is_empty());
-    }
-    #[test]
-    fn labels_bound_giant_unicode_messages_and_use_first_nonempty_line() {
-        assert_eq!(navigator_label("\n  \n  hello  \nsecond").as_ref(), "hello");
-        let label = navigator_label(&"界".repeat(10_000));
-        assert_eq!(label.chars().count(), 161);
-        assert!(label.ends_with('…'));
     }
 }

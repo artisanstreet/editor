@@ -1,11 +1,25 @@
-{"id": "evt_023", "type": "session.next.prompt.admitted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_024", "type": "session.next.prompted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_025", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_bash", "tool": "bash", "input": {}}}
-{"id": "evt_026", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_read", "tool": "read", "input": {}}}
-{"id": "evt_027", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_write", "tool": "write", "input": {}}}
-{"id": "evt_028", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_edit", "tool": "edit", "input": {}}}
-{"id": "evt_029", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_grep", "tool": "grep", "input": {}}}
-{"id": "evt_030", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_glob", "tool": "glob", "input": {}}}
-{"id": "evt_031", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_webfetch", "tool": "webfetch", "input": {}}}
-{"id": "evt_032", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_websearch", "tool": "websearch", "input": {}}}
-{"id": "evt_033", "type": "session.next.tool.called", "data": {"sessionID": "ses_root", "callID": "call_write_ok", "tool": "write", "input": {"filePath": "file", "content": ""}}}
+{"id": "evt_023", "type": "session.inbox.enqueued", "data": {"sessionID": "ses_root", "inboxID": "msg_1", "item": {"type": "user"}}}
+{"id": "evt_024", "type": "session.execution.started", "data": {"sessionID": "ses_root"}}
+{"id": "evt_025", "type": "session.inbox.delivered", "data": {"sessionID": "ses_root", "inboxID": "msg_1"}}
+{"id": "evt_026", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_shell_26", "name": "shell"}}
+{"id": "evt_027", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_shell_26", "input": {}, "executed": false}}
+{"id": "evt_028", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_read_28", "name": "read"}}
+{"id": "evt_029", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_read_28", "input": {}, "executed": false}}
+{"id": "evt_030", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_write_30", "name": "write"}}
+{"id": "evt_031", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_write_30", "input": {}, "executed": false}}
+{"id": "evt_032", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_edit_32", "name": "edit"}}
+{"id": "evt_033", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_edit_32", "input": {}, "executed": false}}
+{"id": "evt_034", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_grep_34", "name": "grep"}}
+{"id": "evt_035", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_grep_34", "input": {}, "executed": false}}
+{"id": "evt_036", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_glob_36", "name": "glob"}}
+{"id": "evt_037", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_glob_36", "input": {}, "executed": false}}
+{"id": "evt_038", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_webfetch_38", "name": "webfetch"}}
+{"id": "evt_039", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_webfetch_38", "input": {}, "executed": false}}
+{"id": "evt_040", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_websearch_40", "name": "websearch"}}
+{"id": "evt_041", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_websearch_40", "input": {}, "executed": false}}
+{"id": "evt_042", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_write_42", "name": "write"}}
+{"id": "evt_043", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_write_42", "input": {"path": "file", "content": ""}, "executed": false}}
+{"id": "evt_044", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_github_create_issue_44", "name": "github_create_issue"}}
+{"id": "evt_045", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_github_create_issue_44", "input": {"title": "x"}, "executed": false}}
+{"id": "evt_046", "type": "session.tool.input.started", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_execute_46", "name": "execute"}}
+{"id": "evt_047", "type": "session.tool.called", "data": {"sessionID": "ses_root", "assistantMessageID": "msg_a", "id": "call_execute_46", "input": {"code": "return 1"}, "executed": false}}

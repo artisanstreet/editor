@@ -19,6 +19,7 @@ mod items;
 pub mod legacy;
 mod pairing;
 mod read;
+mod recall;
 mod schema;
 mod settings;
 mod source_index;
@@ -43,15 +44,43 @@ use writer::{Job, Tx, Writer};
 pub use blobs::{BlobRejected, MAX_BLOB_BYTES};
 pub use items::Acceptance;
 pub use pairing::Device;
+pub use recall::{GrepMatch, GrepPage, GrepQuery, RecallScope, SearchHit, SearchPage, Touch};
 
 const EVENT_CAPACITY: usize = 8192;
 const READERS_KEPT: usize = 4;
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Whether runs a restart cut short carry on by themselves; default on.
+pub const CONTINUE_AFTER_RESTART_KEY: &str = "continue_after_restart";
+/// How many restarts in a row a turn carries on through before it waits
+/// for the user: one that keeps taking Forge down would otherwise loop.
+pub const MAX_RESTART_CONTINUATIONS: usize = 3;
+/// Whether a turn the provider's capacity failed is retried; default on.
+pub const RETRY_WHEN_OVERLOADED_KEY: &str = "retry_when_overloaded";
+/// Whether a turn the usage limit stopped carries on once it resets;
+/// default on.
+pub const CONTINUE_AFTER_USAGE_LIMIT_KEY: &str = "continue_after_usage_limit";
+
+/// A failed turn Forge picks up again by itself at `due_at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Park {
+    pub continuation: artisan_api::Continuation,
+    pub due_at: artisan_api::Timestamp,
+}
+
+/// The setting that turns parking for `continuation` on and off.
+#[must_use]
+pub const fn park_setting(continuation: artisan_api::Continuation) -> Option<&'static str> {
+    match continuation {
+        artisan_api::Continuation::Overloaded => Some(RETRY_WHEN_OVERLOADED_KEY),
+        artisan_api::Continuation::UsageLimit => Some(CONTINUE_AFTER_USAGE_LIMIT_KEY),
+        artisan_api::Continuation::Requested | artisan_api::Continuation::Restart => None,
+    }
+}
 
 /// An item as an engine adapter or the HTTP layer reports it; the store
 /// fills in position, seq and timestamps.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewItem {
     pub id: ItemId,
     pub thread_id: ThreadId,
@@ -165,9 +194,11 @@ impl Store {
 
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let head = Arc::new(AtomicU64::new(0));
-        let mut writer = Writer::new(conn, head.clone(), events.clone())?;
-        // `Tx::recover` binds the impl lifetime early; the job must be generic over it.
-        #[allow(clippy::redundant_closure_for_method_calls)]
+        let mut writer = Writer::new(conn, Arc::clone(&head), events.clone())?;
+        #[expect(
+            clippy::redundant_closure_for_method_calls,
+            reason = "`Tx::recover` binds the impl lifetime early; the job must be generic over it"
+        )]
         writer
             .transact(|tx| tx.recover())
             .context("recover live runs")?;
@@ -207,11 +238,15 @@ impl Store {
     /// Fans out a memory-only event (streaming text, shell output).
     pub fn publish_live(&self, event: Event) {
         let live_revision = self.inner.live_revision.fetch_add(1, Ordering::AcqRel) + 1;
-        let _ = self.inner.events.send(Envelope {
-            seq: None,
-            live_revision,
-            event,
-        });
+        // No subscribers is fine: live events are not replayed.
+        self.inner
+            .events
+            .send(Envelope {
+                seq: None,
+                live_revision,
+                event,
+            })
+            .ok();
     }
 
     #[must_use]
@@ -234,10 +269,11 @@ impl Store {
         self.inner
             .jobs
             .send(Box::new(move |writer: &mut Writer| {
-                let _ = reply.send(writer.transact(job));
+                // The caller stopped waiting; the write still committed.
+                reply.send(writer.transact(job)).ok();
             }))
             .await
-            .map_err(|_| anyhow!("the store writer stopped"))?;
+            .map_err(|_unsent_job| anyhow!("the store writer stopped"))?;
         result.await.context("the store writer dropped a write")?
     }
 
@@ -246,8 +282,8 @@ impl Store {
         R: Send + 'static,
         F: FnOnce(&Connection) -> Result<R> + Send + 'static,
     {
-        let inner = self.inner.clone();
-        let slot = inner.read_slots.clone().acquire_owned().await?;
+        let inner = Arc::clone(&self.inner);
+        let slot = Arc::clone(&inner.read_slots).acquire_owned().await?;
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
             inner.with_reader(query)

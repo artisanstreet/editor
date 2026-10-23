@@ -6,6 +6,7 @@ version.workspace = true
 description = "Preferences, engines, skills and MCP servers, hosts and devices."
 
 [dependencies]
+claude-ai-browser = { path = "../claude-ai-browser" }
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
 editor-ui = { path = "../editor-ui" }

@@ -34,7 +34,10 @@ fn main() -> Result<(), String> {
                 thread::sleep(Duration::from_millis(300));
                 player.resume();
             }
-            _ => {}
+            PlaybackState::Idle
+            | PlaybackState::Loading
+            | PlaybackState::Playing
+            | PlaybackState::Paused => {}
         }
         if started.elapsed() > Duration::from_secs(30) {
             return Err("timed out".to_owned());

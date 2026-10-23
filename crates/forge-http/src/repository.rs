@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, Semaphore};
 const ENTRIES: usize = 64;
 const AVATAR_BYTES: usize = 512 * 1024;
 
-pub(crate) struct Repositories {
+pub struct Repositories {
     entries: Mutex<HashMap<PathBuf, Arc<Mutex<Observation>>>>,
     slots: Semaphore,
     http: reqwest::Client,
@@ -36,7 +36,7 @@ impl Repositories {
     async fn entry(&self, path: &Path) -> Arc<Mutex<Observation>> {
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.get(path) {
-            return entry.clone();
+            return Arc::clone(entry);
         }
         if entries.len() >= ENTRIES {
             // At most four callers own entries; all other slots can be evicted.
@@ -50,7 +50,7 @@ impl Repositories {
             }
         }
         let entry = Arc::new(Mutex::new(Observation::default()));
-        entries.insert(path.to_owned(), entry.clone());
+        entries.insert(path.to_owned(), Arc::clone(&entry));
         entry
     }
     async fn refresh(&self, path: &Path, entry: &mut Observation) {
@@ -111,12 +111,12 @@ impl Repositories {
 /// Project icons as stored blobs, by source, so a request decodes and
 /// encodes an image only when its source changed.
 #[derive(Default)]
-pub(crate) struct Icons {
+pub struct Icons {
     encoded: std::sync::Mutex<HashMap<IconSource, Icon>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) enum IconSource {
+pub enum IconSource {
     File {
         path: PathBuf,
         modified: SystemTime,
@@ -128,7 +128,7 @@ pub(crate) enum IconSource {
 
 /// What a source was found to be.
 #[derive(Clone)]
-pub(crate) enum Icon {
+pub enum Icon {
     Blob(BlobRef),
     /// Not an image Forge can store.
     Unusable,
@@ -179,6 +179,7 @@ async fn git(path: &Path, args: &[&str]) -> Option<String> {
 /// Three native commands instead of six: one structural observation, names,
 /// then the selected remote URL (git owns URL rewriting and include semantics).
 async fn read(path: &Path) -> Option<ProjectRepository> {
+    use tokio::io::AsyncReadExt as _;
     let observation = git(
         path,
         &[
@@ -196,7 +197,6 @@ async fn read(path: &Path) -> Option<ProjectRepository> {
     };
     // HEAD has one documented native ref line; reading it also supports an
     // unborn repository without a fourth branch-probe subprocess.
-    use tokio::io::AsyncReadExt as _;
     let mut head = Vec::new();
     let branch = match tokio::fs::File::open(Path::new(git_dir).join("HEAD")).await {
         Ok(file) => {
@@ -326,7 +326,7 @@ async fn owner_avatar(http: &reqwest::Client, repository: &ProjectRepository) ->
 }
 
 /// Local icons share Forge's encoded blob admission limit before allocation.
-pub(crate) async fn icon_file(path: &Path) -> Option<Vec<u8>> {
+pub async fn icon_file(path: &Path) -> Option<Vec<u8>> {
     use tokio::io::AsyncReadExt as _;
     // Reject pipes/devices before opening: a finite read limit alone does not
     // prevent a pipe's open from occupying a blocking worker indefinitely.
@@ -488,7 +488,7 @@ mod owner_tests {
         command(folder.path(), &["init", "-b", "main"]).await;
         let mut jobs = Vec::new();
         for _ in 0..16 {
-            let owner = owner.clone();
+            let owner = Arc::clone(&owner);
             let path = folder.path().to_owned();
             jobs.push(tokio::spawn(
                 async move { owner.read(&path).await.unwrap() },
@@ -497,7 +497,7 @@ mod owner_tests {
         for job in jobs {
             assert_eq!(job.await.unwrap().branch.as_deref(), Some("main"));
         }
-        let entry = owner.entries.lock().await[folder.path()].clone();
+        let entry = Arc::clone(&owner.entries.lock().await[folder.path()]);
         let observed = entry.lock().await.repository.as_ref().unwrap().0;
         owner.read(folder.path()).await;
         assert_eq!(entry.lock().await.repository.as_ref().unwrap().0, observed);
@@ -568,7 +568,7 @@ mod owner_tests {
                     break;
                 }
             }
-            let _ = socket.write_all(b"0\r\n\r\n").await;
+            socket.write_all(b"0\r\n\r\n").await.ok();
         });
         let response = reqwest::Client::new()
             .get(format!("http://{address}"))

@@ -5,7 +5,7 @@
 
 use crate::Conversation;
 use crate::content::SourceField;
-use crate::fold::{PlainSection, Row, RowKey, Slot};
+use crate::fold::{PlainSection, Row, RowKey, Slot, TextSection};
 use crate::motion::LiveBlockArrivals;
 use crate::source_actions::CopySource;
 use crate::thread::ItemUi;
@@ -23,19 +23,19 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// One text body of one item.
-pub(crate) type BodyKey = (ItemId, Slot);
+pub type BodyKey = (ItemId, Slot);
 /// How many times the reader had scrolled, and the row on top.
-pub(crate) type ReaderPlace = (u64, Option<RowKey>);
+pub type ReaderPlace = (u64, Option<RowKey>);
 /// The source a stored body's page moved for, where the reader was then,
 /// and whether it moved toward the end: a page change must not undo itself
 /// until the reader scrolls on to another row.
-pub(crate) type SourceFrontier = (ContentRef, ReaderPlace, bool);
+pub type SourceFrontier = (ContentRef, ReaderPlace, bool);
 
 /// Visual rows of one long literal leaf registered with the list at once.
-pub(crate) const NATIVE_BODY_WINDOW: usize = 64;
+pub const NATIVE_BODY_WINDOW: usize = 64;
 
 /// The visual rows of one literal leaf too long for one list row.
-pub(crate) struct NativeBodyWindow {
+pub struct NativeBodyWindow {
     pub reference: ContentRef,
     pub range: Range<usize>,
     pub width: gpui::Pixels,
@@ -50,14 +50,14 @@ pub(crate) struct NativeBodyWindow {
 }
 
 /// One fetched literal leaf and the selection source copying it.
-pub(crate) struct LiteralSelection {
+pub struct LiteralSelection {
     pub leaf: Arc<LiteralLeaf>,
     pub source: Rc<SelectionSource>,
     pub visible: SharedString,
 }
 
 /// An inline literal body split into bounded chunks, one row each.
-pub(crate) struct PlainBody {
+pub struct PlainBody {
     pub seq: Seq,
     pub chunks: Vec<SharedString>,
     pub source: Rc<SelectionSource>,
@@ -65,7 +65,7 @@ pub(crate) struct PlainBody {
 
 /// What one text row shows.
 #[derive(Clone)]
-pub(crate) enum Body {
+pub enum Body {
     /// Nothing (the item or its text is gone).
     Empty,
     /// Preparation is under way.
@@ -89,7 +89,7 @@ pub(crate) enum Body {
 
 /// The whole text behind a failed body.
 #[derive(Clone)]
-pub(crate) enum Full {
+pub enum Full {
     /// Copied from what the item holds.
     Copy(SharedString, CopySource),
     /// Read from Forge.
@@ -98,7 +98,7 @@ pub(crate) enum Full {
 
 /// Prepared Markdown blocks.
 #[derive(Clone)]
-pub(crate) struct Markdown {
+pub struct Markdown {
     pub prepared: Rc<PreparedSource>,
     pub range: Range<usize>,
     pub selector: SharedString,
@@ -110,11 +110,13 @@ pub(crate) struct Markdown {
     pub copy: Option<(SharedString, CopySource)>,
     /// Said under the last block while live text is incomplete.
     pub notice: Option<SharedString>,
+    /// Code blocks carry a copy action; a tool call's preview has none.
+    pub code_copy: bool,
 }
 
 /// Literal text, selectable as authored.
 #[derive(Clone)]
-pub(crate) struct Plain {
+pub struct Plain {
     pub text: SharedString,
     pub source: Rc<SelectionSource>,
     pub key: SharedString,
@@ -128,7 +130,7 @@ pub(crate) struct Plain {
 
 /// One visual row of a long literal leaf.
 #[derive(Clone)]
-pub(crate) struct Native {
+pub struct Native {
     pub key: SharedString,
     pub visual: usize,
     pub window: Range<usize>,
@@ -138,27 +140,25 @@ pub(crate) struct Native {
 
 /// A text row's input: its body and where it sits in it.
 #[derive(Clone)]
-pub(crate) struct TextBody {
+pub struct TextBody {
     pub body: Body,
     pub first: bool,
     pub last: bool,
-    pub stored: bool,
 }
 
 impl TextBody {
-    fn whole(body: Body) -> Self {
+    const fn whole(body: Body) -> Self {
         Self {
             body,
             first: true,
             last: true,
-            stored: false,
         }
     }
 }
 
 /// Every text body's preparation state. The conversation owns it; rows
 /// never see it.
-pub(crate) struct Bodies {
+pub struct Bodies {
     pub markdown: Rc<MarkdownRenderer>,
     /// The selection document of the open thread or agent.
     pub scope: SharedString,
@@ -240,14 +240,18 @@ impl Bodies {
             cached.1 = Arc::from(text);
         }
         cached.0 = item.seq;
-        cached.1.clone()
+        Arc::clone(&cached.1)
     }
 
     /// Whether `source` is the current, completely prepared inline revision.
     pub(crate) fn inline_prepared(&self, id: &ItemId, slot: Slot, seq: Seq) -> bool {
         let key: SharedString = match slot {
             Slot::Prose => id.to_string().into(),
-            slot => format!("{id}:{slot}").into(),
+            slot @ (Slot::Plain(_)
+            | Slot::Text(_)
+            | Slot::Output
+            | Slot::Answer
+            | Slot::Preview) => format!("{id}:{slot}").into(),
         };
         self.inline
             .get(&(id.clone(), slot))
@@ -316,9 +320,19 @@ fn body_text(item: &Item, slot: Slot) -> Option<&TextContent> {
     match slot {
         Slot::Prose => match &item.kind {
             ItemKind::AssistantMessage { text, .. } => Some(text),
-            _ => None,
+            ItemKind::UserMessage { .. }
+            | ItemKind::Tool { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => None,
         },
-        slot => slot.text(item),
+        slot @ (Slot::Plain(_) | Slot::Text(_) | Slot::Output | Slot::Answer | Slot::Preview) => {
+            slot.text(item)
+        }
     }
 }
 
@@ -334,7 +348,21 @@ impl Conversation {
                 let item = self.view.as_ref()?.shared_item(id)?;
                 Some(match slot {
                     Slot::Plain(section) => self.plain_body(&item, *section, *block, visual, cx),
-                    slot => TextBody::whole(self.markdown_body(&item, *slot, *block, cx)),
+                    slot @ (Slot::Prose
+                    | Slot::Text(_)
+                    | Slot::Output
+                    | Slot::Answer
+                    | Slot::Preview) => {
+                        let body = self.markdown_body(&item, *slot, *block, cx);
+                        // A framed body (bubble, card) joins its block rows
+                        // into one frame.
+                        let count = self.block_count(&item, *slot);
+                        TextBody {
+                            first: *block == 0,
+                            last: count.is_none_or(|count| *block + 1 >= count),
+                            ..TextBody::whole(body)
+                        }
+                    }
                 })
             }
             Row::WorkEntry { id, .. } => {
@@ -347,10 +375,12 @@ impl Conversation {
                 let source: Arc<str> = {
                     let key = (item.id.clone(), Slot::Preview);
                     match self.bodies.inline.get(&key) {
-                        Some((seq, source)) if *seq == item.seq => source.clone(),
+                        Some((seq, source)) if *seq == item.seq => Arc::clone(source),
                         _ => {
                             let source: Arc<str> = crate::preview::markdown(&item)?.into();
-                            self.bodies.inline.insert(key, (item.seq, source.clone()));
+                            self.bodies
+                                .inline
+                                .insert(key, (item.seq, Arc::clone(&source)));
                             source
                         }
                     }
@@ -364,11 +394,41 @@ impl Conversation {
                     cx,
                 )))
             }
-            _ => None,
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::EarlierWork { .. }
+            | Row::Chain { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => None,
+        }
+    }
+
+    /// How many block rows a formatted section has, once known.
+    fn block_count(&self, item: &Item, slot: Slot) -> Option<usize> {
+        match body_text(item, slot)? {
+            TextContent::Stored(_) => self
+                .bodies
+                .stored
+                .get(&(item.id.clone(), slot))
+                .map(|source| source.loaded_range().end),
+            TextContent::Inline(_) => self
+                .bodies
+                .markdown
+                .prepared_source(&format!("{}:{slot}", item.id).into())
+                .map(|prepared| prepared.block_count().max(1)),
         }
     }
 
     /// A reply or a formatted section: inline, live or stored.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one pass from the reply's source to its prepared blocks; the item kinds are listed out"
+    )]
     fn markdown_body(
         &mut self,
         item: &Item,
@@ -379,8 +439,8 @@ impl Conversation {
         let Some(text) = body_text(item, slot) else {
             return Body::Empty;
         };
-        let tone = if slot == Slot::Text(crate::fold::TextSection::Message) {
-            MarkdownBodyTone::Muted
+        let tone = if slot.is_card() {
+            MarkdownBodyTone::Code
         } else {
             MarkdownBodyTone::Foreground
         };
@@ -423,18 +483,18 @@ impl Conversation {
         let owner = cx.entity().downgrade();
         let id = item.id.clone();
         let ready = move |cx: &mut gpui::App| {
-            let _ = owner.update(cx, |this, cx| this.prose_ready(&id, cx));
+            owner.update(cx, |this, cx| this.prose_ready(&id, cx)).ok();
         };
         let preparation = match (&live, &source) {
             (Some(live), _) => {
                 self.bodies
                     .markdown
-                    .prepare_rope_source(key.clone(), live.clone(), cx, ready)
+                    .prepare_rope_source(key.clone(), Arc::clone(live), cx, ready)
             }
             (None, Some(source)) => {
                 self.bodies
                     .markdown
-                    .prepare_source(key.clone(), source.clone(), cx, ready)
+                    .prepare_source(key.clone(), Arc::clone(source), cx, ready)
             }
             (None, None) => return Body::Empty,
         };
@@ -467,6 +527,7 @@ impl Conversation {
                     CopySource::from_parts(live, source),
                 )
             }),
+            code_copy: true,
             notice: last.then_some(coverage).flatten().map(|(shown, total)| {
                 format!(
                     "Live preview shows {shown} of {total} bytes. Complete content is available after the reply is saved."
@@ -484,7 +545,7 @@ impl Conversation {
 
     /// Inline Markdown other than a reply, parsed off the main thread.
     fn inline_markdown(
-        &mut self,
+        &self,
         item: &Item,
         slot: Slot,
         source: Arc<str>,
@@ -495,12 +556,27 @@ impl Conversation {
         let key: SharedString = format!("{}:{slot}", item.id).into();
         let owner = cx.entity().downgrade();
         let id = item.id.clone();
-        let preparation =
+        let ready = move |cx: &mut gpui::App| {
+            owner
+                .update(cx, |this, cx| this.body_ready(&id, slot, cx))
+                .ok();
+        };
+        // A user's message paints the special `/command` it starts with as
+        // the composer does.
+        let preparation = if slot == Slot::Text(TextSection::User) {
+            let command = artisan_mentions::special_command(&source);
+            self.bodies.markdown.prepare_message(
+                key.clone(),
+                Arc::clone(&source),
+                command,
+                cx,
+                ready,
+            )
+        } else {
             self.bodies
                 .markdown
-                .prepare_source(key.clone(), source.clone(), cx, move |cx| {
-                    let _ = owner.update(cx, |this, cx| this.body_ready(&id, slot, cx));
-                });
+                .prepare_source(key.clone(), Arc::clone(&source), cx, ready)
+        };
         let prepared = match preparation {
             MarkdownPreparation::Ready(prepared) => prepared,
             MarkdownPreparation::Pending => match self.bodies.markdown.prepared_source(&key) {
@@ -515,11 +591,13 @@ impl Conversation {
             }
         };
         let end = blocks.end.min(prepared.block_count());
-        let preview = prepared.is_preview() && end >= prepared.block_count();
+        let tool = slot == Slot::Preview;
+        let preview = prepared.is_preview() && end >= prepared.block_count() && !tool;
         Body::Markdown(Markdown {
             range: blocks.start.min(end)..end,
             copy: preview.then(|| (format!("copy-full-{key}").into(), CopySource::Text(source))),
             notice: None,
+            code_copy: !tool,
             prepared,
             selector: key,
             order: self.bodies.order(item.position, slot),
@@ -585,7 +663,9 @@ impl Conversation {
             index,
             cx,
             move |cx| {
-                let _ = owner.update(cx, |this, cx| this.body_ready(&id, slot, cx));
+                owner
+                    .update(cx, |this, cx| this.body_ready(&id, slot, cx))
+                    .ok();
             },
         );
         match preparation {
@@ -596,7 +676,9 @@ impl Conversation {
                 let owner = cx.entity().downgrade();
                 let id = item.id.clone();
                 cx.defer(move |cx| {
-                    let _ = owner.update(cx, |this, cx| this.respace(&id, slot, cx));
+                    owner
+                        .update(cx, |this, cx| this.respace(&id, slot, cx))
+                        .ok();
                 });
                 Ok(source)
             }
@@ -634,7 +716,9 @@ impl Conversation {
             self.bodies
                 .markdown
                 .prepare_stored_leaf(key.clone(), &index, block, cx, move |cx| {
-                    let _ = owner.update(cx, |this, cx| this.leaf_ready(&id, slot, block, cx));
+                    owner
+                        .update(cx, |this, cx| this.leaf_ready(&id, slot, block, cx))
+                        .ok();
                 });
         let prepared = match preparation {
             MarkdownPreparation::Ready(prepared) => prepared,
@@ -656,6 +740,7 @@ impl Conversation {
             tone,
             wrapped: false,
             copy: None,
+            code_copy: true,
             notice: None,
         })
     }
@@ -684,10 +769,9 @@ impl Conversation {
             return TextBody {
                 first: block == 0,
                 last: block + 1 == body.chunks.len(),
-                stored: false,
                 body: Body::Plain(Plain {
                     text: text.clone(),
-                    source: body.source.clone(),
+                    source: Rc::clone(&body.source),
                     key: format!("{slot}-{}-{block}", item.id).into(),
                     order,
                     separator: "\n\n",
@@ -711,7 +795,6 @@ impl Conversation {
             return TextBody {
                 first: true,
                 last: true,
-                stored: true,
                 body: if visual.unwrap_or(0) == state.window.start {
                     Body::NativeFailed {
                         error: error.clone(),
@@ -735,12 +818,7 @@ impl Conversation {
         let first = block == 0 && visual.unwrap_or(0) == 0;
         let last = block + 1 == count && visual_last;
         let body = self.stored_literal(item, section, &reference, block, visual, window, order, cx);
-        TextBody {
-            body,
-            first,
-            last,
-            stored: true,
-        }
+        TextBody { body, first, last }
     }
 
     #[expect(
@@ -774,7 +852,7 @@ impl Conversation {
             .literal
             .get(&(item.id.clone(), slot, block))
             .filter(|entry| same_leaf(&index, block, &entry.leaf))
-            .map(|entry| entry.leaf.clone());
+            .map(|entry| Arc::clone(&entry.leaf));
         let owner = cx.entity().downgrade();
         let id = item.id.clone();
         let preparation = match held {
@@ -785,7 +863,9 @@ impl Conversation {
                 block,
                 cx,
                 move |cx| {
-                    let _ = owner.update(cx, |this, cx| this.leaf_ready(&id, slot, block, cx));
+                    owner
+                        .update(cx, |this, cx| this.leaf_ready(&id, slot, block, cx))
+                        .ok();
                 },
             ),
         };
@@ -822,11 +902,11 @@ impl Conversation {
                     block,
                     run: None,
                 },
-                leaf: leaf.clone(),
+                leaf: Arc::clone(&leaf),
             });
         Body::Plain(Plain {
             text: visible,
-            source: entry.source.clone(),
+            source: Rc::clone(&entry.source),
             key: format!("{key}:native:{}", visual.unwrap_or(0)).into(),
             order,
             separator,
@@ -935,13 +1015,12 @@ impl Conversation {
                 .take_while(|(row, _)| is_body(row))
                 .count();
         let base = self.folded.0.iter().find(|(row, _)| is_body(row)).cloned();
-        if !self.disclosures.is_empty() || base.is_none() {
+        let Some((base, version)) = base.filter(|_| self.disclosures.is_empty()) else {
             // A disclosure in flight keeps the rows it measured.
             self.reexpand(cx);
             self.refresh_item(id, cx);
             return;
-        }
-        let (base, version) = base.expect("checked above");
+        };
         let rows = self.body_rows(base, version);
         let rows = self.project_native_windows(rows);
         let same = rows.len() == end - start
@@ -1053,14 +1132,14 @@ impl Conversation {
                         .map(|(row, _)| (row, version))
                         .collect()
                 }
-                _ => match self
+                Slot::Prose | Slot::Text(_) | Slot::Output | Slot::Answer | Slot::Preview => self
                     .bodies
                     .markdown
                     .prepared_source(&format!("{id}:{slot}").into())
-                {
-                    Some(prepared) => blocks(0..prepared.block_count().max(1), prepared.revision()),
-                    None => vec![(row, version)],
-                },
+                    .map_or_else(
+                        || vec![(row, version)],
+                        |prepared| blocks(0..prepared.block_count().max(1), prepared.revision()),
+                    ),
             },
         }
     }
@@ -1131,7 +1210,19 @@ impl Conversation {
                     block,
                     ..
                 } => Some((row.semantic().key(), (id.clone(), *slot, *block))),
-                _ => None,
+                Row::Projected { .. }
+                | Row::Work { .. }
+                | Row::EarlierWork { .. }
+                | Row::WorkEntry { .. }
+                | Row::Chain { .. }
+                | Row::Text { .. }
+                | Row::Prompt(_)
+                | Row::Compaction(_)
+                | Row::Image(_)
+                | Row::Gap
+                | Row::Status(_)
+                | Row::AgentResult(_)
+                | Row::AgentStatus(..) => None,
             })
             .collect();
         bodies.native.retain(|key, state| {
@@ -1150,7 +1241,7 @@ impl Conversation {
 }
 
 /// Whether `leaf` is ordinal `block` of the source `index` describes.
-pub(crate) fn same_leaf(index: &StoredSource, block: usize, leaf: &LiteralLeaf) -> bool {
+pub fn same_leaf(index: &StoredSource, block: usize, leaf: &LiteralLeaf) -> bool {
     index.source_ref() == &leaf.source_ref
         && index.leaf_descriptor(block).is_some_and(|descriptor| {
             descriptor.source_start == leaf.source_range.start as u64
@@ -1165,7 +1256,7 @@ fn literal_selection(
     separator: &'static str,
 ) -> LiteralSelection {
     LiteralSelection {
-        leaf: leaf.clone(),
+        leaf: Arc::clone(leaf),
         visible: leaf
             .text
             .strip_suffix('\n')

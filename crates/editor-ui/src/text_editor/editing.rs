@@ -101,7 +101,7 @@ impl TextEditor {
         &mut self,
         range: Range<usize>,
         replacement: &str,
-        marked_selection: Option<Range<usize>>,
+        marked_selection: Option<&Range<usize>>,
         cx: &mut Context<Self>,
     ) {
         if self.disabled {
@@ -118,7 +118,7 @@ impl TextEditor {
                 replacement
             };
         let retained = self.text.len().saturating_sub(range.len());
-        if replacement.len() > self.max_bytes().saturating_sub(retained) {
+        if replacement.len() > Self::max_bytes().saturating_sub(retained) {
             self.limit_notice = true;
             cx.notify();
             return;
@@ -128,7 +128,7 @@ impl TextEditor {
         if range.start > range.end || self.text.get(range.clone()).is_none() {
             return;
         }
-        let selected_offsets = match marked_selection.clone() {
+        let selected_offsets = match marked_selection.cloned() {
             Some(selected) if selected.start <= selected.end => {
                 let (Some(start), Some(end)) = (
                     utf16_offset_to_utf8(fitted, selected.start),
@@ -265,13 +265,14 @@ impl TextEditor {
     /// The UTF-8 range an input-handler edit replaces: the given UTF-16
     /// range, else the marked text, else the selection.
     pub(super) fn replacement_range(&self, range: Option<Range<usize>>) -> Option<Range<usize>> {
-        let range = match range {
-            Some(range) => utf16_range_to_utf8(&self.text, range),
-            None => self
-                .marked_range
-                .clone()
-                .or_else(|| Some(self.selection.clone())),
-        }?;
+        let range = range.map_or_else(
+            || {
+                self.marked_range
+                    .clone()
+                    .or_else(|| Some(self.selection.clone()))
+            },
+            |range| utf16_range_to_utf8(&self.text, range),
+        )?;
         (range.start <= range.end
             && range.end <= self.text.len()
             && self.text.is_char_boundary(range.start)
@@ -321,6 +322,10 @@ impl TextEditor {
     pub(super) fn insert_tab(&mut self, _: &InsertTab, _: &mut Window, cx: &mut Context<Self>) {
         if self.list_open {
             cx.emit(ListKey::Accept);
+            return;
+        }
+        if let Some(suggestion) = self.shown_suggestion().cloned() {
+            self.insert(&suggestion, cx);
             return;
         }
         match self.mode {
@@ -373,7 +378,7 @@ impl TextEditor {
             .map(|token| token.range.clone())
     }
 
-    fn cursor_offset(&self) -> usize {
+    const fn cursor_offset(&self) -> usize {
         if self.selection_reversed {
             self.selection.start
         } else {
@@ -697,7 +702,12 @@ impl TextEditor {
         if self.disabled {
             return;
         }
-        let target = self.vertical_target(self.cursor_offset(), up);
+        let cursor = self.cursor_offset();
+        let mut target = self.vertical_target(cursor, up);
+        if target == cursor {
+            // No row above or below: go to the text's edge, as Chrome does.
+            target = if up { 0 } else { self.text.len() };
+        }
         if extend {
             self.select_to(target);
         } else {
@@ -859,7 +869,7 @@ impl TextEditor {
         }
     }
 
-    pub(super) fn mouse_up(&mut self) {
+    pub(super) const fn mouse_up(&mut self) {
         self.selection_dragging = false;
     }
 

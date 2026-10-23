@@ -19,6 +19,7 @@ use gpui::{
     Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, point,
     px,
 };
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 /// A Forge on its own runtime with one project and one thread.
@@ -59,6 +60,7 @@ impl Forge {
                     config: EngineConfig::new(EngineId::Claude),
                     title: None,
                     parent_thread_id: None,
+                    spawned_by: None,
                 })
                 .await
                 .unwrap();
@@ -68,7 +70,7 @@ impl Forge {
             runtime,
             address,
             thread,
-            printed: Default::default(),
+            printed: std::cell::RefCell::default(),
             _dir: dir,
         }
     }
@@ -90,6 +92,7 @@ impl Forge {
                         command: "npm run dev\n# watch".into(),
                         cwd: Some("/home/me/app".into()),
                         background: true,
+                        watch: false,
                     },
                     title: None,
                     output,
@@ -177,12 +180,12 @@ fn draw(cx: &mut VisualTestContext) {
 fn lines(range: std::ops::Range<usize>) -> String {
     use std::fmt::Write as _;
     range.fold(String::new(), |mut text, index| {
-        let _ = writeln!(text, "\x1b[32mline\x1b[0m {index}");
+        writeln!(text, "\x1b[32mline\x1b[0m {index}").ok();
         text
     })
 }
 
-fn dialog_rows(dialog: &Entity<TerminalDialog>, cx: &mut VisualTestContext) -> usize {
+fn dialog_rows(dialog: &Entity<TerminalDialog>, cx: &VisualTestContext) -> usize {
     cx.read(|cx| dialog.read(cx).list.item_count())
 }
 
@@ -191,6 +194,10 @@ fn dialog_rows(dialog: &Entity<TerminalDialog>, cx: &mut VisualTestContext) -> u
 /// final output snapshot is missing, and closes on escape or a
 /// click outside.
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario from opening the dialog to closing it"
+)]
 fn the_terminal_dialog_shows_the_whole_output_and_follows_it(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let forge = Forge::start();
@@ -379,6 +386,10 @@ fn the_terminal_dialog_shows_the_whole_output_and_follows_it(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario across eviction and navigation"
+)]
 fn shared_thread_details_survive_transcript_eviction_and_release_on_navigation(
     cx: &mut TestAppContext,
 ) {
@@ -472,7 +483,7 @@ fn shared_thread_details_survive_transcript_eviction_and_release_on_navigation(
                 thread: forge.thread.clone(),
             },
             cx,
-        )
+        );
     });
     wait(cx, "shared current-thread details", |cx| {
         cx.read(|cx| {
@@ -548,6 +559,26 @@ fn shared_thread_details_survive_transcript_eviction_and_release_on_navigation(
                 })
         })
     });
+    // A goal the engine stopped on, blocked, stays on the strip.
+    put(
+        goal.clone(),
+        Status::Done,
+        ItemKind::Notice {
+            kind: artisan_api::NoticeKind::Goal {
+                state: "blocked".into(),
+            },
+            text: "Retain the current goal".into(),
+        },
+    );
+    wait(cx, "the blocked goal", |cx| {
+        cx.read(|cx| {
+            host.read(cx)
+                .thread_summary(&forge.thread)
+                .and_then(|state| state.value.as_ref())
+                .and_then(|value| value.goal.as_ref())
+                .is_some_and(|goal| goal.state == artisan_api::ThreadGoalState::Blocked)
+        })
+    });
     // Navigation cancels any pending refresh and releases the sole retained projection.
     put(
         goal,
@@ -566,7 +597,7 @@ fn shared_thread_details_survive_transcript_eviction_and_release_on_navigation(
                 project: None,
             },
             cx,
-        )
+        );
     });
     wait(cx, "summary lifetime ends with observation", |cx| {
         cx.read(|cx| {
@@ -577,6 +608,14 @@ fn shared_thread_details_survive_transcript_eviction_and_release_on_navigation(
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario that fills every section before measuring"
+)]
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the inspector is still read inside the later update closures"
+)]
 fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let forge = Forge::start();
@@ -596,6 +635,8 @@ fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContex
     };
     for index in 0..160 {
         put(ItemKind::Agent {
+            engine: None,
+            thread: None,
             name: Some(format!("agent {index}")),
             description: format!("Task {index}").into(),
             prompt: None,
@@ -628,9 +669,10 @@ fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContex
         ),
         "fixture must exercise real stored collection paging"
     );
-    let command = (0..80)
-        .map(|index| format!("echo command-{index}\n"))
-        .collect::<String>();
+    let command = (0..80).fold(String::new(), |mut command, index| {
+        writeln!(command, "echo command-{index}").unwrap();
+        command
+    });
     let mut jobs = Vec::new();
     for index in 0..160 {
         jobs.push(
@@ -643,6 +685,7 @@ fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContex
                     },
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -681,7 +724,7 @@ fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContex
                 thread: forge.thread.clone(),
             },
             cx,
-        )
+        );
     });
     wait(cx, "large canonical Inspector summary", |cx| {
         cx.read(|cx| {
@@ -769,7 +812,7 @@ fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContex
         })
     });
     inspector.update(cx, |inspector, _| {
-        inspector.test_plan_presented.borrow_mut().clear()
+        inspector.test_plan_presented.borrow_mut().clear();
     });
     draw(cx);
     cx.read(|cx| {
@@ -789,8 +832,8 @@ fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContex
     inspector.update(cx, |inspector, _| inspector.plan = None);
     cx.update(|window, cx| {
         inspector.update(cx, |inspector, cx| {
-            inspector.open_terminal(&jobs[0], window, cx)
-        })
+            inspector.open_terminal(&jobs[0], window, cx);
+        });
     });
     let dialog = cx.read(|cx| inspector.read(cx).terminal_dialog().clone());
     wait(cx, "multiline terminal command loaded", |cx| {
@@ -816,5 +859,153 @@ fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContex
     assert_eq!(
         cx.read(|cx| dialog.read(cx).job.as_ref().unwrap().command_offset_builds),
         1
+    );
+}
+
+/// Work nothing waits on gets its own section: a command the engine moved to
+/// the background, a watcher and a workflow sit under "In the background",
+/// while a command the turn waits on stays under Terminals. An agent always
+/// sits under Agents, even one running in the background.
+#[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario with every kind of background work"
+)]
+fn background_work_has_its_own_section(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let forge = Forge::start();
+    let put = |id: &str, kind| {
+        forge
+            .runtime
+            .block_on(forge.store.upsert_item(NewItem {
+                id: id.into(),
+                thread_id: forge.thread.clone(),
+                run_id: None,
+                parent_id: None,
+                native_id: None,
+                status: Status::Running,
+                kind,
+            }))
+            .unwrap();
+    };
+    let shell = |command: &str, background, watch| ItemKind::Tool {
+        tool: ToolKind::Shell {
+            command: command.into(),
+            cwd: None,
+            background,
+            watch,
+        },
+        title: None,
+        output: None,
+        exit_code: None,
+        approval: None,
+    };
+    put("server", shell("npm run dev", true, false));
+    put("tests", shell("cargo test", false, false));
+    put("watcher", shell("tail -f build.log", true, true));
+    put(
+        "workflow",
+        ItemKind::Tool {
+            tool: ToolKind::Other {
+                name: "Workflow".into(),
+                input: Some(r#"{"name":"review-changes"}"#.into()),
+            },
+            title: None,
+            output: None,
+            exit_code: None,
+            approval: None,
+        },
+    );
+    put(
+        "crawler",
+        ItemKind::Agent {
+            engine: None,
+            thread: None,
+            name: None,
+            description: "Prepare playable crawl".into(),
+            prompt: None,
+            agent_id: None,
+            context_used: None,
+            model: None,
+            background: true,
+            result: None,
+            label: None,
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (files, host) = forge.pair(dir.path());
+    let core = cx.new(|cx| Core::new(files, cx).unwrap());
+    let shell_core = core.clone();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let conversation = cx.new(|cx| Conversation::new(shell_core.clone(), window, cx));
+        let inspector =
+            cx.new(|cx| Inspector::new(shell_core.clone(), conversation.clone(), window, cx));
+        Shell {
+            inspector,
+            conversation,
+        }
+    });
+    let inspector = cx.read(|cx| view.read(cx).inspector.clone());
+    let live_host = host.clone();
+    wait(cx, "the host to connect", |cx| {
+        cx.read(|cx| {
+            core.read(cx)
+                .host(&live_host)
+                .is_some_and(|host| host.read(cx).is_live())
+        })
+    });
+    core.update(cx, |core, cx| {
+        core.navigate(
+            Screen::Thread {
+                host,
+                thread: forge.thread.clone(),
+            },
+            cx,
+        );
+    });
+    wait(cx, "the summary", |cx| {
+        cx.read(|cx| {
+            inspector.read(cx).summary.terminals.len() == 3
+                && inspector.read(cx).summary.agents.len() == 1
+        })
+    });
+    draw(cx);
+    let sections = cx.read(|cx| {
+        let inspector = inspector.read(cx);
+        let summary = &inspector.summary;
+        inspector
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                crate::Entry::Heading(heading) => Some((*heading).to_owned()),
+                crate::Entry::Terminal(index) => {
+                    let terminal = &summary.terminals[*index];
+                    let kind = if terminal.watch { "watcher" } else { "command" };
+                    Some(format!("  {kind}: {:?}", terminal.command))
+                }
+                crate::Entry::Workflow(index) => {
+                    Some(format!("  workflow: {:?}", summary.workflows[*index].name))
+                }
+                crate::Entry::Agent(index) => {
+                    Some(format!("  agent: {:?}", summary.agents[*index].description))
+                }
+                crate::Entry::Fact(_) | crate::Entry::Plan(_) | crate::Entry::PlanCollection => {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        sections,
+        [
+            "Agents",
+            "  agent: Inline(\"Prepare playable crawl\")",
+            "Terminals",
+            "  command: Inline(\"cargo test\")",
+            "In the background",
+            "  workflow: Some(\"review-changes\")",
+            "  watcher: Inline(\"tail -f build.log\")",
+            "  command: Inline(\"npm run dev\")",
+        ],
     );
 }

@@ -6,7 +6,7 @@
 //! steers and work headers never wait.
 use crate::{
     Conversation,
-    fold::{PlainSection, Row, RowKey, Slot},
+    fold::{PlainSection, Row, RowKey, Slot, TextSection},
 };
 use gpui::{App, Context};
 
@@ -15,7 +15,7 @@ fn immediate(row: &Row) -> bool {
         row.semantic(),
         Row::Work { .. }
             | Row::Text {
-                slot: Slot::Plain(PlainSection::User),
+                slot: Slot::Plain(PlainSection::User) | Slot::Text(TextSection::User),
                 ..
             }
     )
@@ -38,9 +38,22 @@ impl Conversation {
         })
     }
 
+    /// A disclosure in flight shows the row: the reader unfolded it, so it
+    /// is history and never holds back the rows after it.
+    fn unfolding(&self, row: &Row) -> bool {
+        self.disclosures.values().any(|flight| flight.includes(row))
+    }
+
     /// Whether the speculative frontier's row has yet to start revealing.
     fn awaiting(&self, key: &RowKey, cx: &App) -> bool {
-        self.speculative_reveal_visible(key)
+        let unfolding = self
+            .row_context
+            .key_rows
+            .get(key)
+            .and_then(|index| self.rows.get(*index))
+            .is_some_and(|(row, _)| self.unfolding(row));
+        !unfolding
+            && self.speculative_reveal_visible(key)
             && self.row_context.key_rows.get(key).is_some_and(|index| {
                 self.row_views
                     .get(*index)
@@ -59,7 +72,7 @@ impl Conversation {
         self.rows
             .iter()
             .find(|(row, _)| {
-                if immediate(row) {
+                if immediate(row) || self.unfolding(row) {
                     return false;
                 }
                 let key = row.key();
@@ -95,30 +108,37 @@ impl Conversation {
                     Row::WorkEntry { .. } | Row::Chain { .. } | Row::Prompt(_) | Row::Image(_) => {
                         row.anchor().is_some_and(fresh)
                     }
-                    _ => false,
+                    Row::Projected { .. }
+                    | Row::Work { .. }
+                    | Row::EarlierWork { .. }
+                    | Row::Text { .. }
+                    | Row::Compaction(_)
+                    | Row::Gap
+                    | Row::Status(_)
+                    | Row::AgentResult(_)
+                    | Row::AgentStatus(..) => false,
                 }
             })
             .map(|(row, _)| row.key())
     }
 
     /// Follows the reveal queue's frontier, once per frame before layout.
-    pub(crate) fn sync_reveal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_reveal(&mut self, cx: &Context<Self>) {
         let queued = self.reveal.borrow().frontier_key();
         if queued == self.reveal_frontier {
             return;
         }
-        let frontier = match queued {
-            Some(key) => Some(key),
-            None => {
-                // The queue drained, or a chosen row has yet to present.
-                let Some(current) = self.reveal_frontier.clone() else {
-                    return;
-                };
-                if !cx.reduce_motion() && self.awaiting(&current, cx) {
-                    return;
-                }
-                self.speculative_frontier(cx)
+        let frontier = if let Some(key) = queued {
+            Some(key)
+        } else {
+            // The queue drained, or a chosen row has yet to present.
+            let Some(current) = self.reveal_frontier.clone() else {
+                return;
+            };
+            if !cx.reduce_motion() && self.awaiting(&current, cx) {
+                return;
             }
+            self.speculative_frontier(cx)
         };
         self.set_reveal_frontier(frontier);
     }

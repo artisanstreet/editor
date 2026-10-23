@@ -13,7 +13,7 @@ const MAX_TRACE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy)]
-pub(crate) enum Kind {
+pub enum Kind {
     Out,
     In,
     Stderr,
@@ -40,7 +40,7 @@ struct Sink {
     remaining: AtomicUsize,
 }
 #[derive(Clone, Default)]
-pub(crate) struct Trace {
+pub struct Trace {
     sink: Option<Arc<Sink>>,
 }
 
@@ -70,7 +70,8 @@ impl Trace {
                 if serde_json::to_writer(&mut file, &value).is_err() || writeln!(file).is_err() { break; }
                 if boundary && file.flush().is_err() { break; }
             }
-            let _ = file.flush();
+            // Nowhere left to report a failed final flush.
+            file.flush().ok();
         });
         if worker.is_err() {
             return Self::default();

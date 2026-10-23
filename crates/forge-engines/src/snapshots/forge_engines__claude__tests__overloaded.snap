@@ -1,0 +1,51 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "s1",
+        },
+        Model {
+            id: "claude-opus-5-5",
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: None,
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Item {
+            key: "error-1",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Api,
+                message: Inline(
+                    "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+                ),
+                retryable: true,
+            },
+        },
+    ],
+    Some(
+        Outcome {
+            status: Failed,
+            error: Some(
+                "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+            ),
+            retry: Some(
+                Overloaded,
+            ),
+        },
+    ),
+)

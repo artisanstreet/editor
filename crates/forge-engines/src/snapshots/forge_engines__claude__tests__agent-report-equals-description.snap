@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/claude.rs
-assertion_line: 770
 expression: "(events, outcome)"
 ---
 (
@@ -27,6 +26,8 @@ expression: "(events, outcome)"
                 background: true,
                 result: None,
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
         Item {
@@ -55,6 +56,8 @@ expression: "(events, outcome)"
                     ),
                 ),
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
     ],

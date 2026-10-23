@@ -18,7 +18,7 @@ impl Render for Fixture {
             .child(HierarchyView {
                 id: "native-hierarchy".into(),
                 theme: ArtisanTheme::resolved(),
-                tree: self.tree.clone(),
+                tree: std::sync::Arc::clone(&self.tree),
                 layout: Layout::Treemap,
                 unit: None,
                 levels: 3,

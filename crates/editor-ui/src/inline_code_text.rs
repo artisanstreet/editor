@@ -31,6 +31,10 @@ struct InlineFragment {
 
 /// CommonMark inline content flattened into styled runs; block markers are omitted.
 #[must_use]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "pulldown-cmark events that carry no inline text are skipped, future ones too"
+)]
 fn inline_fragments(raw: &str) -> Vec<InlineFragment> {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let mut fragments = Vec::<InlineFragment>::new();
@@ -93,7 +97,8 @@ fn inline_fragments(raw: &str) -> Vec<InlineFragment> {
                 continue;
             }
         } else {
-            fragment.text = fragment.text.trim_start().to_owned();
+            let leading = fragment.text.len() - fragment.text.trim_start().len();
+            fragment.text.drain(..leading);
         }
         if !fragment.text.is_empty() {
             fragments.push(fragment);
@@ -136,10 +141,9 @@ fn fragment_runs(fragments: &[InlineFragment]) -> FragmentRuns {
             continue;
         }
         let mut style = HighlightStyle::default();
-        let mut styled = false;
+        let mut styled = fragment.strong;
         if fragment.strong {
             style.font_weight = Some(ProseTypography::STRONG_WEIGHT);
-            styled = true;
         }
         if fragment.em {
             style.font_style = Some(FontStyle::Italic);

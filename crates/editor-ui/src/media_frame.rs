@@ -3,8 +3,8 @@
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, canvas, div, px,
+    ParentElement as _, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, canvas, div, px,
 };
 
 type Activation = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -63,21 +63,23 @@ impl MediaFrame {
     }
     pub(crate) fn attachment(
         id: impl Into<ElementId>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         content: impl IntoElement,
     ) -> Self {
         Self {
             size: Size::Attachment,
             id: Some(id.into()),
-            ..Self::new(theme, 1.0, content)
+            ..Self::new(*theme, 1.0, content)
         }
     }
+    #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.selector = Some(selector.into());
         self
     }
     /// Makes the whole frame a native keyboard and pointer action. Nested
     /// controls can stop propagation to keep their own action separate.
+    #[must_use]
     pub fn on_activate(
         mut self,
         id: impl Into<ElementId>,
@@ -90,13 +92,29 @@ impl MediaFrame {
     }
     /// Defers feature work only after this individual frame paints inside the
     /// native content clip. Building or measuring a frame never runs it.
+    #[must_use]
     pub fn on_visible(mut self, action: impl Fn(&mut App) + 'static) -> Self {
         self.visible = Some(Box::new(action));
         self
     }
-    pub(crate) fn error(mut self, value: bool) -> Self {
+    pub(crate) const fn error(mut self, value: bool) -> Self {
         self.error = value;
         self
+    }
+    /// The composer tile's outer corner.
+    pub(crate) const ATTACHMENT_RADIUS: RadiusStep = RadiusStep::Sm;
+    /// The sent thumbnail's outer corner.
+    const SENT_ATTACHMENT_RADIUS: RadiusStep = RadiusStep::Md;
+    /// The frame clips square, so content rounds itself to the corner inside
+    /// the 1 px border.
+    #[must_use]
+    pub fn attachment_content_radius() -> Pixels {
+        RadiusTokens::nested(RadiusTokens::value(Self::ATTACHMENT_RADIUS), px(1.0))
+    }
+    /// [`Self::attachment_content_radius`] for the sent thumbnail.
+    #[must_use]
+    pub fn sent_attachment_content_radius() -> Pixels {
+        RadiusTokens::nested(RadiusTokens::value(Self::SENT_ATTACHMENT_RADIUS), px(1.0))
     }
 }
 impl RenderOnce for MediaFrame {
@@ -109,7 +127,11 @@ impl RenderOnce for MediaFrame {
             .border_color(if self.error {
                 theme.colors.destructive.to_paint()
             } else {
-                theme.colors.foreground.with_alpha(0.12).to_paint()
+                theme
+                    .colors
+                    .text
+                    .at(crate::theme::Opacity::MediaEdge)
+                    .to_paint()
             });
         frame = match self.size {
             Size::Aspect(aspect) => frame
@@ -119,15 +141,15 @@ impl RenderOnce for MediaFrame {
             Size::Attachment => frame
                 .size(px(72.0))
                 .flex_none()
-                .rounded(RadiusTokens::value(RadiusStep::Sm))
-                .bg(theme.colors.field.to_paint())
+                .rounded(RadiusTokens::value(Self::ATTACHMENT_RADIUS))
+                .bg(theme.colors.surface.to_paint())
                 .shadow(crate::glass::card_shadows(&theme)),
             Size::SentAttachment => frame
                 .size(px(96.0))
                 .flex_none()
-                .rounded(RadiusTokens::value(RadiusStep::Md))
-                .border_color(theme.colors.border.to_paint())
-                .bg(theme.colors.card.to_paint()),
+                .rounded(RadiusTokens::value(Self::SENT_ATTACHMENT_RADIUS))
+                .border_color(theme.colors.line.to_paint())
+                .bg(theme.colors.surface.to_paint()),
             Size::Transcript => frame
                 .max_w(px(576.0))
                 .max_h(px(480.0))

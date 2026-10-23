@@ -46,12 +46,12 @@ impl MediaPresenter<'_> {
         let theme = self.theme;
         let (content, image) = match self.images.get(hash) {
             Some(Blob::Ready(image)) => (
-                img(image.clone())
+                img(std::sync::Arc::clone(image))
                     .size_full()
-                    .rounded(RadiusTokens::value(RadiusStep::Md))
+                    .rounded(MediaFrame::sent_attachment_content_radius())
                     .object_fit(ObjectFit::Cover)
                     .into_any_element(),
-                Some(image.clone()),
+                Some(std::sync::Arc::clone(image)),
             ),
             Some(Blob::Failed(_)) => {
                 let retry = self.actions.handler(Action::RetryImage(hash.clone()));
@@ -64,7 +64,7 @@ impl MediaPresenter<'_> {
                         .justify_center()
                         .px(px(8.0))
                         .text_size(theme.typography.label_text)
-                        .text_color(theme.colors.muted_foreground.to_paint())
+                        .text_color(theme.colors.text_muted.to_paint())
                         .child("Couldn't load")
                         .child(
                             Button::text(format!("retry-sent-{item}-{index}"), theme, "Retry")
@@ -96,12 +96,12 @@ impl MediaPresenter<'_> {
         let retry = self.actions.handler(Action::RetryImage(retry_hash));
         let (content, image): (AnyElement, _) = match self.images.get(hash) {
             Some(Blob::Ready(image)) => (
-                img(image.clone())
+                img(std::sync::Arc::clone(image))
                     .max_h(px(480.0))
                     .max_w(px(ChatBubbleSegment::MAX_WIDTH))
                     .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .into_any_element(),
-                Some(image.clone()),
+                Some(std::sync::Arc::clone(image)),
             ),
             Some(Blob::Failed(error)) => (
                 div()
@@ -110,7 +110,7 @@ impl MediaPresenter<'_> {
                     .items_center()
                     .justify_center()
                     .text_size(theme.typography.control_text)
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .flex_col()
                     .child(format!("Couldn't load the image: {error}"))
                     .child(
@@ -124,7 +124,7 @@ impl MediaPresenter<'_> {
             _ => (
                 div()
                     .size(px(480.0))
-                    .bg(theme.colors.muted.to_paint())
+                    .bg(theme.colors.raised.to_paint())
                     .into_any_element(),
                 None,
             ),

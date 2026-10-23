@@ -37,7 +37,7 @@ pub(super) fn render_row(
         .min_w_0()
         .text_size(px(ProseTypography::TABLE_SIZE_PX))
         .line_height(px(ProseTypography::TABLE_LINE_PX))
-        .tracking(ProseTypography::TRACKING_EM);
+        .tracking(theme.typography.tracking_em);
     let kind = if row_index < prepared.header_rows {
         RowKind::Header
     } else {
@@ -52,9 +52,7 @@ pub(super) fn render_row(
         let selector = render.id(prepared_cell.selector);
         let mut cell = cell_frame(kind, *alignment, column, columns, theme);
         if row_index + 1 < prepared.rows.len() || prepared.trailing_border {
-            cell = cell
-                .border_b_1()
-                .border_color(theme.colors.border.to_paint());
+            cell = cell.border_b_1().border_color(theme.colors.line.to_paint());
         }
         if let Some(leaf) = &prepared_cell.leaf {
             cell = cell.child(render_leaf(
@@ -98,7 +96,7 @@ fn cell_frame(
         RowKind::Header => cell
             .justify_end()
             .font_weight(ProseTypography::STRONG_WEIGHT)
-            .text_color(theme.colors.foreground.to_paint()),
+            .text_color(theme.colors.text.to_paint()),
         RowKind::Body => cell.pt(pad),
     }
 }

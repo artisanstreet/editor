@@ -1,4 +1,5 @@
-//! Pairing entry screen for local, WSL and remote Forges.
+//! Home: with no host yet, the pairing entry for local, WSL and remote
+//! Forges.
 
 use editor_core::{Core, LocalTarget, Screen, SettingsPage, hosts};
 use editor_ui::AssetId;
@@ -52,7 +53,7 @@ impl Home {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = hosts::pair_local(target, &identity, &device_name).await;
-            let _ = this.update(cx, |home, cx| {
+            this.update(cx, |home, cx| {
                 home.pairing = None;
                 match result.and_then(|config| {
                     let host = config.id.clone();
@@ -72,7 +73,8 @@ impl Home {
                     Err(error) => home.error = Some(format!("{error:#}")),
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         })
         .detach();
     }
@@ -90,7 +92,7 @@ impl Home {
         let selector = id.to_string();
         let button = div()
             .id(id)
-            .debug_selector(move || selector.clone())
+            .debug_selector(move || selector)
             .focusable()
             .tab_index(0)
             .role(gpui::Role::Button)
@@ -101,7 +103,7 @@ impl Home {
             .rounded(px(8.0))
             .border_1()
             .border_color(desktop.line.to_paint())
-            .text_color(desktop.workspace_foreground.to_paint())
+            .text_color(desktop.text.to_paint())
             .child(label);
 
         match target {
@@ -112,7 +114,7 @@ impl Home {
             })),
             None => button.on_click(cx.listener(|home, _, _, cx| {
                 home.core.update(cx, |core, cx| {
-                    core.navigate(Screen::Settings(SettingsPage::Hosts), cx)
+                    core.navigate(Screen::Settings(SettingsPage::Hosts), cx);
                 });
             })),
         }
@@ -121,6 +123,10 @@ impl Home {
 }
 
 impl Render for Home {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the pairing page's buttons and copy build one element tree"
+    )]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let desktop = cx.theme().colors;
         let targets = std::iter::once(LocalTarget::ThisMachine).chain(
@@ -144,7 +150,7 @@ impl Render for Home {
                     format!("pair-{index}").into(),
                     label,
                     cx,
-                    Some(target.clone()),
+                    Some(target),
                 )
             })
             .collect();
@@ -158,7 +164,7 @@ impl Render for Home {
                 )
                 .on_activate(cx.listener(|this, _, _, cx| {
                     this.core
-                        .update(cx, |core, cx| core.load_pairing_targets(true, cx))
+                        .update(cx, |core, cx| core.load_pairing_targets(true, cx));
                 }))
                 .into_any_element(),
             );
@@ -187,14 +193,14 @@ impl Render for Home {
                         div().mb(px(16.0)).child(
                             asset_glyph(AssetId::TABLER_TERMINAL_2)
                                 .size(px(EMBLEM))
-                                .text_color(desktop.workspace_secondary.to_paint()),
+                                .text_color(desktop.text_muted.to_paint()),
                         ),
                     )
                     .child(
                         div()
                             .text_size(px(HEADLINE))
                             .font_weight(FontWeight::NORMAL)
-                            .text_color(desktop.workspace_foreground.to_paint())
+                            .text_color(desktop.text.to_paint())
                             .child("Add a host"),
                     )
                     .child(
@@ -202,7 +208,7 @@ impl Render for Home {
                             .mt(px(8.0))
                             .max_w(px(440.0))
                             .text_size(px(15.0))
-                            .text_color(desktop.workspace_secondary.to_paint())
+                            .text_color(desktop.text_muted.to_paint())
                             .child(
                                 "Artisan works on a Forge host you trust. Use the Forge on this computer, or pair with one on another machine.",
                             ),
@@ -221,9 +227,10 @@ impl Render for Home {
                             .mt(px(16.0))
                             .max_w(px(440.0))
                             .text_size(px(15.0))
-                            .text_color(gpui::rgb(0x00f8_7171))
+                            .text_color(desktop.destructive_text.to_paint())
                             .child(error)
                     })),
             )
+            .into_any_element()
     }
 }

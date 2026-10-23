@@ -33,6 +33,8 @@ fn messages_to_an_agent_show_in_its_view_and_read_as_talking_to_it(cx: &mut Test
         None,
         Status::Running,
         ItemKind::Agent {
+            engine: None,
+            thread: None,
             name: None,
             description: "Close renderer gaps".into(),
             prompt: Some("Close the renderer gaps: thin geometry and glass.".into()),
@@ -88,7 +90,7 @@ fn messages_to_an_agent_show_in_its_view_and_read_as_talking_to_it(cx: &mut Test
     let dir = tempfile::tempdir().unwrap();
     let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
     open(&core, &host, &thread, cx);
-    wait(cx, "the thread", |cx| loaded(&conversation, cx).len() == 2);
+    landed(cx, &conversation);
 
     // The lead's work: it delegated a task and messaged its agent by name
     // of that task.
@@ -147,6 +149,8 @@ fn an_agents_view_reads_its_own_context(cx: &mut TestAppContext) {
         &ItemId::new(),
         Status::Running,
         ItemKind::Agent {
+            engine: None,
+            thread: None,
             name: None,
             description: "Perf overlay".into(),
             prompt: None,
@@ -161,7 +165,7 @@ fn an_agents_view_reads_its_own_context(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
     open(&core, &host, &thread, cx);
-    wait(cx, "the thread", |cx| loaded(&conversation, cx).len() == 1);
+    landed(cx, &conversation);
     let reading = |cx: &mut VisualTestContext| cx.read(|cx| conversation.read(cx).agent_context());
     assert_eq!(reading(cx), None, "the thread itself reads the lead's run");
     conversation.update(cx, |conversation, cx| {
@@ -194,6 +198,8 @@ fn a_subagent_opens_into_its_own_view(cx: &mut TestAppContext) {
             text: "build the HUD".into(),
             images: Vec::new(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     );
     let agent = ItemId::new();
@@ -202,6 +208,8 @@ fn a_subagent_opens_into_its_own_view(cx: &mut TestAppContext) {
         &agent,
         Status::Running,
         ItemKind::Agent {
+            engine: None,
+            thread: None,
             name: Some("general-purpose".into()),
             description: "Match UI: HUD and in-match screens".into(),
             prompt: None,
@@ -230,6 +238,8 @@ fn a_subagent_opens_into_its_own_view(cx: &mut TestAppContext) {
         &agent,
         Status::Done,
         ItemKind::Agent {
+            engine: None,
+            thread: None,
             name: Some("general-purpose".into()),
             description: "Match UI: HUD and in-match screens".into(),
             prompt: None,
@@ -259,7 +269,7 @@ fn a_subagent_opens_into_its_own_view(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
     open(&core, &host, &thread, cx);
-    wait(cx, "the thread", |cx| loaded(&conversation, cx).len() == 3);
+    landed(cx, &conversation);
     settle(cx, &conversation);
     // The work section is folded under its reply: open it.
     click(cx, "work-header");
@@ -330,5 +340,91 @@ fn copying_an_agents_view_keeps_its_task_work_and_report_in_order() {
         ),
         vec![10],
         "root preserves canonical Item position"
+    );
+}
+
+/// Every user message is one bubble of rendered markdown, with no header;
+/// one another thread's agent sent is tinted with its harness.
+#[gpui::test]
+#[expect(
+    clippy::suspicious_operation_groupings,
+    reason = "the tint's top must fall inside the row; its bottom may run past it"
+)]
+fn user_messages_are_one_bubble_of_markdown_tinted_when_an_agent_sent_them(
+    cx: &mut TestAppContext,
+) {
+    let forge = Forge::start();
+    let thread = forge.thread();
+    let sending = forge.thread();
+    let text = "## Findings\n\n- **one**\n- two\n\nShip it.";
+    let put = |id: &str, sender: Option<artisan_api::Sender>| {
+        forge
+            .runtime
+            .block_on(forge.store.upsert_item(NewItem {
+                id: ItemId::from(id.to_owned()),
+                thread_id: thread.clone(),
+                run_id: None,
+                parent_id: None,
+                native_id: None,
+                status: Status::Done,
+                kind: ItemKind::UserMessage {
+                    text: text.into(),
+                    images: Vec::new(),
+                    steer: false,
+                    from_agent: None,
+                    sender,
+                },
+            }))
+            .unwrap()
+    };
+    let own = put("own", None);
+    let sent = put(
+        "sent",
+        Some(artisan_api::Sender {
+            thread: sending,
+            engine: EngineId::Claude,
+            title: Some("Review".to_owned()),
+        }),
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
+    open(&core, &host, &thread, cx);
+    landed(cx, &conversation);
+    settle(cx, &conversation);
+    cx.run_until_parked();
+    draw(cx);
+
+    // The heading, each list item and the closing line are blocks.
+    for (block, position) in [(0, "Head"), (1, "Body"), (2, "Body"), (3, "Tail")] {
+        assert!(
+            painted(cx, format!("sent-by:claude:{block}:{position}")).is_some(),
+            "block {block} is the bubble's {position}, in the harness's tint"
+        );
+    }
+    for message in [&own, &sent] {
+        let blocks: Vec<_> = (0..4)
+            .map(|block| {
+                shown(cx, format!("user:{}:{block}", message.id)).unwrap_or_else(|| {
+                    panic!("block {block} of {} renders as markdown", message.id)
+                })
+            })
+            .collect();
+        for pair in blocks.windows(2) {
+            assert_eq!(
+                pair[1].top(),
+                pair[0].bottom(),
+                "the blocks join into one bubble: {pair:?}"
+            );
+        }
+    }
+    let tint = painted(cx, "sent-by:claude:0:Head".to_owned()).unwrap();
+    let mut within = |id: &ItemId| {
+        shown(cx, format!("user:{id}:0"))
+            .is_some_and(|row| row.top() <= tint.top() && tint.top() <= row.bottom())
+    };
+    assert!(
+        within(&sent.id) && !within(&own.id),
+        "only the agent's message is tinted"
     );
 }

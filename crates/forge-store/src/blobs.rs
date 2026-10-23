@@ -42,13 +42,13 @@ impl std::error::Error for BlobRejected {}
 
 const WEBP_QUALITY: f32 = 85.0;
 
-pub(crate) fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
+pub fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
     hash.is_valid()
         .then(|| dir.join(&hash.as_str()[..2]).join(hash.as_str()))
 }
 
 /// Canonical encoded image admission, also used to validate historical pending inputs.
-pub(crate) fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathBuf>, u64)> {
+pub fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathBuf>, u64)> {
     if hashes.len() > 128 {
         return Err(
             crate::SendRejected::Payload("message exceeds 128 image references".into()).into(),
@@ -83,23 +83,23 @@ pub(crate) fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathB
     Ok((paths, bytes))
 }
 
-pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
+pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
+    use image::ImageDecoder as _;
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());
     }
     if !is_webp(bytes) {
         return Err(BlobRejected::NotWebp.into());
     }
-    use image::ImageDecoder as _;
     let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))
-        .map_err(|_| BlobRejected::NotWebp)?;
+        .map_err(|_decode_error| BlobRejected::NotWebp)?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(64 * 1024 * 1024);
     decoder
         .set_limits(limits)
-        .map_err(|_| BlobRejected::NotWebp)?;
+        .map_err(|_decode_error| BlobRejected::NotWebp)?;
     let (width, height) = decoder.dimensions();
     if u64::from(width) * u64::from(height) > 16_777_216 {
         return Err(BlobRejected::NotWebp.into());
@@ -135,7 +135,7 @@ impl Store {
     /// Stores WebP bytes by content. Rejected input fails with a
     /// [`BlobRejected`] inside the error.
     pub async fn put_blob(&self, bytes: Vec<u8>) -> Result<BlobRef> {
-        let inner = self.inner.clone();
+        let inner = std::sync::Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
             let _guard = inner
                 .blob_lock
@@ -149,7 +149,7 @@ impl Store {
 
     /// Stores any common image format, converted to WebP first.
     pub async fn put_image(&self, bytes: Vec<u8>) -> Result<BlobRef> {
-        let inner = self.inner.clone();
+        let inner = std::sync::Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || {
             let bytes = to_webp(bytes)?;
             let _guard = inner
@@ -177,7 +177,7 @@ impl Store {
 
     /// Deletes blob files no item or draft references. Returns how many.
     pub async fn gc_blobs(&self) -> Result<usize> {
-        let inner = self.inner.clone();
+        let inner = std::sync::Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || inner.gc_blobs())
             .await
             .context("blob collection task")?
@@ -218,7 +218,7 @@ impl Inner {
 }
 
 /// Deletes blob files (and stale temp files) that nothing references.
-pub(crate) fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
+pub fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
     let cutoff = SystemTime::now() - GC_MIN_AGE;
     let mut removed = 0;
     for shard in fs::read_dir(dir).with_context(|| format!("list {}", dir.display()))? {
@@ -245,17 +245,17 @@ pub(crate) fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
     Ok(removed)
 }
 
-pub(crate) fn is_webp(bytes: &[u8]) -> bool {
+pub fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
 
 /// WebP stays as it is (re-encoding only adds loss); anything else is
 /// decoded and encoded lossy at quality 85 with sharp YUV.
-pub(crate) fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
+pub fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    use image::ImageDecoder as _;
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());
     }
-    use image::ImageDecoder as _;
     let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
@@ -329,6 +329,7 @@ mod tests {
                 config: EngineConfig::new(EngineId::Claude),
                 title: None,
                 parent_thread_id: None,
+                spawned_by: None,
             })
             .await
             .unwrap()

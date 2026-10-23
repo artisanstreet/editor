@@ -1,5 +1,7 @@
-//! Wheel ticks eased into a glide, as the previous Editor's transcript and
-//! sidebar did (`PickerScrollState`): ticks accumulate into one distance
+//! Wheel ticks eased into a glide.
+//!
+//! As the previous Editor's transcript and sidebar did
+//! (`PickerScrollState`), ticks accumulate into one distance
 //! that settles on display frames. Offsets use GPUI's range `[-max, 0]`.
 
 use std::time::{Duration, Instant};
@@ -23,7 +25,7 @@ impl WheelGlide {
     }
 
     /// Drops the glide: a trackpad delta or a jump moved the offset itself.
-    pub fn cancel(&mut self) {
+    pub const fn cancel(&mut self) {
         self.remaining = 0.0;
         self.last_frame = None;
     }

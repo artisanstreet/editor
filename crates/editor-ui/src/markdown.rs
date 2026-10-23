@@ -1,9 +1,13 @@
 //! Markdown syntax through maintained pulldown-cmark and syntect parsers.
+//!
 //! Owned blocks retain authored source order, ranges, task markers, and tables.
 //! Raw HTML remains inert; images retain alt text. The renderer owns theme and
 //! interaction, while adapters own provider normalization.
 
-#![allow(clippy::module_name_repetitions)]
+#![expect(
+    clippy::module_name_repetitions,
+    reason = "public names stay self-describing at use sites"
+)]
 
 /// Shared source budget for parsed/rendered Markdown previews.
 pub(crate) const MAX_MARKDOWN_SOURCE_BYTES: usize = 256 * 1024;
@@ -84,9 +88,12 @@ pub struct CodeToken {
 }
 
 /// Worker-prepared SVG bytes and dimensions, independent of GPUI state.
+/// `source` is painted in the dark theme's tokens, `light_source` in the
+/// light theme's; both share one layout.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DiagramSvg {
     pub source: String,
+    pub light_source: String,
     pub width_bits: u32,
     pub height_bits: u32,
 }
@@ -120,16 +127,20 @@ pub enum Span {
     Code(String),
     /// Raw inline HTML, carried verbatim as inert data.
     Html(String),
+    /// The special `/command` a user's message starts with, painted as the
+    /// composer paints it. Never parsed: [`MarkdownDocument::mark_command`]
+    /// sets it.
+    Command(String),
     /// Emphasized runs (`*x*`, `_x_`); structure is preserved, rendering
     /// stays plain until the native text primitive exposes italics.
-    Emphasis(Vec<Span>),
+    Emphasis(Vec<Self>),
     /// Strong runs (`**x**`); rendered bold through the native highlight.
-    Strong(Vec<Span>),
+    Strong(Vec<Self>),
     /// Link label plus the verbatim authored destination. The engine keeps
     /// every destination; the renderer decides safety and never executes one.
     Link {
         /// Visible label runs.
-        label: Vec<Span>,
+        label: Vec<Self>,
         /// Verbatim destination URL as authored.
         destination: String,
     },
@@ -141,7 +152,9 @@ impl Span {
     #[must_use]
     pub fn text_content(&self) -> String {
         match self {
-            Self::Text(text) | Self::Code(text) | Self::Html(text) => text.clone(),
+            Self::Text(text) | Self::Code(text) | Self::Html(text) | Self::Command(text) => {
+                text.clone()
+            }
             Self::Emphasis(inner) | Self::Strong(inner) => {
                 inner.iter().map(Self::text_content).collect()
             }
@@ -212,7 +225,7 @@ impl Block {
                 .flat_map(|item| {
                     item.blocks
                         .iter()
-                        .map(Block::text_content)
+                        .map(Self::text_content)
                         .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>()
@@ -251,6 +264,25 @@ pub struct MarkdownDocument {
 }
 
 impl MarkdownDocument {
+    /// Marks `command` where the document opens with it as plain text: the
+    /// first paragraph's leading run.
+    pub(crate) fn mark_command(&mut self, command: &str) {
+        let Some(Block::Paragraph { spans, .. }) = self.blocks.first_mut() else {
+            return;
+        };
+        let Some(Span::Text(text)) = spans.first_mut() else {
+            return;
+        };
+        let Some(rest) = text.strip_prefix(command) else {
+            return;
+        };
+        let rest = rest.to_owned();
+        spans[0] = Span::Command(command.to_owned());
+        if !rest.is_empty() {
+            spans.insert(1, Span::Text(rest));
+        }
+    }
+
     /// Heap allocations retained by the owned syntax tree (shared tokens
     /// are conservatively charged to each document referencing them).
     pub(crate) fn resident_bytes(&self) -> usize {
@@ -259,7 +291,10 @@ impl MarkdownDocument {
                 + spans
                     .iter()
                     .map(|span| match span {
-                        Span::Text(text) | Span::Code(text) | Span::Html(text) => text.capacity(),
+                        Span::Text(text)
+                        | Span::Code(text)
+                        | Span::Html(text)
+                        | Span::Command(text) => text.capacity(),
                         Span::Emphasis(inner) | Span::Strong(inner) => spans_bytes(inner),
                         Span::Link { label, destination } => {
                             spans_bytes(label) + destination.capacity()
@@ -276,11 +311,9 @@ impl MarkdownDocument {
                             spans_bytes(spans)
                         }
                         Block::Code(fence) => {
-                            fence
-                                .diagram
-                                .as_ref()
-                                .map_or(0, |svg| svg.source.capacity())
-                                + fence.source.capacity()
+                            fence.diagram.as_ref().map_or(0, |svg| {
+                                svg.source.capacity() + svg.light_source.capacity()
+                            }) + fence.source.capacity()
                                 + fence.language.as_ref().map_or(0, String::capacity)
                                 + fence
                                     .tokens
@@ -418,7 +451,11 @@ impl MarkdownEngine {
                         self.highlight_blocks(&mut item.blocks, memo)?;
                     }
                 }
-                _ => {}
+                Block::Heading { .. }
+                | Block::Paragraph { .. }
+                | Block::Code(_)
+                | Block::Html { .. }
+                | Block::Table(_) => {}
             }
         }
         Ok(())
@@ -464,7 +501,7 @@ impl MarkdownEngine {
         }
 
         let tokens: Arc<[CodeToken]> = merged.into();
-        memo.remember(language, &fence.source, tokens.clone());
+        memo.remember(language, &fence.source, Arc::clone(&tokens));
         fence.tokens = Some(tokens);
         Ok(())
     }
@@ -507,7 +544,10 @@ impl MarkdownEngine {
 
     /// Classifies one segment when it is contiguous, in bounds, and contains
     /// visible content; whitespace between tokens stays unclassified.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the classifier threads its scratch state through one call"
+    )]
     fn emit_segment(
         &self,
         scope_stack: &ScopeStack,
@@ -578,7 +618,7 @@ struct LineOffsets<'a> {
 }
 
 impl<'a> LineOffsets<'a> {
-    fn new(source: &'a str) -> Self {
+    const fn new(source: &'a str) -> Self {
         Self { source, cursor: 0 }
     }
 }
@@ -617,6 +657,10 @@ fn merge_token(tokens: &mut Vec<CodeToken>, token: CodeToken) {
 
 /// Closes out the segment under construction, merging it forward when it
 /// continues the same semantic run, otherwise emitting the finished one.
+#[expect(
+    clippy::suspicious_operation_groupings,
+    reason = "a run continues when the kind matches and the ranges touch"
+)]
 fn extend(
     pending: &mut Option<(Range<usize>, CodeTokenKind)>,
     range: Range<usize>,
@@ -643,7 +687,7 @@ fn extend(
 }
 
 /// Maps a `pulldown-cmark` heading level onto the owned depth value.
-fn heading_depth(level: HeadingLevel) -> u8 {
+const fn heading_depth(level: HeadingLevel) -> u8 {
     match level {
         HeadingLevel::H1 => 1,
         HeadingLevel::H2 => 2,
@@ -782,7 +826,7 @@ enum FormatFrame {
 }
 
 impl FormatFrame {
-    fn spans_mut(&mut self) -> &mut Vec<Span> {
+    const fn spans_mut(&mut self) -> &mut Vec<Span> {
         match self {
             Self::Emphasis(spans) | Self::Strong(spans) | Self::ImageAlt(spans) => spans,
             Self::Link { label, .. } => label,
@@ -816,6 +860,10 @@ impl DocumentBuilder {
 
     /// Indexed leaves replay the exact original parser events against only
     /// their admitted source range. No fragment is parsed as a new document.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "only nesting depth is counted here; other pulldown-cmark events pass"
+    )]
     fn build_events<'a>(
         mut self,
         source: &str,
@@ -991,6 +1039,10 @@ impl DocumentBuilder {
         }
     }
 
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "pulldown-cmark ends that close nothing here are skipped, future ones too"
+    )]
     fn end_tag(&mut self, tag_end: TagEnd, range: Range<usize>, source: &str) {
         match tag_end {
             TagEnd::Paragraph => {

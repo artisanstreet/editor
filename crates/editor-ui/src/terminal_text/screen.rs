@@ -275,7 +275,7 @@ impl Grid {
     }
 
     /// `ESC 7` / `CSI s`.
-    fn save_cursor(&mut self) {
+    const fn save_cursor(&mut self) {
         self.saved = Some((self.row, self.col));
     }
 
@@ -610,19 +610,19 @@ impl TerminalScreen {
 
     /// Whether a clear screen has dropped earlier content.
     #[must_use]
-    pub fn cleared_earlier(&self) -> bool {
+    pub const fn cleared_earlier(&self) -> bool {
         self.grid.cleared_lines > 0
     }
 
     /// Content lines dropped by clear-screen sequences so far.
     #[must_use]
-    pub fn cleared_line_count(&self) -> u64 {
+    pub const fn cleared_line_count(&self) -> u64 {
         self.grid.cleared_lines
     }
 
     /// Lines dropped from the front by the `max_lines` bound so far.
     #[must_use]
-    pub fn truncated_line_count(&self) -> u64 {
+    pub const fn truncated_line_count(&self) -> u64 {
         self.grid.truncated_lines
     }
 }

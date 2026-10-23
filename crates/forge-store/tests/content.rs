@@ -5,6 +5,7 @@ use artisan_api::{
 use forge_store::{NewItem, Store};
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -23,6 +24,7 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
             config: EngineConfig::new(EngineId::Codex),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await
         .unwrap();
@@ -129,6 +131,7 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
 }
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn version_twelve_migration_preserves_revisions_native_identity_and_complete_output() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -147,6 +150,7 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
             config: EngineConfig::new(EngineId::Codex),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await
         .unwrap();
@@ -163,6 +167,7 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
                     command: "printf source".into(),
                     cwd: None,
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: Some(artisan_api::Output::from_text("placeholder")),
@@ -184,6 +189,8 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
     .unwrap();
     conn.execute_batch(
         "DROP TRIGGER item_content_owner_delete;
+         DROP INDEX items_transcript_rows;
+         ALTER TABLE items DROP COLUMN work;
          DROP INDEX items_pending_input;
          DROP INDEX items_pending_inputs;
          DROP INDEX items_thread_kind_position;
@@ -199,6 +206,7 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
          DROP TABLE item_content;
          DROP TABLE content_chunks;
          DROP TABLE content;
+         DROP TABLE continues;
          PRAGMA user_version=12;",
     )
     .unwrap();
@@ -260,6 +268,7 @@ async fn goal_summary_reads_a_bounded_prefix_and_preserves_full_source_identity(
             config: EngineConfig::new(EngineId::Codex),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await
         .unwrap();
@@ -306,4 +315,120 @@ async fn goal_summary_reads_a_bounded_prefix_and_preserves_full_source_identity(
         store.resolve_text(&goal.objective).await.is_err(),
         "fixture must prevent accidental full-source reads"
     );
+}
+
+#[tokio::test]
+async fn a_large_compaction_summary_is_stored_and_resolves_after_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/checkpoint".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Claude),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let summary = format!(
+        "## Objective\n- Keep building the parser\n{}",
+        "A consequential detail.\n".repeat(3000)
+    );
+    let item = store
+        .upsert_item(NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::Compaction {
+                summary: Some(summary.clone().into()),
+                tokens_before: None,
+                tokens_after: None,
+                switch: None,
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        &item.kind,
+        ItemKind::Compaction {
+            summary: Some(TextContent::Stored(_)),
+            ..
+        }
+    ));
+    assert!(serde_json::to_vec(&item).unwrap().len() < 2048);
+    let reopened = Store::open(dir.path()).unwrap();
+    let item = reopened.item(&item.id).await.unwrap().unwrap();
+    let ItemKind::Compaction {
+        summary: Some(stored),
+        ..
+    } = item.kind
+    else {
+        panic!("checkpoint retained");
+    };
+    assert_eq!(reopened.resolve_text(&stored).await.unwrap(), summary);
+}
+
+#[tokio::test]
+async fn a_compaction_summary_between_4_kib_and_the_inline_limit_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/checkpoint".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Claude),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let summary = "A consequential detail.\n".repeat(400);
+    assert!(summary.len() > 4096 && summary.len() <= artisan_api::INLINE_TEXT_BYTES);
+    let item = store
+        .upsert_item(NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::Compaction {
+                summary: Some(summary.clone().into()),
+                tokens_before: None,
+                tokens_after: None,
+                switch: None,
+            },
+        })
+        .await
+        .unwrap();
+    let ItemKind::Compaction {
+        summary: Some(kept),
+        ..
+    } = item.kind
+    else {
+        panic!("checkpoint retained");
+    };
+    assert_eq!(store.resolve_text(&kept).await.unwrap(), summary);
 }

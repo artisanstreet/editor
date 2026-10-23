@@ -4,32 +4,38 @@
 
 use crate::Settings;
 use crate::page;
-use artisan_api::{McpMutation, McpServer};
-use editor_core::{HostData, HostId, Screen, SettingsPage};
+use crate::ui::{PageBlock, card, error_text, header, row, section_shell};
+use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpMutation, McpServer};
+use editor_core::{HostData, HostId, McpSignIn, McpSignInPhase, Screen, SettingsPage};
 use editor_ui::button::ButtonVariant;
-use editor_ui::page::{PageBlock, card, error_text, header, row, section_shell};
 use editor_ui::text_editor::TextEditor;
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
+    AnyElement, AppContext as _, ClipboardItem, Context, Div, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, Styled as _, div, px,
 };
 
-pub(crate) const MCP_SERVERS_KEY: &str = "mcp_servers";
+pub const MCP_SERVERS_KEY: &str = "mcp_servers";
 /// The Skills section's way to the Marketplace.
-pub(crate) const MANAGE_SKILLS_SELECTOR: &str = "settings-manage-skills";
+pub const MANAGE_SKILLS_SELECTOR: &str = "settings-manage-skills";
 
-pub(crate) struct ExtensionsForm {
+pub struct ExtensionsForm {
     /// The host the form was opened for.
     host: Option<HostId>,
     /// `Some(None)` adds a server, `Some(Some(name))` edits that one.
+    #[expect(
+        clippy::option_option,
+        reason = "closed, adding and editing map directly onto the nested options"
+    )]
     mcp_editing: Option<Option<McpServer>>,
+
     generation: u64,
     mcp_name: Entity<TextEditor>,
     mcp_command: Entity<TextEditor>,
     mcp_args: Entity<TextEditor>,
     mcp_url: Entity<TextEditor>,
     mcp_env: Entity<TextEditor>,
+    mcp_headers: Entity<TextEditor>,
     mcp_saving: bool,
     mcp_error: Option<String>,
 }
@@ -48,13 +54,14 @@ impl ExtensionsForm {
             mcp_args: line("[\"-y\", \"@modelcontextprotocol/server-github\"]", cx),
             mcp_url: line("https://example.com/mcp", cx),
             mcp_env: line("{\"GITHUB_TOKEN\": \"…\"}", cx),
+            mcp_headers: line("{\"Authorization\": \"Bearer …\"}", cx),
             mcp_saving: false,
             mcp_error: None,
         }
     }
 
     /// Closes the server form when the host changes.
-    pub(crate) fn sync(&mut self, host: Option<&Entity<HostData>>, cx: &mut Context<Settings>) {
+    pub(crate) fn sync(&mut self, host: Option<&Entity<HostData>>, cx: &Context<Settings>) {
         let id = host.map(|host| host.read(cx).id.clone());
         if self.host == id {
             return;
@@ -78,8 +85,14 @@ fn mcp_servers(host: &HostData) -> Result<Vec<McpServer>, String> {
 impl Settings {
     fn open_mcp_form(&mut self, previous: Option<McpServer>, cx: &mut Context<Self>) {
         let server = previous.clone().unwrap_or_default();
-        let args = serde_json::to_string(&server.args).expect("string array serializes");
-        let env = serde_json::to_string(&server.env).expect("string map serializes");
+        // A string array and a string map always serialize.
+        let args = serde_json::to_string(&server.args).unwrap_or_default();
+        let env = serde_json::to_string(&server.env).unwrap_or_default();
+        let headers = if server.headers.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(&server.headers).unwrap_or_default()
+        };
         let form = &mut self.extensions;
         form.generation += 1;
         form.mcp_saving = false;
@@ -89,6 +102,7 @@ impl Settings {
             (&form.mcp_args, args.as_str()),
             (&form.mcp_url, server.url.as_deref().unwrap_or_default()),
             (&form.mcp_env, env.as_str()),
+            (&form.mcp_headers, headers.as_str()),
         ] {
             editor.update(cx, |editor, cx| editor.set_text(text, cx));
         }
@@ -110,14 +124,17 @@ impl Settings {
         let form = &self.extensions;
         let read = |editor: &Entity<TextEditor>| editor.read(cx).text().to_owned();
         match parse_server(
-            read(&form.mcp_name),
+            &read(&form.mcp_name),
             read(&form.mcp_command),
             &read(&form.mcp_args),
-            read(&form.mcp_url),
+            &read(&form.mcp_url),
             &read(&form.mcp_env),
+            &read(&form.mcp_headers),
         ) {
-            Ok(server) => {
-                self.mutate_mcp(&host, McpMutation::Upsert { previous, server }, true, cx)
+            Ok(mut server) => {
+                // The form has no switch for the legacy SSE transport; keep it.
+                server.sse = previous.as_ref().is_some_and(|previous| previous.sse);
+                self.mutate_mcp(&host, McpMutation::Upsert { previous, server }, true, cx);
             }
             Err(error) => {
                 self.extensions.mcp_error = Some(error);
@@ -159,7 +176,7 @@ impl Settings {
             if let Some(gate) = completion_gate {
                 gate.wait().await;
             }
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 let form = &mut this.extensions;
                 if form.host.as_ref() != Some(&host_id) || form.generation != generation {
                     return;
@@ -169,22 +186,75 @@ impl Settings {
                     Ok(_) if close_form => form.mcp_editing = None,
                     Ok(_) => {}
                     Err(error) => {
-                        form.mcp_error = Some(format!("Couldn't save MCP servers: {error:#}"))
+                        form.mcp_error = Some(format!("Couldn't save MCP servers: {error:#}"));
                     }
                 }
                 cx.notify();
-            });
+            })
+            .ok();
+        })
+        .detach();
+    }
+}
+
+impl Settings {
+    /// Starts signing in `server` and opens its page in the browser; the
+    /// card follows the sign-in through Core.
+    fn sign_in_mcp(&mut self, server: &str, cx: &mut Context<Self>) {
+        let Some(host) = self.selected_host(cx) else {
+            return;
+        };
+        self.extensions.mcp_error = None;
+        // A failure lands on the card; nothing waits for the answer here.
+        self.core
+            .update(cx, |core, cx| core.start_mcp_sign_in(&host, server, true, cx))
+            .detach();
+    }
+
+    fn cancel_mcp_sign_in(&self, server: &str, cx: &mut Context<Self>) {
+        let Some(host) = self.selected_host(cx) else {
+            return;
+        };
+        self.core
+            .update(cx, |core, cx| core.cancel_mcp_sign_in(&host, server, cx));
+    }
+
+    fn sign_out_mcp(&self, server: String, cx: &Context<Self>) {
+        let Some(host) = self.selected_host(cx) else {
+            return;
+        };
+        let (client, host_id) = {
+            let data = host.read(cx);
+            (data.client.clone(), data.id.clone())
+        };
+        cx.spawn(async move |this, cx| {
+            let result = client
+                .mcp_sign_out(&artisan_api::McpSignOut {
+                    server: server.clone(),
+                })
+                .await;
+            if let Err(error) = result {
+                this.update(cx, |this, cx| {
+                    if this.extensions.host.as_ref() == Some(&host_id) {
+                        this.extensions.mcp_error =
+                            Some(format!("Couldn't sign out of {server}: {error:#}"));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            }
         })
         .detach();
     }
 }
 
 fn parse_server(
-    name: String,
+    name: &str,
     command: String,
     args: &str,
-    url: String,
+    url: &str,
     env: &str,
+    headers: &str,
 ) -> Result<McpServer, String> {
     let name = name.trim().to_owned();
     let url = url.trim().to_owned();
@@ -201,7 +271,7 @@ fn parse_server(
             .map_err(|error| format!("Arguments must be a JSON array of strings: {error}"))?
     };
     let env: std::collections::BTreeMap<String, String> = if env.trim().is_empty() {
-        Default::default()
+        std::collections::BTreeMap::default()
     } else {
         serde_json::from_str(env)
             .map_err(|error| format!("Environment must be a JSON object of strings: {error}"))?
@@ -209,20 +279,31 @@ fn parse_server(
     if !url.is_empty() && (!args.is_empty() || !env.is_empty()) {
         return Err("HTTP servers do not take process arguments or environment variables.".into());
     }
+    let headers: std::collections::BTreeMap<String, String> = if headers.trim().is_empty() {
+        std::collections::BTreeMap::default()
+    } else {
+        serde_json::from_str(headers)
+            .map_err(|error| format!("Headers must be a JSON object of strings: {error}"))?
+    };
+    if url.is_empty() && !headers.is_empty() {
+        return Err("Only HTTP servers take headers.".into());
+    }
     Ok(McpServer {
         name,
         command,
         args,
         env,
         url: (!url.is_empty()).then_some(url),
+        headers,
+        ..McpServer::default()
     })
 }
 
-pub(crate) fn render(
+pub fn render(
     settings: &Settings,
     host: &Entity<HostData>,
     theme: &ArtisanTheme,
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> Div {
     div()
         .flex()
@@ -238,11 +319,7 @@ pub(crate) fn render(
 
 /// The skills live in the Marketplace, which shows where each stands in
 /// each engine and turns them on and off.
-fn skills_section(
-    settings: &Settings,
-    theme: &ArtisanTheme,
-    cx: &mut Context<Settings>,
-) -> PageBlock {
+fn skills_section(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> PageBlock {
     let manage = div()
         .debug_selector(|| MANAGE_SKILLS_SELECTOR.to_owned())
         .child(settings.button(
@@ -267,32 +344,51 @@ fn skills_section(
 .debug_selector("settings-section-skills")
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "each server's row with its sign-in controls, then the form"
+)]
 fn mcp_section(
     settings: &Settings,
     host: &Entity<HostData>,
     theme: &ArtisanTheme,
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> PageBlock {
     let form = &settings.extensions;
     let servers = mcp_servers(host.read(cx));
+    let host_id = host.read(cx).id.clone();
+    let auth: std::collections::BTreeMap<String, McpAuthStatus> = host
+        .read(cx)
+        .setting(MCP_AUTH_KEY)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let core = settings.core().read(cx);
     let mut rows: Vec<AnyElement> = Vec::new();
     if let Err(error) = &servers {
         rows.push(error_text(theme, error.clone()).into_any_element());
     }
     for server in servers.unwrap_or_default() {
-        let summary = match &server.url {
+        let target = match &server.url {
             Some(url) => url.clone(),
             None => format!(
                 "{} {}",
                 server.command,
-                serde_json::to_string(&server.args).expect("string array serializes")
+                serde_json::to_string(&server.args).unwrap_or_default()
             ),
+        };
+        let status = auth.get(&server.name).copied();
+        let sign_in = core.mcp_sign_in(&host_id, &server.name);
+        let summary = match auth_note(status, sign_in) {
+            Some(note) => format!("{target} · {note}"),
+            None => target,
         };
         let (edit, remove) = (server.clone(), server.clone());
         let controls = div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .gap(px(6.0))
+            .children(sign_in_controls(settings, &server.name, status, sign_in, cx))
             .child(settings.button(
                 SharedString::from(format!("mcp-edit-{}", server.name)),
                 "Edit",
@@ -361,7 +457,95 @@ fn mcp_section(
     .debug_selector("settings-section-mcp")
 }
 
-fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> AnyElement {
+/// The sign-in state a card's summary ends with.
+fn auth_note(status: Option<McpAuthStatus>, sign_in: Option<&McpSignIn>) -> Option<String> {
+    if let Some(sign_in) = sign_in {
+        return Some(match &sign_in.phase {
+            McpSignInPhase::Starting => "Opening the sign-in…".to_owned(),
+            McpSignInPhase::Waiting => "Waiting for the browser…".to_owned(),
+            McpSignInPhase::Finishing => "Signing in…".to_owned(),
+            McpSignInPhase::Failed(reason) => format!("Couldn't sign in: {reason}"),
+        });
+    }
+    match status? {
+        McpAuthStatus::NeedsSignIn => Some("Needs sign-in".to_owned()),
+        McpAuthStatus::SignedIn => Some("Signed in".to_owned()),
+        McpAuthStatus::NeedsToken => {
+            Some("Refused without a token: add an Authorization header (Edit)".to_owned())
+        }
+    }
+}
+
+/// Sign in, the waiting sign-in's page, link and Cancel, or Sign out.
+fn sign_in_controls(
+    settings: &Settings,
+    name: &str,
+    status: Option<McpAuthStatus>,
+    sign_in: Option<&McpSignIn>,
+    cx: &Context<Settings>,
+) -> Vec<AnyElement> {
+    let id = |what: &str| SharedString::from(format!("mcp-{what}-{name}"));
+    let busy = |label: &'static str| {
+        settings.button(id("busy"), label, ButtonVariant::Outline, true, |_, _, _| {})
+    };
+    let start = |label: &'static str| {
+        let server = name.to_owned();
+        settings.button(
+            id("sign-in"),
+            label,
+            ButtonVariant::Default,
+            false,
+            cx.listener(move |this, _, _, cx| this.sign_in_mcp(&server, cx)),
+        )
+    };
+    match sign_in.map(|sign_in| (&sign_in.phase, sign_in.authorize_url.clone())) {
+        Some((McpSignInPhase::Waiting, Some(url))) => {
+            let (open, copy, server) = (url.clone(), url, name.to_owned());
+            vec![
+                settings.button(
+                    id("open"),
+                    "Open sign-in page",
+                    ButtonVariant::Outline,
+                    false,
+                    move |_, _, cx| cx.open_url(&open),
+                ),
+                settings.button(
+                    id("copy"),
+                    "Copy link",
+                    ButtonVariant::Ghost,
+                    false,
+                    move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())),
+                ),
+                settings.button(
+                    id("cancel-sign-in"),
+                    "Cancel",
+                    ButtonVariant::Ghost,
+                    false,
+                    cx.listener(move |this, _, _, cx| this.cancel_mcp_sign_in(&server, cx)),
+                ),
+            ]
+        }
+        Some((McpSignInPhase::Starting | McpSignInPhase::Waiting, _)) => vec![busy("Opening…")],
+        Some((McpSignInPhase::Finishing, _)) => vec![busy("Signing in…")],
+        Some((McpSignInPhase::Failed(_), _)) => vec![start("Try again")],
+        None => match status {
+            Some(McpAuthStatus::NeedsSignIn) => vec![start("Sign in")],
+            Some(McpAuthStatus::SignedIn) => {
+                let server = name.to_owned();
+                vec![settings.button(
+                    id("sign-out"),
+                    "Sign out",
+                    ButtonVariant::Ghost,
+                    false,
+                    cx.listener(move |this, _, _, cx| this.sign_out_mcp(server.clone(), cx)),
+                )]
+            }
+            Some(McpAuthStatus::NeedsToken) | None => Vec::new(),
+        },
+    }
+}
+
+fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> AnyElement {
     let form = &settings.extensions;
     let field = |label: &'static str, editor: &Entity<TextEditor>| {
         div()
@@ -371,7 +555,7 @@ fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings
             .child(
                 div()
                     .text_sm()
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .child(label),
             )
             .child(editor.clone())
@@ -413,6 +597,10 @@ fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings
         .child(field("Arguments (JSON array)", &form.mcp_args))
         .child(field("Or URL (HTTP server)", &form.mcp_url))
         .child(field("Environment (JSON object)", &form.mcp_env))
+        .child(field(
+            "Headers, HTTP only (JSON object; leave out Authorization to sign in instead)",
+            &form.mcp_headers,
+        ))
         .child(
             div()
                 .flex()
@@ -430,16 +618,33 @@ mod tests {
     #[test]
     fn structured_fields_preserve_literal_arguments() {
         let server = parse_server(
-            "test".into(),
+            "test",
             r"C:\Program Files\server.exe".into(),
             r#"["a b","\"quoted\"","", "line\nnext"]"#,
-            String::new(),
+            "",
             r#"{"TOKEN":"a=b \"quoted\""}"#,
+            "",
         )
         .unwrap();
         assert_eq!(server.command, r"C:\Program Files\server.exe");
         assert_eq!(server.args, ["a b", "\"quoted\"", "", "line\nnext"]);
         assert_eq!(server.env["TOKEN"], "a=b \"quoted\"");
+    }
+
+    #[test]
+    fn headers_belong_to_http_servers() {
+        let server = parse_server(
+            "docs",
+            String::new(),
+            "",
+            "https://example.com/mcp",
+            "",
+            r#"{"Authorization":"Bearer x"}"#,
+        )
+        .unwrap();
+        assert_eq!(server.headers["Authorization"], "Bearer x");
+        assert!(parse_server("cli", "npx".into(), "", "", "", r#"{"X":"y"}"#).is_err());
+        assert!(parse_server("docs", String::new(), "", "https://e.com", "", "[1]").is_err());
     }
 }
 

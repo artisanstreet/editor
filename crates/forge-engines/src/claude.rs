@@ -16,12 +16,13 @@
 //! runs one more turn when it reports back.
 
 mod decoder;
-mod tools;
+mod side;
+pub mod tools;
 
 pub use decoder::ClaudeDecoder;
 
 use crate::process::{self, EngineProcess};
-use crate::{EngineEvent, Harness, Input, Outcome, RunIo, Turn, UserInput};
+use crate::{EngineEvent, Harness, Input, Outcome, RunIo, SideReply, Turn, UserInput};
 use anyhow::{Context, Result};
 use artisan_api::{EngineConfig, Permissions};
 use base64::Engine as _;
@@ -30,6 +31,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 /// How long an interrupted turn may take to wind down before it is killed.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
@@ -40,20 +42,103 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 const SETTLED_INPUT_GRACE: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const SETTLED_INPUT_GRACE: Duration = Duration::from_millis(300);
+/// How long a side query may take before its fork is killed.
+const SIDE_QUERY_LIMIT: Duration = Duration::from_secs(120);
 
 pub struct ClaudeHarness;
 
 impl Harness for ClaudeHarness {
+    fn compact(
+        &self,
+        turn: Turn,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'static, Result<SideReply>> {
+        // Route by the source session when present: switching transports must
+        // summarize the session being left, not try to resume it elsewhere.
+        let native = turn.session_id.as_deref().map_or_else(
+            || {
+                turn.config
+                    .options
+                    .get("transport")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(CLAUDE_AI_TRANSPORT)
+            },
+            |id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX),
+        );
+        if native {
+            Box::pin(crate::claudeai::compact(turn, cancel))
+        } else {
+            Box::pin(side::compact(turn, cancel))
+        }
+    }
+
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
         Box::pin(run(turn, io))
     }
+
+    fn side_query(
+        &self,
+        turn: Turn,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'static, Result<SideReply>> {
+        // A session made on claude.ai is asked there: Claude Code cannot
+        // resume it.
+        if turn
+            .session_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX))
+        {
+            Box::pin(crate::claudeai::side_query(turn, cancel))
+        } else {
+            Box::pin(side::side_query(turn, cancel))
+        }
+    }
 }
 
-async fn run(mut turn: Turn, mut io: RunIo) -> Outcome {
+/// The run's environment: what the thread's settings ask of the CLI.
+fn apply_env(turn: &mut Turn) {
     if let Some((key, value)) = context_window_env(&turn.config) {
         turn.launch.env.retain(|(existing, _)| existing != key);
         turn.launch.env.push((key.to_owned(), value));
     }
+}
+
+/// Runs the turn, on whichever transport Forge chose for it.
+///
+/// The claude.ai transport (Native Claude Mode) is the same engine
+/// pointed at Anthropic's chat backend, which is the only one that returns
+/// the provider's one-line recap of the model's thinking. Forge picks it
+/// when the mode is on and a session is kept; when the mode is on but
+/// nothing is signed in, the turn runs on Claude Code and says so.
+async fn run(turn: Turn, io: RunIo) -> Outcome {
+    match turn.config.options.get("transport").and_then(Value::as_str) {
+        Some(CLAUDE_AI_TRANSPORT) => return Box::pin(crate::claudeai::run(turn, io)).await,
+        Some(CLAUDE_AI_UNAVAILABLE) => {
+            io.emit(EngineEvent::Item {
+                key: "claude-ai-unavailable".to_owned(),
+                parent: None,
+                status: artisan_api::Status::Done,
+                kind: artisan_api::ItemKind::Notice {
+                    kind: artisan_api::NoticeKind::Info,
+                    text: "Native Claude Mode is on, but claude.ai isn't signed in, so this turn runs on Claude Code. Sign in under Settings → Claude Code → Account.".to_owned().into(),
+                },
+            })
+            .await;
+        }
+        _ => {}
+    }
+    run_claude_code(turn, io).await
+}
+
+/// The `transport` option that runs a turn on claude.ai.
+pub const CLAUDE_AI_TRANSPORT: &str = "claude.ai";
+/// The `transport` option for a turn that asked for claude.ai without a
+/// session: it runs on Claude Code and says why.
+pub const CLAUDE_AI_UNAVAILABLE: &str = "claude.ai-unavailable";
+
+/// Runs the turn on Claude Code.
+async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
+    apply_env(&mut turn);
     let mut decoder = ClaudeDecoder::default();
     let mut session = turn.session_id.clone();
     let fresh = session.is_none();
@@ -93,15 +178,17 @@ async fn run(mut turn: Turn, mut io: RunIo) -> Outcome {
             &mut inbox_open,
         )
         .await;
-        if let Err(error) = finished {
-            tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), "Claude protocol exchange failed: {error:#}");
-            engine.kill().await;
-            for event in decoder.finish() {
-                io.emit(event).await;
+        let finished = match finished {
+            Ok(finished) => finished,
+            Err(error) => {
+                tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), "Claude protocol exchange failed: {error:#}");
+                engine.kill().await;
+                for event in decoder.finish() {
+                    io.emit(event).await;
+                }
+                return Outcome::failed(format!("Claude protocol exchange failed: {error:#}"));
             }
-            return Outcome::failed(format!("Claude protocol exchange failed: {error:#}"));
-        }
-        let finished = finished.expect("error handled above");
+        };
         let code = engine.wait().await;
         for event in decoder.finish() {
             io.emit(event).await;
@@ -113,7 +200,7 @@ async fn run(mut turn: Turn, mut io: RunIo) -> Outcome {
             return Outcome::cancelled();
         }
         if let Some(result) = decoder.take_outcome() {
-            outcome = Some(result)
+            outcome = Some(result);
         } else {
             let stderr = engine.stderr_tail();
             tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), ?code, "Claude exited without a result: {stderr}");
@@ -154,6 +241,10 @@ struct Finished {
 }
 
 /// Pumps one process until its stdout closes.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one select loop; each arm is one event source"
+)]
 async fn drive(
     thread: &artisan_api::ThreadId,
     engine: &mut EngineProcess,
@@ -170,6 +261,9 @@ async fn drive(
     let settle = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
     tokio::pin!(settle);
     let mut settling = false;
+    // A `result` left input open for a title request or steer still on its
+    // way; once it is answered with no turn following, input closes.
+    let mut held_for_input = false;
     loop {
         tokio::select! {
             line = engine.next_line() => {
@@ -196,6 +290,18 @@ async fn drive(
                 // background agent is still on its way.
                 if decoder.take_result_seen() && engine.stdin_open() {
                     waiting_on_background |= after_result(engine, decoder, cancelling);
+                    held_for_input = engine.stdin_open() && !decoder.background_running();
+                } else if held_for_input
+                    && engine.stdin_open()
+                    && !decoder.in_turn()
+                    && !decoder.awaiting_input()
+                    && !decoder.background_running()
+                {
+                    // The title answer (or a steer's echo) came after the
+                    // `result`: nothing else would close input, and the CLI
+                    // would wait on it forever.
+                    held_for_input = false;
+                    engine.close_stdin("what held input open after the result was answered");
                 }
                 // The last agent ended: its report starts a follow-up turn
                 // whose `result` closes input; failing that, the grace does.
@@ -244,6 +350,22 @@ async fn drive(
                         if let Err(error) = engine.send(&reply).await {
                             tracing::warn!(%thread, session = ?decoder.session(), key, "answering Claude: {error:#}");
                         }
+                    }
+                }
+                // Forge clears a Claude goal with `/goal clear` as a message.
+                Some(Input::ClearGoal) => {}
+                Some(Input::SetPermissions(permissions)) => {
+                    let mode = match permissions {
+                        Permissions::Auto => "auto",
+                        Permissions::Full => "bypassPermissions",
+                    };
+                    let request = json!({
+                        "type": "control_request",
+                        "request_id": format!("artisan-mode-{mode}"),
+                        "request": { "subtype": "set_permission_mode", "mode": mode },
+                    });
+                    if let Err(error) = engine.send(&request).await {
+                        tracing::warn!(%thread, session = ?decoder.session(), mode, "switching Claude's permission mode: {error:#}");
                     }
                 }
                 None => *inbox_open = false,
@@ -321,13 +443,8 @@ async fn request_title(engine: &mut EngineProcess, decoder: &mut ClaudeDecoder, 
 /// A stream-json user message: the text, then each image as a base64 block.
 async fn user_line(input: &UserInput) -> Result<Value> {
     let mut content = Vec::new();
-    let native_text = match crate::normalize_command(artisan_api::EngineId::Claude, &input.text)? {
-        Some(crate::PromptCommand::Prompt { text }) => text,
-        Some(crate::PromptCommand::Configure { .. }) => {
-            anyhow::bail!("configuration commands must be accepted by Forge before model delivery")
-        }
-        None => input.text.clone(),
-    };
+    let native_text = crate::normalize_command(artisan_api::EngineId::Claude, &input.text)?
+        .unwrap_or_else(|| input.text.clone());
     if !native_text.is_empty() {
         content.push(json!({ "type": "text", "text": native_text }));
     }
@@ -372,7 +489,15 @@ fn launch_args(config: &EngineConfig, session: Option<&str>) -> Vec<String> {
     .map(str::to_owned)
     .into();
     match config.permissions {
-        Permissions::Auto => args.extend(["--permission-mode".to_owned(), "auto".to_owned()]),
+        // Allowed, not enabled: the user may switch to Full mid-run.
+        Permissions::Auto => args.extend(
+            [
+                "--permission-mode",
+                "auto",
+                "--allow-dangerously-skip-permissions",
+            ]
+            .map(str::to_owned),
+        ),
         Permissions::Full => args.push("--dangerously-skip-permissions".to_owned()),
     }
     if let Some(effort) = config.effort.as_deref().filter(|effort| !effort.is_empty()) {
@@ -387,13 +512,6 @@ fn launch_args(config: &EngineConfig, session: Option<&str>) -> Vec<String> {
     if config.speed.as_deref() == Some(crate::catalog::CLAUDE_FAST) {
         settings.insert("fastMode".to_owned(), json!(true));
     }
-    if let Some(enabled) = config
-        .session_options
-        .get("ultracode")
-        .and_then(Value::as_bool)
-    {
-        settings.insert("ultracode".to_owned(), json!(enabled));
-    }
     if !settings.is_empty() {
         args.extend(["--settings".to_owned(), Value::Object(settings).to_string()]);
     }
@@ -405,22 +523,20 @@ fn launch_args(config: &EngineConfig, session: Option<&str>) -> Vec<String> {
 
 /// The newest `ai-title` in the session's transcript, if any. Best effort.
 fn transcript_title(turn: &Turn, session: &str) -> Option<String> {
-    let config_dir = turn
-        .launch
+    let path = config_dir(turn)
+        .join("projects")
+        .join(side::project_dir(turn))
+        .join(format!("{session}.jsonl"));
+    title_from_transcript(&path)
+}
+
+/// Where the CLI keeps its sessions for this launch.
+fn config_dir(turn: &Turn) -> std::path::PathBuf {
+    turn.launch
         .env
         .iter()
         .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
-        .map_or_else(|| turn.home.join(".claude"), |(_, value)| value.into());
-    let cwd = turn.cwd.to_string_lossy();
-    let directory: String = cwd
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let path = config_dir
-        .join("projects")
-        .join(directory)
-        .join(format!("{session}.jsonl"));
-    title_from_transcript(&path)
+        .map_or_else(|| turn.home.join(".claude"), |(_, value)| value.into())
 }
 
 fn title_from_transcript(path: &Path) -> Option<String> {
@@ -720,6 +836,85 @@ cat > /dev/null
         assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
     }
 
+    /// A side query answers from a fork: a tool the fork reaches for is
+    /// refused by its hook, even in a full-access thread, the thread's own
+    /// transcript is left alone and the fork's is deleted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_side_query_answers_from_a_fork_and_leaves_the_thread_alone() {
+        use crate::{Harness as _, Launch, Turn, UserInput};
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("claude");
+        std::fs::write(
+            &fake,
+            r#"#!/usr/bin/env bash
+case " $* " in *" --resume s1 "*) ;; *) exit 3;; esac
+case " $* " in *" --fork-session "*) ;; *) exit 3;; esac
+case " $* " in *" --dangerously-skip-permissions "*) ;; *) exit 4;; esac
+projects="$CLAUDE_CONFIG_DIR/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')"
+read -r init
+case "$init" in *'"PreToolUse"'*'"hookCallbackIds"'*) ;; *) exit 6;; esac
+read -r line
+echo '{"type":"system","subtype":"init","session_id":"f1","model":"m"}'
+echo '{}' > "$projects/f1.jsonl"
+echo '{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback","callback_id":"artisan-side-refuse-tools","input":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}}}'
+read -r answer
+case "$answer" in *'"permissionDecision":"deny"'*) ;; *) exit 5;; esac
+echo '{"type":"result","subtype":"success","is_error":false,"session_id":"f1","result":" Ship it. ","usage":{"input_tokens":10,"cache_read_input_tokens":9000,"cache_creation_input_tokens":0,"output_tokens":4}}'
+cat > /dev/null
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().join("home");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let projects = home.join(".claude").join("projects").join(project);
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(projects.join("s1.jsonl"), "{}\n").unwrap();
+        let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
+        config.permissions = artisan_api::Permissions::Full;
+        let turn = Turn {
+            trace_dir: None,
+            thread_id: artisan_api::ThreadId::from("thread"),
+            engine: artisan_api::EngineId::Claude,
+            binary: fake,
+            home,
+            cwd,
+            config,
+            session_id: Some("s1".into()),
+            input: UserInput {
+                text: "What next?".into(),
+                ..UserInput::default()
+            },
+            launch: Launch::default(),
+        };
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            super::ClaudeHarness.side_query(turn, tokio_util::sync::CancellationToken::new()),
+        )
+        .await
+        .expect("the fork answers")
+        .expect("the side query succeeds");
+        assert_eq!(reply.text, "Ship it.");
+        assert_eq!(reply.usage.cached_input, 9000);
+        assert_eq!(reply.usage.input, 9010);
+        assert!(
+            projects.join("s1.jsonl").exists(),
+            "the thread's transcript stays"
+        );
+        assert!(
+            !projects.join("f1.jsonl").exists(),
+            "the fork's transcript is gone"
+        );
+    }
+
     /// Fast mode is Claude's `fastMode` setting, given for this run only.
     #[test]
     fn the_fast_speed_turns_on_fast_mode() {
@@ -756,31 +951,18 @@ cat > /dev/null
     }
 
     #[tokio::test]
-    async fn ultrathink_is_native_prompt_text_and_ultracode_is_an_independent_setting() {
-        let input = crate::UserInput {
-            text: "/ultrathink audit this".to_owned(),
-            ..crate::UserInput::default()
-        };
-        let line = super::user_line(&input).await.unwrap();
-        assert_eq!(
-            line["message"]["content"][0]["text"],
-            "ultrathink\naudit this"
-        );
-        assert_eq!(input.text, "/ultrathink audit this");
-        let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
-        config.effort = Some("high".to_owned());
-        config.speed = Some("fast".to_owned());
-        for enabled in [true, false] {
-            config
-                .session_options
-                .insert("ultracode".to_owned(), serde_json::json!(enabled));
-            let args = super::launch_args(&config, None);
-            let effort = args.iter().position(|arg| arg == "--effort").unwrap();
-            assert_eq!(args[effort + 1], "high");
-            let settings = args.iter().position(|arg| arg == "--settings").unwrap();
-            let settings: serde_json::Value = serde_json::from_str(&args[settings + 1]).unwrap();
-            assert_eq!(settings["ultracode"], enabled);
-            assert_eq!(settings["fastMode"], true);
+    async fn ultra_commands_reach_claude_as_keywords_of_their_turn() {
+        for (typed, sent) in [
+            ("/ultrathink audit this", "ultrathink\naudit this"),
+            ("/ultracode ship the parser", "ultracode\nship the parser"),
+            ("ship the parser", "ship the parser"),
+        ] {
+            let input = crate::UserInput {
+                text: typed.to_owned(),
+                ..crate::UserInput::default()
+            };
+            let line = super::user_line(&input).await.unwrap();
+            assert_eq!(line["message"]["content"][0]["text"], sent);
         }
     }
 
@@ -859,6 +1041,75 @@ cat > /dev/null
                 insta::assert_debug_snapshot!(name, (events, outcome, protocol_errors));
             }
         }
+    }
+
+    fn turn_end(case: &str) -> crate::Outcome {
+        let text = crate::transcript_tests::read("claude", case);
+        let mut decoder = ClaudeDecoder::default();
+        for line in text.lines() {
+            decoder.feed(line).unwrap();
+        }
+        decoder.take_outcome().expect("the turn ends")
+    }
+
+    /// The CLI says the plan's limit was hit before the request, and when
+    /// it resets; the failed turn waits for that.
+    #[test]
+    fn a_turn_the_usage_limit_rejected_waits_for_the_reset_it_named() {
+        let outcome = turn_end("usage-limit");
+        assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
+        assert_eq!(
+            outcome.retry,
+            Some(crate::Retry::UsageLimit {
+                resets_at: Some(1_791_931_800_000)
+            })
+        );
+    }
+
+    /// An overloaded API (529) fails the turn, and Forge may retry it.
+    #[test]
+    fn an_overloaded_turn_can_be_retried() {
+        let outcome = turn_end("overloaded");
+        assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
+        assert_eq!(outcome.retry, Some(crate::Retry::Overloaded));
+    }
+
+    /// A foreground command past its timeout moves to the background
+    /// (recorded: Claude 2.1.296). It stays running, in the background,
+    /// until its task notification, not ending at its tool result.
+    #[test]
+    fn a_command_moved_to_the_background_runs_until_its_notification() {
+        use artisan_api::Status::{Done, Running};
+        let text = crate::transcript_tests::read("claude", "command-moved-to-background");
+        let mut decoder = ClaudeDecoder::default();
+        let mut states = Vec::new();
+        for line in text.lines() {
+            for event in decoder.feed(line).unwrap() {
+                if let crate::EngineEvent::Item {
+                    status,
+                    kind:
+                        artisan_api::ItemKind::Tool {
+                            tool: artisan_api::ToolKind::Shell { background, .. },
+                            output,
+                            ..
+                        },
+                    ..
+                } = event
+                {
+                    states.push((status, background, output.is_some()));
+                }
+            }
+        }
+        assert_eq!(
+            states,
+            [
+                (Running, false, false),
+                (Running, true, false),
+                // Its result only says it moved.
+                (Running, true, true),
+                (Done, true, true),
+            ],
+        );
     }
 
     /// An agent that ends its turn to wait on its own background shell is

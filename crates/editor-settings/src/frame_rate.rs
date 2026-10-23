@@ -1,117 +1,42 @@
-//! The redraw limit and the FPS overlay (`native_frame_rate`), kept in this
-//! device's `settings.json` and applied to the window.
+//! The redraw rate (`native_frame_rate`), applied to the window.
+//!
+//! The setting is kept in this device's `settings.json`. By default the
+//! window draws at its monitor's refresh rate: the platform frame clock waits on the
+
+//! vblank of whichever monitor the window is on, so moving it between a
+//! 60 Hz and a 165 Hz monitor retimes it. The setting caps that at 60.
 
 use editor_core::Core;
-use gpui::{App, DebugFrameOverlayMode, Entity, Window};
+use gpui::{App, Entity, Window};
 use serde_json::Value;
 use std::num::NonZeroU32;
 
-/// Frames per second, or `null` for unlimited.
-pub const FRAME_RATE_LIMIT_KEY: &str = "frame_rate_limit";
-/// Whether the FPS overlay shows; default on, as before.
-pub const FPS_OVERLAY_KEY: &str = "fps_overlay";
+/// Whether redraws are capped at [`LOWER_REFRESH_RATE`]; default off.
+pub const LOWER_REFRESH_RATE_KEY: &str = "lower_refresh_rate";
+const LOWER_REFRESH_RATE: NonZeroU32 = NonZeroU32::new(60).unwrap();
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct FrameRateLimit(Option<NonZeroU32>);
-
-impl FrameRateLimit {
-    pub const OPTIONS: [Self; 10] = [
-        Self(NonZeroU32::new(30)),
-        Self(NonZeroU32::new(60)),
-        Self(NonZeroU32::new(120)),
-        Self(NonZeroU32::new(144)),
-        Self(NonZeroU32::new(165)),
-        Self(NonZeroU32::new(180)),
-        Self(NonZeroU32::new(240)),
-        Self(NonZeroU32::new(360)),
-        Self(NonZeroU32::new(500)),
-        Self(None),
-    ];
-
-    #[must_use]
-    pub fn label(self) -> String {
-        self.0
-            .map_or_else(|| "Unlimited".into(), |fps| fps.to_string())
-    }
-
-    fn value(self) -> Value {
-        self.0.map_or(Value::Null, |fps| Value::from(fps.get()))
-    }
-
-    fn from_value(value: Option<&Value>) -> Self {
-        let fps = value
-            .and_then(Value::as_u64)
-            .and_then(|fps| u32::try_from(fps).ok())
-            .and_then(NonZeroU32::new);
-        Self::OPTIONS
-            .into_iter()
-            .find(|limit| limit.0 == fps)
-            .unwrap_or_default()
-    }
-}
-
-/// The stored limit.
-pub fn current(core: &Core) -> FrameRateLimit {
-    FrameRateLimit::from_value(core.settings.get(FRAME_RATE_LIMIT_KEY))
-}
-
-/// Whether the overlay is on.
-pub fn overlay_visible(core: &Core) -> bool {
+/// Whether the lower refresh rate is on.
+pub fn lowered(core: &Core) -> bool {
     core.settings
-        .get(FPS_OVERLAY_KEY)
+        .get(LOWER_REFRESH_RATE_KEY)
         .and_then(Value::as_bool)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
-/// Applies the stored limit and overlay to a newly opened window.
+/// Applies the stored rate to a newly opened window.
 pub fn initialize(core: &Core, window: &mut Window) {
-    set_limit(current(core), window);
-    set_overlay(overlay_visible(core), window);
+    set_lowered(lowered(core), window);
 }
 
-fn set_limit(limit: FrameRateLimit, window: &mut Window) {
-    window.set_max_frame_rate(limit.0);
-    window.set_vsync(limit.0.is_some());
+fn set_lowered(lowered: bool, window: &mut Window) {
+    window.set_max_frame_rate(lowered.then_some(LOWER_REFRESH_RATE));
+    window.set_vsync(true);
 }
 
-fn set_overlay(visible: bool, window: &mut Window) {
-    window.set_debug_frame_overlay_mode(if visible {
-        DebugFrameOverlayMode::FrameRate
-    } else {
-        DebugFrameOverlayMode::Hidden
-    });
-}
-
-/// Applies `limit` now and stores it.
-pub fn apply(core: &Entity<Core>, limit: FrameRateLimit, window: &mut Window, cx: &mut App) {
-    set_limit(limit, window);
+/// Applies the rate now and stores it.
+pub fn apply(core: &Entity<Core>, lowered: bool, window: &mut Window, cx: &mut App) {
+    set_lowered(lowered, window);
     core.update(cx, |core, cx| {
-        core.set_setting(FRAME_RATE_LIMIT_KEY, limit.value(), cx);
+        core.set_setting(LOWER_REFRESH_RATE_KEY, Value::Bool(lowered), cx);
     });
-}
-
-/// Shows or hides the overlay now and stores it.
-pub fn apply_overlay(core: &Entity<Core>, visible: bool, window: &mut Window, cx: &mut App) {
-    set_overlay(visible, window);
-    core.update(cx, |core, cx| {
-        core.set_setting(FPS_OVERLAY_KEY, Value::Bool(visible), cx);
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::FrameRateLimit;
-    use serde_json::json;
-
-    #[test]
-    fn the_limit_round_trips_through_settings_json() {
-        for limit in FrameRateLimit::OPTIONS {
-            assert_eq!(FrameRateLimit::from_value(Some(&limit.value())), limit);
-        }
-        assert_eq!(
-            FrameRateLimit::from_value(Some(&json!(77))).label(),
-            "Unlimited"
-        );
-        assert_eq!(FrameRateLimit::OPTIONS[1].label(), "60");
-    }
 }

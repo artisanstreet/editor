@@ -2,13 +2,12 @@
 
 use crate::{
     motion::{FADE_ARC_ROTATION, MotionPolicy, started_after},
-    theme::ArtisanTheme,
+    theme::{ArtisanTheme, Oklch, Opacity},
 };
 use gpui::{
-    App, Bounds, ColorExt as _, ElementId, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Path, PathBuilder, Pixels, Point, RenderOnce,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, linear_color_stop,
-    linear_gradient, point, px, size,
+    App, Bounds, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, Path,
+    PathBuilder, Pixels, Point, RenderOnce, StatefulInteractiveElement as _, Styled as _, Window,
+    canvas, div, linear_color_stop, linear_gradient, point, px, size,
 };
 use std::{sync::OnceLock, time::Duration};
 
@@ -16,14 +15,14 @@ use std::{sync::OnceLock, time::Duration};
 pub struct FadeArc {
     id: ElementId,
     size: Pixels,
-    color: Hsla,
+    color: Oklch,
 }
 impl FadeArc {
     pub fn new(id: impl Into<ElementId>, theme: ArtisanTheme) -> Self {
         Self {
             id: id.into(),
             size: px(24.0),
-            color: theme.colors.muted_foreground.to_paint(),
+            color: theme.colors.text_muted,
         }
     }
     #[must_use]
@@ -74,7 +73,7 @@ impl RenderOnce for FadeArc {
 }
 
 /// Paints the arc turned `phase` of a full rotation.
-fn paint_arc(bounds: Bounds<Pixels>, color: Hsla, phase: f32, window: &mut Window) {
+fn paint_arc(bounds: Bounds<Pixels>, color: Oklch, phase: f32, window: &mut Window) {
     let rotation = phase * std::f32::consts::TAU;
     let (sin, cos) = rotation.sin_cos();
     let edge = f32::from(bounds.size.width.min(bounds.size.height));
@@ -104,8 +103,17 @@ fn paint_arc(bounds: Bounds<Pixels>, color: Hsla, phase: f32, window: &mut Windo
             path,
             linear_gradient(
                 0.0,
-                linear_color_stop(color.opacity(if index == 0 { 1.0 } else { 0.0 }), 0.0),
-                linear_color_stop(color.opacity(0.55), 1.0),
+                // The spinning trail fades its one token toward clear.
+                linear_color_stop(
+                    if index == 0 {
+                        color
+                    } else {
+                        color.at(Opacity::Clear)
+                    }
+                    .to_paint(),
+                    0.0,
+                ),
+                linear_color_stop(color.fade(0.55).to_paint(), 1.0),
             ),
         );
     }
@@ -117,7 +125,10 @@ fn unit_paths() -> &'static [Option<Path<Pixels>>; 2] {
         [(-90.0f32, 120.0f32, true), (120.0, 270.0, false)].map(|(start, end, large)| {
             let on_circle = |degrees: f32| -> Point<Pixels> {
                 let (sin, cos) = degrees.to_radians().sin_cos();
-                point(px(12.0 + 10.5 * cos), px(12.0 + 10.5 * sin))
+                point(
+                    px(10.5f32.mul_add(cos, 12.0)),
+                    px(10.5f32.mul_add(sin, 12.0)),
+                )
             };
             let mut path = PathBuilder::stroke(px(3.0));
             path.move_to(on_circle(start));

@@ -1,0 +1,6 @@
+{"client": {"id": 2, "method": "thread/start", "params": {}}}
+{"id": 2, "result": {"thread": {"id": "root"}, "model": "gpt-6.1-sol"}}
+{"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{"method": "error", "params": {"threadId": "root", "error": {"message": "Selected model is at capacity. Please try a different model.", "codexErrorInfo": "serverOverloaded"}, "willRetry": true}}
+{"method": "error", "params": {"threadId": "root", "error": {"message": "Selected model is at capacity. Please try a different model.", "codexErrorInfo": "serverOverloaded"}, "willRetry": false}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn", "status": "failed", "error": {"message": "Selected model is at capacity. Please try a different model.", "codexErrorInfo": "serverOverloaded"}}}}

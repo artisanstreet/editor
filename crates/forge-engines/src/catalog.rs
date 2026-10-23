@@ -5,7 +5,7 @@
 
 use crate::engines::{ModelSource, host_spec};
 use anyhow::{Context, Result, bail, ensure};
-use artisan_api::{ContextWindow, EffortNote, EngineId, Model, Speed, Variant};
+use artisan_api::{ContextWindow, EffortNote, EngineId, Model, SlashCommand, Speed, Variant};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -18,38 +18,48 @@ const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 /// More than any engine lists; the rest are dropped with a warning.
 const MAX_MODELS: usize = 1024;
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Listing {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Listing {
     pub models: Vec<Model>,
     pub default: Option<String>,
+    /// The `/` commands, when this engine's probe can ask for them; the
+    /// rest report theirs while they run.
+    pub commands: Option<Vec<SlashCommand>>,
 }
 
 /// How a probe runs the engine.
-pub(crate) struct Program<'a> {
+pub struct Program<'a> {
     pub binary: Option<&'a Path>,
     pub env: &'a [(String, String)],
     pub home: &'a Path,
 }
 
-pub(crate) async fn list(
+pub async fn list(
     engine: EngineId,
     program: Program<'_>,
     http: &reqwest::Client,
 ) -> Result<Listing> {
     let listing = match host_spec(engine).models {
-        ModelSource::ClaudeCatalog => claude(http, program.home).await?,
+        ModelSource::ClaudeCatalog => {
+            let (listing, commands) =
+                tokio::join!(claude(http, program.home), claude_commands(&program));
+            let mut listing = listing?;
+            match commands {
+                Ok(commands) => listing.commands = Some(commands),
+                Err(error) => {
+                    tracing::debug!(error = format!("{error:#}"), "Claude commands unavailable");
+                }
+            }
+            listing
+        }
         ModelSource::CodexAppServer => codex(&program).await?,
-        ModelSource::OpenCodeCli => opencode(&program).await?,
-        ModelSource::CliLines(args) => parse_lines(&run(&program, args).await?),
+        ModelSource::OpenCodeCli => opencode(&program, http).await?,
     };
     Ok(finish(engine, listing))
 }
 
 /// What every engine's listing goes through before the picker sees it.
 fn finish(engine: EngineId, mut listing: Listing) -> Listing {
-    if engine == EngineId::Cursor {
-        fold_fast_ids(&mut listing);
-    }
     for model in &mut listing.models {
         model.name = readable_name(&model.name);
     }
@@ -109,114 +119,6 @@ fn read_json_file(path: &Path) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-// ---------------------------------------------------------------- one id per line (Grok, Cursor)
-
-/// `[*|-] <id> [label] [(default)]` lines, after a `…models:` header when
-/// there is one. `*` or `(default)` marks the default.
-pub(crate) fn parse_lines(output: &str) -> Listing {
-    let lines: Vec<&str> = output.lines().collect();
-    let start = lines
-        .iter()
-        .position(|line| line.trim().to_ascii_lowercase().ends_with("models:"))
-        .map_or(0, |header| header + 1);
-    let mut listing = Listing::default();
-    let mut seen = HashSet::new();
-    for line in &lines[start..] {
-        if listing.models.len() >= MAX_MODELS {
-            break;
-        }
-        let marked =
-            line.starts_with(char::is_whitespace) || line.starts_with('*') || line.starts_with('-');
-        let trimmed = line.trim();
-        let mut default = trimmed.starts_with('*');
-        let rest = trimmed
-            .strip_prefix(['*', '-'])
-            .map_or(trimmed, str::trim_start);
-        let mut parts = rest.split_whitespace();
-        let Some(id) = parts.next() else { continue };
-        let valid = id.len() <= 200
-            && id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "._:-/[]".contains(c));
-        let signal = id.chars().any(|c| c.is_ascii_digit() || "-._".contains(c));
-        // Unindented prose ("not authenticated") is not a model.
-        if !valid || !(marked || signal) || !seen.insert(id) {
-            continue;
-        }
-        let label = parts
-            .filter(|part| {
-                let marker = part.eq_ignore_ascii_case("(default)");
-                default |= marker;
-                !marker
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        if default && listing.default.is_none() {
-            listing.default = Some(id.to_owned());
-        }
-        listing.models.push(Model {
-            id: id.to_owned(),
-            name: if label.is_empty() {
-                title_case(id)
-            } else {
-                label
-            },
-            ..Model::default()
-        });
-    }
-    listing
-}
-
-/// The `-fast` speed of a model Cursor lists under its own id
-/// (`composer-2.5` and `composer-2.5-fast`): one model with a Fast tier, run
-/// as the `-fast` id (`acp::cursor_model`). A `-fast` id without its base
-/// stays a model of its own.
-pub(crate) fn fold_fast_ids(listing: &mut Listing) {
-    let ids: Vec<String> = listing
-        .models
-        .iter()
-        .map(|model| model.id.clone())
-        .collect();
-    let indexed: HashMap<&str, usize> = ids
-        .iter()
-        .enumerate()
-        .map(|(index, id)| (id.as_str(), index))
-        .collect();
-    let mut folded = HashSet::new();
-    for fast in &ids {
-        let Some(base) = fast.strip_suffix("-fast") else {
-            continue;
-        };
-        let Some(index) = indexed.get(base).copied() else {
-            continue;
-        };
-        let fast_default = listing.default.as_deref() == Some(fast.as_str());
-        if let Some(model) = listing.models.get_mut(index) {
-            model.speeds = vec![
-                Speed {
-                    id: STANDARD_SPEED.to_owned(),
-                    label: "Standard".to_owned(),
-                    description: None,
-                    default: !fast_default,
-                },
-                Speed {
-                    id: "fast".to_owned(),
-                    label: "Fast".to_owned(),
-                    description: None,
-                    default: fast_default,
-                },
-            ];
-        }
-        if fast_default {
-            listing.default = Some(base.to_owned());
-        }
-        folded.insert(fast.as_str());
-    }
-    listing
-        .models
-        .retain(|model| !folded.contains(model.id.as_str()));
-}
-
 /// Engines report hyphenated names (`GPT-6-Astra`) where the picker reads
 /// `GPT 6 Astra`: separator runs collapse to one space and the ends trim.
 fn readable_name(raw: &str) -> String {
@@ -227,20 +129,7 @@ fn readable_name(raw: &str) -> String {
 }
 
 /// The tier that sends nothing: the engine's own default speed.
-pub(crate) const STANDARD_SPEED: &str = "standard";
-
-fn title_case(id: &str) -> String {
-    id.split('-')
-        .map(|part| {
-            let mut chars = part.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+pub const STANDARD_SPEED: &str = "standard";
 
 // ---------------------------------------------------------------- Claude
 
@@ -281,6 +170,60 @@ async fn claude(http: &reqwest::Client, home: &Path) -> Result<Listing> {
         "neither the published nor the cached Claude catalog is available"
     );
     Ok(listing)
+}
+
+/// The commands Claude reads, from its `initialize` reply: the same list its
+/// own `/` menu shows, with descriptions. No model turn runs.
+async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>> {
+    let mut command = command(program)?;
+    command
+        .args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ])
+        .stdin(Stdio::piped());
+    let mut process = crate::process::spawn_probe(command)?;
+    let reply = tokio::time::timeout(DEADLINE, async {
+        process
+            .send(&json!({
+                "type": "control_request",
+                "request_id": "artisan-commands",
+                "request": { "subtype": "initialize" },
+            }))
+            .await?;
+        while let Some(line) = process.next_line().await? {
+            let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if frame["type"] == "control_response"
+                && frame["response"]["request_id"] == "artisan-commands"
+            {
+                return Ok(frame["response"]["response"]["commands"].clone());
+            }
+        }
+        bail!(
+            "Claude closed before answering initialize: {}",
+            process.stderr_tail()
+        )
+    })
+    .await
+    .context("Claude initialize timed out")??;
+    Ok(reply
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|command| {
+            Some(SlashCommand {
+                name: command["name"].as_str()?.to_owned(),
+                description: text(command.get("description")).unwrap_or_default(),
+                hint: text(command.get("argumentHint")),
+            })
+        })
+        .collect())
 }
 
 /// The newest `*-cc.json` the CLI cached: what this account is actually served.
@@ -471,6 +414,9 @@ fn claude_model(value: &Value) -> Option<Model> {
             .unwrap_or(false),
         speeds: claude_speeds(value.get("fast_mode")),
         variants: Vec::new(),
+        default_variant: None,
+        lab: None,
+        group: None,
     })
 }
 
@@ -505,7 +451,7 @@ fn claude_speeds(fast_mode: Option<&Value>) -> Vec<Speed> {
 }
 
 /// The id of Claude's fast mode option, and the speed that turns it on.
-pub(crate) const CLAUDE_FAST: &str = "fast";
+pub const CLAUDE_FAST: &str = "fast";
 
 /// A non-empty string.
 fn text(value: Option<&Value>) -> Option<String> {
@@ -635,6 +581,9 @@ fn codex_listing(rows: &[Value], windows: &[(String, u64, u64)]) -> Listing {
                 .is_some_and(|inputs| inputs.iter().any(|input| input.as_str() == Some("image"))),
             speeds: codex_speeds(row),
             variants: Vec::new(),
+            default_variant: None,
+            lab: None,
+            group: None,
         });
     }
     listing
@@ -725,91 +674,395 @@ fn codex_context_windows(path: &Path) -> Vec<(String, u64, u64)> {
 
 // ---------------------------------------------------------------- OpenCode
 
-async fn opencode(program: &Program<'_>) -> Result<Listing> {
-    let output = run(program, &["models"]).await?;
-    let home = program.home.to_owned();
-    let cache = tokio::task::spawn_blocking(move || {
-        [".cache", "cache"]
-            .iter()
-            .map(|dir| home.join(dir).join("opencode/models.json"))
-            .find_map(|path| read_json_file(&path))
-    })
-    .await
-    .context("read OpenCode model cache")?;
-    let listing = opencode_listing(&output, cache.as_ref());
+/// OpenCode's own catalog source, for what its API leaves out: each
+/// model's description and the lab that made it.
+const MODELS_DEV: &str = "https://models.dev/api.json";
+const MODELS_DEV_MAX_BYTES: usize = 32 * 1024 * 1024;
+/// How long the digest of it serves before it is fetched again.
+const MODELS_DEV_FRESH: Duration = Duration::from_hours(12);
+
+async fn opencode(program: &Program<'_>, http: &reqwest::Client) -> Result<Listing> {
+    // Private servers: the background service sits on one fixed port
+    // shared with the user's own OpenCode, so whichever starts second fails.
+    let models = run(program, &["api", "--standalone", "model.list"]).await?;
+    let models: Value = serde_json::from_str(&models).context("parse OpenCode model.list")?;
+    let gateways = match run(program, &["api", "--standalone", "integration.list"]).await {
+        Ok(text) => serde_json::from_str(&text).ok(),
+        Err(error) => {
+            tracing::debug!(
+                error = format!("{error:#}"),
+                "OpenCode integrations unavailable"
+            );
+            None
+        }
+    };
+    let digest = models_dev(http, program.home).await;
+    let listing = opencode_listing(&models, gateways.as_ref(), digest.as_ref());
     ensure!(!listing.models.is_empty(), "opencode listed no models");
     Ok(listing)
 }
 
-/// `opencode2 models` lines (`provider/model`), named and described from
-/// OpenCode's own `models.json` cache. A model's effort `reasoning_options`
-/// are the variants OpenCode runs it as (`model.variant`).
-fn opencode_listing(output: &str, cache: Option<&Value>) -> Listing {
-    let mut listing = Listing::default();
-    let mut seen = HashSet::new();
-    for line in output.lines().map(str::trim) {
-        if listing.models.len() >= MAX_MODELS {
-            break;
-        }
-        let Some((provider, model)) = line.split_once('/') else {
-            continue;
-        };
-        if provider.is_empty() || model.is_empty() || line.contains(char::is_whitespace) {
-            continue;
-        }
-        if !seen.insert(line) {
-            continue;
-        }
-        let meta = cache.and_then(|cache| cache.get(provider)?.get("models")?.get(model));
-        let mut variants: Vec<Variant> = Vec::new();
-        let mut variant_ids = HashSet::new();
-        for id in meta
-            .and_then(|meta| meta.get("reasoning_options"))
-            .and_then(Value::as_array)
+/// OpenCode's `model.list`, its models named by the gateway that serves
+/// them (`integration.list`) and, from models.dev, described and credited
+/// to their lab. Grouped by gateway; within one, the lab with the latest
+/// release first, each lab's models newest first.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the listing: name, describe, credit, then order"
+)]
+fn opencode_listing(models: &Value, gateways: Option<&Value>, digest: Option<&Value>) -> Listing {
+    let gateway_name = |provider: &str| {
+        gateways
+            .and_then(|gateways| gateways.get("data")?.as_array())
             .into_iter()
             .flatten()
-            .filter(|option| option.get("type").and_then(Value::as_str) == Some("effort"))
-            .filter_map(|option| option.get("values").and_then(Value::as_array))
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter(|id| !id.is_empty() && *id != "default")
-        {
-            if variants.len() == 128 {
-                break;
-            }
-            if variant_ids.insert(id) {
-                variants.push(Variant {
-                    id: id.to_owned(),
-                    label: variant_label(id),
-                });
-            }
+            .find(|gateway| gateway.get("id").and_then(Value::as_str) == Some(provider))
+            .and_then(|gateway| gateway.get("name")?.as_str())
+            .or_else(|| digest?.pointer(&format!("/labs/{provider}"))?.as_str())
+            .unwrap_or(provider)
+            .to_owned()
+    };
+    let mut listed: Vec<(Model, u64)> = Vec::new();
+    let mut seen = HashSet::new();
+    for meta in models
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if listed.len() >= MAX_MODELS {
+            break;
         }
-        listing.models.push(Model {
-            id: line.to_owned(),
-            name: meta
-                .and_then(|m| m.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or(line)
-                .to_owned(),
-            description: text(meta.and_then(|m| m.get("description"))),
-            context_windows: meta
-                .and_then(|m| m.pointer("/limit/context"))
-                .and_then(Value::as_u64)
-                .map_or_else(Vec::new, |base| {
+        let (Some(provider), Some(model)) = (
+            meta.get("providerID").and_then(Value::as_str),
+            meta.get("id").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if provider.is_empty()
+            || model.is_empty()
+            || meta.get("enabled").and_then(Value::as_bool) == Some(false)
+            || meta.get("status").and_then(Value::as_str) == Some("deprecated")
+        {
+            continue;
+        }
+        let id = format!("{provider}/{model}");
+        if id.contains(char::is_whitespace) || !seen.insert(id.clone()) {
+            continue;
+        }
+        let known = digest.and_then(|digest| digest.get("models")?.get(&id));
+        let variants = opencode_variants(meta);
+        let default_variant = default_variant(&variants);
+        let context = meta.pointer("/limit/context").and_then(Value::as_u64);
+        let lab = opencode_lab(meta, known, digest);
+        listed.push((
+            Model {
+                id,
+                name: meta
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(model)
+                    .to_owned(),
+                description: text(known.and_then(|known| known.get("description"))),
+                context_windows: context.map_or_else(Vec::new, |base| {
                     context_choices(EngineId::OpenCode, base, base)
                 }),
-            context_window: meta
-                .and_then(|m| m.pointer("/limit/context"))
-                .and_then(Value::as_u64),
-            supports_images: meta
-                .and_then(|m| m.pointer("/modalities/input"))
-                .and_then(Value::as_array)
-                .is_some_and(|inputs| inputs.iter().any(|input| input.as_str() == Some("image"))),
-            variants,
-            ..Model::default()
-        });
+                context_window: context,
+                supports_images: meta
+                    .pointer("/capabilities/input")
+                    .and_then(Value::as_array)
+                    .is_some_and(|inputs| {
+                        inputs.iter().any(|input| input.as_str() == Some("image"))
+                    }),
+                variants,
+                default_variant,
+                lab,
+                group: Some(gateway_name(provider)),
+                ..Model::default()
+            },
+            meta.pointer("/time/released")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+        ));
     }
-    listing
+    // Stable: the gateways keep OpenCode's order among themselves.
+    let mut order: Vec<String> = Vec::new();
+    for (model, _) in &listed {
+        if let Some(group) = &model.group
+            && !order.contains(group)
+        {
+            order.push(group.clone());
+        }
+    }
+    // Within a gateway, the lab with the latest release leads, and each
+    // lab's models run newest first.
+    let mut lab_latest: HashMap<(Option<String>, Option<String>), u64> = HashMap::new();
+    for (model, released) in &listed {
+        let latest = lab_latest
+            .entry((model.group.clone(), model.lab.clone()))
+            .or_default();
+        *latest = (*latest).max(*released);
+    }
+    listed.sort_by_cached_key(|(model, released)| {
+        let group = order
+            .iter()
+            .position(|group| Some(group) == model.group.as_ref());
+        let lab = (model.group.clone(), model.lab.clone());
+        (
+            group,
+            std::cmp::Reverse(lab_latest[&lab]),
+            lab.1,
+            std::cmp::Reverse(*released),
+        )
+    });
+    Listing {
+        models: listed.into_iter().map(|(model, _)| model).collect(),
+        ..Listing::default()
+    }
+}
+
+/// Who made a model: OpenCode's own `canonical` when it fills it in, else
+/// models.dev's credit for this model or, failing that, for its family.
+fn opencode_lab(meta: &Value, known: Option<&Value>, digest: Option<&Value>) -> Option<String> {
+    meta.get("canonical")
+        .and_then(Value::as_str)
+        .or_else(|| known?.get("lab")?.as_str())
+        .map(str::to_owned)
+        .or_else(|| {
+            family_lab(
+                digest?,
+                meta.get("family")
+                    .or_else(|| known?.get("family"))?
+                    .as_str()?,
+            )
+        })
+        .map(|lab| lab_name(&lab, digest))
+}
+
+/// The variants OpenCode runs a model as (`model.variant`), in its order.
+fn opencode_variants(meta: &Value) -> Vec<Variant> {
+    let mut variants: Vec<Variant> = Vec::new();
+    let mut seen = HashSet::new();
+    for id in meta
+        .get("variants")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|variant| variant.get("id")?.as_str())
+        .filter(|id| !id.is_empty() && *id != "default")
+    {
+        if variants.len() == 128 {
+            break;
+        }
+        if seen.insert(id) {
+            variants.push(Variant {
+                id: id.to_owned(),
+                label: variant_label(id),
+            });
+        }
+    }
+    variants
+}
+
+/// The variant a model runs when none is chosen: medium, else the nearest
+/// level above it (an on/off model thinks), else the highest below it.
+fn default_variant(variants: &[Variant]) -> Option<String> {
+    const LEVELS: [&str; 10] = [
+        "none", "minimal", "light", "low", "medium", "thinking", "high", "xhigh", "max", "ultra",
+    ];
+    const MEDIUM: usize = 4;
+    let ranked = || {
+        variants.iter().filter_map(|variant| {
+            Some((
+                LEVELS.iter().position(|level| *level == variant.id)?,
+                &variant.id,
+            ))
+        })
+    };
+    ranked()
+        .filter(|(rank, _)| *rank >= MEDIUM)
+        .min_by_key(|(rank, _)| *rank)
+        .or_else(|| ranked().max_by_key(|(rank, _)| *rank))
+        .map(|(_, id)| id.clone())
+        .or_else(|| variants.first().map(|variant| variant.id.clone()))
+}
+
+/// The lab of a family models.dev doesn't credit directly, from the
+/// family's other models, trimming it until one matches
+/// (`gpt-codex-spark` → `gpt`, `qwen3.7-plus` → `qwen`).
+fn family_lab(digest: &Value, family: &str) -> Option<String> {
+    let families = digest.get("families")?;
+    let mut family = family.to_ascii_lowercase();
+    loop {
+        if let Some(lab) = families.get(&family).and_then(Value::as_str) {
+            return Some(lab.to_owned());
+        }
+        match family.rfind('-') {
+            Some(cut) => family.truncate(cut),
+            None => break,
+        }
+    }
+    let stem: String = family
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect();
+    (stem != family && !stem.is_empty())
+        .then(|| families.get(&stem)?.as_str().map(str::to_owned))
+        .flatten()
+}
+
+/// A lab as people name it; models.dev's provider names are its hosts'
+/// ("MiniMax (minimax.io)") and miss labs that host nothing.
+fn lab_name(lab: &str, digest: Option<&Value>) -> String {
+    let known = match lab {
+        "alibaba" => "Alibaba",
+        "anthropic" => "Anthropic",
+        "deepseek" => "DeepSeek",
+        "google" => "Google",
+        "meituan" => "Meituan",
+        "meta" => "Meta",
+        "minimax" => "MiniMax",
+        "mistral" => "Mistral",
+        "moonshotai" => "Moonshot AI",
+        "nvidia" => "NVIDIA",
+        "openai" => "OpenAI",
+        "reflection" => "Reflection AI",
+        "stepfun" => "StepFun",
+        "tencent" => "Tencent",
+        "xai" => "xAI",
+        "xiaomi" => "Xiaomi",
+        "zhipuai" | "zai" => "Z.ai",
+        _ => "",
+    };
+    if !known.is_empty() {
+        return known.to_owned();
+    }
+    digest
+        .and_then(|digest| digest.pointer(&format!("/labs/{lab}"))?.as_str())
+        .map_or_else(
+            || lab.to_owned(),
+            |name| name.split(" (").next().unwrap_or(name).to_owned(),
+        )
+}
+
+/// models.dev's digest: a fresh cached copy, else a new fetch, else a
+/// stale copy. Absent offline on first use; the listing stands without it.
+async fn models_dev(http: &reqwest::Client, home: &Path) -> Option<Value> {
+    let path = home.join("cache/models-dev.json");
+    let cached = {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let age = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok());
+            read_json_file(&path).map(|digest| (digest, age))
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+    if let Some((digest, Some(age))) = &cached
+        && *age < MODELS_DEV_FRESH
+    {
+        return Some(digest.clone());
+    }
+    let fetched = async {
+        let mut response = http
+            .get(MODELS_DEV)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                bytes.len().saturating_add(chunk.len()) <= MODELS_DEV_MAX_BYTES,
+                "models.dev catalog exceeds byte budget"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        anyhow::Ok(models_dev_digest(&serde_json::from_slice(&bytes)?))
+    }
+    .await;
+    match fetched {
+        Ok(digest) => {
+            let bytes = serde_json::to_vec(&digest).unwrap_or_default();
+            tokio::task::spawn_blocking(move || {
+                let written = path
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|()| std::fs::write(&path, bytes));
+                if let Err(error) = written {
+                    tracing::debug!(%error, "models.dev digest not cached");
+                }
+            });
+            Some(digest)
+        }
+        Err(error) => {
+            tracing::debug!(error = format!("{error:#}"), "models.dev unavailable");
+            cached.map(|(digest, _)| digest)
+        }
+    }
+}
+
+/// What the listing needs of models.dev's catalog: per `provider/model`
+/// its description, lab and family; each family's most credited lab; and
+/// the providers' names.
+fn models_dev_digest(catalog: &Value) -> Value {
+    let mut labs = serde_json::Map::new();
+    let mut models = serde_json::Map::new();
+    let mut credits: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for (provider, entry) in catalog.as_object().into_iter().flatten() {
+        if let Some(name) = entry.get("name").and_then(Value::as_str) {
+            labs.insert(provider.clone(), json!(name));
+        }
+        for (id, model) in entry
+            .get("models")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            let lab = model
+                .get("canonical_model_id")
+                .and_then(Value::as_str)
+                .and_then(|canonical| canonical.split_once('/'))
+                .map(|(lab, _)| lab.to_ascii_lowercase())
+                .filter(|lab| !lab.is_empty());
+            let family = model.get("family").and_then(Value::as_str);
+            if let (Some(lab), Some(family)) = (&lab, family) {
+                *credits
+                    .entry(family.to_ascii_lowercase())
+                    .or_default()
+                    .entry(lab.clone())
+                    .or_default() += 1;
+            }
+            let mut known = serde_json::Map::new();
+            if let Some(description) = model.get("description").and_then(Value::as_str) {
+                known.insert("description".into(), json!(description));
+            }
+            if let Some(lab) = lab {
+                known.insert("lab".into(), json!(lab));
+            }
+            if let Some(family) = family {
+                known.insert("family".into(), json!(family));
+            }
+            if !known.is_empty() {
+                models.insert(format!("{provider}/{id}"), Value::Object(known));
+            }
+        }
+    }
+    let families: serde_json::Map<String, Value> = credits
+        .into_iter()
+        .filter_map(|(family, labs)| {
+            let lab = labs
+                .into_iter()
+                .max_by(|(a, left), (b, right)| left.cmp(right).then_with(|| b.cmp(a)))?
+                .0;
+            Some((family, json!(lab)))
+        })
+        .collect();
+    json!({ "labs": labs, "models": models, "families": families })
 }
 
 /// A variant as the picker names it (the old Editor's `humanize_variant`).
@@ -817,6 +1070,7 @@ fn variant_label(id: &str) -> String {
     match id {
         "xhigh" => "Extra High".to_owned(),
         "minimal" => "Minimal".to_owned(),
+        "none" => "Off".to_owned(),
         "medium" => "Medium".to_owned(),
         "high" => "High".to_owned(),
         "light" | "low" => "Light".to_owned(),
@@ -839,8 +1093,8 @@ fn context_choices(engine: EngineId, base: u64, max: u64) -> Vec<ContextWindow> 
     let mut choices = Vec::new();
     if engine == EngineId::Claude && base >= 1_000_000 {
         choices.push(ContextWindow {
-            tokens: 400_000,
-            override_tokens: Some(400_000),
+            tokens: 500_000,
+            override_tokens: Some(500_000),
         });
     }
     choices.push(ContextWindow {
@@ -892,8 +1146,8 @@ mod tests {
             claude.context_windows,
             [
                 ContextWindow {
-                    tokens: 400_000,
-                    override_tokens: Some(400_000)
+                    tokens: 500_000,
+                    override_tokens: Some(500_000)
                 },
                 ContextWindow {
                     tokens: 1_000_000,
@@ -980,37 +1234,6 @@ mod tests {
         let path = directory.path().join("catalog.json");
         std::fs::write(&path, "x".repeat(MAX_OUTPUT_BYTES + 1)).unwrap();
         assert!(read_json_file(&path).is_none());
-    }
-
-    #[test]
-    fn grok_listing_marks_the_default_and_skips_prose() {
-        let listing = parse_lines(
-            "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n",
-        );
-        let ids: Vec<_> = listing
-            .models
-            .iter()
-            .map(|model| (model.id.as_str(), model.name.as_str()))
-            .collect();
-        assert_eq!(ids, [("grok-4.6", "Grok 4.6"), ("grok-4.5", "Grok 4.5")]);
-        assert_eq!(listing.default.as_deref(), Some("grok-4.6"));
-
-        let cursor = parse_lines(
-            "* composer-2.5-fast Fast Composer\n  gpt-5.6-sol GPT 5.6 Sol\n\nnot a model id line\n",
-        );
-        let ids: Vec<_> = cursor
-            .models
-            .iter()
-            .map(|model| (model.id.as_str(), model.name.as_str()))
-            .collect();
-        assert_eq!(
-            ids,
-            [
-                ("composer-2.5-fast", "Fast Composer"),
-                ("gpt-5.6-sol", "GPT 5.6 Sol")
-            ]
-        );
-        assert_eq!(cursor.default.as_deref(), Some("composer-2.5-fast"));
     }
 
     fn recording(path: &str) -> String {
@@ -1143,58 +1366,117 @@ mod tests {
         );
     }
 
-    /// OpenCode's own `models.json` (as the old Forge's fixtures had it):
-    /// effort reasoning options are the variants OpenCode runs.
+    /// OpenCode 2's `model.list`: variants are what it runs, the gateway
+    /// names the group, and models.dev describes the model and its lab.
     #[test]
-    fn opencode_reasoning_options_become_variants() {
-        let cache = serde_json::json!({ "anthropic": { "models": { "claude-opus-5": {
-            "name": "Claude Opus 5",
-            "description": "Anthropic's most capable model.",
-            "limit": { "context": 1_000_000, "output": 128_000 },
-            "modalities": { "input": ["text", "image"] },
-            "reasoning_options": [
-                { "type": "effort", "values": ["high", "max"] },
-                { "type": "toggle" }
-            ]
-        } } } });
-        let listing = opencode_listing(
-            "anthropic/claude-opus-5\nopencode/big-pickle\n",
-            Some(&cache),
-        );
-        let opus = model(&listing, "anthropic/claude-opus-5");
-        let variants: Vec<_> = opus
-            .variants
-            .iter()
-            .map(|variant| (variant.id.as_str(), variant.label.as_str()))
-            .collect();
-        assert_eq!(variants, [("high", "High"), ("max", "Max")]);
-        assert!(opus.efforts.is_empty(), "variants are not efforts");
-        assert_eq!(
-            opus.description.as_deref(),
-            Some("Anthropic's most capable model.")
-        );
-        assert!(model(&listing, "opencode/big-pickle").variants.is_empty());
-    }
-
-    #[test]
-    fn cursor_fast_ids_become_the_fast_tier_of_their_model() {
-        let mut listing = parse_lines(
-            "* composer-2.5 Composer 2.5\n  composer-2.5-fast Composer 2.5 Fast\n  grok-code-fast Grok Code Fast\n",
-        );
-        fold_fast_ids(&mut listing);
+    fn opencode_models_are_grouped_by_gateway_and_credited_to_their_lab() {
+        let models = serde_json::json!({ "data": [
+            { "id": "glm-5.3", "providerID": "opencode-go", "family": "glm", "name": "GLM-5.3",
+              "enabled": true, "status": "active", "time": { "released": 2 },
+              "capabilities": { "input": ["text"] }, "limit": { "context": 1_000_000, "output": 131_072 },
+              "variants": [{ "id": "low" }, { "id": "max" }] },
+            { "id": "claude-opus-5-5", "providerID": "opencode", "family": "claude-opus",
+              "name": "Claude Opus 5.5", "enabled": true, "status": "active", "time": { "released": 1 },
+              "capabilities": { "input": ["text", "image"] }, "limit": { "context": 1_000_000, "output": 128_000 },
+              "variants": [{ "id": "none" }, { "id": "high" }] },
+            { "id": "gpt-5.3-codex-spark", "providerID": "opencode", "family": "gpt-codex-spark",
+              "name": "GPT-5.3-Codex-Spark", "enabled": true, "status": "active", "time": { "released": 3 },
+              "capabilities": { "input": ["text"] }, "limit": { "context": 400_000, "output": 128_000 },
+              "variants": [] },
+            { "id": "claude-sonnet-5-5", "providerID": "opencode", "family": "claude-sonnet",
+              "name": "Claude Sonnet 5.5", "enabled": true, "status": "active", "time": { "released": 4 },
+              "capabilities": { "input": ["text"] }, "limit": { "context": 1_000_000, "output": 64_000 },
+              "variants": [] },
+            { "id": "big-pickle", "providerID": "opencode", "name": "Big Pickle", "enabled": true,
+              "status": "active", "time": { "released": 0 }, "capabilities": { "input": ["text"] },
+              "limit": { "context": 200_000, "output": 32_000 }, "variants": [] },
+            { "id": "gpt-4", "providerID": "opencode", "name": "GPT-4", "enabled": true,
+              "status": "deprecated", "time": { "released": 0 }, "capabilities": { "input": ["text"] },
+              "limit": { "context": 8_000, "output": 4_000 }, "variants": [] }
+        ] });
+        let gateways = serde_json::json!({ "data": [
+            { "id": "opencode", "name": "OpenCode Console" },
+            { "id": "opencode-go", "name": "OpenCode Go" }
+        ] });
+        let digest = models_dev_digest(&serde_json::json!({
+            "opencode": { "name": "OpenCode", "models": {
+                "claude-opus-5-5": { "description": "Claude for long-running work.",
+                    "family": "claude-opus", "canonical_model_id": "anthropic/claude-opus-5-5" },
+                "claude-sonnet-5-5": { "family": "claude-sonnet",
+                    "canonical_model_id": "anthropic/claude-sonnet-5-5" },
+                "gpt-5.5": { "family": "gpt", "canonical_model_id": "openai/gpt-5.5" }
+            } },
+            "opencode-go": { "name": "OpenCode Go", "models": {
+                "glm-5.3": { "description": "Flagship GLM.", "family": "glm",
+                    "canonical_model_id": "zhipuai/glm-5.3" }
+            } }
+        }));
+        let listing = opencode_listing(&models, Some(&gateways), Some(&digest));
         let ids: Vec<_> = listing
             .models
             .iter()
             .map(|model| model.id.as_str())
             .collect();
-        assert_eq!(ids, ["composer-2.5", "grok-code-fast"]);
         assert_eq!(
-            speeds(&listing.models[0]),
+            ids,
             [
-                ("standard", "Standard", None, true),
-                ("fast", "Fast", None, false)
-            ]
+                "opencode-go/glm-5.3",
+                "opencode/claude-sonnet-5-5",
+                "opencode/claude-opus-5-5",
+                "opencode/gpt-5.3-codex-spark",
+                "opencode/big-pickle",
+            ],
+            "gateways in OpenCode's order, the lab with the latest release first, \
+             each lab newest first, deprecated left out"
         );
-        assert!(listing.models[1].speeds.is_empty());
+        let glm = model(&listing, "opencode-go/glm-5.3");
+        assert_eq!(glm.group.as_deref(), Some("OpenCode Go"));
+        assert_eq!(glm.lab.as_deref(), Some("Z.ai"));
+        assert_eq!(glm.description.as_deref(), Some("Flagship GLM."));
+        let opus = model(&listing, "opencode/claude-opus-5-5");
+        let variants: Vec<_> = opus
+            .variants
+            .iter()
+            .map(|variant| (variant.id.as_str(), variant.label.as_str()))
+            .collect();
+        assert_eq!(variants, [("none", "Off"), ("high", "High")]);
+        assert!(opus.efforts.is_empty(), "variants are not efforts");
+        assert!(opus.supports_images);
+        assert_eq!(opus.lab.as_deref(), Some("Anthropic"));
+        assert_eq!(opus.group.as_deref(), Some("OpenCode Console"));
+        let spark = model(&listing, "opencode/gpt-5.3-codex-spark");
+        assert_eq!(spark.lab.as_deref(), Some("OpenAI"), "trimmed family");
+        assert_eq!(model(&listing, "opencode/big-pickle").lab, None);
+    }
+
+    /// No OpenCode model offers a "Default": one without a chosen variant
+    /// runs at medium, or the nearest level above it, so an on/off model
+    /// thinks. Sets as OpenCode 2.1.0 lists them.
+    #[test]
+    fn opencode_models_default_to_medium_or_the_nearest_level_above() {
+        let default = |ids: &[&str]| {
+            let variants: Vec<Variant> = ids
+                .iter()
+                .map(|id| Variant {
+                    id: (*id).to_owned(),
+                    label: variant_label(id),
+                })
+                .collect();
+            default_variant(&variants)
+        };
+        assert_eq!(
+            default(&["low", "medium", "high", "xhigh", "max"]).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            default(&["none", "low", "medium", "high"]).as_deref(),
+            Some("medium")
+        );
+        assert_eq!(default(&["low", "high", "max"]).as_deref(), Some("high"));
+        assert_eq!(default(&["none", "thinking"]).as_deref(), Some("thinking"));
+        assert_eq!(default(&["high", "max"]).as_deref(), Some("high"));
+        assert_eq!(default(&["max"]).as_deref(), Some("max"));
+        assert_eq!(default(&["none", "minimal", "low"]).as_deref(), Some("low"));
+        assert_eq!(default(&[]), None);
     }
 }

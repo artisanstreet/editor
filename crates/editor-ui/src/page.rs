@@ -1,4 +1,4 @@
-//! Shared page headers, sections, field rows, notices and navigation.
+//! Shared page headers, sections, field rows and notices.
 
 use crate::card::Card;
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
@@ -13,9 +13,10 @@ pub struct PageBlock {
     content: Div,
 }
 impl PageBlock {
-    fn new(content: Div) -> Self {
+    pub const fn new(content: Div) -> Self {
         Self { content }
     }
+    #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         let selector = selector.into();
         self.content = self.content.debug_selector(move || selector.to_string());
@@ -33,10 +34,12 @@ pub struct Notice {
     content: Div,
 }
 impl Notice {
+    #[must_use]
     pub fn action(mut self, action: impl IntoElement) -> Self {
         self.content = self.content.child(div().mt(px(8.0)).child(action));
         self
     }
+    #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         let selector = selector.into();
         self.content = self.content.debug_selector(move || selector.to_string());
@@ -56,9 +59,9 @@ pub fn text_preview(theme: &ArtisanTheme, text: &str) -> PageBlock {
             .px(px(12.0))
             .py(px(10.0))
             .rounded(RadiusTokens::value(RadiusStep::Md))
-            .bg(theme.colors.foreground.with_alpha(0.04).to_paint())
+            .bg(theme.colors.raised.to_paint())
             .text_xs()
-            .text_color(theme.colors.muted_foreground.to_paint())
+            .text_color(theme.colors.text_muted.to_paint())
             .whitespace_normal()
             .children(
                 preview_lines(text)
@@ -84,12 +87,8 @@ fn preview_lines(text: &str) -> Vec<String> {
     shown
 }
 
-/// Maximum width of a settings or catalog page.
+/// Maximum width of a catalog page.
 pub const CONTENT_MAX_WIDTH: f32 = 896.0;
-/// Navigation rail width.
-pub const NAV_RAIL_WIDTH: f32 = 176.0;
-/// Gap between navigation and content.
-pub const NAV_CONTENT_GAP: f32 = 56.0;
 
 /// The page header: a 20 px title over a muted line.
 pub fn header(
@@ -105,14 +104,14 @@ pub fn header(
                 div()
                     .text_size(TypographyTokens::size(TextStep::Xl))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.colors.foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child(title.into()),
             )
             .child(
                 div()
                     .mt(px(6.0))
                     .text_sm()
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .child(description.into()),
             ),
     )
@@ -138,7 +137,7 @@ pub fn section_shell(
             div()
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.colors.foreground.to_paint())
+                .text_color(theme.colors.text.to_paint())
                 .child(title.to_owned()),
         );
     if let Some(action) = action {
@@ -150,7 +149,7 @@ pub fn section_shell(
             div()
                 .mt(px(4.0))
                 .text_sm()
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .child(intro.to_owned()),
         );
     }
@@ -159,7 +158,7 @@ pub fn section_shell(
 
 /// One card: the compact card with a hairline between
 /// its bands.
-pub fn card(theme: &ArtisanTheme, blocks: Vec<AnyElement>) -> Card {
+pub const fn card(theme: &ArtisanTheme, blocks: Vec<AnyElement>) -> Card {
     Card::bands(*theme, blocks)
 }
 
@@ -181,14 +180,14 @@ pub fn row(
         .child(
             div()
                 .text_sm()
-                .text_color(theme.colors.foreground.to_paint())
+                .text_color(theme.colors.text.to_paint())
                 .child(title.into()),
         );
     if !description.is_empty() {
         text = text.child(
             div()
                 .text_xs()
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .child(description),
         );
     }
@@ -207,17 +206,6 @@ pub fn row(
     PageBlock::new(row)
 }
 
-/// A muted 12 px line under a section.
-pub fn footnote(theme: &ArtisanTheme, text: impl Into<SharedString>) -> PageBlock {
-    PageBlock::new(
-        div()
-            .mt(px(10.0))
-            .text_xs()
-            .text_color(theme.colors.muted_foreground.to_paint())
-            .child(text.into()),
-    )
-}
-
 /// A muted line inside a card band.
 pub fn note(theme: &ArtisanTheme, text: impl Into<SharedString>) -> PageBlock {
     PageBlock::new(
@@ -225,7 +213,7 @@ pub fn note(theme: &ArtisanTheme, text: impl Into<SharedString>) -> PageBlock {
             .w_full()
             .py(px(12.0))
             .text_sm()
-            .text_color(theme.colors.muted_foreground.to_paint())
+            .text_color(theme.colors.text_muted.to_paint())
             .child(text.into()),
     )
 }
@@ -237,50 +225,23 @@ pub fn error_text(theme: &ArtisanTheme, text: impl Into<SharedString>) -> PageBl
             .w_full()
             .py(px(12.0))
             .text_sm()
-            .text_color(theme.colors.destructive.to_paint())
+            .text_color(theme.colors.destructive_text.to_paint())
             .child(text.into()),
-    )
-}
-
-/// The rail's `Settings` heading.
-pub fn nav_heading(theme: &ArtisanTheme) -> PageBlock {
-    PageBlock::new(
-        div()
-            .px(px(8.0))
-            .pb(px(12.0))
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.colors.foreground.to_paint())
-            .child("Settings"),
-    )
-}
-
-/// One uppercase group label (`ARTISAN`, `ENGINES`).
-pub fn nav_group_label(theme: &ArtisanTheme, label: &'static str) -> PageBlock {
-    PageBlock::new(
-        div()
-            .px(px(8.0))
-            .pt(px(20.0))
-            .pb(px(6.0))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.colors.muted_foreground.to_paint())
-            .child(label),
     )
 }
 
 /// An application warning or failed operation, with shared notice geometry.
 pub fn notice(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Notice {
-    let tone = theme.colors.destructive;
+    let tone = theme.colors.banner_error;
     Notice {
         content: div()
             .mt(px(24.0))
             .px(px(12.0))
             .py(px(10.0))
             .rounded(RadiusTokens::value(RadiusStep::Lg))
-            .bg(tone.with_alpha(0.10).to_paint())
+            .bg(tone.text.at(crate::theme::Opacity::ToneTint).to_paint())
             .text_sm()
-            .text_color(tone.to_paint())
+            .text_color(tone.text.to_paint())
             .child(text.into()),
     }
 }

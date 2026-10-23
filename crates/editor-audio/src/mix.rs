@@ -15,7 +15,7 @@ use crate::decode::Audio;
 /// device, and output channels beyond stereo stay silent. Pads with
 /// silence past the end and returns whether the track's last frame was read.
 #[cfg(test)]
-pub(crate) fn render(
+pub fn render(
     audio: &Audio,
     cursor: &mut usize,
     phase: &mut f64,
@@ -33,7 +33,7 @@ pub(crate) fn render(
     clippy::cast_sign_loss,
     reason = "samples narrow to f32 by design, and the whole-frame advance is a small non-negative count"
 )]
-pub(crate) fn render_mapped<T: Copy>(
+pub fn render_mapped<T: Copy>(
     audio: &Audio,
     cursor: &mut usize,
     phase: &mut f64,
@@ -54,7 +54,7 @@ pub(crate) fn render_mapped<T: Copy>(
             f64::from(audio.samples[frame * channels + channel.min(channels - 1)])
         };
         let sample = |channel: usize| {
-            let mixed = (at(*cursor, channel) * (1.0 - *phase) + at(next, channel) * *phase) as f32;
+            let mixed = at(*cursor, channel).mul_add(1.0 - *phase, at(next, channel) * *phase) as f32;
             if mixed.is_finite() { mixed } else { 0.0 }
         };
         let (left, right) = (sample(0), sample(1));
@@ -64,7 +64,7 @@ pub(crate) fn render_mapped<T: Copy>(
                     left
                 } else {
                     f32::midpoint(left, right)
-                })
+                });
             }
             [first, second, rest @ ..] => {
                 *first = convert(left);
@@ -147,6 +147,7 @@ mod tests {
 mod invalid_float_output_tests {
     use super::*;
     #[test]
+    #[expect(clippy::float_cmp, reason = "silence is exactly zero")]
     fn mapped_float_output_never_carries_nan_or_infinity() {
         let audio = Audio {
             samples: [f32::NAN, f32::INFINITY].into(),

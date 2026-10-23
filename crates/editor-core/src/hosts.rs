@@ -61,12 +61,12 @@ pub struct EditorFiles {
 impl EditorFiles {
     #[must_use]
     pub fn default_location() -> Self {
+        // `ARTISAN_EDITOR_DATA` is for capture and test runs only.
         let dir = std::env::var_os("ARTISAN_EDITOR_DATA").map_or_else(
             || {
-                dirs::config_dir()
-                    .unwrap_or_else(std::env::temp_dir)
-                    .join("Artisan")
-                    .join("editor")
+                artisan_paths::App::Editor
+                    .data()
+                    .unwrap_or_else(|_| std::env::temp_dir().join("artisan-editor"))
             },
             PathBuf::from,
         );
@@ -117,10 +117,10 @@ fn read_json<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    use std::io::Write as _;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    use std::io::Write as _;
     let parent = path.parent().context("configuration directory")?;
     let mut temporary =
         tempfile::NamedTempFile::new_in(parent).context("create configuration temporary")?;
@@ -132,7 +132,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     Ok(())
 }
 
-/// What `ae forge pair --json` prints.
+/// What `ae pair --json` prints.
 #[derive(Debug, Deserialize)]
 struct Invite {
     code: String,
@@ -149,7 +149,7 @@ pub enum LocalTarget {
 }
 
 /// Pairs with a Forge on this machine or in WSL with no typing: runs
-/// `ae forge pair --json` there and uses the code it prints.
+/// `ae pair --json` there and uses the code it prints.
 pub async fn pair_local(
     target: LocalTarget,
     identity: &Identity,
@@ -158,39 +158,29 @@ pub async fn pair_local(
     let mut command = match &target {
         LocalTarget::ThisMachine => tokio::process::Command::new("ae"),
         LocalTarget::Wsl { distro } => {
-            // `wsl.exe` gives bash only the system PATH; fall back to where
-            // `ae install` puts it.
-            let mut command = tokio::process::Command::new("wsl.exe");
-            command.args([
-                "-d",
-                distro,
-                "--",
-                "bash",
-                "-c",
-                r#"if command -v ae >/dev/null; then exec ae "$@"; else exec "$HOME/.local/bin/ae" "$@"; fi"#,
-                "ae",
-            ]);
+            let mut command = wsl_exe();
+            command.args(["-d", distro, "--exec", "sh", "-c", AE_IN_WSL, "ae"]);
             command
         }
     };
-    command.args(["forge", "pair", "--json"]);
+    command.args(["pair", "--json"]);
     let output = runtime()
         .spawn(async move { command.output().await })
         .await?
-        .context("run `ae forge pair`")?;
+        .context("run `ae pair`")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // The pre-reform `ae` has no `forge` command; its usage text says
-        // nothing about why pairing can't work.
-        if stderr.contains("unrecognized subcommand 'forge'") {
+        // An older `ae` has no `pair` command; its usage text says nothing
+        // about why pairing can't work.
+        if stderr.contains("unrecognized subcommand 'pair'") {
             bail!(
-                "the `ae` found there is from an older Artisan and has no Forge to pair with; install the new Artisan there first"
+                "the `ae` found there is from an older Artisan; install the new Artisan there first (`ae install`)"
             );
         }
-        bail!("`ae forge pair` failed: {}", stderr.trim());
+        bail!("`ae pair` failed: {}", stderr.trim());
     }
     let invite: Invite =
-        serde_json::from_slice(&output.stdout).context("read what `ae forge pair` printed")?;
+        serde_json::from_slice(&output.stdout).context("read what `ae pair` printed")?;
     let address = invite
         .address
         .unwrap_or_else(|| format!("127.0.0.1:{}", 47_900));
@@ -211,47 +201,147 @@ pub async fn pair_local(
     .await
 }
 
+/// Runs `ae` inside a WSL distribution, where `ae install` links it.
+const AE_IN_WSL: &str = r#"exec "$HOME/.local/bin/ae" "$@""#;
+
+/// `wsl.exe` without a console window: the Editor is a GUI app, so a console
+/// child would otherwise flash one.
+fn wsl_exe() -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("wsl.exe");
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.kill_on_drop(true);
+    command
+}
+
+/// Runs `wsl.exe` with `args` and returns what it printed. `wsl.exe` prints
+/// its own listings in UTF-16LE.
+async fn wsl_listing(args: &'static [&'static str]) -> Result<String> {
+    let mut command = wsl_exe();
+    command.args(args);
+    let output = runtime()
+        .spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await
+        })
+        .await
+        .context("WSL query task failed")?
+        .context("WSL query timed out")?
+        .context("Could not run wsl.exe")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "wsl.exe failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let units: Vec<u16> = output
+        .stdout
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    Ok(String::from_utf16_lossy(&units).replace('\0', ""))
+}
+
 /// The WSL distributions installed on this Windows machine; empty elsewhere
 /// or when `wsl.exe` is missing.
 pub(crate) async fn wsl_distros() -> Result<Vec<String>> {
     if !cfg!(windows) {
         return Ok(Vec::new());
     }
-    let mut command = tokio::process::Command::new("wsl.exe");
-    command.args(["--list", "--quiet"]).kill_on_drop(true);
-    let output = runtime()
-        .spawn(async move {
-            tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await
-        })
+    Ok(wsl_listing(&["--list", "--quiet"])
         .await
-        .context("WSL discovery task failed")?
-        .context("WSL discovery timed out")?
-        .context("Could not list WSL distributions")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "WSL discovery failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    let output = output.stdout;
-    // wsl.exe prints UTF-16LE.
-    let units: Vec<u16> = output
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes(*pair))
-        .collect();
-    Ok(String::from_utf16_lossy(&units)
+        .context("Could not list WSL distributions")?
         .lines()
-        .map(|line| {
-            line.trim_matches(|c: char| c.is_whitespace() || c == '\0')
-                .to_owned()
-        })
+        .map(|line| line.trim().to_owned())
         .filter(|line| !line.is_empty())
         .collect())
 }
 
+/// One row of `wsl.exe --list --verbose`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WslDistro {
+    pub name: String,
+    pub default: bool,
+    pub running: bool,
+}
+
+/// Reads `wsl.exe --list --verbose`: `* Ubuntu  Running  2`, the default
+/// marked with `*`. Distribution names hold no spaces.
+pub(crate) fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let line = line.trim();
+            let (default, line) = line
+                .strip_prefix('*')
+                .map_or((false, line), |rest| (true, rest));
+
+            let mut fields = line.split_whitespace();
+            let name = fields.next()?.to_owned();
+            let state = fields.next()?;
+            Some(WslDistro {
+                name,
+                default,
+                running: state.eq_ignore_ascii_case("running"),
+            })
+        })
+        .collect()
+}
+
+/// The installed distributions and which run; empty off Windows.
+pub(crate) async fn wsl_state() -> Result<Vec<WslDistro>> {
+    if !cfg!(windows) {
+        return Ok(Vec::new());
+    }
+    Ok(parse_wsl_verbose(
+        &wsl_listing(&["--list", "--verbose"])
+            .await
+            .context("Could not read WSL's state")?,
+    ))
+}
+
+/// Starts `distro` and the Forge installed in it (`ae forge start`, which
+/// does nothing when Forge already runs).
+pub(crate) async fn start_wsl_forge(distro: String) -> Result<()> {
+    let mut command = wsl_exe();
+    command.args([
+        "-d", &distro, "--exec", "sh", "-c", AE_IN_WSL, "ae", "forge", "start",
+    ]);
+    let output = runtime()
+        .spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(60), command.output()).await
+        })
+        .await
+        .context("WSL start task failed")?
+        .context("starting WSL timed out")?
+        .context("Could not run wsl.exe")?;
+    if !output.status.success() {
+        bail!(
+            "`ae forge start` failed in {distro}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Holds a session open in `distro`, so WSL doesn't shut it down (and the
+/// Forge in it) once no terminal is open. Dropping the child ends it.
+pub(crate) fn keep_wsl_awake(distro: &str) -> Result<tokio::process::Child> {
+    let _runtime = runtime().enter();
+    wsl_exe()
+        .args(["-d", distro, "--exec", "sleep", "infinity"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("keep WSL awake")
+}
+
 /// A remote pairing string: `<host:port> <CODE> <fingerprint>` (as `ae
-/// forge pair` prints it), any whitespace or `/` between the parts.
+/// pair` prints it), any whitespace or `/` between the parts.
 pub fn parse_pairing(text: &str) -> Result<(String, String, String)> {
     let parts: Vec<&str> = text
         .split(|c: char| c.is_whitespace() || c == '/')
@@ -263,7 +353,7 @@ pub fn parse_pairing(text: &str) -> Result<(String, String, String)> {
             (*code).to_owned(),
             fingerprint.to_ascii_lowercase(),
         )),
-        _ => bail!("expected `<host:port> <code> <fingerprint>` as printed by `ae forge pair`"),
+        _ => bail!("expected `<host:port> <code> <fingerprint>` as printed by `ae pair`"),
     }
 }
 

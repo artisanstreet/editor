@@ -76,13 +76,13 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         self
     }
     #[must_use]
-    pub fn disabled(mut self, disabled: bool) -> Self {
+    pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
     /// Joined outlined segments used by settings choices.
     #[must_use]
-    pub fn outline(mut self) -> Self {
+    pub const fn outline(mut self) -> Self {
         self.outline = true;
         self
     }
@@ -93,6 +93,10 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
     }
 }
 impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let selected = self
@@ -127,6 +131,10 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
                 .iter()
                 .map(|option| {
                     let retained = focus.read(cx);
+                    #[expect(
+                        clippy::expect_used,
+                        reason = "the retained handles were synced to the options above"
+                    )]
                     let (_, handle, id) = retained
                         .handles
                         .iter()
@@ -150,7 +158,7 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
             .gap(if outline { px(0.0) } else { px(2.0) })
             .children(self.options.into_iter().enumerate().map(|(index, option)| {
                 let chosen = index == selected;
-                let targets = targets.clone();
+                let targets = Rc::clone(&targets);
                 let key_change = change.clone();
                 let click_change = change.clone();
                 let target = targets[index].1.clone();
@@ -159,7 +167,7 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
                     .id(targets[index].2)
                     .when_some(selector.clone(), |el, selector| {
                         let selector = format!("{selector}-{index}");
-                        el.debug_selector(move || selector.clone())
+                        el.debug_selector(move || selector)
                     })
                     .role(gpui::Role::RadioButton)
                     .aria_label(option.label.clone())
@@ -178,13 +186,13 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
                     .border_color(gpui::transparent_black())
                     .text_size(TypographyTokens::size(TextStep::Xs))
                     .text_color(if chosen {
-                        theme.colors.foreground.to_paint()
+                        theme.colors.text.to_paint()
                     } else {
-                        theme.colors.muted_foreground.to_paint()
+                        theme.colors.text_muted.to_paint()
                     })
                     .when(chosen, |el| {
                         el.font_weight(FontWeight::SEMIBOLD)
-                            .bg(theme.colors.muted.to_paint())
+                            .bg(theme.colors.selected.to_paint())
                     })
                     .when(outline, |el| {
                         el.h(theme.density.control_default)
@@ -197,14 +205,15 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
                             .when(index + 1 == option_count, |el| {
                                 el.rounded_r(RadiusTokens::value(RadiusStep::X3l))
                             })
-                            .border_color(theme.colors.input.to_paint())
-                            .when(index > 0, |el| el.border_l_0())
+                            .border_color(theme.colors.line_strong.to_paint())
+                            .when(index > 0, gpui::Styled::border_l_0)
                             .text_size(theme.typography.control_text)
-                            .text_color(theme.colors.foreground.to_paint())
+                            .text_color(theme.colors.text.to_paint())
                             .font_weight(FontWeight::MEDIUM)
                     })
                     .when(disabled, |el| {
-                        el.opacity(0.5).aria_description("Unavailable")
+                        el.opacity(crate::theme::Opacity::Disabled.alpha())
+                            .aria_description("Unavailable")
                     })
                     .when(!disabled, |el| {
                         el.track_focus(&target)

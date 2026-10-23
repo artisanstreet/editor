@@ -3,45 +3,34 @@
 //! The global stream carries every session on the server, so the decoder
 //! follows the run's root session plus any child session whose parent it
 //! already follows; everything else is ignored. Shapes were captured from
-//! OpenCode 1.18.32 (see `transcripts/opencode`).
+//! OpenCode 2.1.0 (see `transcripts/opencode`).
 
 use crate::{EngineEvent, LiveKind};
 use anyhow::Context as _;
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Collection, Decision, ErrorKind, FileChange, FileOp, ItemId,
-    ItemKind, Output, Phase, PlanStep, Question, QuestionOption, SearchMode, Status, StepStatus,
-    ToolKind, Usage,
+    ItemKind, Output, Phase, Question, QuestionOption, SearchMode, Status, ToolKind, Usage,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 
 #[derive(serde::Deserialize)]
-struct NativeError<'a> {
-    name: &'a str,
-}
-
-#[derive(serde::Deserialize)]
-struct NativeSessionStatus<'a> {
-    #[serde(borrow)]
-    status: NativeStatus<'a>,
-}
-#[derive(serde::Deserialize)]
-struct NativeStatus<'a> {
+struct NativeField {
+    key: String,
     #[serde(rename = "type")]
-    kind: &'a str,
-}
-
-#[derive(serde::Deserialize)]
-struct NativeQuestion {
-    question: String,
+    kind: String,
     #[serde(default)]
-    header: Option<String>,
+    title: Option<String>,
     #[serde(default)]
-    multiple: bool,
-    options: Vec<NativeQuestionOption>,
+    description: Option<String>,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    options: Vec<NativeOption>,
 }
 #[derive(serde::Deserialize)]
-struct NativeQuestionOption {
+struct NativeOption {
+    value: String,
     label: String,
     #[serde(default)]
     description: Option<String>,
@@ -50,61 +39,68 @@ struct NativeQuestionOption {
 /// Tool names OpenCode ships; any other name with an underscore is an MCP
 /// tool (`<server>_<tool>`).
 const BUILTIN_TOOLS: &[&str] = &[
-    "apply_patch",
-    "bash",
-    "codesearch",
     "edit",
+    "execute",
     "glob",
     "grep",
-    "invalid",
-    "list",
-    "lsp",
-    "ls",
-    "multiedit",
-    "patch",
-    "plan_enter",
-    "plan_exit",
     "question",
     "read",
+    "shell",
     "skill",
-    "task",
-    "todoread",
-    "todowrite",
+    "subagent",
     "webfetch",
     "websearch",
     "write",
 ];
 
 /// An HTTP request the driver must send to answer OpenCode.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Reply {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reply {
+    pub method: Method,
     pub path: String,
     pub body: Option<Value>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Post,
+    Delete,
+}
+
 #[derive(Default)]
-pub(crate) struct Decoder {
+pub struct Decoder {
     reasoning_summary: crate::reasoning::Summary,
     root: Option<String>,
     /// Followed sessions → the `Agent` item their items belong to.
     sessions: HashMap<String, Option<String>>,
+    /// Child sessions no `subagent` call has claimed yet → their
+    /// `session.created` data, for the Agent item they get if none does.
+    unbound: HashMap<String, Value>,
+    /// Tool names by call id: `session.tool.called` doesn't repeat it.
+    tool_names: HashMap<String, String>,
     /// By OpenCode call id.
     tools: HashMap<String, Tool>,
+    /// Shells still running in the background → the call that started them.
+    shells: HashMap<String, String>,
     /// Texts ended in the current step, per session, for the phase decision.
     step_texts: HashMap<String, Vec<(String, String)>>,
     open_texts: HashSet<String>,
-    /// OpenCode message id → our user message, for steers.
+    /// Compactions started per session, which keys the running one.
+    compactions: HashMap<String, usize>,
+    /// OpenCode inbox id → our user message, for steers.
     steers: HashMap<String, ItemId>,
     admitted: HashSet<String>,
-    prompted: HashSet<String>,
+    delivered: HashSet<String>,
     turn_open: bool,
     pending: HashMap<String, Pending>,
     usage: Usage,
     model: Option<String>,
     title: Option<String>,
+    /// The error the last step failed with, which the execution failure
+    /// that follows repeats.
+    step_error: Option<String>,
     /// The last error that ended a turn.
     pub error: Option<String>,
-    recoverable_error: Option<String>,
     cancelled: bool,
 }
 
@@ -112,13 +108,35 @@ struct Tool {
     session: String,
     status: Status,
     kind: ItemKind,
-    /// Set for `task` calls whose child session isn't known yet.
-    awaiting_child: bool,
 }
 
 enum Pending {
-    Permission { session: String, request: String },
-    Question { session: String, request: String },
+    Permission {
+        session: String,
+        request: String,
+    },
+    Form {
+        session: String,
+        form: String,
+        fields: Vec<FormField>,
+    },
+}
+
+/// A form field asked as one question.
+struct FormField {
+    key: String,
+    kind: FieldKind,
+    /// Option label → the value OpenCode wants back.
+    values: HashMap<String, String>,
+}
+
+#[derive(Clone, Copy)]
+enum FieldKind {
+    Text,
+    Choice,
+    Choices,
+    Boolean,
+    Number,
 }
 
 impl Decoder {
@@ -131,7 +149,7 @@ impl Decoder {
     }
 
     #[cfg(test)]
-    pub fn has_root(&self) -> bool {
+    pub const fn has_root(&self) -> bool {
         self.root.is_some()
     }
 
@@ -140,12 +158,12 @@ impl Decoder {
         self.root = Some(session);
     }
 
-    /// The driver sent a prompt OpenCode admitted as `message`; `steer`
-    /// names our user message when it was a steer.
+    /// The driver sent a prompt OpenCode admitted as inbox item `message`;
+    /// `steer` names our user message when it was a steer.
     pub fn prompt_sent(&mut self, message: &str, steer: Option<ItemId>) -> Vec<EngineEvent> {
         self.admitted.insert(message.to_owned());
         match steer {
-            Some(id) if self.prompted.contains(message) => vec![EngineEvent::InputAccepted { id }],
+            Some(id) if self.delivered.contains(message) => vec![EngineEvent::InputAccepted { id }],
             Some(id) => {
                 self.steers.insert(message.to_owned(), id);
                 Vec::new()
@@ -154,14 +172,14 @@ impl Decoder {
         }
     }
 
-    /// The engine has nothing left to do for this run: the last turn ended
-    /// and every prompt we sent has started.
+    /// The engine has nothing left to do for this run: the last execution
+    /// ended and every prompt we sent has been delivered.
     pub fn idle(&self) -> bool {
         !self.turn_open
             && self
                 .admitted
                 .iter()
-                .all(|message| self.prompted.contains(message))
+                .all(|message| self.delivered.contains(message))
     }
 
     /// Settles what is still open after the user cancelled.
@@ -189,6 +207,10 @@ impl Decoder {
 
     /// One SSE `data:` payload.
     pub fn feed(&mut self, data: &str) -> anyhow::Result<Vec<EngineEvent>> {
+        #[derive(serde::Deserialize)]
+        struct Identity<'a> {
+            id: &'a str,
+        }
         let event: Value = serde_json::from_str(data).context("decoding OpenCode protocol JSON")?;
         anyhow::ensure!(
             event.is_object(),
@@ -198,10 +220,6 @@ impl Decoder {
             event["type"].is_string(),
             "OpenCode event is missing its type"
         );
-        #[derive(serde::Deserialize)]
-        struct Identity<'a> {
-            id: &'a str,
-        }
         let identity = <Identity as serde::Deserialize>::deserialize(&event)
             .context("decoding OpenCode event identity")?;
         anyhow::ensure!(!identity.id.trim().is_empty(), "OpenCode event ID is empty");
@@ -210,51 +228,97 @@ impl Decoder {
         Ok(crate::retained::settle(self, events))
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per OpenCode event")]
     fn feed_raw(&mut self, event: &Value) -> Vec<EngineEvent> {
         let mut out = Vec::new();
         let kind = event["type"].as_str().unwrap_or_default();
         let data = &event["data"];
-        // Child sessions announce themselves before any of their events.
-        if matches!(kind, "session.created" | "session.updated") {
-            self.session_info(data, &mut out);
-            return out;
+        match kind {
+            // Child sessions announce themselves before any of their events.
+            "session.created" => {
+                self.session_created(data);
+                return out;
+            }
+            // Shells live outside sessions: a background one reports its exit here.
+            "shell.exited" => {
+                self.shell_exited(data, &mut out);
+                return out;
+            }
+            "form.created" => {
+                self.form_created(event, &data["form"], &mut out);
+                return out;
+            }
+            "form.replied" | "form.cancelled" => {
+                self.form_settled(kind == "form.replied", data, &mut out);
+                return out;
+            }
+            _ => {}
         }
         let Some(session) = data["sessionID"].as_str() else {
             return out;
         };
+        if kind == "session.step.started" {
+            self.bind_orphan(session, &mut out);
+        }
         let Some(parent) = self.sessions.get(session).cloned() else {
             return out;
         };
         let root = self.root.as_deref() == Some(session);
         match kind {
-            "session.next.prompt.admitted" if root => {
-                if let Some(message) = data["messageID"].as_str() {
+            "session.renamed" if root => {
+                if let Some(title) = data["title"].as_str()
+                    && !title.is_empty()
+                    && self.title.as_deref() != Some(title)
+                {
+                    self.title = Some(title.to_owned());
+                    out.push(EngineEvent::Title {
+                        title: title.to_owned(),
+                    });
+                }
+            }
+            "session.inbox.enqueued" if root => {
+                if let Some(message) = data["inboxID"].as_str()
+                    && data["item"]["type"] == "user"
+                {
                     self.admitted.insert(message.to_owned());
                 }
             }
-            "session.next.prompted" if root => {
-                if let Some(message) = data["messageID"].as_str() {
-                    self.prompted.insert(message.to_owned());
+            "session.inbox.delivered" if root => {
+                if let Some(message) = data["inboxID"].as_str() {
+                    self.delivered.insert(message.to_owned());
                     if let Some(id) = self.steers.remove(message) {
                         out.push(EngineEvent::InputAccepted { id });
                     }
                 }
-                self.turn_open = true;
             }
-            "session.next.step.started" => {
+            "session.execution.started" if root => {
+                self.turn_open = true;
+                self.step_error = None;
+            }
+            "session.execution.succeeded" | "session.execution.interrupted" if root => {
+                self.turn_open = false;
+            }
+            "session.execution.failed" => {
+                let message = error_message(&data["error"]);
+                if self.step_error.take().as_ref() != Some(&message) {
+                    out.push(error_item(event, parent, ErrorKind::Api, &message, false));
+                }
                 if root {
-                    self.turn_open = true;
-                    self.recoverable_error = None;
-                    if let Some(model) = model_id(&data["model"])
-                        && self.model.as_ref() != Some(&model)
-                    {
-                        self.model = Some(model.clone());
-                        out.push(EngineEvent::Model { id: model });
-                    }
+                    self.turn_open = false;
+                    self.error = Some(message);
+                }
+            }
+            "session.step.started" => {
+                if root
+                    && let Some(model) = model_id(&data["model"])
+                    && self.model.as_ref() != Some(&model)
+                {
+                    self.model = Some(model.clone());
+                    out.push(EngineEvent::Model { id: model });
                 }
                 self.step_texts.remove(session);
             }
-            "session.next.text.started" => {
+            "session.text.started" => {
                 let Some(key) = text_key(data) else {
                     return out;
                 };
@@ -269,29 +333,23 @@ impl Decoder {
                     },
                 });
             }
-            "session.next.text.delta" => {
-                if let Some(text) = data["delta"].as_str() {
+            "session.text.delta" => {
+                if let Some(text) = data["delta"].as_str()
+                    && let Some(key) = text_key(data)
+                {
                     out.push(EngineEvent::Live {
-                        target: LiveKind::Text {
-                            key: {
-                                let Some(key) = text_key(data) else {
-                                    return out;
-                                };
-                                key
-                            },
-                        },
+                        target: LiveKind::Text { key },
                         text: text.to_owned(),
                         append: true,
                     });
                 }
             }
-            "session.next.text.ended" => {
+            "session.text.ended" => {
                 let Some(text) = data["text"].as_str() else {
                     let message = "OpenCode completed a text without its required final body";
                     out.push(error_item(event, parent, ErrorKind::Api, message, false));
                     if root {
                         self.error = Some(message.to_owned());
-                        self.turn_open = false;
                     }
                     return out;
                 };
@@ -310,14 +368,14 @@ impl Decoder {
                     append: false,
                 });
             }
-            "session.next.reasoning.started" if root => {
+            "session.reasoning.started" if root => {
                 out.push(EngineEvent::Live {
                     target: LiveKind::Reasoning,
                     text: String::new(),
                     append: false,
                 });
             }
-            "session.next.reasoning.delta" if root => {
+            "session.reasoning.delta" if root => {
                 if let Some(text) = data["delta"].as_str() {
                     out.push(EngineEvent::Live {
                         target: LiveKind::Reasoning,
@@ -326,65 +384,28 @@ impl Decoder {
                     });
                 }
             }
-            "session.next.tool.called" => self.tool_called(session, data, &mut out),
-            "session.next.tool.progress" => self.tool_progress(data, &mut out),
-            "session.next.tool.success" => self.tool_settled(data, true, &mut out),
-            "session.next.tool.failed" => self.tool_settled(data, false, &mut out),
-            "session.next.step.ended" => {
-                self.step_ended(session, parent, data, &mut out);
+            "session.tool.input.started" => {
+                if let (Some(call), Some(name)) = (data["id"].as_str(), data["name"].as_str()) {
+                    self.tool_names.insert(call.to_owned(), name.to_owned());
+                }
             }
-            "session.next.step.failed" => {
-                let message = error_message(&data["error"]);
+            "session.tool.called" => self.tool_called(session, data, &mut out),
+            "session.tool.progress" => self.tool_progress(data),
+            "session.tool.success" => self.tool_settled(data, true, &mut out),
+            "session.tool.failed" => self.tool_settled(data, false, &mut out),
+            "session.step.ended" => {
+                self.step_ended(session, parent.as_deref(), data, &mut out);
+            }
+            "session.step.failed" => {
                 self.step_texts.remove(session);
-                out.push(error_item(event, parent, ErrorKind::Api, &message, false));
-                if root {
-                    self.turn_open = false;
-                    self.error = Some(message);
+                // An interrupt fails the step; the user already knows.
+                if data["error"]["type"] != "aborted" {
+                    let message = error_message(&data["error"]);
+                    out.push(error_item(event, parent, ErrorKind::Api, &message, false));
+                    self.step_error = Some(message);
                 }
             }
-            "session.error" => {
-                let message = error_message(&data["error"]);
-                let recovering = matches!(
-                    <NativeError as serde::Deserialize>::deserialize(&data["error"]),
-                    Ok(NativeError {
-                        name: "ContextOverflowError"
-                    })
-                );
-                out.push(error_item(
-                    event,
-                    parent,
-                    ErrorKind::Api,
-                    &message,
-                    recovering,
-                ));
-                // v1.18.32 processor.ts halt publishes other session errors
-                // before setting idle; overflow instead requests compaction.
-                if root {
-                    if recovering {
-                        self.recoverable_error = Some(message);
-                    } else {
-                        self.error = Some(message);
-                        self.turn_open = false;
-                    }
-                }
-            }
-            "session.status" | "session.idle" if root => {
-                let idle = kind == "session.idle"
-                    || matches!(
-                        <NativeSessionStatus as serde::Deserialize>::deserialize(data),
-                        Ok(NativeSessionStatus {
-                            status: NativeStatus { kind: "idle" }
-                        })
-                    );
-                if idle
-                    && self.turn_open
-                    && let Some(message) = self.recoverable_error.take()
-                {
-                    self.error = Some(message);
-                    self.turn_open = false;
-                }
-            }
-            "session.next.retried" if root => {
+            "session.retry.scheduled" if root => {
                 let attempt = data["attempt"].as_u64().unwrap_or_default();
                 out.push(EngineEvent::Live {
                     target: LiveKind::Status,
@@ -395,75 +416,32 @@ impl Decoder {
                     append: false,
                 });
             }
-            "session.next.compaction.started" | "session.next.compaction.ended" => {
-                let Some(message) = data["messageID"]
-                    .as_str()
-                    .filter(|id| !id.trim().is_empty())
-                else {
-                    out.push(error_item(
-                        event,
-                        parent,
-                        ErrorKind::Execution,
-                        "OpenCode compaction omitted required messageID",
-                        false,
-                    ));
-                    return out;
-                };
-                let key = format!("compaction:{message}");
-                let status = if kind.ends_with("started") {
-                    Status::Running
-                } else {
-                    Status::Done
+            "session.compaction.started"
+            | "session.compaction.ended"
+            | "session.compaction.failed" => {
+                let count = self.compactions.entry(session.to_owned()).or_default();
+                let status = match kind {
+                    "session.compaction.started" => {
+                        *count += 1;
+                        Status::Running
+                    }
+                    "session.compaction.ended" => Status::Done,
+                    _ => Status::Failed,
                 };
                 out.push(EngineEvent::Item {
-                    key,
+                    key: format!("compaction:{session}:{count}"),
                     parent,
                     status,
                     kind: ItemKind::Compaction {
+                        summary: None,
                         tokens_before: None,
                         tokens_after: None,
+                        switch: None,
                     },
                 });
             }
-            "todo.updated" if root => {
-                let steps = match todo_steps(&data["todos"]) {
-                    Ok(steps) => steps,
-                    Err(message) => {
-                        out.push(error_item(
-                            event,
-                            parent,
-                            ErrorKind::Execution,
-                            &message,
-                            false,
-                        ));
-                        return out;
-                    }
-                };
-                let status = if steps
-                    .iter()
-                    .all(|step| matches!(step.status, StepStatus::Done | StepStatus::Cancelled))
-                {
-                    Status::Done
-                } else {
-                    Status::Running
-                };
-                out.push(EngineEvent::Item {
-                    key: "plan".into(),
-                    parent: None,
-                    status,
-                    kind: ItemKind::Plan {
-                        steps: steps.into(),
-                        proposal: None,
-                        approval: None,
-                    },
-                });
-            }
-            "permission.v2.asked" => self.permission_asked(session, data, &mut out),
-            "permission.v2.replied" => self.permission_replied(data, &mut out),
-            "question.v2.asked" => self.question_asked(session, data, &mut out),
-            "question.v2.replied" | "question.v2.rejected" => {
-                self.question_settled(kind == "question.v2.replied", data, &mut out);
-            }
+            "permission.asked" => self.permission_asked(session, data, &mut out),
+            "permission.replied" => self.permission_replied(data, &mut out),
             _ => tracing::debug!(kind, "ignored unsupported OpenCode event"),
         }
         out
@@ -517,11 +495,19 @@ impl Decoder {
                     out.push(self.tool_event(key));
                 }
                 Reply {
+                    method: Method::Post,
                     path: format!("/api/session/{session}/permission/{request}/reply"),
-                    body: Some(json!({ "reply": reply })),
+                    body: Some(json!({ "decision": reply })),
                 }
             }
-            (Pending::Question { session, request }, Answer::Question { answers }) => {
+            (
+                Pending::Form {
+                    session,
+                    form,
+                    fields,
+                },
+                Answer::Question { answers },
+            ) => {
                 let skipped = answers.iter().all(Option::is_none);
                 if let Some(tool) = self.tools.get_mut(key) {
                     if let ItemKind::Question {
@@ -539,17 +525,22 @@ impl Decoder {
                 }
                 if skipped {
                     Reply {
-                        path: format!("/api/session/{session}/question/{request}/reject"),
+                        method: Method::Delete,
+                        path: format!("/api/session/{session}/form/{form}"),
                         body: None,
                     }
                 } else {
-                    let answers: Vec<Vec<String>> = native
+                    let answer: Map<String, Value> = fields
                         .iter()
-                        .map(|answer| answer.clone().unwrap_or_default())
+                        .zip(&native)
+                        .filter_map(|(field, answer)| {
+                            Some((field.key.clone(), field.value(answer.as_ref()?)))
+                        })
                         .collect();
                     Reply {
-                        path: format!("/api/session/{session}/question/{request}/reply"),
-                        body: Some(json!({ "answers": answers })),
+                        method: Method::Post,
+                        path: format!("/api/session/{session}/form/{form}/reply"),
+                        body: Some(json!({ "answer": answer })),
                     }
                 }
             }
@@ -562,81 +553,69 @@ impl Decoder {
         Some((reply, out))
     }
 
-    fn session_info(&mut self, data: &Value, out: &mut Vec<EngineEvent>) {
-        let info = &data["info"];
-        let Some(session) = data["sessionID"].as_str().or_else(|| info["id"].as_str()) else {
+    /// A child session of a followed one: followed from now on, under the
+    /// `subagent` call that claims it with its progress.
+    fn session_created(&mut self, data: &Value) {
+        let (Some(session), Some(parent)) = (data["sessionID"].as_str(), data["parentID"].as_str())
+        else {
             return;
         };
-        if self.root.as_deref() == Some(session) {
-            if let Some(title) = info["title"].as_str()
-                && !title.is_empty()
-                && !title.starts_with("New session - ")
-                && self.title.as_deref() != Some(title)
-            {
-                self.title = Some(title.to_owned());
-                out.push(EngineEvent::Title {
-                    title: title.to_owned(),
-                });
-            }
+        if self.sessions.contains_key(session) || !self.sessions.contains_key(parent) {
             return;
         }
-        if self.sessions.contains_key(session) {
-            return;
-        }
-        let Some(parent_session) = info["parentID"].as_str() else {
+        self.sessions.insert(session.to_owned(), None);
+        self.unbound.insert(session.to_owned(), data.clone());
+    }
+
+    /// A child no call claimed before its first step still gets an Agent
+    /// item. Arrival order never ties a child to a call.
+    fn bind_orphan(&mut self, session: &str, out: &mut Vec<EngineEvent>) {
+        let Some(info) = self.unbound.remove(session) else {
             return;
         };
-        if !self.sessions.contains_key(parent_session) {
-            return;
-        }
-        // Bind only an explicit call relation. Arrival order and lexical call
-        // IDs do not identify the process that created a child session.
-        let call = info["parentCallID"]
+        let parent = info["parentID"]
             .as_str()
-            .or_else(|| data["callID"].as_str());
-        let agent = if let Some((key, tool)) =
-            call.and_then(|call| self.tools.get_mut(call).map(|tool| (call, tool)))
-        {
-            tool.awaiting_child = false;
-            key.to_owned()
-        } else {
-            // A child we can't tie to a call still gets an Agent item.
-            let key = format!("agent:{session}");
-            out.push(EngineEvent::Item {
-                key: key.clone(),
-                parent: self.sessions[parent_session].clone(),
-                status: Status::Running,
-                kind: ItemKind::Agent {
-                    name: info["agent"].as_str().map(str::to_owned),
-                    description: (info["title"].as_str().unwrap_or_default().to_owned()).into(),
-                    prompt: None,
-                    agent_id: None,
-                    context_used: None,
-                    model: None,
-                    background: false,
-                    result: None,
-                    label: None,
-                },
-            });
-            key
-        };
-        self.sessions.insert(session.to_owned(), Some(agent));
+            .and_then(|parent| self.sessions.get(parent).cloned().flatten());
+        let key = format!("agent:{session}");
+        out.push(EngineEvent::Item {
+            key: key.clone(),
+            parent,
+            status: Status::Running,
+            kind: ItemKind::Agent {
+                engine: None,
+                thread: None,
+                name: str_at(&info, "agent"),
+                description: (str_at(&info, "title").unwrap_or_default()).into(),
+                prompt: None,
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: false,
+                result: None,
+                label: None,
+            },
+        });
+        self.sessions.insert(session.to_owned(), Some(key));
     }
 
     fn tool_called(&mut self, session: &str, data: &Value, out: &mut Vec<EngineEvent>) {
-        let (Some(call), Some(name)) = (data["callID"].as_str(), data["tool"].as_str()) else {
+        let Some(call) = data["id"].as_str() else {
+            return;
+        };
+        let Some(name) = self.tool_names.get(call).cloned() else {
+            tracing::warn!(call, "OpenCode called a tool it never named");
             return;
         };
         let input = &data["input"];
-        match name {
-            // The todo list arrives as `todo.updated`; the question as
-            // `question.v2.asked`.
-            "todowrite" | "todoread" | "question" => return,
-            _ => {}
+        // The question arrives as `form.created`.
+        if name == "question" {
+            return;
         }
-        let kind = if name == "task" {
+        let kind = if name == "subagent" {
             ItemKind::Agent {
-                name: str_at(input, "subagent_type"),
+                engine: None,
+                thread: None,
+                name: str_at(input, "agent"),
                 description: (str_at(input, "description").unwrap_or_default()).into(),
                 prompt: (str_at(input, "prompt")).map(Into::into),
                 agent_id: None,
@@ -652,7 +631,7 @@ impl Decoder {
                 _ => None,
             };
             ItemKind::Tool {
-                tool: match tool_kind(name, input) {
+                tool: match tool_kind(&name, input) {
                     Ok(tool) => tool,
                     Err(message) => {
                         out.push(EngineEvent::Item {
@@ -684,60 +663,46 @@ impl Decoder {
                 session: session.to_owned(),
                 status,
                 kind,
-                awaiting_child: name == "task",
             },
         );
         out.push(self.tool_event(call));
     }
 
-    fn tool_progress(&mut self, data: &Value, out: &mut Vec<EngineEvent>) {
-        let Some(call) = data["callID"].as_str() else {
+    /// A `subagent` call names the child session it runs in its progress.
+    fn tool_progress(&mut self, data: &Value) {
+        let (Some(call), Some(child)) =
+            (data["id"].as_str(), data["metadata"]["sessionID"].as_str())
+        else {
             return;
         };
         let Some(tool) = self.tools.get(call) else {
             return;
         };
-        let text = data["delta"]
-            .as_str()
-            .or_else(|| data["output"].as_str())
-            .or_else(|| data["text"].as_str())
-            .map(str::to_owned)
-            .or_else(|| crate::native::content_text(&data["content"]));
-        if let Some(text) = text {
-            let key = call.to_owned();
-            let target = match &tool.kind {
-                ItemKind::Tool {
-                    tool: ToolKind::Shell { .. },
-                    ..
-                } => LiveKind::Shell { key },
-                _ => LiveKind::Progress { key },
-            };
-            out.push(EngineEvent::Live {
-                target,
-                text,
-                append: true,
-            });
+        if !matches!(tool.kind, ItemKind::Agent { .. }) {
+            return;
         }
+        self.unbound.remove(child);
+        self.sessions
+            .insert(child.to_owned(), Some(call.to_owned()));
     }
 
     fn tool_settled(&mut self, data: &Value, success: bool, out: &mut Vec<EngineEvent>) {
-        let Some(call) = data["callID"].as_str() else {
+        let Some(call) = data["id"].as_str() else {
             return;
         };
-        let cancelled = self.cancelled;
+        let cancelled = self.cancelled || data["error"]["type"] == "aborted";
         let Some(tool) = self.tools.get_mut(call) else {
             return;
         };
-        let structured = &data["structured"];
+        let metadata = &data["metadata"];
         let text = if success {
-            crate::native::content_text(&data["content"]).or_else(|| str_at(structured, "content"))
+            crate::native::content_text(&data["content"])
         } else {
             Some(error_message(&data["error"]))
         };
         match &mut tool.kind {
             ItemKind::Agent { result, .. } => {
                 *result = text.map(Into::into);
-                tool.awaiting_child = false;
             }
             ItemKind::Tool {
                 tool: kind,
@@ -749,11 +714,11 @@ impl Decoder {
                 *output = text
                     .filter(|text| !text.is_empty())
                     .map(|text| Output::from_text(&text));
-                *exit_code = structured["exit"]
+                *exit_code = metadata["exit"]
                     .as_i64()
                     .and_then(|code| i32::try_from(code).ok());
                 if let ToolKind::Edit { changes } = kind
-                    && let Err(message) = settle_changes(changes, structured)
+                    && let Err(message) = settle_changes(changes, metadata)
                 {
                     tool.status = Status::Failed;
                     out.push(EngineEvent::Item {
@@ -779,12 +744,29 @@ impl Decoder {
                     (false, false, true) => Status::Cancelled,
                     (false, false, false) => Status::Failed,
                 };
+                // A background shell's call returns while it runs on; it
+                // ends with its `shell.exited`.
+                if success
+                    && str_at(metadata, "status").as_deref() == Some("running")
+                    && let ToolKind::Shell { background, .. } = kind
+                    && let Some(shell) = str_at(metadata, "shellID")
+                {
+                    *background = true;
+                    tool.status = Status::Running;
+                    self.shells.insert(shell, call.to_owned());
+                }
                 out.push(self.tool_event(call));
                 return;
             }
             // Settled when answered.
             ItemKind::Question { .. } => return,
-            _ => {}
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => {}
         }
         tool.status = match (success, cancelled) {
             (true, _) => Status::Done,
@@ -794,10 +776,36 @@ impl Decoder {
         out.push(self.tool_event(call));
     }
 
+    fn shell_exited(&mut self, data: &Value, out: &mut Vec<EngineEvent>) {
+        let Some(call) = data["id"]
+            .as_str()
+            .and_then(|shell| self.shells.remove(shell))
+        else {
+            return;
+        };
+        let Some(tool) = self.tools.get_mut(&call) else {
+            return;
+        };
+        let exit = data["exit"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok());
+        tool.status = match (data["status"].as_str(), exit) {
+            (Some("exited"), Some(0) | None) => Status::Done,
+            (Some("killed"), _) => Status::Cancelled,
+            _ => Status::Failed,
+        };
+        if let ItemKind::Tool { exit_code, .. } = &mut tool.kind
+            && exit.is_some()
+        {
+            *exit_code = exit;
+        }
+        out.push(self.tool_event(&call));
+    }
+
     fn step_ended(
         &mut self,
         session: &str,
-        parent: Option<String>,
+        parent: Option<&str>,
         data: &Value,
         out: &mut Vec<EngineEvent>,
     ) {
@@ -812,8 +820,7 @@ impl Decoder {
         if let Some(cost) = data["cost"].as_f64() {
             self.usage.cost_usd = Some(self.usage.cost_usd.unwrap_or_default() + cost);
         }
-        let root = self.root.as_deref() == Some(session);
-        if root {
+        if self.root.as_deref() == Some(session) {
             self.usage.context_used = Some(
                 count(&tokens["input"])
                     + count(&tokens["cache"]["read"])
@@ -827,7 +834,7 @@ impl Decoder {
         for (index, (key, text)) in texts.into_iter().enumerate() {
             out.push(EngineEvent::Item {
                 key,
-                parent: parent.clone(),
+                parent: parent.map(str::to_owned),
                 status: Status::Done,
                 kind: ItemKind::AssistantMessage {
                     text: text.into(),
@@ -838,12 +845,6 @@ impl Decoder {
                     },
                 },
             });
-        }
-        if !final_step {
-            return;
-        }
-        if root {
-            self.turn_open = false;
         }
     }
 
@@ -859,11 +860,11 @@ impl Decoder {
             .filter_map(Value::as_str)
             .collect();
         let approval_request = match action {
-            "bash" => ApprovalRequest::Command {
+            "shell" => ApprovalRequest::Command {
                 command: (resources.join("\n")).into(),
                 cwd: None,
             },
-            "edit" => ApprovalRequest::FileChange,
+            "edit" | "write" => ApprovalRequest::FileChange,
             _ => ApprovalRequest::Action {
                 description: (format!("{action} {}", resources.join(", "))
                     .trim()
@@ -883,10 +884,7 @@ impl Decoder {
         };
         // Approvals live on the tool they gate; one asked before its call
         // is announced creates the item from what the permission says.
-        let key = data["source"]["callID"]
-            .as_str()
-            .unwrap_or(request)
-            .to_owned();
+        let key = data["source"]["id"].as_str().unwrap_or(request).to_owned();
         let tool = self.tools.entry(key.clone()).or_insert_with(|| Tool {
             session: session.to_owned(),
             status: Status::Running,
@@ -904,7 +902,6 @@ impl Decoder {
                 exit_code: None,
                 approval: None,
             },
-            awaiting_child: false,
         });
         if let ItemKind::Tool { approval: slot, .. } = &mut tool.kind {
             *slot = Some(approval);
@@ -930,7 +927,7 @@ impl Decoder {
             .iter()
             .find_map(|(key, pending)| match pending {
                 Pending::Permission { request: asked, .. } if asked == request => Some(key.clone()),
-                _ => None,
+                Pending::Permission { .. } | Pending::Form { .. } => None,
             })
         else {
             return;
@@ -945,67 +942,45 @@ impl Decoder {
         }
     }
 
-    fn question_asked(&mut self, session: &str, data: &Value, out: &mut Vec<EngineEvent>) {
-        let Some(request) = data["id"].as_str() else {
+    /// A form (the question tool asks through one) becomes a question per
+    /// field.
+    fn form_created(&mut self, event: &Value, form: &Value, out: &mut Vec<EngineEvent>) {
+        let (Some(session), Some(id)) = (form["sessionID"].as_str(), form["id"].as_str()) else {
             return;
         };
-        let key = data["tool"]["callID"]
+        let Some(parent) = self.sessions.get(session).cloned() else {
+            return;
+        };
+        let key = form["metadata"]["tool"]["id"]
             .as_str()
-            .unwrap_or(request)
+            .unwrap_or(id)
             .to_owned();
-        let parsed = <Vec<NativeQuestion> as serde::Deserialize>::deserialize(&data["questions"]);
-        let native = match parsed {
-            Ok(questions)
-                if !questions.is_empty()
-                    && questions.iter().all(|question| {
-                        !question.question.trim().is_empty()
-                            && question
-                                .options
-                                .iter()
-                                .all(|option| !option.label.trim().is_empty())
-                    }) =>
-            {
-                questions
-            }
-            _ => {
-                let message = "OpenCode supplied malformed question prompts or options";
-                tracing::warn!(session, request, message);
-                out.push(EngineEvent::Item {
-                    key: format!("invalid-question:{request}"),
-                    parent: self.sessions.get(session).cloned().flatten(),
-                    status: Status::Done,
-                    kind: ItemKind::Error {
-                        kind: ErrorKind::Execution,
-                        message: (message.to_owned()).into(),
-                        retryable: false,
-                    },
-                });
+        let native = <Vec<NativeField> as serde::Deserialize>::deserialize(&form["fields"]);
+        let asked = native.ok().and_then(|fields| {
+            let asked: Option<Vec<_>> = fields
+                .into_iter()
+                .filter(|field| !field.hidden)
+                .map(form_question)
+                .collect();
+            asked.filter(|asked| !asked.is_empty())
+        });
+        let Some(asked) = asked else {
+            let message = "OpenCode asked a form Artisan can't show";
+            tracing::warn!(session, form = id, message);
+            out.push(error_item(
+                event,
+                parent,
+                ErrorKind::Execution,
+                message,
+                false,
+            ));
+            if self.root.as_deref() == Some(session) {
                 self.error = Some(message.to_owned());
                 self.turn_open = false;
-                return;
             }
+            return;
         };
-        let questions = native
-            .into_iter()
-            .enumerate()
-            .map(|(index, question)| Question {
-                id: index.to_string(),
-                header: question.header,
-                text: (question.question).into(),
-                multi_select: question.multiple,
-                options: question
-                    .options
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, option)| QuestionOption {
-                        id: format!("option-{index}"),
-                        label: option.label,
-                        description: (option.description).map(Into::into),
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
-            })
-            .collect::<Vec<_>>();
+        let (questions, fields): (Vec<Question>, Vec<FormField>) = asked.into_iter().unzip();
         self.tools.insert(
             key.clone(),
             Tool {
@@ -1017,54 +992,65 @@ impl Decoder {
                     answers: None,
                     answer_text: None,
                 },
-                awaiting_child: false,
             },
         );
         self.pending.insert(
             key.clone(),
-            Pending::Question {
+            Pending::Form {
                 session: session.to_owned(),
-                request: request.to_owned(),
+                form: id.to_owned(),
+                fields,
             },
         );
         out.push(self.tool_event(&key));
     }
 
-    /// Settles a question another client answered.
-    fn question_settled(&mut self, replied: bool, data: &Value, out: &mut Vec<EngineEvent>) {
-        let Some(request) = data["requestID"].as_str() else {
+    /// Settles a form another client answered or dismissed.
+    fn form_settled(&mut self, replied: bool, data: &Value, out: &mut Vec<EngineEvent>) {
+        let Some(form) = data["id"].as_str() else {
             return;
         };
-        let Some(key) = self
+        let Some((key, keys)) = self
             .pending
             .iter()
             .find_map(|(key, pending)| match pending {
-                Pending::Question { request: asked, .. } if asked == request => Some(key.clone()),
-                _ => None,
+                Pending::Form {
+                    form: asked,
+                    fields,
+                    ..
+                } if asked == form => Some((
+                    key.clone(),
+                    fields
+                        .iter()
+                        .map(|field| field.key.clone())
+                        .collect::<Vec<_>>(),
+                )),
+                Pending::Permission { .. } | Pending::Form { .. } => None,
             })
         else {
             return;
         };
-        let answers = if replied {
-            data["answers"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|answer| {
-                    Some(artisan_api::QuestionAnswer::Text {
-                        text: answer
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let answers = keys
+            .iter()
+            .map(|field| {
+                let value = replied
+                    .then(|| &data["answer"][field])
+                    .filter(|value| !value.is_null())?;
+                let text = match value {
+                    Value::String(text) => text.clone(),
+                    Value::Array(items) => items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    other
+                    @ (Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_)) => {
+                        other.to_string()
+                    }
+                };
+                Some(artisan_api::QuestionAnswer::Text { text })
+            })
+            .collect();
         if let Some((_, events)) = self.answer(&key, &Answer::Question { answers }) {
             out.extend(events);
         }
@@ -1087,23 +1073,93 @@ impl crate::retained::Retains for Decoder {
     }
 }
 
-fn text_key(data: &Value) -> Option<String> {
-    use serde::Deserialize;
-    #[derive(Deserialize)]
-    struct TextIdentity<'a> {
-        #[serde(rename = "assistantMessageID")]
-        message: &'a str,
-        #[serde(rename = "textID")]
-        text: &'a str,
+/// One form field as a question; `None` for a field Artisan can't ask.
+fn form_question(field: NativeField) -> Option<(Question, FormField)> {
+    let text = field
+        .description
+        .clone()
+        .or_else(|| field.title.clone())
+        .unwrap_or_else(|| field.key.clone());
+    let header = field.title.filter(|title| *title != text);
+    let (kind, options) = match field.kind.as_str() {
+        "string" if field.options.is_empty() => (FieldKind::Text, Vec::new()),
+        "string" => (FieldKind::Choice, field.options),
+        "multiselect" => (FieldKind::Choices, field.options),
+        "boolean" => (
+            FieldKind::Boolean,
+            ["Yes", "No"]
+                .map(|label| NativeOption {
+                    value: label.to_owned(),
+                    label: label.to_owned(),
+                    description: None,
+                })
+                .into(),
+        ),
+        "number" | "integer" => (FieldKind::Number, Vec::new()),
+        _ => return None,
+    };
+    if text.trim().is_empty() || options.iter().any(|option| option.label.trim().is_empty()) {
+        return None;
     }
-    match TextIdentity::deserialize(data) {
-        Ok(identity) if !identity.message.is_empty() && !identity.text.is_empty() => {
-            Some(format!("{}/{}", identity.message, identity.text))
+    let question = Question {
+        id: field.key.clone(),
+        header,
+        text: text.into(),
+        multi_select: field.kind == "multiselect",
+        options: options
+            .iter()
+            .enumerate()
+            .map(|(index, option)| QuestionOption {
+                id: format!("option-{index}"),
+                label: option.label.clone(),
+                description: option.description.clone().map(Into::into),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    };
+    let values = options
+        .into_iter()
+        .map(|option| (option.label, option.value))
+        .collect();
+    Some((
+        question,
+        FormField {
+            key: field.key,
+            kind,
+            values,
+        },
+    ))
+}
+
+impl FormField {
+    /// The value OpenCode wants for the chosen labels or typed text.
+    fn value(&self, answer: &[String]) -> Value {
+        let value = |label: &String| self.values.get(label).unwrap_or(label).clone();
+        match self.kind {
+            FieldKind::Choices => Value::from(answer.iter().map(value).collect::<Vec<_>>()),
+            FieldKind::Boolean => Value::from(answer.first().is_some_and(|label| label == "Yes")),
+            FieldKind::Number => {
+                let text = answer.first().map(String::as_str).unwrap_or_default();
+                text.trim()
+                    .parse::<f64>()
+                    .map_or_else(|_| Value::from(text), Value::from)
+            }
+            FieldKind::Text | FieldKind::Choice => {
+                Value::from(answer.first().map(value).unwrap_or_default())
+            }
         }
-        _ => {
-            tracing::warn!("OpenCode text event omitted its message/text identity");
-            None
-        }
+    }
+}
+
+fn text_key(data: &Value) -> Option<String> {
+    let message = data["assistantMessageID"]
+        .as_str()
+        .filter(|message| !message.is_empty());
+    if let (Some(message), Some(ordinal)) = (message, data["ordinal"].as_u64()) {
+        Some(format!("{message}/{ordinal}"))
+    } else {
+        tracing::warn!("OpenCode text event omitted its message/ordinal identity");
+        None
     }
 }
 
@@ -1125,13 +1181,16 @@ fn str_at(value: &Value, key: &str) -> Option<String> {
 fn error_message(error: &Value) -> String {
     error["message"]
         .as_str()
-        .or_else(|| error["data"]["message"].as_str())
         .or_else(|| error.as_str())
-        .or_else(|| error["name"].as_str())
+        .or_else(|| error["type"].as_str())
         .unwrap_or("OpenCode reported an error")
         .to_owned()
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "callers pass events whose identity was validated on arrival"
+)]
 fn error_item(
     event: &Value,
     parent: Option<String>,
@@ -1156,6 +1215,10 @@ fn error_item(
     }
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "the required fields are checked at the top before any is read"
+)]
 fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     let required = |field: &str| {
         input[field]
@@ -1163,12 +1226,11 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             .is_some_and(|value| !value.trim().is_empty())
     };
     let valid = match name {
-        "bash" => required("command"),
-        "read" | "write" | "edit" | "multiedit" => required("path") || required("filePath"),
+        "shell" => required("command"),
+        "read" | "write" | "edit" => required("path"),
         "grep" | "glob" => required("pattern"),
         "webfetch" => required("url"),
-        "websearch" | "codesearch" => required("query"),
-        "apply_patch" | "patch" => !patch_changes(input).is_empty(),
+        "websearch" => required("query"),
         _ => !name.trim().is_empty(),
     };
     if !valid {
@@ -1177,16 +1239,13 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
         ));
     }
     let text = |key: &str| str_at(input, key).filter(|value| !value.trim().is_empty());
-    let path = || {
-        text("path")
-            .or_else(|| text("filePath"))
-            .expect("validated path")
-    };
+    let path = || text("path").expect("validated path");
     Ok(match name {
-        "bash" => ToolKind::Shell {
+        "shell" => ToolKind::Shell {
             command: (text("command").expect("validated command")).into(),
             cwd: text("workdir"),
-            background: false,
+            background: input["background"].as_bool() == Some(true),
+            watch: false,
         },
         "read" => ToolKind::Read {
             path: path(),
@@ -1211,16 +1270,13 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             }])
             .into(),
         },
-        "edit" | "multiedit" => ToolKind::Edit {
+        "edit" => ToolKind::Edit {
             changes: (vec![FileChange {
                 path: path(),
                 op: FileOp::Modify,
                 diff: None,
             }])
             .into(),
-        },
-        "apply_patch" | "patch" => ToolKind::Edit {
-            changes: (patch_changes(input)).into(),
         },
         "grep" => ToolKind::Search {
             pattern: text("pattern").expect("validated pattern"),
@@ -1232,15 +1288,10 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             path: text("path"),
             mode: SearchMode::Glob,
         },
-        "list" | "ls" => ToolKind::Search {
-            pattern: text("path").unwrap_or_else(|| ".".to_owned()),
-            path: text("path"),
-            mode: SearchMode::List,
-        },
         "webfetch" => ToolKind::WebFetch {
             url: text("url").expect("validated URL"),
         },
-        "websearch" | "codesearch" => ToolKind::WebSearch {
+        "websearch" => ToolKind::WebSearch {
             query: text("query").expect("validated query"),
         },
         _ => {
@@ -1260,36 +1311,10 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     })
 }
 
-/// Files named in an `apply_patch` envelope (`*** Add File: path`, …).
-fn patch_changes(input: &Value) -> Vec<FileChange> {
-    let patch = input["patchText"]
-        .as_str()
-        .or_else(|| input["patch"].as_str())
-        .unwrap_or_default();
-    patch
-        .lines()
-        .filter_map(|line| {
-            let line = line.strip_prefix("*** ")?;
-            let (op, path) = if let Some(path) = line.strip_prefix("Add File: ") {
-                (FileOp::Add, path)
-            } else if let Some(path) = line.strip_prefix("Update File: ") {
-                (FileOp::Modify, path)
-            } else {
-                (FileOp::Delete, line.strip_prefix("Delete File: ")?)
-            };
-            Some(FileChange {
-                path: path.trim().to_owned(),
-                op,
-                diff: None,
-            })
-        })
-        .collect()
-}
-
 /// Edit results list the files with their diffs; `write` says whether the
 /// file existed.
-fn settle_changes(changes: &mut Collection<FileChange>, structured: &Value) -> Result<(), String> {
-    if let Some(files) = structured["files"].as_array() {
+fn settle_changes(changes: &mut Collection<FileChange>, metadata: &Value) -> Result<(), String> {
+    if let Some(files) = metadata["files"].as_array() {
         *changes = files
             .iter()
             .map(|file| FileChange {
@@ -1305,7 +1330,7 @@ fn settle_changes(changes: &mut Collection<FileChange>, structured: &Value) -> R
             })
             .collect::<Vec<_>>()
             .into();
-    } else if structured["existed"].as_bool() == Some(true) {
+    } else if metadata["existed"].as_bool() == Some(true) {
         let records = changes
             .inline_mut()
             .ok_or("late native edit correction requires explicit file records")?;
@@ -1314,37 +1339,4 @@ fn settle_changes(changes: &mut Collection<FileChange>, structured: &Value) -> R
         }
     }
     Ok(())
-}
-
-#[derive(serde::Deserialize)]
-struct NativeTodo {
-    content: String,
-    status: NativeTodoStatus,
-}
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum NativeTodoStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Cancelled,
-}
-fn todo_steps(todos: &Value) -> Result<Vec<PlanStep>, String> {
-    let entries = <Vec<NativeTodo> as serde::Deserialize>::deserialize(todos)
-        .map_err(|error| format!("malformed OpenCode todos: {error}"))?;
-    if entries.iter().any(|entry| entry.content.trim().is_empty()) {
-        return Err("OpenCode todo content is empty".into());
-    }
-    Ok(entries
-        .into_iter()
-        .map(|todo| PlanStep {
-            text: (todo.content).into(),
-            status: match todo.status {
-                NativeTodoStatus::Pending => StepStatus::Pending,
-                NativeTodoStatus::InProgress => StepStatus::InProgress,
-                NativeTodoStatus::Completed => StepStatus::Done,
-                NativeTodoStatus::Cancelled => StepStatus::Cancelled,
-            },
-        })
-        .collect())
 }

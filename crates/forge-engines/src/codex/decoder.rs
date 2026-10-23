@@ -36,10 +36,10 @@ const PLAN_KEY: &str = "plan";
 const DEFERRED_FRAMES: usize = 256;
 const DEFERRED_BYTES: usize = 4 * 1024 * 1024;
 
-pub(crate) use crate::rpc::Response;
+pub use crate::rpc::Response;
 
 #[derive(Default)]
-pub(crate) struct Decoder {
+pub struct Decoder {
     reasoning_summary: crate::reasoning::Summary,
     rpc: crate::rpc::State,
     citations: super::citations::Citations,
@@ -54,6 +54,10 @@ pub(crate) struct Decoder {
     /// Child thread → text of its last agent message, the agent's result.
     child_replies: HashMap<String, TextContent>,
     items: HashMap<String, Tracked>,
+    /// Each thread's agent message still streaming. Codex finishes one
+    /// before it starts the next, so a new one means it dropped the open
+    /// one unfinished (a steer restarts its reply).
+    open_messages: HashMap<Scope, String>,
     approvals: Approvals,
     questions: Questions,
     turn: Option<String>,
@@ -65,6 +69,8 @@ pub(crate) struct Decoder {
     usage: Usage,
     /// The last error Codex reported, so a failed turn doesn't repeat it.
     last_error: Option<String>,
+    /// Whether that error passes by itself.
+    last_retry: Option<crate::Retry>,
     notices: u32,
     /// User messages to send for answered async questions.
     messages: Vec<String>,
@@ -99,10 +105,6 @@ impl Decoder {
         self.rpc.request(method, params)
     }
 
-    pub fn notify(&mut self, method: &str) {
-        self.rpc.notify(method, None);
-    }
-
     pub fn take_outbox(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.rpc.outbox)
     }
@@ -112,7 +114,7 @@ impl Decoder {
     }
 
     /// How the root thread's last turn ended, once.
-    pub fn take_turn_end(&mut self) -> Option<Outcome> {
+    pub const fn take_turn_end(&mut self) -> Option<Outcome> {
         self.turn_end.take()
     }
 
@@ -264,7 +266,24 @@ impl Decoder {
                 return;
             }
             Notification::Unknown => return,
-            _ => {}
+            Notification::TurnStarted(_)
+            | Notification::TurnCompleted(_)
+            | Notification::ItemStarted(_)
+            | Notification::ItemCompleted(_)
+            | Notification::TextDelta(_)
+            | Notification::ReasoningDelta(_)
+            | Notification::ReasoningPart(_)
+            | Notification::OutputDelta(_)
+            | Notification::McpProgress(_)
+            | Notification::PlanUpdated(_)
+            | Notification::TokenUsageUpdated(_)
+            | Notification::Rerouted(_)
+            | Notification::SafetyBuffering(_)
+            | Notification::GoalUpdated(_)
+            | Notification::GoalCleared(_)
+            | Notification::Error(_)
+            | Notification::Warning(_)
+            | Notification::RequestResolved(_) => {}
         }
         let Some(thread) = notice.thread().map(str::to_owned) else {
             return;
@@ -405,6 +424,7 @@ impl Decoder {
             }
             Notification::Error(notice) => {
                 let refused = notice.error.is_refusal();
+                let retry = notice.error.retry();
                 let message = notice
                     .error
                     .message
@@ -419,6 +439,7 @@ impl Decoder {
                 }
                 if scope.is_none() {
                     self.last_error = Some(message.clone());
+                    self.last_retry = retry;
                 }
                 let kind = if refused {
                     ErrorKind::Refusal
@@ -480,6 +501,8 @@ impl Decoder {
         // A child with no spawn call we saw is its own agent.
         let agent = thread.id.clone();
         let kind = ItemKind::Agent {
+            engine: None,
+            thread: None,
             name: thread.agent_nickname,
             description: TextContent::default(),
             prompt: None,
@@ -503,6 +526,7 @@ impl Decoder {
         out: &mut Vec<EngineEvent>,
     ) {
         let message = turn.error.as_ref().and_then(|error| error.message.clone());
+        self.open_messages.remove(&scope);
         let Some(agent) = scope else {
             self.turn = None;
             let outcome = match turn.status {
@@ -518,6 +542,12 @@ impl Decoder {
                         };
                         self.error_item(None, kind, &message, out);
                     }
+                    // The turn's own error says why, else the error notice
+                    // before it.
+                    let retry = match turn.error.as_ref() {
+                        Some(error) if error.codex_error_info.is_some() => error.retry(),
+                        _ => self.last_retry,
+                    };
                     Outcome {
                         status: if refused {
                             RunStatus::Refused
@@ -525,22 +555,24 @@ impl Decoder {
                             RunStatus::Failed
                         },
                         error: Some(message),
+                        retry: retry.filter(|_| !refused),
                     }
                 }
-                TurnStatus::Completed => {
+                TurnStatus::Completed | TurnStatus::Ended => {
                     self.stranded = std::mem::take(&mut self.unanswered);
                     Outcome::done()
                 }
             };
             self.unanswered = false;
             self.last_error = None;
+            self.last_retry = None;
             self.turn_end = Some(outcome);
             return;
         };
         let status = match turn.status {
             TurnStatus::Interrupted => Status::Cancelled,
             TurnStatus::Failed => Status::Failed,
-            TurnStatus::Completed => Status::Done,
+            TurnStatus::Completed | TurnStatus::Ended => Status::Done,
         };
         let reply = self
             .child_replies
@@ -597,6 +629,9 @@ impl Decoder {
                     _ => Phase::Final,
                 };
                 if completed {
+                    if self.open_messages.get(&scope) == Some(&id) {
+                        self.open_messages.remove(&scope);
+                    }
                     if scope.is_some() && !text.is_empty() {
                         // Kept until the child's turn ends; Forge has the text.
                         let mut reply = TextContent::from(text.as_str());
@@ -604,6 +639,10 @@ impl Decoder {
                         self.child_replies.insert(thread.to_owned(), reply);
                     }
                     self.async_questions(&id, scope.clone(), questions, out);
+                } else if let Some(open) = self.open_messages.insert(scope.clone(), id.clone())
+                    && open != id
+                {
+                    self.drop_message(&open, out);
                 }
                 let kind = ItemKind::AssistantMessage {
                     text: text.into(),
@@ -663,6 +702,7 @@ impl Decoder {
                     command: display_command(&command).into(),
                     cwd,
                     background: false,
+                    watch: false,
                 };
                 let output = aggregated_output
                     .filter(|text| !text.is_empty())
@@ -852,8 +892,10 @@ impl Decoder {
                     _ => self.usage.context_used,
                 };
                 let kind = ItemKind::Compaction {
+                    summary: None,
                     tokens_before,
                     tokens_after: None,
+                    switch: None,
                 };
                 (id, settled, kind)
             }
@@ -930,7 +972,9 @@ impl Decoder {
                 CollabStatus::Failed => Status::Failed,
                 CollabStatus::Interrupted => Status::Cancelled,
                 _ if completed => Status::Done,
-                _ => Status::Running,
+                CollabStatus::InProgress | CollabStatus::Completed | CollabStatus::Unknown => {
+                    Status::Running
+                }
             };
             let mut waited: Vec<String> = call
                 .agents_states
@@ -958,7 +1002,7 @@ impl Decoder {
             };
             if let Some(tool) = tool {
                 let kind = self.tool_kind(&key, tool, None, None);
-                self.track(key.clone(), scope.clone(), status, kind);
+                self.track(key.clone(), scope, status, kind);
                 out.push(self.event(&key));
             }
             // `wait` reports what the agents said; fill results we missed.
@@ -982,6 +1026,8 @@ impl Decoder {
         }
         if !self.items.contains_key(&key) {
             let kind = ItemKind::Agent {
+                engine: None,
+                thread: None,
                 name: None,
                 description: call.description.unwrap_or_default().into(),
                 prompt: call.prompt.map(Into::into),
@@ -1120,6 +1166,23 @@ impl Decoder {
         out.push(self.event(key));
     }
 
+    /// Ends a message Codex dropped unfinished. It never completes it nor
+    /// keeps it in its history, so it ends empty: nothing it streamed stays.
+    fn drop_message(&mut self, key: &str, out: &mut Vec<EngineEvent>) {
+        let Some(tracked) = self.items.get_mut(key) else {
+            return;
+        };
+        let ItemKind::AssistantMessage { text, .. } = &mut tracked.kind else {
+            return;
+        };
+        if tracked.status.is_terminal() {
+            return;
+        }
+        *text = TextContent::from("");
+        tracked.status = Status::Cancelled;
+        out.push(self.event(key));
+    }
+
     /// Settles what is still open when the run ends: plans keep their
     /// steps, everything else stopped with the run.
     pub fn finish(&mut self) -> Vec<EngineEvent> {
@@ -1142,15 +1205,16 @@ impl Decoder {
             .collect();
         keys.sort();
         keys.into_iter()
-            .map(|key| {
-                let tracked = self.items.get_mut(&key).expect("collected above");
+            .filter_map(|key| {
+                // Present: the keys were collected from `items` above.
+                let tracked = self.items.get_mut(&key)?;
                 let status = if matches!(tracked.kind, ItemKind::Plan { .. }) {
                     Status::Done
                 } else {
                     Status::Cancelled
                 };
                 tracked.status = status;
-                EngineEvent::Status { key, status }
+                Some(EngineEvent::Status { key, status })
             })
             .collect()
     }
@@ -1191,7 +1255,7 @@ impl crate::retained::Retains for Decoder {
     }
 }
 
-fn live(target: LiveKind, text: String) -> EngineEvent {
+const fn live(target: LiveKind, text: String) -> EngineEvent {
     EngineEvent::Live {
         target,
         text,
@@ -1274,7 +1338,9 @@ fn arguments_text(value: Value) -> Option<String> {
         Value::Null => None,
         Value::Object(map) if map.is_empty() => None,
         Value::String(text) => Some(text),
-        other => Some(other.to_string()),
+        other @ (Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_)) => {
+            Some(other.to_string())
+        }
     }
 }
 

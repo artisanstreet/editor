@@ -3,13 +3,14 @@ name = "editor-marketplace"
 edition.workspace = true
 license-file.workspace = true
 version.workspace = true
-description = "The Marketplace: the active host's skills and its global prompt."
+description = "The Marketplace: search the active host's skills and MCP servers."
 
 [dependencies]
 artisan-api = { path = "../artisan-api" }
 editor-ui = { path = "../editor-ui" }
 editor-core = { path = "../editor-core" }
 gpui.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 artisan-api = { path = "../artisan-api", features = ["tls"] }

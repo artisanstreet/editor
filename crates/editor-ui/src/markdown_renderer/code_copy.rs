@@ -20,7 +20,7 @@ const COPY_CODE_LABEL: &str = "Copy code";
 
 /// Copies one fence's exact displayed source to the clipboard.
 #[derive(IntoElement)]
-pub(super) struct CodeCopyButton {
+pub struct CodeCopyButton {
     selector: SharedString,
     state_id: ElementId,
     source: SharedString,
@@ -35,7 +35,8 @@ struct CodeCopyState {
 impl CodeCopyButton {
     /// Stable action and state IDs are prepared once per Item. `source`
     /// contains the exact text copied by this action.
-    pub(super) fn new(
+    #[must_use]
+    pub const fn new(
         selector: SharedString,
         state_id: ElementId,
         source: SharedString,
@@ -86,7 +87,10 @@ impl RenderOnce for CodeCopyButton {
             COPY_CODE_LABEL,
         )
         .variant(ButtonVariant::Ghost)
-        .icon_slot(copy_feedback_icon(copied))
+        // Muted like the code it sits beside, never brighter than it.
+        .icon_slot(
+            copy_feedback_icon(copied).text_color(self.theme.colors.text_muted.to_paint()),
+        )
         .debug_selector(self.selector)
         .on_activate(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(source.to_string()));
@@ -95,10 +99,11 @@ impl RenderOnce for CodeCopyButton {
                 cx.background_executor()
                     .timer(Duration::from_millis(1500))
                     .await;
-                let _ = weak.update(cx, |state, cx| {
+                // A released view has nothing left to update.
+                weak.update(cx, |state, cx| {
                     state.wake = None;
                     cx.notify();
-                });
+                }).ok();
             });
             state.update(cx, |state, cx| {
                 state.copied_at = Some(Instant::now());

@@ -22,6 +22,7 @@ use artisan_api::{Answer, Collection, ItemId, Question, QuestionAnswer};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
 use editor_ui::button::Button;
+use editor_ui::hover_card::{HoverFill, hover_fill};
 use editor_ui::theme::{
     ActiveTheme as _, ArtisanTheme, ColorTokens, RadiusStep, RadiusTokens, TextStep,
     TypographyTokens,
@@ -33,6 +34,9 @@ use gpui::{
     SharedString, Styled as _, div, px,
 };
 use std::collections::{BTreeMap, HashMap};
+
+/// How far an answer's hover fill reaches past its text on each side.
+const OPTION_INSET_PX: f32 = 10.0;
 
 /// One open questionnaire: the questions one agent request asked together.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,7 +62,7 @@ struct AnswerDraft {
 
 /// The composer's questionnaire state.
 #[derive(Default)]
-pub(crate) struct QuestionnairePanel {
+pub struct QuestionnairePanel {
     /// Open questionnaires, oldest first, as the conversation last pushed.
     questionnaires: Vec<ComposerQuestionnaire>,
     /// Answered here and accepted by Forge, hidden until the item settles
@@ -88,7 +92,7 @@ pub(crate) struct QuestionnairePanel {
 }
 
 impl QuestionnairePanel {
-    pub(crate) fn sending(&self) -> bool {
+    pub(crate) const fn sending(&self) -> bool {
         self.sending.is_some()
     }
     fn visible(&self) -> impl Iterator<Item = &ComposerQuestionnaire> {
@@ -98,13 +102,14 @@ impl QuestionnairePanel {
     }
 
     fn active_questionnaire(&self) -> Option<&ComposerQuestionnaire> {
-        match &self.active {
-            Some(active) => self
-                .visible()
-                .find(|questionnaire| &questionnaire.item == active)
-                .or_else(|| self.visible().next()),
-            None => self.visible().next(),
-        }
+        self.active.as_ref().map_or_else(
+            || self.visible().next(),
+            |active| {
+                self.visible()
+                    .find(|questionnaire| &questionnaire.item == active)
+                    .or_else(|| self.visible().next())
+            },
+        )
     }
 
     fn current_question<'a>(&'a self, cx: &'a gpui::App) -> Option<&'a Question> {
@@ -120,7 +125,8 @@ impl QuestionnairePanel {
                     return None;
                 }
                 let page = window.page_for(self.step as u64)?;
-                page.records.get(self.step - page.start as usize)
+                page.records
+                    .get(self.step - usize::try_from(page.start).ok()?)
             }
         }
     }
@@ -139,7 +145,7 @@ impl QuestionnairePanel {
 
     pub(crate) fn restore_aside_text(&mut self, text: &str) -> bool {
         if let Some(aside) = &mut self.aside {
-            aside.text = text.to_owned();
+            text.clone_into(&mut aside.text);
             true
         } else {
             false
@@ -171,11 +177,12 @@ impl Composer {
         if self.questionnaire.question_owner.as_ref() != Some(&id) {
             let Some(host) = self.host(cx) else { return };
             let window = cx.new(|cx| editor_core::CollectionWindow::new(&host, source.clone(), cx));
-            self.questionnaire.question_events = Some(
-                cx.subscribe(&window, |_, _, _: &editor_core::RangeWindowEvent, cx| {
-                    cx.notify()
-                }),
-            );
+            self.questionnaire.question_events = Some(cx.subscribe(
+                &window,
+                |_, _, _: &editor_core::RangeWindowEvent, cx| {
+                    cx.notify();
+                },
+            ));
             self.questionnaire.question_window = Some(window);
             self.questionnaire.question_owner = Some(id);
         }
@@ -212,7 +219,7 @@ impl Composer {
         let step = self.questionnaire.step;
         let multi = question.multi_select;
         let expected = source.clone();
-        let expected_item = item.clone();
+        let expected_item = item;
         let present = std::rc::Rc::new(
             move |option: &artisan_api::QuestionOption, _, cx: &gpui::App| {
                 editor_sources::CollectionPreview {
@@ -230,32 +237,34 @@ impl Composer {
         let activate = std::rc::Rc::new(
             move |option: &artisan_api::QuestionOption, _, cx: &mut gpui::App| {
                 let id = option.id.clone();
-                let _ = owner.update(cx, |this, cx| {
-                    if this.questionnaire.step != step
-                        || this
-                            .questionnaire
-                            .active_questionnaire()
-                            .is_none_or(|active| active.item != expected_item)
-                        || this
-                            .questionnaire
-                            .current_question(cx)
-                            .is_none_or(|question| question.options.stored() != Some(&expected))
-                        || this.questionnaire.sending.is_some()
-                    {
-                        return;
-                    }
-                    if multi {
-                        this.toggle_suggested_answer(id, cx)
-                    } else {
-                        this.clear_answer_text(cx);
-                        this.answer_current(
-                            QuestionAnswer::Choices {
-                                ids: vec![id].into(),
-                            },
-                            cx,
-                        );
-                    }
-                });
+                owner
+                    .update(cx, |this, cx| {
+                        if this.questionnaire.step != step
+                            || this
+                                .questionnaire
+                                .active_questionnaire()
+                                .is_none_or(|active| active.item != expected_item)
+                            || this
+                                .questionnaire
+                                .current_question(cx)
+                                .is_none_or(|question| question.options.stored() != Some(&expected))
+                            || this.questionnaire.sending.is_some()
+                        {
+                            return;
+                        }
+                        if multi {
+                            this.toggle_suggested_answer(id, cx);
+                        } else {
+                            this.clear_answer_text(cx);
+                            this.answer_current(
+                                QuestionAnswer::Choices {
+                                    ids: vec![id].into(),
+                                },
+                                cx,
+                            );
+                        }
+                    })
+                    .ok();
             },
         );
         self.questionnaire.options = Some(cx.new(|cx| {
@@ -274,14 +283,14 @@ impl Composer {
     fn open_question_source(
         &mut self,
         source: artisan_api::ContentRef,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         cx: &mut Context<Self>,
     ) {
         let Some(host) = self.host(cx) else {
             return;
         };
         self.questionnaire.source =
-            Some(cx.new(|cx| editor_sources::ContentText::new(&host, source, theme, cx)));
+            Some(cx.new(|cx| editor_sources::ContentText::new(&host, source, *theme, cx)));
         cx.notify();
     }
 
@@ -334,7 +343,7 @@ impl Composer {
 
     /// Whether the editor is the answer field: sending records the typed
     /// text as the current question's answer.
-    pub(crate) fn writing_answer(&self) -> bool {
+    pub(crate) const fn writing_answer(&self) -> bool {
         self.questionnaire.aside.is_some()
     }
 
@@ -410,7 +419,9 @@ impl Composer {
         let count = self
             .questionnaire
             .active_questionnaire()
-            .map_or(0, |questionnaire| questionnaire.questions.len() as usize);
+            .map_or(0, |questionnaire| {
+                usize::try_from(questionnaire.questions.len()).unwrap_or(usize::MAX)
+            });
         if step + 1 < count {
             self.questionnaire.source = None;
             self.questionnaire.step += 1;
@@ -425,7 +436,8 @@ impl Composer {
         let Some(questionnaire) = self.questionnaire.active_questionnaire().cloned() else {
             return;
         };
-        let answers = (0..questionnaire.questions.len() as usize)
+        let count = usize::try_from(questionnaire.questions.len()).unwrap_or(usize::MAX);
+        let answers = (0..count)
             .map(|index| self.questionnaire.recorded.get(&index).cloned())
             .collect();
         self.send_answer(questionnaire.item, answers, cx);
@@ -439,7 +451,8 @@ impl Composer {
             return;
         };
         self.clear_answer_text(cx);
-        let answers = vec![None; questionnaire.questions.len() as usize];
+        let count = usize::try_from(questionnaire.questions.len()).unwrap_or(usize::MAX);
+        let answers = vec![None; count];
         self.send_answer(questionnaire.item, answers, cx);
     }
 
@@ -471,11 +484,12 @@ impl Composer {
                     tracing::warn!(%item, "couldn't send the answer: {error:#}");
                     format!("Couldn't send your answer: {error:#}")
                 });
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 if this.target_generation == generation {
                     this.answer_settled(&item, result.err(), cx);
                 }
-            });
+            })
+            .ok();
         })
         .detach();
         cx.notify();
@@ -549,13 +563,16 @@ impl Composer {
             .and_then(|entry| self.questionnaire.drafts.get(&entry.item))
             .cloned()
             .unwrap_or_default();
-        self.questionnaire.step = draft.step.min(
-            self.questionnaire
-                .active_questionnaire()
-                .map_or(0, |entry| {
-                    (entry.questions.len() as usize).saturating_sub(1)
-                }),
-        );
+        self.questionnaire.step =
+            draft.step.min(
+                self.questionnaire
+                    .active_questionnaire()
+                    .map_or(0, |entry| {
+                        usize::try_from(entry.questions.len())
+                            .unwrap_or(usize::MAX)
+                            .saturating_sub(1)
+                    }),
+            );
         self.questionnaire.recorded = draft.recorded;
         self.questionnaire.ticked = draft.ticked;
         self.questionnaire.error = draft.error;
@@ -605,6 +622,10 @@ impl Composer {
     }
 
     /// Questions share the same accessible rows and controls as other pages.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree for the questionnaire panel, ported from the old Editor"
+    )]
     pub(crate) fn render_questionnaires(
         &mut self,
         desktop: &ColorTokens,
@@ -619,13 +640,13 @@ impl Composer {
                 .as_ref()
                 .and_then(|window| match window.read(cx).state() {
                     editor_core::RangeState::Failed(error) => Some(error.clone()),
-                    _ => None,
+                    editor_core::RangeState::Loading | editor_core::RangeState::Ready(_) => None,
                 });
             let mut loading = div().child(error.unwrap_or_else(|| "Loading question…".into()));
             if let Some(window) = window {
                 loading = loading.child(
                     Button::text("question-page-retry", *cx.theme(), "Retry").on_activate(
-                        move |_, _, cx| window.update(cx, |window, cx| window.retry(cx)),
+                        move |_, _, cx| window.update(cx, editor_core::RangeWindow::retry),
                     ),
                 );
             }
@@ -647,14 +668,12 @@ impl Composer {
             .rounded(RadiusTokens::value(RadiusStep::Sm))
             .cursor_pointer()
             .hover(move |style| {
-                style
-                    .bg(desktop.selected.to_paint())
-                    .text_color(desktop.workspace_foreground.to_paint())
+                hover_fill(style, &theme, HoverFill::Plain).text_color(desktop.text.to_paint())
             })
             .debug_selector(|| "composer-question-dismiss".into())
             .child(asset_glyph(AssetId::TABLER_X).size(px(14.0)))
             .on_click(move |_, _, cx| {
-                let _ = owner.update(cx, |this, cx| this.dismiss_questionnaire(cx));
+                owner.update(cx, Self::dismiss_questionnaire).ok();
             });
         let mut card =
             div()
@@ -669,7 +688,7 @@ impl Composer {
                         .gap(px(8.0))
                         .text_size(TypographyTokens::size(TextStep::Xs))
                         .line_height(px(16.0))
-                        .text_color(desktop.workspace_secondary.to_paint())
+                        .text_color(desktop.text_muted.to_paint())
                         .child(asset_glyph(AssetId::TABLER_MESSAGE_CIRCLE).size(px(14.0)))
                         .child(
                             div().flex_1().min_w_0().truncate().child(
@@ -683,7 +702,7 @@ impl Composer {
                         .px(px(2.0))
                         .text_size(TypographyTokens::size(TextStep::SmMid))
                         .line_height(px(22.0))
-                        .text_color(desktop.workspace_foreground.to_paint())
+                        .text_color(desktop.text.to_paint())
                         .whitespace_normal()
                         .child(match &question.text {
                             artisan_api::TextContent::Inline(text) => {
@@ -693,7 +712,7 @@ impl Composer {
                                 let source = source.clone();
                                 Button::text("question-source", theme, "Read full question")
                                     .on_activate(cx.listener(move |this, _, _, cx| {
-                                        this.open_question_source(source.clone(), theme, cx)
+                                        this.open_question_source(source.clone(), &theme, cx);
                                     }))
                                     .into_any_element()
                             }
@@ -722,20 +741,21 @@ impl Composer {
                         .justify_center()
                         .rounded(RadiusTokens::value(RadiusStep::Xs))
                         .border_1()
-                        .border_color(desktop.field_line.to_paint())
+                        .border_color(desktop.line.to_paint())
                         .when(selected, |marker| {
                             marker.child(asset_glyph(AssetId::TABLER_CHECK).size(px(12.0)))
                         })
                 } else {
+                    // As wide as its digits, so the row gap alone sits
+                    // between the number and its answer.
                     div()
-                        .w(px(16.0))
                         .flex_none()
-                        .text_color(desktop.workspace_secondary.to_paint())
+                        .text_color(desktop.text_muted.to_paint())
                         .child(format!("{}", index + 1))
                 };
                 let mut text = div().flex().flex_col().min_w_0().child(
                     div()
-                        .text_color(desktop.workspace_foreground.to_paint())
+                        .text_color(desktop.text.to_paint())
                         .child(label.clone()),
                 );
                 if let Some(description) = &option.description {
@@ -743,7 +763,7 @@ impl Composer {
                         div()
                             .text_size(TypographyTokens::size(TextStep::Xs))
                             .line_height(px(16.0))
-                            .text_color(desktop.workspace_secondary.to_paint())
+                            .text_color(desktop.text_muted.to_paint())
                             .child(match description {
                                 artisan_api::TextContent::Inline(text) => text.clone(),
                                 artisan_api::TextContent::Stored(_) => {
@@ -763,7 +783,10 @@ impl Composer {
                     .flex()
                     .items_start()
                     .gap(px(10.0))
-                    .px(px(10.0))
+                    // The fill reaches past the text; the number lines up
+                    // with the question above it.
+                    .mx(px(-OPTION_INSET_PX))
+                    .px(px(OPTION_INSET_PX))
                     .py(px(6.0))
                     .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .text_size(TypographyTokens::size(TextStep::Sm))
@@ -771,12 +794,12 @@ impl Composer {
                     .when(selected, |row| row.bg(desktop.selected.to_paint()))
                     .when(!sending, |row| {
                         row.cursor_pointer()
-                            .hover(move |style| style.bg(desktop.selected.to_paint()))
+                            .hover(move |style| hover_fill(style, &theme, HoverFill::Edged))
                     })
                     .child(marker)
                     .child(text)
                     .on_click(move |_, _, cx| {
-                        let _ = owner.update(cx, |this, cx| {
+                        owner.update(cx, |this, cx| {
                             if this.questionnaire.sending.is_some()
                                 || this.questionnaire.active.as_ref() != Some(&expected_item)
                                 || this.questionnaire.step != expected_step
@@ -796,7 +819,7 @@ impl Composer {
                                     cx,
                                 );
                             }
-                        });
+                        }).ok();
                     });
                 let mut option_row = div()
                     .debug_selector(move || format!("composer-question-option-{index}"))
@@ -810,7 +833,7 @@ impl Composer {
                             "Read description",
                         )
                         .on_activate(cx.listener(move |this, _, _, cx| {
-                            this.open_question_source(source.clone(), theme, cx)
+                            this.open_question_source(source.clone(), &theme, cx);
                         })),
                     );
                 }
@@ -818,6 +841,7 @@ impl Composer {
             }
         }
         if let Some(source) = &self.questionnaire.source {
+            source.update(cx, |source, cx| source.set_theme(theme, cx));
             rows = rows.child(source.clone());
         }
         if question.multi_select && !self.questionnaire.ticked.is_empty() && !sending {
@@ -836,8 +860,8 @@ impl Composer {
                     .py(px(4.0))
                     .rounded(RadiusTokens::value(RadiusStep::Md))
                     .text_size(TypographyTokens::size(TextStep::XsMid))
-                    .bg(desktop.primary_action.to_paint())
-                    .text_color(desktop.primary_action_foreground.to_paint())
+                    .bg(desktop.primary.to_paint())
+                    .text_color(desktop.primary_text.to_paint())
                     .when(!sending, |button| {
                         button.focusable().tab_index(0).cursor_pointer()
                     })
@@ -848,14 +872,19 @@ impl Composer {
                         "Send answers"
                     })
                     .on_click(move |_, _, cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            if this.questionnaire.sending.is_some() {
-                                return;
-                            }
-                            let ticked = std::mem::take(&mut this.questionnaire.ticked);
-                            this.clear_answer_text(cx);
-                            this.answer_current(QuestionAnswer::Choices { ids: ticked.into() }, cx);
-                        });
+                        owner
+                            .update(cx, |this, cx| {
+                                if this.questionnaire.sending.is_some() {
+                                    return;
+                                }
+                                let ticked = std::mem::take(&mut this.questionnaire.ticked);
+                                this.clear_answer_text(cx);
+                                this.answer_current(
+                                    QuestionAnswer::Choices { ids: ticked.into() },
+                                    cx,
+                                );
+                            })
+                            .ok();
                     }),
             );
         }
@@ -865,7 +894,7 @@ impl Composer {
                 div()
                     .px(px(2.0))
                     .text_size(TypographyTokens::size(TextStep::Xs))
-                    .text_color(desktop.workspace_secondary.to_paint())
+                    .text_color(desktop.text_muted.to_paint())
                     .child("Sending your answer…"),
             );
         } else if let Some(error) = &self.questionnaire.error {
@@ -873,13 +902,13 @@ impl Composer {
             card = card
                 .child(
                     div()
-                        .text_color(theme.colors.destructive.to_paint())
+                        .text_color(theme.colors.destructive_text.to_paint())
                         .child(error.clone()),
                 )
                 .child(
                     Button::text("composer-question-retry", theme, "Retry answer").on_activate(
                         move |_, _, cx| {
-                            let _ = owner.update(cx, |this, cx| this.retry_answer(cx));
+                            owner.update(cx, Self::retry_answer).ok();
                         },
                     ),
                 );
@@ -897,13 +926,15 @@ impl Composer {
                 .questions
                 .inline()
                 .and_then(|questions| questions.first())
-                .map(|q| match &q.text {
-                    artisan_api::TextContent::Inline(text) => text.clone(),
-                    artisan_api::TextContent::Stored(_) => {
-                        q.header.clone().unwrap_or_else(|| "Questionnaire".into())
-                    }
-                })
-                .unwrap_or_else(|| "Questionnaire".into());
+                .map_or_else(
+                    || "Questionnaire".into(),
+                    |q| match &q.text {
+                        artisan_api::TextContent::Inline(text) => text.clone(),
+                        artisan_api::TextContent::Stored(_) => {
+                            q.header.clone().unwrap_or_else(|| "Questionnaire".into())
+                        }
+                    },
+                );
             let owner = cx.entity().downgrade();
             let questions = other.questions.len();
             stacked = true;
@@ -922,12 +953,11 @@ impl Composer {
                     .rounded(RadiusTokens::value(RadiusStep::Md))
                     .text_size(TypographyTokens::size(TextStep::XsMid))
                     .line_height(px(18.0))
-                    .text_color(desktop.workspace_secondary.to_paint())
+                    .text_color(desktop.text_muted.to_paint())
                     .when(!sending, |row| {
                         row.cursor_pointer().hover(move |style| {
-                            style
-                                .bg(desktop.selected.to_paint())
-                                .text_color(desktop.workspace_foreground.to_paint())
+                            hover_fill(style, &theme, HoverFill::Edged)
+                                .text_color(desktop.text.to_paint())
                         })
                     })
                     .child(asset_glyph(AssetId::TABLER_CHEVRON_RIGHT).size(px(14.0)))
@@ -936,8 +966,9 @@ impl Composer {
                         row.child(format!("{questions} questions"))
                     })
                     .on_click(move |_, _, cx| {
-                        let _ = owner
-                            .update(cx, |this, cx| this.activate_questionnaire(item.clone(), cx));
+                        owner
+                            .update(cx, |this, cx| this.activate_questionnaire(item.clone(), cx))
+                            .ok();
                     }),
             );
         }
@@ -1096,7 +1127,7 @@ mod regression_tests {
         ]
         .into();
         composer.update(cx, |this, cx| {
-            this.set_questionnaires(vec![question.clone()], cx)
+            this.set_questionnaires(vec![question.clone()], cx);
         });
         cx.run_until_parked();
         let second = cx

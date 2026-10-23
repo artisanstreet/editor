@@ -61,31 +61,31 @@ impl std::fmt::Debug for StoredSource {
             .field("reference", &self.reference)
             .field("revision", &self.revision)
             .field("blocks", &self.blocks)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 impl StoredSource {
-    pub fn format(&self) -> SourceIndexFormat {
+    pub const fn format(&self) -> SourceIndexFormat {
         self.format
     }
-    pub fn block_count(&self) -> usize {
+    pub const fn block_count(&self) -> usize {
         self.blocks
     }
-    pub fn revision(&self) -> u64 {
+    pub const fn revision(&self) -> u64 {
         self.revision
     }
-    pub fn source_ref(&self) -> &ContentRef {
+    pub const fn source_ref(&self) -> &ContentRef {
         &self.reference
     }
     pub fn loaded_range(&self) -> std::ops::Range<usize> {
-        self.index.page.start as usize..self.index.page.end as usize
+        super::wire_index(self.index.page.start)..super::wire_index(self.index.page.end)
     }
     pub fn leaf_descriptor(&self, ordinal: usize) -> Option<SourceLeafDescriptor> {
         let index = &self.index;
         index
             .page
             .leaves
-            .get(ordinal.checked_sub(index.page.start as usize)?)
+            .get(ordinal.checked_sub(super::wire_index(index.page.start))?)
             .cloned()
     }
 }
@@ -142,6 +142,10 @@ impl StoredOwner {
         clippy::too_many_arguments,
         reason = "one preparation request: its key, reference, format, fetchers, page and the callback"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential pass; splitting it would only thread its locals through helpers"
+    )]
     pub(super) fn prepare(
         &self,
         key: SharedString,
@@ -150,7 +154,7 @@ impl StoredOwner {
         fetcher: ContentFetch,
         index_fetcher: SourceIndexFetch,
         offset: Option<u64>,
-        cx: &mut App,
+        cx: &App,
         notify: impl Fn(&mut App) + 'static,
     ) -> StoredPreparation {
         if reference.bytes > MAX_SOURCE_BYTES as u64 {
@@ -160,33 +164,33 @@ impl StoredOwner {
             );
         }
         let mut cache = self.cache.borrow_mut();
-        if let Some(position) = cache.entries.iter().rposition(|entry| {
+        let found = cache.entries.iter().rposition(|entry| {
             entry.reference == reference
                 && entry.format == format
-                && match offset {
-                    None => entry
-                        .index
-                        .as_ref()
-                        .map_or(entry.offset.is_none(), |index| {
-                            index.page.end == index.header.leaves
-                        }),
-                    Some(offset) => entry
-                        .index
-                        .as_ref()
-                        .map_or(entry.offset == Some(offset), |index| {
-                            index.page.start == offset
-                        }),
-                }
-        }) {
-            let entry = cache.entries.remove(position).unwrap();
+                && offset.map_or_else(
+                    || {
+                        entry.index.as_ref().map_or_else(
+                            || entry.offset.is_none(),
+                            |index| index.page.end == index.header.leaves,
+                        )
+                    },
+                    |offset| {
+                        entry.index.as_ref().map_or_else(
+                            || entry.offset == Some(offset),
+                            |index| index.page.start == offset,
+                        )
+                    },
+                )
+        });
+        if let Some(entry) = found.and_then(|position| cache.entries.remove(position)) {
             let result = if let Some(index) = &entry.index {
                 StoredPreparation::Ready(StoredSource {
-                    index: index.clone(),
-                    reference: reference.clone(),
+                    index: Arc::clone(index),
+                    reference,
                     format,
                     fetcher,
                     revision: entry.revision,
-                    blocks: index.header.leaves as usize,
+                    blocks: super::wire_index(index.header.leaves),
                     index_fetcher,
                 })
             } else if let Some(error) = &entry.error {
@@ -298,6 +302,10 @@ impl StoredOwner {
     }
 }
 
+#[expect(
+    clippy::suspicious_operation_groupings,
+    reason = "each leaf bound is checked against its own limit"
+)]
 fn validate_page(
     reference: &ContentRef,
     format: SourceIndexFormat,
@@ -333,13 +341,17 @@ fn validate_page(
 
 /// Collect exactly the requested immutable range, stripping UTF-8 overlap by
 /// actual server bounds. No caller guesses page advances or parses a prefix.
+#[expect(
+    clippy::suspicious_operation_groupings,
+    reason = "the page must describe the same source as the reference"
+)]
 pub(super) async fn fetch_complete_range(
     reference: &ContentRef,
     range: std::ops::Range<usize>,
     fetcher: &ContentFetch,
 ) -> Result<String, String> {
     if range.start > range.end
-        || range.end > reference.bytes as usize
+        || range.end > super::wire_index(reference.bytes)
         || range.len() > MAX_SOURCE_BYTES
     {
         return Err("Markdown source range exceeds its admission limit".into());
@@ -347,7 +359,8 @@ pub(super) async fn fetch_complete_range(
     let mut output = String::with_capacity(range.len());
     let mut cursor = range.start as u64;
     while cursor < range.end as u64 {
-        let limit = RANGE_BYTES.min((range.end as u64 - cursor).max(4) as u32);
+        let limit =
+            RANGE_BYTES.min(u32::try_from((range.end as u64 - cursor).max(4)).unwrap_or(u32::MAX));
         let page = fetcher(reference.clone(), cursor, limit).await?;
         if page.id != reference.id
             || page.total != reference.bytes
@@ -359,8 +372,8 @@ pub(super) async fn fetch_complete_range(
         {
             return Err("Markdown source response does not match its immutable range".into());
         }
-        let start = (cursor - page.start) as usize;
-        let end = (page.end.min(range.end as u64) - page.start) as usize;
+        let start = super::wire_index(cursor - page.start);
+        let end = super::wire_index(page.end.min(range.end as u64) - page.start);
         let fragment = page
             .text
             .get(start..end)
@@ -379,11 +392,11 @@ mod tests {
         let text = Arc::new(format!("prefix {} suffix", "β🙂&".repeat(1000)));
         let reference = ContentRef::from_text(&text);
         let range = 7..text.len() - 7;
-        let source = text.clone();
+        let source = Arc::clone(&text);
         let fetcher: ContentFetch = Arc::new(move |reference, offset, _| {
-            let source = source.clone();
+            let source = Arc::clone(&source);
             Box::pin(async move {
-                let mut start = offset as usize;
+                let mut start = usize::try_from(offset).unwrap();
                 while !source.is_char_boundary(start) {
                     start -= 1;
                 }
@@ -443,7 +456,7 @@ mod sparse_tests {
         let raw: ContentFetch =
             Arc::new(|_, _, _| Box::pin(async { panic!("topology must not fetch raw source") }));
         let requests = Arc::new(AtomicUsize::new(0));
-        let observed = requests.clone();
+        let observed = Arc::clone(&requests);
         let index: SourceIndexFetch = Arc::new(move |source, format, offset, limit| {
             assert_eq!(format, SourceIndexFormat::Markdown);
             assert_eq!(limit, 64);
@@ -457,8 +470,8 @@ mod sparse_tests {
                     "source".into(),
                     reference.clone(),
                     SourceIndexFormat::Markdown,
-                    raw.clone(),
-                    index.clone(),
+                    Arc::clone(&raw),
+                    Arc::clone(&index),
                     offset,
                     cx,
                     |_| {},

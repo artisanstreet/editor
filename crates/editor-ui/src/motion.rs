@@ -121,6 +121,16 @@ impl MotionCurve {
         cubic_axis(lower.midpoint(upper), y1, y2)
     }
 
+    /// [`Self::sample`] narrowed for paint values, which are `f32`.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the curve's 0..=1 output fits an f32"
+    )]
+    pub fn sample_f32(self, progress: f64) -> f32 {
+        self.sample(progress) as f32
+    }
+
     const fn control_points(self) -> (f64, f64, f64, f64) {
         match self {
             Self::SmoothOut => (0.22, 1.0, 0.36, 1.0),
@@ -143,7 +153,10 @@ pub fn smooth_out(progress: f32) -> f32 {
 
 fn cubic_axis(t: f64, first: f64, second: f64) -> f64 {
     let inverse = 1.0 - t;
-    3.0 * inverse * inverse * t * first + 3.0 * inverse * t * t * second + t * t * t
+    (t * t).mul_add(
+        t,
+        (3.0 * inverse * t * t).mul_add(second, 3.0 * inverse * inverse * t * first),
+    )
 }
 
 /// The shared copy-confirmation transition.
@@ -203,18 +216,20 @@ fn clock(
         wake: None,
     })
 }
-fn wake(state: &mut PaintClock, delay: Duration, cx: &mut gpui::Context<PaintClock>) {
+fn wake(state: &mut PaintClock, delay: Duration, cx: &gpui::Context<PaintClock>) {
     if state.wake.is_some() {
         return;
     }
     state.wake = Some(cx.spawn(async move |this, cx| {
         cx.background_executor().timer(delay).await;
-        let _ = this.update(cx, |state, cx| {
+        // A released view has nothing left to update.
+        this.update(cx, |state, cx| {
             state.since = std::time::Instant::now();
             state.waiting = false;
             state.wake = None;
             cx.notify();
-        });
+        })
+        .ok();
     }));
 }
 /// When the mounted clock started, `None` while its `delay` holds. The
@@ -350,6 +365,7 @@ impl Element for AnimatedPaint {
         window: &mut Window,
         cx: &mut App,
     ) {
+        #[expect(clippy::expect_used, reason = "GPUI paints an element once per frame")]
         let mut repaint = self.repaint.take().expect("an element paints once");
         let recording = window.record_paint(|window| self.child.paint(window, cx));
         window.paint_animated(

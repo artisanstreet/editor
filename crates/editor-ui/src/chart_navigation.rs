@@ -49,12 +49,12 @@ impl ChartNavigation {
         }
     }
     #[must_use]
-    pub fn content_height(mut self) -> Self {
+    pub const fn content_height(mut self) -> Self {
         self.content_height = true;
         self
     }
     #[must_use]
-    pub fn selected(mut self, selected: Option<usize>) -> Self {
+    pub const fn selected(mut self, selected: Option<usize>) -> Self {
         self.selected = selected;
         self
     }
@@ -70,12 +70,10 @@ impl RenderOnce for ChartNavigation {
         let range = self.range;
         let selected = self.selected.filter(|index| range.contains(index));
         let navigate = self.navigate;
-        let label = self
-            .selection_label
-            .as_ref()
-            .map_or(self.label.clone(), |selection| {
-                SharedString::from(format!("{} {}", self.label, selection))
-            });
+        let label = self.selection_label.as_ref().map_or_else(
+            || self.label.clone(),
+            |selection| SharedString::from(format!("{} {}", self.label, selection)),
+        );
         let mut root = div()
             .id(self.id)
             .relative()

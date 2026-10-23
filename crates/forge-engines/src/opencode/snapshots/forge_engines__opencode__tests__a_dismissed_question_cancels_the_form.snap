@@ -1,0 +1,141 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"question-dismissed\")"
+---
+[
+    Event(
+        Model {
+            id: "opencode-go/minimax-m3.1-flash-free",
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d777a8a71d0b955c4f2",
+            parent: None,
+            status: AwaitingUser,
+            kind: Question {
+                blocking: true,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "q0",
+                            header: Some(
+                                "Favourite fruits",
+                            ),
+                            text: Inline(
+                                "Which fruits do you like?",
+                            ),
+                            multi_select: true,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Apple",
+                                        description: Some(
+                                            Inline(
+                                                "Apple",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Pear",
+                                        description: Some(
+                                            Inline(
+                                                "Pear",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-2",
+                                        label: "Plum",
+                                        description: Some(
+                                            Inline(
+                                                "Plum",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: None,
+                answer_text: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d777a8a71d0b955c4f2",
+            parent: None,
+            status: Declined,
+            kind: Question {
+                blocking: true,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "q0",
+                            header: Some(
+                                "Favourite fruits",
+                            ),
+                            text: Inline(
+                                "Which fruits do you like?",
+                            ),
+                            multi_select: true,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Apple",
+                                        description: Some(
+                                            Inline(
+                                                "Apple",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Pear",
+                                        description: Some(
+                                            Inline(
+                                                "Pear",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-2",
+                                        label: "Plum",
+                                        description: Some(
+                                            Inline(
+                                                "Plum",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: Some(
+                    Inline(
+                        [
+                            None,
+                        ],
+                    ),
+                ),
+                answer_text: None,
+            },
+        },
+    ),
+    Reply(
+        Reply {
+            method: Delete,
+            path: "/api/session/ses_ea28ed706ffeIjmWlwiN403xfs/form/frm_15d77861a001c3jSHgbUEHaabS",
+            body: None,
+        },
+    ),
+    Idle(
+        true,
+    ),
+]

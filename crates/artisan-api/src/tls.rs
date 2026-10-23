@@ -60,10 +60,14 @@ pub fn provider() -> Arc<CryptoProvider> {
 #[must_use]
 pub fn fingerprint(certificate_der: &[u8]) -> String {
     use sha2::Digest;
-    sha2::Sha256::digest(certificate_der)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = sha2::Sha256::digest(certificate_der);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push(char::from(HEX[usize::from(byte >> 4)]));
+        hex.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    hex
 }
 
 /// The fingerprint of a base64 DER certificate.

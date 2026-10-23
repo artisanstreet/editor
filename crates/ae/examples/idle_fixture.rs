@@ -13,6 +13,10 @@ use serde_json::json;
 use std::path::PathBuf;
 
 #[tokio::main(flavor = "current_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture is built step by step in one readable script"
+)]
 async fn main() -> Result<()> {
     let root = PathBuf::from(
         std::env::args_os()
@@ -64,12 +68,14 @@ async fn main() -> Result<()> {
             config: EngineConfig::new(EngineId::Claude),
             title: Some("Completed conversation".into()),
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await?;
     for turn in 0..20 {
         let run_id = RunId::from(format!("idle-run-{turn}"));
         store
             .upsert_run(Run {
+                config: None,
                 id: run_id.clone(),
                 thread_id: thread_id.clone(),
                 engine: EngineId::Claude,
@@ -82,6 +88,7 @@ async fn main() -> Result<()> {
                 seq: 0,
                 started_at: 1_700_000_000_000 + turn * 60_000,
                 ended_at: Some(1_700_000_030_000 + turn * 60_000),
+                continuation: None,
             })
             .await?;
         let items = [
@@ -89,6 +96,8 @@ async fn main() -> Result<()> {
                 text: format!("Review iteration {} of this small Rust function.", turn + 1).into(),
                 images: Vec::new(),
                 steer: false,
+                from_agent: None,
+                sender: None,
             },
             ItemKind::AssistantMessage {
                 phase: Phase::Final,

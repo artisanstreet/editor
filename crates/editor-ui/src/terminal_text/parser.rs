@@ -12,7 +12,7 @@ pub(super) trait Perform {
 #[derive(Debug, Default)]
 pub(super) struct Params(Vec<Vec<u32>>);
 impl Params {
-    pub(super) fn len(&self) -> usize {
+    pub(super) const fn len(&self) -> usize {
         self.0.len()
     }
     pub(super) fn group(&self, index: usize) -> &[u32] {

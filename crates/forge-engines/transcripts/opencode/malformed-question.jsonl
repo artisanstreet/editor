@@ -1,3 +1,4 @@
-{"id": "evt_020", "type": "session.next.prompt.admitted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_021", "type": "session.next.prompted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_022", "type": "question.v2.asked", "data": {"sessionID": "ses_root", "id": "ask", "tool": {"callID": "call_q"}, "questions": [{"options": []}]}}
+{"id": "evt_020", "type": "session.inbox.enqueued", "data": {"sessionID": "ses_root", "inboxID": "msg_1", "item": {"type": "user"}}}
+{"id": "evt_021", "type": "session.execution.started", "data": {"sessionID": "ses_root"}}
+{"id": "evt_0215", "type": "session.inbox.delivered", "data": {"sessionID": "ses_root", "inboxID": "msg_1"}}
+{"id": "evt_022", "type": "form.created", "data": {"form": {"id": "frm_1", "sessionID": "ses_root", "title": "Connect", "metadata": {"kind": "auth"}, "fields": [{"key": "link", "type": "external", "url": "https://example.com"}]}}}

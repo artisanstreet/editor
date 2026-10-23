@@ -64,6 +64,21 @@ id!(
     /// A working directory the user opened.
     ProjectId
 );
+
+impl ProjectId {
+    /// The built-in "No project": each of its threads runs in a fresh
+    /// folder of its own under Forge's data folder.
+    #[must_use]
+    pub fn scratch() -> Self {
+        Self("scratch".to_owned())
+    }
+
+    #[must_use]
+    pub fn is_scratch(&self) -> bool {
+        self.0 == "scratch"
+    }
+}
+
 id!(
     /// A paired Editor device.
     DeviceId

@@ -48,7 +48,7 @@ fn option_row(
                 .child(
                     asset_glyph(AssetId::TABLER_CHECK)
                         .size(px(14.0))
-                        .text_color(theme.colors.muted_foreground.to_paint()),
+                        .text_color(theme.colors.text_muted.to_paint()),
                 ),
         );
     }
@@ -67,14 +67,14 @@ impl Composer {
         axis: Axis,
         options: Vec<AxisOption>,
         theme: &ArtisanTheme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = *theme;
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let value = options
             .iter()
             .find(|option| option.selected)
-            .or(options.first())
+            .or_else(|| options.first())
             .map(|option| option.label.clone())
             .unwrap_or_default();
         let trigger = div()
@@ -91,7 +91,7 @@ impl Composer {
             .h(px(POLICY_CONTROL_HEIGHT_PX))
             .px(px(8.0))
             .rounded(RadiusTokens::value(RadiusStep::Md))
-            .bg(control_gradient())
+            .bg(control_gradient(&theme))
             .shadow(card_shadows(&theme))
             .cursor_pointer()
             .relative()
@@ -121,7 +121,7 @@ impl Composer {
                     .justify_center()
                     .truncate()
                     .text_size(TypographyTokens::size(TextStep::Xs))
-                    .text_color(theme.colors.foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child(value),
             )
             .child(
@@ -187,13 +187,7 @@ impl Composer {
             if option.special && !special_shown {
                 special_shown = true;
                 rows = rows
-                    .child(
-                        div()
-                            .h(px(1.0))
-                            .mx(px(8.0))
-                            .my(px(4.0))
-                            .bg(theme.colors.line.to_paint()),
-                    )
+                    .child(editor_ui::glass::glass_menu_separator(&theme))
                     .child(header("Special Efforts", true));
             }
             let config = option.apply;

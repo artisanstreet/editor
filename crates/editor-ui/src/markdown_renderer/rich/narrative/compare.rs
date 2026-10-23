@@ -94,7 +94,7 @@ impl RichBlock for Compare {
         CompareView {
             id: cx.key("compare"),
             theme: *cx.theme,
-            data: self.0.clone(),
+            data: Arc::clone(&self.0),
         }
         .into_any_element()
     }
@@ -128,7 +128,13 @@ impl Grid {
     /// cells, so it takes the hover fill's lower stop as one flat tint
     /// instead of a gradient per cell.
     fn tint(&self, column: usize) -> Option<Hsla> {
-        (self.hovered == Some(column)).then(|| self.theme.interaction.hover_fill_bottom.to_paint())
+        (self.hovered == Some(column)).then(|| {
+            self.theme
+                .colors
+                .text
+                .at(crate::theme::Opacity::HoverBottom)
+                .to_paint()
+        })
     }
 
     fn cell(&self, row: &str, column: usize) -> Stateful<Div> {
@@ -155,17 +161,21 @@ impl Grid {
 }
 
 impl RenderOnce for CompareView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let data = self.data;
         let state = kit::keyed(window, cx, part(&self.id, "state"), || HoverState {
             column: None,
-            data: data.clone(),
+            data: Arc::clone(&data),
             rows: gpui::ListState::new(data.rows.len(), gpui::ListAlignment::Top, px(96.0)),
         });
         state.update(cx, |state, _| {
             if !Arc::ptr_eq(&state.data, &data) {
-                state.data = data.clone();
+                state.data = Arc::clone(&data);
                 state.column = None;
                 state.rows.reset(data.rows.len());
             }
@@ -209,9 +219,9 @@ impl RenderOnce for CompareView {
                         ),
                 )
             }));
-        let minimum = px(columns as f32 * 96.0 + 128.0);
+        let minimum = px(crate::f32_of_count(columns).mul_add(96.0, 128.0));
         let row_grid = grid.clone();
-        let height = px(data.rows.len().min(6) as f32 * 40.0);
+        let height = px(crate::f32_of_count(data.rows.len().min(6)) * 40.0);
         let selection = data.options.get(hovered.unwrap_or(usize::MAX)).cloned();
         let body = gpui::list(rows, move |index, _, _| {
             let Some(row) = data.rows.get(index) else {

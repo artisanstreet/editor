@@ -1,5 +1,0 @@
-{"dir": "note", "text": "recorded from cursor with a signed-out engine home (2026-10-11)"}
-{"dir":"out","line":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"elicitation":{"form":{}}},"clientInfo":{"name":"Artisan Editor","version":"0.3.0"}}}}
-{"dir":"in","line":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"mcpCapabilities":{"http":true,"sse":true},"promptCapabilities":{"audio":false,"embeddedContext":false,"image":true},"sessionCapabilities":{"list":{}}},"authMethods":[{"id":"cursor_login","name":"Cursor Login","description":"Authenticate using existing Cursor login credentials. Run 'agent login' first if not logged in."}]}}}
-{"dir":"out","line":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp/scratch","mcpServers":[]}}}
-{"dir":"in","line":{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required","data":{"message":"Authentication required. Please run 'agent login' first, then call authenticate() with methodId 'cursor_login'."}}}}

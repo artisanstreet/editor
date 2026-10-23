@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::asset_seam::asset_glyph;
 use crate::motion::MotionPolicy;
-use crate::theme::{ArtisanTheme, SurfaceStep};
+use crate::theme::{ArtisanTheme, Opacity};
 
 /// The visual purpose of an action.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -20,6 +20,8 @@ pub enum ButtonVariant {
     Outline,
     Secondary,
     Ghost,
+    /// The blue gradient: the composer's primary control.
+    Accent,
 }
 
 /// Supported corner recipes. Geometry is never supplied by individual callers.
@@ -32,7 +34,7 @@ pub enum ButtonShape {
 }
 
 impl ButtonShape {
-    fn radius(self) -> gpui::Pixels {
+    const fn radius(self) -> gpui::Pixels {
         px(match self {
             Self::Pill => 16.0,
             Self::Rounded => 10.0,
@@ -86,6 +88,10 @@ type Activation = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 
 /// An infallible text, icon, or icon-and-text action. The constructor fixes its shape.
 #[derive(IntoElement)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent builder flags, each set on its own"
+)]
 pub struct Button {
     id: ElementId,
     theme: ArtisanTheme,
@@ -94,6 +100,10 @@ pub struct Button {
     shape: ButtonShape,
     disabled: bool,
     hover_fill: bool,
+    muted: bool,
+    radius: Option<gpui::Pixels>,
+    glass: bool,
+    size: Option<gpui::Pixels>,
     label_overflow: Option<LabelOverflow>,
     icon_slot: Option<gpui::AnyElement>,
     on_activate: Option<Activation>,
@@ -101,15 +111,19 @@ pub struct Button {
 }
 
 impl Button {
-    fn with_content(id: impl Into<ElementId>, theme: ArtisanTheme, content: Content) -> Self {
+    fn with_content(id: impl Into<ElementId>, theme: &ArtisanTheme, content: Content) -> Self {
         Self {
             id: id.into(),
-            theme,
+            theme: *theme,
             content,
             variant: ButtonVariant::Default,
             shape: ButtonShape::Pill,
             disabled: false,
             hover_fill: false,
+            muted: false,
+            radius: None,
+            glass: false,
+            size: None,
             label_overflow: None,
             icon_slot: None,
             on_activate: None,
@@ -122,7 +136,7 @@ impl Button {
         theme: ArtisanTheme,
         label: impl Into<SharedString>,
     ) -> Self {
-        Self::with_content(id, theme, Content::Text(label.into()))
+        Self::with_content(id, &theme, Content::Text(label.into()))
     }
 
     /// The icon's accessible label is required even though it is not painted.
@@ -134,7 +148,7 @@ impl Button {
     ) -> Self {
         Self::with_content(
             id,
-            theme,
+            &theme,
             Content::Icon {
                 icon,
                 label: label.into(),
@@ -150,7 +164,7 @@ impl Button {
     ) -> Self {
         Self::with_content(
             id,
-            theme,
+            &theme,
             Content::IconText {
                 icon,
                 label: label.into(),
@@ -159,28 +173,52 @@ impl Button {
     }
 
     #[must_use]
-    pub fn variant(mut self, variant: ButtonVariant) -> Self {
+    pub const fn variant(mut self, variant: ButtonVariant) -> Self {
         self.variant = variant;
         self
     }
     #[must_use]
-    pub fn shape(mut self, shape: ButtonShape) -> Self {
+    pub const fn shape(mut self, shape: ButtonShape) -> Self {
         self.shape = shape;
         self
     }
     #[must_use]
-    pub fn label_overflow(mut self, overflow: LabelOverflow) -> Self {
+    pub const fn label_overflow(mut self, overflow: LabelOverflow) -> Self {
         self.label_overflow = Some(overflow);
         self
     }
     #[must_use]
-    pub fn disabled(mut self, disabled: bool) -> Self {
+    pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
     /// Uses the established shared row highlight on a surface action.
-    pub fn hover_fill(mut self) -> Self {
+    #[must_use]
+    pub const fn hover_fill(mut self) -> Self {
         self.hover_fill = true;
+        self
+    }
+    /// Rests in the muted foreground and lifts to the foreground on hover.
+    #[must_use]
+    pub const fn muted(mut self) -> Self {
+        self.muted = true;
+        self
+    }
+    /// A component that nests the button in its own corner supplies the
+    /// concentric radius; feature code keeps to [`ButtonShape`].
+    pub(crate) const fn nested_radius(mut self, radius: gpui::Pixels) -> Self {
+        self.radius = Some(radius);
+        self
+    }
+    /// A frosted glass card at rest, for buttons over media.
+    pub(crate) const fn glass(mut self) -> Self {
+        self.glass = true;
+        self
+    }
+    /// A component that seats the button in tight media chrome supplies a
+    /// smaller square than the control height.
+    pub(crate) const fn compact(mut self, size: gpui::Pixels) -> Self {
+        self.size = Some(size);
         self
     }
     #[must_use]
@@ -205,35 +243,69 @@ impl Button {
 }
 
 impl RenderOnce for Button {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let transparent = transparent_black();
         let (background, foreground, border, hover) = match self.variant {
             ButtonVariant::Default => (
                 theme.colors.primary.to_paint(),
-                theme.colors.primary_foreground.to_paint(),
+                theme.colors.primary_text.to_paint(),
                 transparent,
-                theme.colors.primary.with_alpha(0.8).to_paint(),
+                theme.colors.primary_hover.to_paint(),
             ),
             ButtonVariant::Outline => (
-                SurfaceStep::S900.oklch().to_paint(),
-                theme.colors.foreground.to_paint(),
-                theme.colors.border.to_paint(),
-                theme.colors.input.with_alpha(0.5).to_paint(),
+                theme.colors.surface.to_paint(),
+                theme.colors.text.to_paint(),
+                theme.colors.line.to_paint(),
+                theme.colors.hover.to_paint(),
             ),
             ButtonVariant::Secondary => (
-                theme.colors.secondary.to_paint(),
-                theme.colors.secondary_foreground.to_paint(),
+                theme.colors.raised.to_paint(),
+                theme.colors.text.to_paint(),
                 transparent,
-                theme.colors.secondary.with_alpha(0.8).to_paint(),
+                theme.colors.hover.to_paint(),
             ),
             ButtonVariant::Ghost => (
                 transparent,
-                theme.colors.foreground.to_paint(),
+                theme.colors.text.to_paint(),
                 transparent,
-                theme.colors.muted.with_alpha(0.5).to_paint(),
+                theme.colors.hover.to_paint(),
+            ),
+            // Painted as gradients below; these are unused.
+            ButtonVariant::Accent => (
+                transparent,
+                theme.colors.action_text.to_paint(),
+                transparent,
+                transparent,
             ),
         };
+        let accent = self.variant == ButtonVariant::Accent;
+        let (foreground, hover_foreground) = if self.muted {
+            (theme.colors.text_muted.to_paint(), Some(foreground))
+        } else {
+            (foreground, None)
+        };
+        let (background, border): (gpui::Background, _) = if self.glass {
+            (
+                crate::glass::glass_foreground_base(&theme).into(),
+                theme.colors.text.at(Opacity::GlassBorder).to_paint(),
+            )
+        } else if accent {
+            (
+                crate::gradient::vertical_gradient(
+                    theme.colors.action_top,
+                    theme.colors.action_bottom,
+                ),
+                border,
+            )
+        } else {
+            (background.into(), border)
+        };
+        let height = self.size.unwrap_or(theme.density.control_sm);
         let icon_only = matches!(self.content, Content::Icon { .. });
         let mut root = div()
             .id(self.id)
@@ -244,8 +316,8 @@ impl RenderOnce for Button {
             .justify_center()
             .flex_shrink_0()
             .gap(px(4.0))
-            .h(theme.density.control_sm)
-            .rounded(self.shape.radius())
+            .h(height)
+            .rounded(self.radius.unwrap_or_else(|| self.shape.radius()))
             .border_1()
             .border_color(border)
             .bg(background)
@@ -253,7 +325,12 @@ impl RenderOnce for Button {
             .text_size(theme.typography.control_text)
             .font_weight(FontWeight::MEDIUM)
             .whitespace_nowrap()
-            .when(icon_only, |el| el.w(theme.density.control_sm))
+            .when(icon_only, |el| el.w(height))
+            .when(self.glass, |el| {
+                el.backdrop_blur(crate::glass::glass_blur_radius(
+                    crate::glass::GlassStrength::Quiet,
+                ))
+            })
             .when(!icon_only, |el| el.px(px(12.0)))
             .when_some(self.debug_selector, |el, selector| {
                 el.debug_selector(move || selector.to_string())
@@ -286,7 +363,9 @@ impl RenderOnce for Button {
                 .child(label_element(label, overflow)),
         };
         if self.disabled {
-            return root.aria_description("Unavailable").opacity(0.5);
+            return root
+                .aria_description("Unavailable")
+                .opacity(Opacity::Disabled.alpha());
         }
         root = root
             .focusable()
@@ -296,7 +375,11 @@ impl RenderOnce for Button {
                 style
                     .border_color(theme.colors.ring.to_paint())
                     .shadow(vec![BoxShadow {
-                        color: theme.interaction.focus_ring_color.to_paint(),
+                        color: theme
+                            .colors
+                            .ring
+                            .at(crate::theme::Opacity::FocusRing)
+                            .to_paint(),
                         offset: point(px(0.0), px(0.0)),
                         blur_radius: px(0.0),
                         spread_radius: theme.interaction.focus_ring_width,
@@ -304,14 +387,23 @@ impl RenderOnce for Button {
                     }])
             })
             .hover(move |style| {
-                if self.hover_fill {
+                let style = if self.hover_fill {
                     crate::hover_card::hover_fill(
                         style,
                         &theme,
                         crate::hover_card::HoverFill::Plain,
                     )
+                } else if accent {
+                    style.bg(crate::gradient::vertical_gradient(
+                        theme.colors.action_hover_top,
+                        theme.colors.action_hover_bottom,
+                    ))
                 } else {
                     style.bg(hover)
+                };
+                match hover_foreground {
+                    Some(color) => style.text_color(color),
+                    None => style,
                 }
             })
             .when(MotionPolicy::current(cx) == MotionPolicy::Full, |el| {

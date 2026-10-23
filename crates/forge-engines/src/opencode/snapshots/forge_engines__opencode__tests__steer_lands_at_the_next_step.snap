@@ -1,0 +1,156 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"steer\")"
+---
+[
+    Event(
+        Model {
+            id: "opencode-go/minimax-m3.1-flash-free",
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d7596407474ad7f0679",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "sleep 6 && echo a",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d7596407474ad7f0679",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "sleep 6 && echo a",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "a\n",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: Some(
+                    0,
+                ),
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 195,
+                output: 32,
+                reasoning: 0,
+                cache_read: 12001,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    12196,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        InputAccepted {
+            id: ItemId(
+                "steer-2",
+            ),
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_15d75b31b001y5O6yQLJ3N0jec/0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d75b31b001y5O6yQLJ3N0jec/0",
+            },
+            text: "It printed:\n\n```\na\n```\n\n(The command took ~6 seconds to complete due to the `sleep 6`.)\n\nAnd 2+2 = **4**.",
+            append: true,
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d75b31b001y5O6yQLJ3N0jec/0",
+            },
+            text: "It printed:\n\n```\na\n```\n\n(The command took ~6 seconds to complete due to the `sleep 6`.)\n\nAnd 2+2 = **4**.",
+            append: false,
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 258,
+                output: 67,
+                reasoning: 0,
+                cache_read: 24197,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    12259,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d75b31b001y5O6yQLJ3N0jec/0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "It printed:\n\n```\na\n```\n\n(The command took ~6 seconds to complete due to the `sleep 6`.)\n\nAnd 2+2 = **4**.",
+                ),
+                phase: Final,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+]

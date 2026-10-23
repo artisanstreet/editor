@@ -197,13 +197,57 @@ fn async_questions_are_answered_as_a_message() {
     insta::assert_debug_snapshot!(replay("async-questions"));
 }
 
+/// How the turn ended, from a replayed transcript.
+fn turn_end(case: &str) -> crate::Outcome {
+    replay(case)
+        .into_iter()
+        .rev()
+        .find_map(|step| match step {
+            Step::TurnEnd(outcome) => Some(outcome),
+            Step::Event(_)
+            | Step::Reply(_)
+            | Step::Response { .. }
+            | Step::Message(_)
+            | Step::ProtocolError(_) => None,
+        })
+        .expect("the turn ends")
+}
+
+/// "Selected model is at capacity" after Codex's own retries: the turn
+/// fails, and Forge may retry it.
+#[test]
+fn a_turn_failed_at_capacity_can_be_retried() {
+    let outcome = turn_end("overloaded");
+    assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
+    assert_eq!(outcome.retry, Some(crate::Retry::Overloaded));
+}
+
+/// A used-up plan fails the turn until the limit resets; Codex doesn't
+/// say when here.
+#[test]
+fn a_turn_failed_on_the_usage_limit_waits_for_the_reset() {
+    let outcome = turn_end("usage-limit");
+    assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
+    assert_eq!(
+        outcome.retry,
+        Some(crate::Retry::UsageLimit { resets_at: None })
+    );
+}
+
+/// A policy refusal is never retried.
+#[test]
+fn a_refused_turn_is_not_retried() {
+    assert_eq!(turn_end("notices").retry, None);
+}
+
 #[test]
 fn notices_and_a_refused_turn() {
     insta::assert_debug_snapshot!(replay("notices"));
 }
 
 /// The tier chosen in the picker is what Codex is asked for, on the thread
-/// and on each turn; the standard tier asks for nothing.
+/// and on each turn; a turn on the standard tier says so, since the thread
+/// may have been loaded on another.
 #[test]
 fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
     let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Codex);
@@ -235,12 +279,16 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
     let (_, standard) = super::thread_params(&turn);
     assert!(standard["config"].get("model_context_window").is_none());
     let mut overrides = json!({});
-    super::turn_overrides(&turn.config, &mut overrides);
-    assert_eq!(overrides["serviceTier"], "priority");
+    super::turn_overrides(&turn, &mut overrides);
+    assert_eq!(overrides["serviceTierForTurn"], "priority");
+    assert_eq!(overrides["model"], "gpt-6.1-sol");
 
     turn.config.speed = Some("standard".into());
     let (_, params) = super::thread_params(&turn);
     assert!(params.get("serviceTier").is_none(), "{params}");
+    let mut overrides = json!({});
+    super::turn_overrides(&turn, &mut overrides);
+    assert_eq!(overrides["serviceTierForTurn"], "default");
 }
 
 /// Auto is Codex's sandbox plus its automatic reviewer; Full has neither.
@@ -272,11 +320,34 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
         )
     );
 
+    let mut overrides = json!({});
+    super::turn_overrides(&turn, &mut overrides);
+    assert_eq!(
+        (
+            &overrides["sandboxPolicy"],
+            &overrides["approvalPolicy"],
+            &overrides["approvalsReviewer"]
+        ),
+        (
+            &json!({ "type": "workspaceWrite" }),
+            &json!("on-request"),
+            &json!("auto_review")
+        )
+    );
+
     turn.config.permissions = artisan_api::Permissions::Full;
     let (_, params) = super::thread_params(&turn);
     assert_eq!(params["sandbox"], "danger-full-access");
     assert_eq!(params["approvalPolicy"], "never");
     assert!(params.get("approvalsReviewer").is_none(), "{params}");
+    // A thread loaded under Auto switches to full access on its next turn.
+    let mut overrides = json!({});
+    super::turn_overrides(&turn, &mut overrides);
+    assert_eq!(
+        overrides["sandboxPolicy"],
+        json!({ "type": "dangerFullAccess" })
+    );
+    assert_eq!(overrides["approvalPolicy"], "never");
 }
 
 /// Codex sends `thread/goal/cleared` at every turn, goal or not: a thread
@@ -312,7 +383,16 @@ fn a_goal_is_shown_only_when_one_was_set() {
                     };
                     Some(format!("{state}: {text}"))
                 }
-                _ => None,
+                EngineEvent::Session { .. }
+                | EngineEvent::Model { .. }
+                | EngineEvent::Title { .. }
+                | EngineEvent::Item { .. }
+                | EngineEvent::Image { .. }
+                | EngineEvent::Status { .. }
+                | EngineEvent::Live { .. }
+                | EngineEvent::Usage(_)
+                | EngineEvent::Commands(_)
+                | EngineEvent::InputAccepted { .. } => None,
             })
             .collect()
     };
@@ -394,4 +474,108 @@ fn waits_and_sleeps_become_rows() {
         crate::EngineEvent::Item { kind: ItemKind::Tool {
             tool: ToolKind::Other { name, .. }, title: Some(title), ..
         }, .. } if name == "sleep" && title == "30 s")));
+}
+
+/// A question Codex leaves open (`"options": null`) asks for the user's own
+/// words; it is a question like any other, never an error.
+#[test]
+fn a_question_without_options_is_asked_in_own_words() {
+    use artisan_api::ItemKind;
+    use serde_json::json;
+    let mut decoder = super::decoder::Decoder::default();
+    let request = decoder.request("thread/start", json!({}));
+    decoder
+        .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
+        .unwrap();
+    let events = decoder
+        .feed(
+            &json!({ "method": "item/completed", "params": { "threadId": "root", "item": {
+        "id": "asks", "type": "agentMessage", "text": "Where is it?", "phase": "final_answer",
+        "questions": [{ "title": "Where is the Block 17 brief?", "options": null }],
+    } } })
+            .to_string(),
+        )
+        .unwrap();
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        EngineEvent::Item {
+            kind: ItemKind::Error { .. },
+            ..
+        }
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        EngineEvent::Item { kind: ItemKind::Question { questions, .. }, .. }
+            if questions.inline().is_some_and(|questions| questions.len() == 1
+                && questions[0].options.inline().is_some_and(<[_]>::is_empty)))));
+}
+
+/// A steer landing while Codex streams a reply makes it drop that reply and
+/// answer again (seen 2026-10-20). It never completes the dropped one, so it
+/// ends empty as soon as the new reply starts instead of keeping its
+/// half-streamed text until the turn ends.
+#[test]
+fn a_reply_codex_drops_for_a_steer_ends_empty_when_the_next_starts() {
+    use artisan_api::{ItemKind, Status};
+    use serde_json::json;
+    let mut decoder = super::decoder::Decoder::default();
+    let request = decoder.request("thread/start", json!({}));
+    decoder
+        .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
+        .unwrap();
+    let message = |method: &str, id: &str, text: &str| {
+        json!({ "method": method, "params": { "threadId": "root", "item": {
+            "id": id, "type": "agentMessage", "text": text, "phase": "final_answer",
+        } } })
+        .to_string()
+    };
+    decoder
+        .feed(&message("item/started", "dropped", ""))
+        .unwrap();
+    decoder
+        .feed(&json!({ "method": "item/agentMessage/delta", "params": {
+            "threadId": "root", "turnId": "t", "itemId": "dropped", "delta": "Yes. **The result does not justify",
+        } }).to_string())
+        .unwrap();
+    let restarted = decoder
+        .feed(&message("item/started", "answer", ""))
+        .unwrap();
+    let ended: Vec<_> = restarted
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::Item {
+                key,
+                status,
+                kind: ItemKind::AssistantMessage { text, .. },
+                ..
+            } => Some((key.as_str(), *status, text.inline().unwrap_or_default())),
+            EngineEvent::Session { .. }
+            | EngineEvent::Model { .. }
+            | EngineEvent::Title { .. }
+            | EngineEvent::Item { .. }
+            | EngineEvent::Image { .. }
+            | EngineEvent::Status { .. }
+            | EngineEvent::Live { .. }
+            | EngineEvent::Usage(_)
+            | EngineEvent::Commands(_)
+            | EngineEvent::InputAccepted { .. } => None,
+        })
+        .collect();
+    assert_eq!(
+        ended,
+        [
+            ("dropped", Status::Cancelled, ""),
+            ("answer", Status::Running, "")
+        ]
+    );
+    let answered = decoder
+        .feed(&message(
+            "item/completed",
+            "answer",
+            "Yes. The delivered result does not justify it.",
+        ))
+        .unwrap();
+    assert!(answered.iter().all(|event| !matches!(event,
+        EngineEvent::Item { key, .. } | EngineEvent::Status { key, .. } if key == "dropped")));
+    assert!(decoder.finish().iter().all(|event| !matches!(event,
+        EngineEvent::Item { key, .. } | EngineEvent::Status { key, .. } if key == "dropped")));
 }

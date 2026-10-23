@@ -16,7 +16,7 @@ use crate::EngineEvent;
 use artisan_api::ItemKind;
 
 /// A decoder that keeps copies of the items it emits.
-pub(crate) trait Retains {
+pub trait Retains {
     /// The decoder's copy of the item it emits as `key`, if it keeps one.
     fn retained(&mut self, key: &str) -> Option<&mut ItemKind>;
 }
@@ -24,7 +24,7 @@ pub(crate) trait Retains {
 /// Passes a decoder's events on, compacting its copy of every item they
 /// settle. The events still carry the complete item: Forge stores it before
 /// any later event names the descriptors.
-pub(crate) fn settle(decoder: &mut impl Retains, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
+pub fn settle(decoder: &mut impl Retains, events: Vec<EngineEvent>) -> Vec<EngineEvent> {
     for event in &events {
         let (EngineEvent::Item { key, status, .. } | EngineEvent::Status { key, status }) = event
         else {

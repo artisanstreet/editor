@@ -10,19 +10,21 @@ ropey.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api", features = ["tls"] }
-dirs.workspace = true
+claude-ai-browser = { path = "../claude-ai-browser" }
+artisan-paths = { path = "../artisan-paths" }
 futures.workspace = true
 gpui.workspace = true
-reqwest = { workspace = true, features = ["json", "stream"] }
+editor-ui = { path = "../editor-ui" }
+reqwest = { workspace = true, features = ["json", "stream", "zstd"] }
 serde.workspace = true
 serde_json.workspace = true
 sse-core.workspace = true
 tokio-util.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
-editor-ui = { path = "../editor-ui" }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
 gpui = { workspace = true, features = ["test-support"] }

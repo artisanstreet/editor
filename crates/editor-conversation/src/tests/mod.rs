@@ -66,7 +66,7 @@ impl Forge {
         let address = server.local_addr().unwrap().to_string();
         let store = server.store().clone();
         runtime.spawn(async move {
-            let _ = server.run().await;
+            server.run().await.ok();
         });
         let path = dir.path().join("project");
         std::fs::create_dir_all(&path).unwrap();
@@ -96,6 +96,7 @@ impl Forge {
                 config: EngineConfig::new(EngineId::Claude),
                 title: None,
                 parent_thread_id: None,
+                spawned_by: None,
             }))
             .unwrap();
         id
@@ -111,20 +112,26 @@ impl Forge {
     }
 
     fn finish_run_in(&self, run: &RunId, thread: &ThreadId) {
+        self.end_run_in(run, thread, artisan_api::RunStatus::Done);
+    }
+
+    fn end_run_in(&self, run: &RunId, thread: &ThreadId, status: artisan_api::RunStatus) {
         self.runtime
             .block_on(self.store.upsert_run(artisan_api::Run {
+                config: None,
                 id: run.clone(),
                 thread_id: thread.clone(),
                 engine: EngineId::Claude,
                 model: None,
                 input_cutoff: 0,
-                status: artisan_api::RunStatus::Done,
-                usage: Default::default(),
+                status,
+                usage: artisan_api::Usage::default(),
                 session_id: None,
                 error: None,
                 seq: 0,
                 started_at: 0,
                 ended_at: Some(1),
+                continuation: None,
             }))
             .unwrap();
     }
@@ -251,7 +258,7 @@ fn draw(cx: &mut VisualTestContext) {
     });
 }
 
-fn loaded(conversation: &Entity<Conversation>, cx: &mut VisualTestContext) -> Vec<Item> {
+fn loaded(conversation: &Entity<Conversation>, cx: &VisualTestContext) -> Vec<Item> {
     cx.read(|cx| conversation.read(cx).items().cloned().collect())
 }
 
@@ -273,6 +280,7 @@ fn shell(command: &str) -> ItemKind {
             command: command.into(),
             cwd: None,
             background: false,
+            watch: false,
         },
         title: None,
         output: None,
@@ -303,7 +311,7 @@ fn painted_order(cx: &mut VisualTestContext, selectors: &[String]) -> Vec<String
 /// Where the element marked `selector` painted in the last frame.
 fn painted(cx: &mut VisualTestContext, selector: String) -> Option<gpui::Bounds<gpui::Pixels>> {
     thread_local! {
-        static NAMES: std::cell::RefCell<HashMap<String, &'static str>> = Default::default();
+        static NAMES: std::cell::RefCell<HashMap<String, &'static str>> = std::cell::RefCell::default();
     }
     let name = NAMES.with(|names| {
         *names
@@ -324,6 +332,17 @@ fn read(forge: &Forge, thread: &ThreadId) -> bool {
         .is_unread()
 }
 
+/// Waits until the opened thread shows: its first screen is ready.
+fn landed(cx: &mut VisualTestContext, conversation: &Entity<Conversation>) {
+    wait(cx, "the thread", |cx| {
+        draw(cx);
+        cx.read(|cx| {
+            let c = conversation.read(cx);
+            !c.landing() && c.view.as_ref().is_some_and(|view| view.window().loaded())
+        })
+    });
+}
+
 /// Waits until nothing loads, reveals or slides any more and the
 /// transcript has stopped moving.
 fn settle(cx: &mut VisualTestContext, conversation: &Entity<Conversation>) {
@@ -338,7 +357,8 @@ fn settle(cx: &mut VisualTestContext, conversation: &Entity<Conversation>) {
             let c = conversation.read(cx);
             let top = c.list.logical_scroll_top();
             (
-                c.view.as_ref().is_some_and(|view| view.window().in_flight),
+                c.view.as_ref().is_some_and(|view| view.window().in_flight)
+                    || c.work_reading.is_some(),
                 (
                     top.item_ix,
                     f32::from(top.offset_in_item),

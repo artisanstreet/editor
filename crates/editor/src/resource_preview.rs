@@ -33,11 +33,7 @@ pub struct ResourcePreview {
 impl EventEmitter<Dismissed> for ResourcePreview {}
 
 impl ResourcePreview {
-    pub fn new(
-        reference: OpenReference,
-        client: Option<ForgeClient>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(reference: OpenReference, client: Option<ForgeClient>, cx: &Context<Self>) -> Self {
         let selection_scope: SharedString = format!("source-preview-{:?}", cx.entity_id()).into();
         let mut request = None;
         let target_line = reference.line.unwrap_or(1).saturating_sub(1) as usize;
@@ -51,12 +47,16 @@ impl ResourcePreview {
                     .spawn(async move {
                         let bytes = result
                             .map_err(|error| format!("Couldn't read this resource: {error:#}"))?;
+                        #[expect(
+                            clippy::map_err_ignore,
+                            reason = "the byte offset of the bad sequence means nothing to the reader"
+                        )]
                         let text = String::from_utf8(bytes)
                             .map_err(|_| "This resource is not a UTF-8 text file.".to_owned())?;
                         Ok::<_, String>(Arc::new(PreviewText::new(text, target_line)))
                     })
                     .await;
-                let _ = this.update(cx, |this, cx| {
+                this.update(cx, |this, cx| {
                     this.selection_source = result
                         .as_ref()
                         .ok()
@@ -65,7 +65,7 @@ impl ResourcePreview {
                     this.request = None;
                     this.jump = true;
                     cx.notify();
-                });
+                }).ok();
             }));
             None
         } else {
@@ -88,6 +88,10 @@ impl ResourcePreview {
 }
 
 impl Render for ResourcePreview {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the preview's header, actions and body build one element tree"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.release.is_none() {
             let scope = self.selection_scope.clone();
@@ -114,7 +118,7 @@ impl Render for ResourcePreview {
                     );
                     self.jump = false;
                 }
-                let lines = lines.clone();
+                let lines = Arc::clone(lines);
                 let target_line = self.target_line;
                 let scope = self.selection_scope.clone();
                 uniform_list("resource-lines", lines.offsets.len(), move |range, _, _| {
@@ -133,7 +137,7 @@ impl Render for ResourcePreview {
                                 .bg(if line == target_line {
                                     theme.colors.selected.to_paint()
                                 } else {
-                                    theme.colors.sidebar.to_paint()
+                                    theme.colors.surface.to_paint()
                                 })
                                 .font_family(theme.typography.mono.family)
                                 .tracking(0.0)
@@ -141,7 +145,7 @@ impl Render for ResourcePreview {
                                     div()
                                         .w(px(64.0))
                                         .flex_shrink_0()
-                                        .text_color(theme.colors.workspace_secondary.to_paint())
+                                        .text_color(theme.colors.text_muted.to_paint())
                                         .child((line + 1).to_string()),
                                 )
                                 .child(
@@ -184,14 +188,14 @@ impl Render for ResourcePreview {
                 Button::text("resource-copy-path", theme, "Copy path")
                     .variant(ButtonVariant::Outline)
                     .on_activate(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string()))
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.to_string()));
                     }),
             )
             .children(source.map(|text| {
                 Button::text("resource-copy-text", theme, "Copy file")
                     .variant(ButtonVariant::Outline)
                     .on_activate(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.text.clone()))
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.text.clone()));
                     })
             }))
             .children(preview_note)
@@ -201,7 +205,7 @@ impl Render for ResourcePreview {
             .on_dismiss({
                 let owner = cx.entity().downgrade();
                 move |_, _, cx| {
-                    let _ = owner.update(cx, |_, cx| cx.emit(Dismissed));
+                    owner.update(cx, |_, cx| cx.emit(Dismissed)).ok();
                 }
             })
     }

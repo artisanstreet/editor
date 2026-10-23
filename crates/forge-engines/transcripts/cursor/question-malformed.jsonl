@@ -1,5 +1,0 @@
-{"dir": "note", "text": "synthesized from the ACP schema: shapes as Cursor sends them, values made up"}
-{"dir": "out", "line": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "s", "prompt": [{"type": "text", "text": "go"}]}}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 7, "method": "cursor/ask_question", "params": {"toolCallId": "empty-id", "questions": [{"id": "", "prompt": "Choose", "options": []}]}}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 8, "method": "cursor/ask_question", "params": {"toolCallId": "same-option", "questions": [{"id": "q", "prompt": "Choose", "options": [{"id": "same", "label": "First"}, {"id": "same", "label": "Second"}]}]}}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 9, "method": "cursor/ask_question", "params": {"toolCallId": "same-question", "questions": [{"id": "q", "prompt": "First", "options": []}, {"id": "q", "prompt": "Second", "options": []}]}}}

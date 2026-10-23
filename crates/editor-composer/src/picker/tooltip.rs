@@ -92,9 +92,9 @@ fn tooltip_surface(
 ) -> AnyElement {
     let advisory = advisory.filter(|advisory| !advisory.is_empty());
     let advisory_color = if advisory.as_deref() == Some("Additional info:") {
-        theme.colors.banner_info
+        theme.colors.banner_info.text
     } else {
-        theme.colors.destructive
+        theme.colors.destructive_text
     };
     let mut body = String::new();
     let mut advisory_end = 0;

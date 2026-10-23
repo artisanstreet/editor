@@ -35,7 +35,7 @@ const RASTER_CACHE_CAPACITY: usize = 128;
 const RASTER_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 /// A full-colour SVG element with the regular GPUI style and hitbox surface.
-pub(crate) struct FullColorSvg {
+pub struct FullColorSvg {
     interactivity: Interactivity,
     asset_id: AssetId,
 }
@@ -72,7 +72,7 @@ impl FullColorSvg {
     }
 }
 
-pub(crate) struct FullColorSvgPrepaintState {
+pub struct FullColorSvgPrepaintState {
     hitbox: Option<Hitbox>,
     image: Option<CachedSvgImage>,
 }
@@ -115,24 +115,24 @@ impl Element for FullColorSvg {
                     style
                         .aspect_ratio
                         .get_or_insert(intrinsic.width / intrinsic.height);
-                    if let Length::Auto = style.size.width {
+                    if style.size.width == Length::Auto {
                         style.size.width = Length::Definite(match style.size.height {
                             Length::Definite(DefiniteLength::Absolute(length)) => {
                                 px(f32::from(length.to_pixels(window.rem_size()))
                                     * (intrinsic.width / intrinsic.height))
                                 .into()
                             }
-                            _ => intrinsic.width.into(),
+                            Length::Definite(_) | Length::Auto => intrinsic.width.into(),
                         });
                     }
-                    if let Length::Auto = style.size.height {
+                    if style.size.height == Length::Auto {
                         style.size.height = Length::Definite(match style.size.width {
                             Length::Definite(DefiniteLength::Absolute(length)) => {
                                 px(f32::from(length.to_pixels(window.rem_size()))
                                     * (intrinsic.height / intrinsic.width))
                                 .into()
                             }
-                            _ => intrinsic.height.into(),
+                            Length::Definite(_) | Length::Auto => intrinsic.height.into(),
                         });
                     }
                 }
@@ -186,21 +186,24 @@ impl Element for FullColorSvg {
                     return;
                 };
                 let corner_radii = style.corner_radii.to_pixels(window.rem_size());
-                let _ = window.paint_image(
-                    bounds,
-                    Bounds {
-                        origin: bounds.origin
-                            + point(
-                                (bounds.size.width - image.display_size.width) / 2.0,
-                                (bounds.size.height - image.display_size.height) / 2.0,
-                            ),
-                        size: image.display_size,
-                    },
-                    corner_radii,
-                    Arc::clone(&image.image),
-                    0,
-                    false,
-                );
+                // A failed paint leaves this element blank for one frame.
+                window
+                    .paint_image(
+                        bounds,
+                        Bounds {
+                            origin: bounds.origin
+                                + point(
+                                    (bounds.size.width - image.display_size.width) / 2.0,
+                                    (bounds.size.height - image.display_size.height) / 2.0,
+                                ),
+                            size: image.display_size,
+                        },
+                        corner_radii,
+                        Arc::clone(&image.image),
+                        0,
+                        false,
+                    )
+                    .ok();
             },
         );
     }
@@ -251,7 +254,7 @@ struct RasterEntry {
 /// full-colour rasters. `VecDeque` order is MRU at the front, so resizes can
 /// evict old dimensions without accumulating an unbounded per-DPI history.
 #[derive(Default)]
-pub(crate) struct FullColorSvgCache {
+pub struct FullColorSvgCache {
     parsed: VecDeque<ParsedSvgEntry>,
     rasters: VecDeque<RasterEntry>,
     raster_bytes: usize,

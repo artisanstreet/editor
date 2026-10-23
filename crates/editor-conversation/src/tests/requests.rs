@@ -127,6 +127,11 @@ fn a_question_is_answered_in_your_own_words_from_the_composer(cx: &mut TestAppCo
             .into()
         )
     );
+    // The answer reads as the user's own message.
+    wait(cx, "the answer in the transcript", |cx| {
+        draw(cx);
+        cx.debug_bounds("question-answer").is_some()
+    });
 }
 
 /// Goal lifecycle belongs to one thread's composer, never its transcript.
@@ -177,7 +182,7 @@ fn goals_are_thread_scoped_and_not_transcript_announcements(cx: &mut TestAppCont
                 project: Some(forge.project.clone()),
             },
             cx,
-        )
+        );
     });
     draw(cx);
     assert!(
@@ -195,4 +200,93 @@ fn goals_are_thread_scoped_and_not_transcript_announcements(cx: &mut TestAppCont
         draw(cx);
         cx.debug_bounds("composer-goal-label").is_some()
     });
+}
+
+/// Names its session, then fails the turn on the usage limit, which resets
+/// in an hour.
+struct OutOfUsage;
+
+impl Harness for OutOfUsage {
+    fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
+        Box::pin(async move {
+            io.emit(EngineEvent::InputAccepted {
+                id: turn.input.id.clone(),
+            })
+            .await;
+            io.emit(EngineEvent::Session {
+                id: "session".to_owned(),
+            })
+            .await;
+            Outcome::retryable(
+                "You've hit your limit",
+                forge_engines::Retry::UsageLimit {
+                    resets_at: Some(artisan_api::now() + 60 * 60 * 1000),
+                },
+            )
+        })
+    }
+}
+
+/// A thread parked until its usage limit resets says when it picks up, on
+/// the strip ahead of its goal; the strip's close mark cancels the pickup
+/// and gives the strip back to the goal.
+#[gpui::test]
+fn a_parked_thread_says_when_it_picks_up_until_the_pickup_is_cancelled(cx: &mut TestAppContext) {
+    let forge = Forge::with_engine(Arc::new(OutOfUsage));
+    let thread = forge.thread();
+    forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        ItemKind::Notice {
+            kind: artisan_api::NoticeKind::Goal {
+                state: "active".into(),
+            },
+            text: "Ship cascading deletes.".into(),
+        },
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (core, host, _conversation, cx) = editor(&forge, dir.path(), cx);
+    open(&core, &host, &thread, cx);
+    wait(cx, "the goal on the strip", |cx| {
+        draw(cx);
+        cx.debug_bounds("composer-goal-clear").is_some()
+    });
+    let client = cx.read(|cx| core.read(cx).host(&host).unwrap().read(cx).client.clone());
+    let message = SendMessage {
+        draft: None,
+        id: ItemId::new(),
+        text: "add cascading deletes".into(),
+        images: Vec::new(),
+        config: None,
+    };
+    editor_core::runtime::runtime()
+        .block_on(client.send_message(&thread, &message))
+        .unwrap();
+
+    wait(cx, "the pickup on the strip", |cx| {
+        draw(cx);
+        cx.debug_bounds("composer-park-cancel").is_some()
+    });
+    assert!(
+        cx.debug_bounds("composer-goal-clear").is_none(),
+        "the pickup takes the goal's place"
+    );
+    let parked = || {
+        forge
+            .runtime
+            .block_on(forge.store.thread(&thread))
+            .unwrap()
+            .unwrap()
+            .parked_until
+    };
+    assert!(parked().is_some());
+
+    click(cx, "composer-park-cancel");
+    wait(cx, "the goal back once the pickup is cancelled", |cx| {
+        draw(cx);
+        cx.debug_bounds("composer-park-cancel").is_none()
+            && cx.debug_bounds("composer-goal-clear").is_some()
+    });
+    assert_eq!(parked(), None);
 }

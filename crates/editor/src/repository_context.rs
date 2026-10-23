@@ -39,6 +39,10 @@ impl RepositoryContext {
         this.sync(cx);
         this
     }
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "the host subscription is only held; replacing it drops the old one"
+    )]
     fn sync(&mut self, cx: &mut Context<Self>) {
         let core = self.core.read(cx);
         let (host, thread, project) = match core.screen() {
@@ -48,7 +52,9 @@ impl RepositoryContext {
             Screen::NewThread { host, project } => {
                 (core.host(host).cloned(), None, project.clone())
             }
-            _ => (None, None, None),
+            Screen::Home | Screen::Settings(_) | Screen::Marketplace | Screen::Usage => {
+                (None, None, None)
+            }
         };
         let host_id = host.as_ref().map(|host| host.read(cx).id.clone());
         if self.host != host_id {
@@ -63,9 +69,16 @@ impl RepositoryContext {
                     HostEvent::ThreadChanged { thread_id }
                         if this.thread.as_ref() == Some(thread_id) =>
                     {
-                        this.sync(cx)
+                        this.sync(cx);
                     }
-                    _ => {}
+                    HostEvent::ImagesChanged
+                    | HostEvent::EngineInstall { .. }
+                    | HostEvent::ThreadSummaryChanged { .. }
+                    | HostEvent::WslDistro { .. }
+                    | HostEvent::ThreadChanged { .. }
+                    | HostEvent::Item(_)
+                    | HostEvent::Live { .. }
+                    | HostEvent::EditorCall { .. } => {}
                 })
             });
         }

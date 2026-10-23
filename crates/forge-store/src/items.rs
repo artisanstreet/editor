@@ -19,6 +19,10 @@ pub struct Acceptance {
     pub title: Option<String>,
     /// Saves the thread's resulting config as `default_engine_config`.
     pub remember_config: bool,
+    /// The message reports this agent's result (see `ItemKind::UserMessage`).
+    pub from_agent: Option<ItemId>,
+    /// Another thread's agent wrote the message (see `ItemKind::UserMessage`).
+    pub sender: Option<artisan_api::Sender>,
 }
 
 impl Store {
@@ -176,6 +180,8 @@ impl Store {
                         text: message.text.into(),
                         images: message.images,
                         steer,
+                        from_agent: acceptance.from_agent.clone(),
+                        sender: acceptance.sender.clone(),
                     },
                 },
                 &blob_dir,
@@ -190,51 +196,6 @@ impl Store {
                 tx.accept_command(thread, item.seq, acceptance.remember_config, message.draft)?;
             }
             Ok((item, created, engine))
-        })
-        .await
-    }
-
-    /// Accepts a thread setting command once, as a notice instead of model
-    /// input. `apply` changes the thread's config and returns the notice; a
-    /// replay is a notice with the same id that starts with `replay_prefix`.
-    pub async fn configure_thread(
-        &self,
-        thread_id: ThreadId,
-        message: SendMessage,
-        replay_prefix: String,
-        remember_config: bool,
-        apply: impl FnOnce(&mut artisan_api::EngineConfig) -> String + Send + 'static,
-    ) -> Result<Item> {
-        self.write(move |tx| {
-            let mut thread = read::thread(tx, &thread_id)?
-                .ok_or_else(|| SendRejected::ThreadNotFound(thread_id.clone()))?;
-            if let Some(existing) = read::item(tx, &message.id)? {
-                let same = existing.thread_id == thread_id
-                    && matches!(&existing.kind,
-                        ItemKind::Notice { kind: artisan_api::NoticeKind::Info, text }
-                        if text.inline().is_some_and(|text| text.starts_with(&replay_prefix)));
-                ensure!(same, SendRejected::IdConflict(message.id));
-                return Ok(existing);
-            }
-            if let Some(config) = message.config {
-                thread.config = config;
-            }
-            let text = apply(&mut thread.config);
-            let new = NewItem {
-                id: message.id,
-                thread_id,
-                run_id: None,
-                parent_id: None,
-                native_id: None,
-                status: Status::Done,
-                kind: ItemKind::Notice {
-                    kind: artisan_api::NoticeKind::Info,
-                    text: text.into(),
-                },
-            };
-            let item = tx.save_item(fresh_item(new, tx.created_at()), None)?;
-            tx.accept_command(thread, item.seq, remember_config, message.draft)?;
-            Ok(item)
         })
         .await
     }
@@ -283,8 +244,111 @@ impl Store {
         .await
     }
 
+    /// Asks for the thread's stopped turn to carry on with no new message.
+    pub async fn request_continue(&self, thread: ThreadId) -> Result<()> {
+        self.write(move |tx| tx.request_continue(&thread, artisan_api::Continuation::Requested))
+            .await
+    }
+
+    /// Takes the thread's continue request, if it has one.
+    pub async fn take_continue(
+        &self,
+        thread: ThreadId,
+    ) -> Result<Option<artisan_api::Continuation>> {
+        self.write(move |tx| tx.take_continue(&thread)).await
+    }
+
+    /// Drops the thread's parked turn; returns whether it had one.
+    pub async fn unpark(&self, thread: ThreadId) -> Result<bool> {
+        self.write(move |tx| tx.unpark(&thread)).await
+    }
+
+    /// How many runs in a row, newest first, carried the thread's turn on
+    /// for `continuation`, counting at most `limit`.
+    pub async fn continuation_chain(
+        &self,
+        thread: ThreadId,
+        continuation: artisan_api::Continuation,
+        limit: usize,
+    ) -> Result<usize> {
+        self.write(move |tx| tx.continuation_chain(&thread, continuation, limit))
+            .await
+    }
+
+    /// When the earliest parked turn is due.
+    pub async fn next_parked(&self) -> Result<Option<artisan_api::Timestamp>> {
+        self.read(|conn| {
+            Ok(conn.query_row(
+                "SELECT min(due_at) FROM continues WHERE due_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
+    /// Whether the thread's stopped turn is waiting to carry on.
+    pub async fn continue_pending(&self, thread: &ThreadId) -> Result<bool> {
+        let thread = thread.clone();
+        self.read(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM continues WHERE thread_id=?1)",
+                [thread.as_str()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+
+    /// The items a run left open when it stopped, in order.
+    pub async fn cancelled_items(&self, run: &artisan_api::RunId) -> Result<Vec<Item>> {
+        let run = run.clone();
+        self.read(move |conn| {
+            read::items(
+                conn,
+                "SELECT body FROM items WHERE run_id=?1 AND status='cancelled' ORDER BY position",
+                [run.as_str()],
+            )
+        })
+        .await
+    }
+
+    /// Puts the messages a stop cancelled before the engine read them back
+    /// in line: the cancelled ones after the last message it did read.
+    /// Returns how many.
+    pub async fn restore_undelivered_inputs(&self, thread: ThreadId) -> Result<usize> {
+        self.write(move |tx| {
+            let inputs: Vec<Item> = read::items(
+                tx,
+                "SELECT body FROM items WHERE thread_id=?1 AND parent_id IS NULL
+                    AND kind_type='user_message' AND status='cancelled'
+                    AND position > (SELECT coalesce(max(position), 0) FROM items
+                        WHERE thread_id=?1 AND parent_id IS NULL
+                        AND kind_type='user_message' AND status!='cancelled')
+                    ORDER BY position",
+                params![thread.as_str()],
+            )?;
+            let mut activity = None;
+            for old in &inputs {
+                let input = Item {
+                    status: Status::Running,
+                    ..old.clone()
+                };
+                activity = Some(tx.save_item(input, Some(old.clone()))?.seq);
+            }
+            if let Some(seq) = activity {
+                tx.mark_activity(&thread, seq)?;
+            }
+            Ok(inputs.len())
+        })
+        .await
+    }
+
+    /// Cancels the thread's undelivered messages through `through`, and a
+    /// waiting continue request.
     pub async fn cancel_pending_inputs(&self, thread: ThreadId, through: Seq) -> Result<()> {
         self.write(move |tx| {
+            tx.take_continue(&thread)?;
             let inputs: Vec<Item> = read::items(
                 tx,
                 "SELECT body FROM items WHERE thread_id=?1 AND position<=?2 AND status='running'
@@ -308,7 +372,14 @@ impl Store {
     }
 
     /// All remaining outputs and the final run commit together; activity changes once.
-    pub async fn settle_run(&self, run: Run, open: Vec<ItemId>) -> Result<Run> {
+    /// Ends the run, closing the items it left open; a failed run that
+    /// passes by itself parks as `park` says. Returns whether it parked.
+    pub async fn settle_run(
+        &self,
+        run: Run,
+        open: Vec<ItemId>,
+        park: Option<crate::Park>,
+    ) -> Result<(Run, bool)> {
         self.write(move |tx| {
             let status = if run.status == RunStatus::Done {
                 Status::Done
@@ -348,9 +419,19 @@ impl Store {
                     tx.save_item(item, Some(old))?;
                 }
             }
+            // Parked first, so no reader sees the failure without the time
+            // it is picked up again.
+            let parked = match park.filter(|_| run.status == RunStatus::Failed) {
+                Some(park) => tx.park(&run, park)?,
+                None => false,
+            };
             let run = tx.save_run(run)?;
+            // Forge stopping (an update, a restart) ended it unfinished.
+            if run.status == RunStatus::Interrupted {
+                tx.continue_after_restart(&run)?;
+            }
             tx.mark_activity(&run.thread_id, run.seq)?;
-            Ok(run)
+            Ok((run, parked))
         })
         .await
     }
@@ -380,7 +461,7 @@ impl Store {
             let input_id = ItemId(format!("answer-{id}"));
             if item.status.is_terminal() {
                 ensure!(
-                    collection::answers_equal(tx, saved, &answers)?,
+                    collection::answers_equal(tx, saved.as_ref(), &answers)?,
                     Refused("This question was already answered differently.".into())
                 );
                 return read::item(tx, &input_id)?.context("question answer input is missing");
@@ -415,6 +496,8 @@ impl Store {
                         text: text.into(),
                         images: Vec::new(),
                         steer: false,
+                        from_agent: None,
+                        sender: None,
                     },
                 },
                 &blob_dir,
@@ -523,6 +606,31 @@ impl Store {
         let parent = parent.cloned();
         self.read(move |conn| read::scoped_items_page(conn, &thread, &query, Some(parent.as_ref())))
             .await
+    }
+
+    /// A page of the root transcript in rows, the work between them as
+    /// spans (see `read::transcript_page`).
+    pub async fn transcript_rows(
+        &self,
+        thread_id: &ThreadId,
+        query: ItemsQuery,
+    ) -> Result<ItemsPage> {
+        let thread_id = thread_id.clone();
+        self.read(move |conn| {
+            read::transcript_page(conn, &thread_id, &query)
+                .with_context(|| format!("page the transcript of thread {thread_id}"))
+        })
+        .await
+    }
+
+    /// Root work between `after` and `before`, newest first.
+    pub async fn work_page(&self, thread_id: &ThreadId, query: ItemsQuery) -> Result<ItemsPage> {
+        let thread_id = thread_id.clone();
+        self.read(move |conn| {
+            read::work_page(conn, &thread_id, &query)
+                .with_context(|| format!("page work of thread {thread_id}"))
+        })
+        .await
     }
 
     /// Approvals and questions waiting on the user, across threads.

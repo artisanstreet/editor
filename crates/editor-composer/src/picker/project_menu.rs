@@ -1,6 +1,7 @@
 //! The project menu (`home_project_picker`).
 
 use super::*;
+use editor_ui::project_mark::project_mark;
 
 impl Composer {
     /// The project menu (`home_project_picker`): one row per project, with
@@ -13,7 +14,7 @@ impl Composer {
         &self,
         theme: &ArtisanTheme,
         desktop: &ColorTokens,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let (theme, desktop) = (*theme, *desktop);
         let width = PROJECT_MENU_WIDTH_PX.min(self.viewport_width - MENU_VIEWPORT_INSET_X_PX);
@@ -25,13 +26,22 @@ impl Composer {
                 let Some(host) = this.host(cx) else {
                     return Vec::new();
                 };
+                let visible: Vec<_> = range
+                    .clone()
+                    .filter_map(|index| this.picker.projects.get(index).cloned())
+                    .collect();
+                host.update(cx, |host, cx| {
+                    for project in &visible {
+                        host.load_repository(project, false, cx);
+                        host.load_project_icon(project, cx);
+                    }
+                });
+                let chosen_project = this.project(cx);
+                let host = host.read(cx);
                 range
                     .filter_map(|index| {
-                        let project = host
-                            .read(cx)
-                            .projects
-                            .get(this.picker.projects.get(index)?)?;
-                        let chosen = this.project().as_ref() == Some(&project.id);
+                        let project = host.projects.get(this.picker.projects.get(index)?)?;
+                        let chosen = chosen_project.as_ref() == Some(&project.id);
                         let id = project.id.clone();
                         let hover_id = id.to_string();
                         Some(
@@ -68,25 +78,27 @@ impl Composer {
                                     this.choose_project(id.clone(), cx);
                                 }))
                                 .child(this.picker.project_hover.row_probe(hover_id))
-                                .child(
-                                    asset_glyph(AssetId::TABLER_FOLDER)
-                                        .size(px(16.0))
-                                        .text_color(desktop.workspace_secondary.to_paint()),
-                                )
+                                .child(project_mark(
+                                    host.project_icon(&project.id),
+                                    host.repository(&project.id)
+                                        .map(|repository| repository.host.clone()),
+                                    16.0,
+                                    desktop.text_muted.to_paint(),
+                                ))
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w(px(0.0))
                                         .truncate()
                                         .text_size(TypographyTokens::size(TextStep::Sm))
-                                        .text_color(desktop.workspace_foreground.to_paint())
+                                        .text_color(desktop.text.to_paint())
                                         .child(project.name.clone()),
                                 )
                                 .when(chosen, |row| {
                                     row.child(
                                         div()
                                             .text_size(TypographyTokens::size(TextStep::Base))
-                                            .text_color(desktop.workspace_secondary.to_paint())
+                                            .text_color(desktop.text_muted.to_paint())
                                             .child("✓"),
                                     )
                                 })
@@ -97,77 +109,51 @@ impl Composer {
                     .collect()
             }),
         )
-        .h(px((count.clamp(1, 8) * 36) as f32));
-        let mut list = div().flex().flex_col().p(px(8.0)).child(project_rows);
-        // The distinct intake row after a hairline: adding a project.
-        list = list.child(
-            div()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .h(px(1.0))
-                        .w_full()
-                        .bg(desktop.popover_line.to_paint())
-                        .my(px(4.0))
-                        .mx(px(4.0)),
+        .h(px(f32::from(u8::try_from(count.min(8)).unwrap_or(8)) * 36.0));
+        let scratch = ProjectId::scratch();
+        let offers_scratch = self.host(cx).is_some_and(|host| {
+            host.read(cx)
+                .projects
+                .get(&scratch)
+                .is_some_and(|project| !project.removed)
+        });
+        let mut list = div().flex().flex_col().p(px(8.0));
+        if count > 0 {
+            list = list
+                .child(project_rows)
+                .child(editor_ui::glass::glass_menu_separator(&theme));
+        }
+        // The distinct intake rows after a hairline: a thread without a
+        // project, and adding a project.
+        if offers_scratch {
+            let chosen = self.project(cx).as_ref() == Some(&scratch);
+            list = list.child(
+                self.intake_row(
+                    NO_PROJECT_ROW,
+                    "No project",
+                    AssetId::TABLER_MESSAGE_CIRCLE,
+                    chosen,
+                    &desktop,
+                    cx,
                 )
-                .child(
-                    div()
-                        .id("composer-project-new")
-                        .role(gpui::Role::MenuItem)
-                        .aria_label("New project")
-                        .focusable()
-                        .tab_index(0)
-                        .debug_selector(|| "composer-project-new".to_owned())
-                        .relative()
-                        .flex()
-                        .items_center()
-                        .w_full()
-                        .gap(px(10.0))
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(RadiusTokens::value(RadiusStep::Sm))
-                        .cursor_pointer()
-                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                            if *hovered {
-                                this.picker
-                                    .project_hover
-                                    .set_active(NEW_PROJECT_ROW.to_owned());
-                                cx.notify();
-                            }
-                        }))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.close_menu(cx);
-                            cx.emit(crate::ComposerEvent::NewProject);
-                        }))
-                        .child(
-                            self.picker
-                                .project_hover
-                                .row_probe(NEW_PROJECT_ROW.to_owned()),
-                        )
-                        .child(
-                            div()
-                                .w(px(16.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .flex_shrink_0()
-                                .text_size(TypographyTokens::size(TextStep::Base))
-                                .text_color(desktop.workspace_secondary.to_paint())
-                                .child("+"),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .text_size(TypographyTokens::size(TextStep::Sm))
-                                .text_color(desktop.workspace_foreground.to_paint())
-                                .child("New project"),
-                        ),
-                ),
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.choose_project(scratch.clone(), cx);
+                })),
+            );
+        }
+        list = list.child(
+            self.intake_row(
+                NEW_PROJECT_ROW,
+                "New project",
+                AssetId::TABLER_FOLDER_PLUS,
+                false,
+                &desktop,
+                cx,
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.close_menu(cx);
+                cx.emit(crate::ComposerEvent::NewProject);
+            })),
         );
         glass_menu(
             "composer-project-menu",
@@ -191,5 +177,65 @@ impl Composer {
         ))
         .child(list)
         .into_any_element()
+    }
+
+    /// A project menu row that is not a project: its glyph, its label and
+    /// the shared hover pill; the caller adds the click.
+    fn intake_row(
+        &self,
+        hover_id: &'static str,
+        label: &'static str,
+        glyph: AssetId,
+        chosen: bool,
+        desktop: &ColorTokens,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(SharedString::from(format!("composer-project-{hover_id}")))
+            .role(gpui::Role::MenuItem)
+            .aria_label(label)
+            .aria_selected(chosen)
+            .focusable()
+            .tab_index(0)
+            .debug_selector(move || format!("composer-project-{hover_id}"))
+            .relative()
+            .flex()
+            .items_center()
+            .w_full()
+            .gap(px(10.0))
+            .px(px(8.0))
+            .py(px(6.0))
+            .rounded(RadiusTokens::value(RadiusStep::Sm))
+            .cursor_pointer()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.picker.project_hover.set_active(hover_id.to_owned());
+                    cx.notify();
+                }
+            }))
+            .child(self.picker.project_hover.row_probe(hover_id.to_owned()))
+            .child(
+                asset_glyph(glyph)
+                    .size(px(16.0))
+                    .flex_shrink_0()
+                    .text_color(desktop.text_muted.to_paint()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(TypographyTokens::size(TextStep::Sm))
+                    .text_color(desktop.text.to_paint())
+                    .child(label),
+            )
+            .when(chosen, |row| {
+                row.child(
+                    div()
+                        .text_size(TypographyTokens::size(TextStep::Base))
+                        .text_color(desktop.text_muted.to_paint())
+                        .child("✓"),
+                )
+            })
     }
 }

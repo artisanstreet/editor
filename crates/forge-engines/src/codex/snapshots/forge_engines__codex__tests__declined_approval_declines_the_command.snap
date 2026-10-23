@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 125
 expression: "replay(\"decline\")"
 ---
 [
@@ -89,6 +88,7 @@ expression: "replay(\"decline\")"
                         "/work",
                     ),
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -111,6 +111,7 @@ expression: "replay(\"decline\")"
                         "/work",
                     ),
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -156,6 +157,7 @@ expression: "replay(\"decline\")"
                         "/work",
                     ),
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -211,6 +213,7 @@ expression: "replay(\"decline\")"
                         "/work",
                     ),
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -323,6 +326,7 @@ expression: "replay(\"decline\")"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
 ]

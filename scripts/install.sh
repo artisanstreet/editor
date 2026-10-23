@@ -2,13 +2,13 @@
 # Installs Artisan on Linux or macOS:
 #
 #   curl -fsSL https://github.com/sandersonstabo/artisan-editor/releases/latest/download/install.sh | sh
-#   curl -fsSL …/install.sh | sh -s -- forge        (arguments go to `ae install`)
+#   curl -fsSL …/install.sh | sh -s -- --forge here --editor none   (arguments go to `ae install`)
 #
-# Downloads release.json and this platform's archive, checks the archive's
-# SHA-256 against release.json, and runs the `ae` inside with `install`.
-# `ae install` reuses these files and verifies release.json's
-# Ed25519 signature before installing anything. ARTISAN_RELEASES overrides
-# the feed (a release.json URL or a directory holding a release).
+# Downloads release.json and this platform's `ae`, checks it against the
+# SHA-256 in release.json, and runs `ae install`, which verifies
+# release.json's Ed25519 signature before installing anything and asks what
+# goes where. ARTISAN_RELEASES overrides the feed (a release.json URL or a
+# directory holding a release).
 set -eu
 
 feed="${ARTISAN_RELEASES:-https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release.json}"
@@ -47,7 +47,7 @@ fetch "$feed" "$tmp/release.json"
 fetch "$feed.sig" "$tmp/release.json.sig"
 
 # release.json lists one artifact per line.
-line="$(grep "\"os\":\"$os\"" "$tmp/release.json" | grep "\"arch\":\"$arch\"" | head -n1 || true)"
+line="$(grep '"app":"ae"' "$tmp/release.json" | grep "\"os\":\"$os\"" | grep "\"arch\":\"$arch\"" | head -n1 || true)"
 [ -n "$line" ] || fail "this release has no build for $os $arch"
 file="$(printf '%s\n' "$line" | sed -n 's/.*"file":"\([^"]*\)".*/\1/p')"
 sha256="$(printf '%s\n' "$line" | sed -n 's/.*"sha256":"\([0-9a-fA-F]*\)".*/\1/p')"
@@ -68,9 +68,9 @@ fi
 
 mkdir "$tmp/unpacked"
 tar -xzf "$tmp/$file" -C "$tmp/unpacked" ae
-# Piped into sh, stdin is this script; `ae install` may ask questions.
-if [ -r /dev/tty ]; then
-    ARTISAN_RELEASE_CACHE="$tmp" "$tmp/unpacked/ae" install --from "$source" "$@" < /dev/tty
+# Piped into sh, stdin is this script; `ae install` asks on the terminal.
+if [ -r /dev/tty ] && [ -t 2 ]; then
+    "$tmp/unpacked/ae" install --from "$source" "$@" < /dev/tty
 else
-    ARTISAN_RELEASE_CACHE="$tmp" "$tmp/unpacked/ae" install --from "$source" "$@"
+    "$tmp/unpacked/ae" install --from "$source" "$@"
 fi

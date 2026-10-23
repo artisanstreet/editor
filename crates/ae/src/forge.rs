@@ -1,38 +1,42 @@
-//! `ae forge serve | pair | import | devices`.
+//! `ae pair` and `ae devices`: connecting Editors to this machine's Forge.
+//! Both work on Forge's data directly, running or not.
 
-use anyhow::{Context, Result};
+use crate::{service, ui};
+use anyhow::{Context, Result, bail};
 use artisan_api::Timestamp;
-use forge_http::{DEFAULT_PORT, ServeConfig, tls};
+use artisan_paths::App;
+use forge_http::tls;
 use forge_store::admin::Admin;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::net::SocketAddr;
+use std::time::Duration;
 
-pub fn default_listen() -> SocketAddr {
-    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DEFAULT_PORT)
+fn data() -> Result<std::path::PathBuf> {
+    let data = App::Forge.data()?;
+    anyhow::ensure!(
+        App::Forge.binary()?.is_file() || data.exists(),
+        "Forge isn't installed here; run `ae install`"
+    );
+    Ok(data)
 }
 
-pub fn serve(data_dir: PathBuf, listen: SocketAddr) -> Result<()> {
-    tracing::info!(version = crate::LONG_VERSION, "starting Forge");
-    tokio::runtime::Runtime::new()
-        .context("start the async runtime")?
-        .block_on(forge_http::serve(ServeConfig { data_dir, listen }))
-}
-
-/// Works beside a running Forge: never opens its `Store`.
-pub fn pair(data_dir: &Path, listen: SocketAddr, json: bool) -> Result<()> {
-    let invite = forge_http::invite_offline(data_dir).with_context(|| {
-        format!(
-            "make a pairing code for the Forge in {}",
-            data_dir.display()
-        )
-    })?;
-    let fingerprint = tls::fingerprint_of(&invite.forge_certificate)?;
-    // An unspecified listen address (0.0.0.0) is reachable on loopback.
-    let address = if listen.ip().is_unspecified() {
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), listen.port())
+/// The address Editors on this machine reach Forge at.
+fn reachable_address() -> SocketAddr {
+    let address = service::address();
+    if address.ip().is_unspecified() {
+        SocketAddr::from(([127, 0, 0, 1], address.port()))
     } else {
-        listen
-    };
+        address
+    }
+}
+
+/// Makes a one-time pairing code. In a terminal it waits until an Editor
+/// uses it; `--json` prints it for the Editor and returns.
+pub fn pair(json: bool) -> Result<()> {
+    let data = data()?;
+    let invite = forge_http::invite_offline(&data)
+        .with_context(|| format!("make a pairing code for the Forge in {}", data.display()))?;
+    let fingerprint = tls::fingerprint_of(&invite.forge_certificate)?;
+    let address = reachable_address();
     if json {
         let value = serde_json::json!({
             "code": invite.code,
@@ -42,154 +46,159 @@ pub fn pair(data_dir: &Path, listen: SocketAddr, json: bool) -> Result<()> {
             "address": address.to_string(),
         });
         println!("{value}");
-    } else {
-        println!(
-            "Pairing code: {}  (valid for 10 minutes, once)",
-            invite.code
-        );
-        println!("Forge address: {address}");
-        println!("Forge fingerprint: {fingerprint}");
-        println!("Check that the Editor shows the same fingerprint before you enter the code.");
+        return Ok(());
     }
-    Ok(())
-}
-
-/// Imports the old Forge. Needs this Forge stopped (it takes its lock); the
-/// old one may keep running, its database is only read.
-pub fn import(data_dir: &Path, from: Option<PathBuf>) -> Result<()> {
-    let old = match from {
-        Some(dir) => dir,
-        None => legacy_data_dir()?,
-    };
-    let old_db = old.join("forge.sqlite3");
-    anyhow::ensure!(
-        old_db.is_file(),
-        "no old Forge database at {}",
-        old_db.display()
-    );
-    std::fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
-    let _lock =
-        forge_http::lock_data_dir(data_dir).context("stop Forge first (`ae forge stop`)")?;
-    tokio::runtime::Runtime::new()
-        .context("start the async runtime")?
-        .block_on(async {
-            let store = forge_store::Store::open(data_dir)?;
-            println!("Importing threads from {} …", old_db.display());
-            let report = forge_store::legacy::import(&old_db, &old, &store)
-                .await
-                .with_context(|| format!("import {}", old_db.display()))?;
-            println!(
-                "{} projects, {} threads, {} items, {} runs, {} images, {} global prompt versions",
-                report.projects,
-                report.threads,
-                report.items,
-                report.runs,
-                report.images,
-                report.prompt_versions
-            );
-            for (reason, count) in &report.skipped {
-                println!("  skipped {count}: {reason}");
-            }
-            let skills = forge_engines::import_legacy_extensions(
-                &old,
-                &data_dir.join("extensions").join("skills"),
-            );
-            if !skills.is_empty() {
-                println!("Skills: {}", skills.join(", "));
-            }
-            // Engine homes are copied; only toolchain caches are shared.
-            let engines = forge_engines::Engines::new(data_dir)
-                .import_legacy(&old.join("toolchain"))
-                .await?;
-            if !engines.is_empty() {
-                let names: Vec<String> = engines.iter().map(ToString::to_string).collect();
-                println!("Engines: {}", names.join(", "));
-            }
-            anyhow::Ok(())
-        })
-}
-
-/// Explicit offline repair; taking the same data lock as Forge prevents any
-/// mutation of an active instance. Dry-run never opens the recovering Store.
-pub fn normalize(data_dir: &Path, dry_run: bool) -> Result<()> {
-    anyhow::ensure!(
-        data_dir.join("forge.sqlite3").is_file(),
-        "no Forge database at {}",
-        data_dir.display()
-    );
-    if dry_run {
-        let count = forge_store::legacy::inspect_agent_messages(data_dir)?;
-        println!(
-            "Would normalize {count} agent messages in {}",
-            data_dir.display()
+    let paste = format!("{address} {} {fingerprint}", invite.code);
+    if !ui::interactive() {
+        println!("{paste}");
+        eprintln!(
+            "Paste this into the Editor (Settings → Hosts → Add). Valid for 10 minutes, once."
         );
         return Ok(());
     }
-    let _lock = forge_http::lock_data_dir(data_dir)
-        .context("the target Forge database must be offline for normalization")?;
-    tokio::runtime::Runtime::new()
-        .context("start the async runtime")?
-        .block_on(async {
-            let store = forge_store::Store::open(data_dir)?;
-            let count = forge_store::legacy::normalize_agent_messages(&store).await?;
-            println!(
-                "Normalized {count} agent messages in {}",
-                data_dir.display()
-            );
-            anyhow::Ok(())
-        })
+    ui::intro("Pair an Editor");
+    ui::note(
+        "Paste this into the Editor: Settings → Hosts → Add",
+        format!(
+            "{paste}\n\nCode         {}\nForge        {address}\nFingerprint  {fingerprint}",
+            invite.code
+        ),
+    );
+    if !service::listening(service::address()) {
+        ui::warning("Forge isn't running; the Editor can't pair until it is (`ae forge start`).");
+    }
+    let before = Admin::open(&data)?.devices()?.len();
+    let progress = ui::Progress::spinner("Waiting for an Editor");
+    loop {
+        let left = (invite.expires_at - artisan_api::now()) / 1000;
+        if left <= 0 {
+            progress.fail("The code expired; run `ae pair` again");
+            bail!("the pairing code expired");
+        }
+        progress.message(format!(
+            "Waiting for an Editor (code valid for {}:{:02})",
+            left / 60,
+            left % 60
+        ));
+        let devices = Admin::open(&data)?.devices()?;
+        if devices.len() > before {
+            let newest = devices
+                .iter()
+                .max_by_key(|device| device.created_at)
+                .map_or("an Editor", |device| device.name.as_str());
+            progress.done(format!("Paired {newest}"));
+            ui::outro("Done.");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
-/// Where the previous Forge kept its data.
-fn legacy_data_dir() -> Result<PathBuf> {
-    let base = if cfg!(windows) {
-        crate::paths::local_app_data()?
-    } else {
-        crate::paths::xdg_data()?
-    };
-    ["Artisan Street", "Artisan Street Dev"]
-        .into_iter()
-        .map(|name| base.join(name).join("data"))
-        .find(|dir| dir.join("forge.sqlite3").is_file())
-        .context("found no previous Forge; pass --from <its data directory>")
-}
-
-pub fn devices(data_dir: &Path) -> Result<()> {
-    let devices = Admin::open(data_dir)?.devices()?;
+pub fn devices(json: bool) -> Result<()> {
+    let devices = Admin::open(&data()?)?.devices()?;
+    if json {
+        let list: Vec<_> = devices
+            .iter()
+            .map(|device| {
+                serde_json::json!({
+                    "id": device.id.as_str(),
+                    "name": device.name,
+                    "paired_at": device.created_at,
+                    "last_seen": device.last_seen,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::Value::Array(list));
+        return Ok(());
+    }
     if devices.is_empty() {
-        println!("No paired devices. Pair one with `ae forge pair`.");
+        println!("No paired devices. Pair one with `ae pair`.");
         return Ok(());
     }
     let now = artisan_api::now();
-    println!("{:<12} {:<24} {:<14} LAST SEEN", "ID", "NAME", "PAIRED");
-    for device in devices {
-        let id: String = device.id.as_str().chars().take(12).collect();
-        let last_seen = device
-            .last_seen
-            .map_or_else(|| "never".to_owned(), |at| ago(now, at));
-        println!(
-            "{id:<12} {:<24} {:<14} {last_seen}",
-            device.name,
-            ago(now, device.created_at)
-        );
-    }
+    let rows: Vec<Vec<String>> = devices
+        .iter()
+        .map(|device| {
+            vec![
+                device.id.as_str().chars().take(12).collect(),
+                device.name.clone(),
+                ago(now, device.created_at),
+                device
+                    .last_seen
+                    .map_or_else(|| "never".to_owned(), |at| ago(now, at)),
+            ]
+        })
+        .collect();
+    println!(
+        "{}",
+        ui::table(&["ID", "NAME", "PAIRED", "LAST SEEN"], &rows)
+    );
     Ok(())
 }
 
-pub fn revoke(data_dir: &Path, id: &str) -> Result<()> {
-    match Admin::open(data_dir)?.revoke_device(id)? {
+pub fn revoke(id: Option<&str>, yes: bool) -> Result<()> {
+    let data = data()?;
+    let admin = Admin::open(&data)?;
+    let devices = admin.devices()?;
+    let (id, name) = match id {
+        Some(id) => {
+            let matches: Vec<_> = devices
+                .iter()
+                .filter(|device| device.id.as_str().starts_with(id))
+                .collect();
+            match matches.as_slice() {
+                [device] => (device.id.as_str().to_owned(), device.name.clone()),
+                [] => bail!("no paired device has the id {id:?}; see `ae devices`"),
+                _ => bail!("{id:?} matches several devices; give more of the id"),
+            }
+        }
+        None if ui::interactive() => {
+            anyhow::ensure!(!devices.is_empty(), "no paired devices");
+            let now = artisan_api::now();
+            let mut select = cliclack::select("Unpair which device?");
+            for device in &devices {
+                let seen = device.last_seen.map_or_else(
+                    || "never seen".to_owned(),
+                    |at| format!("seen {}", ago(now, at)),
+                );
+                select = select.item(
+                    (device.id.as_str().to_owned(), device.name.clone()),
+                    &device.name,
+                    seen,
+                );
+            }
+            select.interact().map_err(ui::prompt_error)?
+        }
+        None => {
+            return Err(ui::needs_flag(
+                "which device to unpair",
+                "an id (see `ae devices`)",
+            ));
+        }
+    };
+    if !yes && ui::interactive() {
+        let go = cliclack::confirm(format!("Unpair {name}? It must pair again to connect."))
+            .initial_value(true)
+            .interact()
+            .map_err(ui::prompt_error)?;
+        if !go {
+            return Ok(());
+        }
+    }
+    drop(admin);
+    match Admin::open(&data)?.revoke_device(&id)? {
         Some(device) => {
-            println!(
-                "Revoked {} ({}). Its next request is refused.",
-                device.name, device.id
-            );
+            ui::success(format!(
+                "Unpaired {}. Its next request is refused.",
+                device.name
+            ));
             Ok(())
         }
-        None => anyhow::bail!("no paired device has the id {id:?}; see `ae forge devices`"),
+        None => bail!("no paired device has the id {id:?}"),
     }
 }
 
-fn ago(now: Timestamp, at: Timestamp) -> String {
+pub fn ago(now: Timestamp, at: Timestamp) -> String {
     let seconds = (now - at).max(0) / 1000;
     match seconds {
         0..60 => "just now".to_owned(),

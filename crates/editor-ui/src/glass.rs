@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use crate::theme::{
-    ArtisanTheme, Oklch, RadiusStep, RadiusTokens, ShadowLayer, SurfaceStep, TextStep,
-    TypographyTokens,
+    ArtisanTheme, Elevation, ElevationTokens, Oklch, Opacity, RadiusStep, RadiusTokens, TextStep,
+    ThemeMode, TypographyTokens,
 };
 use gpui::{
     AnyElement, App, Background, BoxShadow, Div, Hsla, InteractiveElement as _, IntoElement,
@@ -28,101 +28,166 @@ const GLASS_STRONG_BLUR_RADIUS_PX: f32 = 20.0;
 
 /// Resolves the material's backdrop blur radius.
 #[must_use]
-pub fn glass_blur_radius(strength: GlassStrength) -> Pixels {
+pub const fn glass_blur_radius(strength: GlassStrength) -> Pixels {
     px(match strength {
         GlassStrength::Quiet => GLASS_QUIET_BLUR_RADIUS_PX,
         GlassStrength::Strong => GLASS_STRONG_BLUR_RADIUS_PX,
     })
 }
 
-/// Translucent diagonal face using the shared neutral ramp.
+/// Translucent diagonal face: gray 7 at the near corner to gray 4 at the
+/// far one, over content the app doesn't control.
 #[must_use]
-pub fn glass_material(strength: GlassStrength) -> Background {
-    let (from_alpha, to_alpha) = match strength {
-        GlassStrength::Quiet => (0.20, 0.14),
-        GlassStrength::Strong => (0.28, 0.20),
+pub fn glass_material(theme: &ArtisanTheme, strength: GlassStrength) -> Background {
+    let (from, to) = match strength {
+        GlassStrength::Quiet => (Opacity::GlassFaceQuiet, Opacity::GlassFaceQuietFar),
+        GlassStrength::Strong => (Opacity::GlassFaceStrong, Opacity::GlassFaceStrongFar),
     };
+    let gray = &theme.colors.gray;
     linear_gradient(
         145.0,
-        linear_color_stop(
-            SurfaceStep::S600.oklch().with_alpha(from_alpha).to_paint(),
-            0.0,
-        ),
-        linear_color_stop(
-            SurfaceStep::S800.oklch().with_alpha(to_alpha).to_paint(),
-            1.0,
-        ),
+        linear_color_stop(gray.step(7).at(from).to_paint(), 0.0),
+        linear_color_stop(gray.step(4).at(to).to_paint(), 1.0),
+    )
+}
+
+/// A top sheen of `colors.white` at `purpose`, fading to clear at `end`.
+fn sheen(theme: &ArtisanTheme, purpose: Opacity, end: f32) -> Background {
+    let white: Oklch = theme.colors.white;
+    linear_gradient(
+        180.0,
+        linear_color_stop(white.at(purpose).to_paint(), 0.0),
+        linear_color_stop(white.at(Opacity::Clear).to_paint(), end),
     )
 }
 
 /// Top highlight fading to transparency before the middle of the material.
 #[must_use]
-pub fn glass_highlight(strength: GlassStrength) -> Background {
-    let (alpha, transparent_at) = match strength {
-        GlassStrength::Quiet => (0.05, 0.42),
-        GlassStrength::Strong => (0.08, 0.44),
-    };
-    let white = Oklch::new(1.0, 0.0, 0.0);
-    linear_gradient(
-        180.0,
-        linear_color_stop(white.with_alpha(alpha).to_paint(), 0.0),
-        linear_color_stop(white.with_alpha(0.0).to_paint(), transparent_at),
-    )
+pub fn glass_highlight(theme: &ArtisanTheme, strength: GlassStrength) -> Background {
+    match strength {
+        GlassStrength::Quiet => sheen(theme, Opacity::Sheen, 0.42),
+        GlassStrength::Strong => sheen(theme, Opacity::SheenStrong, 0.44),
+    }
 }
 
 /// Adds the visual-only material without installing any pointer handlers.
 #[must_use]
-pub fn glass_material_layer(strength: GlassStrength, radius: Pixels) -> Div {
+pub fn glass_material_layer(theme: &ArtisanTheme, strength: GlassStrength, radius: Pixels) -> Div {
     div()
         .absolute()
         .top_0()
         .left_0()
         .size_full()
         .rounded(radius)
-        .bg(glass_material(strength))
+        .bg(glass_material(theme, strength))
 }
 
 /// Adds the highlight without installing pointer handlers.
 #[must_use]
-pub fn glass_highlight_layer(strength: GlassStrength, radius: Pixels) -> Div {
+pub fn glass_highlight_layer(theme: &ArtisanTheme, strength: GlassStrength, radius: Pixels) -> Div {
     div()
         .absolute()
         .top_0()
         .left_0()
         .size_full()
         .rounded(radius)
-        .bg(glass_highlight(strength))
+        .bg(glass_highlight(theme, strength))
 }
 
-/// Translucent foreground base beneath the glass gradient.
+/// Translucent text-coloured base beneath the glass gradient.
 #[must_use]
 pub fn glass_foreground_base(theme: &ArtisanTheme) -> Hsla {
-    theme.colors.foreground.with_alpha(0.05).to_paint()
+    theme.colors.text.at(Opacity::GlassBase).to_paint()
 }
 
-/// Card shadow stack. Glass rims belong to [`glass_card_shadows`].
+/// The fill of a control resting on glass (picker tabs, selects).
+///
+/// A solid well, darkest at the foot, so it sits quietly below the glass
+/// instead of lifting off it. Dark mode runs hover grey down to the content card's
+/// near-black; light mode runs the card's white down to the raised grey.
+#[must_use]
+pub fn glass_control_fill(theme: &ArtisanTheme) -> Background {
+    let colors = &theme.colors;
+    let (top, bottom) = match colors.mode {
+        ThemeMode::Dark => (colors.hover, colors.background),
+        ThemeMode::Light => (colors.background, colors.raised),
+    };
+    linear_gradient(
+        180.0,
+        linear_color_stop(top.to_paint(), 0.0),
+        linear_color_stop(bottom.to_paint(), 1.0),
+    )
+}
+
+/// The colour of the rule between groups in every glass menu: a hairline
+/// of the text colour, translucent so it reads on any backdrop.
+#[must_use]
+pub fn glass_menu_line(theme: &ArtisanTheme) -> Hsla {
+    theme.colors.text.at(Opacity::Hairline).to_paint()
+}
+
+/// The rule between groups in every glass menu: one pixel of
+/// [`glass_menu_line`], 4 px clear above and below, the menu's full width.
+#[must_use]
+pub fn glass_menu_separator(theme: &ArtisanTheme) -> Div {
+    div()
+        .flex_shrink_0()
+        .h(px(1.0))
+        .my(px(4.0))
+        .bg(glass_menu_line(theme))
+}
+
+/// The raised shadow stack of controls and small cards resting on a
+/// surface. Glass rims belong to [`glass_card_shadows`].
 #[must_use]
 pub fn card_shadows(theme: &ArtisanTheme) -> Vec<BoxShadow> {
-    theme
-        .elevation
-        .card_shadow
-        .iter()
-        .copied()
-        .map(ShadowLayer::to_box_shadow)
-        .collect()
+    theme.elevation.shadows(Elevation::Raised)
 }
 
-/// Glass rim and elevation shadows. These do not add a background fill.
+/// [`card_shadows`] in a tone instead of a border: a soft half-pixel ring
+/// and a faint glow of the tone under the raised drops, for small tinted
+/// cards and pills (a blocked goal's state) whose solid border reads harsh.
 #[must_use]
-pub fn glass_card_shadows() -> Vec<BoxShadow> {
-    let white = Oklch::new(1.0, 0.0, 0.0);
-    let black = Oklch::new(0.0, 0.0, 0.0);
+pub fn tinted_card_shadows(theme: &ArtisanTheme, tone: Oklch) -> Vec<BoxShadow> {
+    let mut shadows = vec![
+        glass_shadow(tone.with_alpha(0.35), 0.0, 0.0, 0.5, false),
+        BoxShadow {
+            color: tone.with_alpha(0.18).to_paint(),
+            offset: point(px(0.0), px(1.0)),
+            blur_radius: px(3.0),
+            spread_radius: px(0.0),
+            inset: false,
+        },
+    ];
+    shadows.extend(ElevationTokens::box_shadows(
+        theme.elevation.drops(Elevation::Raised),
+    ));
+    shadows
+}
+
+/// A glass card's rims and the shadow stack of its elevation. These do not
+/// add a background fill.
+#[must_use]
+pub fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<BoxShadow> {
+    let mut shadows = glass_rims(theme);
+    shadows.extend(theme.elevation.shadows(elevation));
+    shadows
+}
+
+/// The rims alone, for glass nested inside other glass, which casts no
+/// shadow of its own: the bright outer top rim, the inner top light and
+/// the inner bottom shade. The shade is a whisper on light glass.
+#[must_use]
+pub fn glass_rims(theme: &ArtisanTheme) -> Vec<BoxShadow> {
+    let colors = &theme.colors;
+    let shade = match colors.mode {
+        ThemeMode::Light => colors.black.with_alpha(0.05),
+        ThemeMode::Dark => colors.black.at(Opacity::RimShade),
+    };
     vec![
-        glass_shadow(white.with_alpha(0.14), -1.0, 0.0, 0.0, false),
-        glass_shadow(white.with_alpha(0.10), 1.0, 0.0, 0.0, true),
-        glass_shadow(black.with_alpha(0.22), -1.0, 0.0, 0.0, true),
-        glass_shadow(black.with_alpha(0.70), 18.0, 48.0, -18.0, false),
-        glass_shadow(white.with_alpha(0.08), 0.0, 0.0, 0.5, false),
+        glass_shadow(colors.white.at(Opacity::RimLight), -1.0, 0.0, 0.0, false),
+        glass_shadow(colors.white.at(Opacity::RimInner), 1.0, 0.0, 0.0, true),
+        glass_shadow(shade, -1.0, 0.0, 0.0, true),
     ]
 }
 
@@ -158,6 +223,7 @@ pub struct GlassBadge {
     selector: Option<SharedString>,
 }
 impl GlassBadge {
+    #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
         self.selector = Some(selector.into());
         self
@@ -182,15 +248,23 @@ impl RenderOnce for GlassBadge {
             .overflow_hidden()
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
             .bg(glass_foreground_base(&self.theme))
-            .child(glass_material_layer(GlassStrength::Quiet, radius))
-            .child(glass_highlight_layer(GlassStrength::Quiet, radius))
+            .child(glass_material_layer(
+                &self.theme,
+                GlassStrength::Quiet,
+                radius,
+            ))
+            .child(glass_highlight_layer(
+                &self.theme,
+                GlassStrength::Quiet,
+                radius,
+            ))
             .child(
                 div()
                     .relative()
                     .text_size(TypographyTokens::size(TextStep::X3s))
                     .line_height(px(16.0))
                     .font_features(FEATURES.clone())
-                    .text_color(self.theme.colors.foreground.to_paint())
+                    .text_color(self.theme.colors.text.to_paint())
                     .child(self.text),
             );
         if let Some(selector) = self.selector {
@@ -208,6 +282,7 @@ pub struct ComposerFrame {
     theme: ArtisanTheme,
     content: AnyElement,
     selector: Option<gpui::SharedString>,
+    nested: bool,
 }
 impl ComposerFrame {
     pub fn new(theme: ArtisanTheme, content: impl IntoElement) -> Self {
@@ -215,7 +290,15 @@ impl ComposerFrame {
             theme,
             content: content.into_any_element(),
             selector: None,
+            nested: false,
         }
+    }
+    /// Sits inside another glass shell that casts the shadow, so the frame
+    /// keeps only its rims.
+    #[must_use]
+    pub const fn nested(mut self, nested: bool) -> Self {
+        self.nested = nested;
+        self
     }
     #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<gpui::SharedString>) -> Self {
@@ -236,9 +319,21 @@ impl RenderOnce for ComposerFrame {
             .rounded(radius)
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
             .bg(glass_foreground_base(&self.theme))
-            .shadow(glass_card_shadows())
-            .child(glass_material_layer(GlassStrength::Quiet, radius))
-            .child(glass_highlight_layer(GlassStrength::Quiet, radius))
+            .shadow(if self.nested {
+                glass_rims(&self.theme)
+            } else {
+                glass_card_shadows(&self.theme, Elevation::Floating)
+            })
+            .child(glass_material_layer(
+                &self.theme,
+                GlassStrength::Quiet,
+                radius,
+            ))
+            .child(glass_highlight_layer(
+                &self.theme,
+                GlassStrength::Quiet,
+                radius,
+            ))
             .child(self.content);
         if let Some(selector) = self.selector {
             root = root.debug_selector(move || selector.to_string());
@@ -257,41 +352,30 @@ pub(crate) struct TabCardMaterial {
     pub ring: Hsla,
     pub top_light: Background,
     pub shadow: Vec<BoxShadow>,
-    pub card_edge: Vec<BoxShadow>,
 }
 impl TabCardMaterial {
     pub fn new(theme: &ArtisanTheme) -> Self {
-        let white = Oklch::new(1.0, 0.0, 0.0);
-        let gradient = |a: Oklch, b: Oklch, alpha: f32| {
+        let colors = &theme.colors;
+        let gradient = |a: Oklch, b: Oklch| {
             linear_gradient(
                 145.0,
-                linear_color_stop(a.with_alpha(alpha).to_paint(), 0.0),
-                linear_color_stop(b.with_alpha(alpha).to_paint(), 1.0),
+                linear_color_stop(a.to_paint(), 0.0),
+                linear_color_stop(b.to_paint(), 1.0),
             )
         };
-        let highlight = |alpha, end| {
-            linear_gradient(
-                180.0,
-                linear_color_stop(white.with_alpha(alpha).to_paint(), 0.0),
-                linear_color_stop(white.with_alpha(0.0).to_paint(), end),
-            )
-        };
+        let pane = |step: usize| colors.gray.step(step).at(Opacity::GlassPane);
         Self {
             blur: glass_blur_radius(GlassStrength::Strong),
-            shell: gradient(SurfaceStep::S800.oklch(), SurfaceStep::S900.oklch(), 0.62),
-            strip: gradient(SurfaceStep::S700.oklch(), SurfaceStep::S800.oklch(), 0.62),
-            highlight: highlight(0.035, 0.35),
-            well: Oklch::new(0.164, 0.0, 0.0).to_paint(),
-            ring: SurfaceStep::S50.oklch().with_alpha(0.04).to_paint(),
-            top_light: highlight(0.04, 0.4),
-            shadow: vec![BoxShadow {
-                color: Oklch::new(0.0, 0.0, 0.0).with_alpha(0.6).to_paint(),
-                offset: point(px(0.0), px(18.0)),
-                blur_radius: px(48.0),
-                spread_radius: px(-18.0),
-                inset: false,
-            }],
-            card_edge: card_shadows(theme),
+            shell: gradient(pane(4), pane(2)),
+            // Lighter than the shell, from its lit corner down to where the
+            // shell's own gradient starts, as the S700 to S800 strip did.
+            strip: gradient(colors.gray.step(8).at(Opacity::GlassPaneLit), pane(7)),
+            highlight: sheen(theme, Opacity::SheenFaint, 0.35),
+            well: colors.background.to_paint(),
+            ring: colors.text.at(Opacity::HairlineFaint).to_paint(),
+            top_light: sheen(theme, Opacity::SheenSoft, 0.4),
+            // The shell strokes its own edge.
+            shadow: ElevationTokens::box_shadows(theme.elevation.drops(Elevation::Floating)),
         }
     }
 }

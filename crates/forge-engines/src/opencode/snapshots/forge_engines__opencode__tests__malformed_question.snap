@@ -1,18 +1,17 @@
 ---
 source: crates/forge-engines/src/opencode/tests.rs
-assertion_line: 161
 expression: "replay(\"malformed-question\")"
 ---
 [
     Event(
         Item {
-            key: "invalid-question:ask",
+            key: "error:evt_022",
             parent: None,
             status: Done,
             kind: Error {
                 kind: Execution,
                 message: Inline(
-                    "OpenCode supplied malformed question prompts or options",
+                    "OpenCode asked a form Artisan can't show",
                 ),
                 retryable: false,
             },
@@ -22,6 +21,6 @@ expression: "replay(\"malformed-question\")"
         true,
     ),
     RunError(
-        "OpenCode supplied malformed question prompts or options",
+        "OpenCode asked a form Artisan can't show",
     ),
 ]

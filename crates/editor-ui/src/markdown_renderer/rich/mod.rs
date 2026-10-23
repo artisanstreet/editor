@@ -220,7 +220,7 @@ fn validate_value_budget(root: &Value) -> Result<(), String> {
         let count = match value {
             Value::Array(values) => values.len(),
             Value::Object(values) => values.len(),
-            _ => 0,
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => 0,
         };
         if pending.len().saturating_add(count) > VALUES - visited {
             return Err("rich preview exceeds 32768 JSON values".into());
@@ -228,9 +228,9 @@ fn validate_value_budget(root: &Value) -> Result<(), String> {
         match value {
             Value::Array(values) => pending.extend(values.iter().map(|value| (value, depth + 1))),
             Value::Object(values) => {
-                pending.extend(values.values().map(|value| (value, depth + 1)))
+                pending.extend(values.values().map(|value| (value, depth + 1)));
             }
-            _ => {}
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
     Ok(())
@@ -284,14 +284,14 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
                     .text_size(TypographyTokens::size(TextStep::SmMid))
                     .line_height(px(22.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.colors.foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child(title)
             }))
             .children(prepared.subtitle.clone().map(|subtitle| {
                 div()
                     .text_size(TypographyTokens::size(TextStep::XsMid))
                     .line_height(px(20.0))
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .child(subtitle)
             }))
     });
@@ -307,7 +307,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
             div()
                 .text_size(TypographyTokens::size(TextStep::XsMid))
                 .line_height(px(20.0))
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .child(caption)
         }))
         .into_any_element()
@@ -318,7 +318,7 @@ pub(super) fn render_pending(kind: &SharedString, theme: &ArtisanTheme) -> AnyEl
     div()
         .text_size(TypographyTokens::size(TextStep::Sm))
         .line_height(px(22.0))
-        .text_color(theme.colors.muted_foreground.to_paint())
+        .text_color(theme.colors.text_muted.to_paint())
         .child(SharedString::from(format!("Drawing {kind}…")))
         .into_any_element()
 }
