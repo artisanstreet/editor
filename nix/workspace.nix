@@ -29,6 +29,7 @@ let
   topFiles = [
     "Cargo.toml"
     "Cargo.lock"
+    "clippy.toml"
     "rust-toolchain.toml"
     "rustfmt.toml"
   ];
