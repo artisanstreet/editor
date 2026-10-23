@@ -1,8 +1,13 @@
 //! Bounded text editing with grapheme movement, cached word boundaries, IME and byte-budgeted undo.
+//!
 //! Single-line fields normalize newlines and tabs. Prompt mode emits submit/list/pasted-file events.
 //! All modes share MAX_BYTES; rejected input shows a limit notice. Programmatic replacement is UTF-8 clipped and also reports the limit.
 
 #![forbid(unsafe_code)]
+#![expect(
+    clippy::derive_partial_eq_without_eq,
+    reason = "gpui::actions! derives PartialEq without Eq for its unit actions"
+)]
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -171,6 +176,9 @@ pub struct TextEditor {
     word_boundaries: Option<Rc<crate::text_navigation::WordBoundaries>>,
     limit_notice: bool,
     placeholder: SharedString,
+    /// Shown instead of the placeholder in an empty prompt, with the Tab
+    /// key that writes it in.
+    suggestion: Option<SharedString>,
     disabled: bool,
     focus_handle: FocusHandle,
     undo: Vec<Snapshot>,
@@ -200,6 +208,8 @@ pub struct TextEditor {
     tokens: Option<Rc<[Token]>>,
     /// An owner's list takes the navigation keys.
     list_open: bool,
+    /// The owner draws the field's box; see [`TextEditor::bare`].
+    bare: bool,
 }
 
 impl EventEmitter<TextEditorEvent> for TextEditor {}
@@ -228,6 +238,7 @@ impl TextEditor {
             word_boundaries: None,
             limit_notice,
             placeholder: placeholder.into(),
+            suggestion: None,
             disabled: false,
             focus_handle: cx.focus_handle().tab_stop(true),
             undo: Vec::new(),
@@ -249,6 +260,7 @@ impl TextEditor {
             tokenizer: None,
             tokens: None,
             list_open: false,
+            bare: false,
         }
     }
 
@@ -261,22 +273,30 @@ impl TextEditor {
         self
     }
 
+    /// Leaves out the field's border and fill, for an owner that draws its
+    /// own box around the editor (the Marketplace's search).
+    #[must_use]
+    pub const fn bare(mut self) -> Self {
+        self.bare = true;
+        self
+    }
+
     /// Makes the editor a message prompt; see the module docs.
     #[must_use]
-    pub fn prompt(mut self) -> Self {
+    pub const fn prompt(mut self) -> Self {
         self.mode = Mode::Prompt;
         self
     }
 
     /// Fields and prompts share a visible 64 KiB bound; large source belongs in attachments.
-    fn max_bytes(&self) -> usize {
+    const fn max_bytes() -> usize {
         Self::MAX_BYTES
     }
 
     fn word_boundaries(&mut self) -> Rc<crate::text_navigation::WordBoundaries> {
-        self.word_boundaries
-            .get_or_insert_with(|| Rc::new(crate::text_navigation::WordBoundaries::new(&self.text)))
-            .clone()
+        Rc::clone(self.word_boundaries.get_or_insert_with(|| {
+            Rc::new(crate::text_navigation::WordBoundaries::new(&self.text))
+        }))
     }
 
     /// Selects the whole text, as for replacing it outright.
@@ -296,7 +316,7 @@ impl TextEditor {
 
     /// Whether the editor is read-only.
     #[must_use]
-    pub fn is_disabled(&self) -> bool {
+    pub const fn is_disabled(&self) -> bool {
         self.disabled
     }
 
@@ -311,8 +331,8 @@ impl TextEditor {
         } else {
             text
         };
-        self.limit_notice = text.len() > self.max_bytes();
-        text::truncate_to_bytes(text, self.max_bytes()).clone_into(&mut self.text);
+        self.limit_notice = text.len() > Self::max_bytes();
+        text::truncate_to_bytes(text, Self::max_bytes()).clone_into(&mut self.text);
         self.shared_text = None;
         self.word_boundaries = None;
         self.tokens = None;
@@ -341,6 +361,25 @@ impl TextEditor {
             self.placeholder = placeholder;
             cx.notify();
         }
+    }
+
+    /// Offers a prompt's likely next message: an empty prompt shows it
+    /// instead of the placeholder, and Tab writes it in.
+    pub fn set_suggestion(&mut self, suggestion: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.suggestion != suggestion {
+            self.suggestion = suggestion;
+            if self.text.is_empty() {
+                cx.notify();
+            }
+        }
+    }
+
+    /// The suggestion an empty prompt shows now.
+    #[must_use]
+    pub fn shown_suggestion(&self) -> Option<&SharedString> {
+        self.suggestion
+            .as_ref()
+            .filter(|_| self.mode == Mode::Prompt && self.text.is_empty() && !self.disabled)
     }
 
     /// Makes the editor read-only (no editing, no caret, dimmed) or
@@ -387,7 +426,7 @@ impl TextEditor {
 
     /// While `open`, Up, Down, Enter, Tab and Escape are emitted as
     /// [`ListKey`]s for the owner's list instead of acting on the text.
-    pub fn set_list_open(&mut self, open: bool) {
+    pub const fn set_list_open(&mut self, open: bool) {
         self.list_open = open;
     }
 
@@ -422,7 +461,7 @@ impl TextEditor {
     }
 
     /// Forgets the vertical goal and the open typing undo group.
-    fn reset_transient_state(&mut self) {
+    const fn reset_transient_state(&mut self) {
         self.vertical_goal_x = None;
         self.vertical_goal_column = None;
         self.typing_group_end = None;
@@ -471,6 +510,23 @@ mod reform_tests {
             editor.replace(0..1, "a", cx);
             assert!(!editor.limit_notice);
             assert_eq!(editor.text().len(), TextEditor::MAX_BYTES);
+        });
+    }
+
+    #[gpui::test]
+    fn shift_up_on_the_first_line_selects_to_the_start_like_chrome(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| TextEditor::new("one two\nthree", "", cx));
+        editor.update(cx, |editor, cx| {
+            editor.selection = 4..4;
+            editor.move_vertical(true, true, cx);
+            assert_eq!(editor.selection, 0..4);
+            editor.selection = 10..10;
+            editor.selection_anchor = None;
+            editor.reset_transient_state();
+            editor.move_vertical(false, true, cx);
+            assert_eq!(editor.selection, 10..13);
+            editor.move_vertical(true, false, cx);
+            assert_eq!(editor.selection, 2..2);
         });
     }
 

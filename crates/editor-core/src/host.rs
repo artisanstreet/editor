@@ -1,16 +1,21 @@
 //! What one Forge has told us: projects, threads, runs, settings, engines,
 //! items waiting on the user and live text. Updated only by its connection;
 //! every section reads from here. Caches built from Forge reads (images,
-//! repositories, thread pages, the observed thread's summary) and the
-//! read-acknowledgement writer are separate pieces in their own modules,
-//! each owning its tasks.
+//! repositories, project icons, thread pages, the observed thread's
+//! summary) and the read-acknowledgement writer are separate pieces in
+//! their own modules, each owning its tasks.
 
 mod images;
+mod preferences;
+mod project_icons;
 mod projections;
 mod read_acks;
 mod repositories;
 mod thread_pages;
 mod thread_summary;
+mod wsl;
+
+pub use wsl::WslStatus;
 
 pub use images::{BlobImage, ImageDecoder};
 pub use projections::ProjectionLoad;
@@ -25,8 +30,9 @@ use artisan_api::{
     ProjectId, Run, Status, Thread, ThreadId,
 };
 use futures::StreamExt as _;
-use gpui::{Context, EventEmitter, Task};
+use gpui::{Context, EventEmitter, SharedString, Task};
 use images::ImageCache;
+use project_icons::ProjectIconCache;
 use read_acks::ReadAcks;
 use repositories::RepositoryCache;
 use ropey::Rope;
@@ -73,17 +79,29 @@ pub struct HostData {
     live: HashMap<ThreadId, HashMap<LiveTarget, LiveSnapshot>>,
     /// The last stream number handed out.
     live_streams: u64,
+    /// The engine's guess at each thread's next message.
+    suggestions: HashMap<ThreadId, SharedString>,
     /// The thread on screen: its live text and summary are followed.
     observed: watch::Sender<Option<ThreadId>>,
     summary: Option<ObservedSummary>,
     thread_pages: ThreadPages,
     images: ImageCache,
     repositories: RepositoryCache,
+    project_icons: ProjectIconCache,
     read_acks: ReadAcks,
+    preferences: preferences::Preferences,
     /// Cuts the connection's wait before its next attempt short.
     retry: Arc<Notify>,
+    /// While a WSL host's Forge is unreachable: its distribution's state.
+    pub wsl: Option<WslStatus>,
+    wsl_target: wsl::WslTarget,
+    wsl_probe: Option<Task<()>>,
+    /// Keeps the distribution running while its Forge is live.
+    wsl_awake: Option<tokio::process::Child>,
     _follow: Task<()>,
     _connection: tokio_util::task::AbortOnDropHandle<()>,
+    /// When this device last renewed the host's claude.ai session.
+    claude_ai_renewed: Option<std::time::Instant>,
 }
 
 #[derive(Clone, Debug)]
@@ -99,6 +117,10 @@ pub enum HostEvent {
     },
     /// Projects, threads, runs, settings or engines changed.
     Changed,
+    /// Forge runs in this WSL distribution; the pairing should say so.
+    WslDistro {
+        distro: String,
+    },
     /// Metadata or pending interactions changed for one thread.
     ThreadChanged {
         thread_id: ThreadId,
@@ -108,11 +130,90 @@ pub enum HostEvent {
         thread_id: ThreadId,
         target: LiveTarget,
     },
+    /// Forge asks this Editor to act for an agent.
+    EditorCall {
+        id: String,
+        call: artisan_api::EditorCall,
+    },
 }
 
 impl EventEmitter<HostEvent> for HostData {}
 
+/// Threads waiting on the user, split so a question can outrank the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Attention {
+    /// Asking the user a question.
+    pub waiting: usize,
+    /// Finished, failed or interrupted, and not yet read.
+    pub stopped: usize,
+}
+
+impl std::ops::Add for Attention {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            waiting: self.waiting + other.waiting,
+            stopped: self.stopped + other.stopped,
+        }
+    }
+}
+
 impl HostData {
+    /// claude.ai asked the host's Forge for a browser check: a device that
+    /// signed in renews the session in its browser, out of sight. At most
+    /// every ten minutes, so a check the browser cannot pass is not retried
+    /// in a loop.
+    fn renew_claude_ai(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_mins(10);
+        let needs = self.engines.get(&EngineId::Claude).is_some_and(|status| {
+            matches!(
+                status.claude_ai,
+                Some(artisan_api::ClaudeAiState::NeedsRenewal { .. })
+            )
+        });
+        if !needs
+            || self
+                .claude_ai_renewed
+                .is_some_and(|at| at.elapsed() < EVERY)
+            || !claude_ai_browser::can_renew()
+        {
+            return;
+        }
+        self.claude_ai_renewed = Some(std::time::Instant::now());
+        let client = self.client.clone();
+        let host = self.id.clone();
+        crate::runtime::runtime().spawn(async move {
+            let session = match claude_ai_browser::capture(claude_ai_browser::Mode::Renew).await {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(%host, "renewing the claude.ai session failed: {error:#}");
+                    return;
+                }
+            };
+            if let Err(error) = client
+                .engine_action(
+                    EngineId::Claude,
+                    &artisan_api::EngineCommand::ClaudeAiSignIn { session },
+                )
+                .await
+            {
+                tracing::warn!(%host, "the Forge did not take the renewed claude.ai session: {error:#}");
+            }
+        });
+    }
+
+    /// Stops following Forge so a test drives every state change itself.
+    #[cfg(test)]
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "outside tests these fields are only held for their drop"
+    )]
+    pub(crate) fn stop_following(&mut self) {
+        self._connection.abort();
+        self._follow = Task::ready(());
+    }
+
     /// Starts following the Forge behind `client`.
     pub fn new(id: HostId, name: String, client: ForgeClient, cx: &mut Context<Self>) -> Self {
         cx.on_release(|host, cx| host.images.release(cx)).detach();
@@ -149,15 +250,23 @@ impl HostData {
             waiting: HashMap::new(),
             live: HashMap::new(),
             live_streams: 0,
+            suggestions: HashMap::new(),
             observed,
+            wsl: None,
+            wsl_target: wsl::WslTarget::None,
+            wsl_probe: None,
+            wsl_awake: None,
             summary: None,
             thread_pages: ThreadPages::default(),
             images: ImageCache::default(),
             repositories: RepositoryCache::default(),
+            project_icons: ProjectIconCache::default(),
             read_acks: ReadAcks::default(),
+            preferences: preferences::Preferences::default(),
             retry,
             _follow: follow,
             _connection: connection,
+            claude_ai_renewed: None,
         }
     }
 
@@ -182,12 +291,26 @@ impl HostData {
                 if !self.is_live() {
                     self.cancel_projection_reads();
                 }
+                self.wsl_connection_changed(cx);
                 cx.emit(HostEvent::Changed);
             }
             Update::State(state) => {
                 // Everything read from the old state goes, with its reads.
                 self.repositories.clear();
                 let state = *state;
+                // An icon is read from the project's path: one that kept
+                // its path keeps showing its icon while it is read again.
+                let paths: HashMap<_, _> = state
+                    .projects
+                    .iter()
+                    .map(|project| (project.id.clone(), project.path.clone()))
+                    .collect();
+                let projects = &self.projects;
+                self.project_icons.reset(|id| {
+                    projects
+                        .get(id)
+                        .is_some_and(|old| paths.get(id) == Some(&old.path))
+                });
                 self.forge_version = Some(state.forge_version);
                 self.projects = state
                     .projects
@@ -211,12 +334,21 @@ impl HostData {
                 self.settings = state.settings;
                 self.invalidate_prompt();
                 self.invalidate_catalog();
+                self.learn_wsl_distro(
+                    state
+                        .account
+                        .as_ref()
+                        .and_then(|account| account.wsl_distro.as_deref()),
+                    cx,
+                );
                 self.account = state.account;
+                self.wsl_connection_changed(cx);
                 self.engines = state
                     .engines
                     .into_iter()
                     .map(|status| (status.engine, status))
                     .collect();
+                self.renew_claude_ai();
                 self.waiting.clear();
                 for item in state.waiting {
                     self.waiting
@@ -225,6 +357,8 @@ impl HostData {
                         .insert(item.id.clone());
                 }
                 self.live.clear();
+                // The event stream replays the ones that still stand.
+                self.suggestions.clear();
                 self.prune_threads();
                 self.reset_thread_summary(cx);
                 cx.emit(HostEvent::Reset);
@@ -235,6 +369,10 @@ impl HostData {
         cx.notify();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one flat arm per event kind reads better than helpers split across files"
+    )]
     fn apply_event(&mut self, event: Event, seq: Option<artisan_api::Seq>, cx: &mut Context<Self>) {
         self.invalidate_thread_summary(&event, seq, cx);
         match event {
@@ -242,6 +380,15 @@ impl HostData {
             Event::Project { project } => {
                 // New metadata cancels what was read about the old path.
                 self.repositories.forget(&project.id);
+                let moved = self
+                    .projects
+                    .get(&project.id)
+                    .is_none_or(|old| old.path != project.path);
+                if project.removed || moved {
+                    self.project_icons.forget(&project.id);
+                } else {
+                    self.project_icons.refresh(&project.id);
+                }
                 if project.removed {
                     self.projects.remove(&project.id);
                 } else {
@@ -296,6 +443,7 @@ impl HostData {
                     self.invalidate_catalog();
                 }
                 self.engines.insert(status.engine, status);
+                self.renew_claude_ai();
                 cx.emit(HostEvent::Changed);
             }
             Event::Item { item } => {
@@ -375,6 +523,14 @@ impl HostData {
                 }
                 cx.emit(HostEvent::Live { thread_id, target });
             }
+            Event::Suggestion { thread_id, text } => {
+                match text {
+                    Some(text) => self.suggestions.insert(thread_id.clone(), text.into()),
+                    None => self.suggestions.remove(&thread_id),
+                };
+                cx.emit(HostEvent::ThreadChanged { thread_id });
+            }
+            Event::EditorCall { id, call } => cx.emit(HostEvent::EditorCall { id, call }),
             Event::Reset => {}
         }
     }
@@ -395,11 +551,47 @@ impl HostData {
             .is_some_and(|run| run.status.is_live())
     }
 
+    /// The thread's last turn stopped before it finished (the user stopped
+    /// it, or Forge restarted), so it can carry on with no new message.
+    #[must_use]
+    pub fn can_continue(&self, thread: &ThreadId) -> bool {
+        self.runs
+            .get(thread)
+            .is_some_and(|run| run.status.is_stopped())
+    }
+
     #[must_use]
     pub fn is_waiting(&self, thread: &ThreadId) -> bool {
         self.waiting
             .get(thread)
             .is_some_and(|items| !items.is_empty())
+    }
+
+    /// Inbox threads that stopped and want the user: waiting on an answer,
+    /// or finished, failed or interrupted and not yet read or settled. A
+    /// parked thread carries on by itself.
+    #[must_use]
+    pub fn attention(&self) -> Attention {
+        let mut attention = Attention::default();
+        for thread in self.threads.values() {
+            if thread.archived
+                || thread.parent_thread_id.is_some()
+                || !self.projects.contains_key(&thread.project_id)
+            {
+                continue;
+            }
+            let settled = thread.settled_seq > 0 && thread.settled_seq >= thread.activity_seq;
+            if self.is_waiting(&thread.id) {
+                attention.waiting += 1;
+            } else if !self.is_working(&thread.id)
+                && thread.parked_until.is_none()
+                && thread.is_unread()
+                && !settled
+            {
+                attention.stopped += 1;
+            }
+        }
+        attention
     }
 
     fn invalidate_prompt(&mut self) {
@@ -448,6 +640,12 @@ impl HostData {
         self.observed.send_replace(thread);
         self.read_acks.observation_changed();
         self.reset_thread_summary(cx);
+    }
+
+    /// The engine's guess at the thread's next message, while it stands.
+    #[must_use]
+    pub fn suggestion(&self, thread: &ThreadId) -> Option<&SharedString> {
+        self.suggestions.get(thread)
     }
 
     /// Live text for a target, if the run is still producing it.
@@ -514,7 +712,7 @@ mod live_rope_tests {
 "
             .repeat(8192),
         ));
-        let snapshot = live.clone();
+        let snapshot = Arc::clone(&live);
         let before = snapshot.len_bytes();
         let prefix = snapshot.chunks().next().unwrap().as_ptr();
         let end = live.len_chars();
@@ -552,8 +750,7 @@ mod install_delta_client_tests {
                 client,
                 cx,
             );
-            host._connection.abort();
-            host._follow = Task::ready(());
+            host.stop_following();
             host.status = ConnectionStatus::Live;
             host
         });
@@ -562,15 +759,15 @@ mod install_delta_client_tests {
             let status:EngineStatus=serde_json::from_value(serde_json::json!({
                 "engine":"codex","install":{"state":"downloading","version":"2.0.0","received":0,"total":1000},
                 "sign_in":{"state":"signed_in","account":"fixture@example.invalid"},
-                "models":[{"id":"fixture","name":"Fixture","default_effort":null,"context_window":200000}],
+                "models":[{"id":"fixture","name":"Fixture","default_effort":null,"context_window":200_000}],
                 "default_model":"fixture","usage":null,
                 "versions":[{"version":"2.0.0","installed":false,"current":false}]
             })).unwrap();
             host.apply_event(Event::Engine {status},None,cx);
-            let models=host.engines[&engine].models.clone();let versions=host.engines[&engine].versions.clone();
-            let skills=Arc::new(Vec::new());host.skill_catalog=Some(skills.clone());
+            let models=Arc::clone(&host.engines[&engine].models);let versions=Arc::clone(&host.engines[&engine].versions);
+            let skills=Arc::new(Vec::new());host.skill_catalog=Some(Arc::clone(&skills));
             let prompt=Arc::new(artisan_api::GlobalPrompt {version:1,text:"saved prompt".into(),candidates:vec![],engines:vec![]});
-            host.global_prompt=Some(prompt.clone());
+            host.global_prompt=Some(Arc::clone(&prompt));
             let revisions=(host.prompt_revision,host.catalog_revision);
             let install=artisan_api::InstallState::Downloading {version:"2.0.0".into(),received:512,total:Some(1000)};
             let wire=serde_json::to_string(&Event::EngineInstall {engine,install:install.clone()}).unwrap();

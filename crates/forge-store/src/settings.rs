@@ -100,49 +100,79 @@ impl Store {
         .await
     }
 
-    /// Changes the model against the latest config instead of a client's stale full snapshot.
+    /// Changes the model against the latest config instead of a client's
+    /// stale full snapshot; the model comes back as it was last chosen.
     pub async fn set_default_model(
         &self,
         engine: EngineId,
         model: artisan_api::Model,
     ) -> Result<artisan_api::EngineConfig> {
         self.write(move |tx| {
-            let mut config = read::setting(tx, "default_engine_config")?
-                .map(serde_json::from_value::<artisan_api::EngineConfig>)
-                .transpose()?
-                .filter(|config| config.engine == engine)
-                .unwrap_or_else(|| artisan_api::EngineConfig::new(engine));
-            model.normalize_context_window(&mut config);
-            config.session_options.clear();
-            config.model = Some(model.id);
-            if config
-                .effort
-                .as_ref()
-                .is_some_and(|effort| !model.efforts.contains(effort))
-            {
-                config.effort = None;
-            }
-            if config
-                .speed
-                .as_ref()
-                .is_some_and(|speed| !model.speeds.iter().any(|option| &option.id == speed))
-            {
-                config.speed = None;
-            }
-            if config
-                .variant
-                .as_ref()
-                .is_some_and(|variant| !model.variants.iter().any(|option| &option.id == variant))
-            {
-                config.variant = None;
-            }
+            let saved = read::setting(tx, artisan_api::MODEL_CONFIGS_KEY)?
+                .and_then(|configs| artisan_api::saved_model_config(&configs, engine, &model.id));
+            let mut config = match saved {
+                Some(config) => config,
+                None => read::setting(tx, "default_engine_config")?
+                    .map(serde_json::from_value::<artisan_api::EngineConfig>)
+                    .transpose()?
+                    .filter(|config| config.engine == engine)
+                    .unwrap_or_else(|| artisan_api::EngineConfig::new(engine)),
+            };
+            config.model = Some(model.id.clone());
+            model.fit(&mut config);
             tx.save_setting(
                 "default_engine_config".into(),
                 serde_json::to_value(&config)?,
             )?;
+            tx.remember_model_config(&config)?;
             Ok(config)
         })
         .await
+    }
+
+    /// Remembers `config` as the one its model comes back with, fitted to
+    /// what `model` offers.
+    pub async fn set_model_config(
+        &self,
+        mut config: artisan_api::EngineConfig,
+        model: &artisan_api::Model,
+    ) -> Result<artisan_api::EngineConfig> {
+        config.model = Some(model.id.clone());
+        model.fit(&mut config);
+        self.write(move |tx| {
+            tx.remember_model_config(&config)?;
+            Ok(config)
+        })
+        .await
+        .context("remember a model's config")
+    }
+
+    /// Remembers whether the user opened or closed one of `engine`'s model
+    /// groups.
+    pub async fn set_model_group(
+        &self,
+        engine: EngineId,
+        group: artisan_api::ModelGroup,
+    ) -> Result<()> {
+        self.write(move |tx| {
+            let mut groups = match read::setting(tx, artisan_api::MODEL_GROUPS_KEY)? {
+                Some(serde_json::Value::Object(groups)) => groups,
+                _ => serde_json::Map::new(),
+            };
+            let engine_groups = groups
+                .entry(engine.to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if !engine_groups.is_object() {
+                *engine_groups = serde_json::json!({});
+            }
+            engine_groups[group.name.as_str()] = serde_json::Value::Bool(group.open);
+            tx.save_setting(
+                artisan_api::MODEL_GROUPS_KEY.into(),
+                serde_json::Value::Object(groups),
+            )
+        })
+        .await
+        .context("remember a model group")
     }
 
     pub async fn set_skill_enabled(&self, id: String, enabled: bool) -> Result<()> {
@@ -260,6 +290,25 @@ impl Store {
         .await
     }
 
+    /// Replaces a value only Forge reads, or deletes it with `None`. Not
+    /// synced to clients.
+    pub async fn set_secret(&self, key: &str, value: Option<String>) -> Result<()> {
+        let key = key.to_owned();
+        self.write(move |tx| {
+            match value {
+                Some(value) => tx.execute(
+                    "INSERT INTO secrets (key, value) VALUES (?1, ?2)
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![key, value],
+                )?,
+                None => tx.execute("DELETE FROM secrets WHERE key = ?1", [&key])?,
+            };
+            Ok(())
+        })
+        .await
+        .context("save secret")
+    }
+
     /// Stores a value only Forge reads (its identity), unless one is there
     /// already; returns whichever is stored. Not synced to clients.
     pub async fn secret_or_insert(&self, key: &str, value: String) -> Result<String> {
@@ -372,6 +421,7 @@ mod context_window_tests {
                     title: None,
                     config,
                     parent_thread_id: None,
+                    spawned_by: None,
                 })
                 .await;
             assert!(result.is_err());

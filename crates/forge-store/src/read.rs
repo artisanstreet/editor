@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use artisan_api::{
     Envelope, Event, Item, ItemId, ItemsPage, ItemsQuery, Project, ProjectId, Run, RunId, Seq,
-    Thread, ThreadId,
+    Thread, ThreadId, WorkSpan,
 };
 use rusqlite::{Connection, OptionalExtension, Params, params};
 use serde::{Serialize, de::DeserializeOwned};
@@ -11,7 +11,7 @@ use serde::{Serialize, de::DeserializeOwned};
 const DEFAULT_PAGE: usize = 100;
 const MAX_PAGE: usize = 500;
 
-pub(crate) fn to_body<T: Serialize>(value: &T) -> Result<String> {
+pub fn to_body<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).context("serialise row body")
 }
 
@@ -20,7 +20,7 @@ fn from_body<T: DeserializeOwned>(body: &str) -> Result<T> {
 }
 
 /// The serde name of a unit enum variant, as stored in status columns.
-pub(crate) fn tag<T: Serialize>(value: &T) -> Result<String> {
+pub fn tag<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_value(value)?
         .as_str()
         .context("stored status must be a unit enum")
@@ -39,7 +39,7 @@ fn one<T: DeserializeOwned>(
         .transpose()
 }
 
-pub(crate) fn many<T: DeserializeOwned>(
+pub fn many<T: DeserializeOwned>(
     conn: &Connection,
     sql: &str,
     params: impl Params,
@@ -49,7 +49,7 @@ pub(crate) fn many<T: DeserializeOwned>(
     rows.map(|body| from_body(&body?)).collect()
 }
 
-pub(crate) fn max_seq(conn: &Connection) -> Result<Seq> {
+pub fn max_seq(conn: &Connection) -> Result<Seq> {
     conn.query_row(
         "SELECT coalesce(max(seq), 0) FROM (
             SELECT max(seq) AS seq FROM projects UNION ALL
@@ -63,7 +63,7 @@ pub(crate) fn max_seq(conn: &Connection) -> Result<Seq> {
     .context("read the highest stored seq")
 }
 
-pub(crate) fn project(conn: &Connection, id: &ProjectId) -> Result<Option<Project>> {
+pub fn project(conn: &Connection, id: &ProjectId) -> Result<Option<Project>> {
     one(
         conn,
         "SELECT body FROM projects WHERE id = ?1",
@@ -71,7 +71,7 @@ pub(crate) fn project(conn: &Connection, id: &ProjectId) -> Result<Option<Projec
     )
 }
 
-pub(crate) fn thread(conn: &Connection, id: &ThreadId) -> Result<Option<Thread>> {
+pub fn thread(conn: &Connection, id: &ThreadId) -> Result<Option<Thread>> {
     one(
         conn,
         "SELECT body FROM threads WHERE id = ?1",
@@ -85,19 +85,19 @@ fn item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
     })
 }
-pub(crate) fn items(conn: &Connection, sql: &str, params: impl Params) -> Result<Vec<Item>> {
+pub fn items(conn: &Connection, sql: &str, params: impl Params) -> Result<Vec<Item>> {
     conn.prepare_cached(sql)?
         .query_map(params, item_row)?
         .collect::<rusqlite::Result<_>>()
         .context("read Items")
 }
-pub(crate) fn item(conn: &Connection, id: &ItemId) -> Result<Option<Item>> {
+pub fn item(conn: &Connection, id: &ItemId) -> Result<Option<Item>> {
     conn.prepare_cached("SELECT body FROM items WHERE id=?1")?
         .query_row([id.as_str()], item_row)
         .optional()
         .context("read Item")
 }
-pub(crate) fn item_by_native(
+pub fn item_by_native(
     conn: &Connection,
     thread_id: &ThreadId,
     run_id: Option<&RunId>,
@@ -109,7 +109,7 @@ pub(crate) fn item_by_native(
 
 /// The thread's `Agent` item an engine addresses as `address` (Claude's
 /// `agentId`): the latest one, as a resumed agent keeps its address.
-pub(crate) fn agent_by_address(
+pub fn agent_by_address(
     conn: &Connection,
     thread_id: &ThreadId,
     address: &str,
@@ -127,7 +127,7 @@ pub(crate) fn agent_by_address(
 }
 
 /// The names Artisan already gave subagents in a thread.
-pub(crate) fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<String>> {
+pub fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<String>> {
     let mut statement = conn.prepare_cached(
         "SELECT json_extract(body, '$.kind.label') FROM items
          WHERE thread_id = ?1 AND kind_type = 'agent'
@@ -140,7 +140,7 @@ pub(crate) fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Ve
 }
 
 /// Items waiting on the user, across threads.
-pub(crate) fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::PendingItem>> {
+pub fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::PendingItem>> {
     let mut statement = conn.prepare_cached(
         "SELECT id,thread_id FROM items WHERE status='awaiting_user' ORDER BY position",
     )?;
@@ -155,32 +155,38 @@ pub(crate) fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::
         .context("read pending interaction identities")
 }
 
-pub(crate) fn pending_threads(
+pub fn pending_threads(
     conn: &Connection,
     limit: usize,
     excluded: &[ThreadId],
 ) -> Result<Vec<ThreadId>> {
+    // Threads with undelivered messages, and threads asked to continue.
     let mut query = conn.prepare_cached(
-        "SELECT pending.thread_id FROM items pending
-         WHERE pending.status = 'running' AND pending.kind_type = 'user_message'
-           AND pending.thread_id NOT IN (SELECT value FROM json_each(?1))
-           AND NOT EXISTS (
-             SELECT 1 FROM runs latest WHERE latest.rowid = (
-               SELECT rowid FROM runs WHERE thread_id = pending.thread_id ORDER BY rowid DESC LIMIT 1
-             ) AND latest.status IN ('failed','refused')
-               AND pending.seq <= json_extract(latest.body, '$.input_cutoff')
-           )
-         GROUP BY pending.thread_id ORDER BY min(pending.seq) LIMIT ?2"
+        "SELECT thread_id FROM (
+           SELECT pending.thread_id, pending.seq FROM items pending
+           WHERE pending.status = 'running' AND pending.kind_type = 'user_message'
+             AND NOT EXISTS (
+               SELECT 1 FROM runs latest WHERE latest.rowid = (
+                 SELECT rowid FROM runs WHERE thread_id = pending.thread_id ORDER BY rowid DESC LIMIT 1
+               ) AND latest.status IN ('failed','refused')
+                 AND pending.seq <= json_extract(latest.body, '$.input_cutoff')
+             )
+           UNION ALL
+           SELECT thread_id, seq FROM continues WHERE due_at IS NULL OR due_at <= ?3
+         )
+         WHERE thread_id NOT IN (SELECT value FROM json_each(?1))
+         GROUP BY thread_id ORDER BY min(seq) LIMIT ?2"
     )?;
     Ok(query
-        .query_map(params![serde_json::to_string(excluded)?, limit], |row| {
-            row.get::<_, String>(0)
-        })?
+        .query_map(
+            params![serde_json::to_string(excluded)?, limit, artisan_api::now()],
+            |row| row.get::<_, String>(0),
+        )?
         .map(|row| row.map(ThreadId))
         .collect::<rusqlite::Result<_>>()?)
 }
 
-pub(crate) fn pending_inputs(
+pub fn pending_inputs(
     conn: &Connection,
     thread_id: &ThreadId,
     blob_dir: &std::path::Path,
@@ -214,8 +220,7 @@ pub(crate) fn pending_inputs(
             // A bad historical reference remains in the first batch. The
             // coordinator validates it after Run creation and settles Failed.
             crate::blobs::input_images(blob_dir, images)
-                .map(|(_, bytes)| bytes)
-                .unwrap_or(128 * 1024 * 1024 + 1)
+                .map_or(128 * 1024 * 1024 + 1, |(_, bytes)| bytes)
         } else {
             0
         };
@@ -232,12 +237,12 @@ pub(crate) fn pending_inputs(
     Ok(crate::PendingInputs { items, cutoff })
 }
 
-pub(crate) fn run(conn: &Connection, id: &RunId) -> Result<Option<Run>> {
+pub fn run(conn: &Connection, id: &RunId) -> Result<Option<Run>> {
     one(conn, "SELECT body FROM runs WHERE id = ?1", [id.as_str()])
 }
 
 /// Runs are only ever inserted in start order, so rowid orders them.
-pub(crate) fn latest_run(conn: &Connection, thread_id: &ThreadId) -> Result<Option<Run>> {
+pub fn latest_run(conn: &Connection, thread_id: &ThreadId) -> Result<Option<Run>> {
     one(
         conn,
         "SELECT body FROM runs WHERE thread_id = ?1 ORDER BY rowid DESC LIMIT 1",
@@ -245,11 +250,11 @@ pub(crate) fn latest_run(conn: &Connection, thread_id: &ThreadId) -> Result<Opti
     )
 }
 
-pub(crate) fn setting(conn: &Connection, key: &str) -> Result<Option<serde_json::Value>> {
+pub fn setting(conn: &Connection, key: &str) -> Result<Option<serde_json::Value>> {
     one(conn, "SELECT value FROM kv WHERE key = ?1", [key])
 }
 
-pub(crate) fn prompt_version(conn: &Connection) -> Result<u64> {
+pub fn prompt_version(conn: &Connection) -> Result<u64> {
     let version: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM prompt_versions",
         [],
@@ -258,7 +263,7 @@ pub(crate) fn prompt_version(conn: &Connection) -> Result<u64> {
     Ok(u64::try_from(version).unwrap_or(0))
 }
 
-pub(crate) fn draft(conn: &Connection, scope: &str) -> Result<artisan_api::DraftSnapshot> {
+pub fn draft(conn: &Connection, scope: &str) -> Result<artisan_api::DraftSnapshot> {
     let row: Option<(u64, String)> = conn
         .query_row(
             "SELECT revision, body FROM drafts WHERE scope = ?1",
@@ -275,7 +280,7 @@ pub(crate) fn draft(conn: &Connection, scope: &str) -> Result<artisan_api::Draft
     }
 }
 
-pub(crate) fn items_page(
+pub fn items_page(
     conn: &Connection,
     thread_id: &ThreadId,
     query: &ItemsQuery,
@@ -284,12 +289,17 @@ pub(crate) fn items_page(
 }
 
 /// `Some(None)` is the root transcript; `Some(Some(id))` is one agent's own work.
-pub(crate) fn scoped_items_page(
+#[expect(
+    clippy::option_option,
+    reason = "None is every item, Some(None) the root transcript, Some(Some) one agent's work"
+)]
+pub fn scoped_items_page(
     conn: &Connection,
     thread_id: &ThreadId,
     query: &ItemsQuery,
     parent: Option<Option<&ItemId>>,
 ) -> Result<ItemsPage> {
+    const PAGE_BYTES: usize = 8 * 1024 * 1024;
     let snapshot =
         rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
     let limit = query
@@ -331,7 +341,6 @@ pub(crate) fn scoped_items_page(
     };
     let mut items: Vec<Item> = Vec::new();
     let mut bytes = 0usize;
-    const PAGE_BYTES: usize = 8 * 1024 * 1024;
     let mut byte_limited = false;
     while let Some(row) = rows.next()? {
         let body: String = row.get(0)?;
@@ -368,10 +377,225 @@ pub(crate) fn scoped_items_page(
         [serde_json::to_string(&ids)?],
     )?;
     snapshot.commit()?;
-    Ok(ItemsPage { items, runs, more })
+    Ok(ItemsPage {
+        items,
+        runs,
+        more,
+        work: Vec::new(),
+    })
 }
 
-pub(crate) fn changes_since(
+/// Items per page: `limit`, or the default, within bounds.
+fn page_limit(query: &ItemsQuery) -> usize {
+    query
+        .limit
+        .map_or(DEFAULT_PAGE, |limit| {
+            usize::try_from(limit).unwrap_or(MAX_PAGE)
+        })
+        .clamp(1, MAX_PAGE)
+}
+
+/// A page's position bounds, exclusive: `(after, before)`.
+fn page_bounds(query: &ItemsQuery) -> (i64, i64) {
+    let after = query
+        .after
+        .map_or(0, |after| i64::try_from(after).unwrap_or(i64::MAX));
+    let before = query
+        .before
+        .map_or(i64::MAX, |before| i64::try_from(before).unwrap_or(i64::MAX));
+    (after, before)
+}
+
+/// Reads up to `limit` item bodies from `rows`, the first always and the
+/// rest within the page's byte budget. Returns them and whether more exist.
+fn read_page(rows: &mut rusqlite::Rows<'_>, limit: usize) -> Result<(Vec<Item>, bool)> {
+    const PAGE_BYTES: usize = 8 * 1024 * 1024;
+    let mut items: Vec<Item> = Vec::new();
+    let mut bytes = 0usize;
+    while let Some(row) = rows.next()? {
+        let body: String = row.get(0)?;
+        if items.len() == limit
+            || (!items.is_empty() && bytes.saturating_add(body.len()) > PAGE_BYTES)
+        {
+            return Ok((items, true));
+        }
+        bytes = bytes.saturating_add(body.len());
+        items.push(from_body(&body)?);
+    }
+    Ok((items, false))
+}
+
+/// The runs `items` and `work` belong to.
+fn page_runs(conn: &Connection, items: &[Item], work: &[WorkSpan]) -> Result<Vec<Run>> {
+    let ids: std::collections::BTreeSet<_> = items
+        .iter()
+        .filter_map(|item| item.run_id.as_ref())
+        .chain(work.iter().filter_map(|span| span.run_id.as_ref()))
+        .collect();
+    many(
+        conn,
+        "SELECT body FROM runs WHERE id IN (SELECT value FROM json_each(?1))",
+        [serde_json::to_string(&ids)?],
+    )
+}
+
+/// The root work strictly between positions `after` and `before`, as one
+/// span per run's unbroken stretch: a row or another run's item ends one.
+fn work_spans(
+    conn: &Connection,
+    thread_id: &ThreadId,
+    after: i64,
+    before: i64,
+) -> Result<Vec<WorkSpan>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT position,run_id,work,kind_type FROM items
+         WHERE thread_id=?1 AND parent_id IS NULL AND position>?2 AND position<?3
+         ORDER BY position",
+    )?;
+    let mut rows = statement.query(params![thread_id.as_str(), after, before])?;
+    let mut spans: Vec<WorkSpan> = Vec::new();
+    let mut open = false;
+    while let Some(row) = rows.next()? {
+        let position: Seq = row.get(0)?;
+        let run_id: Option<String> = row.get(1)?;
+        let run_id = run_id.map(RunId::from);
+        if !row.get::<_, bool>(2)? {
+            open = false;
+            continue;
+        }
+        let worked = matches!(
+            row.get::<_, Option<String>>(3)?.as_deref(),
+            Some("tool" | "agent" | "plan")
+        );
+        match spans.last_mut() {
+            Some(span) if open && span.run_id == run_id => {
+                span.last = position;
+                span.count += 1;
+                span.worked |= worked;
+            }
+            _ => {
+                spans.push(WorkSpan {
+                    run_id,
+                    first: position,
+                    last: position,
+                    count: 1,
+                    worked,
+                });
+                open = true;
+            }
+        }
+    }
+    Ok(spans)
+}
+
+/// A page of the root transcript as the reader sees it: up to `limit`
+/// items that stand on their own (the newest before `before`, or the
+/// oldest after `after`) and the work between them as spans, so a turn of
+/// any length is one row's worth. The page owns the work from its far row
+/// to its near bound; the next page owns the work beyond the far row. A
+/// live run's newest work ships as items: it is always open, and its
+/// phase reads from it.
+pub fn transcript_page(
+    conn: &Connection,
+    thread_id: &ThreadId,
+    query: &ItemsQuery,
+) -> Result<ItemsPage> {
+    let snapshot =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
+    let limit = page_limit(query);
+    let (after, before) = page_bounds(query);
+    let forward = query.after.is_some();
+    let order = if forward { "ASC" } else { "DESC" };
+    let mut statement = conn.prepare_cached(&format!(
+        "SELECT body FROM items WHERE thread_id=?1 AND parent_id IS NULL AND work=0
+         AND position>?2 AND position<?3 ORDER BY position {order}"
+    ))?;
+    let mut rows = statement.query(params![thread_id.as_str(), after, before])?;
+    let (mut items, more) = read_page(&mut rows, limit)?;
+    drop(rows);
+    drop(statement);
+    if !forward {
+        items.reverse();
+    }
+    // With more rows beyond it, the page's work stops at its far row.
+    let far = |end: Option<&Item>| {
+        end.filter(|_| more)
+            .map(|item| i64::try_from(item.position).unwrap_or(i64::MAX))
+    };
+    let (from, to) = if forward {
+        (after, far(items.last()).unwrap_or(before))
+    } else {
+        (far(items.first()).unwrap_or(after), before)
+    };
+    let mut work = work_spans(conn, thread_id, from, to)?;
+    let runs = page_runs(conn, &items, &work)?;
+    for run in runs.iter().filter(|run| run.status.is_live()) {
+        for span in work
+            .iter_mut()
+            .filter(|span| span.run_id.as_ref() == Some(&run.id))
+        {
+            let mut statement = conn.prepare_cached(
+                "SELECT body FROM items WHERE thread_id=?1 AND parent_id IS NULL AND work=1
+                 AND position>=?2 AND position<=?3 ORDER BY position DESC",
+            )?;
+            let mut rows = statement.query(params![thread_id.as_str(), span.first, span.last])?;
+            let (newest, rest) = read_page(&mut rows, DEFAULT_PAGE)?;
+            drop(rows);
+            drop(statement);
+            let shipped = u32::try_from(newest.len()).unwrap_or(u32::MAX);
+            if let Some(oldest) = newest.last().filter(|_| rest) {
+                // The rest of the span ends just before what shipped.
+                span.last = conn.query_row(
+                    "SELECT max(position) FROM items WHERE thread_id=?1 AND parent_id IS NULL
+                     AND work=1 AND position>=?2 AND position<?3",
+                    params![thread_id.as_str(), span.first, oldest.position],
+                    |row| row.get(0),
+                )?;
+                span.count = span.count.saturating_sub(shipped);
+            } else {
+                span.count = 0;
+            }
+            items.extend(newest);
+        }
+    }
+    work.retain(|span| span.count > 0);
+    items.sort_by_key(|item| item.position);
+    snapshot.commit()?;
+    Ok(ItemsPage {
+        items,
+        runs,
+        more,
+        work,
+    })
+}
+
+/// The root work strictly between `after` and `before`, newest first: an
+/// open work section loading its span from the end the reader meets.
+pub fn work_page(conn: &Connection, thread_id: &ThreadId, query: &ItemsQuery) -> Result<ItemsPage> {
+    let snapshot =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
+    let limit = page_limit(query);
+    let (after, before) = page_bounds(query);
+    let mut statement = conn.prepare_cached(
+        "SELECT body FROM items WHERE thread_id=?1 AND parent_id IS NULL AND work=1
+         AND position>?2 AND position<?3 ORDER BY position DESC",
+    )?;
+    let mut rows = statement.query(params![thread_id.as_str(), after, before])?;
+    let (mut items, more) = read_page(&mut rows, limit)?;
+    drop(rows);
+    drop(statement);
+    items.reverse();
+    let runs = page_runs(conn, &items, &[])?;
+    snapshot.commit()?;
+    Ok(ItemsPage {
+        items,
+        runs,
+        more,
+        work: Vec::new(),
+    })
+}
+
+pub fn changes_since(
     conn: &Connection,
     since: Seq,
     limit: usize,
@@ -461,11 +685,14 @@ pub(crate) fn changes_since(
 
 /// Compact current controls, independent of any transcript page. Every
 /// query is indexed by thread and kind, so it is computed per request.
-pub(crate) fn inspector(
-    conn: &Connection,
-    thread: &ThreadId,
-) -> Result<artisan_api::InspectorSummary> {
-    use artisan_api::{InspectorAgent, InspectorSummary, InspectorTerminal};
+pub fn inspector(conn: &Connection, thread: &ThreadId) -> Result<artisan_api::InspectorSummary> {
+    use artisan_api::{InspectorSummary, InspectorTerminal, InspectorWorkflow};
+    #[derive(serde::Deserialize)]
+    struct WorkflowRow {
+        id: artisan_api::ItemId,
+        status: artisan_api::Status,
+        input: Option<artisan_api::TextContent>,
+    }
     let snapshot =
         rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Deferred)?;
     let revision = conn.query_row(
@@ -473,31 +700,35 @@ pub(crate) fn inspector(
         [thread.as_str()],
         |row| row.get(0),
     )?;
-    let latest: Option<String> = conn
-        .query_row(
-            "SELECT id FROM runs WHERE thread_id=?1 ORDER BY seq DESC LIMIT 1",
-            [thread.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
+    // Work counts as background when the engine started it there, or when it
+    // runs on after its run ended (a Codex command left running).
     let terminals: Vec<InspectorTerminal> = many(conn,
         "SELECT json_object('id',id,'command',json_extract(body,'$.kind.tool.command'),
-            'cwd',json_extract(body,'$.kind.tool.cwd'),'status',status) FROM items
+            'cwd',json_extract(body,'$.kind.tool.cwd'),'status',status,
+            'background',json(CASE WHEN COALESCE(json_extract(body,'$.kind.tool.background'),0)
+                OR (SELECT r.status FROM runs r WHERE r.id=items.run_id)!='running'
+                THEN 'true' ELSE 'false' END),
+            'watch',json(CASE WHEN COALESCE(json_extract(body,'$.kind.tool.watch'),0)
+                THEN 'true' ELSE 'false' END)) FROM items
          WHERE thread_id=?1 AND status IN ('running','awaiting_user') AND json_extract(body,'$.kind.tool.kind')='shell' ORDER BY position DESC",
          [thread.as_str()])?;
-    let mut agents: Vec<InspectorAgent> = many(
-        conn,
-        "SELECT json_object('id',id,'label',COALESCE(json_extract(body,'$.kind.label'),''),
-            'description',json_extract(body,'$.kind.description'),'status',status) FROM items
-         WHERE thread_id=?1 AND kind_type='agent'
-            AND (status IN ('running','awaiting_user') OR run_id=?2) ORDER BY position DESC",
-        params![thread.as_str(), latest],
-    )?;
-    for agent in &mut agents {
-        if agent.label.is_empty() {
-            agent.label = artisan_api::fallback_agent_name(agent.id.as_str()).into();
-        }
-    }
+    let agents = live_agents(conn, thread)?;
+    let workflows: Vec<InspectorWorkflow> = many::<WorkflowRow>(conn,
+        "SELECT json_object('id',id,'status',status,'input',json(body->'$.kind.tool.input')) FROM items
+         WHERE thread_id=?1 AND status IN ('running','awaiting_user')
+            AND json_extract(body,'$.kind.tool.kind')='other'
+            AND json_extract(body,'$.kind.tool.name')='Workflow' ORDER BY position DESC",
+        [thread.as_str()])?
+    .into_iter()
+    .map(|row| InspectorWorkflow {
+        id: row.id,
+        name: match row.input {
+            Some(artisan_api::TextContent::Inline(input)) => workflow_name(&input),
+            _ => None,
+        },
+        status: row.status,
+    })
+    .collect();
     let plan = conn
         .query_row(
             "SELECT json_extract(body,'$.kind.steps') FROM items
@@ -510,30 +741,7 @@ pub(crate) fn inspector(
         .map(|body| from_body(&body))
         .transpose()?
         .unwrap_or_default();
-    let goal = conn.query_row(
-        "SELECT json_extract(body,'$.kind.kind.state'),json_quote(json_extract(body,'$.kind.text')) FROM items
-            WHERE thread_id=?1 AND parent_id IS NULL
-            AND kind_type='notice' AND json_extract(body,'$.kind.kind.type')='goal'
-            ORDER BY position DESC LIMIT 1",
-        [thread.as_str()],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))
-    ).optional()?.and_then(|(state,objective)| {
-        let state = match state.as_str() {
-            "active" => artisan_api::ThreadGoalState::Active,
-            "paused" => artisan_api::ThreadGoalState::Paused,
-            _ => return None,
-        };
-        Some(from_body::<artisan_api::TextContent>(&objective).and_then(|objective| {
-            let prefix = match &objective {
-                artisan_api::TextContent::Inline(text) => std::borrow::Cow::Borrowed(text.as_str()),
-                artisan_api::TextContent::Stored(source) => std::borrow::Cow::Owned(crate::content::range(conn, &source.id,
-                    artisan_api::ContentQuery { offset: 0, limit: Some(1024) })?
-                    .context("current goal source unavailable")?.text),
-            };
-            let mut summary: String = prefix.chars().take(160).collect();
-            if objective.byte_len() > summary.len() as u64 { summary.push('…'); }
-            Ok(artisan_api::ThreadGoal { objective, summary, state })
-        }))
-    }).transpose()?;
+    let goal = current_goal(conn, thread)?;
     let questions = many(conn,
         "SELECT json_object('id',id,'questions',json(json_extract(body,'$.kind.questions'))) FROM items
             WHERE thread_id=?1 AND status='awaiting_user' AND kind_type='question'
@@ -550,6 +758,7 @@ pub(crate) fn inspector(
             },
         )
         .optional()?;
+    let outline = outline(conn, thread)?;
     snapshot.commit()?;
     Ok(InspectorSummary {
         goal,
@@ -557,36 +766,208 @@ pub(crate) fn inspector(
         revision,
         terminals,
         agents,
+        workflows,
         plan,
         edits,
+        outline,
     })
 }
 
-pub(crate) fn threads_page(
+/// The thread's agents still at work, for the inspector.
+fn live_agents(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::InspectorAgent>> {
+    // Only agents still at work: one that settled leaves the list at once,
+    // not when the next turn starts.
+    let mut agents: Vec<artisan_api::InspectorAgent> = many(
+        conn,
+        "SELECT json_object('id',id,'label',COALESCE(json_extract(body,'$.kind.label'),''),
+            'description',json_extract(body,'$.kind.description'),'status',status,
+            'engine',COALESCE(json_extract(body,'$.kind.engine'),
+                (SELECT json_extract(t.body,'$.config.engine') FROM threads t WHERE t.id=?1)),
+            'model',json_extract(body,'$.kind.model'),'thread',json_extract(body,'$.kind.thread'),
+            'config',json(COALESCE(
+                (SELECT json_extract(t.body,'$.config') FROM threads t WHERE t.id=json_extract(items.body,'$.kind.thread')),
+                (SELECT json_extract(t.body,'$.config') FROM threads t WHERE t.id=?1))),
+            'background',json(CASE WHEN COALESCE(json_extract(body,'$.kind.background'),0)
+                OR (SELECT r.status FROM runs r WHERE r.id=items.run_id)!='running'
+                THEN 'true' ELSE 'false' END)) FROM items
+         WHERE thread_id=?1 AND kind_type='agent'
+            AND status IN ('running','awaiting_user') ORDER BY position DESC",
+        [thread.as_str()],
+    )?;
+    for agent in &mut agents {
+        if agent.label.is_empty() {
+            agent.label = artisan_api::fallback_agent_name(agent.id.as_str()).into();
+        }
+        // An engine's own subagent runs on the thread's settings but its own model.
+        if let Some(config) = &mut agent.config
+            && let Some(model) = &agent.model
+            && config.model.as_ref() != Some(model)
+            && agent.thread.is_none()
+        {
+            config.model = Some(model.clone());
+        }
+    }
+    Ok(agents)
+}
+
+/// The thread's current goal, for the inspector's strip.
+fn current_goal(conn: &Connection, thread: &ThreadId) -> Result<Option<artisan_api::ThreadGoal>> {
+    conn.query_row(
+        "SELECT json_extract(body,'$.kind.kind.state'),json_quote(json_extract(body,'$.kind.text')) FROM items
+            WHERE thread_id=?1 AND parent_id IS NULL
+            AND kind_type='notice' AND json_extract(body,'$.kind.kind.type')='goal'
+            ORDER BY seq DESC LIMIT 1",
+        [thread.as_str()],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))
+    ).optional()?.and_then(|(state,objective)| {
+        let state = match state.as_str() {
+            "active" => artisan_api::ThreadGoalState::Active,
+            "paused" => artisan_api::ThreadGoalState::Paused,
+            "blocked" => artisan_api::ThreadGoalState::Blocked,
+            "usageLimited" => artisan_api::ThreadGoalState::UsageLimited,
+            "budgetLimited" => artisan_api::ThreadGoalState::BudgetLimited,
+            // Complete and cleared goals leave the strip.
+            _ => return None,
+        };
+        Some(from_body::<artisan_api::TextContent>(&objective).and_then(|objective| {
+            let prefix = match &objective {
+                artisan_api::TextContent::Inline(text) => std::borrow::Cow::Borrowed(text.as_str()),
+                artisan_api::TextContent::Stored(source) => std::borrow::Cow::Owned(crate::content::range(conn, &source.id,
+                    &artisan_api::ContentQuery { offset: 0, limit: Some(1024) })?
+                    .context("current goal source unavailable")?.text),
+            };
+            let mut summary: String = prefix.chars().take(160).collect();
+            if objective.byte_len() > summary.len() as u64 { summary.push('…'); }
+            Ok(artisan_api::ThreadGoal { objective, summary, state })
+        }))
+    }).transpose()
+}
+
+/// A Claude workflow's name: a saved one's, else the `name` in its script's
+/// `meta`.
+fn workflow_name(input: &str) -> Option<String> {
+    let input: serde_json::Value = serde_json::from_str(input).ok()?;
+    if let Some(name) = input["name"].as_str() {
+        return Some(name.to_owned());
+    }
+    let script = input["script"].as_str()?;
+    let meta = &script[script.find("meta")?..];
+    let rest = meta[meta.find("name")? + 4..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let quote = rest
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\'' | '"' | '`'))?;
+    let name = &rest[1..];
+    Some(name[..name.find(quote)?].to_owned())
+}
+
+/// The user's own messages in `thread`, in order, each labelled by its first
+/// line. A steer sits inside its run's work, and an agent's result Forge
+/// delivered reads as that agent's report, so neither is one.
+fn outline(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::OutlineEntry>> {
+    let mut statement = conn.prepare_cached(
+        "SELECT id,position,json_quote(json_extract(body,'$.kind.text')) FROM items
+         WHERE thread_id=?1 AND kind_type='user_message' AND json_extract(body,'$.parent_id') IS NULL
+            AND NOT (run_id IS NOT NULL AND json_extract(body,'$.kind.steer')=1)
+            AND json_extract(body,'$.kind.from_agent') IS NULL
+         ORDER BY position ASC",
+    )?;
+    let rows = statement.query_map([thread.as_str()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Seq>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (id, position, text) = row?;
+        let text = from_body::<artisan_api::TextContent>(&text)?;
+        let prefix = match &text {
+            artisan_api::TextContent::Inline(text) => std::borrow::Cow::Borrowed(text.as_str()),
+            artisan_api::TextContent::Stored(source) => std::borrow::Cow::Owned(
+                crate::content::range(
+                    conn,
+                    &source.id,
+                    &artisan_api::ContentQuery {
+                        offset: 0,
+                        limit: Some(1024),
+                    },
+                )?
+                .map(|range| range.text)
+                .unwrap_or_default(),
+            ),
+        };
+        Ok(artisan_api::OutlineEntry {
+            id: ItemId(id),
+            position,
+            label: outline_label(&prefix),
+        })
+    })
+    .collect()
+}
+
+/// A message's first non-empty line, at most 160 characters; "Image" for one
+/// that is only attachments.
+fn outline_label(text: &str) -> String {
+    let prefix: String = text.chars().take(1024).collect();
+    let line = prefix
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Image");
+    let mut label: String = line.chars().take(160).collect();
+    if line.chars().nth(160).is_some() {
+        label.push('…');
+    }
+    label
+}
+
+pub fn threads_page(
     conn: &Connection,
     query: &artisan_api::ThreadsQuery,
 ) -> Result<artisan_api::ThreadsPage> {
     let limit = query.limit.unwrap_or(100).clamp(1, 200) as usize;
-    let before = query
-        .before_activity
-        .unwrap_or(i64::MAX as u64)
-        .min(i64::MAX as u64);
     anyhow::ensure!(
-        query.before_activity.is_some() == query.before_id.is_some(),
+        query.before_activity.is_some() == query.before_id.is_some()
+            && query.after_activity.is_some() == query.after_id.is_some(),
         "incomplete thread cursor"
     );
-    let id = query.before_id.as_ref().map_or("", ThreadId::as_str);
+    anyhow::ensure!(
+        query.before_id.is_none() || query.after_id.is_none(),
+        "a thread page is either before or after its cursor"
+    );
+    // A newer page walks up from its cursor, then reads newest first like
+    // every other page.
+    let newer = query.after_id.is_some();
+    let (cursor, id) = if newer {
+        (
+            query.after_activity.unwrap_or(0).min(i64::MAX as u64),
+            query.after_id.as_ref().map_or("", ThreadId::as_str),
+        )
+    } else {
+        (
+            query
+                .before_activity
+                .unwrap_or(i64::MAX as u64)
+                .min(i64::MAX as u64),
+            query.before_id.as_ref().map_or("", ThreadId::as_str),
+        )
+    };
     let search = query.query.as_deref().unwrap_or("").trim();
     anyhow::ensure!(search.len() <= 256, "thread search exceeds 256 bytes");
     let escaped = search
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_");
-    let base =
+    let (compare, order) = if newer { (">", "ASC") } else { ("<", "DESC") };
+    let base = format!(
         "SELECT t.body FROM threads t JOIN projects p ON p.id=json_extract(t.body,'$.project_id')
          WHERE COALESCE(json_extract(t.body,'$.archived'),0)=?1
           AND COALESCE(json_extract(p.body,'$.removed'),0)=0
-          AND (json_extract(t.body,'$.activity_seq'),t.id)<(?2,?3)";
+          AND (json_extract(t.body,'$.activity_seq'),t.id){compare}(?2,?3)"
+    );
     let search_clause = if search.chars().count() >= 3 {
         " AND t.rowid IN (SELECT rowid FROM threads_search WHERE threads_search MATCH ?4)"
     } else {
@@ -598,16 +979,19 @@ pub(crate) fn threads_page(
         escaped
     };
     let sql = format!(
-        "{base}{search_clause} ORDER BY json_extract(t.body,'$.activity_seq') DESC,t.id DESC LIMIT ?5"
+        "{base}{search_clause} ORDER BY json_extract(t.body,'$.activity_seq') {order},t.id {order} LIMIT ?5"
     );
     let mut threads: Vec<Thread> = many(
         conn,
         &sql,
-        params![query.archived, before, id, search, limit + 1],
+        params![query.archived, cursor, id, search, limit + 1],
     )?;
     let more = threads.len() > limit;
     threads.truncate(limit);
-    let next = if more {
+    if newer {
+        threads.reverse();
+    }
+    let next = if more && !newer {
         threads.last().map(|thread| artisan_api::ThreadCursor {
             activity_seq: thread.activity_seq,
             id: thread.id.clone(),
@@ -623,6 +1007,7 @@ pub(crate) fn threads_page(
         threads,
         runs,
         next,
+        newer: newer && more,
     })
 }
 
@@ -659,5 +1044,19 @@ mod waiting_query_tests {
                 .collect::<Vec<_>>(),
             ["earlier", "later"]
         );
+    }
+}
+
+#[cfg(test)]
+mod outline_tests {
+    use super::outline_label;
+
+    #[test]
+    fn labels_bound_giant_unicode_messages_and_use_first_nonempty_line() {
+        assert_eq!(outline_label("\n  \n  hello  \nsecond"), "hello");
+        let label = outline_label(&"界".repeat(10_000));
+        assert_eq!(label.chars().count(), 161);
+        assert!(label.ends_with('…'));
+        assert_eq!(outline_label(""), "Image");
     }
 }

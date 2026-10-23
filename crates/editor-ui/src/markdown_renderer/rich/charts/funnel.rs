@@ -1,7 +1,6 @@
 //! `funnel`: centered bars narrowing step by step; hovering a step reads its
 //! value, its share of the first step, and the drop from the step before.
 
-use crate::markdown_renderer::rich::budget;
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::sync::Arc;
 
@@ -13,7 +12,7 @@ use serde::Deserialize;
 
 use super::super::{BlockContext, RichBlock, kit};
 use super::frame;
-use super::scale::{f32_of, percent};
+use super::scale::{f32_of, f32_of_count, percent};
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct Step {
@@ -30,7 +29,7 @@ struct FunnelSpec {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "FunnelSpec")]
 pub(super) struct Funnel {
-    steps: Arc<Vec<Step>>,
+    steps: Arc<[Step]>,
     widest: f64,
 }
 impl TryFrom<FunnelSpec> for Funnel {
@@ -48,7 +47,7 @@ impl TryFrom<FunnelSpec> for Funnel {
         }
         let widest = spec.steps.iter().map(|step| step.value).fold(0.0, f64::max);
         Ok(Self {
-            steps: Arc::new(spec.steps),
+            steps: Arc::from(spec.steps),
             widest,
         })
     }
@@ -116,7 +115,7 @@ impl Funnel {
 impl RichBlock for Funnel {
     fn resident_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
-            + budget::vector(&self.steps)
+            + std::mem::size_of_val(&*self.steps)
             + self
                 .steps
                 .iter()
@@ -137,10 +136,10 @@ impl RichBlock for Funnel {
 fn drop_text(drop: f64, share: Option<f64>) -> String {
     let amount = kit::format_number(drop.abs());
     let sign = if drop >= 0.0 { "−" } else { "+" };
-    match share {
-        Some(share) => format!("{sign}{amount} ({sign}{})", percent(share.abs())),
-        None => format!("{sign}{amount}"),
-    }
+    share.map_or_else(
+        || format!("{sign}{amount}"),
+        |share| format!("{sign}{amount} ({sign}{})", percent(share.abs())),
+    )
 }
 
 #[derive(IntoElement)]
@@ -151,12 +150,16 @@ struct FunnelView {
 }
 
 struct FunnelState {
-    model: Arc<Vec<Step>>,
+    model: Arc<[Step]>,
     hover: Option<usize>,
     rows: gpui::UniformListScrollHandle,
 }
 
 impl RenderOnce for FunnelView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let funnel = &self.funnel;
@@ -166,7 +169,7 @@ impl RenderOnce for FunnelView {
         let state = kit::keyed(window, cx, ElementId::Name(self.id.clone()), || {
             let rows = gpui::UniformListScrollHandle::new();
             FunnelState {
-                model: funnel.steps.clone(),
+                model: Arc::clone(&funnel.steps),
                 hover: None,
                 rows,
             }
@@ -174,7 +177,7 @@ impl RenderOnce for FunnelView {
         state.update(cx, |state, _| {
             if !Arc::ptr_eq(&state.model, &funnel.steps) {
                 let changed = *state.model != *funnel.steps;
-                state.model = funnel.steps.clone();
+                state.model = Arc::clone(&funnel.steps);
                 if changed {
                     state.hover = None;
                     state.rows = gpui::UniformListScrollHandle::new();
@@ -183,7 +186,11 @@ impl RenderOnce for FunnelView {
         });
         let hover = state.read(cx).hover;
         let list_state = state.read(cx).rows.clone();
-        let color = kit::series_color(0);
+        // The bars take the first series colour; while one is hovered the
+        // others step back.
+        let series = kit::series_color(&theme, 0);
+        let color = series.at(crate::theme::Opacity::BarSolo).to_paint();
+        let dimmed = series.at(crate::theme::Opacity::Dimmed).to_paint();
         let row_funnel = funnel.clone();
         let row_state = state.clone();
         let row_id = self.id.clone();
@@ -196,9 +203,9 @@ impl RenderOnce for FunnelView {
                         let funnel = &row_funnel;
                         let reading = funnel.reading(index);
                         let hovered = hover == Some(index);
-                        let alpha = match hover {
-                            Some(_) if !hovered => 0.45,
-                            _ => 0.85,
+                        let fill = match hover {
+                            Some(_) if !hovered => dimmed,
+                            _ => color,
                         };
                         let entering = row_state.clone();
                         div()
@@ -243,7 +250,7 @@ impl RenderOnce for FunnelView {
                                             .h_full()
                                             .w(relative(funnel.width(index)))
                                             .rounded(RadiusTokens::value(RadiusStep::Xs))
-                                            .bg(color.with_alpha(alpha).to_paint()),
+                                            .bg(fill),
                                     ),
                             )
                             .child(
@@ -260,15 +267,13 @@ impl RenderOnce for FunnelView {
                                     .child(
                                         div()
                                             .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.colors.foreground.to_paint())
+                                            .text_color(theme.colors.text.to_paint())
                                             .child(kit::format_number(reading.value)),
                                     )
                                     .child(
-                                        div()
-                                            .text_color(theme.colors.muted_foreground.to_paint())
-                                            .child(
-                                                reading.of_first.map(percent).unwrap_or_default(),
-                                            ),
+                                        div().text_color(theme.colors.text_muted.to_paint()).child(
+                                            reading.of_first.map(percent).unwrap_or_default(),
+                                        ),
                                     ),
                             )
                             .into_any_element()
@@ -278,7 +283,7 @@ impl RenderOnce for FunnelView {
         )
         .track_scroll(&list_state)
         .w_full()
-        .h(theme.density.control_sm * funnel.steps.len().min(10) as f32);
+        .h(theme.density.control_sm * f32_of_count(funnel.steps.len().min(10)));
         let summary = self.summary(hover);
         let selection_label = hover.map(|index| {
             format!(
@@ -313,7 +318,7 @@ impl RenderOnce for FunnelView {
                         ChartCommand::Parent | ChartCommand::Reset => None,
                     };
                     cx.notify();
-                })
+                });
             },
         )
         .selected(hover)
@@ -327,6 +332,10 @@ impl RenderOnce for FunnelView {
 
 impl FunnelView {
     /// The hovered step against the one before, or the overall conversion.
+    #[expect(
+        clippy::option_if_let_else,
+        reason = "the hovered and overall readings read clearer as two arms"
+    )]
     fn summary(&self, hover: Option<usize>) -> String {
         let funnel = &self.funnel;
         let last = funnel.steps.len().saturating_sub(1);
@@ -395,7 +404,7 @@ mod native_window_tests {
                 steps: (0..64)
                     .map(|index| Step {
                         label: format!("Step {index}"),
-                        value: (64 - index) as f64,
+                        value: f64::from(64 - index),
                     })
                     .collect(),
             })
@@ -429,7 +438,7 @@ mod native_window_tests {
         // the selected endpoint and the native list's viewport.
         cx.update(|_, cx| {
             view.update(cx, |fixture, cx| {
-                fixture.funnel.steps = Arc::new((*fixture.funnel.steps).clone());
+                fixture.funnel.steps = Arc::from(fixture.funnel.steps.to_vec());
                 cx.notify();
             });
         });

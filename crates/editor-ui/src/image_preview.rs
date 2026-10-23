@@ -2,11 +2,14 @@
 //! The image fits the window. Escape, the close button, or a click outside
 //! the image dismisses the preview and restores focus.
 
+use crate::AssetId;
+use crate::attachment_tile::{ACTION_INSET, REMOVE_SIZE};
+use crate::button::{Button, ButtonVariant};
+use crate::media_frame::MediaFrame;
 use crate::overlay as overlays;
-use crate::theme::ArtisanTheme;
-use crate::{AssetId, asset_seam::asset_glyph};
+use crate::theme::{ArtisanTheme, RadiusTokens};
 use gpui::{
-    AnyElement, App, ClickEvent, ColorExt as _, InteractiveElement as _, IntoElement, ObjectFit,
+    AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement, ObjectFit,
     ParentElement as _, Pixels, RenderImage, Size, StatefulInteractiveElement as _, Styled as _,
     StyledImage as _, Window, deferred, div, img, px,
 };
@@ -14,8 +17,7 @@ use gpui::{
 /// Largest preview box, before the window bound applies.
 const MAX_WIDTH: Pixels = px(960.0);
 const MAX_HEIGHT: Pixels = px(720.0);
-/// Kept clear between the preview and every window edge (the close action
-/// sits in it).
+/// Kept clear between the preview and every window edge.
 const WINDOW_MARGIN: Pixels = px(56.0);
 
 /// Shows an image in this window, preserving the opener for dismissal.
@@ -27,7 +29,7 @@ pub fn open(image: std::sync::Arc<RenderImage>, window: &mut Window, cx: &mut Ap
 pub fn open_on_click(
     image: std::sync::Arc<RenderImage>,
 ) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
-    move |_, window, cx| open(image.clone(), window, cx)
+    move |_, window, cx| open(std::sync::Arc::clone(&image), window, cx)
 }
 
 /// Closes the preview.
@@ -35,13 +37,18 @@ pub fn close(window: &mut Window, cx: &mut App) {
     overlays::dismiss("image-preview", window, cx);
 }
 
-/// Bounds the preview box to the window less its margin on each side.
-fn preview_box(viewport: Size<Pixels>) -> (Pixels, Pixels) {
+/// The picture's size: never upscaled, scaled down to fit the preview box
+/// (the window less its margin on each side). Explicit so the close card's
+/// container is exactly the picture, never its unscaled width.
+#[expect(clippy::cast_precision_loss, reason = "image sides are far below 2^24")]
+fn picture_size(image: &RenderImage, viewport: Size<Pixels>) -> Size<Pixels> {
     let fit = |cap: Pixels, extent: Pixels| cap.min(extent - WINDOW_MARGIN * 2.0).max(px(1.0));
-    (
-        fit(MAX_WIDTH, viewport.width),
-        fit(MAX_HEIGHT, viewport.height),
-    )
+    let native = image.size(0);
+    let (width, height) = (native.width.0.max(1) as f32, native.height.0.max(1) as f32);
+    let scale = (f32::from(fit(MAX_WIDTH, viewport.width)) / width)
+        .min(f32::from(fit(MAX_HEIGHT, viewport.height)) / height)
+        .min(1.0);
+    gpui::size(px(width * scale), px(height * scale))
 }
 
 /// The open preview over the whole window, or nothing. Mount it in the
@@ -49,27 +56,29 @@ fn preview_box(viewport: Size<Pixels>) -> (Pixels, Pixels) {
 pub fn overlay(theme: &ArtisanTheme, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     let (image, focus) = overlays::preview(window, cx)?;
     overlays::retain("image-preview", window, cx);
-    let (max_width, max_height) = preview_box(window.viewport_size());
-    let close_button = div()
-        .id("image-preview-close")
-        .debug_selector(|| "image-preview-close".to_owned())
-        .absolute()
-        .top(px(12.0))
-        .right(px(12.0))
-        .size(px(32.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(theme.colors.card.to_paint().opacity(0.94))
-        .text_color(theme.colors.muted_foreground.to_paint())
-        .role(gpui::Role::Button)
-        .aria_label("Close image preview")
-        .focusable()
-        .tab_index(0)
-        .cursor_pointer()
-        .on_click(|_, window, cx| close(window, cx))
-        .child(asset_glyph(AssetId::TABLER_X).size(px(16.0)));
+    let picture = picture_size(&image, window.viewport_size());
+    // The attachment tile's remove card, at its inset and nested radius.
+    let radius = MediaFrame::attachment_content_radius();
+    let inset = px(ACTION_INSET);
+    let close_button = div().absolute().top(inset).right(inset).child(
+        Button::icon(
+            "image-preview-close",
+            *theme,
+            AssetId::TABLER_X,
+            "Close image preview",
+        )
+        .debug_selector("image-preview-close")
+        .variant(ButtonVariant::Ghost)
+        .hover_fill()
+        .muted()
+        .glass()
+        .compact(px(REMOVE_SIZE))
+        .nested_radius(RadiusTokens::nested(radius, inset))
+        .on_activate(|_, window, cx| {
+            cx.stop_propagation();
+            close(window, cx);
+        }),
+    );
     let keys = focus.clone();
     let root = div()
         .id("image-preview")
@@ -79,7 +88,11 @@ pub fn overlay(theme: &ArtisanTheme, window: &mut Window, cx: &mut App) -> Optio
         .flex()
         .items_center()
         .justify_center()
-        .bg(theme.colors.background.to_paint().opacity(0.97))
+        .bg(theme
+            .colors
+            .background
+            .at(crate::theme::Opacity::BackdropDense)
+            .to_paint())
         .occlude()
         .track_focus(&focus)
         .role(gpui::Role::Dialog)
@@ -98,14 +111,22 @@ pub fn overlay(theme: &ArtisanTheme, window: &mut Window, cx: &mut App) -> Optio
         // Anywhere but the picture closes it.
         .on_click(|_, window, cx| close(window, cx))
         .child(
-            img(image)
-                .id("image-preview-image")
-                .debug_selector(|| "image-preview-image".to_owned())
-                .max_w(max_width).max_h(max_height)
-                .object_fit(ObjectFit::Contain)
-                .on_click(|_, _, cx| cx.stop_propagation()),
-        )
-        .child(close_button);
+            div()
+                .relative()
+                .flex_none()
+                .w(picture.width)
+                .h(picture.height)
+                .child(
+                    img(image)
+                        .id("image-preview-image")
+                        .debug_selector(|| "image-preview-image".to_owned())
+                        .size_full()
+                        .rounded(radius)
+                        .object_fit(ObjectFit::Contain)
+                        .on_click(|_, _, cx| cx.stop_propagation()),
+                )
+                .child(close_button),
+        );
     Some(
         deferred(root)
             .with_priority(overlays::priority("image-preview", window, cx))

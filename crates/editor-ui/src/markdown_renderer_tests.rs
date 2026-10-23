@@ -123,7 +123,7 @@ fn bare_urls_keep_authored_text_and_sentence_punctuation() {
                 .iter()
                 .any(|(range, style)| range.start <= link.range.start
                     && range.end >= link.range.end
-                    && style.color == Some(theme.colors.banner_info.to_paint()))
+                    && style.color == Some(theme.colors.link.to_paint()))
         );
     }
     assert_eq!(
@@ -166,4 +166,43 @@ fn fence_display_drops_only_the_final_line_terminator() {
     // A streaming fence may end mid-line.
     assert_eq!(fence_display_source("one"), "one");
     assert_eq!(fence_display_source(""), "");
+}
+
+#[test]
+fn a_message_paints_its_leading_command_and_keeps_its_markdown() {
+    let theme = ArtisanTheme::resolved();
+    let engine = crate::markdown::MarkdownEngine::new().unwrap();
+    let mut document = engine
+        .parse_document("/goal ship **it**\n\n## Next")
+        .unwrap();
+    document.mark_command("/goal");
+    let Block::Paragraph { spans, .. } = &document.blocks()[0] else {
+        panic!("the message opens with a paragraph");
+    };
+    let presentation = present_inline(spans, theme);
+    assert_eq!(presentation.source, "/goal ship it");
+    assert!(
+        presentation
+            .highlights
+            .iter()
+            .any(|(range, style)| range == &(0..5) && *style == command_style(&theme)),
+        "the command paints as the composer paints it: {:?}",
+        presentation.highlights
+    );
+    assert!(
+        presentation
+            .highlights
+            .iter()
+            .any(|(range, _)| &presentation.source[range.clone()] == "it"),
+        "the rest stays markdown"
+    );
+    assert!(matches!(&document.blocks()[1], Block::Heading { .. }));
+
+    // Text that only mentions the command later is left alone.
+    let mut document = engine.parse_document("see /goal later").unwrap();
+    document.mark_command("/goal");
+    let Block::Paragraph { spans, .. } = &document.blocks()[0] else {
+        panic!("one paragraph");
+    };
+    assert_eq!(spans, &vec![Span::Text("see /goal later".to_owned())]);
 }

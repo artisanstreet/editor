@@ -285,6 +285,7 @@ impl Import<'_> {
                         config,
                         title,
                         parent_thread_id: None,
+                        spawned_by: None,
                     },
                     stamp(thread.created_at, thread.created_at),
                 )
@@ -416,6 +417,8 @@ impl Import<'_> {
                     text: text.into(),
                     images: hashes,
                     steer,
+                    from_agent: None,
+                    sender: None,
                 }
             }
             Content::Assistant { text, phase } => ItemKind::AssistantMessage {

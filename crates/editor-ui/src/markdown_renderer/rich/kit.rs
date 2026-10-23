@@ -31,16 +31,16 @@ pub(super) enum Tone {
 }
 
 impl Tone {
-    /// The tone's color; neutral reads as the muted foreground.
-    pub(super) fn color(self, theme: &ArtisanTheme) -> Oklch {
+    /// The tone's text and icon colour; neutral reads as muted text.
+    pub(super) const fn color(self, theme: &ArtisanTheme) -> Oklch {
         let colors = &theme.colors;
         match self {
-            Self::Neutral => colors.muted_foreground,
-            Self::Info => colors.banner_info,
-            Self::Success => colors.banner_success,
-            Self::Warning => colors.banner_warning,
-            Self::Danger => colors.banner_error,
-            Self::Accent => colors.question_to,
+            Self::Neutral => colors.text_muted,
+            Self::Info => colors.banner_info.text,
+            Self::Success => colors.banner_success.text,
+            Self::Warning => colors.banner_warning.text,
+            Self::Danger => colors.banner_error.text,
+            Self::Accent => colors.link,
         }
     }
 }
@@ -48,37 +48,60 @@ impl Tone {
 // ---------------------------------------------------------------------------
 // Series palette
 
-/// Hues of the categorical series palette, in order: blue, violet, teal,
-/// amber, rose, green, orange, cyan.
-const SERIES_HUES: [f32; 8] = [255.0, 300.0, 190.0, 80.0, 10.0, 150.0, 50.0, 220.0];
-
-/// The color of series `index`; past eight series the hues repeat lighter.
-pub(super) fn series_color(index: usize) -> Oklch {
-    let hue = SERIES_HUES[index % SERIES_HUES.len()];
-    #[expect(clippy::cast_precision_loss, reason = "the round count stays tiny")]
-    let round = (index / SERIES_HUES.len()) as f32;
-    let lightness = 0.72;
-    Oklch::new((lightness + round * 0.08).min(0.9), 0.15, hue)
+/// The colour of series `index`: the theme's data palette, repeating past
+/// eight series.
+pub(super) const fn series_color(theme: &ArtisanTheme, index: usize) -> Oklch {
+    let palette = &theme.colors.palette;
+    palette[index % palette.len()]
 }
 
-/// A sequential ramp from the surface to the first series hue, `t` in 0..=1.
-pub(super) fn sequential_color(t: f32) -> Oklch {
+/// Accent steps of the sequential ramp, from the surface outwards. Steps
+/// 3–8 and 11 move away from the background in both modes.
+pub(super) const SEQUENTIAL_STEPS: [usize; 7] = [3, 4, 5, 6, 7, 8, 11];
+
+/// A sequential ramp in discrete accent steps, `t` in 0..=1.
+pub(super) fn sequential_color(theme: &ArtisanTheme, t: f32) -> Oklch {
     let t = t.clamp(0.0, 1.0);
-    let (from, to) = (0.3, 0.78);
-    Oklch::new(from + (to - from) * t, 0.02 + 0.14 * t, SERIES_HUES[0])
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "t is clamped, so the index stays inside the seven steps"
+    )]
+    let index = (t * (SEQUENTIAL_STEPS.len() - 1) as f32).round() as usize;
+    theme.colors.accent.step(SEQUENTIAL_STEPS[index])
 }
 
-/// A diverging ramp, `t` in -1..=1: rose below zero, blue above.
-pub(super) fn diverging_color(t: f32) -> Oklch {
+/// A diverging ramp in discrete steps, `t` in -1..=1: red below zero,
+/// accent above, the raised fill at zero.
+pub(super) fn diverging_color(theme: &ArtisanTheme, t: f32) -> Oklch {
+    let colors = &theme.colors;
     let t = t.clamp(-1.0, 1.0);
-    let hue = if t < 0.0 {
-        SERIES_HUES[4]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "|t| is clamped to 0..=1, so the index stays inside 0..=4"
+    )]
+    let index = (t.abs() * 4.0).round() as usize;
+    if index == 0 {
+        return colors.raised;
+    }
+    let side = if t < 0.0 {
+        [
+            colors.red.bg,
+            colors.red.border,
+            colors.red.solid,
+            colors.red.text,
+        ]
     } else {
-        SERIES_HUES[0]
+        [
+            colors.accent.step(3),
+            colors.accent.step(6),
+            colors.accent.step(8),
+            colors.accent.step(11),
+        ]
     };
-    let strength = t.abs();
-    let (from, to) = (0.3, 0.74);
-    Oklch::new(from + (to - from) * strength, 0.15 * strength, hue)
+    side[index - 1]
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +113,7 @@ pub(super) fn title(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div 
         .text_size(TypographyTokens::size(TextStep::Sm))
         .line_height(px(20.0))
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.colors.foreground.to_paint())
+        .text_color(theme.colors.text.to_paint())
         .child(text.into())
 }
 
@@ -99,7 +122,7 @@ pub(super) fn body(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()
         .text_size(TypographyTokens::size(TextStep::Sm))
         .line_height(px(22.0))
-        .text_color(theme.colors.foreground.to_paint())
+        .text_color(theme.colors.text.to_paint())
         .child(text.into())
 }
 
@@ -108,7 +131,7 @@ pub(super) fn muted(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div 
     div()
         .text_size(TypographyTokens::size(TextStep::XsMid))
         .line_height(px(20.0))
-        .text_color(theme.colors.muted_foreground.to_paint())
+        .text_color(theme.colors.text_muted.to_paint())
         .child(text.into())
 }
 
@@ -118,7 +141,7 @@ pub(super) fn label(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div 
         .text_size(TypographyTokens::size(TextStep::Xs))
         .line_height(px(16.0))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(theme.colors.muted_foreground.to_paint())
+        .text_color(theme.colors.text_muted.to_paint())
         .child(text.into())
 }
 
@@ -129,7 +152,7 @@ pub(super) fn mono(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
         .tracking(0.0)
         .text_size(TypographyTokens::size(TextStep::XsMid))
         .line_height(px(20.0))
-        .text_color(theme.colors.foreground.to_paint())
+        .text_color(theme.colors.text.to_paint())
         .child(text.into())
 }
 
@@ -147,13 +170,13 @@ pub(super) fn paragraphs(theme: &ArtisanTheme, text: &str) -> Div {
 // Surfaces, chips, and glyphs
 
 /// Corner radius of a surface nested inside the block card.
-pub(super) fn inner_radius() -> gpui::Pixels {
+pub(super) const fn inner_radius() -> gpui::Pixels {
     RadiusTokens::value(RadiusStep::Lg)
 }
 
 /// The hairline color shared by surfaces, rules, and axes.
 pub(super) fn hairline(theme: &ArtisanTheme) -> Hsla {
-    theme.colors.foreground.with_alpha(0.1).to_paint()
+    theme.colors.text.at(crate::theme::Opacity::Rule).to_paint()
 }
 
 /// A tinted glyph at `size` in `color`.
@@ -264,11 +287,11 @@ impl<'de> Deserialize<'de> for LineSpan {
             Raw::Text(text) => {
                 let (start, end) = if let Some((start, end)) = text.trim().split_once('-') {
                     (
-                        start.trim().parse().map_err(|_| invalid())?,
-                        end.trim().parse().map_err(|_| invalid())?,
+                        start.trim().parse().map_err(|_unparsable| invalid())?,
+                        end.trim().parse().map_err(|_unparsable| invalid())?,
                     )
                 } else {
-                    let line = text.trim().parse().map_err(|_| invalid())?;
+                    let line = text.trim().parse().map_err(|_unparsable| invalid())?;
                     (line, line)
                 };
                 Ok(Self {

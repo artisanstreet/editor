@@ -142,15 +142,15 @@ impl Asset for ModelLoader {
 #[cfg(test)]
 fn read(path: &std::path::Path) -> Result<Vec<u8>, SharedString> {
     use std::io::Read as _;
-    let metadata = std::fs::metadata(path).map_err(|_| "the file does not exist")?;
+    let metadata = std::fs::metadata(path).map_err(|_missing| "the file does not exist")?;
     if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
         return Err("the model must be a regular file no larger than 12 MiB".into());
     }
-    let file = std::fs::File::open(path).map_err(|_| "the file could not be read")?;
+    let file = std::fs::File::open(path).map_err(|_unreadable| "the file could not be read")?;
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "the file could not be read")?;
+        .map_err(|_unreadable| "the file could not be read")?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err("the file is larger than 12 MiB".into());
     }
@@ -179,6 +179,10 @@ mod tests {
     }
 
     #[gpui::test]
+    #[expect(
+        clippy::future_not_send,
+        reason = "gpui::test runs the future on its own thread"
+    )]
     async fn a_block_keeps_its_model_and_a_later_block_reads_the_rewrite(
         cx: &mut gpui::TestAppContext,
     ) {

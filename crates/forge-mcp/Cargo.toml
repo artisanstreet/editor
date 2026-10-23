@@ -1,0 +1,22 @@
+[package]
+name = "forge-mcp"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "The Artisan MCP: what an agent can do with Artisan, served to every engine through Forge's gateway."
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api" }
+forge-runs = { path = "../forge-runs" }
+forge-store = { path = "../forge-store" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

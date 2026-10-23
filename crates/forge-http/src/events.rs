@@ -59,15 +59,19 @@ impl Queue {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct Since {
+pub struct Since {
     #[serde(default)]
+    #[expect(
+        clippy::struct_field_names,
+        reason = "the field is the `since` query parameter"
+    )]
     since: Seq,
     #[serde(default)]
     summary: bool,
     thread: Option<artisan_api::ThreadId>,
 }
 
-pub(crate) async fn stream(
+pub async fn stream(
     State(app): State<App>,
     Query(scope): Query<Since>,
     Extension(client): Extension<crate::routes::Client>,
@@ -95,7 +99,9 @@ pub(crate) async fn stream(
             () = watch_authorization(store, &device, &client.certificate, revocations) => { stop.cancel(); },
             () = sender.sender.closed() => {},
             result = async {
-                let _ = store.touch_device(&device).await;
+                if let Err(error) = store.touch_device(&device).await {
+                    tracing::warn!(%device, "recording when the device was last seen: {error:#}");
+                }
                 forward(&app, &scope, &sender).await
             } => {
                 if let Err(error) = result {
@@ -116,6 +122,7 @@ pub(crate) async fn stream(
                 event = event.id(seq.to_string());
             }
             let event = event.data(&queued.data);
+            drop(queued);
             Some((Ok(event), (receiver, stop)))
         });
     Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
@@ -150,7 +157,19 @@ async fn forward(app: &App, scope: &Since, sender: &Queue) -> anyhow::Result<()>
                 Event::Run { run } if !run.status.is_live() => {
                     completed_runs.insert(run.id.clone());
                 }
-                _ => {}
+                Event::Hello { .. }
+                | Event::Project { .. }
+                | Event::Thread { .. }
+                | Event::Item { .. }
+                | Event::Run { .. }
+                | Event::ItemState { .. }
+                | Event::Setting { .. }
+                | Event::Live { .. }
+                | Event::Suggestion { .. }
+                | Event::Engine { .. }
+                | Event::EngineInstall { .. }
+                | Event::EditorCall { .. }
+                | Event::Reset => {}
             }
             last = last.max(envelope.seq.unwrap_or(last));
             if let Some(envelope) = scoped(envelope, scope) {
@@ -161,6 +180,62 @@ async fn forward(app: &App, scope: &Since, sender: &Queue) -> anyhow::Result<()>
         send(sender, None, Event::Reset).await?;
         return Ok(());
     }
+    let live_revision =
+        send_live_snapshot(app, scope, sender, &completed_items, &completed_runs).await?;
+    let mut cursor = Cursor {
+        last,
+        live_revision,
+    };
+    send_engine_statuses(app, sender).await?;
+    loop {
+        let change = changes.recv().await;
+        match change {
+            Ok(mut envelope) => {
+                if !cursor.accept(&envelope) {
+                    continue;
+                }
+                match &mut envelope.event {
+                    Event::Engine { status } => *status = app.hub.engines().status(status.engine),
+                    // Queued pre-snapshot progress must never regress the scalar
+                    // installation state shown by the initial Engine snapshot.
+                    Event::EngineInstall { engine, install } => {
+                        *install = app.hub.engines().install_state(*engine);
+                    }
+                    Event::Hello { .. }
+                    | Event::Project { .. }
+                    | Event::Thread { .. }
+                    | Event::Item { .. }
+                    | Event::Run { .. }
+                    | Event::ItemState { .. }
+                    | Event::Setting { .. }
+                    | Event::Live { .. }
+                    | Event::Suggestion { .. }
+                    | Event::EditorCall { .. }
+                    | Event::Reset => {}
+                }
+                if let Some(envelope) = scoped(envelope, scope) {
+                    sender.send(envelope).await?;
+                }
+            }
+            // Fell behind: the client refetches the state and reconnects.
+            Err(RecvError::Lagged(_)) => {
+                send(sender, None, Event::Reset).await?;
+                return Ok(());
+            }
+            Err(RecvError::Closed) => return Ok(()),
+        }
+    }
+}
+
+/// Sends the live text of every run the backlog didn't see end; returns the
+/// snapshot's live revision.
+async fn send_live_snapshot(
+    app: &App,
+    scope: &Since,
+    sender: &Queue,
+    completed_items: &HashSet<artisan_api::ItemId>,
+    completed_runs: &HashSet<artisan_api::RunId>,
+) -> anyhow::Result<u64> {
     let (live_revision, snapshot) = app.hub.live_snapshot();
     for event in snapshot {
         if let Event::Live { target, .. } = &event {
@@ -187,10 +262,11 @@ async fn forward(app: &App, scope: &Since, sender: &Queue) -> anyhow::Result<()>
             sender.send(envelope).await?;
         }
     }
-    let mut cursor = Cursor {
-        last,
-        live_revision,
-    };
+    Ok(live_revision)
+}
+
+/// Sends every engine's current status.
+async fn send_engine_statuses(app: &App, sender: &Queue) -> anyhow::Result<()> {
     for engine in artisan_api::EngineId::ALL {
         send(
             sender,
@@ -201,34 +277,7 @@ async fn forward(app: &App, scope: &Since, sender: &Queue) -> anyhow::Result<()>
         )
         .await?;
     }
-    loop {
-        let change = changes.recv().await;
-        match change {
-            Ok(mut envelope) => {
-                if !cursor.accept(&envelope) {
-                    continue;
-                }
-                match &mut envelope.event {
-                    Event::Engine { status } => *status = app.hub.engines().status(status.engine),
-                    // Queued pre-snapshot progress must never regress the scalar
-                    // installation state shown by the initial Engine snapshot.
-                    Event::EngineInstall { engine, install } => {
-                        *install = app.hub.engines().install_state(*engine)
-                    }
-                    _ => {}
-                }
-                if let Some(envelope) = scoped(envelope, scope) {
-                    sender.send(envelope).await?;
-                }
-            }
-            // Fell behind: the client refetches the state and reconnects.
-            Err(RecvError::Lagged(_)) => {
-                send(sender, None, Event::Reset).await?;
-                return Ok(());
-            }
-            Err(RecvError::Closed) => return Ok(()),
-        }
-    }
+    Ok(())
 }
 
 struct Cursor {
@@ -236,7 +285,7 @@ struct Cursor {
     live_revision: u64,
 }
 impl Cursor {
-    fn accept(&mut self, envelope: &Envelope) -> bool {
+    const fn accept(&mut self, envelope: &Envelope) -> bool {
         if let Some(seq) = envelope.seq {
             if seq <= self.last {
                 return false;
@@ -286,7 +335,19 @@ fn scoped(mut envelope: Envelope, scope: &Since) -> Option<Envelope> {
             };
         }
         Event::Live { thread_id, .. } if scope.thread.as_ref() != Some(thread_id) => return None,
-        _ => {}
+        Event::Hello { .. }
+        | Event::Project { .. }
+        | Event::Thread { .. }
+        | Event::Item { .. }
+        | Event::Run { .. }
+        | Event::ItemState { .. }
+        | Event::Setting { .. }
+        | Event::Live { .. }
+        | Event::Suggestion { .. }
+        | Event::Engine { .. }
+        | Event::EngineInstall { .. }
+        | Event::EditorCall { .. }
+        | Event::Reset => {}
     }
     Some(envelope)
 }
@@ -326,6 +387,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the test holds its queue and frames until it ends"
+    )]
     async fn byte_budget_blocks_even_when_the_entry_queue_has_space() {
         let envelope = live("abc", 1);
         let encoded = serde_json::to_string(&envelope).unwrap().len();
@@ -345,6 +410,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the test holds its queue and frames until it ends"
+    )]
     async fn oversized_events_send_a_reset_without_retaining_the_large_body() {
         let (sender, mut receiver) = mpsc::channel(64);
         let queue = Queue {

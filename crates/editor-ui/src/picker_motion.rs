@@ -1,5 +1,7 @@
-//! The picker surfaces' motion (`native_picker_motion` and the paint helpers
-//! of `native_model_selector/render`): the shared hover pill that flies from
+//! The picker surfaces' motion.
+//!
+//! It serves `native_picker_motion` and the paint helpers of
+//! `native_model_selector/render`: the shared hover pill that flies from
 //! row to row, and the open and close of a popover that stays mounted until
 //! its exit has played.
 //!
@@ -17,7 +19,7 @@ use gpui::{
     Pixels, Point, Stateful, Styled as _, div, px,
 };
 
-use crate::hover_card::{HoverFill, hover_fill};
+use crate::hover_card::{HoverColors, HoverFill, HoverTone};
 use crate::measure::Measured;
 use crate::motion::MotionCurve;
 use crate::theme::ArtisanTheme;
@@ -57,10 +59,10 @@ impl HoverRect {
     pub fn lerp(self, target: Self, progress: f32) -> Self {
         let progress = progress.clamp(0.0, 1.0);
         Self {
-            left: self.left + (target.left - self.left) * progress,
-            top: self.top + (target.top - self.top) * progress,
-            width: self.width + (target.width - self.width) * progress,
-            height: self.height + (target.height - self.height) * progress,
+            left: (target.left - self.left).mul_add(progress, self.left),
+            top: (target.top - self.top).mul_add(progress, self.top),
+            width: (target.width - self.width).mul_add(progress, self.width),
+            height: (target.height - self.height).mul_add(progress, self.height),
         }
     }
 
@@ -81,6 +83,8 @@ impl HoverRect {
 pub struct HoverTransition {
     pub from: HoverRect,
     pub to: HoverRect,
+    pub from_tone: HoverTone,
+    pub to_tone: HoverTone,
     /// Retires the paint closure of an interrupted flight.
     pub generation: u64,
 }
@@ -89,7 +93,10 @@ pub struct HoverTransition {
 #[derive(Clone, Debug, Default)]
 pub struct SlidingHoverState {
     active_id: Option<String>,
+    active_tone: HoverTone,
     target_id: Option<String>,
+    from_tone: HoverTone,
+    tone: HoverTone,
     current: HoverRect,
     from: HoverRect,
     target: HoverRect,
@@ -106,7 +113,7 @@ impl SlidingHoverState {
     }
 
     #[must_use]
-    pub fn visual_rect(&self) -> HoverRect {
+    pub const fn visual_rect(&self) -> HoverRect {
         self.current
     }
 
@@ -115,11 +122,23 @@ impl SlidingHoverState {
         self.visible
     }
 
+    /// The tone the pill shows, or flies to.
+    #[must_use]
+    pub const fn tone(&self) -> HoverTone {
+        self.tone
+    }
+
     /// Makes `id` the row the pill goes to; its probe supplies the place.
     pub fn set_active(&mut self, id: String) {
+        self.set_active_toned(id, HoverTone::Neutral);
+    }
+
+    /// [`Self::set_active`] for a row whose hover wears `tone`.
+    pub fn set_active_toned(&mut self, id: String, tone: HoverTone) {
         if self.active_id.as_deref() != Some(id.as_str()) {
             self.active_id = Some(id);
         }
+        self.active_tone = tone;
         self.visible = true;
     }
 
@@ -167,11 +186,14 @@ impl SlidingHoverState {
         self.has_geometry = true;
         self.from = self.current;
         self.target = rect;
+        self.from_tone = self.tone;
+        self.tone = self.active_tone;
         self.generation = self.generation.wrapping_add(1);
         if animate {
             self.animating = true;
         } else {
             self.current = rect;
+            self.from_tone = self.tone;
             self.animating = false;
         }
         true
@@ -182,6 +204,8 @@ impl SlidingHoverState {
         self.animating.then_some(HoverTransition {
             from: self.from,
             to: self.target,
+            from_tone: self.from_tone,
+            to_tone: self.tone,
             generation: self.generation,
         })
     }
@@ -194,6 +218,7 @@ impl SlidingHoverState {
         self.current = self.from.lerp(self.target, progress);
         if progress >= 1.0 {
             self.current = self.target;
+            self.from_tone = self.tone;
             self.animating = false;
         }
     }
@@ -211,9 +236,14 @@ pub fn sliding_hover_pill(
     shadow: bool,
     reduce_motion: bool,
 ) -> AnyElement {
-    let (mut rect, visible, transition) = {
+    let (mut rect, visible, tone, transition) = {
         let hover = hover.borrow();
-        (hover.visual_rect(), hover.visible(), hover.transition())
+        (
+            hover.visual_rect(),
+            hover.visible(),
+            hover.tone(),
+            hover.transition(),
+        )
     };
     if reduce_motion && let Some(transition) = transition {
         rect = transition.to;
@@ -221,38 +251,43 @@ pub fn sliding_hover_pill(
             .borrow_mut()
             .apply_progress(transition.generation, 1.0);
     }
-    let pill = hover_fill(
-        div()
-            .id(ElementId::Name(id.to_owned().into()))
-            .absolute()
-            .left(px(rect.left))
-            .top(px(rect.top))
-            .w(px(rect.width))
-            .h(px(rect.height))
-            .rounded(radius)
-            .opacity(if visible { 1.0 } else { 0.0 }),
-        theme,
-        if shadow {
-            HoverFill::Edged
-        } else {
-            HoverFill::Plain
-        },
-    );
+    let fill = if shadow {
+        HoverFill::Edged
+    } else {
+        HoverFill::Plain
+    };
+    let colors = |tone| HoverColors::new(theme, tone);
+    let pill = div()
+        .id(ElementId::Name(id.to_owned().into()))
+        .absolute()
+        .left(px(rect.left))
+        .top(px(rect.top))
+        .w(px(rect.width))
+        .h(px(rect.height))
+        .rounded(radius)
+        .opacity(if visible { 1.0 } else { 0.0 });
     if !reduce_motion && let Some(transition) = transition {
         let motion = Rc::clone(hover);
         let HoverTransition {
             from,
             to,
+            from_tone,
+            to_tone,
             generation,
         } = transition;
-        return pill
+        let (from_colors, to_colors) = (colors(from_tone), colors(to_tone));
+        return from_colors
+            .paint(pill, fill)
             .with_animation(
                 ElementId::Name(format!("{id}-{generation}").into()),
                 Animation::new(HOVER_FLIGHT).with_easing(smooth_out),
                 move |pill, progress| {
                     let rect = from.lerp(to, progress);
                     motion.borrow_mut().apply_progress(generation, progress);
-                    pill.left(px(rect.left))
+                    from_colors
+                        .animate_to(to_colors, progress)
+                        .paint(pill, fill)
+                        .left(px(rect.left))
                         .top(px(rect.top))
                         .w(px(rect.width))
                         .h(px(rect.height))
@@ -260,12 +295,13 @@ pub fn sliding_hover_pill(
             )
             .into_any_element();
     }
-    pill.into_any_element()
+    colors(tone).paint(pill, fill).into_any_element()
 }
 
-/// One sliding hover surface: the pill flies between the rows measured
-/// against the surface (sidebar lists, the profile menu, picker menus).
-/// Place [`Self::surface_probe`] first inside the surface and
+/// One sliding hover surface.
+///
+/// The pill flies between the rows measured against the surface (sidebar
+/// lists, the profile menu, picker menus). Place [`Self::surface_probe`] first inside the surface and
 /// [`Self::row_probe`] inside each row.
 #[derive(Clone, Default)]
 pub struct HoverSurface {
@@ -317,9 +353,14 @@ impl HoverSurface {
 
     /// The pointer entered or left row `id`.
     pub fn hovered(&self, id: &str, hovered: bool) {
+        self.hovered_toned(id, hovered, HoverTone::Neutral);
+    }
+
+    /// [`Self::hovered`] for a row whose hover wears `tone`.
+    pub fn hovered_toned(&self, id: &str, hovered: bool, tone: HoverTone) {
         let mut state = self.state.borrow_mut();
         if hovered {
-            state.set_active(id.to_owned());
+            state.set_active_toned(id.to_owned(), tone);
         } else if state.active_id() == Some(id) {
             state.hide();
         }
@@ -420,7 +461,7 @@ impl MenuMotion {
     }
 
     /// Opens, or reverses a close, from the displayed frame.
-    pub fn begin_open(&mut self) -> u64 {
+    pub const fn begin_open(&mut self) -> u64 {
         self.from_opacity = self.current_opacity;
         self.from_offset = self.current_offset;
         self.to_opacity = 1.0;
@@ -431,7 +472,7 @@ impl MenuMotion {
     }
 
     /// Closes, or reverses an open, from the displayed frame.
-    pub fn begin_close(&mut self) -> u64 {
+    pub const fn begin_close(&mut self) -> u64 {
         self.from_opacity = self.current_opacity;
         self.from_offset = self.current_offset;
         self.to_opacity = 0.0;
@@ -446,8 +487,10 @@ impl MenuMotion {
             return;
         }
         let progress = progress.clamp(0.0, 1.0);
-        self.current_opacity = self.from_opacity + (self.to_opacity - self.from_opacity) * progress;
-        self.current_offset = self.from_offset + (self.to_offset - self.from_offset) * progress;
+        self.current_opacity =
+            (self.to_opacity - self.from_opacity).mul_add(progress, self.from_opacity);
+        self.current_offset =
+            (self.to_offset - self.from_offset).mul_add(progress, self.from_offset);
     }
 
     /// Settles an open nothing newer replaced.
@@ -520,7 +563,8 @@ pub fn animate_menu(
                 DROPDOWN_PRE_SCALE
             };
             panel.opacity(opacity).transform(
-                gpui::ElementTransform::scale(rest + (1.0 - rest) * presence).with_origin(origin),
+                gpui::ElementTransform::scale((1.0 - rest).mul_add(presence, rest))
+                    .with_origin(origin),
             )
         }
     };
@@ -539,8 +583,8 @@ pub fn animate_menu(
                 motion.borrow_mut().apply_progress(generation, progress);
                 place(
                     panel,
-                    from_offset + (to_offset - from_offset) * progress,
-                    from_opacity + (to_opacity - from_opacity) * progress,
+                    (to_offset - from_offset).mul_add(progress, from_offset),
+                    (to_opacity - from_opacity).mul_add(progress, from_opacity),
                 )
             },
         )

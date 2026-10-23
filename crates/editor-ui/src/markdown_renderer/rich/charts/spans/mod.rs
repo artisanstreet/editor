@@ -268,14 +268,14 @@ impl Layout {
                 }
             })
             .collect::<Vec<_>>();
-        let mut domain = Domain::of(
+        let domain = Domain::of(
             spans
                 .iter()
                 .flat_map(|span| [span.start, span.end])
                 .chain(markers.iter().map(|marker| marker.at)),
         )
         .ok_or("needs at least one span")?;
-        if dates {
+        let domain = if dates {
             let lo = spans
                 .iter()
                 .map(|span| span.start)
@@ -286,11 +286,13 @@ impl Layout {
                 .map(|span| span.end)
                 .chain(markers.iter().map(|marker| marker.at))
                 .fold(f64::NEG_INFINITY, f64::max);
-            domain = Domain {
+            Domain {
                 lo: lo - 0.5,
                 hi: hi + 0.5,
-            };
-        }
+            }
+        } else {
+            domain
+        };
         let mut row_spans = vec![Vec::new(); count];
         for (index, span) in spans.iter().enumerate() {
             row_spans[span.row].push(index);
@@ -440,17 +442,14 @@ mod row_stack_tests {
         let mut indexed = RowEnds::new(128);
         let mut linear: Vec<f64> = Vec::new();
         for index in 0..128 {
-            let start = (index / 3) as f64;
-            let end = start + (index % 7) as f64;
-            let expected = match linear.iter().position(|end| *end <= start) {
-                Some(row) => {
-                    linear[row] = end;
-                    row
-                }
-                None => {
-                    linear.push(end);
-                    linear.len() - 1
-                }
+            let start = f64::from(index / 3);
+            let end = start + f64::from(index % 7);
+            let expected = if let Some(row) = linear.iter().position(|end| *end <= start) {
+                linear[row] = end;
+                row
+            } else {
+                linear.push(end);
+                linear.len() - 1
             };
             assert_eq!(stack(&mut indexed, start, end), expected);
         }

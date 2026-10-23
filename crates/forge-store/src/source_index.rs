@@ -8,7 +8,7 @@ use artisan_api::{
 use rusqlite::{Connection, OptionalExtension, params};
 const MAX_METADATA_BYTES: usize = 32 * 1024 * 1024;
 
-pub(crate) fn header(
+pub fn header(
     conn: &Connection,
     id: &ContentId,
     format: SourceIndexFormat,
@@ -20,14 +20,14 @@ pub(crate) fn header(
         version: artisan_api::SOURCE_INDEX_VERSION, leaves:row.get(5)?,
     })).optional().map_err(Into::into)
 }
-pub(crate) struct PreparedIndex {
+pub struct PreparedIndex {
     source: ContentRef,
     format: SourceIndexFormat,
     metadata: String,
     leaves: Vec<SourceLeafDescriptor>,
 }
 
-pub(crate) enum Prepared {
+pub enum Prepared {
     /// The source does not exist.
     Missing,
     /// Another request built the index meanwhile.
@@ -35,11 +35,7 @@ pub(crate) enum Prepared {
     Built(PreparedIndex),
 }
 
-pub(crate) fn prepare(
-    conn: &Connection,
-    id: &ContentId,
-    format: SourceIndexFormat,
-) -> Result<Prepared> {
+pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> Result<Prepared> {
     if header(conn, id, format)?.is_some() {
         return Ok(Prepared::Indexed);
     }
@@ -81,18 +77,22 @@ pub(crate) fn prepare(
             Some(start..text.len())
         }
     });
-    let records: Box<dyn Iterator<Item = artisan_markdown_index::LeafRecord> + '_> =
+    let records: Box<dyn Iterator<Item = Result<artisan_markdown_index::LeafRecord>> + '_> =
         if let Some(index) = &index {
-            Box::new(
-                (0..index.leaves().len())
-                    .map(|ordinal| index.record(ordinal).expect("indexed ordinal")),
-            )
+            Box::new((0..index.leaves().len()).map(|ordinal| {
+                index
+                    .record(ordinal)
+                    .ok_or_else(|| anyhow::anyhow!("indexed ordinal {ordinal} has no record"))
+            }))
         } else {
-            Box::new(literal_ranges.map(artisan_markdown_index::LeafRecord::literal))
+            Box::new(
+                literal_ranges.map(|range| Ok(artisan_markdown_index::LeafRecord::literal(range))),
+            )
         };
     let mut metadata = String::new();
     let mut leaves = Vec::new();
     for (ordinal, record) in records.enumerate() {
+        let record = record?;
         let json = serde_json::to_string(&record)?;
         ensure!(
             metadata.len().saturating_add(json.len() + 1) <= MAX_METADATA_BYTES,
@@ -118,10 +118,7 @@ pub(crate) fn prepare(
         leaves,
     }))
 }
-pub(crate) fn persist(
-    conn: &Connection,
-    prepared: PreparedIndex,
-) -> Result<Option<SourceIndexHeader>> {
+pub fn persist(conn: &Connection, prepared: PreparedIndex) -> Result<Option<SourceIndexHeader>> {
     if let Some(existing) = header(conn, &prepared.source.id, prepared.format)? {
         return Ok(Some(existing));
     }
@@ -174,10 +171,10 @@ pub(crate) fn persist(
     drop(insert);
     header(conn, &prepared.source.id, prepared.format)
 }
-pub(crate) fn range(
+pub fn range(
     conn: &Connection,
     id: &ContentId,
-    query: SourceIndexQuery,
+    query: &SourceIndexQuery,
 ) -> Result<Option<SourceIndexRange>> {
     let Some(index) = header(conn, id, query.format)? else {
         return Ok(None);
@@ -189,7 +186,7 @@ pub(crate) fn range(
     );
     let start = query
         .offset
-        .unwrap_or(index.leaves.saturating_sub(u64::from(limit)));
+        .unwrap_or_else(|| index.leaves.saturating_sub(u64::from(limit)));
     ensure!(
         start <= index.leaves,
         "source leaf offset exceeds index length"

@@ -36,7 +36,7 @@ impl FenceEntry {
 /// comparing the source bytes, which is far cheaper than classifying them
 /// and keeps a hash collision from ever serving another fence's tokens.
 #[derive(Debug, Default)]
-pub(crate) struct FenceTokenCache {
+pub struct FenceTokenCache {
     /// Front is least recently used.
     entries: VecDeque<FenceEntry>,
     bytes: usize,
@@ -79,7 +79,7 @@ impl FenceTokenMemo for FenceTokenCache {
                 && entry.source == source
         })?;
         let entry = self.entries.remove(index)?;
-        let tokens = entry.tokens.clone();
+        let tokens = Arc::clone(&entry.tokens);
         self.entries.push_back(entry);
         Some(tokens)
     }
@@ -117,7 +117,7 @@ mod tests {
         }]
         .into();
         assert!(memo.cached("rust", "let").is_none());
-        memo.remember("rust", "let", tokens.clone());
+        memo.remember("rust", "let", Arc::clone(&tokens));
         assert!(Arc::ptr_eq(&tokens, &memo.cached("rust", "let").unwrap()));
         memo.entries[0].hash = fence_hash("rust", "var");
         assert!(

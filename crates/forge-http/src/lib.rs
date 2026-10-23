@@ -4,6 +4,7 @@
 
 mod events;
 mod extensions;
+mod gateway;
 mod repository;
 mod routes;
 pub mod tls;
@@ -27,8 +28,29 @@ use tower::Service;
 
 pub use tls::Identity;
 
-/// Default port for `ae forge serve`.
+/// Forge's port unless `config.json` in its data says otherwise.
 pub const DEFAULT_PORT: u16 = 47_900;
+
+/// Where Forge listens: `listen` in `<data>/config.json`, else loopback on
+/// [`DEFAULT_PORT`].
+pub fn configured_listen(data_dir: &Path) -> Result<SocketAddr> {
+    #[derive(Deserialize)]
+    struct Config {
+        listen: Option<SocketAddr>,
+    }
+    let path = data_dir.join("config.json");
+    let listen = match std::fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice::<Config>(&bytes)
+                .with_context(|| format!("read {}", path.display()))?
+                .listen
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    Ok(listen
+        .unwrap_or_else(|| SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), DEFAULT_PORT)))
+}
 const IDENTITY_KEY: &str = "forge_identity";
 const PAIR_CODE_LIFETIME_MS: Timestamp = 10 * 60 * 1000;
 
@@ -47,11 +69,15 @@ pub struct PairInvite {
     pub expires_at: Timestamp,
 }
 
-/// Opens the store and engines under `data_dir` and serves until the
-/// listener fails. Holds an exclusive lock on the data directory.
-pub async fn serve(config: ServeConfig) -> Result<()> {
-    start(config).await?.run().await
+/// Opens the store and engines under `data_dir` and serves until `stop`
+/// resolves. Holds an exclusive lock on the data directory.
+pub async fn serve(config: ServeConfig, stop: impl Future<Output = ()>) -> Result<()> {
+    start(config).await?.run_until(stop).await
 }
+
+/// How long a stopping Forge waits for its runs to settle. Within the
+/// service manager's stop timeout (30 s).
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A bound, not yet serving Forge.
 pub struct Server {
@@ -99,6 +125,9 @@ pub async fn start_with_harness(
         hub.reconcile_skills()
             .await
             .context("reconcile managed skills")?;
+        hub.ensure_scratch_project()
+            .await
+            .context("ensure the scratch project")?;
         let app = routes::router(routes::App {
             hub: hub.clone(),
             forge_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -115,7 +144,12 @@ pub async fn start_with_harness(
         let address = listener.local_addr()?;
         // Failed binds must leave durable inputs untouched, without launching
         // a controller that will never accept its paired clients.
+        gateway::start(&hub, shutdown.clone(), &tasks).await?;
         hub.resume_pending();
+        let auth = hub.clone();
+        tasks.spawn(async move { auth.check_mcp_auth().await });
+        let agents = hub.clone();
+        tasks.spawn(async move { agents.reconcile_agents().await });
         anyhow::Ok((listener, address, app))
     }
     .await;
@@ -164,15 +198,25 @@ impl Server {
     }
 
     #[must_use]
-    pub fn store(&self) -> &Store {
+    pub const fn store(&self) -> &Store {
         &self.store
     }
 
+    pub const fn hub(&self) -> &Hub {
+        &self.hub
+    }
+
     pub async fn run(self) -> Result<()> {
+        self.run_until(std::future::pending()).await
+    }
+
+    /// Serves until `stop` resolves, then stops every run so it ends
+    /// interrupted, and carries on when Forge starts again.
+    pub async fn run_until(self, stop_requested: impl Future<Output = ()>) -> Result<()> {
         let store = self.store.clone();
         let stop = self.shutdown.clone();
         self.tasks.spawn(async move {
-            let hour = std::time::Duration::from_secs(60 * 60);
+            let hour = std::time::Duration::from_hours(1);
             let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + hour, hour);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -194,8 +238,13 @@ impl Server {
                 }
             }
         });
+        tokio::pin!(stop_requested);
         loop {
-            let (socket, peer) = match self.listener.accept().await {
+            let accepted = tokio::select! {
+                () = &mut stop_requested => break,
+                accepted = self.listener.accept() => accepted,
+            };
+            let (socket, peer) = match accepted {
                 Ok(accepted) => accepted,
                 Err(error) => {
                     // Out of descriptors or memory fails every accept until
@@ -247,6 +296,9 @@ impl Server {
                 }
             });
         }
+        tracing::info!("stopping: settling live runs");
+        self.hub.stop(STOP_GRACE).await;
+        Ok(())
     }
 }
 
@@ -284,12 +336,11 @@ pub async fn invite(store: &Store) -> Result<PairInvite> {
 /// `data_dir` (opening a `Store` would recover, i.e. cancel, its live runs).
 pub fn invite_offline(data_dir: &Path) -> Result<PairInvite> {
     let mut admin = forge_store::admin::Admin::open(data_dir)?;
-    let stored = match admin.secret(IDENTITY_KEY)? {
-        Some(stored) => stored,
-        None => {
-            let fresh = serde_json::to_string(&Identity::generate("artisan-forge")?)?;
-            admin.secret_or_insert(IDENTITY_KEY, &fresh)?
-        }
+    let stored = if let Some(stored) = admin.secret(IDENTITY_KEY)? {
+        stored
+    } else {
+        let fresh = serde_json::to_string(&Identity::generate("artisan-forge")?)?;
+        admin.secret_or_insert(IDENTITY_KEY, &fresh)?
     };
     let identity: Identity = serde_json::from_str(&stored).context("read Forge's identity")?;
     let (code, expires_at) = new_code()?;

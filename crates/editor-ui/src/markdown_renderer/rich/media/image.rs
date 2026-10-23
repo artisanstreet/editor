@@ -92,8 +92,8 @@ impl RichBlock for ImageBlock {
                 .iter()
                 .map(|image| {
                     image.src.resident_bytes()
-                        + budget::optional(&image.alt)
-                        + budget::optional(&image.caption)
+                        + budget::optional(image.alt.as_ref())
+                        + budget::optional(image.caption.as_ref())
                 })
                 .sum::<usize>()
     }
@@ -112,8 +112,7 @@ impl RichBlock for ImageBlock {
                     .alt
                     .as_deref()
                     .filter(|alt| !alt.trim().is_empty())
-                    .map(SharedString::from)
-                    .unwrap_or_else(|| image.src.raw()),
+                    .map_or_else(|| image.src.raw(), SharedString::from),
                 caption: image
                     .caption
                     .as_deref()
@@ -165,8 +164,8 @@ impl RenderOnce for ImageShowcase {
         let (aspect, width) = Loaded::frame(&[&loaded], self.hint, self.max_height);
         let path = self.src.raw();
         let preview = match &loaded {
-            Loaded::Ready(image) => Some(image.clone()),
-            _ => None,
+            Loaded::Ready(image) => Some(std::sync::Arc::clone(image)),
+            Loaded::Loading | Loaded::Failed => None,
         };
         let content = div()
             .relative()

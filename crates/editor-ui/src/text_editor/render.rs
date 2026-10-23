@@ -57,7 +57,7 @@ struct EditorMetrics {
 }
 
 impl EditorMetrics {
-    fn of(mode: Mode, style: &TextareaStyle) -> Self {
+    const fn of(mode: Mode, style: &TextareaStyle) -> Self {
         match mode {
             Mode::SingleLine => Self {
                 text_size: px(SINGLE_LINE_TEXT_SIZE_PX),
@@ -98,7 +98,11 @@ impl TextEditor {
         cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let prompt = self.mode == Mode::Prompt;
-        let border_width = if prompt { px(0.0) } else { style.border_width };
+        let border_width = if prompt || self.bare {
+            px(0.0)
+        } else {
+            style.border_width
+        };
         let min_height = metrics.line_height * metrics.visible_lines
             + metrics.padding_y * 2.0
             + border_width * 2.0;
@@ -122,6 +126,8 @@ impl TextEditor {
                         cx.stop_propagation();
                     }
                 })
+        } else if self.bare {
+            root
         } else {
             let focus_border = style.focus_border;
             root.rounded(metrics.radius)
@@ -187,7 +193,7 @@ impl TextEditor {
                 HighlightStyle {
                     underline: Some(UnderlineStyle {
                         thickness: px(1.0),
-                        color: Some(theme.workspace_foreground.to_paint()),
+                        color: Some(theme.text.to_paint()),
                         wavy: false,
                     }),
                     ..HighlightStyle::default()
@@ -200,8 +206,8 @@ impl TextEditor {
         vec![(
             self.selection.clone(),
             HighlightStyle {
-                color: Some(theme.workspace_foreground.to_paint()),
-                background_color: Some(theme.selected.to_paint()),
+                color: Some(theme.text.to_paint()),
+                background_color: Some(theme.text_selection.to_paint()),
                 ..HighlightStyle::default()
             },
         )]
@@ -216,11 +222,8 @@ impl TextEditor {
             .filter_map(|token| {
                 let glyph = token.glyph?;
                 let sigil = self.text[token.range.clone()].chars().next()?;
-                let mut color = token
-                    .style
-                    .color
-                    .unwrap_or(desktop.workspace_foreground.to_paint());
-                color.alpha *= 0.85;
+                let mut color = token.style.color.unwrap_or_else(|| desktop.text.to_paint());
+                color.alpha *= crate::theme::Opacity::MentionGlyph.alpha();
                 Some((
                     token.range.start..token.range.start + sigil.len_utf8(),
                     sigil,
@@ -236,9 +239,13 @@ impl TextEditor {
 type Glyph = (Range<usize>, char, crate::AssetId, gpui::Hsla);
 
 impl Render for TextEditor {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        let style = TextareaStyle::resolve(theme);
+        let style = TextareaStyle::resolve(&theme);
         let desktop = theme.colors;
 
         let highlights = self.highlights(&desktop);
@@ -261,29 +268,37 @@ impl Render for TextEditor {
         if self.text.is_empty() {
             // A prompt's placeholder is the composer's secondary text.
             let placeholder = if self.mode == Mode::Prompt {
-                desktop.workspace_secondary.to_paint()
+                desktop.text_muted.to_paint()
             } else {
                 style.placeholder_foreground
             };
-            content = content.child(
-                div()
-                    .absolute()
-                    .top(px(0.0))
-                    .left(px(0.0))
-                    .w_full()
-                    .text_color(placeholder)
-                    .debug_selector(|| TEXT_EDITOR_PLACEHOLDER_SELECTOR.to_owned())
-                    .child(self.placeholder.clone()),
-            );
+            let hint = div()
+                .absolute()
+                .top(px(0.0))
+                .left(px(0.0))
+                .w_full()
+                .text_color(placeholder)
+                .debug_selector(|| TEXT_EDITOR_PLACEHOLDER_SELECTOR.to_owned());
+            content = content.child(match self.shown_suggestion() {
+                // The keycap sits on the first line, after the words.
+                Some(suggestion) => hint
+                    .h(line_height)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(div().min_w(px(0.0)).truncate().child(suggestion.clone()))
+                    .child(crate::keycap::Keycap::new(theme, "Tab")),
+                None => hint.child(self.placeholder.clone()),
+            });
         }
 
         let root = self.chrome(&metrics, &style, window, cx);
         let mut root = root
-            .text_color(desktop.workspace_foreground.to_paint())
+            .text_color(desktop.text.to_paint())
             .text_size(metrics.text_size)
             .line_height(line_height)
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .tracking(ProseTypography::TRACKING_EM)
+            .tracking(theme.typography.tracking_em)
             .child(content);
         if self.disabled {
             root = root.opacity(style.disabled_opacity);
@@ -335,7 +350,7 @@ impl Render for TextEditor {
                 root.child(
                     div()
                         .text_xs()
-                        .text_color(theme.colors.destructive.to_paint())
+                        .text_color(theme.colors.destructive_text.to_paint())
                         .child("Text is limited to 64 KiB. Attach a file for larger content."),
                 )
             });
@@ -431,7 +446,7 @@ impl Element for InputElement {
         if let Some(caret) = self
             .view
             .read(cx)
-            .caret_quad(window, cx.theme().colors.workspace_foreground.to_paint())
+            .caret_quad(window, cx.theme().colors.text.to_paint())
         {
             window.paint_quad(caret);
         }
@@ -558,7 +573,7 @@ impl gpui::EntityInputHandler for TextEditor {
         cx: &mut Context<Self>,
     ) {
         if let Some(range) = self.replacement_range(range) {
-            self.replace_range(range, new_text, new_selected_range, cx);
+            self.replace_range(range, new_text, new_selected_range.as_ref(), cx);
         }
     }
 

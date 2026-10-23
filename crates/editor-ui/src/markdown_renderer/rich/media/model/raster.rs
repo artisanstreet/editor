@@ -128,9 +128,9 @@ pub(super) struct Frame {
 
 fn rotate(m: &[[f32; 3]; 3], v: Vec3) -> Vec3 {
     Vec3::new(
-        m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z,
-        m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
-        m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z,
+        m[0][2].mul_add(v.z, m[0][1].mul_add(v.y, m[0][0] * v.x)),
+        m[1][2].mul_add(v.z, m[1][1].mul_add(v.y, m[1][0] * v.x)),
+        m[2][2].mul_add(v.z, m[2][1].mul_add(v.y, m[2][0] * v.x)),
     )
 }
 
@@ -161,14 +161,14 @@ struct Screen {
 impl Screen {
     fn new(corners: [Projected; 3]) -> Self {
         let [a, b, c] = corners;
-        let area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        let area = (b.y - a.y).mul_add(-(c.x - a.x), (b.x - a.x) * (c.y - a.y));
         Self { corners, area }
     }
 
     /// The edge function of the side from `p` to `q` at `(x, y)`: twice the
     /// signed area of the triangle it makes with the point.
     fn edge(p: Projected, q: Projected, x: f32, y: f32) -> f32 {
-        (q.x - p.x) * (y - p.y) - (q.y - p.y) * (x - p.x)
+        (q.y - p.y).mul_add(-(x - p.x), (q.x - p.x) * (y - p.y))
     }
 
     /// Screen-space barycentric weights of `(x, y)`, each the share of the
@@ -233,8 +233,8 @@ impl Projection {
                 }
                 let inverse_depth = 1.0 / depth;
                 Projected {
-                    x: width * 0.5 + focal * point.x * inverse_depth,
-                    y: height * 0.5 - focal * point.y * inverse_depth,
+                    x: (focal * point.x).mul_add(inverse_depth, width * 0.5),
+                    y: (focal * point.y).mul_add(-inverse_depth, height * 0.5),
                     inverse_depth,
                 }
             })
@@ -348,8 +348,7 @@ fn visibility(projection: &Projection, grid: Grid) -> Vec<u32> {
             for x in (min_x as usize)..=(max_x as usize) {
                 let wc = 1.0 - wa - wb;
                 if wa >= 0.0 && wb >= 0.0 && wc >= 0.0 {
-                    let nearness = wa * first.inverse_depth
-                        + wb * second.inverse_depth
+                    let nearness = wb.mul_add(second.inverse_depth, wa * first.inverse_depth)
                         + wc * third.inverse_depth;
                     let at = row + x;
                     if nearness > depth[at] {
@@ -479,7 +478,7 @@ impl Lights {
 
     fn shade(&self, normal: Vec3, eye: Vec3, albedo: Vec3) -> Vec3 {
         let tint = |a: Vec3, b: Vec3| Vec3::new(a.x * b.x, a.y * b.y, a.z * b.z);
-        let sky = (normal.y * 0.5 + 0.5).clamp(0.0, 1.0);
+        let sky = normal.y.mul_add(0.5, 0.5).clamp(0.0, 1.0);
         let ambient = Self::GROUND * (1.0 - sky) + Self::SKY * sky;
         let key = normal.dot(self.key).max(0.0);
         let fill = normal.dot(self.fill).max(0.0);
@@ -516,12 +515,12 @@ fn encode(linear: f32) -> u8 {
                 let s = if c <= 0.003_130_8 {
                     c * 12.92
                 } else {
-                    1.055 * c.powf(1.0 / 2.4) - 0.055
+                    1.055f32.mul_add(c.powf(1.0 / 2.4), -0.055)
                 };
                 (s * 255.0 + 0.5).clamp(0.0, 255.0) as u8
             })
             .collect()
     });
-    let index = (linear.clamp(0.0, 1.0) * 4095.0 + 0.5) as usize;
+    let index = linear.clamp(0.0, 1.0).mul_add(4095.0, 0.5) as usize;
     TABLE[index.min(4095)]
 }

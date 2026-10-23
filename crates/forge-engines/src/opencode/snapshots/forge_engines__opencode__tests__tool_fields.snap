@@ -1,18 +1,17 @@
 ---
 source: crates/forge-engines/src/opencode/tests.rs
-assertion_line: 162
 expression: "replay(\"tool-fields\")"
 ---
 [
     Event(
         Item {
-            key: "invalid-tool:call_bash",
+            key: "invalid-tool:call_shell_26",
             parent: None,
             status: Done,
             kind: Error {
                 kind: Execution,
                 message: Inline(
-                    "OpenCode bash omitted required native tool fields",
+                    "OpenCode shell omitted required native tool fields",
                 ),
                 retryable: false,
             },
@@ -20,7 +19,7 @@ expression: "replay(\"tool-fields\")"
     ),
     Event(
         Item {
-            key: "invalid-tool:call_read",
+            key: "invalid-tool:call_read_28",
             parent: None,
             status: Done,
             kind: Error {
@@ -34,7 +33,7 @@ expression: "replay(\"tool-fields\")"
     ),
     Event(
         Item {
-            key: "invalid-tool:call_write",
+            key: "invalid-tool:call_write_30",
             parent: None,
             status: Done,
             kind: Error {
@@ -48,7 +47,7 @@ expression: "replay(\"tool-fields\")"
     ),
     Event(
         Item {
-            key: "invalid-tool:call_edit",
+            key: "invalid-tool:call_edit_32",
             parent: None,
             status: Done,
             kind: Error {
@@ -62,7 +61,7 @@ expression: "replay(\"tool-fields\")"
     ),
     Event(
         Item {
-            key: "invalid-tool:call_grep",
+            key: "invalid-tool:call_grep_34",
             parent: None,
             status: Done,
             kind: Error {
@@ -76,7 +75,7 @@ expression: "replay(\"tool-fields\")"
     ),
     Event(
         Item {
-            key: "invalid-tool:call_glob",
+            key: "invalid-tool:call_glob_36",
             parent: None,
             status: Done,
             kind: Error {
@@ -90,7 +89,7 @@ expression: "replay(\"tool-fields\")"
     ),
     Event(
         Item {
-            key: "invalid-tool:call_webfetch",
+            key: "invalid-tool:call_webfetch_38",
             parent: None,
             status: Done,
             kind: Error {
@@ -104,7 +103,7 @@ expression: "replay(\"tool-fields\")"
     ),
     Event(
         Item {
-            key: "invalid-tool:call_websearch",
+            key: "invalid-tool:call_websearch_40",
             parent: None,
             status: Done,
             kind: Error {
@@ -118,7 +117,7 @@ expression: "replay(\"tool-fields\")"
     ),
     Event(
         Item {
-            key: "call_write_ok",
+            key: "call_write_42",
             parent: None,
             status: Running,
             kind: Tool {
@@ -131,6 +130,49 @@ expression: "replay(\"tool-fields\")"
                                 diff: None,
                             },
                         ],
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_github_create_issue_44",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Mcp {
+                    server: "github",
+                    tool: "create_issue",
+                    input: Some(
+                        Inline(
+                            "{\"title\":\"x\"}",
+                        ),
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_execute_46",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Other {
+                    name: "execute",
+                    input: Some(
+                        Inline(
+                            "{\"code\":\"return 1\"}",
+                        ),
                     ),
                 },
                 title: None,

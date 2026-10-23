@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 145
 expression: "replay(\"command\")"
 ---
 [
@@ -54,6 +53,7 @@ expression: "replay(\"command\")"
                         "/work",
                     ),
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: None,
@@ -76,6 +76,7 @@ expression: "replay(\"command\")"
                         "/work",
                     ),
                     background: false,
+                    watch: false,
                 },
                 title: None,
                 output: Some(
@@ -172,6 +173,7 @@ expression: "replay(\"command\")"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
 ]

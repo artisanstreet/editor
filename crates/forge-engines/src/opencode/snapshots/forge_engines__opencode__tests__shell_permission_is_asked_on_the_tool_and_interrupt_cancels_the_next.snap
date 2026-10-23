@@ -1,0 +1,521 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"permission\")"
+---
+[
+    Event(
+        Title {
+            title: "Shell command and two-item todo request",
+        },
+    ),
+    Event(
+        Model {
+            id: "opencode-go/minimax-m3.1-flash-free",
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_15d7153b50017PTQzjpg5fIQcU/0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d7153b50017PTQzjpg5fIQcU/0",
+            },
+            text: "I'll run the shell command first.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d716a8b728b9493668a",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "echo hello-probe",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d7153b50017PTQzjpg5fIQcU/0",
+            },
+            text: "I'll run the shell command first.",
+            append: false,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d716a8b728b9493668a",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "echo hello-probe",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "echo hello-probe",
+                            ),
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d716a8b728b9493668a",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "echo hello-probe",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "echo hello-probe",
+                            ),
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        Reply {
+            method: Post,
+            path: "/api/session/ses_ea28ed706ffeIjmWlwiN403xfs/permission/per_15d7172bd001naln9I2BcBY6Yj/reply",
+            body: Some(
+                Object {
+                    "decision": String("once"),
+                },
+            ),
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d716a8b728b9493668a",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "echo hello-probe",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "hello-probe\n",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: Some(
+                    0,
+                ),
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "echo hello-probe",
+                            ),
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 8070,
+                output: 37,
+                reasoning: 0,
+                cache_read: 1722,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    9792,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d7153b50017PTQzjpg5fIQcU/0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "I'll run the shell command first.",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Let me try",
+            append: false,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d727b007535bb963696",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Other {
+                    name: "execute",
+                    input: Some(
+                        Inline(
+                            "{\"code\":\"const matches = search(\\\"todo\\\"); return matches;\"}",
+                        ),
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d727b007535bb963696",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Other {
+                    name: "execute",
+                    input: Some(
+                        Inline(
+                            "{\"code\":\"const matches = search(\\\"todo\\\"); return matches;\"}",
+                        ),
+                    ),
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "Invalid input for tool 'search': SchemaError(Expected object)",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 8126,
+                output: 73,
+                reasoning: 148,
+                cache_read: 11514,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    9848,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Let me try search with an object first to be thorough",
+            append: false,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d729da573be9ba6c4e9",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Other {
+                    name: "execute",
+                    input: Some(
+                        Inline(
+                            "{\"code\":\"try { return search({ query: \\\"todo\\\" }); } catch (e) { return String(e); }\"}",
+                        ),
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d729da573be9ba6c4e9",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Other {
+                    name: "execute",
+                    input: Some(
+                        Inline(
+                            "{\"code\":\"try { return search({ query: \\\"todo\\\" }); } catch (e) { return String(e); }\"}",
+                        ),
+                    ),
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "{\n  \"items\": [],\n  \"remaining\": 0,\n  \"next\": null\n}",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 8337,
+                output: 121,
+                reasoning: 305,
+                cache_read: 21362,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    10059,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Let me check the working directory contents first, to avoid clobbering",
+            append: false,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d72af27748c809cb4a0",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "ls -la",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d72af27748c809cb4a0",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "ls -la",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "ls -la",
+                            ),
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d72af27748c809cb4a0",
+            parent: None,
+            status: Cancelled,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "ls -la",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "Tool execution interrupted",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "ls -la",
+                            ),
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+]

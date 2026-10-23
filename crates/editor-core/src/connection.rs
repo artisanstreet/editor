@@ -13,6 +13,9 @@ use std::time::Duration;
 use tokio::sync::{Notify, watch};
 use tokio_util::task::AbortOnDropHandle;
 
+/// The largest event frame Forge may send.
+const FRAME_LIMIT: NonZeroUsize = NonZeroUsize::new(4 * 1024 * 1024).unwrap();
+
 #[derive(Debug)]
 pub enum Update {
     State(Box<artisan_api::State>),
@@ -158,9 +161,7 @@ async fn session(
         .ok()
         .context("store closed")?;
     *attempt = 0;
-    let mut stream = SseStream::with_decoder(SseDecoder::with_limit(
-        NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
-    ));
+    let mut stream = SseStream::with_decoder(SseDecoder::with_limit(FRAME_LIMIT));
     stream.attach(response.bytes_stream());
     loop {
         let event = tokio::select! {
@@ -199,9 +200,10 @@ async fn session(
             });
         }
         let seq = envelope.seq;
-        let permit = budget
-            .clone()
-            .acquire_many_owned(message.data.len().max(1) as u32)
+        let permit = Arc::clone(budget)
+            // Frames are capped at FRAME_LIMIT, so the size always fits.
+            .acquire_many_owned(u32::try_from(message.data.len().max(1)).unwrap_or(u32::MAX))
+
             .await
             .context("event queue closed")?;
         updates

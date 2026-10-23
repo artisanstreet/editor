@@ -4,14 +4,18 @@
 //! - Claude: `claude -p /usage --output-format json` (a local slash command),
 //!   run in UTC so reset times resolve to instants.
 //! - Codex: `account/rateLimits/read` over `codex app-server`.
-//! - Cursor: the dashboard's `GetCurrentPeriodUsage` with the CLI's token.
+//! - OpenCode: the Go plan's windows from `opencode.ai/zen/go/v1/usage`
+//!   with the stored Console or Go credential, and spend from
+//!   `opencode stats --json`.
 
 use crate::account::engine_command;
 use anyhow::{Context, Result, bail};
-use artisan_api::{EngineId, Timestamp, UsageCadence, UsageLimits, UsageWindow};
+use artisan_api::{
+    EngineId, SpendLine, Timestamp, UsageCadence, UsageLimits, UsageSpend, UsageWindow,
+};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{
     Mutex, PoisonError,
     atomic::{AtomicU64, Ordering},
@@ -24,22 +28,26 @@ const CLAUDE_TIMEOUT: Duration = Duration::from_secs(45);
 /// A failed read is tried again after this, not after the full TTL.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 const CODEX_TIMEOUT: Duration = Duration::from_secs(15);
-const CURSOR_TIMEOUT: Duration = Duration::from_secs(10);
-const CURSOR_USAGE_URL: &str =
-    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+/// Each `opencode` command starts a private server: well under a second.
+const OPENCODE_TIMEOUT: Duration = Duration::from_secs(30);
+const OPENCODE_GO_USAGE: &str = "https://opencode.ai/zen/go/v1/usage";
 
 /// Reads usage without caching. `None` when the engine has no reader or the
 /// read failed.
 pub async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<UsageLimits> {
     let read = match engine {
-        EngineId::Claude => read_claude(binary, home).await,
-        EngineId::Codex => read_codex(binary, home).await,
-        EngineId::Cursor => read_cursor(home).await,
-        EngineId::Grok | EngineId::OpenCode => return None,
+        EngineId::Claude => read_claude(binary, home)
+            .await
+            .map(|windows| (windows, None)),
+        EngineId::Codex => read_codex(binary, home)
+            .await
+            .map(|windows| (windows, None)),
+        EngineId::OpenCode => read_opencode(binary, home).await,
     };
     match read {
-        Ok(windows) if !windows.is_empty() => Some(UsageLimits {
+        Ok((windows, spend)) if !windows.is_empty() || spend.is_some() => Some(UsageLimits {
             windows,
+            spend: spend.map(Box::new),
             read_at: artisan_api::now(),
         }),
         Ok(_) => None,
@@ -207,6 +215,7 @@ fn parse_claude_usage(text: &str, now: Timestamp) -> Vec<UsageWindow> {
 /// `resets Oct 11, 11:49am (UTC)` → ms. Only UTC resolves; the reader runs
 /// the CLI with `TZ=UTC` so that is what it prints.
 fn claude_reset(line: &str, now: Timestamp) -> Option<Timestamp> {
+    use chrono::{Datelike, NaiveDate, Utc};
     let clause = line[line.rfind("resets ")? + "resets ".len()..].trim();
     let (when, zone) = clause.strip_suffix(')')?.rsplit_once('(')?;
     if !matches!(
@@ -222,29 +231,28 @@ fn claude_reset(line: &str, now: Timestamp) -> Option<Timestamp> {
         "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
     ]
     .iter()
-    .zip(1_i64..)
+    .zip(1_u32..)
     .find_map(|(name, number)| (*name == month_name).then_some(number))?;
-    let day: i64 = date.next()?.parse().ok()?;
+    let day: u32 = date.next()?.parse().ok()?;
     let time = time.trim().to_lowercase();
     let (clock, pm) = match time.strip_suffix("pm") {
         Some(clock) => (clock, true),
         None => (time.strip_suffix("am")?, false),
     };
     let (hour, minute) = match clock.trim().split_once(':') {
-        Some((hour, minute)) => (hour.parse::<i64>().ok()?, minute.parse::<i64>().ok()?),
-        None => (clock.trim().parse::<i64>().ok()?, 0),
+        Some((hour, minute)) => (hour.parse::<u32>().ok()?, minute.parse::<u32>().ok()?),
+        None => (clock.trim().parse::<u32>().ok()?, 0),
     };
     if !(1..=12).contains(&hour) || !(0..60).contains(&minute) || !(1..=31).contains(&day) {
         return None;
     }
     let hour = hour % 12 + if pm { 12 } else { 0 };
-    use chrono::{Datelike, NaiveDate, Utc};
     let now_date = chrono::DateTime::<Utc>::from_timestamp_millis(now)?;
     [now_date.year() - 1, now_date.year(), now_date.year() + 1]
         .into_iter()
         .filter_map(|year| {
-            NaiveDate::from_ymd_opt(year, month as u32, day as u32)?
-                .and_hms_opt(hour as u32, minute as u32, 0)
+            NaiveDate::from_ymd_opt(year, month, day)?
+                .and_hms_opt(hour, minute, 0)
                 .map(|date| date.and_utc().timestamp_millis())
         })
         .min_by_key(|date| date.abs_diff(now))
@@ -271,10 +279,10 @@ async fn read_codex_inner(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>
 
 /// Maps `account/rateLimits/read` to windows, one per non-null slot.
 fn parse_codex_limits(result: &Value) -> Vec<UsageWindow> {
-    let buckets: Vec<&Value> = match result["rateLimitsByLimitId"].as_object() {
-        Some(map) => map.values().collect(),
-        None => result.get("rateLimits").into_iter().collect(),
-    };
+    let buckets: Vec<&Value> = result["rateLimitsByLimitId"].as_object().map_or_else(
+        || result.get("rateLimits").into_iter().collect(),
+        |map| map.values().collect(),
+    );
     let mut windows = Vec::new();
     for bucket in buckets {
         let name = bucket["limitName"].as_str().filter(|name| !name.is_empty());
@@ -312,119 +320,198 @@ fn duration_label(minutes: u64) -> String {
     }
 }
 
-// --- Cursor ----------------------------------------------------------------
+// --- OpenCode --------------------------------------------------------------
 
-fn cursor_auth_file(home: &Path) -> PathBuf {
-    if cfg!(windows) {
-        home.join("AppData/Roaming/Cursor/auth.json")
-    } else {
-        home.join(".config/cursor/auth.json")
+/// The Go plan's windows and the spend `OpenCode` priced. Either may be
+/// missing (no Go plan, an older `OpenCode`); only both failing fails.
+async fn read_opencode(
+    binary: &Path,
+    home: &Path,
+) -> Result<(Vec<UsageWindow>, Option<UsageSpend>)> {
+    let (windows, spend) = tokio::join!(
+        read_opencode_go(binary, home),
+        read_opencode_spend(binary, home)
+    );
+    match (windows, spend) {
+        (Err(windows), Err(spend)) => Err(spend.context(format!("{windows:#}"))),
+        (windows, spend) => {
+            if let Err(error) = &windows {
+                tracing::info!(home = %home.display(), error = %format!("{error:#}"), "OpenCode Go limits unavailable");
+            }
+            if let Err(error) = &spend {
+                tracing::info!(home = %home.display(), error = %format!("{error:#}"), "OpenCode spend unavailable");
+            }
+            Ok((windows.unwrap_or_default(), spend.ok()))
+        }
     }
 }
 
-async fn read_cursor(home: &Path) -> Result<Vec<UsageWindow>> {
-    let path = cursor_auth_file(home);
-    let auth: Value = serde_json::from_slice(
-        &tokio::fs::read(&path)
-            .await
-            .with_context(|| format!("reading {}", path.display()))?,
+async fn read_opencode_go(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>> {
+    let (success, stdout, stderr) = crate::account::run_short(
+        EngineId::OpenCode,
+        binary,
+        home,
+        &["api", "--standalone", "credential.list"],
+        OPENCODE_TIMEOUT,
     )
-    .with_context(|| format!("decoding {}", path.display()))?;
-    let token = auth["accessToken"]
-        .as_str()
-        .filter(|token| !token.is_empty())
-        .context("cursor has no access token")?;
-    let response = reqwest::Client::builder()
-        .timeout(CURSOR_TIMEOUT)
+    .await?;
+    if !success {
+        bail!(
+            "listing OpenCode credentials: {}",
+            crate::account::strip_ansi(stderr.trim())
+        );
+    }
+    let listing: Value = serde_json::from_str(&stdout).context("reading OpenCode's credentials")?;
+    let (token, org) = go_credential(&listing, artisan_api::now())
+        .context("no OpenCode Console or Go credential")?;
+    let mut request = reqwest::Client::builder()
+        .timeout(OPENCODE_TIMEOUT)
         .build()?
-        .post(CURSOR_USAGE_URL)
-        .bearer_auth(token)
-        .header("connect-protocol-version", "1")
-        .header("x-cursor-client-type", "cli")
-        .header("content-type", "application/json")
-        .body("{}")
+        .get(OPENCODE_GO_USAGE)
+        .bearer_auth(token);
+    if let Some(org) = org {
+        request = request.header("x-org-id", org);
+    }
+    let response = request
         .send()
         .await
-        .context("calling the cursor dashboard")?
-        .error_for_status()
-        .context("cursor dashboard")?;
-    let body: Value = serde_json::from_slice(&response.bytes().await?)
-        .context("decoding the cursor dashboard")?;
-    parse_cursor_usage(&body)
+        .context("asking opencode.ai for Go usage")?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("opencode.ai answered Go usage with {status}");
+    }
+    let body: Value =
+        serde_json::from_slice(&response.bytes().await?).context("reading Go usage")?;
+    Ok(parse_go_usage(&body))
 }
 
-/// Maps `GetCurrentPeriodUsage`. Protobuf JSON omits zeros.
-fn parse_cursor_usage(response: &Value) -> Result<Vec<UsageWindow>> {
-    let plan = response["planUsage"]
-        .as_object()
-        .context("cursor usage has no planUsage")?;
-    let number = |value: &Value| value.as_f64().or_else(|| value.as_str()?.parse().ok());
-    #[expect(clippy::cast_possible_truncation, reason = "a millisecond timestamp")]
-    let resets_at = number(&response["billingCycleEnd"]).map(|ms| ms as Timestamp);
-    let window = |label: &str, percent: f64| UsageWindow {
-        label: label.to_owned(),
-        cadence: UsageCadence::Other,
-        scope: None,
-        used_percent: percent.clamp(0.0, 100.0),
-        resets_at,
+/// The bearer for Go usage: a Go key, else the Console sign-in while its
+/// access token is good (`OpenCode` refreshes it whenever it loads).
+fn go_credential(listing: &Value, now: Timestamp) -> Option<(String, Option<String>)> {
+    let credentials = listing.get("data").unwrap_or(listing).as_array()?;
+    let active = |integration: &str| {
+        credentials.iter().find(|credential| {
+            credential["integrationID"] == integration && credential["active"] != false
+        })
     };
-    let mut windows = Vec::new();
-    let auto = plan.get("autoPercentUsed").and_then(number);
-    let api = plan.get("apiPercentUsed").and_then(number);
-    if auto.is_some() || api.is_some() || response["autoBucketModels"].is_array() {
-        windows.push(window("Cursor models", auto.unwrap_or(0.0)));
-        windows.push(window("Other models", api.unwrap_or(0.0)));
-    } else {
-        let spend = plan.get("totalSpend").and_then(number).unwrap_or(0.0);
-        let limit = plan.get("limit").and_then(number).unwrap_or(0.0);
-        let percent = if limit > 0.0 {
-            spend / limit * 100.0
-        } else {
-            plan.get("totalPercentUsed")
-                .and_then(number)
-                .or_else(|| {
-                    response["displayMessage"]
-                        .as_str()
-                        .and_then(percent_in_text)
-                })
-                .unwrap_or(0.0)
-        };
-        windows.push(window("Included usage", percent));
-    }
-    let spend = &response["spendLimitUsage"];
-    for (limit, used, remaining) in [
-        ("overallLimit", "overallUsed", "overallRemaining"),
-        ("individualLimit", "individualUsed", "individualRemaining"),
-        ("pooledLimit", "pooledUsed", "pooledRemaining"),
-    ] {
-        let Some(limit) = number(&spend[limit]).filter(|limit| *limit > 0.0) else {
+    for integration in ["opencode-go", "opencode"] {
+        let Some(credential) = active(integration) else {
             continue;
         };
-        let used = number(&spend[used])
-            .or_else(|| number(&spend[remaining]).map(|left| (limit - left).max(0.0)))
-            .unwrap_or(0.0);
-        windows.push(window("On-demand", used / limit * 100.0));
-        break;
+        let value = &credential["value"];
+        let token = match value["type"].as_str() {
+            Some("key") => value["key"].as_str(),
+            Some("oauth") if value["expires"].as_i64().is_some_and(|at| at > now) => {
+                value["access"].as_str()
+            }
+            _ => None,
+        };
+        if let Some(token) = token.filter(|token| !token.is_empty()) {
+            let org = value["metadata"]["orgID"].as_str().map(str::to_owned);
+            return Some((token.to_owned(), org));
+        }
     }
-    Ok(windows)
+    None
 }
 
-/// The first `N%` in display copy like "You have used 73% of your plan".
-fn percent_in_text(text: &str) -> Option<f64> {
-    text.split_whitespace().find_map(|word| {
-        word.trim_end_matches(|c: char| !c.is_ascii_digit() && c != '%')
-            .strip_suffix('%')?
-            .parse()
-            .ok()
+/// `{"usage":{"rolling":{"status","percent","resetsAt"},"weekly",..,"monthly"}}`;
+/// a `rate-limited` window is spent whatever its percent says.
+fn parse_go_usage(body: &Value) -> Vec<UsageWindow> {
+    [
+        ("rolling", "Session", UsageCadence::Session),
+        ("weekly", "Week", UsageCadence::Week),
+        ("monthly", "Month", UsageCadence::Month),
+    ]
+    .into_iter()
+    .filter_map(|(key, label, cadence)| {
+        let window = &body["usage"][key];
+        let percent = if window["status"] == "rate-limited" {
+            100.0
+        } else {
+            window["percent"].as_f64()?
+        };
+        Some(UsageWindow {
+            label: label.to_owned(),
+            cadence,
+            scope: Some("OpenCode Go".to_owned()),
+            used_percent: percent.clamp(0.0, 100.0),
+            resets_at: window["resetsAt"]
+                .as_str()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.timestamp_millis()),
+        })
     })
+    .collect()
+}
+
+async fn read_opencode_spend(binary: &Path, home: &Path) -> Result<UsageSpend> {
+    let mut spend = UsageSpend::default();
+    let mut models = Vec::new();
+    for (days, label) in [("0", "Today"), ("7", "Last 7 days"), ("30", "Last 30 days")] {
+        let (success, stdout, stderr) = crate::account::run_short(
+            EngineId::OpenCode,
+            binary,
+            home,
+            &["stats", "--standalone", "--json", "--days", days],
+            OPENCODE_TIMEOUT,
+        )
+        .await?;
+        if !success {
+            bail!(
+                "opencode stats: {}",
+                crate::account::strip_ansi(stderr.trim())
+            );
+        }
+        let stats: Value = serde_json::from_str(&stdout).context("reading opencode stats")?;
+        spend.periods.push(spend_line(label, &stats));
+        models = stats["models"].as_array().cloned().unwrap_or_default();
+    }
+    spend.models = spend_by_model(&models);
+    Ok(spend)
+}
+
+fn spend_line(label: &str, entry: &Value) -> SpendLine {
+    let tokens = &entry["tokens"];
+    SpendLine {
+        label: label.to_owned(),
+        cost_usd: entry["cost"].as_f64().unwrap_or_default(),
+        tokens: ["input", "output", "reasoning"]
+            .iter()
+            .filter_map(|key| tokens[key].as_u64())
+            .sum(),
+    }
+}
+
+/// One line per model, its variants summed, costliest first.
+fn spend_by_model(models: &[Value]) -> Vec<SpendLine> {
+    let mut lines: Vec<SpendLine> = Vec::new();
+    for entry in models {
+        let Some(id) = entry["model"]["id"].as_str() else {
+            continue;
+        };
+        let line = spend_line(id, entry);
+        match lines.iter_mut().find(|known| known.label == id) {
+            Some(known) => {
+                known.cost_usd += line.cost_usd;
+                known.tokens += line.tokens;
+            }
+            None => lines.push(line),
+        }
+    }
+    lines.sort_by(|a, b| {
+        b.cost_usd
+            .total_cmp(&a.cost_usd)
+            .then(b.tokens.cmp(&a.tokens))
+    });
+    lines
 }
 
 /// Whether the engine has a usage reader at all.
 #[must_use]
-pub fn has_usage_reader(engine: EngineId) -> bool {
+pub const fn has_usage_reader(engine: EngineId) -> bool {
     matches!(
         engine,
-        EngineId::Claude | EngineId::Codex | EngineId::Cursor
+        EngineId::Claude | EngineId::Codex | EngineId::OpenCode
     )
 }
 
@@ -462,20 +549,64 @@ mod tests {
         ));
     }
 
-    /// Old fixtures for `GetCurrentPeriodUsage` (no signed-in Cursor here).
+    /// `opencode.ai/zen/go/v1/usage`, recorded 2026-10-21 with a Console
+    /// sign-in on the Go plan.
     #[test]
-    fn cursor_dashboard_becomes_windows() {
-        let split = json!({ "billingCycleEnd": "1792000000000", "planUsage": { "totalSpend": 30.0, "limit": 100.0, "autoPercentUsed": 40.0, "apiPercentUsed": 10.0 } });
-        let single = json!({ "planUsage": { "totalSpend": 1.0, "limit": 2.0 }, "spendLimitUsage": { "overallLimit": 100.0, "overallUsed": 25.0 } });
-        let display =
-            json!({ "planUsage": {}, "displayMessage": "You have used 73% of your plan" });
-        insta::assert_debug_snapshot!(
-            [split, single, display]
+    fn opencode_go_usage_becomes_three_windows() {
+        let recorded = json!({"usage":{"rolling":{"status":"ok","percent":0,"resetsAt":"2026-10-21T12:51:10.000Z"},"weekly":{"status":"ok","percent":0,"resetsAt":"2026-10-26T00:00:00.000Z"},"monthly":{"status":"ok","percent":25,"resetsAt":"2026-11-02T21:57:01.000Z"}}});
+        let windows = parse_go_usage(&recorded);
+        assert_eq!(
+            windows
                 .iter()
-                .map(|r| parse_cursor_usage(r).unwrap())
-                .collect::<Vec<_>>()
+                .map(|window| (window.cadence, window.used_percent, window.resets_at))
+                .collect::<Vec<_>>(),
+            [
+                (UsageCadence::Session, 0.0, Some(1_792_587_070_000)),
+                (UsageCadence::Week, 0.0, Some(1_792_972_800_000)),
+                (UsageCadence::Month, 25.0, Some(1_793_656_621_000)),
+            ]
         );
-        assert!(parse_cursor_usage(&json!({})).is_err());
+        let limited =
+            json!({"usage":{"rolling":{"status":"rate-limited","percent":97,"resetsAt":null}}});
+        assert_eq!(parse_go_usage(&limited)[0].used_percent, 100.0);
+    }
+
+    #[test]
+    fn a_go_key_wins_and_an_expired_console_sign_in_reads_nothing() {
+        let console = |expires: i64| json!({"integrationID":"opencode","active":true,"value":{"type":"oauth","access":"console","expires":expires,"metadata":{"orgID":"org"}}});
+        let go =
+            json!({"integrationID":"opencode-go","active":true,"value":{"type":"key","key":"go"}});
+        assert_eq!(
+            go_credential(&json!({"data":[console(NOW + 1), go]}), NOW),
+            Some(("go".to_owned(), None))
+        );
+        assert_eq!(
+            go_credential(&json!([console(NOW + 1)]), NOW),
+            Some(("console".to_owned(), Some("org".to_owned())))
+        );
+        assert_eq!(go_credential(&json!([console(NOW - 1)]), NOW), None);
+    }
+
+    /// `opencode stats --json` models, recorded 2026-10-21 with OpenCode
+    /// 2.1.0: a model's variants are one line.
+    #[test]
+    fn opencode_spend_sums_variants_costliest_first() {
+        let models = json!([
+            {"model":{"id":"minimax-m3.1-flash-free","providerID":"opencode-go","variant":"high"},"tokens":{"input":1_623_901,"output":54_112,"reasoning":78_255,"cache":{"read":71_616_226,"write":0}},"cost":0},
+            {"model":{"id":"glm-5.2","providerID":"opencode-go"},"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"cost":0.42},
+            {"model":{"id":"minimax-m3.1-flash-free","providerID":"opencode-go","variant":"max"},"tokens":{"input":374_992,"output":54_446,"reasoning":109_314,"cache":{"read":54_992_977,"write":0}},"cost":0}
+        ]);
+        let lines = spend_by_model(models.as_array().unwrap());
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| (line.label.as_str(), line.cost_usd, line.tokens))
+                .collect::<Vec<_>>(),
+            [
+                ("glm-5.2", 0.42, 15),
+                ("minimax-m3.1-flash-free", 0.0, 2_295_020),
+            ]
+        );
     }
 
     #[cfg(unix)]
@@ -483,10 +614,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let binary = home.join("fake-usage");
         std::fs::write(&binary, r#"#!/bin/sh
-percentage=$(cat "$HOME/percentage")
-printf 'probe\n' >> "$HOME/calls"
-touch "$HOME/started"
-while [ ! -e "$HOME/release" ]; do sleep 0.01; done
+percentage=$(cat "$PWD/percentage")
+printf 'probe\n' >> "$PWD/calls"
+touch "$PWD/started"
+while [ ! -e "$PWD/release" ]; do sleep 0.01; done
 printf '{"result":"Current week (all models): %s%% used · resets Oct 13, 9:59pm (UTC)"}\n' "$percentage"
 "#).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -507,11 +638,15 @@ printf '{"result":"Current week (all models): %s%% used · resets Oct 13, 9:59pm
 
     #[cfg(unix)]
     #[tokio::test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the percentage is parsed from an exact integer"
+    )]
     async fn an_invalidated_old_account_read_cannot_repopulate_usage() {
         let directory = tempfile::tempdir().unwrap();
         let binary = gated_usage_cli(directory.path());
         let cache = Arc::new(UsageCache::new(Duration::from_secs(300)));
-        let owner = cache.clone();
+        let owner = Arc::clone(&cache);
         let home = directory.path().to_owned();
         let old_binary = binary.clone();
         let old_read =
@@ -537,7 +672,7 @@ printf '{"result":"Current week (all models): %s%% used · resets Oct 13, 9:59pm
         let directory = tempfile::tempdir().unwrap();
         let binary = gated_usage_cli(directory.path());
         let cache = Arc::new(UsageCache::new(Duration::from_secs(300)));
-        let owner = cache.clone();
+        let owner = Arc::clone(&cache);
         let home = directory.path().to_owned();
         let first_binary = binary.clone();
         let first = tokio::spawn(async move {
@@ -546,11 +681,11 @@ printf '{"result":"Current week (all models): %s%% used · resets Oct 13, 9:59pm
                 .await
         });
         wait_for_usage_probe(directory.path()).await;
-        let owner = cache.clone();
+        let owner = Arc::clone(&cache);
         let home = directory.path().to_owned();
         let (started, waiting) = tokio::sync::oneshot::channel();
         let second = tokio::spawn(async move {
-            let _ = started.send(());
+            started.send(()).ok();
             owner.read(EngineId::Claude, &binary, &home, true).await
         });
         waiting.await.unwrap();
@@ -595,28 +730,5 @@ printf '{"result":"Current week (all models): %s%% used · resets Oct 13, 9:59pm
             Some(&good),
             "a failed read dropped the last good one"
         );
-    }
-}
-
-#[cfg(all(test, windows))]
-mod windows_managed_home_tests {
-    use super::*;
-    #[test]
-    fn native_cursor_credentials_stay_inside_the_supplied_engine_home() {
-        let managed = tempfile::tempdir().unwrap();
-        let path = cursor_auth_file(managed.path());
-        assert_eq!(
-            path,
-            managed
-                .path()
-                .join("AppData")
-                .join("Roaming")
-                .join("Cursor")
-                .join("auth.json")
-        );
-        assert!(path.starts_with(managed.path()));
-        if let Some(global) = std::env::var_os("APPDATA") {
-            assert_ne!(path, PathBuf::from(global).join("Cursor").join("auth.json"));
-        }
     }
 }

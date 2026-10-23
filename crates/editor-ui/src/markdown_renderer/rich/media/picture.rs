@@ -158,7 +158,7 @@ pub(super) fn load(
             },
             |output, cx| {
                 if let Some(image) = output {
-                    let image = image.clone();
+                    let image = Arc::clone(image);
                     cx.defer(move |cx| {
                         cx.drop_image(image, None);
                         // Other owners may still draw this image in cached scenes.
@@ -196,7 +196,7 @@ fn load_resource(
             },
             |output, cx| {
                 if let Ok(image) = output {
-                    let image = image.clone();
+                    let image = Arc::clone(image);
                     cx.defer(move |cx| {
                         cx.drop_image(image, None);
                         // Other owners may still draw this image in cached scenes.
@@ -227,7 +227,7 @@ impl Asset for ResourceLoader {
     ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
         let client = cx.http_client();
         let renderer = cx.svg_renderer();
-        let assets = cx.asset_source().clone();
+        let assets = Arc::clone(cx.asset_source());
         async move {
             let _capacity = super::work_permit().await;
             let bytes = match source {
@@ -294,7 +294,7 @@ impl Asset for ImageBytesLoader {
                 ImageBytes::Data(payload) => payload.bytes,
                 ImageBytes::Fetched(_, _) => fetch?.await?,
             };
-            decode(&bytes, renderer)
+            decode(&bytes, &renderer)
         }
     }
 }
@@ -304,11 +304,20 @@ const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_DECODED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IMAGE_EDGE: u32 = 8192;
 const MAX_ANIMATION_FRAMES: usize = 120;
+/// No view draws a picture larger than the image preview's 960x720 box, so pixels beyond
+/// that box at 2x scale are never seen. A full-size 2560x1440 screenshot held 14.7 MB of
+/// RGBA in memory and as much again on the GPU.
+const MAX_SHOWN_WIDTH: u32 = 1920;
+const MAX_SHOWN_HEIGHT: u32 = 1440;
 
 /// Decode preview bytes on a worker with encoded, decoded and animation budgets.
 /// GPUI's SvgRenderer is captured on the UI thread and may be moved into the worker.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "other crates move the renderer into their decode workers; the signature is shared"
+)]
 pub fn decode_image_bytes(bytes: &[u8], renderer: SvgRenderer) -> Result<Arc<RenderImage>, String> {
-    decode(bytes, renderer).ok_or_else(|| "Image is invalid or exceeds preview limits (32 MiB source, 64 MiB decoded, 8192px edges, 120 animation frames)".to_owned())
+    decode(bytes, &renderer).ok_or_else(|| "Image is invalid or exceeds preview limits (32 MiB source, 64 MiB decoded, 8192px edges, 120 animation frames)".to_owned())
 }
 
 /// Retained CPU pixel bytes, used by an owner's cache budget.
@@ -318,7 +327,11 @@ pub fn image_resident_bytes(image: &RenderImage) -> usize {
         .sum()
 }
 
-fn decode(bytes: &[u8], renderer: SvgRenderer) -> Option<Arc<RenderImage>> {
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the limits are powers of two, exact in f32"
+)]
+fn decode(bytes: &[u8], renderer: &SvgRenderer) -> Option<Arc<RenderImage>> {
     use image::{AnimationDecoder as _, ImageDecoder as _};
     use std::io::Cursor;
     if bytes.len() > MAX_IMAGE_BYTES {
@@ -367,7 +380,16 @@ fn decode(bytes: &[u8], renderer: SvgRenderer) -> Option<Arc<RenderImage>> {
     } else {
         let mut reader = reader;
         reader.limits(limits);
-        let mut buffer = reader.decode().ok()?.into_rgba8();
+        let mut image = reader.decode().ok()?;
+        if image.width() > MAX_SHOWN_WIDTH || image.height() > MAX_SHOWN_HEIGHT {
+            // Keeps the aspect ratio, so every view lays the picture out as before.
+            image = image.resize(
+                MAX_SHOWN_WIDTH,
+                MAX_SHOWN_HEIGHT,
+                image::imageops::FilterType::CatmullRom,
+            );
+        }
+        let mut buffer = image.into_rgba8();
         if buffer.as_raw().len() > MAX_DECODED_BYTES {
             return None;
         }
@@ -396,7 +418,7 @@ pub(super) fn placeholder(
     icon: Option<AssetId>,
     text: impl Into<SharedString>,
 ) -> Div {
-    let muted = theme.colors.muted_foreground.to_paint();
+    let muted = theme.colors.text_muted.to_paint();
     div()
         .size_full()
         .flex()
@@ -405,7 +427,7 @@ pub(super) fn placeholder(
         .justify_center()
         .gap(px(6.0))
         .p(px(12.0))
-        .bg(theme.colors.foreground.with_alpha(0.04).to_paint())
+        .bg(theme.colors.surface.to_paint())
         .children(icon.map(|icon| kit::glyph(icon, 20.0, muted)))
         .child(
             kit::muted(theme, text)
@@ -421,6 +443,27 @@ mod budget_tests {
     use crate::asset_seam::CatalogAssetSource;
     fn renderer() -> SvgRenderer {
         SvgRenderer::new(Arc::new(CatalogAssetSource))
+    }
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            width,
+            height,
+            image::Rgb([12, 34, 56]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+        png.into_inner()
+    }
+    #[test]
+    fn screenshots_decode_at_most_at_the_size_any_view_shows() {
+        let screenshot = decode_image_bytes(&png(2560, 1440), renderer()).unwrap();
+        let size = screenshot.size(0);
+        assert_eq!((size.width.0, size.height.0), (1920, 1080));
+        assert_eq!(image_resident_bytes(&screenshot), 1920 * 1080 * 4);
+        let small = decode_image_bytes(&png(800, 600), renderer()).unwrap();
+        let size = small.size(0);
+        assert_eq!((size.width.0, size.height.0), (800, 600));
     }
     #[test]
     fn svg_dimensions_are_rejected_before_large_raster_allocation() {
@@ -518,7 +561,7 @@ mod repeated_reference_tests {
         });
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
-            assert!(Arc::ptr_eq(&original, view.images[1].as_ref().unwrap()))
+            assert!(Arc::ptr_eq(&original, view.images[1].as_ref().unwrap()));
         });
         view.update(cx, |view, cx| {
             view.showing = [false, false];
@@ -536,7 +579,7 @@ mod repeated_reference_tests {
             assert!(
                 !Arc::ptr_eq(&original, view.images[1].as_ref().unwrap()),
                 "last Item removal evicts the actual decoded allocation"
-            )
+            );
         });
     }
 }

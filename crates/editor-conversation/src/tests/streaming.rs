@@ -15,6 +15,8 @@ fn items_stream_into_the_open_thread_only(cx: &mut TestAppContext) {
             text: "hi".into(),
             images: Vec::new(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     );
     let dir = tempfile::tempdir().unwrap();
@@ -154,6 +156,8 @@ fn text_streaming_in_live_work_stays_on_screen(cx: &mut TestAppContext) {
             text: "fix it".into(),
             images: Vec::new(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     );
     forge.put(&thread, &ItemId::new(), Status::Done, shell("rg follow"));
@@ -169,18 +173,20 @@ fn text_streaming_in_live_work_stays_on_screen(cx: &mut TestAppContext) {
     forge
         .runtime
         .block_on(forge.store.upsert_run(artisan_api::Run {
+            config: None,
             id: RunId::from("run"),
             thread_id: thread.clone(),
             engine: EngineId::Claude,
             model: None,
             input_cutoff: 0,
             status: artisan_api::RunStatus::Running,
-            usage: Default::default(),
+            usage: artisan_api::Usage::default(),
             session_id: None,
             error: None,
             seq: 0,
             started_at: 0,
             ended_at: None,
+            continuation: None,
         }))
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -207,6 +213,8 @@ fn canonical_final_messages_keep_their_phase_when_later_work_arrives(cx: &mut Te
             text: "fix it".into(),
             images: Vec::new(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     );
     forge.put(&thread, &ItemId::new(), Status::Done, shell("cargo test"));
@@ -258,6 +266,8 @@ fn streaming_text_redraws_only_its_own_reply(cx: &mut TestAppContext) {
                 text: text.into(),
                 images: Vec::new(),
                 steer: false,
+                from_agent: None,
+                sender: None,
             },
         );
     }
@@ -309,7 +319,7 @@ fn streaming_text_redraws_only_its_own_reply(cx: &mut TestAppContext) {
     let retained = "Replacement paragraph\n\nA second paragraph".len() as u64;
     forge.store.publish_live(artisan_api::Event::Live {
         thread_id: thread.clone(),
-        target: target.clone(),
+        target,
         text: String::new(),
         append: true,
         coverage: artisan_api::LiveCoverage {

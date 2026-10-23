@@ -94,6 +94,8 @@ expression: "replay(\"subagent\")"
                 background: false,
                 result: None,
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
     ),
@@ -201,6 +203,8 @@ expression: "replay(\"subagent\")"
                     ),
                 ),
                 label: None,
+                engine: None,
+                thread: None,
             },
         },
     ),
@@ -303,6 +307,7 @@ expression: "replay(\"subagent\")"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
 ]

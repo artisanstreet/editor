@@ -12,6 +12,8 @@ use gpui::{
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
+const LEGACY_ANSWER_PREFIX: &str = "You answered: ";
+
 /// A row's own tool output and answers, each one selectable source, kept
 /// while their text stays the same.
 pub(in crate::row) type PlainSources =
@@ -53,6 +55,10 @@ impl TextPresenter<'_> {
             return div().into_any_element();
         };
         match text {
+            // Answers saved before the dashed bubble carried a "You answered: " prefix.
+            TextContent::Inline(text) if text.contains(LEGACY_ANSWER_PREFIX) => {
+                self.plain_text(item, Slot::Answer, &text.replace(LEGACY_ANSWER_PREFIX, ""))
+            }
             TextContent::Inline(text) => self.plain_text(item, Slot::Answer, text),
             TextContent::Stored(_) => self.content_text(item, SourceField::AnswerText),
         }
@@ -76,7 +82,7 @@ impl TextPresenter<'_> {
                 source: source.clone(),
                 theme: self.theme,
                 key: (item.id.clone(), field),
-                owners: self.owners.clone(),
+                owners: Rc::clone(self.owners),
             }
             .into_any_element(),
         }
@@ -85,7 +91,7 @@ impl TextPresenter<'_> {
     /// Tool output or an answer: literal, selectable as authored.
     fn plain_text(&self, item: &Item, slot: Slot, text: &str) -> AnyElement {
         let mut order = crate::fold::selection_order(self.agent_scope, item.position, slot);
-        order.push(if slot == Slot::Output { 1 } else { 0 });
+        order.push(u64::from(slot == Slot::Output));
         let (text, source) = {
             let mut plain = self.plain.borrow_mut();
             let cached = plain.entry((item.id.clone(), slot)).or_insert_with(|| {
@@ -128,7 +134,7 @@ impl TextPresenter<'_> {
             return div().into_any_element();
         };
         let theme = self.theme;
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let (asset, prefix) = match kind {
             NoticeKind::Goal { state } => (AssetId::TABLER_TARGET_ARROW, format!("Goal {state}: ")),
             NoticeKind::Safety => (AssetId::TABLER_SHIELD_LOCK, String::new()),
@@ -137,6 +143,8 @@ impl TextPresenter<'_> {
                 format!("Switched to {model}: "),
             ),
             NoticeKind::Info => (AssetId::TABLER_BELL, String::new()),
+            // Its own card in the thread; a line wherever else it shows.
+            NoticeKind::YouShouldKnow { .. } => (AssetId::TABLER_SPARKLES, String::new()),
         };
         body_line(div(), &theme)
             .flex()

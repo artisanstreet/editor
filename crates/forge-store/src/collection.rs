@@ -4,6 +4,7 @@ use artisan_api::{CollectionQuery, CollectionRange, CollectionRef, ContentId, Co
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
 const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -24,7 +25,10 @@ fn record_key(encoded: &str) -> Result<(Option<String>, Option<String>)> {
             .get("id")
             .and_then(|id| id.as_str())
             .map(str::to_owned),
-        _ => None,
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::Array(_) => None,
     };
     ensure!(
         key.as_ref()
@@ -38,7 +42,7 @@ fn record_key(encoded: &str) -> Result<(Option<String>, Option<String>)> {
     Ok((key, label))
 }
 
-pub(crate) fn store<T: Serialize>(
+pub fn store<T: Serialize>(
     conn: &Connection,
     records: &[T],
     dependencies: &BTreeSet<ContentId>,
@@ -141,7 +145,7 @@ pub(crate) fn store<T: Serialize>(
     })
 }
 
-pub(crate) fn range<T: DeserializeOwned>(
+pub fn range<T: DeserializeOwned>(
     conn: &Connection,
     id: &ContentId,
     query: CollectionQuery,
@@ -182,9 +186,13 @@ pub(crate) fn range<T: DeserializeOwned>(
         let source = crate::content::range(
             conn,
             id,
-            artisan_api::ContentQuery {
+            &artisan_api::ContentQuery {
                 offset: start,
-                limit: Some(size.max(4).min(artisan_api::CONTENT_RANGE_BYTES as usize) as u32),
+                limit: Some(
+                    u32::try_from(size.max(4)).map_or(artisan_api::CONTENT_RANGE_BYTES, |size| {
+                        size.min(artisan_api::CONTENT_RANGE_BYTES)
+                    }),
+                ),
             },
         )?
         .context("collection source is missing")?;
@@ -221,7 +229,11 @@ pub(crate) fn range<T: DeserializeOwned>(
     }))
 }
 
-pub(crate) fn validate_answer(
+#[expect(
+    clippy::ref_option,
+    reason = "forwards to artisan_api::Question's validators, which take &Option"
+)]
+pub fn validate_answer(
     conn: &Connection,
     question: &artisan_api::Question,
     answer: &Option<artisan_api::QuestionAnswer>,
@@ -236,7 +248,7 @@ pub(crate) fn validate_answer(
             .ok_or_else(|| refused("submitted choices must be inline"))?;
         match &question.options {
             artisan_api::Collection::Inline(_) => {
-                question.validate_answer(answer).map_err(refused)?
+                question.validate_answer(answer).map_err(refused)?;
             }
             artisan_api::Collection::Stored(reference) => {
                 metrics(conn, reference)?;
@@ -251,7 +263,7 @@ pub(crate) fn validate_answer(
     }
     Ok(())
 }
-pub(crate) fn answer_text(
+pub fn answer_text(
     conn: &Connection,
     question: &artisan_api::Question,
     answer: &artisan_api::QuestionAnswer,
@@ -304,7 +316,7 @@ pub(crate) fn answer_text(
         }
         labels.push_str(&label);
         if duplicates > 1 {
-            labels.push_str(&format!(" (option {} of {})", index + 1, reference.count));
+            write!(labels, " (option {} of {})", index + 1, reference.count)?;
         }
         ensure!(
             labels.len() as u64 <= MAX_COLLECTION_BYTES,
@@ -316,7 +328,7 @@ pub(crate) fn answer_text(
 
 /// Runs once when answers are first persisted or during the historical data
 /// migration. Status-only native events inherit the same immutable display.
-pub(crate) fn derive_answer_text(
+pub fn derive_answer_text(
     conn: &Connection,
     kind: &mut artisan_api::ItemKind,
     old: Option<&artisan_api::ItemKind>,
@@ -372,21 +384,18 @@ pub(crate) fn derive_answer_text(
                         .context("saved answer source is missing")?,
                     );
                 }
-                let page = cached.as_ref().expect("loaded saved answer page");
-                &page.records[index - page.start as usize]
+                let page = cached.as_ref().context("saved answer page is missing")?;
+                &page.records[usize::try_from(index64 - page.start)?]
             }
         };
         if !text.is_empty() {
             text.push_str("\n\n");
         }
         if questions.len() > 1 {
-            text.push_str(&format!("Question {}: ", index + 1));
+            write!(text, "Question {}: ", index + 1)?;
         }
         match answer {
-            Some(answer) => {
-                text.push_str("You answered: ");
-                text.push_str(&answer_text(conn, question, answer)?);
-            }
+            Some(answer) => text.push_str(&answer_text(conn, question, answer)?),
             None => text.push_str("You skipped this question."),
         }
         ensure!(
@@ -400,11 +409,11 @@ pub(crate) fn derive_answer_text(
 }
 
 #[derive(Default, Clone, Copy)]
-pub(crate) struct Metrics {
+pub struct Metrics {
     pub authored: u64,
     pub structural: u64,
 }
-pub(crate) fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
+pub fn metrics(conn: &Connection, reference: &CollectionRef) -> Result<Metrics> {
     ensure!(
         reference.source.id.is_valid(),
         "invalid collection source identity"
@@ -433,8 +442,9 @@ fn normalize<T: Serialize>(
     collection: &mut artisan_api::Collection<T>,
     mut record_metrics: impl FnMut(&Connection, &mut T, &mut BTreeSet<ContentId>) -> Result<Metrics>,
 ) -> Result<Metrics> {
-    let artisan_api::Collection::Inline(records) = collection else {
-        return metrics(conn, collection.stored().expect("stored variant"));
+    let records = match collection {
+        artisan_api::Collection::Inline(records) => records,
+        artisan_api::Collection::Stored(reference) => return metrics(conn, reference),
     };
     let mut total = Metrics::default();
     let mut dependencies = BTreeSet::new();
@@ -484,7 +494,7 @@ fn normalize_options(
         })
     })
 }
-pub(crate) fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
+pub fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
     use artisan_api::{ItemKind, ToolKind};
     match kind {
         ItemKind::Plan { steps, .. } => {
@@ -542,11 +552,18 @@ pub(crate) fn normalize_item(conn: &Connection, kind: &mut artisan_api::ItemKind
                 })?;
             }
         }
-        _ => {}
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Tool { .. }
+        | ItemKind::Agent { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => {}
     }
     Ok(())
 }
-pub(crate) fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics> {
+pub fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<Metrics> {
     let Some(count) = conn
         .query_row(
             "SELECT count FROM content_collections WHERE content_id=?1",
@@ -568,7 +585,7 @@ pub(crate) fn source_metrics(conn: &Connection, source: &ContentRef) -> Result<M
 
 /// Resolving all records is reserved for admitted Forge operations such as a
 /// native question callback. HTTP and the Client use indexed range reads.
-pub(crate) fn resolve<T: DeserializeOwned>(
+pub fn resolve<T: DeserializeOwned>(
     conn: &Connection,
     collection: &artisan_api::Collection<T>,
 ) -> Result<Vec<T>> {
@@ -598,7 +615,7 @@ pub(crate) fn resolve<T: DeserializeOwned>(
     Ok(records)
 }
 
-pub(crate) fn visit_questions(
+pub fn visit_questions(
     conn: &Connection,
     questions: &artisan_api::Collection<artisan_api::Question>,
     mut visit: impl FnMut(usize, &artisan_api::Question) -> Result<()>,
@@ -635,7 +652,7 @@ pub(crate) fn visit_questions(
     }
     Ok(())
 }
-pub(crate) fn validate_answers(
+pub fn validate_answers(
     conn: &Connection,
     questions: &artisan_api::Collection<artisan_api::Question>,
     answers: &[Option<artisan_api::QuestionAnswer>],
@@ -648,9 +665,9 @@ pub(crate) fn validate_answers(
         validate_answer(conn, question, &answers[index])
     })
 }
-pub(crate) fn answers_equal(
+pub fn answers_equal(
     conn: &Connection,
-    saved: &Option<artisan_api::Collection<Option<artisan_api::QuestionAnswer>>>,
+    saved: Option<&artisan_api::Collection<Option<artisan_api::QuestionAnswer>>>,
     answers: &[Option<artisan_api::QuestionAnswer>],
 ) -> Result<bool> {
     let Some(saved) = saved else { return Ok(false) };
@@ -671,7 +688,7 @@ pub(crate) fn answers_equal(
     Ok(decoded == answers)
 }
 
-pub(crate) fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
+pub fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) -> Result<()> {
     use artisan_api::{Collection, ItemKind, ToolKind};
     fn hydrate<T: DeserializeOwned>(conn: &Connection, value: &mut Collection<T>) -> Result<()> {
         if let Collection::Stored(_) = value {
@@ -707,7 +724,14 @@ pub(crate) fn hydrate_item(conn: &Connection, kind: &mut artisan_api::ItemKind) 
                 }
             }
         }
-        _ => {}
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Tool { .. }
+        | ItemKind::Agent { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => {}
     }
     Ok(())
 }
@@ -836,7 +860,7 @@ mod tests {
         };
         let child_bytes = child_source.bytes;
         let child = child_source.id.clone();
-        let dependencies = BTreeSet::from([child.clone()]);
+        let dependencies = BTreeSet::from([child]);
         let parent = store(
             &conn,
             &[PlanStep {
@@ -1095,7 +1119,7 @@ mod tests {
             answer_text: None,
         };
         derive_answer_text(&conn, &mut kind, None).unwrap();
-        let expected = artisan_api::TextContent::from("You answered: Same (option 5000 of 5000)");
+        let expected = artisan_api::TextContent::from("Same (option 5000 of 5000)");
         assert!(
             matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text==&expected)
         );
@@ -1134,7 +1158,7 @@ mod tests {
         };
         derive_answer_text(&conn, &mut kind, None).unwrap();
         assert!(
-            matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text.inline()==Some(format!("You answered: {literal}").as_str()))
+            matches!(&kind,artisan_api::ItemKind::Question {answer_text:Some(text),..} if text.inline()==Some(literal))
         );
     }
     #[test]

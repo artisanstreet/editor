@@ -1,10 +1,12 @@
-# A Forge as a NixOS system service: `ae forge serve` with its data in
-# /var/lib/artisan-forge. Pair an Editor with it on the host:
+# A Forge as a NixOS system service: `forge` running as the artisan-forge
+# user, its data under that user's home
+# (/var/lib/artisan-forge/.local/share/artisan-street/forge/data). Pair an
+# Editor with it on the host:
 #
-#   sudo -u artisan-forge ae --data-dir /var/lib/artisan-forge forge pair --listen <reachable address>
+#   sudo -u artisan-forge -H ae pair
 #
-# Forge makes its own TLS certificate in the data directory on first start;
-# no secret enters the Nix store.
+# Forge makes its own TLS certificate in its data on first start; no secret
+# enters the Nix store.
 self:
 {
   config,
@@ -21,20 +23,21 @@ in
     enable = lib.mkEnableOption "an Artisan Forge";
     package = lib.mkOption {
       type = lib.types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.forge;
+      defaultText = lib.literalExpression "artisan.packages.\${system}.forge";
+      description = "The package providing `forge`.";
+    };
+    aePackage = lib.mkOption {
+      type = lib.types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.ae;
       defaultText = lib.literalExpression "artisan.packages.\${system}.ae";
-      description = "The package providing `ae`.";
+      description = "The package providing `ae` (pairing, devices, engines).";
     };
     listenAddress = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1:47900";
       example = "0.0.0.0:47900";
       description = "Address Forge listens on (HTTPS). Use a reachable interface for Editors on other machines.";
-    };
-    dataDir = lib.mkOption {
-      type = lib.types.str;
-      default = "/var/lib/artisan-forge";
-      description = "Forge's data: database, certificate, engine installs and homes.";
     };
     openFirewall = lib.mkOption {
       type = lib.types.bool;
@@ -52,9 +55,9 @@ in
     users.users.artisan-forge = {
       isSystemUser = true;
       group = "artisan-forge";
-      home = cfg.dataDir;
+      home = "/var/lib/artisan-forge";
     };
-    environment.systemPackages = [ cfg.package ];
+    environment.systemPackages = [ cfg.aePackage ];
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ port ];
     systemd.services.artisan-forge = {
       description = "Artisan Forge";
@@ -68,21 +71,18 @@ in
         pkgs.getent
       ]
       ++ cfg.extraPackages;
-      environment = {
-        HOME = cfg.dataDir;
-        ARTISAN_FORGE_DATA = cfg.dataDir;
-      };
+      environment.HOME = "/var/lib/artisan-forge";
+      # `ae pair` reads the listen address from here too.
+      preStart = ''
+        data="$HOME/.local/share/artisan-street/forge/data"
+        mkdir -p "$data"
+        printf '{"listen":"%s"}\n' ${lib.escapeShellArg cfg.listenAddress} > "$data/config.json"
+      '';
       serviceConfig = {
-        ExecStart = lib.escapeShellArgs [
-          (lib.getExe' cfg.package "ae")
-          "forge"
-          "serve"
-          "--listen"
-          cfg.listenAddress
-        ];
+        ExecStart = lib.getExe' cfg.package "forge";
         User = "artisan-forge";
         Group = "artisan-forge";
-        StateDirectory = lib.mkIf (cfg.dataDir == "/var/lib/artisan-forge") "artisan-forge";
+        StateDirectory = "artisan-forge";
         StateDirectoryMode = "0700";
         UMask = "0077";
         Restart = "on-failure";
@@ -90,7 +90,7 @@ in
         TimeoutStopSec = 30;
         NoNewPrivileges = true;
         ProtectSystem = "strict";
-        ReadWritePaths = [ cfg.dataDir ];
+        ReadWritePaths = [ "/var/lib/artisan-forge" ];
         ProtectHome = true;
         PrivateTmp = true;
       };

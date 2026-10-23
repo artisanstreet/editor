@@ -12,10 +12,10 @@ use gpui::{
 
 use super::super::super::kit;
 use super::super::frame::{self, ReadoutRow};
-use super::super::scale::percent;
+use super::super::scale::{f32_of_count, index_of, percent};
 use super::super::scene::{Probe, probe, probed_width};
 use super::{Graph, Layout, layout};
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, Opacity};
 
 /// Width of a node bar.
 const NODE_WIDTH: f32 = 10.0;
@@ -52,6 +52,10 @@ struct Paint {
 }
 
 impl RenderOnce for SankeyView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let graph = &self.graph;
@@ -60,7 +64,7 @@ impl RenderOnce for SankeyView {
         }
         let state = kit::keyed(window, cx, ElementId::Name(self.id.clone()), || {
             SankeyState {
-                model: self.graph.clone(),
+                model: Arc::clone(&self.graph),
                 layout: None,
                 hover: None,
                 probe: probe(),
@@ -69,7 +73,7 @@ impl RenderOnce for SankeyView {
         state.update(cx, |state, _| {
             if !Arc::ptr_eq(&state.model, &self.graph) {
                 let changed = *state.model != *self.graph;
-                state.model = self.graph.clone();
+                state.model = Arc::clone(&self.graph);
                 if !changed {
                     return;
                 }
@@ -79,16 +83,17 @@ impl RenderOnce for SankeyView {
         });
         let (hover, plot_probe) = {
             let current = state.read(cx);
-            (current.hover, current.probe.clone())
+            (current.hover, Rc::clone(&current.probe))
         };
         let height = (super::super::scale::f32_of(super::super::scale::f64_of(graph.tallest))
             * 44.0)
             .clamp(200.0, 380.0);
         let laid = state.update(cx, |state, _| {
-            state
-                .layout
-                .get_or_insert_with(|| Rc::new(layout(graph, height, NODE_GAP)))
-                .clone()
+            Rc::clone(
+                state
+                    .layout
+                    .get_or_insert_with(|| Rc::new(layout(graph, height, NODE_GAP))),
+            )
         });
         let lit = |link: usize| match hover {
             None => None,
@@ -114,14 +119,15 @@ impl RenderOnce for SankeyView {
         };
         let node_colors: Vec<Hsla> = (0..graph.labels.len())
             .map(|node| {
-                let alpha = if graph.throughput(node) <= 0.0 {
-                    0.0
+                let color = kit::series_color(&theme, node);
+                if graph.throughput(node) <= 0.0 {
+                    color.at(Opacity::Clear)
                 } else if node_lit(node) {
-                    1.0
+                    color
                 } else {
-                    0.3
-                };
-                kit::series_color(node).with_alpha(alpha).to_paint()
+                    color.at(Opacity::NodeDimmed)
+                }
+                .to_paint()
             })
             .collect();
         let link_colors: Vec<Hsla> = graph
@@ -129,12 +135,12 @@ impl RenderOnce for SankeyView {
             .iter()
             .enumerate()
             .map(|(index, link)| {
-                let alpha = match lit(index) {
-                    None => 0.32,
-                    Some(true) => 0.6,
-                    Some(false) => 0.08,
+                let purpose = match lit(index) {
+                    None => Opacity::Flow,
+                    Some(true) => Opacity::FlowLit,
+                    Some(false) => Opacity::FlowDimmed,
                 };
-                kit::series_color(link.from).with_alpha(alpha).to_paint()
+                kit::series_color(&theme, link.from).at(purpose).to_paint()
             })
             .collect();
         let label_height = f32::from(theme.typography.control_text) * (4.0 / 3.0);
@@ -148,7 +154,7 @@ impl RenderOnce for SankeyView {
             .collect();
         let (readout, selection_label) = hover.map(|hover| self.readout(&laid, hover)).unzip();
         let paint = Paint {
-            graph: self.graph.clone(),
+            graph: Arc::clone(&self.graph),
             layout: laid,
             node_colors,
             link_colors,
@@ -194,7 +200,7 @@ impl SankeyView {
         let at = laid.column(place.rank);
         let middle = f32::midpoint(place.y0, place.y1);
         let line_height = self.theme.typography.control_text * (4.0 / 3.0);
-        let room = (width - NODE_WIDTH) / (laid.ranks.saturating_sub(1).max(1) as f32);
+        let room = (width - NODE_WIDTH) / f32_of_count(laid.ranks.saturating_sub(1).max(1));
         let label = div()
             .absolute()
             .top(px(middle) - line_height / 2.0)
@@ -207,20 +213,24 @@ impl SankeyView {
             .whitespace_nowrap()
             .text_size(self.theme.typography.control_text)
             .line_height(line_height)
-            .opacity(if lit { 1.0 } else { 0.4 })
+            .opacity(if lit {
+                1.0
+            } else {
+                Opacity::LabelDimmed.alpha()
+            })
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_color(theme.colors.foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child(self.graph.labels[node].clone()),
             )
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .child(kit::format_number(self.graph.throughput(node))),
             );
         if laid.ranks > 1 && place.rank + 1 == laid.ranks {
@@ -228,7 +238,7 @@ impl SankeyView {
         } else {
             label
                 .left(relative(at))
-                .ml(px(NODE_WIDTH * (1.0 - at) + 6.0))
+                .ml(px(NODE_WIDTH.mul_add(1.0 - at, 6.0)))
         }
     }
 
@@ -286,8 +296,8 @@ impl SankeyView {
     }
 
     fn plot(&self, paint: Paint, state: &gpui::Entity<SankeyState>, probe: Probe) -> AnyElement {
-        let hit_layout = paint.layout.clone();
-        let move_probe = probe.clone();
+        let hit_layout = Rc::clone(&paint.layout);
+        let move_probe = Rc::clone(&probe);
         let moving = state.clone();
         let leaving = state.clone();
         div()
@@ -346,7 +356,7 @@ fn band_span(laid: &Layout, link: (usize, usize), width: f32) -> (f32, f32) {
 
 /// Eases from 0 to 1 the way a band's edge does between its ends.
 fn ease(t: f32) -> f32 {
-    t * t * (3.0 - 2.0 * t)
+    t * t * 2.0f32.mul_add(-t, 3.0)
 }
 
 /// The parameter along a band whose cubic x (controls at the middle) is `x`.
@@ -354,7 +364,10 @@ fn solve(x0: f32, x1: f32, x: f32) -> f32 {
     let middle = f32::midpoint(x0, x1);
     let at = |t: f32| {
         let u = 1.0 - t;
-        u * u * u * x0 + 3.0 * u * u * t * middle + 3.0 * u * t * t * middle + t * t * t * x1
+        (t * t * t).mul_add(
+            x1,
+            (3.0 * u * t * t).mul_add(middle, (3.0 * u * u * t).mul_add(middle, u * u * u * x0)),
+        )
     };
     let (mut lo, mut hi) = (0.0f32, 1.0f32);
     for _ in 0..24 {
@@ -374,7 +387,9 @@ fn hit(laid: &Layout, width: f32, x: f32, y: f32) -> Option<Hover> {
     let column_x = |rank| laid.column(rank) * rank_width;
     // Only columns whose horizontal node extent can contain the pointer.
     let first = if laid.ranks > 1 && rank_width > 0.0 {
-        (((x - NODE_WIDTH - 2.0).max(0.0) / rank_width) * (laid.ranks - 1) as f32).floor() as usize
+        index_of(f64::from(
+            ((x - NODE_WIDTH - 2.0).max(0.0) / rank_width) * f32_of_count(laid.ranks - 1),
+        ))
     } else {
         0
     };
@@ -412,8 +427,8 @@ fn hit(laid: &Layout, width: f32, x: f32, y: f32) -> Option<Hover> {
                 break;
             }
             let band = laid.bands[index];
-            let top = band.source.0 + (band.target.0 - band.source.0) * t;
-            let bottom = band.source.1 + (band.target.1 - band.source.1) * t;
+            let top = (band.target.0 - band.source.0).mul_add(t, band.source.0);
+            let bottom = (band.target.1 - band.source.1).mul_add(t, band.source.1);
             if (top - 1.0..=bottom + 1.0).contains(&y) {
                 found = Some(index);
                 break;
@@ -481,7 +496,7 @@ mod native_tests {
                 .child(SankeyView {
                     id: "native-sankey".into(),
                     theme: ArtisanTheme::resolved(),
-                    graph: self.graph.clone(),
+                    graph: Arc::clone(&self.graph),
                 })
         }
     }
@@ -569,8 +584,8 @@ mod hit_index_tests {
             let t = *parameters
                 .entry(pair)
                 .or_insert_with(|| ease(solve(x0, x1, x)));
-            let top = band.source.0 + (band.target.0 - band.source.0) * t;
-            let bottom = band.source.1 + (band.target.1 - band.source.1) * t;
+            let top = (band.target.0 - band.source.0).mul_add(t, band.source.0);
+            let bottom = (band.target.1 - band.source.1).mul_add(t, band.source.1);
             (top - 1.0..=bottom + 1.0)
                 .contains(&y)
                 .then_some(Hover::Link(index))
@@ -623,11 +638,11 @@ mod hit_index_tests {
             links.len()
         );
         assert!(laid.hit_groups.len() < links.len());
-        for x in (0..640).step_by(3) {
-            for y in (0..300).step_by(3) {
+        for x in (0..640_u16).step_by(3) {
+            for y in (0..300_u16).step_by(3) {
                 assert_eq!(
-                    hit(&laid, 640.0, x as f32, y as f32),
-                    reference_hit(&laid, &links, 640.0, x as f32, y as f32),
+                    hit(&laid, 640.0, f32::from(x), f32::from(y)),
+                    reference_hit(&laid, &links, 640.0, f32::from(x), f32::from(y)),
                     "at {x},{y}"
                 );
             }

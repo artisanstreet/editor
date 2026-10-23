@@ -1,10 +1,15 @@
 //! Codex over `codex app-server` (JSON-RPC, one JSON object per line).
 //!
-//! One process per run: `initialize`, `thread/start` or `thread/resume`,
-//! then `turn/start`. A steer goes in as `turn/steer` against the running
-//! turn; if Codex says the turn already ended, the steer starts the next
-//! turn in the same process. The run ends when the root thread's turn
-//! completes with nothing left to send. Cancel is `turn/interrupt`.
+//! Every run attaches to one shared app-server (see [`server`]):
+//! `thread/start` or `thread/resume`, then `turn/start`. A steer goes in as
+//! `turn/steer` against the running turn; if Codex says the turn already
+//! ended, the steer starts the next turn. The run ends when the root
+//! thread's turn completes with nothing left to send. Cancel is
+//! `turn/interrupt`.
+//!
+//! The thread stays loaded between runs, and `thread/resume` of a loaded
+//! thread keeps the settings it was loaded with, so every `turn/start`
+//! carries the run's model, permissions, working directory and tier.
 //!
 //! Verified against Codex 0.162.1: approvals answered `acceptForSession`
 //! skip the next identical prompt and `decline` declines the call, though
@@ -15,12 +20,19 @@
 
 mod citations;
 mod decoder;
+mod goal;
 mod protocol;
+#[cfg(test)]
+mod schema_tests;
+mod server;
+#[cfg(test)]
+#[cfg(unix)]
+mod server_tests;
+mod side;
 #[cfg(test)]
 mod tests;
 
-use crate::process::{self, EngineProcess};
-use crate::{EngineEvent, Harness, Input, Outcome, RunIo, Turn, UserInput};
+use crate::{EngineEvent, Harness, Input, Outcome, RunIo, SideReply, Turn, UserInput};
 use anyhow::{Context, Result, anyhow};
 use artisan_api::{EngineConfig, ItemId, Permissions};
 use decoder::Decoder;
@@ -30,24 +42,32 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::Instant;
 
-/// How long an interrupted turn may take to wind down before Codex is killed.
+/// How long an interrupted turn may take to wind down before Codex is given up on.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 
 pub struct CodexHarness;
 
 impl Harness for CodexHarness {
+    fn compact(
+        &self,
+        turn: Turn,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'static, Result<crate::SideReply>> {
+        Box::pin(side::compact(turn, cancel))
+    }
+
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
         Box::pin(async move {
             let thread = turn.thread_id.clone();
-            let process = match start(&turn) {
-                Ok(process) => process,
+            let conn = match server::attach(&turn).await {
+                Ok(conn) => conn,
                 Err(error) => {
                     tracing::error!(%thread, "starting Codex: {error:#}");
                     return Outcome::failed(format!("Codex could not start: {error:#}"));
                 }
             };
             let mut run = Run {
-                process,
+                conn,
                 decoder: Decoder::default(),
                 io,
                 queued: Vec::new(),
@@ -56,6 +76,7 @@ impl Harness for CodexHarness {
                 cancelling: false,
                 nudge: false,
                 outcome: None,
+                permissions: None,
             };
             let outcome = run.run(&turn).await.unwrap_or_else(|error| {
                 tracing::warn!(%thread, session = ?turn.session_id, "Codex run failed: {error:#}");
@@ -63,24 +84,30 @@ impl Harness for CodexHarness {
             });
             let events = run.decoder.finish();
             run.emit(events).await;
-            run.process.close_stdin("the turn ended");
-            run.process.kill().await;
             outcome
         })
     }
+
+    fn side_query(
+        &self,
+        turn: Turn,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'static, Result<SideReply>> {
+        Box::pin(side::side_query(turn, cancel))
+    }
+
+    fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, Result<()>> {
+        Box::pin(goal::clear_goal(turn))
+    }
 }
 
-/// Codex refuses to start when `CODEX_HOME` doesn't exist.
-fn start(turn: &Turn) -> Result<EngineProcess> {
-    let codex_home = turn
-        .launch
+/// Where Codex keeps its config and sessions for this launch.
+fn codex_home(turn: &Turn) -> std::path::PathBuf {
+    turn.launch
         .env
         .iter()
         .find(|(key, _)| key == "CODEX_HOME")
-        .map_or_else(|| turn.home.join(".codex"), |(_, value)| value.into());
-    std::fs::create_dir_all(&codex_home)
-        .with_context(|| format!("creating CODEX_HOME {}", codex_home.display()))?;
-    process::spawn(turn, &["app-server".to_owned()])
+        .map_or_else(|| turn.home.join(".codex"), |(_, value)| value.into())
 }
 
 /// One queued provider input and whether it acknowledges a persisted user input.
@@ -91,7 +118,7 @@ struct Queued {
 }
 
 struct Run {
-    process: EngineProcess,
+    conn: server::Attachment,
     decoder: Decoder,
     io: RunIo,
     /// Messages for the next `turn/start`.
@@ -105,26 +132,12 @@ struct Run {
     nudge: bool,
     /// How the last finished turn ended.
     outcome: Option<Outcome>,
+    /// Access the user chose mid-run, for the turns after this one.
+    permissions: Option<Permissions>,
 }
 
 impl Run {
     async fn run(&mut self, turn: &Turn) -> Result<Outcome> {
-        let initialize = json!({
-            "clientInfo": { "name": "artisan", "title": "Artisan", "version": env!("CARGO_PKG_VERSION") },
-            // Experimental: `item/tool/requestUserInput`, `turn/steer` fields.
-            "capabilities": {
-                "experimentalApi": true,
-                "optOutNotificationMethods": [
-                    "account/rateLimits/updated",
-                    "mcpServer/startupStatus/updated",
-                    "remoteControl/status/changed",
-                ],
-            },
-        });
-        let Some(_) = self.call("initialize", initialize).await? else {
-            return Ok(Outcome::cancelled());
-        };
-        self.decoder.notify("initialized");
         let (method, params) = thread_params(turn);
         match self.call(method, params).await {
             Ok(Some(_)) => {}
@@ -135,11 +148,20 @@ impl Run {
                 );
             }
         }
+        // A thread already loaded answers with the model it was loaded with;
+        // `turn/start` switches it to the run's.
+        if let Some(model) = non_empty(turn.config.model.as_deref()) {
+            self.io
+                .emit(EngineEvent::Model {
+                    id: model.to_owned(),
+                })
+                .await;
+        }
         self.queued.push(Queued {
             input: turn.input.clone(),
             acknowledge: true,
         });
-        self.pump(turn).await?;
+        self.pump(turn)?;
         self.drive(turn).await
     }
 
@@ -147,10 +169,10 @@ impl Run {
     /// sends meanwhile. `None` when the run was cancelled.
     async fn call(&mut self, method: &str, params: Value) -> Result<Option<Value>> {
         let id = self.decoder.request(method, params);
-        self.flush().await?;
+        self.flush()?;
         loop {
             let line = tokio::select! {
-                line = self.process.next_line() => line?,
+                line = self.conn.next_line() => line,
                 () = self.io.cancel.cancelled() => return Ok(None),
             };
             let Some(line) = line else {
@@ -176,8 +198,8 @@ impl Run {
         let mut deadline: Option<Instant> = None;
         loop {
             tokio::select! {
-                line = self.process.next_line() => {
-                    let Some(line) = line? else {
+                line = self.conn.next_line() => {
+                    let Some(line) = line else {
                         if self.cancelling {
                             return Ok(Outcome::cancelled());
                         }
@@ -206,7 +228,7 @@ impl Run {
                             self.input(input).await?;
                         }
                     }
-                    self.pump(turn).await?;
+                    self.pump(turn)?;
                     if self.idle()
                         && self.queued.is_empty()
                         && !self.nudge
@@ -218,7 +240,7 @@ impl Run {
                 input = self.io.inbox.recv(), if inbox_open && !self.cancelling => match input {
                     Some(input) => {
                         self.input(input).await?;
-                        self.pump(turn).await?;
+                        self.pump(turn)?;
                     }
                     None => inbox_open = false,
                 },
@@ -229,11 +251,12 @@ impl Run {
                     };
                     let params = json!({ "threadId": thread, "turnId": turn_id });
                     self.decoder.request("turn/interrupt", params);
-                    self.flush().await?;
+                    self.flush()?;
                     deadline = Some(Instant::now() + INTERRUPT_GRACE);
                 }
                 () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
-                    tracing::warn!(thread = %turn.thread_id, "Codex did not stop after an interrupt; killing it");
+                    tracing::warn!(thread = %turn.thread_id, "Codex did not stop after an interrupt; later runs use a fresh app-server");
+                    self.conn.retire();
                     return Ok(Outcome::cancelled());
                 }
             }
@@ -254,7 +277,15 @@ impl Run {
             Input::Answer { key, answer } => {
                 let events = self.decoder.answer(&key, &answer);
                 self.emit(events).await;
-                self.flush().await?;
+                self.flush()?;
+            }
+            // Codex sets access per turn; Forge approves what this one asks.
+            Input::SetPermissions(permissions) => self.permissions = Some(permissions),
+            Input::ClearGoal => {
+                let thread = self.decoder.thread().context("no Codex thread")?.to_owned();
+                self.decoder
+                    .request("thread/goal/clear", json!({ "threadId": thread }));
+                self.flush()?;
             }
         }
         Ok(())
@@ -262,7 +293,7 @@ impl Run {
 
     /// Sends queued messages: as steers into the running turn, or as the
     /// next turn once the last one is over.
-    async fn pump(&mut self, turn: &Turn) -> Result<()> {
+    fn pump(&mut self, turn: &Turn) -> Result<()> {
         if self.cancelling || self.starting.is_some() || (self.queued.is_empty() && !self.nudge) {
             return Ok(());
         }
@@ -281,7 +312,10 @@ impl Run {
                 .flat_map(|queued| user_input(&queued.input))
                 .collect();
             let mut params = json!({ "threadId": thread, "input": input });
-            turn_overrides(&turn.config, &mut params);
+            turn_overrides(turn, &mut params);
+            if let Some(permissions) = self.permissions {
+                access_overrides(permissions, &mut params);
+            }
             let id = self.decoder.request("turn/start", params);
             let inputs = queued
                 .into_iter()
@@ -290,7 +324,7 @@ impl Run {
                 .collect();
             self.starting = Some((id, inputs));
         }
-        self.flush().await
+        self.flush()
     }
 
     async fn responded(&mut self, response: decoder::Response) -> Result<()> {
@@ -331,6 +365,11 @@ impl Run {
                     tracing::debug!("Codex turn/interrupt: {error}");
                 }
             }
+            "thread/goal/clear" => {
+                if let Err(error) = response.result {
+                    tracing::warn!("Codex thread/goal/clear: {error}");
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -339,15 +378,12 @@ impl Run {
     async fn handle_line(&mut self, line: &str) -> Result<()> {
         let events = self.decoder.feed(line)?;
         self.emit(events).await;
-        self.flush().await
+        self.flush()
     }
 
-    async fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self) -> Result<()> {
         for message in self.decoder.take_outbox() {
-            self.process
-                .send(&message)
-                .await
-                .context("writing to Codex")?;
+            self.conn.send(message).context("writing to Codex")?;
         }
         Ok(())
     }
@@ -359,13 +395,13 @@ impl Run {
     }
 
     fn exited(&self, during: &str) -> anyhow::Error {
-        let tail = self.process.stderr_tail();
+        let ended = self.conn.ended();
         anyhow!(
             "Codex exited during {during}{}",
-            if tail.is_empty() {
+            if ended.is_empty() {
                 String::new()
             } else {
-                format!(": {tail}")
+                format!(": {ended}")
             }
         )
     }
@@ -382,6 +418,12 @@ fn thread_params(turn: &Turn) -> (&'static str, Value) {
     }
     if let Some(tokens) = config.context_window_override() {
         settings.insert("model_context_window".to_owned(), json!(tokens));
+    }
+    for (name, url) in &turn.launch.gateway_mcp {
+        let server = format!("mcp_servers.{name}");
+        settings.insert(format!("{server}.url"), json!(url));
+        // `agent_wait` and approval cards block for up to nine minutes.
+        settings.insert(format!("{server}.tool_timeout_sec"), json!(600));
     }
     let mut params = json!({
         "cwd": turn.cwd,
@@ -417,21 +459,40 @@ fn thread_params(turn: &Turn) -> (&'static str, Value) {
     }
 }
 
-fn turn_overrides(config: &EngineConfig, params: &mut Value) {
+/// What a turn sets for itself and the turns after it: the thread may have
+/// been loaded by an earlier run with other settings.
+fn turn_overrides(turn: &Turn, params: &mut Value) {
+    let config = &turn.config;
+    params["cwd"] = json!(turn.cwd);
+    if let Some(model) = non_empty(config.model.as_deref()) {
+        params["model"] = json!(model);
+    }
     if let Some(effort) = non_empty(config.effort.as_deref()) {
         params["effort"] = json!(effort);
     }
-    if let Some(tier) = service_tier(config) {
-        params["serviceTier"] = json!(tier);
+    // `serviceTier` can't go back to standard; this one can, per turn.
+    params["serviceTierForTurn"] = json!(service_tier(config).unwrap_or("default"));
+    access_overrides(config.permissions, params);
+}
+
+/// The same access choices as `thread_params`, in `turn/start`'s shapes.
+fn access_overrides(permissions: Permissions, params: &mut Value) {
+    match permissions {
+        Permissions::Auto => {
+            params["approvalPolicy"] = json!("on-request");
+            params["approvalsReviewer"] = json!("auto_review");
+            params["sandboxPolicy"] = json!({ "type": "workspaceWrite" });
+        }
+        Permissions::Full => {
+            params["approvalPolicy"] = json!("never");
+            params["sandboxPolicy"] = json!({ "type": "dangerFullAccess" });
+        }
     }
 }
 
 /// The chosen tier's id (`priority`); the standard tier sends nothing.
 fn service_tier(config: &EngineConfig) -> Option<&str> {
-    match non_empty(config.speed.as_deref()) {
-        Some(speed) => Some(speed).filter(|speed| *speed != crate::catalog::STANDARD_SPEED),
-        None => None,
-    }
+    non_empty(config.speed.as_deref()).filter(|speed| *speed != crate::catalog::STANDARD_SPEED)
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {

@@ -167,7 +167,7 @@ impl MarkdownIndex {
             .get(leaf)
             .map(|leaf| &self.contexts[leaf.context])
     }
-    pub fn source_bytes(&self) -> usize {
+    pub const fn source_bytes(&self) -> usize {
         self.source_bytes
     }
     pub fn resident_bytes(&self) -> usize {
@@ -199,7 +199,10 @@ impl MarkdownIndex {
                             .iter()
                             .map(|e| match &e.token {
                                 Token::Structural(event) => event_heap_bytes(event),
-                                _ => 0,
+                                Token::Text(_)
+                                | Token::Code(_)
+                                | Token::Html(_)
+                                | Token::InlineHtml(_) => 0,
                             })
                             .sum::<usize>()
                 })
@@ -230,6 +233,10 @@ fn resolve_text<'a>(
     Ok(value.into())
 }
 
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "pulldown-cmark's events: only the ones that own heap memory count"
+)]
 fn event_heap_bytes(event: &Event<'_>) -> usize {
     match event {
         Event::Start(
@@ -296,10 +303,10 @@ impl LeafRecord {
         }
     }
 
-    pub fn is_table_header(&self) -> Option<bool> {
+    pub const fn is_table_header(&self) -> Option<bool> {
         match self.leaf.kind {
             Kind::TableRow { header } => Some(header),
-            _ => None,
+            Kind::Paragraph | Kind::Heading | Kind::Code | Kind::Html => None,
         }
     }
     pub fn replay(

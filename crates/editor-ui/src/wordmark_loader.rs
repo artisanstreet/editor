@@ -4,9 +4,9 @@
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, ContentMask, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
-    size,
+    App, Bounds, ContentMask, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div,
+    point, px, size,
 };
 
 use editor_assets::AssetId;
@@ -101,68 +101,121 @@ impl RenderOnce for WordmarkLoader {
             .w(width)
             .h(height);
         let reduced = MotionPolicy::current(cx) == MotionPolicy::Reduced;
-        let elapsed = if reduced {
-            Some(Duration::ZERO)
-        } else {
-            crate::motion::elapsed_after(
-                SharedString::from(format!("{}-clock", self.id)),
-                self.appear_after.unwrap_or_default(),
-                window,
-                cx,
-            )
-        };
-        let Some(elapsed) = elapsed else {
+        let theme = self.theme;
+        let path: SharedString = AssetId::ARTISAN_WORDMARK_STACKED.as_str().into();
+        if reduced {
+            return root.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, cx| {
+                        let color = theme.colors.text.to_paint();
+                        // A failed paint leaves this element blank for one frame.
+                        window
+                            .paint_svg(
+                                bounds,
+                                path,
+                                None,
+                                gpui::TransformationMatrix::default(),
+                                color,
+                                cx,
+                            )
+                            .ok();
+                    },
+                )
+                .size_full(),
+            );
+        }
+        let Some(started) = crate::motion::started_after(
+            SharedString::from(format!("{}-clock", self.id)),
+            self.appear_after.unwrap_or_default(),
+            window,
+            cx,
+        ) else {
             return root;
         };
-        let opacity = if reduced || self.appear_after.is_none() {
-            1.0
-        } else {
-            entrance_opacity(elapsed)
-        };
-        let foreground = self.theme.colors.foreground.to_paint();
-        let muted = self.theme.colors.muted_foreground.to_paint();
-        let progress = (elapsed.as_secs_f32() / SHIMMER_CYCLE.as_secs_f32()).fract();
+        let fades = self.appear_after.is_some();
+        // The entrance and the band are paint-only: they repaint without
+        // rendering again.
         root = root.child(
             canvas(
                 |_, _, _| {},
                 move |bounds, (), window, cx| {
-                    let mut color = if reduced { foreground } else { muted };
-                    color.alpha *= opacity;
-                    let path: SharedString = AssetId::ARTISAN_WORDMARK_STACKED.as_str().into();
-                    let _ =
-                        window.paint_svg(bounds, path.clone(), None, Default::default(), color, cx);
-                    if reduced {
-                        return;
-                    }
-                    let mark_width = f32::from(bounds.size.width);
-                    let band_width = mark_width * BAND_FRACTION;
-                    let slice_width = band_width / BAND_SLICES as f32;
-                    let leading = band_left(progress, mark_width, band_width);
-                    for slice in 0..BAND_SLICES {
-                        let left = leading + slice_width * slice as f32;
-                        let clip = Bounds::new(
-                            point(bounds.left() + px(left), bounds.top()),
-                            size(px(slice_width), bounds.size.height),
-                        );
-                        let mut color = foreground;
-                        color.alpha *=
-                            opacity * band_opacity((slice as f32 + 0.5) / BAND_SLICES as f32);
-                        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-                            let _ = window.paint_svg(
-                                bounds,
-                                path.clone(),
-                                None,
-                                Default::default(),
-                                color,
-                                cx,
-                            );
-                        });
-                    }
-                    window.request_animation_frame();
+                    window.paint_animated(
+                        move |window, cx| {
+                            let elapsed = started.elapsed();
+                            let opacity = if fades {
+                                entrance_opacity(elapsed)
+                            } else {
+                                1.0
+                            };
+                            let progress =
+                                (elapsed.as_secs_f32() / SHIMMER_CYCLE.as_secs_f32()).fract();
+                            paint_shimmer(bounds, &path, &theme, opacity, progress, window, cx);
+                            !cx.reduce_motion()
+                        },
+                        cx,
+                    );
                 },
             )
             .size_full(),
         );
         root
+    }
+}
+
+/// Paints the muted mark at `opacity` with the band at `progress` over it.
+fn paint_shimmer(
+    bounds: Bounds<Pixels>,
+    path: &SharedString,
+    theme: &ArtisanTheme,
+    opacity: f32,
+    progress: f32,
+    window: &mut Window,
+    cx: &App,
+) {
+    let foreground = theme.colors.text;
+    let color = theme.colors.text_muted.fade(opacity).to_paint();
+    // A failed paint leaves this element blank for one frame.
+    window
+        .paint_svg(
+            bounds,
+            path.clone(),
+            None,
+            gpui::TransformationMatrix::default(),
+            color,
+            cx,
+        )
+        .ok();
+    let mark_width = f32::from(bounds.size.width);
+    let band_width = mark_width * BAND_FRACTION;
+    let slice_width = band_width / crate::f32_of_count(BAND_SLICES);
+    let leading = band_left(progress, mark_width, band_width);
+    for slice in 0..BAND_SLICES {
+        let left = slice_width.mul_add(crate::f32_of_count(slice), leading);
+        let clip = Bounds::new(
+            point(bounds.left() + px(left), bounds.top()),
+            size(px(slice_width), bounds.size.height),
+        );
+        let color = foreground
+            .fade(
+                opacity
+                    * band_opacity(
+                        (crate::f32_of_count(slice) + 0.5) / crate::f32_of_count(BAND_SLICES),
+                    ),
+            )
+            .to_paint();
+        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+            // A failed paint leaves this element blank for one frame.
+            window
+                .paint_svg(
+                    bounds,
+                    path.clone(),
+                    None,
+                    gpui::TransformationMatrix::default(),
+                    color,
+                    cx,
+                )
+                .ok();
+        });
     }
 }

@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 197
 expression: "replay(\"async-questions\")"
 ---
 [
@@ -158,6 +157,7 @@ expression: "replay(\"async-questions\")"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
     Event(

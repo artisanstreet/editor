@@ -63,8 +63,8 @@ impl RichBlock for CodeRefBlock {
     fn resident_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + self.reference.path.len()
-            + budget::optional(&self.excerpt)
-            + budget::optional(&self.note)
+            + budget::optional(self.excerpt.as_ref())
+            + budget::optional(self.note.as_ref())
             + budget::shared(&self.lines)
     }
 
@@ -81,7 +81,8 @@ impl RichBlock for CodeRefBlock {
                 cx.id("path"),
                 &reference.path,
                 reference.start,
-                cx.media.and_then(|provider| provider.resource_scope()),
+                cx.media
+                    .and_then(super::super::media::MediaFetcher::resource_scope),
                 reference.display(),
             ));
         div()
@@ -96,7 +97,7 @@ impl RichBlock for CodeRefBlock {
                 numbered(
                     theme,
                     cx.id("excerpt"),
-                    self.lines.clone(),
+                    Arc::clone(&self.lines),
                     reference.start.unwrap_or(1),
                     self.width,
                 )

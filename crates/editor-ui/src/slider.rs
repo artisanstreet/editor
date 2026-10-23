@@ -35,6 +35,10 @@ impl SliderRange {
             .unwrap_or(fallback);
         Self { min, max, step }
     }
+    #[expect(
+        clippy::float_cmp,
+        reason = "the clamped ends are kept exactly, not snapped"
+    )]
     pub fn snap(self, value: f64) -> f64 {
         let value = if value.is_finite() {
             value.clamp(self.min, self.max)
@@ -45,7 +49,7 @@ impl SliderRange {
             return value;
         }
         let steps = ((value - self.min) / self.step).round();
-        let snapped = self.min + steps * self.step;
+        let snapped = steps.mul_add(self.step, self.min);
         if snapped.is_finite() {
             snapped.clamp(self.min, self.max)
         } else {
@@ -104,7 +108,7 @@ impl SliderState {
             track: Rc::new(Cell::new(None)),
         }
     }
-    pub fn value(&self) -> f64 {
+    pub const fn value(&self) -> f64 {
         self.value
     }
     /// Reset when feature data changes; cancel an in-flight drag and keep geometry ownership.
@@ -113,6 +117,10 @@ impl SliderState {
         self.value = range.snap(value);
         self.dragging = false;
     }
+    #[expect(
+        clippy::float_cmp,
+        reason = "any change of the snapped value is a change"
+    )]
     fn set_value(&mut self, value: f64) -> bool {
         let value = self.range.snap(value);
         let changed = value != self.value;
@@ -187,7 +195,7 @@ impl Slider {
         }
     }
     #[must_use]
-    pub fn disabled(mut self, disabled: bool) -> Self {
+    pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
@@ -230,6 +238,10 @@ impl Slider {
 }
 
 impl RenderOnce for Slider {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self {
             id,
@@ -248,8 +260,8 @@ impl RenderOnce for Slider {
         });
         let current = state.read(cx);
         let t = current.position();
-        let track_probe = current.track.clone();
-        let accent = theme.colors.banner_warning;
+        let track_probe = Rc::clone(&current.track);
+        let accent = theme.colors.amber.solid;
         let press = state.clone();
         let keys = state.clone();
         let focus_theme = theme;
@@ -257,7 +269,9 @@ impl RenderOnce for Slider {
             .id(id)
             .when(!disabled, |track| track.focusable().tab_index(0))
             .when(disabled, |track| {
-                track.opacity(0.5).aria_description("Unavailable")
+                track
+                    .opacity(crate::theme::Opacity::Disabled.alpha())
+                    .aria_description("Unavailable")
             })
             .when_some(debug_selector, |track, selector| {
                 track.debug_selector(move || selector.to_string())
@@ -267,7 +281,11 @@ impl RenderOnce for Slider {
             .aria_value(readout.clone())
             .focus_visible(move |style| {
                 style.shadow(vec![BoxShadow {
-                    color: focus_theme.interaction.focus_ring_color.to_paint(),
+                    color: focus_theme
+                        .colors
+                        .ring
+                        .at(crate::theme::Opacity::FocusRing)
+                        .to_paint(),
                     offset: point(px(0.0), px(0.0)),
                     blur_radius: px(0.0),
                     spread_radius: focus_theme.interaction.focus_ring_width,
@@ -297,7 +315,7 @@ impl RenderOnce for Slider {
             .rounded(RadiusTokens::value(RadiusStep::Sm))
             .border_1()
             .border_color(gpui::transparent_black())
-            .when(!disabled, |track| track.cursor_ew_resize())
+            .when(!disabled, gpui::Styled::cursor_ew_resize)
             .on_mouse_down(MouseButton::Left, move |event: &MouseDownEvent, _, cx| {
                 if disabled {
                     return;
@@ -318,7 +336,7 @@ impl RenderOnce for Slider {
                     .top(px(9.0))
                     .h(px(2.0))
                     .rounded(RadiusTokens::value(RadiusStep::X3s))
-                    .bg(theme.colors.foreground.with_alpha(0.1).to_paint()),
+                    .bg(theme.colors.line.to_paint()),
             )
             .child(
                 div()
@@ -366,7 +384,7 @@ impl RenderOnce for Slider {
                     .text_size(TypographyTokens::size(TextStep::Xs))
                     .line_height(px(16.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .child(label),
             )
             .child(track)
@@ -376,7 +394,7 @@ impl RenderOnce for Slider {
                     .whitespace_nowrap()
                     .text_size(TypographyTokens::size(TextStep::Xs))
                     .line_height(px(16.0))
-                    .text_color(theme.colors.foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child(readout),
             )
     }
@@ -394,6 +412,7 @@ fn release(sliders: &[Entity<SliderState>], cx: &mut App) {
 mod tests {
     use super::*;
     #[test]
+    #[expect(clippy::float_cmp, reason = "snapped slider values are exact")]
     fn ranges_keep_endpoints_finite_and_reachable() {
         let range = SliderRange::new(1.0, 0.0, Some(0.3));
         assert_eq!(range.snap(0.4), 0.3);
@@ -420,6 +439,7 @@ mod tests {
         );
     }
     #[test]
+    #[expect(clippy::float_cmp, reason = "snapped slider values are exact")]
     fn disabled_and_reset_cancel_pointer_interaction() {
         let mut state = SliderState::new(SliderRange::new(0.0, 1.0, Some(0.1)), 0.0);
         state.track.set(Some(Bounds {

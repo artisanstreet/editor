@@ -121,7 +121,9 @@ impl ModelBlock {
 
 impl RichBlock for ModelBlock {
     fn resident_bytes(&self) -> usize {
-        std::mem::size_of::<Self>() + self.src.resident_bytes() + budget::optional(&self.name)
+        std::mem::size_of::<Self>()
+            + self.src.resident_bytes()
+            + budget::optional(self.name.as_ref())
     }
 
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {

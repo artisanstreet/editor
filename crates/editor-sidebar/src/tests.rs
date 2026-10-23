@@ -2,7 +2,7 @@
 //! list, and what Forge records when a thread is opened.
 
 #[path = "../../editor-ui/test_support/forge.rs"]
-pub(crate) mod forge_fixture;
+pub mod forge_fixture;
 #[path = "../../editor-ui/test_support/server.rs"]
 mod server_fixture;
 use crate::Sidebar;
@@ -14,13 +14,13 @@ use editor_core::{Core, Screen};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle};
 use std::time::{Duration, Instant};
 
-pub(crate) struct Setup {
+pub struct Setup {
     pub(crate) store: forge_store::Store,
     pub(crate) forge: tokio::runtime::Runtime,
     pub(crate) core: Entity<Core>,
     pub(crate) window: WindowHandle<Sidebar>,
     project: ProjectId,
-    pub(crate) _dir: tempfile::TempDir,
+    pub(crate) dir: tempfile::TempDir,
 }
 
 impl Setup {
@@ -54,7 +54,7 @@ impl Setup {
             core,
             window,
             project,
-            _dir: dir,
+            dir,
         }
     }
 
@@ -66,6 +66,7 @@ impl Setup {
             config: EngineConfig::new(EngineId::Claude),
             title: Some("A thread".into()),
             parent_thread_id: parent.cloned(),
+            spawned_by: None,
         };
         self.forge
             .block_on(self.store.create_thread(request))
@@ -95,6 +96,7 @@ impl Setup {
     fn ran(&self, thread: &ThreadId, hours: i64) {
         let ended = artisan_api::now() - hours * 3_600_000;
         let run = Run {
+            config: None,
             id: RunId::new(),
             thread_id: thread.clone(),
             engine: EngineId::Claude,
@@ -107,11 +109,12 @@ impl Setup {
             seq: 0,
             started_at: ended - 60_000,
             ended_at: Some(ended),
+            continuation: None,
         };
         self.forge.block_on(self.store.upsert_run(run)).unwrap();
     }
 
-    fn lists(&self, cx: &mut TestAppContext) -> (Vec<ThreadId>, Vec<ThreadId>) {
+    fn lists(&self, cx: &TestAppContext) -> (Vec<ThreadId>, Vec<ThreadId>) {
         self.window
             .read_with(cx, |sidebar, _| (sidebar.inbox(), sidebar.history()))
             .unwrap()
@@ -137,6 +140,34 @@ impl Setup {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+}
+
+/// Wheels the thread list at `at` by `dy` per event until `until` holds.
+fn wheel_threads_until(
+    cx: &mut VisualTestContext,
+    at: gpui::Point<gpui::Pixels>,
+    dy: f32,
+    until: impl Fn(&mut VisualTestContext) -> bool,
+) {
+    // Each event moves at most the list's read-ahead: 650 threads take a while.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !until(cx) {
+        assert!(Instant::now() < deadline, "the list never slid there");
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(dy))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        // Draw, as the window would: the list learns the heights of the
+        // rows it reached, which is how far it can scroll.
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -168,7 +199,7 @@ fn threads_stay_in_the_inbox_until_settled(cx: &mut TestAppContext) {
     setup
         .window
         .update(cx, |sidebar, _, cx| {
-            sidebar.open_thread(answered.clone(), cx)
+            sidebar.open_thread(answered.clone(), cx);
         })
         .unwrap();
     let unread = setup
@@ -274,7 +305,7 @@ fn collapsed_history_has_no_retained_rows_and_expanding_renders_a_window(cx: &mu
     setup
         .window
         .update(cx, |sidebar, _, cx| {
-            sidebar._host = None;
+            sidebar.host_events = None;
             sidebar.host = None;
             let rows = (0..10_000)
                 .map(|index| crate::list::RowData {
@@ -321,7 +352,6 @@ fn collapsed_history_has_no_retained_rows_and_expanding_renders_a_window(cx: &mu
     setup
         .window
         .update(&mut cx, |sidebar, _, _| {
-            assert!(sidebar.icon_tasks.len() <= 4);
             sidebar.threads_list.scroll_to(gpui::ListOffset {
                 item_ix: 100,
                 offset_in_item: gpui::px(5.0),
@@ -357,7 +387,7 @@ fn a_working_thread_breathes_without_redrawing_the_sidebar(cx: &mut TestAppConte
     setup
         .window
         .update(cx, |sidebar, _, cx| {
-            sidebar._host = None;
+            sidebar.host_events = None;
             sidebar.host = None;
             sidebar.lists = crate::list::Lists {
                 inbox: vec![crate::list::RowData {
@@ -413,7 +443,7 @@ fn summary_pages_evict_history_and_direct_navigation_keeps_its_metadata(cx: &mut
         .core
         .read_with(cx, |core, _| core.active_host().unwrap().clone());
     host.update(cx, |host, cx| {
-        host.load_threads(false, editor_core::ThreadPageDirection::Latest, cx)
+        host.load_threads(false, editor_core::ThreadPageDirection::Latest, cx);
     });
     setup.wait(cx, "latest page completes", |_, cx| {
         host.read_with(cx, |host, _| !host.thread_page(false).loading)
@@ -423,18 +453,21 @@ fn summary_pages_evict_history_and_direct_navigation_keeps_its_metadata(cx: &mut
         assert_eq!(host.threads.len(), 200);
         assert!(!host.threads.contains_key(&oldest));
     });
-    for expected in [400, 600, 600] {
-        host.update(cx, |host, cx| {
-            host.load_threads(false, editor_core::ThreadPageDirection::Older, cx)
-        });
-        setup.wait(cx, "older page completes", |_, cx| {
-            host.read_with(cx, |host, _| !host.thread_page(false).loading)
-        });
+    // Scrolling to the end pages back through every thread; the window
+    // keeps 600 and drops the newest.
+    let mut visual = VisualTestContext::from_window(setup.window.into(), cx);
+    visual.run_until_parked();
+    let at = visual
+        .debug_bounds(format!("sidebar-thread-{newest}").leak())
+        .expect("the newest thread's row")
+        .center();
+    wheel_threads_until(&mut visual, at, -4000.0, |cx| {
         host.read_with(cx, |host, _| {
-            assert_eq!(host.thread_page(false).ids.len(), expected)
-        });
-    }
+            host.threads.contains_key(&oldest) && !host.thread_page(false).loading
+        })
+    });
     host.read_with(cx, |host, _| {
+        assert_eq!(host.thread_page(false).ids.len(), 600);
         assert!(!host.thread_page(false).at_latest);
         assert!(host.thread_page(false).next.is_none());
         assert_eq!(host.threads.len(), 600);
@@ -448,13 +481,13 @@ fn summary_pages_evict_history_and_direct_navigation_keeps_its_metadata(cx: &mut
                 thread: newest.clone(),
             },
             cx,
-        )
+        );
     });
     setup.wait(cx, "direct navigation loads evicted metadata", |_, cx| {
         host.read_with(cx, |host, _| host.threads.contains_key(&newest))
     });
     host.update(cx, |host, cx| {
-        host.load_threads(false, editor_core::ThreadPageDirection::Older, cx)
+        host.load_threads(false, editor_core::ThreadPageDirection::Older, cx);
     });
     host.read_with(cx, |host, _| assert!(host.threads.contains_key(&newest)));
     setup
@@ -468,7 +501,7 @@ fn summary_pages_evict_history_and_direct_navigation_keeps_its_metadata(cx: &mut
         ))
         .unwrap();
     host.update(cx, |host, cx| {
-        host.load_threads(true, editor_core::ThreadPageDirection::Latest, cx)
+        host.load_threads(true, editor_core::ThreadPageDirection::Latest, cx);
     });
     setup.wait(cx, "archive is loaded separately", |_, cx| {
         host.read_with(cx, |host, _| {
@@ -483,94 +516,6 @@ fn summary_pages_evict_history_and_direct_navigation_keeps_its_metadata(cx: &mut
             "direct navigation remains pinned across archive loads"
         );
     });
-}
-
-#[test]
-fn avatar_cache_expires_success_and_missing_results() {
-    let now = Instant::now();
-    let mut entry = crate::IconEntry {
-        project_seq: 1,
-        hash: Some(artisan_api::BlobHash("image".into())),
-        failed: false,
-        checked: now - Duration::from_secs(299),
-    };
-    assert!(entry.fresh(now));
-    assert!(!entry.fresh(now + Duration::from_secs(1)));
-    entry.hash = None;
-    entry.checked = now - Duration::from_secs(4);
-    assert!(entry.fresh(now));
-    assert!(!entry.fresh(now + Duration::from_secs(1)));
-    entry.hash = Some(artisan_api::BlobHash("last-good".into()));
-    entry.failed = true;
-    assert!(
-        !entry.fresh(now + Duration::from_secs(1)),
-        "failed refresh uses failure TTL even with retained pixels"
-    );
-}
-
-#[gpui::test]
-fn project_metadata_replacement_releases_icons_and_the_old_request(cx: &mut TestAppContext) {
-    let setup = Setup::new(cx);
-    setup.wait(cx, "project is observed", |setup, cx| {
-        setup.core.read_with(cx, |core, cx| {
-            core.active_host()
-                .unwrap()
-                .read(cx)
-                .projects
-                .contains_key(&setup.project)
-        })
-    });
-    setup
-        .window
-        .update(cx, |sidebar, _, cx| {
-            let host = sidebar.host.clone().unwrap();
-            let old = host.read(cx).projects[&setup.project].seq;
-            sidebar.icons.insert(
-                setup.project.clone(),
-                crate::IconEntry {
-                    project_seq: old,
-                    hash: Some(artisan_api::BlobHash("old-icon".into())),
-                    failed: false,
-                    checked: Instant::now(),
-                },
-            );
-            sidebar.icon_order.push_back(setup.project.clone());
-            sidebar.icon_tasks.insert(
-                setup.project.clone(),
-                crate::IconRequest {
-                    project_seq: old,
-                    _task: gpui::Task::ready(()),
-                },
-            );
-            host.update(cx, |host, _| {
-                host.projects.get_mut(&setup.project).unwrap().seq = old + 1
-            });
-            sidebar.reconcile_icons(cx);
-            assert!(!sidebar.icons.contains_key(&setup.project));
-            assert!(!sidebar.icon_tasks.contains_key(&setup.project));
-            assert!(sidebar.icon_order.is_empty());
-            // An expired missing avatar is retried once when this project is visible.
-            sidebar.icons.insert(
-                setup.project.clone(),
-                crate::IconEntry {
-                    project_seq: old + 1,
-                    hash: None,
-                    failed: false,
-                    checked: Instant::now() - Duration::from_secs(6),
-                },
-            );
-            sidebar.load_visible_projects(&[setup.project.clone(), setup.project.clone()], cx);
-            assert_eq!(sidebar.icon_tasks.len(), 1);
-            assert_eq!(sidebar.icon_tasks[&setup.project].project_seq, old + 1);
-            assert_eq!(sidebar.icon_order.len(), 1);
-            sidebar.clear_icons();
-            assert!(
-                sidebar.icons.is_empty()
-                    && sidebar.icon_tasks.is_empty()
-                    && sidebar.icon_order.is_empty()
-            );
-        })
-        .unwrap();
 }
 
 #[gpui::test]
@@ -609,6 +554,10 @@ fn metadata_and_read_updates_do_not_reset_history_age(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the test walks one scenario end to end"
+)]
 fn delayed_settle_failure_preserves_new_activity_and_independent_dialog(cx: &mut TestAppContext) {
     use std::sync::{
         Arc,
@@ -639,7 +588,7 @@ fn delayed_settle_failure_preserves_new_activity_and_independent_dialog(cx: &mut
     setup
         .window
         .update(cx, |sidebar, _, cx| {
-            sidebar.call_completion_gate = Some((arrived.clone(), receive));
+            sidebar.call_completion_gate = Some((Arc::clone(&arrived), receive));
             sidebar.settle(&first, cx);
         })
         .unwrap();
@@ -745,6 +694,10 @@ fn delayed_settle_failure_preserves_new_activity_and_independent_dialog(cx: &mut
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the test sets up two Forge hosts and switches between them"
+)]
 fn host_switch_preserves_new_rename_dialog_after_old_rename_failure(cx: &mut TestAppContext) {
     use std::sync::{
         Arc,
@@ -755,7 +708,7 @@ fn host_switch_preserves_new_rename_dialog_after_old_rename_failure(cx: &mut Tes
     setup.wait(cx, "first thread", |setup, cx| {
         setup.lists(cx).0.contains(&thread)
     });
-    let second_dir = setup._dir.path().join("second-forge");
+    let second_dir = setup.dir.path().join("second-forge");
     let server = setup
         .forge
         .block_on(forge_http::start(forge_http::ServeConfig {
@@ -770,7 +723,7 @@ fn host_switch_preserves_new_rename_dialog_after_old_rename_failure(cx: &mut Tes
         .forge
         .block_on(other_store.create_project(CreateProject {
             id: ProjectId::new(),
-            path: setup._dir.path().display().to_string(),
+            path: setup.dir.path().display().to_string(),
             name: None,
         }))
         .unwrap()
@@ -783,20 +736,21 @@ fn host_switch_preserves_new_rename_dialog_after_old_rename_failure(cx: &mut Tes
             config: EngineConfig::new(EngineId::Claude),
             title: Some("other host title".into()),
             parent_thread_id: None,
+            spawned_by: None,
         }))
         .unwrap();
     let (_, other_host) = forge_fixture::pair(
         &other_store,
         &setup.forge,
         &address,
-        &setup._dir.path().join("editor"),
+        &setup.dir.path().join("editor"),
     );
     let arrived = Arc::new(AtomicBool::new(false));
     let (release, receive) = tokio::sync::oneshot::channel();
     setup
         .window
         .update(cx, |sidebar, window, cx| {
-            sidebar.call_completion_gate = Some((arrived.clone(), receive));
+            sidebar.call_completion_gate = Some((Arc::clone(&arrived), receive));
             sidebar.start_rename(thread.clone(), window, cx);
         })
         .unwrap();
@@ -918,14 +872,14 @@ fn thread_rows_open_and_offer_actions_from_the_keyboard(cx: &mut TestAppContext)
             .expect("thread row receives native focus")
     });
     setup.core.update(&mut visual, |core, cx| {
-        core.navigate(Screen::Marketplace, cx)
+        core.navigate(Screen::Marketplace, cx);
     });
     visual.run_until_parked();
     visual.update(|window, _| {
         assert!(
             focus.is_focused(window),
             "the actual thread-row focus survives navigation"
-        )
+        );
     });
     let press = |visual: &mut VisualTestContext, key: &str| {
         visual.update(|window, cx| {
@@ -958,8 +912,58 @@ fn thread_rows_open_and_offer_actions_from_the_keyboard(cx: &mut TestAppContext)
 }
 
 /// An empty pagination state must not reserve a flex gap below the account.
+/// The profile menu floats over thread rows; a click on the menu must stay
+/// on the menu instead of opening the thread beneath it.
 #[gpui::test]
-fn profile_footer_keeps_only_the_sidebar_bottom_inset(cx: &mut TestAppContext) {
+fn clicks_on_the_profile_menu_never_open_the_thread_beneath(cx: &mut TestAppContext) {
+    let setup = Setup::new(cx);
+    let threads: Vec<_> = (0..12).map(|_| setup.thread(None)).collect();
+    setup.wait(cx, "threads in the inbox", |setup, cx| {
+        threads
+            .iter()
+            .all(|thread| setup.lists(cx).0.contains(thread))
+    });
+    let mut visual = VisualTestContext::from_window(setup.window.into(), cx);
+    visual.simulate_resize(gpui::size(gpui::px(360.0), gpui::px(600.0)));
+    visual.run_until_parked();
+    let trigger = visual
+        .debug_bounds("artisan-desktop-profile-trigger")
+        .expect("profile avatar");
+    visual.simulate_click(trigger.center(), Modifiers::none());
+    visual.run_until_parked();
+    // Let the opening scale finish so the menu has its full bounds.
+    std::thread::sleep(Duration::from_millis(400));
+    for _ in 0..3 {
+        visual.simulate_frame(setup.window.into());
+        visual.run_until_parked();
+    }
+    let menu = visual
+        .debug_bounds("artisan-desktop-profile-menu")
+        .expect("profile menu is open");
+    let (thread, point) = threads
+        .iter()
+        .find_map(|thread| {
+            let selector: &'static str = format!("sidebar-thread-{thread}").leak();
+            let row = visual.debug_bounds(selector)?;
+            let overlap = row.intersect(&menu);
+            (overlap.size.width > gpui::px(0.0) && overlap.size.height > gpui::px(0.0))
+                .then(|| (thread.clone(), overlap.center()))
+        })
+        .expect("a thread row lies beneath the profile menu");
+    visual.simulate_click(point, Modifiers::none());
+    visual.run_until_parked();
+    let opened = setup.core.read_with(
+        &visual,
+        |core, _| matches!(core.screen(), Screen::Thread { thread: open, .. } if *open == thread),
+    );
+    assert!(
+        !opened,
+        "the click went through the profile menu to {thread}"
+    );
+}
+
+#[gpui::test]
+fn profile_avatar_sits_in_the_rails_bottom_corner(cx: &mut TestAppContext) {
     let setup = Setup::new(cx);
     let thread = setup.thread(None);
     setup.wait(cx, "thread in the inbox", |setup, cx| {
@@ -968,8 +972,115 @@ fn profile_footer_keeps_only_the_sidebar_bottom_inset(cx: &mut TestAppContext) {
     let mut visual = VisualTestContext::from_window(setup.window.into(), cx);
     visual.simulate_resize(gpui::size(gpui::px(360.0), gpui::px(600.0)));
     visual.run_until_parked();
-    let footer = visual
+    let avatar = visual
         .debug_bounds("artisan-desktop-profile-trigger")
-        .expect("profile footer");
-    assert_eq!(footer.bottom(), gpui::px(590.0));
+        .expect("profile avatar");
+    // 4 px in from the window's left and bottom edges, inside the rail.
+    assert_eq!(avatar.bottom(), gpui::px(596.0));
+    assert_eq!(avatar.left(), gpui::px(4.0));
+    assert!(avatar.right() <= gpui::px(crate::RAIL_WIDTH));
+}
+
+/// The thread list pages like the conversation: scrolling down loads older
+/// threads and drops the newest, scrolling back up loads them again. There
+/// is nothing to press.
+#[gpui::test]
+fn the_thread_list_slides_with_the_scroll(cx: &mut TestAppContext) {
+    let setup = Setup::new(cx);
+    let ids: Vec<_> = (0..650).map(|_| setup.thread(None)).collect();
+    let (oldest, newest) = (ids[0].clone(), ids[649].clone());
+    setup.wait(cx, "the newest page", |setup, cx| {
+        setup.lists(cx).0.contains(&newest)
+    });
+    let host = setup
+        .core
+        .read_with(cx, |core, _| core.active_host().unwrap().clone());
+    let mut cx = VisualTestContext::from_window(setup.window.into(), cx);
+    cx.run_until_parked();
+    let at = cx
+        .debug_bounds(format!("sidebar-thread-{newest}").leak())
+        .expect("the newest thread's row")
+        .center();
+    let loaded = |cx: &mut VisualTestContext, id: &ThreadId| {
+        host.read_with(cx, |host, _| host.threads.contains_key(id))
+    };
+    wheel_threads_until(&mut cx, at, -4000.0, |cx| loaded(cx, &oldest));
+    host.read_with(&cx, |host, _| {
+        assert!(
+            !host.threads.contains_key(&newest),
+            "the window dropped the newest threads"
+        );
+        assert!(!host.thread_page(false).at_latest);
+    });
+    wheel_threads_until(&mut cx, at, 4000.0, |cx| {
+        loaded(cx, &newest) && host.read_with(cx, |host, _| host.thread_page(false).at_latest)
+    });
+}
+
+/// The rail's Usage button opens the Usage page, which has a section for
+/// the paired host.
+#[gpui::test]
+fn the_rail_opens_usage_with_a_section_per_host(cx: &mut TestAppContext) {
+    let setup = Setup::new(cx);
+    setup.wait(cx, "paired host", |setup, cx| {
+        setup.core.read_with(cx, |core, cx| {
+            core.active_host()
+                .is_some_and(|host| host.read(cx).is_live())
+        })
+    });
+    let host = setup.core.read_with(cx, |core, cx| {
+        core.active_host().unwrap().read(cx).id.clone()
+    });
+    let mut visual = VisualTestContext::from_window(setup.window.into(), cx);
+    visual.run_until_parked();
+    let usage = visual
+        .debug_bounds("sidebar-usage")
+        .expect("the rail's Usage button");
+    visual.simulate_click(usage.center(), Modifiers::none());
+    visual.run_until_parked();
+    assert!(
+        setup
+            .core
+            .read_with(&visual, |core, _| matches!(core.screen(), Screen::Usage)),
+        "the Usage button opens the Usage page"
+    );
+
+    let core = setup.core.clone();
+    let page = cx.add_window(|_, cx| crate::UsagePage::new(core, cx));
+    let mut page = VisualTestContext::from_window(page.into(), cx);
+    page.run_until_parked();
+    assert!(
+        page.debug_bounds(format!("usage-host-{}", host.0).leak())
+            .is_some(),
+        "the page has the paired host's section"
+    );
+}
+
+/// A parked thread (its failed turn waits for Forge to pick it up) keeps
+/// its place at the top with the yellow dot, even when it's old and read,
+/// and can't be settled away while it waits.
+#[gpui::test]
+fn a_parked_thread_stays_in_the_inbox_with_its_own_dot(cx: &mut TestAppContext) {
+    let setup = Setup::new(cx);
+    let id = setup.thread(None);
+    setup.wait(cx, "the idle thread to arrive", |setup, cx| {
+        setup.lists(cx).0.contains(&id)
+    });
+    let host = setup
+        .core
+        .read_with(cx, |core, _| core.active_host().unwrap().clone());
+    host.update(cx, |host, _| {
+        let now = artisan_api::now();
+        let thread = host.threads.get_mut(&id).unwrap();
+        thread.activity_at = now - 2 * 24 * 60 * 60 * 1000;
+        thread.read_seq = thread.activity_seq;
+        thread.marked_unread = false;
+        thread.parked_until = Some(now + 60 * 60 * 1000);
+        let lists = crate::list::lists(host, None, now);
+        let row = &lists.inbox[0];
+        assert_eq!(row.id, id);
+        assert_eq!(row.state, crate::list::RowState::Parked);
+        assert!(!row.settleable);
+        assert_eq!(host.attention().stopped, 0, "it carries on by itself");
+    });
 }

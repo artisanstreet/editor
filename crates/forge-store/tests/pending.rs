@@ -2,8 +2,12 @@ use artisan_api::{
     BlobHash, CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ProjectId, RunId,
     SendMessage, ThreadId,
 };
-use forge_store::{SendRejected, Store};
+use forge_store::{Acceptance, SendRejected, Store};
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
 async fn thread(store: &Store) -> ThreadId {
     let project = store
         .create_project(CreateProject {
@@ -20,6 +24,7 @@ async fn thread(store: &Store) -> ThreadId {
             config: EngineConfig::new(EngineId::Claude),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         })
         .await
         .unwrap()
@@ -46,7 +51,7 @@ async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
                 thread.clone(),
                 message("queued".into(), Vec::new()),
                 false,
-                Default::default(),
+                Acceptance::default(),
             )
             .await
             .unwrap()
@@ -77,7 +82,7 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
             thread.clone(),
             message(text.clone(), Vec::new()),
             false,
-            Default::default(),
+            Acceptance::default(),
         )
         .await
         .unwrap()
@@ -87,7 +92,7 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
             thread.clone(),
             message("tail".into(), Vec::new()),
             false,
-            Default::default(),
+            Acceptance::default(),
         )
         .await
         .unwrap()
@@ -113,7 +118,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
             thread.clone(),
             message("x".repeat(32 * 1024 * 1024 + 1), Vec::new()),
             false,
-            Default::default(),
+            Acceptance::default(),
         )
         .await
         .unwrap_err();
@@ -128,7 +133,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
             thread.clone(),
             message("missing".into(), vec![hash.clone()]),
             false,
-            Default::default(),
+            Acceptance::default(),
         )
         .await
         .unwrap_err();
@@ -142,7 +147,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
             thread.clone(),
             message("too many".into(), vec![hash; 129]),
             false,
-            Default::default(),
+            Acceptance::default(),
         )
         .await
         .unwrap_err();
@@ -171,7 +176,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
             thread,
             message("too much image data".into(), hashes),
             false,
-            Default::default(),
+            Acceptance::default(),
         )
         .await
         .unwrap_err();
@@ -205,7 +210,7 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
                 thread.clone(),
                 message(format!("image-{n}"), vec![hash]),
                 false,
-                Default::default(),
+                Acceptance::default(),
             )
             .await
             .unwrap()
@@ -236,7 +241,7 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
             thread,
             message("invalid oversized blob".into(), vec![hash]),
             false,
-            Default::default(),
+            Acceptance::default(),
         )
         .await
         .unwrap_err();

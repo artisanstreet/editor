@@ -62,12 +62,12 @@ impl WordBehavior {
     }
 }
 
-fn is_line_break(character: char) -> bool {
+const fn is_line_break(character: char) -> bool {
     matches!(character, '\n' | '\r')
 }
 
 /// Blink's `IsWhitespace`: only these four count, unlike `char::is_whitespace`.
-fn is_blink_whitespace(character: char) -> bool {
+const fn is_blink_whitespace(character: char) -> bool {
     matches!(character, '\u{00a0}' | ' ' | '\n' | '\t')
 }
 
@@ -333,7 +333,7 @@ pub enum SelectionUnit {
 impl SelectionUnit {
     /// The unit of a click with GPUI's `click_count`.
     #[must_use]
-    pub fn from_click_count(click_count: usize) -> Self {
+    pub const fn from_click_count(click_count: usize) -> Self {
         match click_count {
             0 | 1 => Self::Character,
             2 => Self::Word,

@@ -1,4 +1,5 @@
 //! Projection of original native glyph records into bounded visual row windows.
+//!
 //! No substring is independently shaped. The original fonts, glyph IDs,
 //! positions and cluster indices survive projection, including bidi runs.
 
@@ -23,7 +24,9 @@ pub enum ProjectionError {
     InvalidCluster,
 }
 
-/// Logical source fragments belonging to a projected visual row. Bidi visual
+/// Logical source fragments belonging to a projected visual row.
+///
+/// Bidi visual
 /// order can produce several disjoint fragments; one source_slice cannot
 /// represent that shape. This mapping never adds direction-control bytes.
 #[derive(Debug)]
@@ -31,12 +34,13 @@ pub struct ProjectedSource {
     pub ranges: Vec<Range<usize>>,
 }
 impl ProjectedSource {
-    pub fn resident_bytes(&self) -> usize {
+    pub const fn resident_bytes(&self) -> usize {
         self.ranges.capacity() * std::mem::size_of::<Range<usize>>()
     }
 }
 
 /// A visual cluster's original logical coverage and translated horizontal edges.
+///
 /// Several glyphs can belong to one cluster; hit testing must not invent an
 /// intermediate UTF-8 caret inside a ligature or combining sequence.
 #[derive(Debug, Clone)]
@@ -105,7 +109,7 @@ struct PhysicalIndex {
     base_rtl: bool,
 }
 impl PhysicalIndex {
-    fn resident_bytes(&self) -> usize {
+    const fn resident_bytes(&self) -> usize {
         std::mem::size_of::<WrappedLineLayout>()
             + 2 * std::mem::size_of::<usize>()
             + self.cluster_starts.capacity() * std::mem::size_of::<u32>()
@@ -124,6 +128,10 @@ pub struct ParagraphWrapIndex {
 }
 impl ParagraphWrapIndex {
     /// `physical` uses the same physical-line split as native text presentation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential pass; splitting it would only thread its locals through helpers"
+    )]
     pub fn from_native(
         physical: &[Arc<WrappedLineLayout>],
         text: &str,
@@ -163,6 +171,10 @@ impl ParagraphWrapIndex {
             let source = text
                 .get(source_start..source_end)
                 .ok_or(ProjectionError::InvalidCluster)?;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the text was checked to fit u32 offsets"
+            )]
             let mut clusters: Vec<u32> = native
                 .runs
                 .iter()
@@ -183,7 +195,7 @@ impl ParagraphWrapIndex {
                 .map(|index| {
                     bidi.levels
                         .get(*index as usize)
-                        .is_some_and(|level| level.is_rtl())
+                        .is_some_and(unicode_bidi::Level::is_rtl)
                 })
                 .collect();
             let index = PhysicalIndex {
@@ -241,7 +253,7 @@ impl ParagraphWrapIndex {
             physical: indexed,
         })
     }
-    pub fn row_count(&self) -> usize {
+    pub const fn row_count(&self) -> usize {
         self.rows.len()
     }
     pub fn resident_bytes(&self) -> usize {
@@ -256,7 +268,6 @@ impl ParagraphWrapIndex {
     }
 
     fn glyph_cell(
-        &self,
         row: &Row,
         indexed: &PhysicalIndex,
         native: &LineLayout,
@@ -337,7 +348,8 @@ impl ParagraphWrapIndex {
                         return Err(ProjectionError::WindowBudget);
                     }
                     cells.extend(
-                        (start..end).map(|glyph| self.glyph_cell(row, indexed, native, run, glyph)),
+                        (start..end)
+                            .map(|glyph| Self::glyph_cell(row, indexed, native, run, glyph)),
                     );
                 }
             }
@@ -360,6 +372,10 @@ impl ParagraphWrapIndex {
 
     /// The worker receives the original full native snapshot transiently and
     /// copies only these rows. Glyph positions are translated, never reshaped.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential pass; splitting it would only thread its locals through helpers"
+    )]
     pub fn project(
         &self,
         physical: &[Arc<WrappedLineLayout>],
@@ -428,7 +444,7 @@ impl ParagraphWrapIndex {
                     .enumerate()
                     .map(|(local_glyph, glyph)| {
                         let mut glyph = glyph.clone();
-                        let cell = self.glyph_cell(
+                        let cell = Self::glyph_cell(
                             row,
                             indexed,
                             native,

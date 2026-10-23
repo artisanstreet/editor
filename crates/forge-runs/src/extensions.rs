@@ -61,11 +61,14 @@ impl Hub {
         Ok(Customisation {
             prompt: self.launch_prompt().await?,
             mcp_servers: self
-                .store()
-                .setting("mcp_servers")
-                .await?
-                .and_then(|value| serde_json::from_value(value).ok())
-                .unwrap_or_default(),
+                .with_mcp_tokens(
+                    self.store()
+                        .setting("mcp_servers")
+                        .await?
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or_default(),
+                )
+                .await,
             ..self.skill_customisation().await?
         })
     }
@@ -117,8 +120,8 @@ impl Hub {
         self.skill_catalog().await
     }
 
-    /// Copies a skill found in the engines into Forge's skills folder, so
-    /// Forge keeps it in every engine.
+    /// Installs a quarantined skill: copies it into Forge's skills folder,
+    /// so Forge keeps it in every engine.
     pub async fn adopt_skill(&self, id: &str) -> Result<Vec<CatalogSkill>> {
         let customisation = self.skill_customisation().await?;
         let homes = self.engine_homes();
@@ -133,6 +136,64 @@ impl Hub {
         self.reconcile_skills().await?;
         self.store().bump_revision("skills_revision".into()).await?;
         self.skill_catalog().await
+    }
+
+    /// skills.sh's skills for `query`.
+    pub async fn marketplace_search(&self, query: &str) -> Result<Vec<artisan_api::Listing>> {
+        forge_engines::search_skills(self.engines().http(), &self.skills_sh_url(), query)
+            .await
+            .map_err(|error| refused(format!("Couldn't search skills.sh: {error:#}")))
+    }
+
+    /// Fetches a listed skill from its repository and installs it like
+    /// `skill_install`: into Forge's skills folder, on, in every engine.
+    pub async fn marketplace_install(&self, id: &str) -> Result<Vec<CatalogSkill>> {
+        let scratch = self
+            .data_dir()
+            .join("scratch")
+            .join(format!("marketplace-{}", artisan_api::now()));
+        let fetched = forge_engines::fetch_skill(self.engines().http(), id, &scratch).await;
+        let installed = match fetched {
+            Ok(folder) => self.install_skill(folder, false).await.map(drop),
+            Err(error) => Err(refused(format!("{error:#}"))),
+        };
+        // Best effort: a leftover scratch folder is harmless.
+        tokio::fs::remove_dir_all(&scratch).await.ok();
+        installed?;
+        self.skill_catalog().await
+    }
+
+    /// Deletes a quarantined skill.
+    pub async fn discard_skill(&self, id: &str) -> Result<Vec<CatalogSkill>> {
+        let customisation = self.skill_customisation().await?;
+        let homes = self.engine_homes();
+        let id = id.to_owned();
+        let discarded = self
+            .on_homes(move || forge_engines::discard_skill(&homes, &customisation, &id))
+            .await?;
+        if let Err(error) = discarded {
+            return Err(refused(format!("{error:#}")));
+        }
+        self.store().bump_revision("skills_revision".into()).await?;
+        self.skill_catalog().await
+    }
+
+    /// Copies a skill folder into Forge's skills folder and turns it on, so
+    /// Forge keeps it in every engine.
+    pub async fn install_skill(&self, from: PathBuf, replace: bool) -> Result<String> {
+        let customisation = self.skill_customisation().await?;
+        let homes = self.engine_homes();
+        let installed = self
+            .on_homes(move || forge_engines::install_skill(&homes, &customisation, &from, replace))
+            .await?;
+        // The customise layer phrases its refusals for the caller.
+        let name = installed.map_err(|error| refused(format!("{error:#}")))?;
+        self.store()
+            .set_skill_enabled(format!("local.{name}"), true)
+            .await?;
+        self.reconcile_skills().await?;
+        self.store().bump_revision("skills_revision".into()).await?;
+        Ok(name)
     }
 
     pub async fn reconcile_skills(&self) -> Result<()> {
@@ -280,7 +341,7 @@ impl Hub {
                 self.store()
                     .save_prompt_version(current.version, candidate.text.clone())
                     .await?
-                    .map_err(|_| refused("The global prompt was set up meanwhile."))?;
+                    .map_err(|_current| refused("The global prompt was set up meanwhile."))?;
                 self.reconcile_prompt(None).await
             }
             ResolvePrompt::UseEngine { engine } => {
@@ -288,7 +349,7 @@ impl Hub {
                 self.store()
                     .save_prompt_version(current.version, text)
                     .await?
-                    .map_err(|_| {
+                    .map_err(|_current| {
                         refused("The global prompt changed meanwhile. Review it and try again.")
                     })?;
                 self.reconcile_prompt(None).await

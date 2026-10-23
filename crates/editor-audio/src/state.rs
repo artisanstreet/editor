@@ -17,7 +17,7 @@ use crate::{PlaybackState, Snapshot};
 
 /// The state shared by the player, the decoder thread and the output.
 #[derive(Default)]
-pub(crate) struct Shared {
+pub struct Shared {
     inner: Mutex<Inner>,
 }
 
@@ -30,7 +30,7 @@ impl Shared {
 }
 
 /// The state behind [`Shared`]'s lock.
-pub(crate) struct Inner {
+pub struct Inner {
     /// Bumped by every `play` and `stop`; work tagged with an older value is stale.
     generation: u64,
     track: Option<PathBuf>,
@@ -60,7 +60,7 @@ impl Default for Inner {
 }
 
 impl Inner {
-    pub(crate) fn is_current(&self, generation: u64) -> bool {
+    pub(crate) const fn is_current(&self, generation: u64) -> bool {
         self.generation == generation
     }
 
@@ -162,7 +162,10 @@ impl Inner {
                 }
                 self.reset_phase = true;
             }
-            _ => return,
+            PlaybackState::Idle
+            | PlaybackState::Loading
+            | PlaybackState::Playing
+            | PlaybackState::Failed(_) => return,
         }
         self.state = PlaybackState::Playing;
         self.sync_output();
@@ -193,7 +196,8 @@ impl Inner {
             self.cursor = 0;
             // Older buffered chunks cannot satisfy a newer seek.
             while stream.pcm.try_recv().is_ok() {}
-            let _ = stream.signal.try_send(());
+            // A wakeup already queued covers this seek too.
+            stream.signal.try_send(()).ok();
             if self.state == PlaybackState::Ended {
                 self.state = PlaybackState::Paused;
             }
@@ -224,7 +228,7 @@ impl Inner {
                 )
             }),
             duration: self.stream.as_ref().map_or_else(
-                || self.audio.as_ref().map(|audio| audio.duration()),
+                || self.audio.as_ref().map(super::decode::Audio::duration),
                 |stream| stream.duration,
             ),
         }
@@ -276,12 +280,17 @@ impl Inner {
         let ended = if let Some(stream) = &mut self.stream {
             // Two source frames permit interpolation. A wider resampling step
             // may need more; the bounded producer queue caps this window.
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the step is a positive resampling ratio of a few frames"
+            )]
             let needed = step.ceil().max(1.0) as usize + 1;
             for frame in out.chunks_mut(out_channels.max(1)) {
                 while audio.frames().saturating_sub(self.cursor) < needed && !stream.ended {
                     match stream.pcm.try_recv() {
                         Ok(PcmEvent::Data { epoch, samples }) if epoch == stream.epoch => {
-                            audio.samples.extend(samples)
+                            audio.samples.extend(samples);
                         }
                         Ok(PcmEvent::End { epoch }) if epoch == stream.epoch => {
                             stream.ended = true;
@@ -530,6 +539,7 @@ mod streaming_tests {
         (inner, generation, sender, commands)
     }
     #[test]
+    #[expect(clippy::float_cmp, reason = "samples are copied, never computed")]
     fn a_temporary_underrun_does_not_end_the_track() {
         let (mut inner, generation, sender, _commands) = streaming();
         let mut first = [0.0; 4];
@@ -551,6 +561,7 @@ mod streaming_tests {
         assert_eq!(inner.snapshot().duration, Some(Duration::from_millis(400)));
     }
     #[test]
+    #[expect(clippy::float_cmp, reason = "samples are copied, never computed")]
     fn seeks_coalesce_and_old_pcm_cannot_replace_the_new_position() {
         let (mut inner, generation, sender, commands) = streaming();
         inner.seek(Duration::from_secs(2));

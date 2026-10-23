@@ -106,8 +106,9 @@ pub const AGENT_NAMES: [&str; 100] = [
     "Vilde",
 ];
 
-/// A name for the agent `seed` (its item id) that `taken` doesn't hold,
-/// case-insensitively. Base names come first; once every one is taken they
+/// A name for the agent `seed` (its item id) that `taken` doesn't hold.
+///
+/// Names compare case-insensitively. Base names come first; once every one is taken they
 /// repeat with a number ("Ada 2"). The seed picks among the names currently
 /// free; assignment depends on which agents have already reserved a name.
 /// Forge persists the chosen name so later reads do not reassign it.

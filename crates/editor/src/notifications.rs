@@ -1,11 +1,13 @@
 //! System notifications when a thread finishes, fails or asks for an
 //! answer, unless the user is already looking at it. Each Forge metadata
-//! event updates one transient thread mark.
+//! event updates one transient thread mark. A posted notification is
+//! withdrawn once its thread is read or answered: Windows keeps it in
+//! Notification Center, badging the taskbar button, until then.
 
 use artisan_api::{RunStatus, ThreadId};
 use editor_core::{HostData, HostId};
 use gpui::{SharedString, SystemNotification};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Mark {
@@ -18,6 +20,8 @@ pub struct Notifications {
     /// `None` until a host's first state arrived, so a fresh connection
     /// doesn't announce everything that happened while away.
     marks: HashMap<HostId, Option<HashMap<ThreadId, Mark>>>,
+    /// Threads whose notification may still sit in Notification Center.
+    posted: HashSet<(HostId, ThreadId)>,
 }
 
 impl Notifications {
@@ -41,8 +45,38 @@ impl Notifications {
         }
     }
 
-    pub fn retain_hosts(&mut self, live: &[HostId]) {
+    /// Returns the tags of a removed host's notifications to withdraw.
+    pub fn retain_hosts(&mut self, live: &[HostId]) -> Vec<SharedString> {
         self.marks.retain(|id, _| live.contains(id));
+        let mut gone = Vec::new();
+        self.posted.retain(|(host, thread)| {
+            let keep = live.contains(host);
+            if !keep {
+                gone.push(tag(host, thread));
+            }
+            keep
+        });
+        gone
+    }
+
+    /// The tags of this host's notifications whose threads no longer want the
+    /// user: read and not asking, or archived. A thread evicted from memory
+    /// keeps its notification.
+    pub fn withdraw(&mut self, host: &HostData) -> Vec<SharedString> {
+        let mut settled = Vec::new();
+        self.posted.retain(|(id, thread)| {
+            let wanted = id != &host.id
+                || host.is_waiting(thread)
+                || host
+                    .threads
+                    .get(thread)
+                    .is_none_or(|info| !info.archived && info.is_unread());
+            if !wanted {
+                settled.push(tag(id, thread));
+            }
+            wanted
+        });
+        settled
     }
 
     /// Inspect only the thread named by Forge's metadata event.
@@ -70,17 +104,32 @@ impl Notifications {
         if info.parent_thread_id.is_some() {
             return None;
         }
+        let engine = info.config.engine.display_name();
         let body = if now.waiting && !previous.waiting {
-            "needs your answer"
+            format!("{engine} asked you a question.")
         } else if previous.working && !now.working {
             match host.runs.get(thread).map(|run| run.status) {
-                Some(RunStatus::Done) => "finished",
-                Some(RunStatus::Failed | RunStatus::Interrupted | RunStatus::Refused) => "failed",
+                Some(RunStatus::Done) => "Finished.".to_owned(),
+                // Parked: Forge picks it up again by itself.
+                Some(RunStatus::Failed) if info.parked_until.is_some() => return None,
+                Some(RunStatus::Failed) => format!("{engine} ran into an error."),
+                // Forge carries the turn on when it starts again.
+                Some(RunStatus::Interrupted)
+                    if host
+                        .setting("continue_after_restart")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true) =>
+                {
+                    return None;
+                }
+                Some(RunStatus::Interrupted) => "Stopped because Forge shut down.".to_owned(),
+                Some(RunStatus::Refused) => format!("{engine} declined to continue."),
                 _ => return None,
             }
         } else {
             return None;
         };
+        self.posted.insert((host.id.clone(), thread.clone()));
         Some(SystemNotification {
             tag: tag(&host.id, thread),
             title: info

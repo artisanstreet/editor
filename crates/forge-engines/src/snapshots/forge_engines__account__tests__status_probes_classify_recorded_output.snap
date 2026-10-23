@@ -31,26 +31,4 @@ expression: results
         "codex",
         SignedOut,
     ),
-    (
-        "grok",
-        SignedOut,
-    ),
-    (
-        "grok",
-        SignedIn {
-            account: None,
-        },
-    ),
-    (
-        "cursor",
-        SignedOut,
-    ),
-    (
-        "cursor",
-        SignedIn {
-            account: Some(
-                "user@example.com",
-            ),
-        },
-    ),
 ]

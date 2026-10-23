@@ -8,12 +8,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) const CHUNK_FRAMES: usize = 2048;
+pub const CHUNK_FRAMES: usize = 2048;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
 /// The small interleaved window currently available to the output callback.
 #[derive(Debug)]
-pub(crate) struct Audio {
+pub struct Audio {
     pub(crate) samples: VecDeque<f32>,
     pub(crate) channels: usize,
     pub(crate) rate: u32,
@@ -37,14 +37,14 @@ impl Audio {
             .unwrap_or(usize::MAX)
     }
 }
-pub(crate) fn display_name(path: &Path) -> String {
+pub fn display_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
         .to_string_lossy()
         .into_owned()
 }
 
-pub(crate) struct StreamDecoder {
+pub struct StreamDecoder {
     source: Box<dyn Source + Send>,
     pub(crate) channels: usize,
     pub(crate) rate: u32,
@@ -106,7 +106,12 @@ fn describe(error: rodio::decoder::DecoderError) -> String {
     match error {
         rodio::decoder::DecoderError::UnrecognizedFormat
         | rodio::decoder::DecoderError::NoStreams => "Unsupported audio format".to_owned(),
-        error => format!("Couldn't decode audio: {error}"),
+        error @ (rodio::decoder::DecoderError::IoError(_)
+        | rodio::decoder::DecoderError::DecodeError(_)
+        | rodio::decoder::DecoderError::LimitError(_)
+        | rodio::decoder::DecoderError::ResetRequired) => {
+            format!("Couldn't decode audio: {error}")
+        }
     }
 }
 
@@ -133,7 +138,7 @@ fn decode_bytes(_: &Path, bytes: Arc<[u8]>) -> Result<Audio, String> {
 }
 
 /// Decoded float samples are normalized before gain arithmetic or output.
-pub(crate) fn sanitize(sample: f32) -> f32 {
+pub const fn sanitize(sample: f32) -> f32 {
     if sample.is_finite() {
         sample.clamp(-1.0, 1.0)
     } else {
@@ -148,7 +153,7 @@ pub(crate) fn sanitize(sample: f32) -> f32 {
 /// centre, LFE, then left/right pairs): the centre goes to both sides at
 /// -3 dB, the LFE is dropped, and each side is normalised by its total gain so
 /// the fold can't clip.
-pub(crate) fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>) {
+pub fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>) {
     if channels <= 2 {
         out.extend(frames.iter().copied().map(sanitize));
         return;
@@ -172,7 +177,7 @@ pub(crate) fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>
                 .zip(gains.clone())
                 .fold((0.0, 0.0), |(left, right), (sample, (l, r))| {
                     let sample = sanitize(*sample);
-                    (left + sample * l, right + sample * r)
+                    (sample.mul_add(l, left), sample.mul_add(r, right))
                 });
         out.push(left / left_total);
         out.push(right / right_total);
@@ -294,7 +299,7 @@ mod stream_budget_tests {
     #[test]
     fn a_long_source_decodes_only_one_bounded_chunk() {
         let reads = Arc::new(AtomicUsize::new(0));
-        let mut decoder = StreamDecoder::new(CountingSource(reads.clone())).unwrap();
+        let mut decoder = StreamDecoder::new(CountingSource(Arc::clone(&reads))).unwrap();
         assert_eq!(reads.load(Ordering::Relaxed), 0);
         assert_eq!(decoder.duration, Some(Duration::from_secs(3600)));
         assert_eq!(decoder.chunk().unwrap().len(), CHUNK_FRAMES);

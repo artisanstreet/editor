@@ -1,13 +1,16 @@
 //! Catalog-backed mention completion. Forge and Client share the token grammar.
-use crate::Composer;
-use artisan_api::McpServer;
+use crate::{Composer, ComposerTarget};
+use artisan_api::{McpServer, Thread, ThreadId};
 use artisan_mentions::{MAX_SKILL_NAME_BYTES, MentionNames, valid_mention_name};
-use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
+use editor_core::{DraggedThread, HostData};
+use editor_ui::theme::{
+    ActiveTheme as _, RadiusStep, RadiusTokens, TextStep, ThemeMode, TypographyTokens,
+};
 use editor_ui::{
     AssetId,
     asset_seam::asset_glyph,
     motion::MotionDuration,
-    picker_motion::{MenuEntrance, MenuMotion, MenuPhase, animate_menu},
+    picker_motion::{HoverSurface, MenuEntrance, MenuMotion, MenuPhase, animate_menu},
     text_editor::{ListKey, TextEditor, Token, Tokenizer},
     theme::{ArtisanTheme, ColorTokens},
 };
@@ -17,8 +20,14 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Task, Window, deferred, div, point, px,
 };
-use std::{cell::RefCell, ops::Range, rc::Rc, time::Duration};
-pub(crate) const MENU_SELECTOR: &str = "composer-mention-menu";
+use std::{
+    cell::RefCell,
+    hash::{Hash as _, Hasher as _},
+    ops::Range,
+    rc::Rc,
+    time::Duration,
+};
+pub const MENU_SELECTOR: &str = "composer-mention-menu";
 const ROW_HEIGHT: f32 = 36.0;
 const MENU_OPEN: Duration = MotionDuration::Fast.as_duration();
 const MENU_CLOSE: Duration = MotionDuration::Quick.as_duration();
@@ -27,18 +36,25 @@ const MENU_CLOSE: Duration = MotionDuration::Quick.as_duration();
 enum Kind {
     Skill,
     Connector,
+    /// A `/` command the engine reported; only at the start of a message.
+    Command,
+    /// Another thread on the host, by its title.
+    Thread,
 }
 impl Kind {
-    fn sigil(self) -> char {
+    const fn sigil(self) -> char {
         match self {
             Self::Skill => '$',
-            Self::Connector => '@',
+            Self::Connector | Self::Thread => '@',
+            Self::Command => '/',
         }
     }
-    fn icon(self) -> AssetId {
+    const fn icon(self) -> AssetId {
         match self {
             Self::Skill => AssetId::TABLER_FILE_SPARK,
             Self::Connector => AssetId::TABLER_PLUG_CONNECTED,
+            Self::Command => AssetId::TABLER_TERMINAL_2,
+            Self::Thread => AssetId::TABLER_MESSAGE_CIRCLE,
         }
     }
 }
@@ -55,12 +71,16 @@ struct Catalog {
     rows: Vec<Row>,
     skills: MentionNames,
     connectors: MentionNames,
+    /// Every titled thread's title, the newest first.
+    threads: Vec<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Trigger {
     sigil: char,
     range: Range<usize>,
     query: String,
+    /// Nothing but whitespace before it: where a `/` command can go.
+    at_start: bool,
 }
 fn trigger(text: &str, caret: usize) -> Option<Trigger> {
     if caret > text.len() || !text.is_char_boundary(caret) {
@@ -87,9 +107,11 @@ fn trigger(text: &str, caret: usize) -> Option<Trigger> {
         sigil,
         range: start..end,
         query: text[query_start..caret].to_owned(),
+        at_start: text[..start].trim().is_empty(),
     })
 }
-fn tokenizer(catalog: Rc<Catalog>, theme: ArtisanTheme) -> Tokenizer {
+fn tokenizer(catalog: Rc<Catalog>, theme: &ArtisanTheme) -> Tokenizer {
+    let theme = *theme;
     Rc::new(move |text| {
         let mut tokens = Vec::new();
         for (kind, names) in [
@@ -104,7 +126,9 @@ fn tokenizer(catalog: Rc<Catalog>, theme: ArtisanTheme) -> Tokenizer {
                         color: Some(
                             match kind {
                                 Kind::Skill => theme.colors.mention_skill,
-                                Kind::Connector => theme.colors.mention_connector,
+                                Kind::Connector | Kind::Command | Kind::Thread => {
+                                    theme.colors.mention_connector
+                                }
                             }
                             .to_paint(),
                         ),
@@ -114,25 +138,70 @@ fn tokenizer(catalog: Rc<Catalog>, theme: ArtisanTheme) -> Tokenizer {
                 });
             }
         }
-        tokens.sort_by_key(|token| token.range.start);
+        let titles = catalog
+            .threads
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        for mention in artisan_mentions::thread_mentions(text, &titles) {
+            tokens.push(Token {
+                range: mention.range,
+                glyph: Some(Kind::Thread.icon()),
+                style: HighlightStyle {
+                    color: Some(theme.colors.mention_connector.to_paint()),
+                    font_weight: Some(FontWeight::MEDIUM),
+                    ..Default::default()
+                },
+            });
+        }
+        // Only the commands Artisan gives a meaning of its own stand out;
+        // every other command is the engine's and reads as text.
+        if let Some(range) = artisan_mentions::special_command(text) {
+            tokens.push(Token {
+                range,
+                glyph: Some(AssetId::TABLER_TARGET_ARROW),
+                style: HighlightStyle {
+                    color: Some(theme.colors.mention_command.to_paint()),
+                    font_weight: Some(FontWeight::MEDIUM),
+                    ..Default::default()
+                },
+            });
+        }
+        // A connector and a thread can share an `@`, and a title can hold
+        // another mention: the earliest, then longest, wins.
+        tokens.sort_by_key(|token| (token.range.start, std::cmp::Reverse(token.range.end)));
+        let mut end = 0;
+        tokens.retain(|token| {
+            let keep = token.range.start >= end;
+            if keep {
+                end = token.range.end;
+            }
+            keep
+        });
         tokens
     })
 }
 #[derive(Default)]
-pub(crate) struct Mentions {
+pub struct Mentions {
     catalog: Rc<Catalog>,
-    catalog_identity: Option<(u64, usize)>,
+    catalog_identity: Option<(u64, usize, usize)>,
+    /// The titled threads the catalog was built from.
+    thread_identity: u64,
     mcp: Option<serde_json::Value>,
     trigger: Option<Trigger>,
     dismissed: Option<(usize, String)>,
     rows: Vec<usize>,
     highlighted: usize,
+    /// The shared pill under the highlighted row.
+    hover: HoverSurface,
     scroll: Option<gpui::ListState>,
     layout: Vec<(bool, bool)>,
     menu_focus: Option<gpui::FocusHandle>,
     motion: Rc<RefCell<MenuMotion>>,
     motion_task: Option<Task<()>>,
     shown: Vec<usize>,
+    /// The theme mode the editor's mention tokenizer colours with.
+    tokenizer_mode: Option<ThemeMode>,
 }
 impl Mentions {
     pub(crate) fn forget_skills(&mut self) {
@@ -147,16 +216,16 @@ impl Mentions {
             return;
         }
         let query = trigger.query.trim().to_lowercase();
-        let preferred = if trigger.sigil == '@' {
-            Kind::Connector
-        } else {
-            Kind::Skill
-        };
+        if trigger.sigil == '/' && !trigger.at_start {
+            return;
+        }
+        // `$` is only for skills; `@` names connectors, then threads.
         let mut ranked: Vec<_> = self
             .catalog
             .rows
             .iter()
             .enumerate()
+            .filter(|(_, row)| row.kind.sigil() == trigger.sigil)
             .filter_map(|(index, row)| {
                 let rank = if query.is_empty() || row.search_name.starts_with(&query) {
                     0
@@ -171,7 +240,7 @@ impl Mentions {
                 } else {
                     return None;
                 };
-                Some((row.kind != preferred, rank, index))
+                Some((row.kind == Kind::Thread, rank, index))
             })
             .collect();
         ranked.sort_unstable();
@@ -180,7 +249,24 @@ impl Mentions {
     }
 }
 impl Composer {
-    pub(crate) fn load_skills(&mut self, cx: &mut Context<Self>) {
+    fn set_mention_tokenizer(&mut self, catalog: Rc<Catalog>, cx: &mut Context<Self>) {
+        let theme = *cx.theme();
+        self.mentions.tokenizer_mode = Some(theme.colors.mode);
+        self.editor.update(cx, |editor, cx| {
+            editor.set_tokenizer(Some(tokenizer(catalog, &theme)), cx);
+        });
+    }
+    /// Recolours the mentions once the theme mode flips.
+    pub(crate) fn sync_mention_theme(&mut self, cx: &mut Context<Self>) {
+        if self
+            .mentions
+            .tokenizer_mode
+            .is_some_and(|mode| mode != cx.theme().colors.mode)
+        {
+            self.set_mention_tokenizer(Rc::clone(&self.mentions.catalog), cx);
+        }
+    }
+    pub(crate) fn load_skills(&self, cx: &mut Context<Self>) {
         if let Some(host) = self.host(cx) {
             host.update(cx, |host, cx| host.load_skill_catalog(false, cx));
         }
@@ -189,21 +275,38 @@ impl Composer {
         // Connecting -> Live can leave the catalog identity unchanged. Start the
         // host-owned read before the projection's identity early return.
         self.load_skills(cx);
+        let engine = self.effective_config(cx).map(|config| config.engine);
         let Some(host) = self.host(cx) else {
             return;
         };
         let state = host.read(cx);
+        let commands = engine
+            .and_then(|engine| state.engines.get(&engine))
+            .map(|status| std::sync::Arc::clone(&status.commands));
         let identity = (
             state.catalog_revision,
             state
                 .skill_catalog
                 .as_ref()
                 .map_or(0, |catalog| std::sync::Arc::as_ptr(catalog) as usize),
+            commands
+                .as_ref()
+                .map_or(0, |commands| commands.as_ptr() as usize),
         );
         let mcp = state.setting("mcp_servers");
-        if self.mentions.catalog_identity == Some(identity) && self.mentions.mcp.as_ref() == mcp {
+        let own = match &self.target {
+            ComposerTarget::Thread { thread, .. } => Some(thread),
+            ComposerTarget::NewThread { .. } => None,
+        };
+        let threads = mentionable_threads(state, own);
+        let thread_identity = thread_identity(&threads);
+        if self.mentions.catalog_identity == Some(identity)
+            && self.mentions.thread_identity == thread_identity
+            && self.mentions.mcp.as_ref() == mcp
+        {
             return;
         }
+        self.mentions.thread_identity = thread_identity;
         self.mentions.catalog_identity = Some(identity);
         self.mentions.mcp = mcp.cloned();
         let mut rows = Vec::new();
@@ -241,8 +344,17 @@ impl Composer {
                 );
             }
         }
+        for command in commands.iter().flat_map(|commands| commands.iter()) {
+            let description = match &command.hint {
+                Some(hint) if command.description.is_empty() => hint.clone(),
+                Some(hint) => format!("{hint} · {}", command.description),
+                None => command.description.clone(),
+            };
+            add(Kind::Command, command.name.clone(), description);
+        }
         rows.sort_by(|a, b| a.search_name.cmp(&b.search_name).then(a.name.cmp(&b.name)));
         rows.dedup_by(|a, b| a.kind == b.kind && a.name == b.name);
+        let titles = add_thread_rows(state, threads, &mut rows);
         let names = |kind| {
             rows.iter()
                 .filter(|row| row.kind == kind)
@@ -253,12 +365,10 @@ impl Composer {
             skills: MentionNames::new(&names(Kind::Skill)),
             connectors: MentionNames::new(&names(Kind::Connector)),
             rows,
+            threads: titles,
         });
-        self.mentions.catalog = catalog.clone();
-        let theme = *cx.theme();
-        self.editor.update(cx, |editor, cx| {
-            editor.set_tokenizer(Some(tokenizer(catalog, theme)), cx);
-        });
+        self.mentions.catalog = Rc::clone(&catalog);
+        self.set_mention_tokenizer(catalog, cx);
         self.mentions.rebuild_rows();
         self.update_list_keys(cx);
         cx.notify();
@@ -287,7 +397,7 @@ impl Composer {
         self.update_list_keys(cx);
         cx.notify();
     }
-    fn update_list_keys(&mut self, cx: &mut Context<Self>) {
+    fn update_list_keys(&self, cx: &mut Context<Self>) {
         let open = !self.mentions.rows.is_empty();
         self.editor
             .update(cx, |editor, _| editor.set_list_open(open));
@@ -300,6 +410,10 @@ impl Composer {
             .map(|&index| self.mentions.catalog.rows[index].name.clone())
             .collect()
     }
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "gpui subscribers receive the event by reference"
+    )]
     pub(crate) fn on_list_key(
         &mut self,
         _: Entity<TextEditor>,
@@ -312,7 +426,7 @@ impl Composer {
         }
         match key {
             ListKey::Up => {
-                self.mentions.highlighted = (self.mentions.highlighted + count - 1) % count
+                self.mentions.highlighted = (self.mentions.highlighted + count - 1) % count;
             }
             ListKey::Down => self.mentions.highlighted = (self.mentions.highlighted + 1) % count,
             ListKey::Accept => {
@@ -350,7 +464,7 @@ impl Composer {
         }
         cx.notify();
     }
-    fn choose_mention(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn choose_mention(&self, index: usize, cx: &mut Context<Self>) {
         let Some(trigger) = self.mentions.trigger.clone() else {
             return;
         };
@@ -379,13 +493,41 @@ impl Composer {
             };
         let mention = format!("{}{}{after}", row.kind.sigil(), row.name);
         self.editor.update(cx, |editor, cx| {
-            editor.replace(trigger.range.start..end, &mention, cx)
+            editor.replace(trigger.range.start..end, &mention, cx);
         });
     }
-    fn begin_mention_menu_motion(&mut self, open: bool, cx: &mut Context<Self>) {
+    /// A thread dragged onto the composer: `@title ` at the caret, else at
+    /// the end.
+    pub(crate) fn mention_thread(
+        &self,
+        thread: &DraggedThread,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if &thread.host != self.target.host()
+            || !artisan_mentions::valid_thread_title(&thread.title)
+        {
+            return;
+        }
+        self.editor.update(cx, |editor, cx| {
+            let text = editor.text();
+            let at = editor.caret().unwrap_or(text.len());
+            let before = text[..at].chars().next_back();
+            let lead = if before.is_none_or(char::is_whitespace) {
+                ""
+            } else {
+                " "
+            };
+            let mention = format!("{lead}@{} ", thread.title);
+            editor.replace(at..at, &mention, cx);
+        });
+        self.editor.focus_handle(cx).focus(window, cx);
+    }
+    fn begin_mention_menu_motion(&mut self, open: bool, cx: &Context<Self>) {
         let generation = {
             let mut motion = self.mentions.motion.borrow_mut();
             if open {
+                self.mentions.hover.clear();
                 motion.begin_open()
             } else {
                 motion.begin_close()
@@ -407,20 +549,25 @@ impl Composer {
         let duration = if open { MENU_OPEN } else { MENU_CLOSE };
         self.mentions.motion_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(duration).await;
-            let _ = this.update(cx, |composer, cx| {
+            this.update(cx, |composer, cx| {
                 if settle(composer) {
                     composer.mentions.motion_task = None;
                     cx.notify();
                 }
-            });
+            })
+            .ok();
         }));
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree for the menu and its rows, ported from the old Editor"
+    )]
     pub(crate) fn render_mention_menu(
         &mut self,
         window: &Window,
         desktop: &ColorTokens,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let desktop = *desktop;
         let focus = self
@@ -524,6 +671,9 @@ impl Composer {
             state.remeasure();
         }
         self.mentions.layout = layout;
+        self.mentions
+            .hover
+            .set_active(hover_id(self.mentions.highlighted));
         let list = gpui::list(
             state,
             cx.processor(move |this, entry: usize, _, cx| {
@@ -535,7 +685,11 @@ impl Composer {
                         .h(px(9.0))
                         .py(px(4.0))
                         .mx(px(10.0))
-                        .child(div().h(px(1.0)).bg(desktop.line.to_paint()))
+                        .child(
+                            div()
+                                .h(px(1.0))
+                                .bg(editor_ui::glass::glass_menu_line(&theme)),
+                        )
                         .into_any_element();
                 }
                 if let Some(kind) = heading {
@@ -545,11 +699,12 @@ impl Composer {
                         .flex()
                         .items_center()
                         .text_size(TypographyTokens::size(TextStep::Xs))
-                        .text_color(desktop.workspace_secondary.to_paint())
-                        .child(if kind == Kind::Skill {
-                            "Skills"
-                        } else {
-                            "Connectors"
+                        .text_color(desktop.text_muted.to_paint())
+                        .child(match kind {
+                            Kind::Command => "Commands",
+                            Kind::Skill => "Skills",
+                            Kind::Connector => "Connectors",
+                            Kind::Thread => "Threads",
                         })
                         .into_any_element();
                 }
@@ -571,60 +726,66 @@ impl Composer {
                     .focusable()
                     .tab_index(0)
                     .debug_selector(move || format!("{MENU_SELECTOR}-row-{index}"))
+                    .w_full()
                     .h(px(ROW_HEIGHT))
                     .px(px(10.0))
                     .flex()
                     .items_center()
                     .gap(px(10.0))
+                    .relative()
                     .rounded(RadiusTokens::value(RadiusStep::LgMid))
                     .text_size(TypographyTokens::size(TextStep::Sm))
                     .cursor_pointer()
-                    // The keyboard's row wears the shared highlight, never
-                    // the pointer's hover fill.
-                    .when(index == this.mentions.highlighted, |row| {
-                        editor_ui::hover_card::highlight_fill(row, &theme)
-                    })
+                    .child(this.mentions.hover.row_probe(hover_id(index)))
                     .child(
                         asset_glyph(row.kind.icon())
                             .size(px(16.0))
-                            .text_color(desktop.workspace_secondary.to_paint()),
+                            .text_color(desktop.text_muted.to_paint()),
                     )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .max_w(px(260.0))
+                    .map(|item| {
+                        let title = div()
                             .truncate()
-                            .text_color(desktop.workspace_foreground.to_paint())
-                            .child(row.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
+                            .text_color(desktop.text.to_paint())
+                            .child(row.title.clone());
+                        let description = div()
                             .min_w_0()
                             .truncate()
-                            .text_color(desktop.workspace_secondary.to_paint())
-                            .child(row.description.clone()),
-                    )
+                            .text_color(desktop.text_muted.to_paint())
+                            .child(row.description.clone());
+                        // A thread's title takes the row; its project sits
+                        // at the right edge.
+                        if row.kind == Kind::Thread {
+                            item.child(title.flex_1().min_w_0())
+                                .child(description.flex_shrink_0().max_w(px(180.0)))
+                        } else {
+                            item.child(title.flex_shrink_0().max_w(px(260.0)))
+                                .child(description.flex_1())
+                        }
+                    })
                     .on_hover(move |hovered: &bool, _, cx| {
                         if *hovered {
-                            let _ = hover_owner.update(cx, |this, cx| {
-                                this.mentions.highlighted = index;
-                                cx.notify();
-                            });
+                            hover_owner
+                                .update(cx, |this, cx| {
+                                    this.mentions.highlighted = index;
+                                    cx.notify();
+                                })
+                                .ok();
                         }
                     })
                     .on_click(move |_, window, cx| {
-                        let _ = owner.update(cx, |this, cx| {
-                            if this.mentions.motion.borrow().phase() != MenuPhase::Closing {
-                                this.choose_mention(index, cx);
-                                this.editor.focus_handle(cx).focus(window, cx);
-                            }
-                        });
+                        owner
+                            .update(cx, |this, cx| {
+                                if this.mentions.motion.borrow().phase() != MenuPhase::Closing {
+                                    this.choose_mention(index, cx);
+                                    this.editor.focus_handle(cx).focus(window, cx);
+                                }
+                            })
+                            .ok();
                     })
                     .into_any_element()
             }),
         )
-        .h(px(height.min(36.0 * 9.5 + 30.0)));
+        .h(px(height.min(36.0f32.mul_add(9.5, 30.0))));
         let card = div()
             .id(MENU_SELECTOR)
             .track_focus(&focus)
@@ -638,7 +799,17 @@ impl Composer {
                     &theme,
                     RadiusTokens::value(RadiusStep::X2l),
                 )
-                .child(div().p(px(6.0)).child(list)),
+                .child(
+                    div().p(px(6.0)).child(
+                        editor_ui::popover::menu_rows(
+                            &self.mentions.hover,
+                            &theme,
+                            cx.reduce_motion(),
+                        )
+                        .overflow_hidden()
+                        .child(list),
+                    ),
+                ),
             );
         let card = animate_menu(
             card,
@@ -661,6 +832,69 @@ impl Composer {
                 .into_any_element(),
         )
     }
+}
+/// The threads a mention can name, the most recently active first.
+fn mentionable_threads<'a>(
+    state: &'a HostData,
+    own: Option<&ThreadId>,
+) -> Vec<(&'a Thread, &'a str)> {
+    let mut threads: Vec<_> = state
+        .threads
+        .values()
+        .filter(|thread| Some(&thread.id) != own)
+        .filter_map(|thread| {
+            let title = thread.title.as_deref()?;
+            artisan_mentions::valid_thread_title(title).then_some((thread, title))
+        })
+        .collect();
+    threads.sort_by(|(a, _), (b, _)| {
+        (b.activity_seq, b.seq, &b.id).cmp(&(a.activity_seq, a.seq, &a.id))
+    });
+    threads
+}
+/// What the thread rows and the painted titles are built from.
+fn thread_identity(threads: &[(&Thread, &str)]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (thread, title) in threads {
+        (&thread.id, title, thread.archived, &thread.project_id).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+/// Threads follow the other rows in recency order, one row per title: a
+/// mention names the newest thread with it. Returns every title the
+/// tokenizer paints, archived threads' included.
+fn add_thread_rows(
+    state: &HostData,
+    threads: Vec<(&Thread, &str)>,
+    rows: &mut Vec<Row>,
+) -> Vec<String> {
+    let mut titles = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (thread, title) in threads {
+        if !seen.insert(title) {
+            continue;
+        }
+        titles.push(title.to_owned());
+        if thread.archived {
+            continue;
+        }
+        rows.push(Row {
+            kind: Kind::Thread,
+            name: title.to_owned(),
+            title: title.to_owned(),
+            description: state
+                .projects
+                .get(&thread.project_id)
+                .map(|project| project.name.clone())
+                .unwrap_or_default(),
+            search_name: title.to_lowercase(),
+            search_title: title.to_lowercase(),
+        });
+    }
+    titles
+}
+fn hover_id(index: usize) -> String {
+    format!("mention-{index}")
 }
 fn display_name(name: &str) -> String {
     let name = name.rsplit_once(':').map_or(name, |(_, name)| name);

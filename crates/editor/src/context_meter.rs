@@ -5,11 +5,11 @@ use editor_ui::hover_card::{glass_hover_card, hover_card_text, hover_card_title}
 use editor_ui::motion::MotionDuration;
 use editor_ui::picker_motion::{MenuEntrance, MenuMotion, animate_menu};
 use editor_ui::progress::Progress;
-use editor_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
+use editor_ui::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens};
 use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
 use gpui::{
-    App, Bounds, Div, Hsla, IntoElement, Path, PathBuilder, Pixels, RenderOnce, Stateful,
-    StatefulInteractiveElement as _, Window, canvas, div, point, px,
+    App, Background, Bounds, Div, Hsla, IntoElement, Path, PathBuilder, Pixels, RenderOnce,
+    Stateful, StatefulInteractiveElement as _, Window, canvas, div, point, px,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -28,7 +28,7 @@ const WARN_FROM: f64 = 50.0;
 const DANGER_FROM: f64 = 80.0;
 
 /// One run's context reading.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextReading {
     pub model_name: String,
     pub context_tokens: u64,
@@ -53,15 +53,37 @@ impl ContextReading {
         (self.context_tokens as f64 / self.window_tokens as f64 * 100.0).clamp(0.0, 100.0)
     }
 
-    fn color(&self, theme: &ArtisanTheme) -> Hsla {
+    /// The warning or danger tone once the window fills; `None` while it is
+    /// unremarkable and the gauge wears the send button's blue.
+    fn alarm(&self, theme: &ArtisanTheme) -> Option<Hsla> {
         let percent = self.percent();
         if percent > DANGER_FROM {
-            theme.colors.banner_error.to_paint()
+            Some(theme.colors.banner_error.text.to_paint())
         } else if percent > WARN_FROM {
-            theme.colors.banner_warning.to_paint()
+            Some(theme.colors.banner_warning.text.to_paint())
         } else {
-            theme.colors.banner_info.to_paint()
+            None
         }
+    }
+
+    /// The ring's stroke: the button's lighter blue reads on the titlebar.
+    fn color(&self, theme: &ArtisanTheme) -> Hsla {
+        self.alarm(theme)
+            .unwrap_or_else(|| theme.colors.action_top.to_paint())
+    }
+
+    /// The bar's fill: the send button's blues, dark to light along the bar.
+    fn fill(&self, theme: &ArtisanTheme) -> Background {
+        self.alarm(theme).map_or_else(
+            || {
+                gpui::linear_gradient(
+                    90.0,
+                    gpui::linear_color_stop(theme.colors.action_bottom.to_paint(), 0.0),
+                    gpui::linear_color_stop(theme.colors.action_top.to_paint(), 1.0),
+                )
+            },
+            Into::into,
+        )
     }
 
     fn percent_sentence(&self) -> String {
@@ -109,8 +131,11 @@ pub struct ContextMeter {
     theme: ArtisanTheme,
 }
 impl ContextMeter {
-    pub fn new(reading: ContextReading, theme: ArtisanTheme) -> Self {
-        Self { reading, theme }
+    pub const fn new(reading: ContextReading, theme: &ArtisanTheme) -> Self {
+        Self {
+            reading,
+            theme: *theme,
+        }
     }
 }
 struct MeterHover {
@@ -149,12 +174,13 @@ impl MeterHover {
             .as_duration();
             self.settle = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(duration).await;
-                let _ = this.update(cx, |this, cx| {
+                this.update(cx, |this, cx| {
                     if settle(this) {
                         this.settle = None;
                         cx.notify();
                     }
-                });
+                })
+                .ok();
             }));
         }
         cx.notify();
@@ -165,20 +191,20 @@ impl RenderOnce for ContextMeter {
         let Self { reading, theme } = self;
         let hover = window.use_keyed_state("context-meter-hover", cx, |_, _| MeterHover {
             open: false,
-            motion: Default::default(),
-            bounds: Default::default(),
+            motion: Rc::default(),
+            bounds: Rc::default(),
             settle: None,
         });
         let state = hover.read(cx);
-        let bounds = state.bounds.clone();
-        let motion = state.motion.clone();
+        let bounds = Rc::clone(&state.bounds);
+        let motion = Rc::clone(&state.motion);
         let painted = motion.borrow().painted();
         div()
             .child(context_ring(&reading, &theme).on_hover(move |over, _, cx| {
                 hover.update(cx, |state, cx| state.set_open(*over, cx));
             }))
             .on_children_prepainted({
-                let bounds = bounds.clone();
+                let bounds = Rc::clone(&bounds);
                 move |children, _, _| {
                     if let Some(first) = children.first() {
                         bounds.set(*first);
@@ -209,11 +235,16 @@ impl RenderOnce for ContextMeter {
     }
 }
 
+/// The old foreground at 16% over the header's background: gray 4.
+fn track_color(theme: &ArtisanTheme) -> Hsla {
+    theme.colors.gray.step(4).to_paint()
+}
+
 /// The ring gauge, the hover trigger of [`context_card`].
 #[must_use]
 fn context_ring(reading: &ContextReading, theme: &ArtisanTheme) -> Stateful<Div> {
     let ring_color = reading.color(theme);
-    let track_color = theme.colors.foreground.with_alpha(0.16).to_paint();
+    let track_color = track_color(theme);
     #[expect(clippy::cast_possible_truncation, reason = "a clamped 0..=1 share")]
     let share = (reading.percent() / 100.0) as f32;
     // Track and arc share one centre, radius, and stroke, so the arc lies
@@ -302,7 +333,10 @@ fn context_card(reading: &ContextReading, theme: &ArtisanTheme) -> Div {
                     Some(compact_tokens(reading.window_tokens)),
                 )),
         )
-        .child(Progress::new("context-progress", *theme, fill));
+        .child(Progress::new("context-progress", *theme, fill).tones(
+            reading.fill(theme),
+            theme.colors.text.at(Opacity::ProgressTrack).to_paint(),
+        ));
     div()
         .debug_selector(|| format!("{CONTEXT_METER_SELECTOR}-card"))
         .w(px(280.0))
@@ -379,7 +413,7 @@ mod native_tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().p(px(40.0)).child(ContextMeter::new(
                 ContextReading::new("Model".into(), self.tokens, 200_000).unwrap(),
-                ArtisanTheme::resolved(),
+                &ArtisanTheme::resolved(),
             ))
         }
     }

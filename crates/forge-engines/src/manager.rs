@@ -5,7 +5,9 @@ use crate::catalog::{self, Listing, Program};
 use crate::engines::{Artifact, Feed, compare_versions, host_spec, meets_minimum};
 use crate::install::{self, Event, Layout, Machine, Resolved};
 use anyhow::{Context, Result, bail};
-use artisan_api::{EngineId, EngineStatus, InstallState, Integrity, Model, PublishedVersion};
+use artisan_api::{
+    EngineId, EngineStatus, InstallState, Integrity, Model, PublishedVersion, SlashCommand,
+};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -21,6 +23,10 @@ pub struct Engines {
 
 /// Full metadata snapshots and a precise install-progress delta.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a full status is sent whole to every listener; the progress delta is the frequent one and stays small"
+)]
 pub enum EngineChange {
     Full(EngineStatus),
     Install {
@@ -48,6 +54,8 @@ struct Slot {
     model_reading: tokio::sync::Mutex<()>,
     /// The vendor's versions, newest first, once asked for.
     versions: Mutex<Arc<[PublishedVersion]>>,
+    /// The `/` commands the engine last reported, by a probe or a run.
+    commands: Mutex<Arc<[SlashCommand]>>,
 }
 
 #[derive(Default)]
@@ -81,7 +89,7 @@ impl Drop for Slot {
 /// Keeps an installed binary's files available until its run finishes.
 pub struct BinaryLease {
     path: PathBuf,
-    _usage: std::fs::File,
+    usage: std::fs::File,
 }
 impl BinaryLease {
     #[must_use]
@@ -95,7 +103,7 @@ impl Drop for BinaryLease {
         // A concurrent fork can briefly inherit this open file description.
         // Release the owner's lock explicitly instead of waiting for every
         // inherited descriptor to close at exec.
-        if let Err(error) = fs2::FileExt::unlock(&self._usage) {
+        if let Err(error) = fs2::FileExt::unlock(&self.usage) {
             tracing::warn!(path = %self.path.display(), %error, "release engine binary lease");
         }
     }
@@ -116,6 +124,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Engines {
+    /// Forge's HTTP client, for what the engines' vendors and directories
+    /// serve.
+    #[must_use]
+    pub fn http(&self) -> &reqwest::Client {
+        &self.inner.http
+    }
+
     #[must_use]
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
         let layout = Layout::new(data_dir.as_ref());
@@ -133,6 +148,7 @@ impl Engines {
                 sign_in_follower: Mutex::new(None),
                 model_reading: tokio::sync::Mutex::new(()),
                 versions: Mutex::new(Arc::from([])),
+                commands: Mutex::new(Arc::from([])),
             }
         });
         let http = reqwest::Client::builder()
@@ -172,10 +188,92 @@ impl Engines {
             sign_in: slot.sign_in.state(),
             models: listing.models,
             default_model: listing.default,
+            commands: self.commands(engine),
             usage: self.inner.usage.cached(engine),
             integrity: integrity(engine),
             versions: self.published(engine),
+            claude_ai: (engine == EngineId::Claude)
+                .then(|| crate::claudeai::Session::state(&self.home(engine))),
         }
+    }
+
+    /// Something about the engine changed outside the manager (a run marked
+    /// its claude.ai session): tell whoever shows its status.
+    pub fn changed(&self, engine: EngineId) {
+        self.publish(engine);
+    }
+
+    /// Checks a claude.ai session a browser captured, and keeps it for
+    /// Native Claude Mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error when the browser was not signed in or claude.ai
+    /// does not take the session.
+    pub async fn claude_ai_sign_in(
+        &self,
+        captured: artisan_api::ClaudeAiSession,
+    ) -> Result<artisan_api::ClaudeAiState> {
+        use crate::claudeai::{Session, Transport};
+        anyhow::ensure!(
+            captured.signed_in(),
+            "that browser is not signed in to claude.ai"
+        );
+        anyhow::ensure!(
+            !captured.user_agent.trim().is_empty(),
+            "the session has no user agent"
+        );
+        let home = self.home(EngineId::Claude);
+        let org = captured
+            .cookie("lastActiveOrg")
+            .unwrap_or_default()
+            .to_owned();
+        let transport = Transport::new(&home, Session::new(captured, org, None))?;
+        let bootstrap = transport
+            .get("/api/bootstrap")
+            .await
+            .context("claude.ai did not take the session")?;
+        let account = &bootstrap["account"];
+        let mut session = transport.session();
+        session.account = account["email_address"]
+            .as_str()
+            .or_else(|| account["full_name"].as_str())
+            .map(str::to_owned);
+        if session.org_uuid.is_empty() {
+            // The organization that can chat; the first one otherwise.
+            let memberships = account["memberships"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let chats = |membership: &&serde_json::Value| {
+                membership["organization"]["capabilities"]
+                    .as_array()
+                    .is_some_and(|capabilities| capabilities.iter().any(|c| c == "chat"))
+            };
+            memberships
+                .iter()
+                .find(chats)
+                .or_else(|| memberships.first())
+                .and_then(|membership| membership["organization"]["uuid"].as_str())
+                .context("claude.ai named no organization for the account")?
+                .clone_into(&mut session.org_uuid);
+        }
+        session
+            .save(&home)
+            .context("keeping the claude.ai session")?;
+        self.publish(EngineId::Claude);
+        Ok(session.status())
+    }
+
+    /// Forgets the claude.ai session.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error if the session cannot be removed.
+    pub fn claude_ai_sign_out(&self) -> Result<()> {
+        crate::claudeai::Session::remove(&self.home(EngineId::Claude))?;
+        self.publish(EngineId::Claude);
+        Ok(())
     }
 
     /// Current scalar installation state without cloning any catalog metadata.
@@ -184,39 +282,46 @@ impl Engines {
     }
 
     /// The listed versions with where each stands on disk now.
+    /// What the engine reported, then what Forge reads for it that the
+    /// engine didn't name.
+    fn commands(&self, engine: EngineId) -> Arc<[SlashCommand]> {
+        let reported = lock(&self.slot(engine).commands).clone();
+        let own: Vec<SlashCommand> = crate::commands::own(engine)
+            .into_iter()
+            .filter(|own| !reported.iter().any(|command| command.name == own.name))
+            .collect();
+        if own.is_empty() {
+            return reported;
+        }
+        reported.iter().cloned().chain(own).collect()
+    }
+
+    /// The engine said which `/` commands it reads now: a probe or a run
+    /// reported them.
+    pub fn set_commands(&self, engine: EngineId, commands: Vec<SlashCommand>) {
+        let commands: Arc<[SlashCommand]> = crate::commands::reported(commands).into();
+        {
+            let mut current = lock(&self.slot(engine).commands);
+            if *current == commands {
+                return;
+            }
+            *current = commands;
+        }
+        self.publish(engine);
+    }
+
     fn published(&self, engine: EngineId) -> Arc<[PublishedVersion]> {
         lock(&self.slot(engine).versions).clone()
     }
 
     /// Asks the vendor which versions it publishes ("Choose version").
-    /// Vendors without a list offer their latest release and whatever this
-    /// Forge has installed.
     pub async fn list_versions(&self, engine: EngineId) -> Result<Arc<[PublishedVersion]>> {
         let feed = artifact(engine)?.feed;
-        let http = &self.inner.http;
-        let listed = install::published_versions(http, feed)
+        let versions = install::published_versions(&self.inner.http, feed)
             .await
             .with_context(|| format!("listing {} versions", engine.display_name()))?;
-        let latest = if listed.is_none() {
-            match install::latest_version(http, feed).await {
-                Ok(latest) => Some(latest),
-                Err(error) => {
-                    tracing::debug!(%engine, error = format!("{error:#}"), "no latest version for the list");
-                    None
-                }
-            }
-        } else {
-            None
-        };
         let layout = self.inner.layout.clone();
         let published = tokio::task::spawn_blocking(move || {
-            let mut versions = listed.unwrap_or_else(|| layout.installed_versions(engine));
-            if let Some(latest) = latest {
-                versions.push(latest);
-            }
-            versions.sort_by(|left, right| compare_versions(right, left));
-            versions.dedup();
-            versions.truncate(install::MAX_LISTED_VERSIONS);
             let current = layout.current(engine);
             versions
                 .into_iter()
@@ -268,19 +373,24 @@ impl Engines {
     }
 
     fn publish(&self, engine: EngineId) {
-        let _ = self
-            .inner
+        // Nobody listening is fine.
+        self.inner
             .statuses
-            .send(EngineChange::Full(self.status(engine)));
+            .send(EngineChange::Full(self.status(engine)))
+            .ok();
     }
 
     fn apply(&self, engine: EngineId, event: &Event) {
         lock(&self.slot(engine).install).handle(event);
         if matches!(event, Event::Progress { .. }) {
-            let _ = self.inner.statuses.send(EngineChange::Install {
-                engine,
-                install: self.install_state(engine),
-            });
+            // Nobody listening is fine.
+            self.inner
+                .statuses
+                .send(EngineChange::Install {
+                    engine,
+                    install: self.install_state(engine),
+                })
+                .ok();
         } else {
             self.publish(engine);
         }
@@ -297,10 +407,7 @@ impl Engines {
         let usage = install::usage_lock(&self.home(engine)).ok()?;
         fs2::FileExt::lock_shared(&usage).ok()?;
         let path = self.binary(engine)?;
-        Some(BinaryLease {
-            path,
-            _usage: usage,
-        })
+        Some(BinaryLease { path, usage })
     }
 
     /// The engine's `HOME`: `<data>/engines/<engine>/home`.
@@ -465,11 +572,14 @@ impl Engines {
         match &result {
             Ok(version) => {
                 let engines = self.clone();
-                let _ = tokio::task::spawn_blocking(move || {
+                if let Err(error) = tokio::task::spawn_blocking(move || {
                     install::prune(&engines.inner.layout, engine);
                     engines.reconcile_install(engine);
                 })
-                .await;
+                .await
+                {
+                    tracing::warn!(%engine, %error, "pruning and reconciling after an install");
+                }
                 self.apply(
                     engine,
                     &Event::Done {
@@ -537,15 +647,17 @@ impl Engines {
             .sign_in
             .with_context(observed_account, || {
                 let cache = lock(&slot.models);
-                (cache.generation == observed.0 && cache.reads != observed.1).then(|| match &cache
-                    .error
-                {
-                    Some(error) => Err(anyhow::anyhow!(error.clone())),
-                    None => Ok(cache
-                        .listing
-                        .as_ref()
-                        .map(|listing| listing.models.clone())
-                        .unwrap_or_default()),
+                (cache.generation == observed.0 && cache.reads != observed.1).then(|| {
+                    cache.error.as_ref().map_or_else(
+                        || {
+                            Ok(cache
+                                .listing
+                                .as_ref()
+                                .map(|listing| Arc::clone(&listing.models))
+                                .unwrap_or_default())
+                        },
+                        |error| Err(anyhow::anyhow!(error.clone())),
+                    )
                 })
             })
             .flatten()
@@ -574,9 +686,12 @@ impl Engines {
                 }
                 cache.reads += 1;
                 match result {
-                    Ok(listing) => {
+                    Ok(mut listing) => {
+                        if let Some(commands) = listing.commands.take() {
+                            *lock(&slot.commands) = crate::commands::reported(commands).into();
+                        }
                         let listing = CachedListing::from(listing);
-                        let models = listing.models.clone();
+                        let models = Arc::clone(&listing.models);
                         cache.error = None;
                         cache.listing = Some(listing);
                         Some(Ok(models))
@@ -591,13 +706,13 @@ impl Engines {
                 }
             })
             .flatten();
-        match committed {
-            Some(result) => {
+        committed.map_or_else(
+            || Ok(Arc::from([])),
+            |result| {
                 self.publish(engine);
                 result
-            }
-            None => Ok(Arc::from([])),
-        }
+            },
+        )
     }
 
     fn invalidate_models(&self, engine: EngineId) {
@@ -628,7 +743,7 @@ fn integrity(engine: EngineId) -> Option<Integrity> {
     Some(match host_spec(engine).artifact?.feed {
         Feed::Claude { .. } => Integrity::VendorSha256,
         Feed::Npm { .. } => Integrity::NpmSha512,
-        Feed::Grok { .. } | Feed::Cursor { .. } => Integrity::HttpsOnly,
+        Feed::Release { .. } => Integrity::ArtisanSha256,
     })
 }
 
@@ -641,21 +756,31 @@ fn artifact(engine: EngineId) -> Result<Artifact> {
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod context_tests {
     use super::*;
     use artisan_api::SignInState;
     use std::os::unix::fs::PermissionsExt as _;
 
-    fn cursor_manager(script: &str) -> (tempfile::TempDir, Engines, PathBuf) {
+    /// A Codex stand-in: a shell script answering the CLI calls Forge makes.
+    /// `app_server <model>` plays `codex app-server`: it answers
+    /// `initialize`, takes `initialized`, and lists `<model>` as the default
+    /// once `model/list` arrives.
+    fn codex_manager(script: &str) -> (tempfile::TempDir, Engines, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
         let layout = Layout::new(directory.path());
-        let engine = EngineId::Cursor;
+        let engine = EngineId::Codex;
         let home = layout.home(engine);
         std::fs::create_dir_all(&home).unwrap();
         let version = layout.version_dir(engine, "1.0.0");
-        std::fs::create_dir_all(&version).unwrap();
         let binary = version.join(host_spec(engine).artifact.unwrap().entry);
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        let script = script.replacen(
+            '\n',
+            "\napp_server() {\n read -r _; echo '{\"id\":1,\"result\":{}}'\n read -r _\n read -r _; printf '{\"id\":2,\"result\":{\"data\":[{\"id\":\"%s\",\"isDefault\":true}]}}\\n' \"$1\"\n}\n",
+            1,
+        );
         std::fs::write(&binary, script).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
         install::switch(&layout, engine, "1.0.0").unwrap();
@@ -675,21 +800,21 @@ mod context_tests {
 
     #[tokio::test]
     async fn login_links_are_still_parsed_after_the_retained_log_budget() {
-        let (_directory, engines, _home) = cursor_manager(
+        let (_directory, engines, _home) = codex_manager(
             r#"#!/bin/sh
-case "$1" in
- login) yes 'noise' | head -n 15000; echo 'https://login.example.test/login'; sleep 30 ;;
- status) echo 'Logged in' ;;
- models) echo '* model1 (default)' ;;
+case "$*" in
+ "login --device-auth") yes 'noise' | head -n 15000; echo 'https://login.example.test/login'; sleep 30 ;;
+ "login status") echo 'Logged in' ;;
+ "app-server --stdio") app_server model1 ;;
 esac
 "#,
         );
-        engines.login(EngineId::Cursor).unwrap();
-        wait_until(|| matches!(engines.status(EngineId::Cursor).sign_in, SignInState::LoggingIn { url: Some(url), .. } if url == "https://login.example.test/login")).await;
-        engines.cancel_login(EngineId::Cursor);
+        engines.login(EngineId::Codex).unwrap();
+        wait_until(|| matches!(engines.status(EngineId::Codex).sign_in, SignInState::LoggingIn { url: Some(url), .. } if url == "https://login.example.test/login")).await;
+        engines.cancel_login(EngineId::Codex);
         wait_until(|| {
             matches!(
-                engines.status(EngineId::Cursor).sign_in,
+                engines.status(EngineId::Codex).sign_in,
                 SignInState::SignedIn { .. }
             )
         })
@@ -698,23 +823,23 @@ esac
 
     #[tokio::test]
     async fn overlapping_model_refreshes_share_one_native_probe() {
-        let (_directory, engines, home) = cursor_manager(
+        let (_directory, engines, home) = codex_manager(
             r#"#!/bin/sh
-printf 'probe\n' >> "$HOME/calls"
-touch "$HOME/started"
-while [ ! -e "$HOME/release" ]; do sleep 0.01; done
-printf '* model1 (default)\n'
+printf 'probe\n' >> "$PWD/calls"
+touch "$PWD/started"
+while [ ! -e "$PWD/release" ]; do sleep 0.01; done
+app_server model1
 "#,
         );
         let owner = engines.clone();
         let first =
-            tokio::spawn(async move { owner.refresh_models(EngineId::Cursor).await.unwrap() });
+            tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
         wait_until(|| home.join("started").exists()).await;
         let owner = engines.clone();
         let (started, waiting) = tokio::sync::oneshot::channel();
         let second = tokio::spawn(async move {
-            let _ = started.send(());
-            owner.refresh_models(EngineId::Cursor).await.unwrap()
+            started.send(()).ok();
+            owner.refresh_models(EngineId::Codex).await.unwrap()
         });
         waiting.await.unwrap();
         std::fs::write(home.join("release"), "").unwrap();
@@ -730,31 +855,30 @@ printf '* model1 (default)\n'
 
     #[tokio::test]
     async fn old_models_cannot_return_after_an_account_aba() {
-        let (_directory, engines, home) = cursor_manager(
+        let (_directory, engines, home) = codex_manager(
             r#"#!/bin/sh
-case "$1" in
- status) if [ -e "$HOME/out" ]; then echo 'Not logged in'; else echo 'Logged in'; fi ;;
- logout) touch "$HOME/out" ;;
- login) rm -f "$HOME/out" ;;
- models) model=$(cat "$HOME/model"); touch "$HOME/started"; while [ ! -e "$HOME/release" ]; do sleep 0.01; done; printf '* %s (default)\n' "$model" ;;
+case "$*" in
+ "login status") if [ -e "$PWD/out" ]; then echo 'Not logged in'; else echo 'Logged in'; fi ;;
+ logout) touch "$PWD/out" ;;
+ "login --device-auth") rm -f "$PWD/out" ;;
+ "app-server --stdio") model=$(cat "$PWD/model"); touch "$PWD/started"; while [ ! -e "$PWD/release" ]; do sleep 0.01; done; app_server "$model" ;;
 esac
 "#,
         );
         std::fs::write(home.join("model"), "old-model1").unwrap();
         assert_eq!(
-            engines.check_sign_in(EngineId::Cursor).await,
+            engines.check_sign_in(EngineId::Codex).await,
             SignInState::SignedIn { account: None }
         );
         let owner = engines.clone();
-        let old =
-            tokio::spawn(async move { owner.refresh_models(EngineId::Cursor).await.unwrap() });
+        let old = tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
         wait_until(|| home.join("started").exists()).await;
-        engines.logout(EngineId::Cursor).unwrap();
-        wait_until(|| engines.status(EngineId::Cursor).sign_in == SignInState::SignedOut).await;
+        engines.logout(EngineId::Codex).unwrap();
+        wait_until(|| engines.status(EngineId::Codex).sign_in == SignInState::SignedOut).await;
         std::fs::write(home.join("model"), "new-model2").unwrap();
-        engines.login(EngineId::Cursor).unwrap();
+        engines.login(EngineId::Codex).unwrap();
         wait_until(|| {
-            engines.status(EngineId::Cursor).sign_in == SignInState::SignedIn { account: None }
+            engines.status(EngineId::Codex).sign_in == SignInState::SignedIn { account: None }
         })
         .await;
         std::fs::write(home.join("release"), "").unwrap();
@@ -764,7 +888,7 @@ esac
         );
         wait_until(|| {
             engines
-                .status(EngineId::Cursor)
+                .status(EngineId::Codex)
                 .models
                 .iter()
                 .any(|model| model.id == "new-model2")
@@ -772,7 +896,7 @@ esac
         .await;
         assert!(
             !engines
-                .status(EngineId::Cursor)
+                .status(EngineId::Codex)
                 .models
                 .iter()
                 .any(|model| model.id == "old-model1")
@@ -781,34 +905,32 @@ esac
 
     #[tokio::test]
     async fn login_pins_the_selected_version_until_cancellation_and_probe_finish() {
-        let (directory, engines, home) = cursor_manager(
+        let (directory, engines, home) = codex_manager(
             r#"#!/bin/sh
-case "$1" in
- login) touch "$HOME/started"; while :; do sleep 1; done ;;
- status) echo 'Logged in' ;;
- models) echo '* model1 (default)' ;;
+case "$*" in
+ "login --device-auth") touch "$PWD/started"; while :; do sleep 1; done ;;
+ "login status") echo 'Logged in' ;;
+ "app-server --stdio") app_server model1 ;;
 esac
 "#,
         );
-        let old_binary = engines.binary(EngineId::Cursor).unwrap();
-        engines.login(EngineId::Cursor).unwrap();
+        let old_binary = engines.binary(EngineId::Codex).unwrap();
+        engines.login(EngineId::Codex).unwrap();
         wait_until(|| home.join("started").exists()).await;
         let layout = Layout::new(directory.path());
         for version in ["2.0.0", "3.0.0"] {
-            let next = layout.version_dir(EngineId::Cursor, version);
-            std::fs::create_dir_all(&next).unwrap();
-            std::fs::copy(
-                &old_binary,
-                next.join(host_spec(EngineId::Cursor).artifact.unwrap().entry),
-            )
-            .unwrap();
-            install::switch(&layout, EngineId::Cursor, version).unwrap();
+            let next = layout
+                .version_dir(EngineId::Codex, version)
+                .join(host_spec(EngineId::Codex).artifact.unwrap().entry);
+            std::fs::create_dir_all(next.parent().unwrap()).unwrap();
+            std::fs::copy(&old_binary, next).unwrap();
+            install::switch(&layout, EngineId::Codex, version).unwrap();
         }
-        install::prune(&layout, EngineId::Cursor);
+        install::prune(&layout, EngineId::Codex);
         assert!(old_binary.is_file());
-        engines.cancel_login(EngineId::Cursor);
+        engines.cancel_login(EngineId::Codex);
         wait_until(|| {
-            install::prune(&layout, EngineId::Cursor);
+            install::prune(&layout, EngineId::Codex);
             !old_binary.exists()
         })
         .await;
@@ -816,26 +938,26 @@ esac
 
     #[tokio::test]
     async fn present_install_reconciles_a_failed_update_without_another_download() {
-        let (_directory, engines, _home) = cursor_manager("#!/bin/sh\necho '* model1'\n");
+        let (_directory, engines, _home) = codex_manager("#!/bin/sh\necho 'Logged in'\n");
         engines.apply(
-            EngineId::Cursor,
+            EngineId::Codex,
             &Event::Start {
                 version: "2.0.0".into(),
             },
         );
         engines.apply(
-            EngineId::Cursor,
+            EngineId::Codex,
             &Event::Fail {
                 message: "download failed".into(),
             },
         );
         assert!(matches!(
-            engines.status(EngineId::Cursor).install,
+            engines.status(EngineId::Codex).install,
             artisan_api::InstallState::Failed { .. }
         ));
-        assert_eq!(engines.install(EngineId::Cursor).await.unwrap(), "1.0.0");
+        assert_eq!(engines.install(EngineId::Codex).await.unwrap(), "1.0.0");
         assert!(matches!(
-            engines.status(EngineId::Cursor).install,
+            engines.status(EngineId::Codex).install,
             artisan_api::InstallState::Installed { .. }
         ));
     }
@@ -848,10 +970,15 @@ mod snapshot_tests {
     async fn download_progress_shares_catalog_allocations_and_preserves_prior_snapshots() {
         let folder = tempfile::tempdir().unwrap();
         let engines = Engines::new(folder.path());
-        let engine = EngineId::Cursor;
-        lock(&engines.slot(engine).models).listing = Some(CachedListing::from(
-            catalog::parse_lines("* fixture-model1 (default)"),
-        ));
+        let engine = EngineId::Codex;
+        lock(&engines.slot(engine).models).listing = Some(CachedListing::from(catalog::Listing {
+            models: vec![artisan_api::Model {
+                id: "fixture-model1".into(),
+                ..artisan_api::Model::default()
+            }],
+            default: Some("fixture-model1".into()),
+            ..catalog::Listing::default()
+        }));
         *lock(&engines.slot(engine).versions) = vec![PublishedVersion {
             version: "1.0.0".into(),
             installed: true,
@@ -920,7 +1047,7 @@ mod lease_release_tests {
         let lease = engines.lease(engine).unwrap();
         // A duplicated handle models the inherited open file description
         // before a concurrently spawned child reaches exec.
-        let inherited = lease._usage.try_clone().unwrap();
+        let inherited = lease.usage.try_clone().unwrap();
         let competing = install::usage_lock(&layout.home(engine)).unwrap();
         assert!(fs2::FileExt::try_lock_exclusive(&competing).is_err());
         drop(lease);

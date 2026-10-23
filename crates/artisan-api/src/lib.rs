@@ -12,10 +12,12 @@ mod extensions;
 mod ids;
 mod item;
 mod request;
+mod settings;
 mod source_index;
 mod thread;
 #[cfg(feature = "tls")]
 pub mod tls;
+pub mod transport;
 
 pub use agent_names::*;
 pub use content::*;
@@ -25,8 +27,10 @@ pub use extensions::*;
 pub use ids::*;
 pub use item::*;
 pub use request::*;
+pub use settings::*;
 pub use source_index::*;
 pub use thread::*;
+pub use transport::*;
 
 /// Milliseconds since the Unix epoch.
 pub type Timestamp = i64;
@@ -42,7 +46,7 @@ pub fn now() -> Timestamp {
 }
 
 /// The wire-schema version both endpoints must support. Build hashes may differ.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 mod collection;
 pub use collection::*;

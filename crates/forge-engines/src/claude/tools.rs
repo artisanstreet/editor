@@ -8,7 +8,11 @@ use artisan_api::{
 use serde_json::Value;
 
 #[expect(clippy::too_many_lines, reason = "one arm per Claude tool")]
-pub(super) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
+#[expect(
+    clippy::expect_used,
+    reason = "validate_input has checked every field read here"
+)]
+pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     validate_input(name, input)?;
     let text = |field: &str| {
         str_at(input, field)
@@ -29,6 +33,7 @@ pub(super) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             command: (text("command")).into(),
             cwd: None,
             background: input["run_in_background"].as_bool() == Some(true),
+            watch: false,
         },
         "Read" => {
             let start = input["offset"].as_u64().unwrap_or(1);
@@ -113,6 +118,7 @@ pub(super) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             command: (text("command")).into(),
             cwd: None,
             background: true,
+            watch: true,
         },
         _ => {
             let input = (!input.is_null()).then(|| input.to_string());
@@ -134,7 +140,7 @@ pub(super) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     })
 }
 
-pub(super) fn validate_input(name: &str, input: &Value) -> Result<(), String> {
+pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("Claude tool omitted its name".into());
     }
@@ -213,7 +219,11 @@ fn diff(old: &str, new: &str) -> String {
         .to_string()
 }
 
-pub(super) fn todo_steps(input: &Value) -> Vec<PlanStep> {
+#[expect(
+    clippy::expect_used,
+    reason = "callers run validate_input first, which checks these fields"
+)]
+pub fn todo_steps(input: &Value) -> Vec<PlanStep> {
     input["todos"]
         .as_array()
         .into_iter()
@@ -233,6 +243,10 @@ pub(super) fn todo_steps(input: &Value) -> Vec<PlanStep> {
         .collect()
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "callers run validate_input first, which checks these fields"
+)]
 pub(super) fn questions(input: &Value) -> Vec<Question> {
     input["questions"]
         .as_array()

@@ -13,6 +13,10 @@ struct ResourceHttpClient {
 }
 
 /// The application's public media transport, sharing its existing runtime.
+#[expect(
+    clippy::expect_used,
+    reason = "a client with only timeouts and a redirect policy set builds unless TLS is broken"
+)]
 pub fn client() -> Arc<dyn HttpClient> {
     let build = |redirects| {
         reqwest::Client::builder()

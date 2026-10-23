@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 191
 expression: "replay(\"plan\")"
 ---
 [
@@ -92,6 +91,7 @@ expression: "replay(\"plan\")"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
 ]

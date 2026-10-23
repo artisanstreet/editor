@@ -1,8 +1,7 @@
 //! Typed mounted collection owners. All screens use Core's same bounded native
 //! viewport; this module chooses only canonical record labels and source fields.
 use artisan_api::{
-    Collection, CollectionRef, FileChange, Item, ItemId, ItemKind, PlanStep, Question, StepStatus,
-    TextContent, ToolKind,
+    Collection, CollectionRef, FileChange, Item, ItemId, ItemKind, Question, TextContent, ToolKind,
 };
 use editor_core::HostData;
 use editor_sources::{CollectionBrowser, CollectionPresenter, CollectionPreview};
@@ -15,8 +14,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 type Owner<T> = Rc<RefCell<Option<(EntityId, ItemId, Entity<CollectionBrowser<T>>)>>>;
 #[derive(Default)]
-pub(crate) struct CollectionOwners {
-    plans: Owner<PlanStep>,
+pub struct CollectionOwners {
     edits: Owner<FileChange>,
     questions: Owner<Question>,
 }
@@ -39,18 +37,6 @@ impl CollectionOwners {
             view.update(cx, |view, cx| view.set_source(source.clone(), cx));
         }
         sync(
-            &self.plans,
-            items,
-            |item| match &item.kind {
-                ItemKind::Plan {
-                    steps: Collection::Stored(source),
-                    ..
-                } => Some(source),
-                _ => None,
-            },
-            cx,
-        );
-        sync(
             &self.edits,
             items,
             |item| match &item.kind {
@@ -61,7 +47,16 @@ impl CollectionOwners {
                         },
                     ..
                 } => Some(source),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             cx,
         );
@@ -73,55 +68,33 @@ impl CollectionOwners {
                     questions: Collection::Stored(source),
                     ..
                 } => Some(source),
-                _ => None,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
             },
             cx,
         );
-    }
-    pub(crate) fn plan(
-        &self,
-        id: ItemId,
-        source: CollectionRef,
-        host: Option<WeakEntity<HostData>>,
-        theme: ArtisanTheme,
-    ) -> gpui::AnyElement {
-        Mounted {
-            owner: self.plans.clone(),
-            id,
-            source,
-            host,
-            theme,
-            title: "Checklist".into(),
-            present: Rc::new(|step: &PlanStep, _, _| {
-                let status = match step.status {
-                    StepStatus::Pending => "○",
-                    StepStatus::InProgress => "●",
-                    StepStatus::Done => "✓",
-                    StepStatus::Cancelled => "−",
-                };
-                CollectionPreview {
-                    label: format!("{status} {}", preview(&step.text)).into(),
-                    detail: Some(step.text.clone()),
-                    selected: false,
-                    disabled: false,
-                }
-            }),
-        }
-        .into_any_element()
     }
     pub(crate) fn edit(
         &self,
         id: ItemId,
         source: CollectionRef,
         host: Option<WeakEntity<HostData>>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> gpui::AnyElement {
         Mounted {
-            owner: self.edits.clone(),
+            owner: Rc::clone(&self.edits),
             id,
             source,
             host,
-            theme,
+            theme: *theme,
             title: "File changes".into(),
             present: Rc::new(|change: &FileChange, _, _| CollectionPreview {
                 label: change.path.clone().into(),
@@ -137,14 +110,14 @@ impl CollectionOwners {
         id: ItemId,
         source: CollectionRef,
         host: Option<WeakEntity<HostData>>,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
     ) -> gpui::AnyElement {
         Mounted {
-            owner: self.questions.clone(),
+            owner: Rc::clone(&self.questions),
             id,
             source,
             host,
-            theme,
+            theme: *theme,
             title: "Questions".into(),
             present: Rc::new(|question: &Question, index, _| CollectionPreview {
                 label: format!("{}. {}", index + 1, preview(&question.text)).into(),

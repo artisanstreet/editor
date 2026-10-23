@@ -1,5 +1,7 @@
-//! The one way a surface learns where an element sits: a probe records the
-//! element's bounds while it paints, and the next frame reads them. Popups
+//! The one way a surface learns where an element sits.
+//!
+//! A probe records the element's bounds while it paints, and the next frame
+//! reads them. Popups
 //! that need a trigger's place (a tooltip beside a row, a menu at a button,
 //! a hover pill between rows) all go through [`Measured`].
 

@@ -12,8 +12,7 @@
 //! place, so a crash never leaves a half-written version as `current`.
 
 use crate::engines::{
-    Archive, Artifact, CLAUDE_RELEASES, CURSOR_INSTALLER, CURSOR_RELEASES, Feed, GROK_RELEASES,
-    NPM_REGISTRY, compare_versions, host_spec,
+    Archive, Artifact, CLAUDE_RELEASES, Feed, NPM_REGISTRY, compare_versions, host_spec,
 };
 use anyhow::{Context, Result, bail, ensure};
 use artisan_api::{EngineId, InstallState};
@@ -31,7 +30,7 @@ const PROGRESS_STEP_BYTES: u64 = 2 * 1024 * 1024;
 // ---------------------------------------------------------------- machine
 
 #[derive(Debug)]
-pub(crate) enum Event {
+pub enum Event {
     /// What `current` says on disk (at start, or after another process changed it).
     Loaded {
         version: Option<String>,
@@ -56,8 +55,8 @@ pub(crate) enum Event {
 }
 
 /// The install lifecycle retains the old serving version during a replacement.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum State {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum State {
     Absent {},
     Installed {
         version: String,
@@ -79,27 +78,17 @@ pub(crate) enum State {
     },
 }
 
-pub(crate) struct Machine {
+pub struct Machine {
     state: State,
 }
 
 impl Machine {
-    pub(crate) fn state(&self) -> &State {
+    pub(crate) const fn state(&self) -> &State {
         &self.state
     }
 
     pub(crate) fn handle(&mut self, event: &Event) {
         let next = match (&mut self.state, event) {
-            (
-                State::Absent {},
-                Event::Loaded {
-                    version: Some(version),
-                }
-                | Event::Done { version },
-            ) => Some(State::Installed {
-                version: version.clone(),
-                update: None,
-            }),
             (State::Absent {}, Event::Start { version }) => Some(State::Downloading {
                 version: version.clone(),
                 received: 0,
@@ -160,6 +149,13 @@ impl Machine {
                 serving: serving.clone(),
             }),
             (
+                State::Absent {},
+                Event::Loaded {
+                    version: Some(version),
+                }
+                | Event::Done { version },
+            )
+            | (
                 State::Downloading { .. } | State::Verifying { .. } | State::Failed { .. },
                 Event::Done { version },
             )
@@ -193,13 +189,13 @@ impl Machine {
     }
 }
 
-pub(crate) fn machine() -> Machine {
+pub const fn machine() -> Machine {
     Machine {
         state: State::Absent {},
     }
 }
 
-pub(crate) fn view(state: &State) -> InstallState {
+pub fn view(state: &State) -> InstallState {
     match state {
         State::Absent {} => InstallState::Absent,
         State::Downloading {
@@ -220,16 +216,16 @@ pub(crate) fn view(state: &State) -> InstallState {
             update: update.clone(),
         },
         State::Failed { message, serving } => InstallState::Failed {
-            message: match serving {
-                Some(version) => format!("{message} (still using {version})"),
-                None => message.clone(),
-            },
+            message: serving.as_ref().map_or_else(
+                || message.clone(),
+                |version| format!("{message} (still using {version})"),
+            ),
         },
     }
 }
 
 /// Whether the machine is between installs, so the disk is the truth.
-pub(crate) fn settled(state: &State) -> bool {
+pub const fn settled(state: &State) -> bool {
     matches!(
         state,
         State::Absent {} | State::Installed { .. } | State::Failed { .. }
@@ -239,7 +235,7 @@ pub(crate) fn settled(state: &State) -> bool {
 // ---------------------------------------------------------------- layout
 
 #[derive(Clone, Debug)]
-pub(crate) struct Layout {
+pub struct Layout {
     root: PathBuf,
 }
 
@@ -284,19 +280,6 @@ impl Layout {
     pub fn binary(&self, engine: EngineId) -> Option<PathBuf> {
         self.executable(engine, &self.current(engine)?)
     }
-
-    /// Every version unpacked here with its executable.
-    pub fn installed_versions(&self, engine: EngineId) -> Vec<String> {
-        let Ok(entries) = fs::read_dir(self.versions(engine)) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter(|version| check_version(version).is_ok())
-            .filter(|version| self.executable(engine, version).is_some())
-            .collect()
-    }
 }
 
 fn read_pointer(path: &Path) -> Option<String> {
@@ -307,7 +290,7 @@ fn read_pointer(path: &Path) -> Option<String> {
 }
 
 /// Versions come from vendor feeds and become directory names.
-pub(crate) fn check_version(version: &str) -> Result<()> {
+pub fn check_version(version: &str) -> Result<()> {
     ensure!(
         !version.is_empty()
             && version.len() <= 64
@@ -329,7 +312,7 @@ fn write_pointer(path: &Path, version: &str) -> Result<()> {
 
 /// Makes `version` current and keeps the old current as previous.
 /// Pruning belongs to the manager, which knows versions leased by live runs.
-pub(crate) fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<()> {
+pub fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<()> {
     let dir = layout.engine_dir(engine);
     let current = layout.current(engine);
     if current.as_deref() != Some(version) {
@@ -343,7 +326,7 @@ pub(crate) fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result
 }
 
 /// One standard lock per engine; active use keeps all installed versions available.
-pub(crate) fn usage_lock(home: &Path) -> Result<fs::File> {
+pub fn usage_lock(home: &Path) -> Result<fs::File> {
     let dir = home.parent().context("engine home has no parent")?;
     fs::create_dir_all(dir)?;
     fs::OpenOptions::new()
@@ -355,7 +338,7 @@ pub(crate) fn usage_lock(home: &Path) -> Result<fs::File> {
         .context("opening engine usage lock")
 }
 
-pub(crate) fn prune(layout: &Layout, engine: EngineId) {
+pub fn prune(layout: &Layout, engine: EngineId) {
     let Ok(usage) = usage_lock(&layout.home(engine)) else {
         return;
     };
@@ -389,7 +372,7 @@ pub(crate) fn prune(layout: &Layout, engine: EngineId) {
 }
 
 /// The engine's install lock, held until the returned file is dropped.
-pub(crate) async fn lock(layout: &Layout, engine: EngineId) -> Result<fs::File> {
+pub async fn lock(layout: &Layout, engine: EngineId) -> Result<fs::File> {
     let dir = layout.engine_dir(engine);
     tokio::task::spawn_blocking(move || {
         fs::create_dir_all(dir.join("versions"))
@@ -413,21 +396,16 @@ pub(crate) async fn lock(layout: &Layout, engine: EngineId) -> Result<fs::File> 
 
 /// One downloadable version and the digest the vendor publishes for it.
 #[derive(Clone, Debug)]
-pub(crate) struct Resolved {
+pub struct Resolved {
     pub version: String,
     pub url: String,
     pub digest: Expected,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Expected {
-    Sha256 {
-        hex: String,
-        size: u64,
-    },
+pub enum Expected {
+    Sha256 { hex: String, size: u64 },
     Sha512(Vec<u8>),
-    /// The vendor publishes no digest; HTTPS is all we have.
-    Nothing,
 }
 
 async fn get(http: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
@@ -455,7 +433,7 @@ fn npm_name(package: &str) -> String {
     package.replace('/', "%2f")
 }
 
-pub(crate) async fn latest_version(http: &reqwest::Client, feed: Feed) -> Result<String> {
+pub async fn latest_version(http: &reqwest::Client, feed: Feed) -> Result<String> {
     let version = match feed {
         Feed::Claude { .. } => get_text(http, &format!("{CLAUDE_RELEASES}/latest"))
             .await?
@@ -471,22 +449,14 @@ pub(crate) async fn latest_version(http: &reqwest::Client, feed: Feed) -> Result
                 .with_context(|| format!("{package} has no {dist_tag:?} tag"))?
                 .to_owned()
         }
-        Feed::Grok { .. } => get_text(http, &format!("{GROK_RELEASES}/stable"))
-            .await?
-            .trim()
-            .to_owned(),
-        Feed::Cursor { .. } => {
-            // The official installer names its release in the URL it downloads.
-            let script = get_text(http, CURSOR_INSTALLER).await?;
-            let marker = format!("{CURSOR_RELEASES}/");
-            let start = script
-                .find(&marker)
-                .context("the Cursor installer names no release")?
-                + marker.len();
-            script[start..]
-                .split('/')
-                .next()
-                .unwrap_or_default()
+        Feed::Release { repository, .. } => {
+            let url =
+                format!("https://github.com/{repository}/releases/latest/download/manifest.json");
+            get_json(http, &url)
+                .await?
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .with_context(|| format!("{url} names no version"))?
                 .to_owned()
         }
     };
@@ -498,20 +468,17 @@ pub(crate) async fn latest_version(http: &reqwest::Client, feed: Feed) -> Result
 /// release list (`downloads.claude.ai` has none).
 const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
 /// The most versions "Choose version" offers.
-pub(crate) const MAX_LISTED_VERSIONS: usize = 40;
+pub const MAX_LISTED_VERSIONS: usize = 40;
 
 /// The vendor's published versions on the channel Forge follows, newest
-/// first. `None` when the vendor publishes no list (Grok, Cursor).
-pub(crate) async fn published_versions(
-    http: &reqwest::Client,
-    feed: Feed,
-) -> Result<Option<Vec<String>>> {
+/// first.
+pub async fn published_versions(http: &reqwest::Client, feed: Feed) -> Result<Vec<String>> {
     let (package, channel) = match feed {
         Feed::Claude { .. } => (CLAUDE_NPM_PACKAGE, "latest"),
         Feed::Npm {
             package, dist_tag, ..
         } => (package, dist_tag),
-        Feed::Grok { .. } | Feed::Cursor { .. } => return Ok(None),
+        Feed::Release { repository, .. } => return release_versions(http, repository).await,
     };
     let url = format!("{NPM_REGISTRY}/{}", npm_name(package));
     // The abbreviated document: versions without their readmes.
@@ -530,14 +497,43 @@ pub(crate) async fn published_versions(
         .with_context(|| format!("reading {url}"))?;
     let packument: serde_json::Value =
         serde_json::from_str(&text).with_context(|| format!("parsing {url}"))?;
-    Ok(Some(channel_versions(&packument, channel)))
+    Ok(channel_versions(&packument, channel))
 }
+
+/// The versions a release feed has published, newest first.
+async fn release_versions(http: &reqwest::Client, repository: &str) -> Result<Vec<String>> {
+    let url = format!(
+        "https://api.github.com/repos/{repository}/releases?per_page={MAX_LISTED_VERSIONS}"
+    );
+    Ok(tagged_versions(&get_json(http, &url).await?))
+}
+
+/// The `artisan-v<version>` releases in a GitHub release listing; drafts and
+/// other tags are left out.
+pub fn tagged_versions(releases: &serde_json::Value) -> Vec<String> {
+    let mut versions: Vec<String> = releases
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|release| release.get("draft").and_then(serde_json::Value::as_bool) != Some(true))
+        .filter_map(|release| release.get("tag_name")?.as_str()?.strip_prefix(RELEASE_TAG))
+        .filter(|version| check_version(version).is_ok())
+        .map(str::to_owned)
+        .collect();
+    versions.sort_by(|left, right| compare_versions(right, left));
+    versions.dedup();
+    versions.truncate(MAX_LISTED_VERSIONS);
+    versions
+}
+
+/// Release feeds tag each version `artisan-v<version>`.
+const RELEASE_TAG: &str = "artisan-v";
 
 /// The packument's versions on `channel`: plain `X.Y.Z` releases for
 /// `latest`, `X.Y.Z-<channel>-<n>` builds for another tag (OpenCode's
 /// `beta`). Platform builds (`0.162.1-linux-x64`) and other channels are
 /// left out.
-pub(crate) fn channel_versions(packument: &serde_json::Value, channel: &str) -> Vec<String> {
+pub fn channel_versions(packument: &serde_json::Value, channel: &str) -> Vec<String> {
     let on_channel = |version: &str| match version.split_once('-') {
         None => channel == "latest",
         Some((_, suffix)) => {
@@ -564,7 +560,7 @@ pub(crate) fn channel_versions(packument: &serde_json::Value, channel: &str) -> 
     versions
 }
 
-pub(crate) async fn resolve(http: &reqwest::Client, feed: Feed, version: &str) -> Result<Resolved> {
+pub async fn resolve(http: &reqwest::Client, feed: Feed, version: &str) -> Result<Resolved> {
     check_version(version)?;
     let (url, digest) = match feed {
         Feed::Claude { platform, binary } => {
@@ -619,17 +615,10 @@ pub(crate) async fn resolve(http: &reqwest::Client, feed: Feed, version: &str) -
                 .context("decoding the npm integrity")?;
             (tarball.to_owned(), Expected::Sha512(digest))
         }
-        Feed::Grok { platform, exe } => {
-            let suffix = if exe { ".exe" } else { "" };
-            (
-                format!("{GROK_RELEASES}/grok-{version}-{platform}{suffix}"),
-                Expected::Nothing,
-            )
-        }
-        Feed::Cursor { os, arch } => (
-            format!("{CURSOR_RELEASES}/{version}/{os}/{arch}/agent-cli-package.tar.gz"),
-            Expected::Nothing,
-        ),
+        Feed::Release {
+            repository,
+            platform,
+        } => resolve_release(http, repository, platform, version).await?,
     };
     Ok(Resolved {
         version: version.to_owned(),
@@ -638,17 +627,60 @@ pub(crate) async fn resolve(http: &reqwest::Client, feed: Feed, version: &str) -
     })
 }
 
+/// The asset and digest a release feed's manifest lists for `platform`.
+async fn resolve_release(
+    http: &reqwest::Client,
+    repository: &str,
+    platform: &str,
+    version: &str,
+) -> Result<(String, Expected)> {
+    let release =
+        format!("https://github.com/{repository}/releases/download/{RELEASE_TAG}{version}");
+    let manifest = get_json(http, &format!("{release}/manifest.json")).await?;
+    ensure!(
+        manifest.get("version").and_then(serde_json::Value::as_str) == Some(version),
+        "the {repository} manifest for {version} names another version"
+    );
+    let entry = manifest
+        .pointer(&format!("/platforms/{platform}"))
+        .with_context(|| format!("{repository} {version} has no {platform} build"))?;
+    let asset = entry
+        .get("asset")
+        .and_then(serde_json::Value::as_str)
+        .filter(|asset| {
+            !asset.is_empty()
+                && asset
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b".-_".contains(&byte))
+        })
+        .context("no usable asset name")?;
+    let hex = entry
+        .get("sha256")
+        .and_then(serde_json::Value::as_str)
+        .context("no sha256")?;
+    let size = entry
+        .get("size")
+        .and_then(serde_json::Value::as_u64)
+        .context("no size")?;
+    Ok((
+        format!("{release}/{asset}"),
+        Expected::Sha256 {
+            hex: hex.to_ascii_lowercase(),
+            size,
+        },
+    ))
+}
+
 // ---------------------------------------------------------------- download and unpack
 
 enum Hasher {
     Sha256(sha2::Sha256),
     Sha512(sha2::Sha512),
-    Nothing,
 }
 
 /// Downloads, verifies and unpacks `resolved` into `versions/<version>`.
 /// Call with the install lock held; `report` sees the lifecycle events.
-pub(crate) async fn fetch(
+pub async fn fetch(
     layout: &Layout,
     http: &reqwest::Client,
     engine: EngineId,
@@ -691,8 +723,9 @@ pub(crate) async fn fetch(
         .context("unpack task")?
     }
     .await;
-    let _ = fs::remove_file(&download);
-    let _ = fs::remove_dir_all(&staging);
+    // Leftovers of this attempt; either may not exist.
+    fs::remove_file(&download).ok();
+    fs::remove_dir_all(&staging).ok();
     result.with_context(|| format!("installing {} {version}", engine.display_name()))
 }
 
@@ -717,7 +750,6 @@ async fn download_to(
     let mut hasher = match expected {
         Expected::Sha256 { .. } => Hasher::Sha256(sha2::Sha256::new()),
         Expected::Sha512(_) => Hasher::Sha512(sha2::Sha512::new()),
-        Expected::Nothing => Hasher::Nothing,
     };
     let (mut received, mut reported) = (0_u64, 0_u64);
     report(Event::Progress { received, total });
@@ -734,7 +766,6 @@ async fn download_to(
         match &mut hasher {
             Hasher::Sha256(hasher) => hasher.update(&chunk),
             Hasher::Sha512(hasher) => hasher.update(&chunk),
-            Hasher::Nothing => {}
         }
         file.write_all(&chunk)
             .await
@@ -752,7 +783,6 @@ async fn download_to(
     let digest = match hasher {
         Hasher::Sha256(hasher) => hasher.finalize().to_vec(),
         Hasher::Sha512(hasher) => hasher.finalize().to_vec(),
-        Hasher::Nothing => Vec::new(),
     };
     Ok((received, digest))
 }
@@ -774,12 +804,15 @@ fn verify(expected: &Expected, size: u64, digest: &[u8]) -> Result<()> {
             digest == want.as_slice(),
             "SHA-512 does not match the published integrity"
         ),
-        Expected::Nothing => {}
     }
     Ok(())
 }
 
 /// Unpacks the download into `dest` and checks the executable is there.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "every other tar entry type (devices, fifos, GNU and PAX headers) is skipped"
+)]
 fn unpack(artifact: Artifact, download: &Path, dest: &Path) -> Result<()> {
     if dest.exists() {
         fs::remove_dir_all(dest)?;
@@ -883,16 +916,18 @@ mod tests {
                 }
                 let request = String::from_utf8_lossy(&request);
                 let path = request.split_whitespace().nth(1).unwrap_or_default();
-                let response = match files.get(path) {
-                    Some(body) => [
-                        format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", body.len())
-                            .into_bytes(),
-                        body.clone(),
-                    ]
-                    .concat(),
-                    None => b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_vec(),
-                };
-                let _ = socket.write_all(&response).await;
+                let response = files.get(path).map_or_else(
+                    || b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_vec(),
+                    |body| {
+                        [
+                            format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", body.len())
+                                .into_bytes(),
+                            body.clone(),
+                        ]
+                        .concat()
+                    },
+                );
+                socket.write_all(&response).await.ok();
             }
         });
         base
@@ -1136,44 +1171,63 @@ mod tests {
         );
     }
 
+    /// "Choose version" lists the release feed's own builds, newest first.
+    #[test]
+    fn a_release_feed_lists_its_tagged_builds() {
+        let releases = serde_json::json!([
+            { "tag_name": "artisan-v2.1.2", "draft": false },
+            { "tag_name": "artisan-v2.1.10", "draft": false },
+            { "tag_name": "artisan-v2.2.0", "draft": true },
+            { "tag_name": "v1.19.3", "draft": false },
+            { "tag_name": "artisan-v../2.1.1", "draft": false },
+        ]);
+        assert_eq!(tagged_versions(&releases), ["2.1.10", "2.1.2"]);
+    }
+
     #[cfg(feature = "legacy-import")]
     #[tokio::test]
     async fn imports_the_old_toolchain_layout() {
         let old = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
-        let grok = old.path().join("grok");
-        fs::create_dir_all(grok.join("versions/generation-abc")).unwrap();
-        fs::create_dir_all(grok.join("versions/generation-old")).unwrap();
-        fs::create_dir_all(grok.join("home/.grok")).unwrap();
-        fs::write(grok.join("versions/generation-abc/grok"), script("1.0.50")).unwrap();
-        fs::write(grok.join("home/.grok/auth.json"), "{}").unwrap();
+        let opencode = old.path().join("opencode2");
+        let entry = host_spec(EngineId::OpenCode).artifact.unwrap().entry;
+        let binary = opencode.join("versions/generation-abc").join(entry);
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::create_dir_all(opencode.join("versions/generation-old")).unwrap();
+        fs::create_dir_all(opencode.join("home/data/opencode")).unwrap();
+        fs::write(&binary, script("1.0.50")).unwrap();
+        fs::write(opencode.join("home/data/opencode/auth.json"), "{}").unwrap();
         fs::write(
-            grok.join("state.json"),
-            r#"{"active":{"binary":"grok","directory":"generation-abc","version":"1.0.50"},"format_version":2,
-                "previous":[{"binary":"grok","directory":"generation-old","version":"1.0.46"}]}"#,
+            opencode.join("state.json"),
+            r#"{"active":{"binary":"opencode2","directory":"generation-abc","version":"1.0.50"},"format_version":2,
+                "previous":[{"binary":"opencode2","directory":"generation-old","version":"1.0.46"}]}"#,
         )
         .unwrap();
 
         let engines = Engines::new(data.path());
         assert_eq!(
             engines.import_legacy(old.path()).await.unwrap(),
-            [EngineId::Grok]
+            [EngineId::OpenCode]
         );
-
         assert_eq!(
-            engines.status(EngineId::Grok).install,
+            engines.status(EngineId::OpenCode).install,
             InstallState::Installed {
                 version: "1.0.50".into(),
                 update: None
             }
         );
         assert!(
-            fs::read_to_string(engines.binary(EngineId::Grok).unwrap())
+            fs::read_to_string(engines.binary(EngineId::OpenCode).unwrap())
                 .unwrap()
                 .contains("1.0.50")
         );
         assert_eq!(
-            fs::read_to_string(engines.home(EngineId::Grok).join(".grok/auth.json")).unwrap(),
+            fs::read_to_string(
+                engines
+                    .home(EngineId::OpenCode)
+                    .join("data/opencode/auth.json")
+            )
+            .unwrap(),
             "{}"
         );
         assert_eq!(

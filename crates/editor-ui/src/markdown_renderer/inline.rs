@@ -16,8 +16,8 @@ use crate::markdown::Span;
 use crate::theme::ArtisanTheme;
 
 use super::{
-    InlineLink, bare_url_spans, code_style, emphasis_style, is_openable_link_destination,
-    link_style, strong_style,
+    InlineLink, bare_url_spans, code_style, command_style, emphasis_style,
+    is_openable_link_destination, link_style, strong_style,
 };
 
 /// One style layer the flattener composes onto its inherited style.
@@ -35,6 +35,8 @@ pub(super) enum InlineLayer {
     Strong { in_link: bool },
     /// An openable link label.
     Link,
+    /// A message's leading `/command`.
+    Command,
 }
 
 impl InlineLayer {
@@ -44,6 +46,7 @@ impl InlineLayer {
             Self::Emphasis => emphasis_style(),
             Self::Strong { in_link } => strong_style(theme, in_link),
             Self::Link => link_style(theme),
+            Self::Command => command_style(theme),
         }
     }
 }
@@ -283,6 +286,14 @@ fn flatten(spans: &[Span], chain: &mut Vec<InlineLayer>, flat: &mut FlatInline, 
                 }
             }
             Span::Code(code) => push_code(flat, code, chain, in_link),
+            Span::Command(command) => {
+                chain.push(InlineLayer::Command);
+                let start = flat.source.len();
+                flat.source.push_str(command);
+                let end = flat.source.len();
+                emit(flat, start, end, chain);
+                chain.pop();
+            }
             Span::Emphasis(inner) => {
                 chain.push(InlineLayer::Emphasis);
                 flatten(inner, chain, flat, in_link);

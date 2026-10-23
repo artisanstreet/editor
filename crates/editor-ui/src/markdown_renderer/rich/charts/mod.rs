@@ -67,7 +67,7 @@ fn preparation_budget(value: &Value) -> Result<(), String> {
         match value {
             Value::Array(values) => stack.extend(values.iter().map(|value| (value, depth + 1))),
             Value::Object(fields) => stack.extend(fields.values().map(|value| (value, depth + 1))),
-            _ => {}
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
     Ok(())

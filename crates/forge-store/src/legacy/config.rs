@@ -36,15 +36,6 @@ pub(super) fn engine_config(bytes: &[u8]) -> Option<EngineConfig> {
         EngineId::Codex => {
             config.speed = text(details, "speed").or_else(|| text(details, "service_tier"))
         }
-        EngineId::Cursor => {
-            config.speed = text(details, "speed").or_else(|| {
-                (details
-                    .and_then(|details| details.get("fast"))
-                    .and_then(Value::as_bool)
-                    == Some(true))
-                .then(|| "fast".to_owned())
-            });
-        }
         EngineId::OpenCode => {
             let retired_effort = config.effort.take();
             config.variant = text(details, "variant").or(retired_effort);
@@ -112,9 +103,6 @@ mod config_tests {
             engine_config(br#"{"engine":"codex","details":{"service_tier":"priority"}}"#).unwrap();
         assert_eq!(codex.speed.as_deref(), Some("priority"));
         assert!(codex.options.is_empty());
-        let cursor = engine_config(br#"{"engine":"cursor","details":{"fast":true}}"#).unwrap();
-        assert_eq!(cursor.speed.as_deref(), Some("fast"));
-        assert!(cursor.options.is_empty());
         let opencode =
             engine_config(br#"{"engine":"opencode","details":{"reasoning_effort":"high"}}"#)
                 .unwrap();

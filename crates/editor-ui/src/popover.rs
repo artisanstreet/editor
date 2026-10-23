@@ -1,23 +1,115 @@
 //! Pointer-anchored menus with shared overlay focus and dismissal.
 
+use crate::asset_seam::asset_glyph;
 use crate::glass::{
     GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
     glass_highlight_layer, glass_material_layer,
 };
-use crate::theme::{RadiusStep, RadiusTokens};
+use crate::hover_card::HoverTone;
+use crate::motion::MotionDuration;
+use crate::picker_motion::{HoverSurface, smooth_out};
+use crate::theme::{RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use crate::{
     overlay,
     theme::{ActiveTheme as _, ArtisanTheme},
 };
+use editor_assets::AssetId;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement, Pixels, Point,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window, anchored, deferred,
-    div, point, px,
+    Animation, AnimationExt as _, AnyElement, App, Div, InteractiveElement as _, IntoElement,
+    ParentElement, Pixels, Point, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled, Window, anchored, deferred, div, point, px,
 };
 use std::rc::Rc;
 
 type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// Where a pointer menu's entrance starts growing from.
+const MENU_PRE_SCALE: f32 = 0.97;
+
+/// A pointer menu's rows over `hover`'s sliding pill. Clear `hover` when
+/// the menu opens, so the pill is placed rather than flown from the last
+/// menu.
+#[must_use]
+pub fn menu_rows(hover: &HoverSurface, theme: &ArtisanTheme, reduce_motion: bool) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .child(hover.surface_probe())
+        .child(hover.pill(
+            "menu-hover",
+            theme,
+            RadiusTokens::value(RadiusStep::LgMid),
+            reduce_motion,
+        ))
+}
+
+/// A pointer-menu row in [`menu_rows`]: a 16 px icon slot (left empty to
+/// indent a row under its iconed siblings), then the label. Destructive
+/// rows are red, and so is the pill under them.
+#[must_use]
+pub fn menu_item(
+    id: impl Into<SharedString>,
+    theme: &ArtisanTheme,
+    hover: &HoverSurface,
+    icon: Option<AssetId>,
+    label: impl Into<SharedString>,
+    destructive: bool,
+) -> Stateful<Div> {
+    let id = id.into();
+    let label = label.into();
+    let theme = *theme;
+    let foreground = if destructive {
+        theme.colors.destructive_text.to_paint()
+    } else {
+        theme.colors.text.to_paint()
+    };
+    let selector = id.clone();
+    let hover_id = id.to_string();
+    let tone = if destructive {
+        HoverTone::Destructive
+    } else {
+        HoverTone::Neutral
+    };
+    let probe = hover.row_probe(hover_id.clone());
+    let hover = hover.clone();
+    div()
+        .id(id)
+        .role(gpui::Role::MenuItem)
+        .aria_label(label.clone())
+        .focusable()
+        .tab_index(0)
+        .debug_selector(move || selector.to_string())
+        .relative()
+        .px(px(12.0))
+        .py(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .rounded(RadiusTokens::value(RadiusStep::LgMid))
+        .cursor_pointer()
+        .on_hover(move |hovered, window, _| {
+            hover.hovered_toned(&hover_id, *hovered, tone);
+            window.refresh();
+        })
+        .child(probe)
+        .child(div().size(px(16.0)).flex_none().children(icon.map(|icon| {
+            asset_glyph(icon).size(px(15.0)).text_color(if destructive {
+                foreground
+            } else {
+                theme.colors.text_muted.to_paint()
+            })
+        })))
+        .child(
+            div()
+                .text_size(TypographyTokens::size(TextStep::Sm))
+                .line_height(px(20.0))
+                .whitespace_nowrap()
+                .text_color(foreground)
+                .child(label),
+        )
+}
 
 #[derive(IntoElement)]
 pub struct Popover {
@@ -48,12 +140,12 @@ impl Popover {
         }
     }
     #[must_use]
-    pub fn menu_padding(mut self, padding: Pixels) -> Self {
+    pub const fn menu_padding(mut self, padding: Pixels) -> Self {
         self.menu_padding = padding;
         self
     }
     #[must_use]
-    pub fn quiet_glass_menu(mut self) -> Self {
+    pub const fn quiet_glass_menu(mut self) -> Self {
         self.quiet_glass = true;
         self
     }
@@ -70,9 +162,11 @@ impl RenderOnce for Popover {
             overlay::dismiss(&id, window, cx);
             dismiss(window, cx);
         });
-        let pointer_close = close.clone();
+        let pointer_close = Rc::clone(&close);
         let keys = focus.clone();
         let theme = *cx.theme();
+        let reduce_motion = cx.reduce_motion();
+        let entrance_id = SharedString::from(format!("{root_id}-entrance"));
         let panel = div()
             .id(root_id)
             .role(gpui::Role::Menu)
@@ -95,6 +189,26 @@ impl RenderOnce for Popover {
                     .menu_padding(self.menu_padding)
                     .when(self.quiet_glass, PopoverPanel::quiet_glass_menu),
             );
+        // Opens below and right of the pointer, so it grows from its
+        // top-left corner (the transitions-dev dropdown).
+        let panel = if reduce_motion {
+            panel.into_any_element()
+        } else {
+            panel
+                .with_animation(
+                    entrance_id,
+                    Animation::new(MotionDuration::Fast.as_duration()).with_easing(smooth_out),
+                    |panel, progress| {
+                        panel.opacity(progress).transform(
+                            gpui::ElementTransform::scale(
+                                (1.0 - MENU_PRE_SCALE).mul_add(progress, MENU_PRE_SCALE),
+                            )
+                            .with_origin(point(0.0, 0.0)),
+                        )
+                    },
+                )
+                .into_any_element()
+        };
         deferred(
             anchored()
                 .position(self.position)
@@ -134,18 +248,18 @@ impl PopoverPanel {
         }
     }
     #[must_use]
-    pub fn menu_padding(mut self, padding: Pixels) -> Self {
+    pub const fn menu_padding(mut self, padding: Pixels) -> Self {
         self.menu_padding = padding;
         self
     }
     #[must_use]
-    pub fn quiet_glass_menu(mut self) -> Self {
+    pub const fn quiet_glass_menu(mut self) -> Self {
         self.quiet_glass = true;
         self
     }
     /// The settings picker menu keeps its original padding-free rounded frame.
     #[must_use]
-    pub fn select_menu(mut self) -> Self {
+    pub const fn select_menu(mut self) -> Self {
         self.select_menu = true;
         self
     }
@@ -170,33 +284,27 @@ impl RenderOnce for PopoverPanel {
                 root.p(self.menu_padding)
                     .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .border_1()
-                    .border_color(theme.colors.border.to_paint())
+                    .border_color(theme.colors.line.to_paint())
             })
             .when(self.select_menu, |root| {
                 root.rounded(crate::theme::RadiusTokens::value(
                     crate::theme::RadiusStep::X2l,
                 ))
-                .shadow(
-                    theme
-                        .elevation
-                        .menu_shadow
-                        .map(crate::theme::ShadowLayer::to_box_shadow)
-                        .to_vec(),
-                )
+                .shadow(theme.elevation.shadows(crate::theme::Elevation::Overlay))
                 .overflow_hidden()
             })
             .when(!self.quiet_glass, |root| {
-                root.bg(theme.colors.popover.to_paint())
+                root.bg(theme.colors.raised.to_paint())
             })
             .when(self.quiet_glass, |root| {
                 root.rounded(radius)
                     .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
                     .bg(glass_foreground_base(&theme))
-                    .shadow(glass_card_shadows())
-                    .child(glass_material_layer(GlassStrength::Quiet, radius))
-                    .child(glass_highlight_layer(GlassStrength::Quiet, radius))
+                    .shadow(glass_card_shadows(&theme, crate::theme::Elevation::Overlay))
+                    .child(glass_material_layer(&theme, GlassStrength::Quiet, radius))
+                    .child(glass_highlight_layer(&theme, GlassStrength::Quiet, radius))
             })
-            .text_color(theme.colors.popover_foreground.to_paint())
+            .text_color(theme.colors.text.to_paint())
             .child(self.content);
         if let Some(selector) = self.selector {
             root = root.debug_selector(move || selector.to_string());
@@ -204,8 +312,9 @@ impl RenderOnce for PopoverPanel {
         root
     }
 }
-/// The glass-menu variant of the popover chrome: a strong-glass column
-/// whose corners follow `radius`. Model, project and option menus and
+/// The glass-menu variant of the popover chrome.
+///
+/// A strong-glass column whose corners follow `radius`. Model, project and option menus and
 /// mention completion are built on it; the caller sizes it, routes its
 /// keys, and adds rows.
 #[must_use]
@@ -218,10 +327,10 @@ pub fn glass_menu(
         .occlude()
         .flex()
         .flex_col()
-        .text_color(theme.colors.foreground.to_paint())
+        .text_color(theme.colors.text.to_paint())
 }
 
-/// The glass surface every glass popup shares: backdrop blur over the glass
+/// The glass surface every glass popup shares: backdrop blur, the foreground
 /// base, the card shadows, then the material and highlight layers.
 pub(crate) fn glass_frame<E: Styled + ParentElement>(
     element: E,
@@ -235,9 +344,9 @@ pub(crate) fn glass_frame<E: Styled + ParentElement>(
         .rounded(radius)
         .backdrop_blur(glass_blur_radius(strength))
         .bg(glass_foreground_base(theme))
-        .shadow(glass_card_shadows())
-        .child(glass_material_layer(strength, radius))
-        .child(glass_highlight_layer(strength, radius))
+        .shadow(glass_card_shadows(theme, crate::theme::Elevation::Overlay))
+        .child(glass_material_layer(theme, strength, radius))
+        .child(glass_highlight_layer(theme, strength, radius))
 }
 
 /// Places `content` above the element this is a child of, `gap` away, its

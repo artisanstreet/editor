@@ -1,8 +1,8 @@
 //! About (`render/about.rs`): which build is running and from where.
 
 use crate::page;
+use crate::ui::{card, header, row, section_shell};
 use editor_core::SettingsPage;
-use editor_ui::page::{card, header, row, section_shell};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{Div, IntoElement, ParentElement as _, Styled as _, div};
 use std::path::Path;
@@ -19,7 +19,7 @@ pub struct BuildInfo {
 }
 
 /// The label and value of each row, in order.
-pub(crate) fn rows(build: &BuildInfo, executable: Option<&Path>) -> Vec<(&'static str, String)> {
+pub fn rows(build: &BuildInfo, executable: Option<&Path>) -> Vec<(&'static str, String)> {
     let mut rows = vec![("Version", build.version.clone())];
     rows.push((
         "Commit",
@@ -37,7 +37,7 @@ pub(crate) fn rows(build: &BuildInfo, executable: Option<&Path>) -> Vec<(&'stati
     rows
 }
 
-pub(crate) fn render(build: &BuildInfo, theme: &ArtisanTheme) -> Div {
+pub fn render(build: &BuildInfo, theme: &ArtisanTheme) -> Div {
     let executable = std::env::current_exe().ok();
     let rows = rows(build, executable.as_deref())
         .into_iter()

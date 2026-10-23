@@ -56,7 +56,7 @@ use editor_assets::AssetId;
 use gpui::{
     App, AssetSource, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId,
     IntoElement, LayoutId, Pixels, SharedString, StyleRefinement, Styled, Svg, TextStyleRefinement,
-    Window, point, px, size, svg,
+    Transformation, Window, point, px, size, svg,
 };
 
 #[path = "full_color_svg.rs"]
@@ -341,6 +341,19 @@ pub fn asset_glyph(id: AssetId) -> AssetGlyph {
 }
 
 impl AssetGlyph {
+    /// Paints a tinted glyph moved, scaled or turned about its centre; its
+    /// laid-out box stays put. Full-color glyphs paint untransformed.
+    #[must_use]
+    pub fn with_transformation(self, transformation: Transformation) -> Self {
+        match self.0 {
+            GlyphRoute::Tinted(TintedSvg { svg, asset_id }) => Self(GlyphRoute::Tinted(TintedSvg {
+                svg: svg.with_transformation(transformation),
+                asset_id,
+            })),
+            route @ GlyphRoute::FullColor(_) => Self(route),
+        }
+    }
+
     /// The pipeline derived for the presented asset.
     #[must_use]
     pub const fn presentation(&self) -> Presentation {

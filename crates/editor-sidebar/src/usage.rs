@@ -3,12 +3,15 @@ use crate::{avatar, usage_visual};
 use artisan_api::{EngineId, UsageLimits};
 #[cfg(test)]
 use artisan_api::{Timestamp, UsageCadence, UsageWindow};
-use editor_core::{ConnectionStatus, Core, HostData, HostEvent, Screen, SettingsPage};
+use editor_core::{Core, HostData, HostEvent, Screen, SettingsPage};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
+use editor_ui::hover_card::{HoverFill, hover_fill};
 use editor_ui::measure::Measured;
 use editor_ui::picker_motion::HoverSurface;
-use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
+use editor_ui::theme::{
+    ActiveTheme as _, ArtisanTheme, RadiusStep, RadiusTokens, TextStep, ThemeMode, TypographyTokens,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Bounds, Context, Entity, FontWeight, Image, InteractiveElement as _, IntoElement,
@@ -19,25 +22,18 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 use std::{collections::HashMap, time::Duration};
 
 type Close = Rc<dyn Fn(&mut gpui::App)>;
-pub(crate) struct Account {
+pub struct Account {
     core: Entity<Core>,
     host: Option<Entity<HostData>>,
-    pub(crate) refreshing: HashMap<EngineId, Task<()>>,
     pub(crate) ui: usage_visual::UsageUi,
     hover: HoverSurface,
     machines_hover: HoverSurface,
     machines_open: bool,
     host_origin: Rc<Cell<Bounds<Pixels>>>,
     submenu_bounds: Measured,
-    avatars: HashMap<String, Arc<Image>>,
+    avatars: HashMap<(ThemeMode, String), Arc<Image>>,
     close: Option<Close>,
     usage_height: Pixels,
-    error: Option<String>,
-    #[cfg(test)]
-    refresh_completion_gate: Option<(
-        std::sync::Arc<std::sync::atomic::AtomicBool>,
-        tokio::sync::oneshot::Receiver<bool>,
-    )>,
     _events: Option<Subscription>,
     _clock: Task<()>,
 }
@@ -64,7 +60,6 @@ impl Account {
         Self {
             core,
             host,
-            refreshing: HashMap::new(),
             ui: usage_visual::UsageUi::default(),
             hover: HoverSurface::default(),
             machines_hover: HoverSurface::default(),
@@ -74,48 +69,9 @@ impl Account {
             avatars: HashMap::new(),
             close: None,
             usage_height: px(0.0),
-            error: None,
-            #[cfg(test)]
-            refresh_completion_gate: None,
             _events: events,
             _clock: clock,
         }
-    }
-    pub(crate) fn refresh(&mut self, engine: EngineId, cx: &mut Context<Self>) {
-        if self.refreshing.contains_key(&engine) {
-            return;
-        }
-        let Some(host) = &self.host else {
-            return;
-        };
-        let client = host.read(cx).client.clone();
-        #[cfg(test)]
-        let completion_gate = self.refresh_completion_gate.take();
-        let task = cx.spawn(async move |this, cx| {
-            let result = client
-                .engine_action(engine, &artisan_api::EngineCommand::Refresh {})
-                .await;
-            #[cfg(test)]
-            let result = if let Some((arrived, release)) = completion_gate {
-                arrived.store(true, std::sync::atomic::Ordering::Release);
-                if release.await.unwrap_or(false) {
-                    Err(anyhow::anyhow!("injected account refresh failure"))
-                } else {
-                    result
-                }
-            } else {
-                result
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.refreshing.remove(&engine);
-                this.error = result
-                    .err()
-                    .map(|error| format!("Couldn't refresh {}: {error:#}", engine.display_name()));
-                cx.notify();
-            });
-        });
-        self.refreshing.insert(engine, task);
-        cx.notify();
     }
 }
 #[cfg(test)]
@@ -123,6 +79,7 @@ fn title(window: &UsageWindow) -> &str {
     match window.cadence {
         UsageCadence::Session => "Session",
         UsageCadence::Week => "Week",
+        UsageCadence::Month => "Month",
         UsageCadence::Other => &window.label,
     }
 }
@@ -169,18 +126,91 @@ impl Account {
         self.ui.clear();
         cx.notify();
     }
-    pub(crate) fn contains_popup(&self, position: &gpui::Point<Pixels>) -> bool {
-        self.machines_open && self.submenu_bounds.contains(position)
+    pub(crate) fn contains_popup(&self, position: gpui::Point<Pixels>) -> bool {
+        self.machines_open && self.submenu_bounds.contains(&position)
     }
+    /// "Theme" with a ghost button showing the current mode: the moon in
+    /// dark, the sun in light. Pressing it flips the mode behind a diagonal
+    /// shimmer across the window. The row has the action rows' height; the
+    /// button's corner is concentric with the menu's: the menu radius less
+    /// the group's padding and the row's inset.
+    fn theme_row(&self, theme: &ArtisanTheme) -> gpui::Div {
+        const ROW_HEIGHT: f32 = 36.0;
+        const INSET: f32 = 4.0;
+        /// The actions group's padding around its rows.
+        const GROUP_PADDING: f32 = 4.0;
+        let row_radius = RadiusTokens::value(RadiusStep::LgMid);
+        let menu_radius = RadiusTokens::value(RadiusStep::X2l);
+        let button_size = px(2.0f32.mul_add(-INSET, ROW_HEIGHT));
+        let mode = theme.colors.mode;
+        let core = self.core.clone();
+        let (icon, label) = if mode.is_dark() {
+            (AssetId::TABLER_MOON, "Switch to light theme")
+        } else {
+            (AssetId::TABLER_SUN, "Switch to dark theme")
+        };
+        let hover_theme = *theme;
+        let button = div()
+            .id("artisan-desktop-profile-theme")
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .focusable()
+            .tab_index(0)
+            .debug_selector(|| "artisan-desktop-profile-theme".into())
+            .size(button_size)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(RadiusTokens::nested(menu_radius, px(GROUP_PADDING + INSET)))
+            .text_color(theme.colors.text_muted.to_paint())
+            .cursor_pointer()
+            .hover(move |style| hover_fill(style, &hover_theme, HoverFill::Plain))
+            .child(asset_glyph(icon).size(px(15.0)))
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                let next = cx.theme().colors.mode.toggled();
+                editor_ui::theme::begin_mode_transition(next, window, cx);
+                core.update(cx, |core, cx| {
+                    core.set_setting("dark_mode", serde_json::Value::Bool(next.is_dark()), cx);
+                });
+            });
+        div()
+            .w_full()
+            .h(px(ROW_HEIGHT))
+            .flex()
+            .items_center()
+            .justify_between()
+            .pl(px(12.0))
+            .pr(px(INSET))
+            .rounded(row_radius)
+            .child(
+                div()
+                    .text_size(TypographyTokens::size(TextStep::Sm))
+                    .line_height(px(20.0))
+                    .text_color(theme.colors.text.to_paint())
+                    .child("Theme"),
+            )
+            .child(button)
+    }
+
+    /// A menu row. `submenu` rows sit in the host dropdown: they use its
+    /// hover surface and keep it open; the profile menu's rows close it.
     fn action(
         &self,
+        submenu: bool,
         id: &'static str,
         asset: AssetId,
         label: &'static str,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let theme = *cx.theme();
-        let hover = self.hover.clone();
+        let surface = if submenu {
+            &self.machines_hover
+        } else {
+            &self.hover
+        };
+        let hover = surface.clone();
         div()
             .id(id)
             .role(gpui::Role::MenuItem)
@@ -196,11 +226,11 @@ impl Account {
             .gap(px(8.0))
             .rounded(RadiusTokens::value(RadiusStep::LgMid))
             .cursor_pointer()
-            .child(self.hover.row_probe(id))
+            .child(surface.row_probe(id))
             .child(
                 asset_glyph(asset)
                     .size(px(15.0))
-                    .text_color(theme.colors.workspace_secondary.to_paint()),
+                    .text_color(theme.colors.text_muted.to_paint()),
             )
             .child(
                 div()
@@ -209,25 +239,32 @@ impl Account {
                     .truncate()
                     .text_size(TypographyTokens::size(TextStep::Sm))
                     .line_height(px(20.0))
-                    .text_color(theme.colors.workspace_foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child(label),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
+                if submenu {
+                    hover.hovered(id, *hovered);
+                    cx.notify();
+                } else if *hovered {
                     this.machines_open = false;
                     hover.hovered(id, true);
                     cx.notify();
                 }
             }))
     }
-    fn host_menu(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree for the machine menu, ported from the old Editor"
+    )]
+    fn host_menu(&mut self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let theme = *cx.theme();
         let current = self.host.as_ref().map(|host| host.read(cx).id.clone());
         let hosts: Vec<_> = self
             .core
             .read(cx)
             .hosts()
-            .map(|(config, host)| (config.clone(), host.read(cx).status.clone()))
+            .map(|(config, host)| (config.clone(), host.read(cx).status_line()))
             .collect();
         let mut rows = div()
             .relative()
@@ -240,16 +277,12 @@ impl Account {
             );
         for (config, status) in hosts {
             let id = config.id.clone();
-            let image = self
-                .avatars
-                .entry(config.fingerprint.clone())
-                .or_insert_with(|| avatar::avatar_image(&config.fingerprint))
-                .clone();
-            let secondary = match status {
-                ConnectionStatus::Live => config.address.clone(),
-                ConnectionStatus::Connecting => "Connecting…".into(),
-                ConnectionStatus::Offline { reason, .. } => format!("Offline: {reason}"),
-            };
+            let image = Arc::clone(
+                self.avatars
+                    .entry((theme.colors.mode, config.fingerprint.clone()))
+                    .or_insert_with(|| avatar::avatar_image(&config.fingerprint)),
+            );
+            let secondary = status.map_or_else(|| config.address.clone(), str::to_owned);
             let hover = self.machines_hover.clone();
             let hover_id = format!("host-{id}");
             let active = current.as_ref() == Some(&id);
@@ -302,7 +335,7 @@ impl Account {
                                     .truncate()
                                     .text_size(TypographyTokens::size(TextStep::Xs))
                                     .line_height(px(16.0))
-                                    .text_color(theme.colors.workspace_secondary.to_paint())
+                                    .text_color(theme.colors.text_muted.to_paint())
                                     .child(secondary),
                             ),
                     )
@@ -321,7 +354,7 @@ impl Account {
                                     project: None,
                                 },
                                 cx,
-                            )
+                            );
                         });
                     }),
             );
@@ -329,14 +362,10 @@ impl Account {
         let core = self.core.clone();
         let close = self.close.clone();
         rows = rows
-            .child(
-                div()
-                    .h(px(1.0))
-                    .my(px(4.0))
-                    .bg(theme.colors.foreground.with_alpha(0.2).to_paint()),
-            )
+            .child(editor_ui::glass::glass_menu_separator(&theme))
             .child(
                 self.action(
+                    true,
                     "sidebar-manage-hosts",
                     AssetId::TABLER_SETTINGS,
                     "Manage hosts…",
@@ -347,8 +376,8 @@ impl Account {
                         close(cx);
                     }
                     core.update(cx, |core, cx| {
-                        core.navigate(Screen::Settings(SettingsPage::Hosts), cx)
-                    })
+                        core.navigate(Screen::Settings(SettingsPage::Hosts), cx);
+                    });
                 }),
             );
         let bounds = self.host_origin.get();
@@ -364,31 +393,45 @@ impl Account {
             anchored()
                 .position(point(left, bounds.top()))
                 .snap_to_window_with_margin(px(8.0))
-                .child(editor_ui::hover_card::glass_hover_card(
-                    &theme,
+                .child(
                     div()
-                        .id("machine-dropdown")
-                        .relative()
-                        .child(submenu_bounds.record())
-                        .debug_selector(|| "machine-dropdown".into())
-                        .w(width)
-                        .max_h(px(400.0))
-                        .overflow_y_scroll()
-                        .p(px(4.0))
-                        .child(rows),
-                )),
+                        .occlude()
+                        .child(editor_ui::hover_card::glass_hover_card(
+                            &theme,
+                            div()
+                                .id("machine-dropdown")
+                                .relative()
+                                .child(submenu_bounds.record())
+                                .debug_selector(|| "machine-dropdown".into())
+                                .w(width)
+                                .max_h(px(400.0))
+                                .overflow_y_scroll()
+                                .p(px(4.0))
+                                .child(rows),
+                        )),
+                ),
         )
         .with_priority(2)
         .into_any_element()
     }
 }
 impl Render for Account {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the account menu's root element tree, ported from the old Editor"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        let (seed, user, name, status) = self
-            .host
-            .as_ref()
-            .map(|host| {
+        let (seed, user, name, status) = self.host.as_ref().map_or_else(
+            || {
+                (
+                    "no-host".into(),
+                    "Artisan".into(),
+                    "No host".into(),
+                    "No host".into(),
+                )
+            },
+            |host| {
                 let host = host.read(cx);
                 let seed = self
                     .core
@@ -399,11 +442,9 @@ impl Render for Account {
                         || host.id.0.clone(),
                         |(config, _)| config.fingerprint.clone(),
                     );
-                let status = match &host.status {
-                    ConnectionStatus::Live => host.name.clone(),
-                    ConnectionStatus::Connecting => "Connecting…".into(),
-                    ConnectionStatus::Offline { reason, .. } => format!("Offline: {reason}"),
-                };
+                let status = host
+                    .status_line()
+                    .map_or_else(|| host.name.clone(), str::to_owned);
                 (
                     seed,
                     host.account
@@ -412,22 +453,15 @@ impl Render for Account {
                     host.name.clone(),
                     status,
                 )
-            })
-            .unwrap_or_else(|| {
-                (
-                    "no-host".into(),
-                    "Artisan".into(),
-                    "No host".into(),
-                    "No host".into(),
-                )
-            });
-        let image = self
-            .avatars
-            .entry(seed.clone())
-            .or_insert_with(|| avatar::avatar_image(&seed))
-            .clone();
+            },
+        );
+        let image = Arc::clone(
+            self.avatars
+                .entry((theme.colors.mode, seed.clone()))
+                .or_insert_with(|| avatar::avatar_image(&seed)),
+        );
         let _ = name;
-        let origin = self.host_origin.clone();
+        let origin = Rc::clone(&self.host_origin);
         let host_hover = self.hover.clone();
         let host_row = div()
             .id("artisan-desktop-profile-machine")
@@ -488,14 +522,14 @@ impl Render for Account {
                             .truncate()
                             .text_size(TypographyTokens::size(TextStep::Xs))
                             .line_height(px(16.0))
-                            .text_color(theme.colors.workspace_secondary.to_paint())
+                            .text_color(theme.colors.text_muted.to_paint())
                             .child(status),
                     ),
             )
             .child(
                 asset_glyph(AssetId::TABLER_CHEVRON_RIGHT)
                     .size(px(15.0))
-                    .text_color(theme.colors.workspace_secondary.to_paint()),
+                    .text_color(theme.colors.text_muted.to_paint()),
             );
         let reports: Vec<(EngineId, UsageLimits)> = self
             .host
@@ -505,19 +539,17 @@ impl Render for Account {
                     .engines
                     .values()
                     .filter_map(|status| {
+                        // The menu meters limits; spend is the Usage page's.
                         status
                             .usage
                             .as_ref()
+                            .filter(|usage| !usage.windows.is_empty())
                             .map(|usage| (status.engine, usage.clone()))
                     })
                     .collect()
             })
             .unwrap_or_default();
-        let separator = theme
-            .colors
-            .border
-            .with_alpha(theme.colors.border.a * 0.5)
-            .to_paint();
+        let separator = editor_ui::glass::glass_menu_line(&theme);
         let mut body = div()
             .id("artisan-profile-content")
             .relative()
@@ -540,20 +572,15 @@ impl Render for Account {
                         .min_h_0()
                         .max_h(self.usage_height)
                         .overflow_y_scroll()
-                        .child(usage_visual::section(
-                            self,
-                            &reports,
-                            &theme,
-                            &theme.colors,
-                            separator,
-                            cx,
-                        )),
+                        .child(usage_visual::section(self, &reports, &theme, cx)),
                 )
                 .child(div().h(px(1.0)).my(px(4.0)).bg(separator));
         }
         let core = self.core.clone();
         let close = self.close.clone();
-        let mut actions = div()
+        let usage_core = self.core.clone();
+        let usage_close = self.close.clone();
+        let actions = div()
             .id("artisan-desktop-profile-actions-hover-surface")
             .debug_selector(|| "artisan-desktop-profile-actions-hover-surface".into())
             .w_full()
@@ -562,6 +589,7 @@ impl Render for Account {
             .p(px(4.0))
             .child(
                 self.action(
+                    false,
                     "artisan-desktop-profile-action-0",
                     AssetId::TABLER_SETTINGS,
                     "Settings",
@@ -572,45 +600,44 @@ impl Render for Account {
                         close(cx);
                     }
                     core.update(cx, |core, cx| {
-                        core.navigate(Screen::Settings(SettingsPage::Models), cx)
-                    })
+                        core.navigate(Screen::Settings(SettingsPage::General), cx);
+                    });
                 }),
-            );
-        if !reports.is_empty() {
-            let engines: Vec<_> = reports.iter().map(|(engine, _)| *engine).collect();
-            actions = actions.child(
+            )
+            .child(
                 self.action(
+                    false,
                     "artisan-desktop-profile-action-1",
-                    AssetId::TABLER_LIST_DETAILS,
+                    AssetId::TABLER_CHART_COLUMN,
                     "Usage",
                     cx,
                 )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    for engine in &engines {
-                        this.refresh(*engine, cx);
+                .on_click(move |_, _, cx| {
+                    if let Some(close) = &usage_close {
+                        close(cx);
                     }
-                })),
+                    usage_core.update(cx, |core, cx| core.navigate(Screen::Usage, cx));
+                }),
             );
-        }
-        body = body.child(actions);
+        // Theme sits apart from the actions, the line edge to edge like the
+        // menu's other separators.
+        body = body.child(
+            actions
+                .child(div().h(px(1.0)).my(px(4.0)).mx(px(-4.0)).bg(separator))
+                .child(self.theme_row(&theme)),
+        );
         if let Some(tooltip) = usage_visual::tooltip(self, &reports, &theme, &theme.colors) {
             body = body.child(tooltip);
         }
         let submenu = self.machines_open.then(|| self.host_menu(window, cx));
-        body.children(self.error.clone().map(|error| {
-            div()
-                .text_color(theme.colors.destructive.to_paint())
-                .child(error)
-        }))
-        .children(submenu)
-        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-            if !*hovered {
-                this.hover.clear();
-                this.ui.clear();
-                cx.notify();
-            }
-        }))
+        body.children(submenu)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.hover.clear();
+                    this.ui.clear();
+                    cx.notify();
+                }
+            }))
     }
 }
 
@@ -633,110 +660,5 @@ mod tests {
         assert_eq!(checked_label(i64::MAX, i64::MIN), "Checked now");
         assert_eq!(reset_label(i64::MIN, i64::MAX), "Reset time reached");
         assert!(reset_label(i64::MAX, i64::MIN).starts_with("Resets in "));
-    }
-}
-
-#[cfg(test)]
-mod request_tests {
-    use super::*;
-    use crate::tests::Setup;
-    use gpui::TestAppContext;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    #[gpui::test]
-    fn switching_hosts_drops_pending_account_refresh_and_preserves_the_new_account(
-        cx: &mut TestAppContext,
-    ) {
-        let setup = Setup::new(cx);
-        setup.wait(cx, "paired host", |setup, cx| {
-            setup.core.read_with(cx, |core, cx| {
-                core.active_host()
-                    .is_some_and(|host| host.read(cx).is_live())
-            })
-        });
-        setup
-            .window
-            .update(cx, |sidebar, _, cx| sidebar.show_profile(cx))
-            .unwrap();
-        let old_account = setup
-            .window
-            .read_with(cx, |sidebar, _| sidebar.profile.clone().unwrap())
-            .unwrap();
-        let old_weak = old_account.downgrade();
-        let arrived = Arc::new(AtomicBool::new(false));
-        let (release, receive) = tokio::sync::oneshot::channel();
-        old_account.update(cx, |account, cx| {
-            account.refresh_completion_gate = Some((arrived.clone(), receive));
-            account.refresh(EngineId::Claude, cx);
-        });
-        setup.wait(cx, "account RPC response held", |_, _| {
-            arrived.load(Ordering::Acquire)
-        });
-        let server = setup
-            .forge
-            .block_on(forge_http::start(forge_http::ServeConfig {
-                data_dir: setup._dir.path().join("second-forge"),
-                listen: "127.0.0.1:0".parse().unwrap(),
-            }))
-            .unwrap();
-        let address = server.local_addr().unwrap().to_string();
-        let store = server.store().clone();
-        setup.forge.spawn(server.run());
-        let (_, host) = super::super::tests::forge_fixture::pair(
-            &store,
-            &setup.forge,
-            &address,
-            &setup._dir.path().join("editor"),
-        );
-        setup
-            .core
-            .update(cx, |core, cx| core.add_host(host.clone(), cx).unwrap());
-        setup.wait(cx, "new host clears old account", |setup, cx| {
-            setup
-                .window
-                .read_with(cx, |sidebar, cx| {
-                    sidebar.profile.is_none()
-                        && sidebar
-                            .host
-                            .as_ref()
-                            .is_some_and(|data| data.read(cx).id == host.id)
-                })
-                .unwrap()
-        });
-        drop(old_account);
-        cx.run_until_parked();
-        assert!(
-            old_weak.upgrade().is_none(),
-            "account and its owned request must release on host switch"
-        );
-        setup.wait(
-            cx,
-            "cancelled account request releases its future",
-            |_, _| release.is_closed(),
-        );
-        setup
-            .window
-            .update(cx, |sidebar, _, cx| sidebar.show_profile(cx))
-            .unwrap();
-        let new_account = setup
-            .window
-            .read_with(cx, |sidebar, _| sidebar.profile.clone().unwrap())
-            .unwrap();
-        new_account.update(cx, |account, _| {
-            account.error = Some("new account error".into())
-        });
-        assert!(
-            release.send(true).is_err(),
-            "dropping account cancels its pending request"
-        );
-        cx.run_until_parked();
-        assert_eq!(
-            new_account.read_with(cx, |account, _| account.error.clone()),
-            Some("new account error".into())
-        );
-        assert!(new_account.read_with(cx, |account, _| account.refreshing.is_empty()));
     }
 }

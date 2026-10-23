@@ -10,6 +10,7 @@
 
 use std::{cell::Cell, rc::Rc};
 
+use gpui::InteractiveElement as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, ContentMask, Corners, Div, ElementId, Filter, IntoElement,
@@ -101,6 +102,8 @@ impl RenderOnce for TabCard {
         let shadow = material.shadow.clone();
         let shell_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
         let shell_probe = Rc::clone(&shell_bounds);
+        let tab_width = Rc::new(Cell::new(None::<Pixels>));
+        let tab_probe = Rc::clone(&tab_width);
 
         // Paint order is the whole trick. Backdrop blur samples whatever is
         // already painted, so the blur layers paint first, then the silhouette,
@@ -127,6 +130,7 @@ impl RenderOnce for TabCard {
         .child(
             canvas(
                 move |bounds, _, cx| {
+                    tab_probe.set(Some(bounds.size.width));
                     shell_bounds.get().map(|shell| {
                         let tab_width = bounds.size.width;
                         let key = GeometryKey { size: shell.size, tab_width, radius, reveal };
@@ -156,17 +160,16 @@ impl RenderOnce for TabCard {
                 .absolute()
                 .size_full(),
         )
-        // The shadow and the body's blur sit under the body area.
+        // The shadow follows the whole silhouette and paints before every
+        // blur. The tab measures itself in prepaint, before this paints.
         .child(
-            div()
-                .absolute()
-                .top(px(TAB_CARD_TAB_HEIGHT_PX))
-                .left_0()
-                .right_0()
-                .bottom_0()
-                .rounded_tr(radius)
-                .rounded_b(radius)
-                .shadow(shadow),
+            canvas(|_, _, _| {}, move |bounds, (), window, _| {
+                if let Some(tab_width) = tab_width.get() {
+                    paint_shell_shadow(bounds, tab_width, radius, reveal, &shadow, window);
+                }
+            })
+            .absolute()
+            .size_full(),
         )
         // A grown strip fills the gap outside the body's top-right corner,
         // and the strip's own blur stops at the body's top edge, so the
@@ -217,6 +220,7 @@ fn strip_layer(strip: TabCardStrip) -> Div {
                 .left_0()
                 .w(relative(reveal))
                 .overflow_hidden()
+                .debug_selector(|| "tab-card-strip".into())
                 .child(strip.content),
         )
 }
@@ -321,7 +325,7 @@ fn strip_end(bounds: Bounds<Pixels>, tab_width: Pixels, radius: Pixels, right: P
     let bottom = if right > corner_x {
         let r = f32::from(radius);
         let dx = f32::from(right - corner_x).min(r);
-        StripBottom::Down(px(r - (r * r - dx * dx).max(0.0).sqrt()))
+        StripBottom::Down(px(r - dx.mul_add(-dx, r * r).max(0.0).sqrt()))
     } else {
         StripBottom::Rounded(top.min(corner_x - right))
     };
@@ -476,46 +480,81 @@ fn paint_strip_blur(
     );
 }
 
-/// The `@utility card` stack along the strip's own edges: its top and its
-/// leading edge, down to where it meets the body.
+/// The shell's drop shadow, following its silhouette: the tab (grown by
+/// the strip) and the body, each casting its own shadow.
 ///
-/// The stack paints outside a rounded rectangle from the tab's corner to the
-/// strip's leading edge. The tab and the body carry the shell's own edge, so
-/// a mask keeps the stack off the rectangle's left and bottom sides and
-/// nothing stacks.
-fn paint_strip_card_edge(
+/// Two shapes that only touch cast exactly the shadow of their union, so
+/// the stacks add up seamlessly, as long as each stays off the other's
+/// area: a shadow never paints under the glass it belongs to. A negative
+/// spread pulls the two apart along their shared edge, so the tab reaches
+/// that much further down to meet the body again.
+fn paint_shell_shadow(
     bounds: Bounds<Pixels>,
     tab_width: Pixels,
     radius: Pixels,
-    right: Pixels,
+    reveal: f32,
     shadows: &[BoxShadow],
     window: &mut Window,
 ) {
-    let y0 = bounds.origin.y;
-    let left = bounds.origin.x + tab_width - TAB_RADIUS;
+    if tab_width <= Pixels::ZERO {
+        return;
+    }
+    let (x0, y0) = (bounds.origin.x, bounds.origin.y);
     let body_y0 = y0 + px(TAB_CARD_TAB_HEIGHT_PX);
-    let end = strip_end(bounds, tab_width, radius, right);
-    let (bottom, bottom_radius) = match end.bottom {
-        StripBottom::Rounded(bottom) => (body_y0, bottom),
-        StripBottom::Down(drop) => (body_y0 + drop, Pixels::ZERO),
-    };
-    // Room for the stack's blur above and to the right.
-    let reach = px(64.0);
-    let mask = ContentMask {
-        bounds: Bounds::from_corners(point(left, y0 - reach), point(right + reach, bottom)),
-    };
-    window.with_content_mask(Some(mask), |window| {
-        window.paint_drop_shadows(
-            Bounds::from_corners(point(left, y0), point(right, bottom)),
-            Corners {
-                top_left: Pixels::ZERO,
-                top_right: end.top,
-                bottom_right: bottom_radius,
-                bottom_left: Pixels::ZERO,
+    let (right, top_right, bottom_right, bottom) = strip_right(bounds, tab_width, reveal)
+        .map_or_else(
+            || (x0 + tab_width, TAB_RADIUS, Pixels::ZERO, body_y0),
+            |right| {
+                let end = strip_end(bounds, tab_width, radius, right);
+                match end.bottom {
+                    StripBottom::Rounded(corner) => (right, end.top, corner, body_y0),
+                    // The strip fills the notch outside the body's corner.
+                    StripBottom::Down(drop) => (right, end.top, Pixels::ZERO, body_y0 + drop),
+                }
             },
-            shadows,
         );
-    });
+    let tab = Bounds::from_corners(point(x0, y0), point(right, bottom));
+    let tab_corners = Corners {
+        top_left: TAB_RADIUS,
+        top_right,
+        bottom_right,
+        bottom_left: Pixels::ZERO,
+    };
+    let body = Bounds::from_corners(point(x0, body_y0), bounds.bottom_right());
+    let body_corners = Corners {
+        top_left: Pixels::ZERO,
+        top_right: radius,
+        bottom_right: radius,
+        bottom_left: radius,
+    };
+    let reach = bounds.dilate(px(128.0));
+    for shadow in shadows {
+        let tuck = (-shadow.spread_radius).max(Pixels::ZERO) * 2.0;
+        let tab = Bounds::from_corners(tab.origin, tab.bottom_right() + point(Pixels::ZERO, tuck));
+        for mask in outside(body, reach) {
+            window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
+                window.paint_drop_shadows(tab, tab_corners, std::slice::from_ref(shadow));
+            });
+        }
+        for mask in outside(tab, reach) {
+            window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
+                window.paint_drop_shadows(body, body_corners, std::slice::from_ref(shadow));
+            });
+        }
+    }
+}
+
+/// Everything in `reach` outside `rect`, as four rectangles that never
+/// overlap: above, below, left and right of it.
+fn outside(rect: Bounds<Pixels>, reach: Bounds<Pixels>) -> [Bounds<Pixels>; 4] {
+    let (left, top) = (rect.origin.x, rect.origin.y);
+    let (right, bottom) = (rect.right(), rect.bottom());
+    [
+        Bounds::from_corners(reach.origin, point(reach.right(), top)),
+        Bounds::from_corners(point(reach.origin.x, bottom), reach.bottom_right()),
+        Bounds::from_corners(point(reach.origin.x, top), point(left, bottom)),
+        Bounds::from_corners(point(right, top), point(reach.right(), bottom)),
+    ]
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -543,7 +582,7 @@ impl GeometryCache {
             self.paths = Rc::new(Geometry::new(key));
             self.key = Some(key);
         }
-        self.paths.clone()
+        Rc::clone(&self.paths)
     }
 }
 impl Geometry {
@@ -623,16 +662,6 @@ fn paint_silhouette(
     if let Some(path) = &paths.edge {
         window.paint_path(translated(path, bounds.origin), material.ring);
         window.paint_path(translated(path, bounds.origin), material.top_light);
-    }
-    if let Some(right) = strip {
-        paint_strip_card_edge(
-            bounds,
-            tab_width,
-            radius,
-            right,
-            &material.card_edge,
-            window,
-        );
     }
 }
 

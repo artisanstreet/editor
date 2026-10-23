@@ -29,7 +29,8 @@ pub use phase::{Phase, turn_phase};
 use artisan_api::{Answer, BlobHash, Item, ItemId, ItemKind, Run, ThreadId};
 use body::Bodies;
 use editor_composer::{
-    Composer, ComposerEvent, ComposerGoal, ComposerGoalState, ComposerQuestionnaire, ComposerTarget,
+    Composer, ComposerEvent, ComposerGoal, ComposerGoalState, ComposerNote, ComposerQuestionnaire,
+    ComposerTarget,
 };
 use editor_core::{Core, CoreEvent, HostData, HostEvent, HostId, Screen};
 use editor_ui::theme::ActiveTheme as _;
@@ -120,6 +121,11 @@ pub struct Conversation {
     core: Entity<Core>,
     /// The subagent whose view is open in place of the thread's.
     agent: Option<ItemId>,
+    /// The new-thread host's connection phase (whether Forge was reached
+    /// before) and when it began, for the delayed reassurance line.
+    waiting: Option<(bool, std::time::Instant)>,
+    waiting_generation: u64,
+    waiting_timer: Option<gpui::Task<()>>,
     open: Option<(HostId, ThreadId)>,
     view: Option<ThreadView>,
     /// The last fold of the items, run and toggles, before text bodies
@@ -138,6 +144,9 @@ pub struct Conversation {
     disclosure_clips: HashMap<RowKey, disclosure::RowClip>,
     disclosure_hidden: HashSet<ItemId>,
     disclosure_fractions: HashMap<RowKey, f32>,
+    /// The space above the row after each group in flight, eased between
+    /// its closed and open spacing.
+    disclosure_gaps: HashMap<RowKey, f32>,
     /// Each painted row's measured height, which a disclosure clips.
     row_heights: HashMap<RowKey, gpui::Pixels>,
     /// Rows hold their reveal until the fresh content before them has.
@@ -146,6 +155,8 @@ pub struct Conversation {
     reveal_frontier: Option<RowKey>,
     row_cache_order: std::collections::VecDeque<usize>,
     list: ListState,
+    /// The transcript's scroll edges: under the header and over the composer.
+    edges: [editor_ui::scroll_edge::EdgeFade; 2],
     composer: Option<Entity<Composer>>,
     composer_events: Option<Subscription>,
     bodies: Bodies,
@@ -159,9 +170,11 @@ pub struct Conversation {
     navigator_hovered: bool,
     navigator_hover: Rc<RefCell<editor_ui::picker_motion::SlidingHoverState>>,
     navigator_hover_surface: editor_ui::measure::Measured,
+    /// The menu's rows, scrolled to the turn in view as it opens.
+    navigator_scroll: gpui::UniformListScrollHandle,
     /// Rebuilt only when transcript rows change; labels retain bounded first lines.
-    navigator_markers: Option<Arc<[render::Marker]>>,
-    navigator_labels: HashMap<ItemId, (artisan_api::Seq, SharedString)>,
+    /// Forge's outline as markers, and the summary they were made from.
+    navigator_markers: Option<(usize, Arc<[render::Marker]>)>,
     /// Per tick (by message), whether it was last active and when that
     /// changed, while it eases between its two looks.
     navigator_ticks: HashMap<ItemId, (bool, Option<std::time::Instant>)>,
@@ -173,6 +186,14 @@ pub struct Conversation {
     page_task: Option<Task<()>>,
     /// The open agent's ancestry being read; dropped like `page_task`.
     agent_task: Option<Task<()>>,
+    /// The unloaded work span being read, by its first position.
+    work_reading: Option<artisan_api::Seq>,
+    /// That read; dropped like `page_task`.
+    work_task: Option<Task<()>>,
+    /// The opened thread is hidden until its first screen is ready (see
+    /// `landed`), at most until this deadline.
+    landing: Option<std::time::Instant>,
+    landing_timer: Option<Task<()>>,
     /// How many times the reader has scrolled; source pages never move
     /// back the way they came until it changes.
     reader_moves: u64,
@@ -188,6 +209,8 @@ pub struct Conversation {
     /// Ticks the elapsed time while the open thread's run is live.
     clock: Option<Task<()>>,
     host_events: Option<Subscription>,
+    /// The new-thread screen's host: its connection card follows it.
+    new_thread_host: Option<(HostId, Subscription)>,
     _core_events: Subscription,
     /// Whether the window is active: what arrives then is seen arriving,
     /// and animates.
@@ -226,13 +249,16 @@ impl Conversation {
             // The list is still borrowed here; `scrolled` reads it.
             let (this, top) = (this.clone(), event.visible_range.start);
             cx.defer(move |cx| {
-                let _ = this.update(cx, |this, cx| this.scrolled(top, cx));
+                this.update(cx, |this, cx| this.scrolled(top, cx)).ok();
             });
         });
         let theme = *cx.theme();
         let mut conversation = Self {
             core,
             agent: None,
+            waiting: None,
+            waiting_generation: 0,
+            waiting_timer: None,
             open: None,
             view: None,
             folded: Default::default(),
@@ -243,11 +269,13 @@ impl Conversation {
             disclosure_clips: HashMap::new(),
             disclosure_hidden: HashSet::new(),
             disclosure_fractions: HashMap::new(),
+            disclosure_gaps: HashMap::new(),
             row_heights: HashMap::new(),
             reveal: Rc::default(),
             reveal_frontier: None,
             row_cache_order: std::collections::VecDeque::new(),
             list,
+            edges: Default::default(),
             composer: None,
             composer_events: None,
             bodies: Bodies::new(),
@@ -257,12 +285,16 @@ impl Conversation {
             navigator_hovered: false,
             navigator_hover: Rc::default(),
             navigator_hover_surface: editor_ui::measure::Measured::default(),
+            navigator_scroll: gpui::UniformListScrollHandle::new(),
             navigator_markers: None,
-            navigator_labels: HashMap::new(),
             navigator_ticks: HashMap::new(),
             navigator_had_active: false,
             page_task: None,
             agent_task: None,
+            work_reading: None,
+            work_task: None,
+            landing: None,
+            landing_timer: None,
             reader_moves: 0,
             reader_toward_end: None,
             frame_started: Rc::default(),
@@ -271,6 +303,7 @@ impl Conversation {
             arrival: None,
             clock: None,
             host_events: None,
+            new_thread_host: None,
             _core_events: core_events,
             window: WindowState::of(window),
             selection_window,
@@ -293,7 +326,7 @@ impl Conversation {
             self.bodies.scope = scope;
         }
     }
-    fn release_selection(&mut self, cx: &mut App) {
+    fn release_selection(&self, cx: &mut App) {
         editor_ui::selectable_text::release_selection_scope(
             &self.bodies.scope,
             self.selection_window,
@@ -310,12 +343,13 @@ impl Conversation {
         self.disclosure_clips.clear();
         self.disclosure_hidden.clear();
         self.disclosure_fractions.clear();
+        self.disclosure_gaps.clear();
         self.row_heights.clear();
     }
 
     /// The thread on screen, if any.
     #[must_use]
-    pub fn open_thread(&self) -> Option<&(HostId, ThreadId)> {
+    pub const fn open_thread(&self) -> Option<&(HostId, ThreadId)> {
         self.open.as_ref()
     }
 
@@ -327,20 +361,28 @@ impl Conversation {
     }
 
     #[must_use]
-    pub fn core(&self) -> &Entity<Core> {
+    pub const fn core(&self) -> &Entity<Core> {
         &self.core
     }
 
     /// Scrolls to an item of the open thread, loading history until it is in.
     pub fn jump_to(&mut self, item: &Item, cx: &mut Context<Self>) {
-        let Some(view) = self
+        if self
             .view
-            .as_mut()
-            .filter(|view| view.thread == item.thread_id)
-        else {
+            .as_ref()
+            .is_some_and(|view| view.thread == item.thread_id)
+        {
+            self.jump_to_position(item.position, cx);
+        }
+    }
+
+    /// Scrolls to `position` in the open thread, loading the stretch around
+    /// it when it isn't loaded.
+    pub(crate) fn jump_to_position(&mut self, position: artisan_api::Seq, cx: &mut Context<Self>) {
+        let Some(view) = self.view.as_mut() else {
             return;
         };
-        let effects = view.jump(Jump::To(item.position));
+        let effects = view.jump(Jump::To(position));
         self.clear_page_frontiers();
         self.perform(effects, cx);
     }
@@ -359,14 +401,13 @@ impl Conversation {
         shift * (1.0 - motion::eased(editor_ui::motion::MotionCurve::SmoothOut, progress))
     }
 
-    /// Loading only until the first usable content or empty tail arrives.
-    pub(crate) fn landing(&self) -> bool {
+    /// The opened thread is still preparing its first screen: its first
+    /// page, the edges around the view and the text in it.
+    pub(crate) const fn landing(&self) -> bool {
         self.agent.is_none()
             && self.load_error.is_none()
-            && self
-                .view
-                .as_ref()
-                .is_some_and(|view| view.items.is_empty() && view.window().in_flight)
+            && self.view.is_some()
+            && self.landing.is_some()
     }
 
     /// Shows the subagent `agent`'s own work in place of the thread's, like
@@ -383,7 +424,16 @@ impl Conversation {
                 model,
                 ..
             } => Some((*used, model.clone())),
-            _ => None,
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Tool { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => None,
         }))
     }
 
@@ -398,7 +448,7 @@ impl Conversation {
         let context = agent
             .as_ref()
             .and_then(|id| self.view.as_ref()?.shared_item(id));
-        self.agent = agent.clone();
+        self.agent.clone_from(&agent);
         self.update_selection_scope();
         let mut effects = Some(if let Some(view) = self.view.as_mut() {
             view.context.clear();
@@ -430,7 +480,7 @@ impl Conversation {
                             if item.thread_id == thread
                                 && matches!(item.kind, ItemKind::Agent { .. }) =>
                         {
-                            next = item.parent_id.clone();
+                            next.clone_from(&item.parent_id);
                             context.insert(id, Arc::new(item));
                         }
                         Ok(_) => {
@@ -446,7 +496,7 @@ impl Conversation {
                 if next.is_some() {
                     error = Some("Agent ancestry exceeds 16 levels".to_owned());
                 }
-                let _ = this.update(cx, |this, cx| {
+                this.update(cx, |this, cx| {
                     if this.open != open || this.agent.as_ref() != Some(&requested_agent) {
                         return;
                     }
@@ -466,13 +516,13 @@ impl Conversation {
                         this.perform(effects, cx);
                     }
                     cx.emit(ConversationEvent::AgentChanged);
-                });
+                })
+                .ok();
             }));
         }
         // Another transcript: build it fresh and land on its end.
         self.rows.clear();
         self.navigator_markers = None;
-        self.navigator_labels.clear();
         self.row_views.clear();
         self.row_cache_order.clear();
         self.list.reset(0);
@@ -531,6 +581,26 @@ impl Conversation {
         self.core.read(cx).host(host).cloned()
     }
 
+    fn follow_new_thread_host(&mut self, id: &HostId, cx: &mut Context<Self>) {
+        if self
+            .new_thread_host
+            .as_ref()
+            .is_some_and(|(followed, _)| followed == id)
+        {
+            return;
+        }
+        let Some(host) = self.core.read(cx).host(id).cloned() else {
+            self.new_thread_host = None;
+            return;
+        };
+        let subscription = cx.subscribe(&host, |_, _, event: &HostEvent, cx| {
+            if matches!(event, HostEvent::Changed | HostEvent::Reset) {
+                cx.notify();
+            }
+        });
+        self.new_thread_host = Some((id.clone(), subscription));
+    }
+
     fn sync_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let screen = self.core.read(cx).screen().clone();
         let target = match screen {
@@ -542,9 +612,10 @@ impl Conversation {
             }
             Screen::NewThread { host, project } => {
                 self.close(cx);
+                self.follow_new_thread_host(&host, cx);
                 ComposerTarget::NewThread { host, project }
             }
-            Screen::Home | Screen::Settings(_) | Screen::Marketplace => return,
+            Screen::Home | Screen::Settings(_) | Screen::Marketplace | Screen::Usage => return,
         };
         if let Some(composer) = &self.composer {
             if composer.read(cx).target() != &target {
@@ -578,6 +649,10 @@ impl Conversation {
     fn close(&mut self, cx: &mut Context<Self>) {
         self.page_task = None;
         self.agent_task = None;
+        self.work_reading = None;
+        self.work_task = None;
+        self.landing = None;
+        self.landing_timer = None;
         self.forget_transcript(cx);
         if self.agent.take().is_some() {
             cx.emit(ConversationEvent::AgentChanged);
@@ -636,12 +711,32 @@ impl Conversation {
         self.list.set_follow_mode(FollowMode::Tail);
         self.rows.clear();
         self.navigator_markers = None;
-        self.navigator_labels.clear();
         self.row_views.clear();
         self.row_cache_order.clear();
+        self.begin_landing(cx);
         self.perform(effects, cx);
         self.rebuild(cx);
         cx.emit(ConversationEvent::ItemsChanged);
+    }
+
+    /// Hides the transcript until its first screen is ready, or the
+    /// deadline passes: a slow Forge still shows what it has.
+    fn begin_landing(&mut self, cx: &Context<Self>) {
+        const LANDING_AT_MOST: Duration = Duration::from_millis(1500);
+        self.landing = Some(std::time::Instant::now() + LANDING_AT_MOST);
+        self.landing_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(LANDING_AT_MOST).await;
+            this.update(cx, Self::landed).ok();
+        }));
+    }
+
+    /// The first screen is ready: the transcript shows, and from here on
+    /// nothing in view moves on its own.
+    pub(crate) fn landed(&mut self, cx: &mut Context<Self>) {
+        if self.landing.take().is_some() {
+            self.landing_timer = None;
+            cx.notify();
+        }
     }
 
     fn host_event(&mut self, host: &Entity<HostData>, event: &HostEvent, cx: &mut Context<Self>) {
@@ -665,11 +760,24 @@ impl Conversation {
                 {
                     return;
                 }
-                let changed = view.apply_item(item.clone(), watched);
+                let changed = view.apply_item(Arc::clone(item), watched);
                 view.set_live(host.read(cx).live_targets(&thread));
+                // The user sent the next message: the reply before it shows
+                // the rest at once rather than keep pacing.
+                let sent = matches!(
+                    item.kind,
+                    ItemKind::UserMessage {
+                        steer: false,
+                        from_agent: None,
+                        ..
+                    }
+                ) && view.ui.get(&item.id).is_some_and(thread::ItemUi::fresh);
                 if changed {
                     if watched && matches!(item.kind, ItemKind::AssistantMessage { .. }) {
                         self.observe_live_prose_arrival(&item.id);
+                    }
+                    if sent {
+                        self.reveal.borrow_mut().rush(item.position);
                     }
                     self.rebuild(cx);
                     cx.emit(ConversationEvent::ItemsChanged);
@@ -702,10 +810,14 @@ impl Conversation {
                     self.rebuild(cx);
                 }
             }
-            HostEvent::EngineInstall { .. } => {}
+            HostEvent::EngineInstall { .. }
+            | HostEvent::WslDistro { .. }
+            | HostEvent::EditorCall { .. } => {}
             HostEvent::Changed => cx.notify(),
             HostEvent::Reset => {
                 self.page_task = None;
+                self.work_reading = None;
+                self.work_task = None;
                 self.list.set_follow_mode(FollowMode::Tail);
                 let effects = view.reset();
                 view.set_live(host.read(cx).live_targets(&thread));
@@ -759,51 +871,34 @@ impl Conversation {
         cx.notify();
     }
 
-    fn fetch(&mut self, fetch: Fetch, cx: &mut Context<Self>) {
+    fn fetch(&mut self, fetch: Fetch, cx: &Context<Self>) {
         let (Some(host), Some(view)) = (self.host(cx), self.view.as_ref()) else {
             return;
         };
         let client = host.read(cx).client.clone();
         let thread = view.thread.clone();
-        let query = thread::query(fetch, thread::PAGE);
         let open = self.open.clone();
         let agent = self.agent.clone();
         self.page_task = Some(cx.spawn(async move |this, cx| {
-            let result = match agent.as_ref() {
-                Some(agent) => client.agent_items(&thread, agent, &query).await,
-                None => client.items(&thread, &query).await,
+            let result = if let Some(agent) = agent.as_ref() {
+                let query = thread::query(fetch, thread::PAGE);
+                client.agent_items(&thread, agent, &query).await
+            } else {
+                // The thread pages in rows; its work loads as it opens.
+                let query = thread::query(fetch, thread::ROWS_PAGE);
+                client.transcript(&thread, &query).await
             };
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 if this.open != open {
                     return;
                 }
-                let Some(view) = this.view.as_mut().filter(|view| view.thread == thread) else {
-                    return;
-                };
-                // A page can replace the work row at the loaded edge. Native
-                // splice cannot keep an anchor whose key disappears; retain the
-                // first surviving visible row's measured position instead.
-                let anchors: Vec<_> = if matches!(fetch, Fetch::Older { .. } | Fetch::Newer { .. })
-                    && !this.list.is_following_tail()
-                {
-                    let viewport = this.list.viewport_bounds();
-                    this.rows
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, (row, _))| {
-                            let bounds = this.list.bounds_for_item(index)?;
-                            (bounds.bottom() > viewport.top() && bounds.top() < viewport.bottom())
-                                .then(|| {
-                                    (
-                                        row.key(),
-                                        row.anchor().cloned(),
-                                        viewport.top() - bounds.top(),
-                                    )
-                                })
-                        })
-                        .collect()
+                let anchors = if matches!(fetch, Fetch::Older { .. } | Fetch::Newer { .. }) {
+                    this.reading_anchors()
                 } else {
                     Vec::new()
+                };
+                let Some(view) = this.view.as_mut().filter(|view| view.thread == thread) else {
+                    return;
                 };
                 let effects = match result {
                     Ok(page) => {
@@ -817,23 +912,101 @@ impl Conversation {
                     }
                 };
                 this.rebuild(cx);
-                if let Some((item_ix, offset_in_item)) =
-                    anchors.iter().find_map(|(key, item, offset)| {
-                        this.rows
-                            .iter()
-                            .position(|(row, _)| row.key() == *key && row.anchor() == item.as_ref())
-                            .map(|index| (index, *offset))
-                    })
-                {
-                    this.list.scroll_to(ListOffset {
-                        item_ix,
-                        offset_in_item,
-                    });
-                }
+                this.restore_anchor(&anchors);
                 this.perform(effects, cx);
                 cx.emit(ConversationEvent::ItemsChanged);
-            });
+            })
+            .ok();
         }));
+    }
+
+    /// Loads the newest stretch of the unloaded work span at `first`, which
+    /// an open section shows as an earlier-work row. One at a time.
+    pub(crate) fn load_work(&mut self, first: artisan_api::Seq, cx: &Context<Self>) {
+        if self.work_reading.is_some() || self.agent.is_some() {
+            return;
+        }
+        let (Some(host), Some(view)) = (self.host(cx), self.view.as_ref()) else {
+            return;
+        };
+        let Some(span) = view.work.get(&first) else {
+            return;
+        };
+        let client = host.read(cx).client.clone();
+        let thread = view.thread.clone();
+        let query = thread::work_query(span);
+        let open = self.open.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let result = client.work(&thread, &query).await;
+            this.update(cx, |this, cx| {
+                this.work_reading = None;
+                if this.open != open {
+                    return;
+                }
+                let Some(view) = this.view.as_mut().filter(|view| view.thread == thread) else {
+                    return;
+                };
+                // What it loads goes in under its earlier-work row: above
+                // the view (the native splice keeps the view), or opening
+                // under a row in view, as a section does.
+                match result {
+                    Ok(page) => {
+                        this.load_error = None;
+                        if view.apply_work(first, page) {
+                            this.rebuild(cx);
+                            cx.emit(ConversationEvent::ItemsChanged);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(thread = %thread, first, "couldn't load work: {error:#}");
+                        this.load_error = Some(format!("Couldn't load this work: {error:#}"));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.work_reading = Some(first);
+        self.work_task = Some(task);
+    }
+
+    /// Where the rows on screen sit, for a reader not following the tail:
+    /// a page can replace the work row at the loaded edge, and the native
+    /// splice cannot keep an anchor whose key disappears.
+    fn reading_anchors(&self) -> Vec<(RowKey, Option<ItemId>, gpui::Pixels)> {
+        if self.list.is_following_tail() {
+            return Vec::new();
+        }
+        let viewport = self.list.viewport_bounds();
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (row, _))| {
+                let bounds = self.list.bounds_for_item(index)?;
+                (bounds.bottom() > viewport.top() && bounds.top() < viewport.bottom()).then(|| {
+                    (
+                        row.key(),
+                        row.anchor().cloned(),
+                        viewport.top() - bounds.top(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Puts the first surviving row of `anchors` back where it was.
+    fn restore_anchor(&self, anchors: &[(RowKey, Option<ItemId>, gpui::Pixels)]) {
+        if let Some((item_ix, offset_in_item)) = anchors.iter().find_map(|(key, item, offset)| {
+            self.rows
+                .iter()
+                .position(|(row, _)| row.key() == *key && row.anchor() == item.as_ref())
+                .map(|index| (index, *offset))
+        }) {
+            self.list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item,
+            });
+        }
     }
 
     /// Glides a wheel tick over the transcript. Trackpad
@@ -850,14 +1023,22 @@ impl Conversation {
         }
         let max = f32::from(self.list.max_offset_for_scrollbar().y).max(0.0);
         if max <= 0.0 {
-            if f32::from(event.delta.pixel_delta(window.line_height()).y) > 0.0
+            if towards < 0.0 {
+                // Down in a list that fits: back to following its tail.
+                self.viewport(vec![Input::BottomReached], cx);
+            } else if towards > 0.0
                 && let Some(anchor) = self.view.as_ref().and_then(|view| view.window().oldest)
             {
                 // Even a short list has an explicit reader position when the
                 // reader asks for older content. Stop native tail following
                 // before that page changes the height of the transcript.
                 self.list.scroll_to(self.list.logical_scroll_top());
-                self.viewport(vec![Input::ScrolledAway { anchor }, Input::TopReached], cx);
+                // The whole list is on screen.
+                let through = self.shown_through(0).unwrap_or(anchor);
+                self.viewport(
+                    vec![Input::ScrolledAway { anchor, through }, Input::TopReached],
+                    cx,
+                );
             }
             return;
         }
@@ -880,7 +1061,7 @@ impl Conversation {
         f32::from(self.list.scroll_px_offset_for_scrollbar().y).clamp(-max, 0.0)
     }
 
-    fn schedule_glide(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn schedule_glide(&mut self, window: &mut Window, cx: &Context<Self>) {
         if !self.glide.active() || self.glide_scheduled {
             return;
         }
@@ -907,7 +1088,11 @@ impl Conversation {
     fn scrolled(&mut self, top: usize, cx: &mut Context<Self>) {
         self.reader_moves += 1;
         let max = f32::from(self.list.max_offset_for_scrollbar().y).max(0.0);
-        let at_end = -f32::from(self.list.scroll_px_offset_for_scrollbar().y) >= max - 1.0;
+        // A list that fits has no end to scroll to: the wheel says which
+        // way the reader went (`transcript_wheel`), or reading older pages
+        // would turn straight back into following and trim them away.
+        let at_end =
+            max > 0.0 && -f32::from(self.list.scroll_px_offset_for_scrollbar().y) >= max - 1.0;
         // A stored body's later page at the top: its source pages back
         // before the thread does.
         let source_prefix = self.rows.first().is_some_and(|(row, _)| {
@@ -934,9 +1119,25 @@ impl Conversation {
             .and_then(|(row, _)| row.anchor())
             .and_then(|id| view.position_of(id))
         {
-            inputs.push(Input::ScrolledAway { anchor });
+            let through = self.shown_through(top).unwrap_or(anchor);
+            inputs.push(Input::ScrolledAway { anchor, through });
         }
         self.viewport(inputs, cx);
+    }
+
+    /// The newest loaded position among the rows on screen from `top` down.
+    fn shown_through(&self, top: usize) -> Option<artisan_api::Seq> {
+        let view = self.view.as_ref()?;
+        self.rows
+            .iter()
+            .enumerate()
+            .skip(top)
+            .take_while(|(ix, _)| {
+                *ix == top || self.list.item_is_below_viewport(*ix) == Some(false)
+            })
+            .filter_map(|(_, (row, _))| row.last_anchor())
+            .filter_map(|id| view.position_of(id))
+            .max()
     }
 
     /// Feeds the viewport and performs what it asks for.
@@ -1033,7 +1234,7 @@ impl Conversation {
         &mut self,
         row: &Row,
         leaf: &editor_ui::markdown_renderer::LiteralLeaf,
-        ready: editor_ui::selectable_text::NativeRowReady,
+        ready: &editor_ui::selectable_text::NativeRowReady,
         painted: bool,
         cx: &mut Context<Self>,
     ) {
@@ -1065,7 +1266,7 @@ impl Conversation {
             range: leaf.source_range.clone(),
             width: ready.width,
             font_size: ready.font_size,
-            runs: ready.page.runs.clone(),
+            runs: Arc::clone(&ready.page.runs),
             count: ready.row_count,
             window: ready.row_count.saturating_sub(body::NATIVE_BODY_WINDOW)..ready.row_count,
             frontier: None,
@@ -1176,7 +1377,19 @@ impl Conversation {
                         block,
                         ..
                     } => Some((id.clone(), *slot, *block)),
-                    _ => None,
+                    Row::Projected { .. }
+                    | Row::Work { .. }
+                    | Row::EarlierWork { .. }
+                    | Row::WorkEntry { .. }
+                    | Row::Chain { .. }
+                    | Row::Text { .. }
+                    | Row::Prompt(_)
+                    | Row::Compaction(_)
+                    | Row::Image(_)
+                    | Row::Gap
+                    | Row::Status(_)
+                    | Row::AgentResult(_)
+                    | Row::AgentStatus(..) => None,
                 })
                 .collect();
             self.bodies.literal.retain(|key, _| live.contains(key));
@@ -1201,8 +1414,13 @@ impl Conversation {
         }
     }
 
-    pub(crate) fn native_window_edge(&mut self, key: RowKey, start: usize, cx: &mut Context<Self>) {
-        let Some(state) = self.bodies.native.get_mut(&key) else {
+    pub(crate) fn native_window_edge(
+        &mut self,
+        key: &RowKey,
+        start: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.bodies.native.get_mut(key) else {
             return;
         };
         let start = start.min(state.count.saturating_sub(1));
@@ -1220,7 +1438,7 @@ impl Conversation {
             .rows
             .iter()
             .map(|(row, version)| (row.semantic(), version))
-            .find(|(row, _)| row.key() == key)
+            .find(|(row, _)| row.key() == *key)
         {
             let (id, slot) = (id.clone(), *slot);
             self.respace(&id, slot, cx);
@@ -1229,7 +1447,7 @@ impl Conversation {
 
     pub(crate) fn source_window_edge(
         &mut self,
-        id: ItemId,
+        id: &ItemId,
         slot: Slot,
         revision: u64,
         offset: usize,
@@ -1239,7 +1457,7 @@ impl Conversation {
         let Some(source) = self.bodies.stored.get(&(id.clone(), slot)).cloned() else {
             return;
         };
-        let Some(item) = self.view.as_ref().and_then(|view| view.item(&id)) else {
+        let Some(item) = self.view.as_ref().and_then(|view| view.item(id)) else {
             return;
         };
         if source.revision() != revision
@@ -1268,14 +1486,16 @@ impl Conversation {
             offset as u64,
             cx,
             move |cx| {
-                let _ = owner.update(cx, |this, cx| {
-                    this.source_window_edge(notify_id.clone(), slot, revision, offset, false, cx);
-                });
+                owner
+                    .update(cx, |this, cx| {
+                        this.source_window_edge(&notify_id, slot, revision, offset, false, cx);
+                    })
+                    .ok();
             },
         );
         if let editor_ui::markdown_renderer::StoredPreparation::Ready(source) = result {
             self.bodies.stored.insert((id.clone(), slot), source);
-            self.respace(&id, slot, cx);
+            self.respace(id, slot, cx);
         }
     }
 
@@ -1312,6 +1532,9 @@ impl Conversation {
     /// then publishes them (see [`Self::reexpand`]).
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let run = self.run(cx);
+        if let (Some(view), Some(run)) = (self.view.as_mut(), &run) {
+            view.remember_run(run.clone());
+        }
         let folded = self
             .view
             .as_ref()
@@ -1400,12 +1623,16 @@ impl Conversation {
                     .all(|(header, flight)| flight.admits(header, row))
             })
             .collect();
-        self.publish(rows, run, cx);
+        self.publish(rows, run.as_ref(), cx);
     }
 
     /// Publishes a whole new set of rows and what they share.
-    fn publish(&mut self, rows: Vec<(Row, u64)>, run: Option<Run>, cx: &mut Context<Self>) {
+    fn publish(&mut self, rows: Vec<(Row, u64)>, run: Option<&Run>, cx: &mut Context<Self>) {
         let agents = self.view.as_ref().map(agent_names).unwrap_or_default();
+        #[expect(
+            clippy::collection_is_never_read,
+            reason = "the sorted names are hashed below, a read the lint does not see"
+        )]
         let mut sorted: Vec<_> = agents.iter().collect();
         sorted.sort();
         let mut hasher = DefaultHasher::new();
@@ -1419,12 +1646,20 @@ impl Conversation {
             if self.agent.is_some() || view.window().gap.is_some() {
                 return None;
             }
-            let latest = view.shown().max_by_key(|item| item.seq)?;
-            let run = run.as_ref()?;
-            (!run.status.is_live()
-                && latest.run_id.as_ref() == Some(&run.id)
-                && run.seq >= latest.seq)
-                .then(|| (latest.id.clone(), run.seq))
+            // The reader sees the run through when its last row, in thread
+            // order, has painted. A call settled late (a background job
+            // cancelled as the run ends) is newer but sits higher up: it
+            // must not keep the thread unread. A run that failed before
+            // writing anything ends at the message that started it. A note
+            // stored after the run settles has no row to paint.
+            let rowed = || view.shown().filter(|item| !fold::in_composer_strip(item));
+            let last = rowed().max_by_key(|item| item.position)?;
+            let newest = rowed().map(|item| item.seq).max()?;
+            let run = run?;
+            let ends_run = last.run_id.as_ref() == Some(&run.id)
+                || rowed().all(|item| item.run_id.as_ref() != Some(&run.id));
+            (!run.status.is_live() && ends_run && run.seq >= newest)
+                .then(|| (last.id.clone(), run.seq))
         });
         let len = self.rows.len();
         self.splice_rows(0..len, rows, cx);
@@ -1562,7 +1797,7 @@ impl Conversation {
         let text = self.text_body(&row, cx);
         let context = &self.row_context;
         let mut model = RowModel {
-            agents: context.agents.clone(),
+            agents: Arc::clone(&context.agents),
             run: row.run().and_then(|run| context.runs.get(run)).cloned(),
             items: HashMap::new(),
             live: HashMap::new(),
@@ -1584,7 +1819,17 @@ impl Conversation {
         let ids: Vec<ItemId> = match &model.row {
             Row::Work { .. } => Vec::new(),
             Row::Chain { ids, .. } => ids.clone(),
-            other => other.anchor().cloned().into_iter().collect(),
+            other @ (Row::Projected { .. }
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Text { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..)) => other.anchor().cloned().into_iter().collect(),
         };
         for id in ids {
             if let Some(item) = view.shared_item(&id) {
@@ -1606,7 +1851,7 @@ impl Conversation {
                 artisan_api::LiveTarget::Reasoning { run_id }
                 | artisan_api::LiveTarget::Status { run_id } => model.row.run() == Some(run_id),
             })
-            .map(|(target, text)| (target.clone(), text.clone()))
+            .map(|(target, text)| (target.clone(), Arc::clone(text)))
             .collect();
         model
     }
@@ -1632,13 +1877,25 @@ impl Conversation {
                 || model.ui.get(id).is_some_and(thread::ItemUi::fresh),
                 |arrival| arrival.claim(*block),
             ),
-            _ => false,
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Chain { .. }
+            | Row::Text { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => false,
         };
         let env = RowEnv {
             theme: self.theme,
             conversation: cx.entity().downgrade(),
-            markdown: self.bodies.markdown.clone(),
-            reveal: self.reveal.clone(),
+            markdown: Rc::clone(&self.bodies.markdown),
+            reveal: Rc::clone(&self.reveal),
             scope: self.bodies.scope.clone(),
             agent_scope: self.bodies.agent_scope,
             host: self.host(cx).map(|host| host.downgrade()),
@@ -1650,22 +1907,35 @@ impl Conversation {
     /// The cached images a row shows: its anchor's,
     /// and in a work section every item's (a steer sent with images sits
     /// there, not on a row of its own).
-    fn row_images(&mut self, row: &Row, cx: &mut Context<Self>) -> HashMap<BlobHash, Blob> {
+    fn row_images(&self, row: &Row, cx: &Context<Self>) -> HashMap<BlobHash, Blob> {
         let ids: Vec<ItemId> = match row {
             Row::Work { .. } | Row::Chain { .. } => Vec::new(),
-            other => other.anchor().cloned().into_iter().collect(),
+            other @ (Row::Projected { .. }
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Text { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..)) => other.anchor().cloned().into_iter().collect(),
         };
-        let hashes: Vec<BlobHash> = ids
-            .iter()
+        ids.iter()
             .filter_map(|id| self.view.as_ref()?.item(id))
             .flat_map(|item| match &item.kind {
                 ItemKind::UserMessage { images, .. } => images.clone(),
                 ItemKind::Image { blob, .. } => vec![blob.clone()],
-                _ => Vec::new(),
+                ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => Vec::new(),
             })
-            .collect();
-        hashes
-            .into_iter()
             .filter_map(|hash| {
                 let blob = self.host(cx).and_then(|host| host.read(cx).image(&hash));
                 Some((hash, blob?))
@@ -1682,7 +1952,19 @@ impl Conversation {
                     Row::Work {
                         run: Some(row_run), ..
                     } if row_run == run => Some(row.key()),
-                    _ => None,
+                    Row::Projected { .. }
+                    | Row::Work { .. }
+                    | Row::EarlierWork { .. }
+                    | Row::WorkEntry { .. }
+                    | Row::Chain { .. }
+                    | Row::Text { .. }
+                    | Row::Prompt(_)
+                    | Row::Compaction(_)
+                    | Row::Image(_)
+                    | Row::Gap
+                    | Row::Status(_)
+                    | Row::AgentResult(_)
+                    | Row::AgentStatus(..) => None,
                 })
                 .collect();
             for header in headers {
@@ -1714,7 +1996,7 @@ impl Conversation {
 
     /// The questions waiting on the user, oldest first, to the composer,
     /// where they are answered.
-    fn sync_questionnaires(&mut self, cx: &mut Context<Self>) {
+    fn sync_questionnaires(&self, cx: &mut Context<Self>) {
         let Some(composer) = self.thread_composer(cx) else {
             return;
         };
@@ -1735,12 +2017,18 @@ impl Conversation {
         composer.update(cx, |composer, cx| composer.set_questionnaires(open, cx));
     }
 
-    /// The thread's goal, as its latest goal notice left it, on the
-    /// composer's strip.
-    fn sync_goal(&mut self, cx: &mut Context<Self>) {
+    /// The thread's goal, as its latest goal notice left it, and when a
+    /// parked turn is picked up again, on the composer's strip.
+    fn sync_goal(&self, cx: &mut Context<Self>) {
+        self.sync_note(cx);
         let Some(composer) = self.thread_composer(cx) else {
             return;
         };
+        let parked = self.host(cx).and_then(|host| {
+            let thread = &self.view.as_ref()?.thread;
+            host.read(cx).threads.get(thread)?.parked_until
+        });
+        composer.update(cx, |composer, cx| composer.set_parked(parked, cx));
         let Some(summary) = self.host(cx).and_then(|host| {
             let thread = &self.view.as_ref()?.thread;
             host.read(cx).thread_summary(thread)?.value.clone()
@@ -1752,10 +2040,55 @@ impl Conversation {
             state: match goal.state {
                 artisan_api::ThreadGoalState::Active => ComposerGoalState::Active,
                 artisan_api::ThreadGoalState::Paused => ComposerGoalState::Paused,
+                artisan_api::ThreadGoalState::Blocked => ComposerGoalState::Blocked,
+                artisan_api::ThreadGoalState::UsageLimited => ComposerGoalState::UsageLimited,
+                artisan_api::ThreadGoalState::BudgetLimited => ComposerGoalState::BudgetLimited,
             },
             detail: None,
         });
-        composer.update(cx, |composer, cx| composer.set_goal(goal, cx));
+        // The first page of items carries the latest turn's note.
+        let settled = self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.window().loaded());
+        composer.update(cx, |composer, cx| {
+            composer.set_goal(goal, cx);
+            if settled {
+                composer.settle_strip();
+            }
+        });
+    }
+
+    /// The latest turn's note on the composer's strip, ahead of the goal;
+    /// gone once another turn starts.
+    fn sync_note(&self, cx: &mut Context<Self>) {
+        let Some(composer) = self.thread_composer(cx) else {
+            return;
+        };
+        let latest = self.run(cx).map(|run| run.id);
+        let note = self.view.as_ref().and_then(|view| {
+            view.shown().rev().find_map(|item| match &item.kind {
+                ItemKind::Notice {
+                    kind: artisan_api::NoticeKind::YouShouldKnow { heads_up },
+                    text,
+                } if item.run_id.is_some() && item.run_id == latest => Some(ComposerNote {
+                    id: item.id.to_string().into(),
+                    heads_up: *heads_up,
+                    text: one_line(text.inline().unwrap_or_default()).into(),
+                }),
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
+            })
+        });
+        composer.update(cx, |composer, cx| composer.set_note(note, cx));
     }
 
     /// The space under the last row (`TRANSCRIPT_END_SPACE_PX`, or more
@@ -1801,7 +2134,7 @@ impl Conversation {
         let client = host.read(cx).client.clone();
         cx.spawn(async move |this, cx| {
             let result = client.answer(&item, &answer).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 if let Some(ui) = this.view.as_mut().and_then(|view| view.ui.get_mut(&item)) {
                     ui.sending = false;
                     if let Err(error) = &result {
@@ -1810,7 +2143,8 @@ impl Conversation {
                     }
                 }
                 this.rebuild(cx);
-            });
+            })
+            .ok();
         })
         .detach();
     }
@@ -1823,7 +2157,7 @@ impl Conversation {
         self.rebuild(cx);
     }
 
-    fn load_image(&mut self, hash: &BlobHash, cx: &mut Context<Self>) {
+    fn load_image(&self, hash: &BlobHash, cx: &mut Context<Self>) {
         let Some(host) = self.host(cx) else {
             return;
         };
@@ -1884,4 +2218,20 @@ fn splice(list: &ListState, offset: usize, old: &[RowKey], new: &[RowKey]) {
         list.splice(offset + j..offset + j + (old.len() - i), new.len() - j);
         break;
     }
+}
+
+/// A note's markdown explanation as one line for the strip's ticker: list
+/// marks and line breaks become sentence breaks.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(['-', '*', '•'])
+                .trim()
+                .replace("**", "")
+                .replace('`', "")
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("  ·  ")
 }

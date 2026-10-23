@@ -237,6 +237,7 @@ fn malformed_chart_data_is_rejected_instead_of_silently_changed() {
 }
 
 #[test]
+#[expect(clippy::float_cmp, reason = "one whole day is exact")]
 fn same_day_calendar_span_has_a_day_sized_domain() {
     let layout = layout_for_tests(
         &serde_json::json!({"spans":[{"start":"2024-02-29","end":"2024-02-29","lane":" "}]}),

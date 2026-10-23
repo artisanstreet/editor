@@ -1,18 +1,27 @@
-//! `ae editor open [<path>]`.
+//! `ae open [<path>]`.
 
-use crate::install::Root;
-use crate::install::platform::spawn_detached;
+use crate::{install, sys, ui};
 use anyhow::{Context, Result};
+use artisan_paths::App;
 use std::path::Path;
 
-/// Starts the installed Editor, detached from this terminal. The path (or
-/// an `artisan://` link) is passed on as its only argument.
-pub fn open(path: Option<&Path>, dry_run: bool) -> Result<()> {
-    let root = Root::locate()?;
-    let editor = root
-        .current_editor()
-        .context("the Editor isn't installed here; run `ae install editor`")?;
-    let mut command = std::process::Command::new(&editor);
+/// Starts the installed Editor, detached from this terminal, on a folder
+/// or an `artisan://` link. Offers to install it when it isn't.
+pub fn open(path: Option<&Path>) -> Result<()> {
+    if install::installed(App::Editor).is_none() {
+        if !ui::interactive() {
+            anyhow::bail!("the Editor isn't installed here; run `ae install --editor here`");
+        }
+        let go = cliclack::confirm("The Editor isn't installed here. Install it?")
+            .initial_value(true)
+            .interact()
+            .map_err(ui::prompt_error)?;
+        if !go {
+            return Ok(());
+        }
+        return install::install_editor();
+    }
+    let mut command = std::process::Command::new(App::Editor.binary()?);
     if let Some(path) = path {
         let is_link = path
             .to_str()
@@ -24,13 +33,8 @@ pub fn open(path: Option<&Path>, dry_run: bool) -> Result<()> {
         });
     }
     command
-        .env("ARTISAN_AE_COMMAND", root.ae())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    if dry_run {
-        println!("would start {command:?}");
-        return Ok(());
-    }
-    spawn_detached(&mut command)?;
+    sys::spawn_detached(&mut command)?;
     Ok(())
 }

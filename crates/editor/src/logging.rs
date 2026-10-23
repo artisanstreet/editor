@@ -5,7 +5,7 @@ use std::{fs::OpenOptions, io, path::Path};
 const FILE_BYTES: usize = 8 * 1024 * 1024;
 const ARCHIVES: usize = 6;
 
-pub(crate) fn file() -> Option<FileRotate<AppendCount>> {
+pub fn file() -> Option<FileRotate<AppendCount>> {
     let directory = editor_core::hosts::EditorFiles::default_location()
         .dir
         .join("logs");

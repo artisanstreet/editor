@@ -1,6 +1,7 @@
 //! Bodies too long to keep inline, read from Forge a window at a time.
 
 use super::*;
+use std::fmt::Write as _;
 
 /// The topmost of the rows `prefix:<n>` for `n` in `range` that painted,
 /// and where.
@@ -30,9 +31,13 @@ fn look(cx: &mut VisualTestContext) {
 fn copying_a_long_message_keeps_every_character(cx: &mut TestAppContext) {
     let forge = Forge::start();
     let thread = forge.thread();
+    // Markdown: paragraphs copy as they read, without indentation.
     let texts = [
         "界🙂".repeat(500),
-        "first\n\n  second\t🙂 third ".repeat(200),
+        "first\n\nsecond 🙂 third\n\n"
+            .repeat(200)
+            .trim_end()
+            .to_owned(),
     ];
     let ids: Vec<ItemId> = texts
         .iter()
@@ -46,6 +51,8 @@ fn copying_a_long_message_keeps_every_character(cx: &mut TestAppContext) {
                         text: text.clone().into(),
                         images: Vec::new(),
                         steer: false,
+                        from_agent: None,
+                        sender: None,
                     },
                 )
                 .id
@@ -60,8 +67,8 @@ fn copying_a_long_message_keeps_every_character(cx: &mut TestAppContext) {
     settle(cx, &conversation);
     let last = ids.last().unwrap();
     let viewport = cx.read(|cx| conversation.read(cx).list.viewport_bounds());
-    let bounds = (0..16)
-        .filter_map(|line| shown(cx, format!("user:{last}:{line}")))
+    let bounds = (0..4096)
+        .filter_map(|block| shown(cx, format!("user:{last}:{block}")))
         .find(|bounds| viewport.contains(&bounds.center()))
         .expect("the message shows");
     cx.simulate_click(bounds.center(), gpui::Modifiers::none());
@@ -93,6 +100,8 @@ fn a_long_message_reads_only_once_its_end_paints(cx: &mut TestAppContext) {
                 .into(),
             images: Vec::new(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     );
     forge.put(
@@ -153,7 +162,7 @@ fn a_long_message_reads_only_once_its_end_paints(cx: &mut TestAppContext) {
     });
     settle(cx, &conversation);
     // The end reads it all.
-    conversation.update(cx, |c, cx| c.jump_to_latest(cx));
+    conversation.update(cx, super::super::Conversation::jump_to_latest);
     wait(cx, "the thread read at its end", |cx| {
         draw(cx);
         read(&forge, &thread)
@@ -176,6 +185,8 @@ fn a_preview_of_a_stored_reply_does_not_mark_it_read(cx: &mut TestAppContext) {
             text: text.into(),
             images: Vec::new(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     );
     assert!(matches!(
@@ -209,11 +220,14 @@ fn a_long_stored_reply_opens_at_its_end_and_reads_once_its_last_block_paints(
 ) {
     let forge = Forge::start();
     let thread = forge.thread();
-    let text = (0..750)
-        .map(|index| {
-            format!("Paragraph **{index}** retains its authored *formatting* and source order.\n\n")
-        })
-        .collect::<String>();
+    let text = (0..750).fold(String::new(), |mut text, index| {
+        write!(
+            text,
+            "Paragraph **{index}** retains its authored *formatting* and source order.\n\n"
+        )
+        .unwrap();
+        text
+    });
     let message = forge.put(&thread, &ItemId::new(), Status::Done, reply(&text));
     let ItemKind::AssistantMessage {
         text: artisan_api::TextContent::Stored(reference),
@@ -245,7 +259,7 @@ fn a_long_stored_reply_opens_at_its_end_and_reads_once_its_last_block_paints(
         !read(&forge, &thread),
         "an early block does not read the reply"
     );
-    conversation.update(cx, |c, cx| c.jump_to_latest(cx));
+    conversation.update(cx, super::super::Conversation::jump_to_latest);
     wait(cx, "the thread read at the reply's end", |cx| {
         draw(cx);
         read(&forge, &thread)
@@ -269,6 +283,8 @@ fn one_huge_stored_line_shows_its_end_without_laying_out_all_of_it(cx: &mut Test
             text: text.into(),
             images: Vec::new(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     );
     forge.finish_run(&thread);
@@ -293,7 +309,7 @@ fn one_huge_stored_line_shows_its_end_without_laying_out_all_of_it(cx: &mut Test
         !read(&forge, &thread),
         "the line's early lines do not read it"
     );
-    conversation.update(cx, |c, cx| c.jump_to_latest(cx));
+    conversation.update(cx, super::super::Conversation::jump_to_latest);
     wait(cx, "the thread read at the line's end", |cx| {
         draw(cx);
         read(&forge, &thread)

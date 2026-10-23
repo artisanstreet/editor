@@ -19,7 +19,7 @@ use super::ChartStyle;
 use super::model::Model;
 use super::plot::{self, Geometry, Snapshot};
 use crate::slider::{Slider, SliderRange, SliderState};
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, ThemeMode};
 
 /// Drags shorter than this many pixels are clicks, not zooms.
 const MIN_ZOOM_DRAG: f32 = 8.0;
@@ -34,6 +34,7 @@ pub(super) struct ChartView {
 
 #[derive(PartialEq)]
 struct GeometryKey {
+    mode: ThemeMode,
     hidden: Vec<bool>,
     zoom: Option<Domain>,
     thresholds: Vec<(SharedString, f64)>,
@@ -78,6 +79,10 @@ impl ChartState {
 }
 
 impl RenderOnce for ChartView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         if !self.model.has_values() {
@@ -86,8 +91,8 @@ impl RenderOnce for ChartView {
         let count = self.model.series.len();
         let state = kit::keyed(window, cx, ElementId::Name(self.id.clone()), || {
             ChartState {
-                spec: self.spec.clone(),
-                model: self.model.clone(),
+                spec: Arc::clone(&self.spec),
+                model: Arc::clone(&self.model),
                 geometry: None,
                 hidden: vec![false; count],
                 hover: None,
@@ -99,8 +104,8 @@ impl RenderOnce for ChartView {
         let replaced = state.update(cx, |state, _| {
             if !Arc::ptr_eq(&state.spec, &self.spec) || !Arc::ptr_eq(&state.model, &self.model) {
                 let changed = *state.spec != *self.spec || !Arc::ptr_eq(&state.model, &self.model);
-                state.spec = self.spec.clone();
-                state.model = self.model.clone();
+                state.spec = Arc::clone(&self.spec);
+                state.model = Arc::clone(&self.model);
                 if changed {
                     state.geometry = None;
                     state.hidden = vec![false; count];
@@ -136,7 +141,7 @@ impl RenderOnce for ChartView {
                 );
                 if replaced {
                     entity.update(cx, |state, _| {
-                        state.reset(SliderRange::new(min, max, step), value)
+                        state.reset(SliderRange::new(min, max, step), value);
                     });
                 }
                 (label, entity)
@@ -147,7 +152,7 @@ impl RenderOnce for ChartView {
         let hover = current.hover;
         let zoom = current.zoom;
         let drag = current.drag;
-        let plot_probe = current.probe.clone();
+        let plot_probe = Rc::clone(&current.probe);
         let snapshot = Snapshot {
             hidden: &hidden,
             hover,
@@ -160,6 +165,7 @@ impl RenderOnce for ChartView {
             width: probed_width(&plot_probe, 480.0),
         };
         let key = GeometryKey {
+            mode: theme.colors.mode,
             hidden: hidden.clone(),
             zoom,
             thresholds: snapshot.thresholds.clone(),
@@ -169,7 +175,7 @@ impl RenderOnce for ChartView {
             if let Some((known, geometry)) = &state.geometry
                 && *known == key
             {
-                return geometry.clone();
+                return Rc::clone(geometry);
             }
             let stable = Snapshot {
                 hidden: &hidden,
@@ -180,7 +186,7 @@ impl RenderOnce for ChartView {
                 width: snapshot.width,
             };
             let geometry = Rc::new(plot::layout(&theme, &self.spec, &self.model, &stable));
-            state.geometry = Some((key, geometry.clone()));
+            state.geometry = Some((key, Rc::clone(&geometry)));
             geometry
         });
         let interaction = plot::interaction(&theme, &self.spec, &self.model, &geometry, &snapshot);
@@ -206,7 +212,7 @@ impl RenderOnce for ChartView {
                     match command {
                         crate::chart_navigation::ChartCommand::Select(index)
                         | crate::chart_navigation::ChartCommand::Activate(index) => {
-                            state.hover = Some(index)
+                            state.hover = Some(index);
                         }
                         crate::chart_navigation::ChartCommand::Parent
                         | crate::chart_navigation::ChartCommand::Reset => {
@@ -215,7 +221,7 @@ impl RenderOnce for ChartView {
                         }
                     }
                     cx.notify();
-                })
+                });
             },
         )
         .selected(snapshot.hover);
@@ -292,7 +298,7 @@ impl ChartView {
             .enumerate()
             .map(|(index, series)| LegendEntry {
                 name: SharedString::from(series.name.clone()),
-                color: kit::series_color(index).to_paint(),
+                color: kit::series_color(&self.theme, index).to_paint(),
                 hidden: hidden.get(index).copied().unwrap_or(false),
             })
             .collect();
@@ -364,7 +370,7 @@ impl ChartView {
                     text = format!("{text} · {}", percent((value.abs() / scale) / total));
                 }
                 ReadoutRow::new(
-                    Some(kit::series_color(*index).to_paint()),
+                    Some(kit::series_color(&self.theme, *index).to_paint()),
                     model.series[*index].name.clone(),
                     text,
                 )
@@ -428,8 +434,8 @@ impl ChartView {
             Arc::clone(&self.model),
             Arc::clone(&self.model),
         );
-        let down_probe = probe.clone();
-        let move_probe = probe.clone();
+        let down_probe = Rc::clone(&probe);
+        let move_probe = Rc::clone(&probe);
         div()
             .id(kit::part(&self.id, "plot"))
             .absolute()
@@ -437,7 +443,7 @@ impl ChartView {
             .left_0()
             .size_full()
             .cursor_crosshair()
-            .child(plot_canvas(geometry.shapes.clone(), probe.clone()))
+            .child(plot_canvas(Rc::clone(&geometry.shapes), Rc::clone(&probe)))
             .child(plot_canvas(interaction, probe))
             .children(labels)
             .children(readout)
@@ -518,8 +524,8 @@ mod native_replacement_tests {
             div().w(px(640.0)).child(ChartView {
                 id: "replacement-chart".into(),
                 theme: ArtisanTheme::resolved(),
-                spec: self.style.clone(),
-                model: self.model.clone(),
+                spec: Arc::clone(&self.style),
+                model: Arc::clone(&self.model),
             })
         }
     }
@@ -532,7 +538,9 @@ mod native_replacement_tests {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             let scale = window.scale_factor();
-            let data_fill: gpui::Background = kit::series_color(0).to_paint().into();
+            let data_fill: gpui::Background = kit::series_color(&ArtisanTheme::resolved(), 0)
+                .to_paint()
+                .into();
             window
                 .painted_quads()
                 .into_iter()

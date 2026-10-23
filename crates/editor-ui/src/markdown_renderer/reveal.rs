@@ -43,10 +43,15 @@ pub struct PreparedReveal {
     fresh: Cell<bool>,
     began_fresh: Cell<Option<bool>>,
     streaming: Cell<bool>,
+    /// The leaf that ends the streamed source: the only one whose last
+    /// word may still be growing.
+    tail: Cell<Option<usize>>,
     reduced: Cell<bool>,
     animating: Cell<bool>,
     now: Cell<Instant>,
     paused: Cell<bool>,
+    /// The reader moved on: every word still waiting fades in at once.
+    rushed: Cell<bool>,
     settling: Cell<bool>,
     blocks: RefCell<HashMap<usize, Option<Instant>>>,
     geometry: Rc<RevealGeometry>,
@@ -61,10 +66,12 @@ impl Default for PreparedReveal {
             fresh: Cell::new(false),
             began_fresh: Cell::new(None),
             streaming: Cell::new(false),
+            tail: Cell::new(None),
             reduced: Cell::new(false),
             animating: Cell::new(false),
             now: Cell::new(Instant::now()),
             paused: Cell::new(false),
+            rushed: Cell::new(false),
             settling: Cell::new(false),
             blocks: RefCell::default(),
             geometry: Rc::default(),
@@ -75,7 +82,7 @@ impl Default for PreparedReveal {
 }
 impl PreparedReveal {
     /// Whether this mounted native leaf has presented prepared content yet.
-    pub fn has_presented(&self) -> bool {
+    pub const fn has_presented(&self) -> bool {
         self.presented.get()
     }
     pub fn mark_presented(&self) {
@@ -93,16 +100,16 @@ impl PreparedReveal {
         self.fully_visible.set(true);
         self.geometry.frontier.set(None);
     }
+    /// Which leaf ends the source, `None` when the range drawn stops before
+    /// its end. Every other leaf is complete and reveals its last word.
+    pub(super) fn set_tail(&self, slot: Option<usize>) {
+        self.tail.set(slot);
+    }
     pub(super) fn block_panel(&self, slot: usize, content: gpui::Div) -> gpui::Div {
-        let measured = self
-            .block_heights
-            .borrow_mut()
-            .entry(slot)
-            .or_default()
-            .clone();
+        let measured = Rc::clone(self.block_heights.borrow_mut().entry(slot).or_default());
         let started = self.blocks.borrow().get(&slot).copied().flatten();
         let grow = started.map_or(0.0, |started| {
-            MotionCurve::SmoothOut.sample(
+            MotionCurve::SmoothOut.sample_f32(
                 (self
                     .now
                     .get()
@@ -110,7 +117,7 @@ impl PreparedReveal {
                     .as_secs_f64()
                     / 0.25)
                     .clamp(0.0, 1.0),
-            ) as f32
+            )
         });
         div()
             .relative()
@@ -137,7 +144,7 @@ impl PreparedReveal {
             .map_or(text.len(), |leaf| leaf.visible)
     }
     pub(super) fn frontier_reporter(&self) -> crate::selectable_text::FrontierReport {
-        let geometry = self.geometry.clone();
+        let geometry = Rc::clone(&self.geometry);
         Rc::new(move |bottom, _| {
             if let Some(bottom) = bottom {
                 geometry.frontier.set(Some(
@@ -156,7 +163,7 @@ impl PreparedReveal {
         if self.fully_visible.get() || self.reduced.get() {
             return content;
         }
-        let geometry = self.geometry.clone();
+        let geometry = Rc::clone(&self.geometry);
         let height = geometry.visible_height.get();
         div()
             .w_full()
@@ -184,7 +191,10 @@ impl PreparedReveal {
     pub fn set_paused(&self, paused: bool) {
         self.paused.set(paused);
     }
-    pub fn is_settling(&self) -> bool {
+    pub fn set_rushed(&self, rushed: bool) {
+        self.rushed.set(rushed);
+    }
+    pub const fn is_settling(&self) -> bool {
         self.settling.get()
     }
 
@@ -197,7 +207,9 @@ impl PreparedReveal {
             return None;
         }
         let started = blocks.entry(slot).or_insert_with(|| {
-            (!self.fresh.get()).then_some(self.now.get() - Duration::from_secs(1))
+            (!self.fresh.get())
+                .then(|| self.now.get().checked_sub(Duration::from_secs(1)))
+                .flatten()
         });
         if self.paused.get() && started.is_none() {
             return Some((0.0, 4.0));
@@ -210,17 +222,17 @@ impl PreparedReveal {
         self.animating.set(true);
         self.settling
             .set(self.settling.get() || elapsed < Duration::from_millis(205));
-        let alpha = MotionCurve::EaseOut.sample(
+        let alpha = MotionCurve::EaseOut.sample_f32(
             (elapsed
                 .saturating_sub(Duration::from_millis(80))
                 .as_secs_f64()
                 / 0.25)
                 .clamp(0.0, 1.0),
-        ) as f32;
+        );
         Some((alpha, 4.0 * (1.0 - alpha)))
     }
 
-    pub fn is_animating(&self) -> bool {
+    pub const fn is_animating(&self) -> bool {
         self.animating.get()
     }
 
@@ -232,6 +244,10 @@ impl PreparedReveal {
     ) -> Rc<[(Range<usize>, HighlightStyle)]> {
         self.highlights_at(slot, text, base, self.now.get())
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential pass; splitting it would only thread its locals through helpers"
+    )]
     fn highlights_at(
         &self,
         slot: usize,
@@ -249,6 +265,7 @@ impl PreparedReveal {
             // unbounded second copy of its presentation ownership.
             return base;
         }
+        let streaming = self.streaming.get() && self.tail.get() == Some(slot);
         let leaf = leaves.entry(slot).or_insert_with(|| {
             let visible = if self.fresh.get() { 0 } else { text.len() };
             Leaf {
@@ -272,10 +289,17 @@ impl PreparedReveal {
         }
         let elapsed = now.saturating_duration_since(leaf.paced_at).as_secs_f64();
         leaf.paced_at = now;
-        let target = (leaf.remaining_words as f64 / 1.5).clamp(5.0, 15.0);
-        leaf.rate += (target - leaf.rate) * (1.0 - (-elapsed / 0.5).exp());
+        // Saturating is exact here: the target clamps far below u32::MAX.
+        let words = f64::from(u32::try_from(leaf.remaining_words).unwrap_or(u32::MAX));
+        let target = (words / 1.5).clamp(5.0, 15.0);
+        leaf.rate = (target - leaf.rate).mul_add(1.0 - (-elapsed / 0.5).exp(), leaf.rate);
         if !self.paused.get() {
-            leaf.budget = (leaf.budget + leaf.rate * elapsed).min(6.0);
+            leaf.budget = leaf.rate.mul_add(elapsed, leaf.budget).min(6.0);
+        }
+        if self.rushed.get() && leaf.visible < text.len() {
+            leaf.marks.push_back((leaf.visible..text.len(), now));
+            leaf.visible = text.len();
+            leaf.remaining_words = 0;
         }
         if !self.paused.get() && now >= leaf.next_tick && leaf.budget >= 1.0 {
             let start = leaf.visible;
@@ -293,7 +317,7 @@ impl PreparedReveal {
                     word |= !ch.is_whitespace();
                 }
                 if !complete {
-                    if self.streaming.get() {
+                    if streaming {
                         break;
                     }
                     end = text.len();
@@ -335,7 +359,7 @@ impl PreparedReveal {
         if waiting {
             self.fully_visible.set(false);
         }
-        let pending_words = if self.streaming.get() {
+        let pending_words = if streaming {
             text[leaf.visible..]
                 .rfind(char::is_whitespace)
                 .is_some_and(|end| {
@@ -368,9 +392,7 @@ impl PreparedReveal {
             highlights.push((
                 range.clone(),
                 HighlightStyle {
-                    fade_out: Some(
-                        1.0 - MotionCurve::EaseOut.sample(progress.clamp(0.0, 1.0)) as f32,
-                    ),
+                    fade_out: Some(1.0 - MotionCurve::EaseOut.sample_f32(progress.clamp(0.0, 1.0))),
                     ..Default::default()
                 },
             ));
@@ -406,6 +428,44 @@ mod tests {
         let done = reveal.highlights_at(1, &text, Rc::from([]), now + Duration::from_secs(5));
         assert!(done.iter().any(|(_, style)| style.fade_out.is_some()));
         assert_eq!(reveal.leaves.borrow()[&1].text, text);
+    }
+    #[test]
+    fn only_the_leaf_ending_the_stream_holds_its_last_word() {
+        let reveal = PreparedReveal::default();
+        reveal.begin_frame(true, true, false);
+        reveal.set_tail(Some(2));
+        let done: SharedString = "never to your inbox.".into();
+        let growing: SharedString = "The rul".into();
+        let later = Instant::now() + Duration::from_secs(5);
+        reveal.highlights_at(1, &done, Rc::from([]), Instant::now());
+        reveal.highlights_at(2, &growing, Rc::from([]), Instant::now());
+        reveal.highlights_at(1, &done, Rc::from([]), later);
+        reveal.highlights_at(2, &growing, Rc::from([]), later);
+        let leaves = reveal.leaves.borrow();
+        assert_eq!(
+            leaves[&1].visible,
+            done.len(),
+            "a finished paragraph shows every word"
+        );
+        assert_eq!(leaves[&2].visible, "The ".len(), "the growing word waits");
+    }
+    #[test]
+    fn sending_the_next_message_shows_the_rest_of_the_reply_at_once() {
+        let reveal = PreparedReveal::default();
+        reveal.begin_frame(false, true, false);
+        let text: SharedString = "a long reply still pacing its words in".into();
+        let now = Instant::now();
+        reveal.highlights_at(1, &text, Rc::from([]), now);
+        assert!(reveal.leaves.borrow()[&1].visible < text.len());
+        reveal.set_rushed(true);
+        reveal.highlights_at(1, &text, Rc::from([]), now);
+        assert_eq!(reveal.leaves.borrow()[&1].visible, text.len());
+        assert!(
+            reveal
+                .highlights_at(1, &text, Rc::from([]), now + FADE)
+                .is_empty(),
+            "the rest is fully shown after one fade"
+        );
     }
     #[test]
     fn history_resumes_whole_and_reduced_motion_drops_reveal_ownership() {

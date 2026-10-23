@@ -1,15 +1,15 @@
 //! Transcript snapshots of the OpenCode decoder.
 //!
 //! Each transcript line is one event from OpenCode's global stream
-//! (`GET /api/event`), recorded from OpenCode 1.18.32. The replay plays the
+//! (`GET /api/event`), recorded from OpenCode 2.1.0. The replay plays the
 //! driver's part: it registers each prompt OpenCode admits (the first as the
-//! run's message, later ones as steers) and answers permissions and
-//! questions the way the recording did. Consecutive live appends to the same
-//! target are merged to keep snapshots readable.
+//! run's message, later ones as steers) and answers permissions and forms
+//! the way the recording did. Consecutive live appends to the same target
+//! are merged to keep snapshots readable.
 
 use super::decoder::{Decoder, Reply};
 use crate::EngineEvent;
-use artisan_api::{Answer, Decision, ItemId};
+use artisan_api::{Answer, Decision, ItemId, QuestionAnswer};
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -26,14 +26,79 @@ enum Step {
     ProtocolError(String),
 }
 
+/// What the recording answered: the later `permission.replied` or
+/// `form.replied`/`form.cancelled` naming `request`.
+fn recorded_answer(events: &[Value], request: &str, form: &Value) -> Option<Answer> {
+    events.iter().find_map(|event| {
+        let data = &event["data"];
+        match event["type"].as_str()? {
+            "permission.replied" if data["requestID"] == request => {
+                let decision = match data["reply"].as_str()? {
+                    "once" => Decision::AllowOnce,
+                    "always" => Decision::AllowAlways,
+                    _ => Decision::DenyOnce,
+                };
+                Some(Answer::Approval { decision })
+            }
+            "form.cancelled" if data["id"] == request => {
+                let fields = form["fields"].as_array()?.len();
+                Some(Answer::Question {
+                    answers: vec![None; fields],
+                })
+            }
+            "form.replied" if data["id"] == request => {
+                let answers = form["fields"]
+                    .as_array()?
+                    .iter()
+                    .map(|field| {
+                        let given = &data["answer"][field["key"].as_str()?];
+                        let given: Vec<&str> = given.as_array().map_or_else(
+                            || given.as_str().into_iter().collect(),
+                            |items| items.iter().filter_map(Value::as_str).collect(),
+                        );
+                        let options = field["options"].as_array().cloned().unwrap_or_default();
+                        let ids: Option<Vec<String>> = given
+                            .iter()
+                            .map(|value| {
+                                options
+                                    .iter()
+                                    .position(|option| option["value"] == *value)
+                                    .map(|index| format!("option-{index}"))
+                            })
+                            .collect();
+                        Some(match ids {
+                            Some(ids) if !ids.is_empty() => {
+                                QuestionAnswer::Choices { ids: ids.into() }
+                            }
+                            _ => QuestionAnswer::Text {
+                                text: given.join(", "),
+                            },
+                        })
+                    })
+                    .collect();
+                Some(Answer::Question { answers })
+            }
+            _ => None,
+        }
+    })
+}
+
 fn replay(case: &str) -> Vec<Step> {
     let transcript = crate::transcript_tests::read("opencode", case);
+    let lines: Vec<&str> = transcript
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    // A line that isn't JSON still goes to the decoder, which fails it.
+    let parsed: Vec<Value> = lines
+        .iter()
+        .map(|line| serde_json::from_str(line).unwrap_or(Value::Null))
+        .collect();
     let mut decoder: Option<Decoder> = None;
+    let mut root: Option<String> = None;
     let mut prompts = 0;
     let mut steps = Vec::new();
-    for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
-        // A line that isn't JSON still goes to the decoder, which fails it.
-        let event: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+    for (index, (line, event)) in lines.iter().zip(&parsed).enumerate() {
         let data = &event["data"];
         // The driver learns the session id when it creates the session.
         let decoder = decoder.get_or_insert_with(|| Decoder::new(None));
@@ -41,6 +106,7 @@ fn replay(case: &str) -> Vec<Step> {
             && let Some(session) = data["sessionID"].as_str()
         {
             decoder.follow_root(session.to_owned());
+            root = Some(session.to_owned());
         }
         let mut events = match decoder.feed(line) {
             Ok(events) => events,
@@ -49,38 +115,46 @@ fn replay(case: &str) -> Vec<Step> {
                 continue;
             }
         };
-        match event["type"].as_str() {
-            Some("session.next.prompt.admitted") => {
-                let message = data["messageID"].as_str().expect("message id");
+        let later = &parsed[index + 1..];
+        let asked = match event["type"].as_str() {
+            // The driver sends only the root's prompts; subagents get theirs
+            // from OpenCode.
+            Some("session.inbox.enqueued")
+                if data["item"]["type"] == "user"
+                    && data["sessionID"].as_str() == root.as_deref() =>
+            {
+                let message = data["inboxID"].as_str().expect("inbox id");
                 prompts += 1;
                 let steer = (prompts > 1).then(|| ItemId::from(format!("steer-{prompts}")));
                 events.extend(decoder.prompt_sent(message, steer));
+                None
             }
-            Some("permission.v2.asked") => {
-                let key = data["source"]["callID"].as_str().expect("call id");
-                let answer = Answer::Approval {
-                    decision: Decision::AllowOnce,
-                };
-                if let Some((reply, answered)) = decoder.answer(key, &answer) {
-                    events.extend(answered);
-                    steps.extend(events.drain(..).map(|event| Step::Event(Box::new(event))));
-                    steps.push(Step::Reply(reply));
-                }
+            Some("permission.asked") => {
+                let key = data["source"]["id"].as_str().expect("call id");
+                let request = data["id"].as_str().expect("request id");
+                recorded_answer(later, request, &Value::Null).map(|answer| (key, answer))
             }
-            Some("question.v2.asked") => {
-                let key = data["tool"]["callID"].as_str().expect("call id");
-                let answer = Answer::Question {
-                    answers: vec![Some(artisan_api::QuestionAnswer::Choices {
-                        ids: (vec!["option-1".to_owned()]).into(),
-                    })],
-                };
-                if let Some((reply, answered)) = decoder.answer(key, &answer) {
-                    events.extend(answered);
-                    steps.extend(events.drain(..).map(|event| Step::Event(Box::new(event))));
-                    steps.push(Step::Reply(reply));
-                }
+            Some("form.created") => {
+                let form = &data["form"];
+                let key = form["metadata"]["tool"]["id"]
+                    .as_str()
+                    .or_else(|| form["id"].as_str())
+                    .expect("form id");
+                let request = form["id"].as_str().expect("form id");
+                recorded_answer(later, request, form).map(|answer| (key, answer))
             }
-            _ => {}
+            _ => None,
+        };
+        if let Some((key, answer)) = asked
+            && let Some((reply, answered)) = decoder.answer(key, &answer)
+        {
+            events.extend(answered);
+            steps.extend(
+                std::mem::take(&mut events)
+                    .into_iter()
+                    .map(|event| Step::Event(Box::new(event))),
+            );
+            steps.push(Step::Reply(reply));
         }
         steps.extend(events.into_iter().map(|event| Step::Event(Box::new(event))));
     }
@@ -106,28 +180,35 @@ fn merge_live(steps: Vec<Step>) -> Vec<Step> {
 }
 
 #[test]
-fn plain_reply() {
-    insta::assert_debug_snapshot!(replay("plain"));
-}
-
-#[test]
-fn file_tools_and_todo_list() {
-    insta::assert_debug_snapshot!(replay("tools"));
-}
-
-#[test]
-fn steer_lands_at_the_next_step_and_queue_after_the_turn() {
-    insta::assert_debug_snapshot!(replay("steer"));
-}
-
-#[test]
-fn permission_is_asked_on_the_tool_and_answered_through_the_api() {
+fn shell_permission_is_asked_on_the_tool_and_interrupt_cancels_the_next() {
     insta::assert_debug_snapshot!(replay("permission"));
 }
 
 #[test]
-fn question_is_asked_and_answered_through_the_api() {
+fn edit_read_and_subagent() {
+    insta::assert_debug_snapshot!(replay("tools"));
+}
+
+#[test]
+fn steer_lands_at_the_next_step() {
+    insta::assert_debug_snapshot!(replay("steer"));
+}
+
+#[test]
+fn question_is_asked_as_a_form_and_answered_through_the_api() {
     insta::assert_debug_snapshot!(replay("question"));
+}
+
+/// Skipping every question dismisses the form, which ends OpenCode's turn.
+#[test]
+fn a_dismissed_question_cancels_the_form() {
+    insta::assert_debug_snapshot!(replay("question-dismissed"));
+}
+
+/// A model OpenCode can't route fails the execution, which ends the run.
+#[test]
+fn a_failed_execution_ends_the_run_with_its_error() {
+    insta::assert_debug_snapshot!(replay("execution-failed"));
 }
 
 /// Lines that aren't OpenCode events fail the run.
@@ -138,29 +219,16 @@ fn malformed_frames_are_protocol_errors() {
 
 /// A text that ends without its body is an error, never an empty reply.
 #[test]
-fn a_text_without_its_body_ends_the_turn_with_an_error() {
+fn a_text_without_its_body_fails_the_run() {
     insta::assert_debug_snapshot!(replay("text-without-body"));
 }
 
-/// A full context is recoverable while OpenCode compacts; idle without a
-/// new step ends the run with it, and any other session error ends it at once.
-#[test]
-fn context_overflow_ends_the_run_only_when_no_compaction_follows() {
-    insta::assert_debug_snapshot!("overflow_then_idle", replay("context-overflow"));
-    insta::assert_debug_snapshot!(
-        "overflow_then_new_step",
-        replay("context-overflow-recovers")
-    );
-    insta::assert_debug_snapshot!("overflow_then_api_error", replay("session-error"));
-}
-
-/// Malformed questions, tool inputs, todos and compactions become explicit
-/// errors, never empty cards or partial plans.
+/// Forms Artisan can't ask and tool calls missing their fields become
+/// explicit errors, never empty cards.
 #[test]
 fn malformed_native_payloads_become_errors() {
     insta::assert_debug_snapshot!("malformed_question", replay("malformed-question"));
     insta::assert_debug_snapshot!("tool_fields", replay("tool-fields"));
-    insta::assert_debug_snapshot!("todos", replay("todos"));
 }
 
 /// The chosen variant is the `model.variant` OpenCode runs; older threads
@@ -191,5 +259,55 @@ fn each_permission_level_is_an_agent_opencode_knows() {
     let full = rules(artisan_api::Permissions::Full);
     assert_eq!(full["external_directory"], "allow");
     assert!(full.get("bash").is_none(), "nothing asks: {full}");
-    assert_eq!(config["agent"].as_object().unwrap().len(), 2);
+    assert_eq!(config["agent"].as_object().unwrap().len(), 3);
+    assert_eq!(config["agent"]["artisan-summary"]["permission"]["*"], "deny");
+}
+
+/// A background shell's call returns at once (`status: "running"` and its
+/// shell id) and the shell ends with `shell.exited`: the command stays
+/// running, in the background, until then. Frames follow the recorded
+/// `shell` call and `shell.exited`; the background fields follow the schema
+/// OpenCode 2.1's binary carries, not a recording.
+#[test]
+fn a_background_shell_runs_until_it_exits() {
+    use artisan_api::Status::{Done, Running};
+    let session = "ses_ed6217996ffeh7hIqceloWYI1S";
+    let call = "call_00_p9ymnkbi7jpt3qyw3zpfd46z";
+    let frames = [
+        serde_json::json!({"id":"evt_0","type":"session.tool.input.started","data":{"sessionID":session,
+            "id":call,"name":"shell"}}),
+        serde_json::json!({"id":"evt_1","type":"session.tool.called","data":{"sessionID":session,
+            "id":call,"input":{"command":"sleep 60","background":true}}}),
+        serde_json::json!({"id":"evt_2","type":"session.tool.success","data":{"sessionID":session,
+            "id":call,"metadata":{"status":"running","shellID":"sh_1","truncated":false},
+            "content":[{"type":"text","text":"Command moved to the background (shell ID: sh_1)"}]}}),
+        serde_json::json!({"id":"evt_3","type":"shell.exited","data":{"id":"sh_1","exit":0,"status":"exited"}}),
+    ];
+    let mut decoder = Decoder::new(Some(session.to_owned()));
+    let mut states = Vec::new();
+    for frame in frames {
+        for event in decoder.feed(&frame.to_string()).unwrap() {
+            if let EngineEvent::Item {
+                status,
+                kind:
+                    artisan_api::ItemKind::Tool {
+                        tool: artisan_api::ToolKind::Shell { background, .. },
+                        exit_code,
+                        ..
+                    },
+                ..
+            } = event
+            {
+                states.push((status, background, exit_code));
+            }
+        }
+    }
+    assert_eq!(
+        states,
+        [
+            (Running, true, None),
+            (Running, true, None),
+            (Done, true, Some(0)),
+        ],
+    );
 }

@@ -70,7 +70,7 @@ impl Color {
     }
 
     /// The color clipped into sRGB, as a screen can show it.
-    pub(super) fn clipped(self) -> Self {
+    pub(super) const fn clipped(self) -> Self {
         Self::srgb(
             self.r.clamp(0.0, 1.0),
             self.g.clamp(0.0, 1.0),
@@ -79,6 +79,10 @@ impl Color {
         )
     }
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the colour crate converts in f32; channels need no more"
+    )]
     fn converted<Space: color::ColorSpace>(self) -> [f64; 3] {
         let value = color::AlphaColor::<color::Srgb>::new([
             self.r as f32,

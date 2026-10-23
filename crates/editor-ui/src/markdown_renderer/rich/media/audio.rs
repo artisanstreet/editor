@@ -121,7 +121,7 @@ impl RichBlock for AudioBlock {
             + self
                 .tracks
                 .iter()
-                .map(|track| track.src.resident_bytes() + budget::optional(&track.name))
+                .map(|track| track.src.resident_bytes() + budget::optional(track.name.as_ref()))
                 .sum::<usize>()
     }
 
@@ -214,16 +214,20 @@ impl Shown {
                 (position.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0)
             }
             Self::Ended { .. } => 1.0,
-            _ => 0.0,
+            Self::Idle
+            | Self::Loading
+            | Self::Playing { .. }
+            | Self::Paused { .. }
+            | Self::Failed(_) => 0.0,
         }
     }
 
-    fn duration(&self) -> Option<Duration> {
+    const fn duration(&self) -> Option<Duration> {
         match self {
             Self::Playing { duration, .. }
             | Self::Paused { duration, .. }
             | Self::Ended { duration } => Some(*duration),
-            _ => None,
+            Self::Idle | Self::Loading | Self::Failed(_) => None,
         }
     }
 }
@@ -239,7 +243,7 @@ impl TrackRow {
             .child(kit::glyph(
                 AssetId::TABLER_PLAYER_PLAY_FILLED,
                 14.0,
-                theme.colors.muted_foreground.to_paint(),
+                theme.colors.text_muted.to_paint(),
             ))
             .child(kit::body(theme, self.name.clone()).flex_shrink_0())
             .child(kit::muted(theme, message).truncate())
@@ -323,26 +327,26 @@ impl TrackRow {
             || self.id.clone(),
             |fetcher| fetcher.asset_owner(&self.id, immutable),
         );
-        let owned = Owned::new(&owner, source);
-        let source_bytes = match &owned.source {
+        let keyed = Owned::new(&owner, source);
+        let source_bytes = match &keyed.source {
             AudioBytes::Data(payload) => payload.bytes.len(),
             AudioBytes::Fetched(request, _) => request.path.len(),
         } + self.id.len();
         let output = match &self.media {
             Some(fetcher) => fetcher.resources.load::<AudioBytesLoader>(
                 &fetcher.owner,
-                &owned,
+                &keyed,
                 window,
                 cx,
                 source_bytes,
                 |output| output.as_ref().map_or(0, |bytes| bytes.len()),
                 |_, _| {},
             ),
-            None => window.use_asset::<AudioBytesLoader>(&owned, cx),
+            None => window.use_asset::<AudioBytesLoader>(&keyed, cx),
         };
         match output {
             Some(Some(bytes)) => Ok(Playable {
-                path: owned.source.track(&owner, &bytes),
+                path: keyed.source.track(&owner, &bytes),
                 bytes: Some(bytes),
             }),
             None => Err("Loading…".into()),
@@ -365,7 +369,6 @@ impl RenderOnce for TrackRow {
 
         let button = {
             let player = player.clone();
-            let path = path.clone();
             let shown = shown.clone();
             let state = state.clone();
             div()
@@ -377,8 +380,8 @@ impl RenderOnce for TrackRow {
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .bg(theme.colors.foreground.with_alpha(0.08).to_paint())
-                .hover(|style| style.bg(theme.colors.foreground.with_alpha(0.14).to_paint()))
+                .bg(theme.colors.hover.to_paint())
+                .hover(|style| style.bg(theme.colors.pressed.to_paint()))
                 .child(kit::glyph(
                     if matches!(shown, Shown::Playing { .. } | Shown::Loading) {
                         AssetId::TABLER_PLAYER_PAUSE_FILLED
@@ -386,7 +389,7 @@ impl RenderOnce for TrackRow {
                         AssetId::TABLER_PLAYER_PLAY_FILLED
                     },
                     12.0,
-                    theme.colors.foreground.to_paint(),
+                    theme.colors.text.to_paint(),
                 ))
                 .on_click(move |_, _, cx| {
                     match shown {
@@ -409,7 +412,11 @@ impl RenderOnce for TrackRow {
                 .truncate()
                 .text_color(Tone::Danger.color(&theme).to_paint())
                 .into_any_element(),
-            _ => self
+            Shown::Idle
+            | Shown::Loading
+            | Shown::Playing { .. }
+            | Shown::Paused { .. }
+            | Shown::Ended { .. } => self
                 .progress_line(&state, &shown, &player, cx)
                 .into_any_element(),
         };
@@ -436,7 +443,7 @@ impl RenderOnce for TrackRow {
                 kit::mono(&theme, time)
                     .flex_shrink_0()
                     .text_size(TypographyTokens::size(TextStep::Xs))
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
             }))
             .into_any_element()
     }
@@ -536,7 +543,7 @@ impl TrackRow {
                             .h_full()
                             .w(relative(shown.progress()))
                             .rounded(RadiusTokens::value(RadiusStep::X2s))
-                            .bg(theme.colors.foreground.with_alpha(0.75).to_paint()),
+                            .bg(theme.colors.text_muted.to_paint()),
                     ),
             )
     }

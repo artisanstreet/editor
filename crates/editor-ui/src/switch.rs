@@ -49,7 +49,7 @@ impl Switch {
         }
     }
     #[must_use]
-    pub fn disabled(mut self, disabled: bool) -> Self {
+    pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
@@ -97,7 +97,7 @@ impl RenderOnce for Switch {
             .bg(if checked {
                 theme.colors.primary.to_paint()
             } else {
-                theme.colors.input.with_alpha(0.8).to_paint()
+                theme.colors.line_strong.to_paint()
             })
             .child(
                 div()
@@ -106,14 +106,14 @@ impl RenderOnce for Switch {
                     .size(thumb)
                     .rounded_full()
                     .bg(if checked {
-                        theme.colors.primary_foreground.to_paint()
+                        theme.colors.primary_text.to_paint()
                     } else {
-                        theme.colors.foreground.to_paint()
+                        theme.colors.text.to_paint()
                     }),
             );
         if let Some(selector) = &self.debug_selector {
             let selector = format!("{selector}-track");
-            track = track.debug_selector(move || selector.clone());
+            track = track.debug_selector(move || selector);
         }
         let mut root = div()
             .id(self.id)
@@ -138,7 +138,9 @@ impl RenderOnce for Switch {
                 el.debug_selector(move || selector.to_string())
             });
         if self.disabled {
-            return root.aria_description("Unavailable").opacity(0.5);
+            return root
+                .aria_description("Unavailable")
+                .opacity(crate::theme::Opacity::Disabled.alpha());
         }
         root = root
             .focusable()
@@ -146,7 +148,11 @@ impl RenderOnce for Switch {
             .cursor_pointer()
             .focus_visible(move |style| {
                 style.shadow(vec![BoxShadow {
-                    color: theme.interaction.focus_ring_color.to_paint(),
+                    color: theme
+                        .colors
+                        .ring
+                        .at(crate::theme::Opacity::FocusRing)
+                        .to_paint(),
                     offset: point(px(0.0), px(0.0)),
                     blur_radius: px(0.0),
                     spread_radius: theme.interaction.focus_ring_width,

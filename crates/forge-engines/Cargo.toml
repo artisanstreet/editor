@@ -21,6 +21,7 @@ flate2.workspace = true
 fs2.workspace = true
 futures.workspace = true
 pulldown-cmark.workspace = true
+regex.workspace = true
 process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
 getrandom.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
@@ -28,6 +29,9 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng = "=0.10.0"
 walkdir = "=2.5.0"
+ignore = "=0.4.33"
+globset = "=0.4.20"
+encoding_rs = "=0.8.35"
 sse-core.workspace = true
 sha2.workspace = true
 hex.workspace = true

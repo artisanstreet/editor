@@ -17,6 +17,11 @@ struct Cached {
     index: ParagraphWrapIndex,
 }
 impl NativeGeometryCache {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "top and bottom are clamped non-negative and the casts saturate"
+    )]
     pub(super) fn visible(
         &mut self,
         text: &SharedString,

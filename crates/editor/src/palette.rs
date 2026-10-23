@@ -9,7 +9,17 @@ use gpui::{
     IntoElement, KeyBinding, ParentElement as _, Render, Styled as _, Window, div, px,
 };
 
-gpui::actions!(palette, [Dismiss, Up, Down]);
+use actions::{Dismiss, Down, Up};
+
+/// The palette's actions, in their own module so the expectation below
+/// covers only the macro's derives.
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui's actions! macro chooses the derives"
+    )]
+    gpui::actions!(palette, [Dismiss, Up, Down]);
+}
 
 const KEY_CONTEXT: &str = "Palette";
 const SHOWN: usize = 12;
@@ -154,15 +164,13 @@ impl Palette {
             });
         }
         for (label, page) in [
-            ("Settings", SettingsPage::Appearance),
-            ("Global prompt", SettingsPage::GlobalPrompt),
-            ("Threads", SettingsPage::Threads),
-            ("Appearance", SettingsPage::Appearance),
-            ("Notifications", SettingsPage::Notifications),
-            ("About", SettingsPage::About),
-            ("Engines", SettingsPage::Engines),
-            ("Skills and MCP servers", SettingsPage::Extensions),
+            ("Settings", SettingsPage::General),
+            ("Notifications and performance", SettingsPage::General),
             ("Hosts and devices", SettingsPage::Hosts),
+            ("About", SettingsPage::About),
+            ("Threads and archive", SettingsPage::Threads),
+            ("Global prompt", SettingsPage::GlobalPrompt),
+            ("Skills and MCP servers", SettingsPage::Extensions),
         ] {
             entries.push(Entry {
                 label: label.into(),
@@ -188,6 +196,10 @@ impl Palette {
                 || entry.detail.to_lowercase().contains(&query)
         });
         if let Some(search) = &self.search {
+            #[expect(
+                clippy::needless_collect,
+                reason = "the filter reads `entries`, so it must finish before extending them"
+            )]
             entries.extend(
                 search
                     .iter()
@@ -232,7 +244,7 @@ impl Palette {
         entries
     }
 
-    fn start_search(&mut self, cx: &mut Context<Self>) {
+    fn start_search(&mut self, cx: &Context<Self>) {
         self.search_generation = self.search_generation.wrapping_add(1);
         self.search_task = gpui::Task::ready(());
         self.search = None;
@@ -320,7 +332,7 @@ impl Palette {
             .unwrap_or(0);
     }
 
-    fn activate(&mut self, cx: &mut Context<Self>) {
+    fn activate(&self, cx: &mut Context<Self>) {
         if let Some(entry) = self.entries.get(self.highlighted).cloned() {
             self.core
                 .update(cx, |core, cx| core.navigate(entry.screen, cx));
@@ -374,7 +386,9 @@ impl Render for Palette {
         .on_dismiss({
             let owner = cx.entity().downgrade();
             move |_, _, cx| {
-                let _ = owner.update(cx, |_, cx| cx.emit(PaletteEvent::Dismissed));
+                owner
+                    .update(cx, |_, cx| cx.emit(PaletteEvent::Dismissed))
+                    .ok();
             }
         })
     }
@@ -402,6 +416,8 @@ mod tests {
             updated_at: 999_999,
             archived: false,
             parent_thread_id: None,
+            spawned_by: None,
+            parked_until: None,
         }
     }
 

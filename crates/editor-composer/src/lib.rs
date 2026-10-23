@@ -16,6 +16,16 @@ mod placeholder;
 mod questionnaire;
 
 pub use goal_strip::{ComposerGoal, ComposerGoalState};
+
+/// The latest turn's note ("You should know", "Heads up") for the strip.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComposerNote {
+    /// The note's item: closing it closes this one, not the next.
+    pub id: SharedString,
+    pub heads_up: bool,
+    /// The note, on one line.
+    pub text: SharedString,
+}
 pub use questionnaire::ComposerQuestionnaire;
 
 use editor_ui::text_editor::{PastedFiles, TextEditor, TextEditorEvent};
@@ -23,11 +33,11 @@ use editor_ui::theme::{ActiveTheme as _, ArtisanTheme, TextStep, TypographyToken
 
 use anyhow::Context as _;
 use artisan_api::{
-    BlobHash, CreateThread, EngineConfig, EngineId, ItemId, ProjectId, SendMessage, SignInState,
-    ThreadId,
+    BlobHash, CreateThread, EngineConfig, EngineId, ItemId, Permissions, ProjectId, SendMessage,
+    SignInState, ThreadId, UpdateThread,
 };
 use draft_session::{DraftSession, SessionEvent, Submission};
-use editor_core::{Core, HostData, HostEvent, HostId, Screen};
+use editor_core::{Core, DraggedThread, HostData, HostEvent, HostId, Screen};
 use editor_ui::AssetId;
 use editor_ui::button::{Button, ButtonShape, ButtonVariant};
 use editor_ui::glass::ComposerFrame;
@@ -57,7 +67,7 @@ pub enum ComposerTarget {
 }
 
 impl ComposerTarget {
-    fn host(&self) -> &HostId {
+    const fn host(&self) -> &HostId {
         match self {
             Self::Thread { host, .. } | Self::NewThread { host, .. } => host,
         }
@@ -85,11 +95,30 @@ struct DraftBody {
     text: String,
     #[serde(default)]
     images: Vec<BlobHash>,
+    /// Dropped files and folders, sent as markdown links.
+    #[serde(default)]
+    files: Vec<DraftFile>,
     #[serde(default)]
     config: Option<EngineConfig>,
     /// Choosing another project carries this draft; its original slot stays stable.
     #[serde(default)]
     project: Option<ProjectId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DraftFile {
+    path: PathBuf,
+    #[serde(default)]
+    folder: bool,
+}
+
+/// A dropped file or folder. The engine gets a markdown link to its path
+/// after the message text; nothing is uploaded.
+pub(crate) struct FileAttachment {
+    key: u64,
+    name: SharedString,
+    path: PathBuf,
+    folder: bool,
 }
 
 pub(crate) struct Attachment {
@@ -101,11 +130,22 @@ pub(crate) struct Attachment {
     /// Encoded bytes move into the upload once conversion finishes.
     encoded: Option<Vec<u8>>,
     preview_error: Option<String>,
-    /// When the preview arrived: it sharpens out of the blur from then.
+    /// When the attachment became ready: it sharpens out of the blur from then.
     revealed: Option<Instant>,
+    /// Hidden until the blurred still decodes, so the tile never swaps
+    /// an empty face for a picture.
+    shown: bool,
     /// Hash and length of the picture as given, to spot it pasted twice.
     source: Option<(u64, usize)>,
     task: Task<()>,
+}
+
+/// What the composer's primary button does now.
+#[derive(Clone, Copy)]
+enum Primary {
+    Send,
+    Stop,
+    Continue,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,12 +154,18 @@ enum Menu {
     Project,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent view flags (requests in flight, text, strip and placeholder motion)"
+)]
 pub struct Composer {
     core: Entity<Core>,
     target: ComposerTarget,
     target_generation: u64,
     edit_revision: u64,
     cancelling: bool,
+    /// A continue request is on its way to Forge.
+    continuing: bool,
     #[cfg(test)]
     cancel_completion_gate: Option<(
         Arc<std::sync::atomic::AtomicBool>,
@@ -132,6 +178,7 @@ pub struct Composer {
     editor: Entity<TextEditor>,
     has_text: bool,
     attachments: Vec<Attachment>,
+    files: Vec<FileAttachment>,
     next_key: u64,
     /// The attachment a duplicate paste or drop shook, and when; every
     /// repeat restarts it.
@@ -156,6 +203,19 @@ pub struct Composer {
     viewport_height: f32,
     /// The thread's goal, on the strip along the card's top edge.
     goal: goal_strip::GoalStrip,
+    /// The goal the thread has, shown when no note takes its place.
+    thread_goal: Option<ComposerGoal>,
+    /// The latest turn's note, which the strip shows ahead of the goal.
+    note: Option<ComposerNote>,
+    /// The note the reader closed; it stays closed.
+    closed_note: Option<SharedString>,
+    /// When Forge picks the thread's parked turn up again; the strip says
+    /// so ahead of everything else.
+    parked_until: Option<artisan_api::Timestamp>,
+    /// The open thread's goal and note have arrived since the target
+    /// changed. Until then the strip is placed, never grown: it was already
+    /// there before the reader came.
+    strip_settled: bool,
     /// Which placeholder phrase shows: the next one each time the draft
     /// empties again.
     placeholder_generation: u64,
@@ -184,8 +244,7 @@ impl Composer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.on_release(|composer, cx| composer.clear_attachments(cx))
-            .detach();
+        cx.on_release(Self::clear_attachments).detach();
         let editor = cx.new(|cx| TextEditor::new("", placeholder::phrase(0), cx).prompt());
         let editor_subscriptions = vec![
             cx.subscribe(&editor, Self::on_editor_event),
@@ -209,6 +268,7 @@ impl Composer {
             target_generation: 0,
             edit_revision: 0,
             cancelling: false,
+            continuing: false,
             #[cfg(test)]
             cancel_completion_gate: None,
             #[cfg(test)]
@@ -218,6 +278,7 @@ impl Composer {
             editor,
             has_text: false,
             attachments: Vec::new(),
+            files: Vec::new(),
             next_key: 0,
             shake: None,
             session: None,
@@ -234,6 +295,11 @@ impl Composer {
             viewport_width: 1280.0,
             viewport_height: 800.0,
             goal: goal_strip::GoalStrip::default(),
+            thread_goal: None,
+            parked_until: None,
+            note: None,
+            closed_note: None,
+            strip_settled: false,
             placeholder_generation: 0,
             placeholder_was_visible: false,
             mentions: mentions::Mentions::default(),
@@ -248,10 +314,66 @@ impl Composer {
     /// Shows the thread's goal on the strip along the card's top edge, or
     /// retracts it.
     pub fn set_goal(&mut self, goal: Option<ComposerGoal>, cx: &mut Context<Self>) {
-        if self
-            .goal
-            .set(goal, std::time::Instant::now(), cx.reduce_motion())
-        {
+        self.thread_goal = goal;
+        self.show_strip(cx);
+    }
+
+    /// Shows the latest turn's note on the strip, ahead of the goal, or
+    /// takes it away (`None` once a new turn starts).
+    pub fn set_note(&mut self, note: Option<ComposerNote>, cx: &mut Context<Self>) {
+        self.note = note;
+        self.show_strip(cx);
+    }
+
+    /// Shows when Forge picks the thread's parked turn up again, ahead of
+    /// the note and goal, or takes it away once the turn goes.
+    pub fn set_parked(&mut self, until: Option<artisan_api::Timestamp>, cx: &mut Context<Self>) {
+        if self.parked_until != until {
+            self.parked_until = until;
+            self.show_strip(cx);
+        }
+    }
+
+    /// The thread's goal and note as they stand when it opens have arrived:
+    /// from now on the strip moves when they change.
+    pub const fn settle_strip(&mut self) {
+        self.strip_settled = true;
+    }
+
+    /// The reader closed the note: the goal, if any, comes back.
+    fn close_note(&mut self, cx: &mut Context<Self>) {
+        self.closed_note = self.note.as_ref().map(|note| note.id.clone());
+        self.show_strip(cx);
+    }
+
+    /// The strip shows a parked turn's pickup, else the open note, else
+    /// the goal.
+    fn show_strip(&mut self, cx: &mut Context<Self>) {
+        let parked = self.parked_until.map(|at| ComposerGoal {
+            objective: format!(
+                "This thread will pick up at {}",
+                editor_ui::local_time::moment(at)
+            )
+            .into(),
+            state: ComposerGoalState::Parked,
+            detail: None,
+        });
+        let note = self
+            .note
+            .as_ref()
+            .filter(|note| self.closed_note.as_ref() != Some(&note.id))
+            .map(|note| ComposerGoal {
+                objective: note.text.clone(),
+                state: if note.heads_up {
+                    ComposerGoalState::HeadsUp
+                } else {
+                    ComposerGoalState::Note
+                },
+                detail: None,
+            });
+        let shown = parked.or(note).or_else(|| self.thread_goal.clone());
+        let place = cx.reduce_motion() || !self.strip_settled;
+        if self.goal.set(shown, std::time::Instant::now(), place) {
             cx.notify();
         }
     }
@@ -271,11 +393,17 @@ impl Composer {
         self.leave_questionnaires();
         // A target switch is a scope change, never a goal-strip transition.
         self.goal = goal_strip::GoalStrip::default();
+        self.thread_goal = None;
+        self.note = None;
+        self.closed_note = None;
+        self.parked_until = None;
+        self.strip_settled = false;
         self.mentions.forget_skills();
         self.target = target;
         self.target_generation = self.target_generation.wrapping_add(1);
         self.edit_revision = 0;
         self.cancelling = false;
+        self.continuing = false;
         self.editor.update(cx, |editor, cx| {
             editor.set_text("", cx);
             editor.set_disabled(false, cx);
@@ -295,12 +423,12 @@ impl Composer {
     }
 
     #[must_use]
-    pub fn target(&self) -> &ComposerTarget {
+    pub const fn target(&self) -> &ComposerTarget {
         &self.target
     }
 
     #[must_use]
-    pub fn core(&self) -> &Entity<Core> {
+    pub const fn core(&self) -> &Entity<Core> {
         &self.core
     }
 
@@ -317,15 +445,30 @@ impl Composer {
     fn open_target(&mut self, cx: &mut Context<Self>) {
         let host = self.host(cx);
         self.host_subscription = host.as_ref().map(|host| {
-            cx.subscribe(host, |this, _, event: &HostEvent, cx| {
+            cx.subscribe(host, |this, host, event: &HostEvent, cx| {
                 if matches!(event, HostEvent::Changed | HostEvent::Reset) {
+                    // A draft that failed to load while Forge was away loads
+                    // once it is back.
+                    if host.read(cx).is_live()
+                        && let Some(session) = this.session.clone()
+                        && session.read(cx).error.is_some()
+                        && !session.read(cx).loaded
+                    {
+                        session.update(cx, |session, cx| session.retry(cx));
+                    }
                     // Settings may have added or removed an MCP server.
                     this.refresh_mention_catalog(cx);
                     this.refresh_picker_catalog(cx);
                     cx.notify();
                 } else if matches!(event, HostEvent::ImagesChanged) {
                     this.sync_attachment_previews(cx);
+                    // The project menu shows each project's icon.
+                    if this.menu == Some(Menu::Project) {
+                        cx.notify();
+                    }
                 } else if matches!(event, HostEvent::ThreadChanged { .. }) {
+                    // A renamed thread is mentioned by its new title.
+                    this.refresh_mention_catalog(cx);
                     cx.notify();
                 }
             })
@@ -381,7 +524,7 @@ impl Composer {
                                 thread: thread.clone(),
                             },
                             cx,
-                        )
+                        );
                     });
                 }
                 cx.emit(ComposerEvent::Sent {
@@ -423,7 +566,7 @@ impl Composer {
         // The user started typing before the draft arrived: theirs wins.
         if &self.target != target
             || (!self.writing_answer() && self.has_text)
-            || !self.attachments.is_empty()
+            || self.has_attachments()
         {
             return;
         }
@@ -436,6 +579,9 @@ impl Composer {
         self.project = body.project;
         for hash in body.images {
             self.restore_attachment(hash, cx);
+        }
+        for file in body.files {
+            self.push_file(file.path, file.folder);
         }
         cx.notify();
     }
@@ -486,7 +632,7 @@ impl Composer {
         self.edit_revision = self.edit_revision.wrapping_add(1);
         self.schedule_save(cx);
     }
-    fn schedule_save(&mut self, cx: &mut Context<Self>) {
+    fn schedule_save(&self, cx: &mut Context<Self>) {
         let body = DraftBody {
             text: self
                 .questionnaire
@@ -498,11 +644,24 @@ impl Composer {
                 .iter()
                 .filter_map(|attachment| attachment.state.hash().cloned())
                 .collect(),
+            files: self
+                .files
+                .iter()
+                .map(|file| DraftFile {
+                    path: file.path.clone(),
+                    folder: file.folder,
+                })
+                .collect(),
             config: self.config.clone(),
             project: self.project.clone(),
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "DraftBody holds only strings, ids and string-keyed data; serializing it cannot fail"
+        )]
         let value = if body.text.is_empty()
             && body.images.is_empty()
+            && body.files.is_empty()
             && body.config.is_none()
             && body.project.is_none()
         {
@@ -534,7 +693,7 @@ impl Composer {
         }
     }
 
-    fn sync_editor_enabled(&mut self, cx: &mut Context<Self>) {
+    fn sync_editor_enabled(&self, cx: &mut Context<Self>) {
         let disabled = !self.draft_editable(cx) || self.questionnaire.sending();
         self.editor
             .update(cx, |editor, cx| editor.set_disabled(disabled, cx));
@@ -558,34 +717,96 @@ impl Composer {
         if !self.metadata_ready(cx) || !self.draft_editable(cx) {
             return;
         }
+        self.apply_permissions(config.permissions, cx);
+        self.remember_model_config(&config, cx);
         self.config = Some(config);
         self.edited(cx);
+        // Another engine reads other commands.
+        self.refresh_mention_catalog(cx);
         cx.notify();
     }
 
+    /// Forge remembers the choice as the one this model comes back with.
+    fn remember_model_config(&self, config: &EngineConfig, cx: &mut Context<Self>) {
+        if let Some(host) = self.host(cx) {
+            host.update(cx, |host, cx| {
+                host.remember_model_config(config.clone(), cx);
+            });
+        }
+    }
+
     /// The project a new thread goes to: the one picked in the tab, else
-    /// the one it was opened for.
-    pub(crate) fn project(&self) -> Option<ProjectId> {
+    /// the one it was opened for, else the one the user last started a
+    /// thread in.
+    pub(crate) fn project(&self, cx: &App) -> Option<ProjectId> {
         match &self.target {
-            ComposerTarget::NewThread { project, .. } => {
-                self.project.clone().or_else(|| project.clone())
-            }
+            ComposerTarget::NewThread { project, .. } => self
+                .project
+                .clone()
+                .or_else(|| project.clone())
+                .or_else(|| last_project(self.host(cx)?.read(cx))),
             ComposerTarget::Thread { .. } => self.project.clone(),
         }
     }
 
     // Attachments.
 
+    /// Pictures attach as images; any other file or folder as a link.
     fn add_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         for path in paths {
-            let name = path.file_name().map_or_else(
-                || path.display().to_string(),
-                |name| name.to_string_lossy().into_owned(),
-            );
-            self.add_image(Source::Path(path), name.into(), cx);
+            let folder = path.is_dir();
+            if !folder && is_image_path(&path) {
+                let name = file_name(&path);
+                self.add_image(Source::Path(path), name, cx);
+                continue;
+            }
+            if !self.draft_editable(cx) {
+                return;
+            }
+            if let Some(existing) = self.files.iter().find(|file| file.path == path) {
+                self.shake = Some((existing.key, Instant::now()));
+                cx.notify();
+                continue;
+            }
+            if self.files.len() >= MAX_FILES {
+                self.notice = Some(format!("A message can link at most {MAX_FILES} files."));
+                cx.notify();
+                return;
+            }
+            self.push_file(path, folder);
+            self.edited(cx);
+            cx.notify();
         }
     }
 
+    fn push_file(&mut self, path: PathBuf, folder: bool) {
+        let key = self.next_key;
+        self.next_key += 1;
+        self.files.push(FileAttachment {
+            key,
+            name: file_name(&path),
+            path,
+            folder,
+        });
+    }
+
+    fn remove_file(&mut self, key: u64, cx: &mut Context<Self>) {
+        if !self.draft_editable(cx) {
+            return;
+        }
+        self.files.retain(|file| file.key != key);
+        self.edited(cx);
+        cx.notify();
+    }
+
+    const fn has_attachments(&self) -> bool {
+        !self.attachments.is_empty() || !self.files.is_empty()
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one pipeline: placeholder, conversion and upload of a single image"
+    )]
     fn add_image(&mut self, source: Source, name: SharedString, cx: &mut Context<Self>) {
         if !self.draft_editable(cx) {
             return;
@@ -606,22 +827,29 @@ impl Composer {
         let task = cx.spawn(async move |this, cx| {
             static CONVERSION: futures::lock::Mutex<()> = futures::lock::Mutex::new(());
             let background = cx.background_executor().clone();
-            let (read, permit) = background
+            // The still decodes in milliseconds, outside the conversion queue.
+            let read = background
                 .spawn(async move {
-                    let permit = CONVERSION.lock().await;
-                    (source.into_bytes(), permit)
+                    source.into_bytes().map(|bytes| {
+                        let placeholder = encode::placeholder(&bytes);
+                        (bytes, placeholder)
+                    })
                 })
                 .await;
-            let bytes = match read {
-                Ok(bytes) => bytes,
+            let (bytes, placeholder) = match read {
+                Ok(read) => read,
                 Err(error) => {
-                    let _ = this.update(cx, |this, cx| {
+                    this.update(cx, |this, cx| {
+                        if let Some(attachment) = this.attachment_mut(key) {
+                            attachment.shown = true;
+                        }
                         this.drive_attachment(
                             key,
                             &attachment::Input::Failed(format!("{error:#}")),
                             cx,
-                        )
-                    });
+                        );
+                    })
+                    .ok();
                     return;
                 }
             };
@@ -641,6 +869,10 @@ impl Composer {
                         return false;
                     };
                     attachment.source = Some(source);
+                    // The tile first appears with its blurred picture in place.
+                    attachment.preview = placeholder;
+                    attachment.shown = true;
+                    cx.notify();
                     true
                 })
                 .unwrap_or(false);
@@ -650,14 +882,14 @@ impl Composer {
             let result = background
                 .spawn(async move {
                     // Keep the permit in the CPU task even if its view is dropped.
-                    let _permit = permit;
+                    let _permit = CONVERSION.lock().await;
                     let webp = encode::to_webp(&bytes)?;
                     let preview = editor_ui::markdown_renderer::decode_image_bytes(&webp, renderer)
                         .map_err(anyhow::Error::msg)?;
                     Ok::<_, anyhow::Error>((webp, preview))
                 })
                 .await;
-            let _ = this.update(cx, |this, cx| match result {
+            this.update(cx, |this, cx| match result {
                 Ok((webp, preview)) => {
                     if let Err(error) = this.admit_preview(key, preview, cx) {
                         this.drive_attachment(key, &attachment::Input::Failed(error), cx);
@@ -669,9 +901,14 @@ impl Composer {
                     this.drive_attachment(key, &attachment::Input::Encoded, cx);
                 }
                 Err(error) => {
-                    this.drive_attachment(key, &attachment::Input::Failed(format!("{error:#}")), cx)
+                    this.drive_attachment(
+                        key,
+                        &attachment::Input::Failed(format!("{error:#}")),
+                        cx,
+                    );
                 }
-            });
+            })
+            .ok();
         });
         self.attachments.push(Attachment {
             key,
@@ -681,6 +918,7 @@ impl Composer {
             encoded: None,
             preview_error: None,
             revealed: None,
+            shown: false,
             source: None,
             task,
         });
@@ -702,6 +940,7 @@ impl Composer {
             encoded: None,
             preview_error: None,
             revealed: None,
+            shown: true,
             source: None,
             task: Task::ready(()),
         });
@@ -733,7 +972,10 @@ impl Composer {
             let previous = attachment.preview.replace(image);
             release_preview(previous, cx);
             attachment.preview_error = None;
-            attachment.revealed = Some(Instant::now());
+            // Restored previews arrive ready; converted ones reveal on upload.
+            if attachment.state.hash().is_some() {
+                attachment.revealed = Some(Instant::now());
+            }
         }
         Ok(())
     }
@@ -810,7 +1052,8 @@ impl Composer {
                             attachment::Input::Failed(format!("Upload failed: {error:#}"))
                         }
                     };
-                    let _ = this.update(cx, |this, cx| this.drive_attachment(key, &input, cx));
+                    this.update(cx, |this, cx| this.drive_attachment(key, &input, cx))
+                        .ok();
                 });
             } else {
                 attachment.state = attachment::State::Failed(
@@ -819,6 +1062,9 @@ impl Composer {
             }
         }
         if matches!(input, attachment::Input::Uploaded(_)) {
+            if attachment.state.hash().is_some() && attachment.preview.is_some() {
+                attachment.revealed = Some(Instant::now());
+            }
             self.schedule_save(cx);
         }
         cx.notify();
@@ -861,6 +1107,7 @@ impl Composer {
     }
 
     fn clear_attachments(&mut self, cx: &mut App) {
+        self.files.clear();
         for attachment in self.attachments.drain(..) {
             release_preview(attachment.preview, cx);
         }
@@ -875,6 +1122,32 @@ impl Composer {
                 .is_some_and(|host| host.read(cx).is_working(thread)),
             ComposerTarget::NewThread { .. } => false,
         }
+    }
+
+    /// The thread's last turn stopped before it finished, and there is
+    /// nothing to send: the primary button carries the turn on.
+    fn can_continue(&self, cx: &App) -> bool {
+        let ComposerTarget::Thread { thread, .. } = &self.target else {
+            return false;
+        };
+        !self.writing_answer()
+            && !self.has_text
+            && !self.has_attachments()
+            && self
+                .host(cx)
+                .is_some_and(|host| host.read(cx).can_continue(thread))
+    }
+
+    /// The engine's guess at the thread's next message, offered while the
+    /// composer would send one: not mid-run, nor while answering a question.
+    fn suggestion(&self, cx: &App) -> Option<SharedString> {
+        let ComposerTarget::Thread { thread, .. } = &self.target else {
+            return None;
+        };
+        if self.writing_answer() || self.is_working(cx) {
+            return None;
+        }
+        self.host(cx)?.read(cx).suggestion(thread).cloned()
     }
 
     /// Why sending is not possible right now, if it isn't.
@@ -892,7 +1165,7 @@ impl Composer {
         {
             return Some("Sending…");
         }
-        if !self.has_text && self.attachments.is_empty() {
+        if !self.has_text && !self.has_attachments() {
             return Some("");
         }
         if self
@@ -907,9 +1180,10 @@ impl Composer {
             .iter()
             .any(|attachment| attachment.state.hash().is_none())
         {
-            return Some("Preparing images…");
+            // The blur on the tile is the only sign; send just waits.
+            return Some("");
         }
-        if matches!(self.target, ComposerTarget::NewThread { .. }) && self.project().is_none() {
+        if matches!(self.target, ComposerTarget::NewThread { .. }) && self.project(cx).is_none() {
             return Some("Choose a project");
         }
         if self.effective_config(cx).is_none() {
@@ -941,7 +1215,7 @@ impl Composer {
 
     fn outgoing_message(&self, cx: &App) -> Option<Submission> {
         let config = self.effective_config(cx)?;
-        let text = self.editor.read(cx).text().trim().to_owned();
+        let text = with_file_links(self.editor.read(cx).text().trim(), &self.files);
         let images = self
             .attachments
             .iter()
@@ -959,10 +1233,11 @@ impl Composer {
             ComposerTarget::NewThread { .. } => {
                 let create = CreateThread {
                     id: ThreadId::new(),
-                    project_id: self.project()?,
+                    project_id: self.project(cx)?,
                     config: config.clone(),
                     title: None,
                     parent_thread_id: None,
+                    spawned_by: None,
                 };
                 (Some(create), Some(config.clone()))
             }
@@ -973,7 +1248,7 @@ impl Composer {
             .map(|create| create.id.clone())
             .or_else(|| match &self.target {
                 ComposerTarget::Thread { thread, .. } => Some(thread.clone()),
-                _ => None,
+                ComposerTarget::NewThread { .. } => None,
             })?;
         Some(Submission {
             message: SendMessage {
@@ -986,6 +1261,127 @@ impl Composer {
             create,
             thread,
         })
+    }
+
+    /// Carries on the thread's stopped turn, with no message.
+    fn continue_turn(&mut self, cx: &mut Context<Self>) {
+        if self.continuing {
+            return;
+        }
+        let (ComposerTarget::Thread { thread, .. }, Some(host)) = (&self.target, self.host(cx))
+        else {
+            return;
+        };
+        let client = host.read(cx).client.clone();
+        let thread = thread.clone();
+        let generation = self.target_generation;
+        self.continuing = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = client.continue_turn(&thread).await;
+            this.update(cx, |this, cx| {
+                if this.target_generation != generation {
+                    return;
+                }
+                this.continuing = false;
+                if let Err(error) = result {
+                    this.notice = Some(format!("Couldn't continue: {error:#}"));
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Access is the thread's, not the next message's: a change is saved at
+    /// once, so a live run switches to it (Full also approves what waits).
+    fn apply_permissions(&self, permissions: Permissions, cx: &Context<Self>) {
+        let (ComposerTarget::Thread { thread, .. }, Some(host)) = (&self.target, self.host(cx))
+        else {
+            return;
+        };
+        let host = host.read(cx);
+        let Some(mut config) = host.threads.get(thread).map(|thread| thread.config.clone()) else {
+            return;
+        };
+        if config.permissions == permissions {
+            return;
+        }
+        config.permissions = permissions;
+        let client = host.client.clone();
+        let thread = thread.clone();
+        let generation = self.target_generation;
+        cx.spawn(async move |this, cx| {
+            let update = UpdateThread {
+                config: Some(config),
+                ..UpdateThread::default()
+            };
+            let result = client.update_thread(&thread, &update).await;
+            this.update(cx, |this, cx| {
+                if this.target_generation != generation {
+                    return;
+                }
+                if let Err(error) = result {
+                    this.notice = Some(format!("Couldn't change access: {error:#}"));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Clears the thread's goal. The strip leaves when Forge reports it
+    /// cleared, so a refusal leaves it standing.
+    fn clear_goal(&self, cx: &Context<Self>) {
+        let (ComposerTarget::Thread { thread, .. }, Some(host)) = (&self.target, self.host(cx))
+        else {
+            return;
+        };
+        let client = host.read(cx).client.clone();
+        let thread = thread.clone();
+        let generation = self.target_generation;
+        cx.spawn(async move |this, cx| {
+            let result = client.clear_goal(&thread).await;
+            this.update(cx, |this, cx| {
+                if this.target_generation != generation {
+                    return;
+                }
+                if let Err(error) = result {
+                    this.notice = Some(format!("Couldn't clear the goal: {error:#}"));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Cancels the parked turn's pickup; the thread stays failed. Forge's
+    /// cancel drops it, and the strip leaves when Forge reports that.
+    fn unpark(&self, cx: &Context<Self>) {
+        let (ComposerTarget::Thread { thread, .. }, Some(host)) = (&self.target, self.host(cx))
+        else {
+            return;
+        };
+        let client = host.read(cx).client.clone();
+        let thread = thread.clone();
+        let generation = self.target_generation;
+        cx.spawn(async move |this, cx| {
+            let result = client.cancel(&thread).await;
+            this.update(cx, |this, cx| {
+                if this.target_generation != generation {
+                    return;
+                }
+                if let Err(error) = result {
+                    this.notice = Some(format!("Couldn't cancel the pickup: {error:#}"));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Stops the thread's live run.
@@ -1020,7 +1416,7 @@ impl Composer {
             } else {
                 result
             };
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 #[cfg(test)]
                 {
                     this.cancel_completions += 1;
@@ -1033,15 +1429,20 @@ impl Composer {
                     this.notice = Some(format!("Couldn't stop the run: {error:#}"));
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         })
         .detach();
     }
 
-    fn sign_in(&mut self, cx: &mut Context<Self>) {
+    /// Opens `engine`'s settings page, where it installs and signs in.
+    fn sign_in(&mut self, engine: EngineId, cx: &mut Context<Self>) {
         self.close_menu(cx);
         self.core.update(cx, |core, cx| {
-            core.navigate(Screen::Settings(editor_core::SettingsPage::Engines), cx);
+            core.navigate(
+                Screen::Settings(editor_core::SettingsPage::Engine(engine)),
+                cx,
+            );
         });
     }
 }
@@ -1059,6 +1460,15 @@ fn remembered_config(host: &HostData) -> Option<EngineConfig> {
             return None;
         }
     };
+    // The model comes back as it was last chosen, also when that was after
+    // the last message.
+    if let Some(saved) = config
+        .model
+        .as_deref()
+        .and_then(|model| saved_model_config(host, config.engine, model))
+    {
+        config = saved;
+    }
     let status = host.engines.get(&config.engine)?;
     if !matches!(status.install, artisan_api::InstallState::Installed { .. })
         || matches!(
@@ -1071,31 +1481,35 @@ fn remembered_config(host: &HostData) -> Option<EngineConfig> {
     if let Some(id) = &config.model
         && !status.models.is_empty()
     {
-        let model = status.models.iter().find(|model| &model.id == id)?;
-        model.normalize_context_window(&mut config);
-        if config
-            .effort
-            .as_ref()
-            .is_some_and(|effort| !model.efforts.contains(effort))
-        {
-            config.effort.clone_from(&model.default_effort);
-        }
-        if config
-            .speed
-            .as_ref()
-            .is_some_and(|speed| !model.speeds.iter().any(|offered| &offered.id == speed))
-        {
-            config.speed = None;
-        }
-        if config
-            .variant
-            .as_ref()
-            .is_some_and(|variant| !model.variants.iter().any(|offered| &offered.id == variant))
-        {
-            config.variant = None;
-        }
+        status
+            .models
+            .iter()
+            .find(|model| &model.id == id)?
+            .fit(&mut config);
     }
     Some(config)
+}
+
+/// The config last chosen for `engine`'s `model` on `host`, as saved.
+pub(crate) fn saved_model_config(
+    host: &HostData,
+    engine: EngineId,
+    model: &str,
+) -> Option<EngineConfig> {
+    artisan_api::saved_model_config(host.setting(artisan_api::MODEL_CONFIGS_KEY)?, engine, model)
+}
+
+/// The project the user last started a thread in, while it is still there.
+fn last_project(host: &HostData) -> Option<ProjectId> {
+    let id = ProjectId(
+        host.setting(artisan_api::LAST_PROJECT_KEY)?
+            .as_str()?
+            .to_owned(),
+    );
+    host.projects
+        .get(&id)
+        .is_some_and(|project| !project.removed)
+        .then_some(id)
 }
 
 /// The default for a new thread: the first signed-in engine with models,
@@ -1169,11 +1583,57 @@ fn source_key(bytes: &[u8]) -> (u64, usize) {
     (hasher.finish(), bytes.len())
 }
 
+/// At most this many files and folders link from one message.
+const MAX_FILES: usize = 32;
+
+/// Extensions the image path attaches as pictures; anything else links.
+fn is_image_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+            )
+        })
+}
+
+fn file_name(path: &std::path::Path) -> SharedString {
+    path.file_name()
+        .map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        )
+        .into()
+}
+
+/// The message text, then one markdown link per file or folder. Angle
+/// brackets keep paths with spaces or parentheses one link.
+fn with_file_links(text: &str, files: &[FileAttachment]) -> String {
+    if files.is_empty() {
+        return text.to_owned();
+    }
+    let links = files
+        .iter()
+        .map(|file| {
+            let slash = if file.folder { "/" } else { "" };
+            let name = file.name.replace(['[', ']'], "");
+            format!("[{name}{slash}](<{}>)", file.path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        links
+    } else {
+        format!("{text}\n\n{links}")
+    }
+}
+
 // Rendering.
 
 impl Composer {
     /// AttachmentTile owns each preview, loading/error state and remove action.
-    fn render_attachments(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_attachments(&self, theme: &ArtisanTheme, cx: &Context<Self>) -> impl IntoElement {
         let mut row = div()
             .id("composer-attachments")
             .w_full()
@@ -1184,7 +1644,7 @@ impl Composer {
             .pt(px(4.0))
             .pb(px(8.0))
             .overflow_x_scroll();
-        for attachment in &self.attachments {
+        for attachment in self.attachments.iter().filter(|a| a.shown) {
             let key = attachment.key;
             let owner = cx.entity().downgrade();
             let mut tile = editor_ui::attachment_tile::AttachmentTile::new(
@@ -1193,6 +1653,10 @@ impl Composer {
                 attachment.name.clone(),
             )
             .preview(attachment.preview.clone(), attachment.revealed)
+            .preparing(matches!(
+                attachment.state,
+                attachment::State::Encoding | attachment::State::Uploading
+            ))
             .error(
                 attachment
                     .state
@@ -1207,23 +1671,54 @@ impl Composer {
             )
             .removable(self.draft_editable(cx))
             .on_remove(move |_, cx| {
-                let _ = owner.update(cx, |this, cx| this.remove_attachment(key, cx));
+                owner
+                    .update(cx, |this, cx| this.remove_attachment(key, cx))
+                    .ok();
             });
             if attachment.preview_error.is_some() {
                 let owner = cx.entity().downgrade();
                 tile = tile.on_retry(move |_, cx| {
-                    let _ = owner.update(cx, |this, cx| this.retry_preview(key, cx));
+                    owner
+                        .update(cx, |this, cx| this.retry_preview(key, cx))
+                        .ok();
                 });
             }
             row = row.child(tile);
         }
+        for file in &self.files {
+            let key = file.key;
+            let owner = cx.entity().downgrade();
+            let glyph = if file.folder {
+                AssetId::TABLER_FOLDER
+            } else {
+                AssetId::TABLER_FILE_TEXT
+            };
+            row = row.child(
+                editor_ui::attachment_tile::AttachmentTile::new(
+                    format!("composer-file-{key}"),
+                    *theme,
+                    file.name.clone(),
+                )
+                .file(glyph)
+                .shaking(
+                    self.shake
+                        .filter(|(shaken, _)| *shaken == key)
+                        .map(|(_, since)| since),
+                )
+                .removable(self.draft_editable(cx))
+                .on_remove(move |_, cx| {
+                    owner.update(cx, |this, cx| this.remove_file(key, cx)).ok();
+                }),
+            );
+        }
         row
     }
 
-    /// The primary control (`render_control_row`): a ghost icon button that
-    /// sends (or steers a live run) with the arrow, and stops the run with
-    /// the filled square while there is nothing to send.
-    fn render_primary(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The primary control (`render_control_row`): a blue icon button that
+    /// sends (or steers a live run) with the arrow, stops the run with the
+    /// filled square while there is nothing to send, and carries a stopped
+    /// turn on with the play glyph while there is nothing to send.
+    fn render_primary(&self, theme: &ArtisanTheme, cx: &Context<Self>) -> impl IntoElement {
         let theme = *theme;
         let working = self.is_working(cx);
         let ready = if self.writing_answer() {
@@ -1231,40 +1726,41 @@ impl Composer {
         } else {
             self.blocked(cx).is_none()
         };
-        let stop_face = working && !ready;
-        let (icon, label) = if stop_face {
-            (AssetId::TABLER_PLAYER_STOP_FILLED, "Stop")
+        let face = if working && !ready {
+            Primary::Stop
+        } else if !working && !ready && self.can_continue(cx) {
+            Primary::Continue
         } else {
-            (AssetId::TABLER_ARROW_UP, "Send message")
+            Primary::Send
+        };
+        let (icon, label, id) = match face {
+            Primary::Stop => (AssetId::TABLER_PLAYER_STOP_FILLED, "Stop", "composer-stop"),
+            Primary::Continue => (
+                AssetId::TABLER_PLAYER_PLAY_FILLED,
+                "Continue where it stopped",
+                "composer-continue",
+            ),
+            Primary::Send => (AssetId::TABLER_ARROW_UP, "Send message", "composer-send"),
         };
         let entity = cx.entity().downgrade();
-        let button = Button::icon(
-            if stop_face {
-                "composer-stop"
-            } else {
-                "composer-send"
-            },
-            theme,
-            icon,
-            label,
-        )
-        .debug_selector(if stop_face {
-            "composer-stop"
-        } else {
-            "composer-send"
-        })
-        .variant(ButtonVariant::Ghost)
-        .shape(ButtonShape::Rounded)
-        .disabled(if stop_face { self.cancelling } else { !ready })
-        .on_activate(move |_, _, cx| {
-            let _ = entity.update(cx, |this, cx| {
-                if stop_face {
-                    this.stop(cx);
-                } else {
-                    this.send(cx);
-                }
+        let button = Button::icon(id, theme, icon, label)
+            .debug_selector(id)
+            .variant(ButtonVariant::Accent)
+            .shape(ButtonShape::Rounded)
+            .disabled(match face {
+                Primary::Stop => self.cancelling,
+                Primary::Continue => self.continuing,
+                Primary::Send => !ready,
+            })
+            .on_activate(move |_, _, cx| {
+                entity
+                    .update(cx, |this, cx| match face {
+                        Primary::Stop => this.stop(cx),
+                        Primary::Continue => this.continue_turn(cx),
+                        Primary::Send => this.send(cx),
+                    })
+                    .ok();
             });
-        });
         div()
             .flex()
             .flex_row()
@@ -1280,12 +1776,13 @@ impl Render for Composer {
         reason = "one GPUI builder stacks the card, its tab, the error line and the picker tooltip in visual order"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_mention_theme(cx);
         let theme = *cx.theme();
         self.viewport_width = f32::from(window.viewport_size().width);
         self.viewport_height = f32::from(window.viewport_size().height);
         let desktop = theme.colors;
         // Each time the draft empties again, the next phrase shows.
-        let placeholder_visible = !self.has_text && self.attachments.is_empty();
+        let placeholder_visible = !self.has_text && !self.has_attachments();
         if let Some(answer) = self.answer_placeholder(cx) {
             self.editor
                 .update(cx, |editor, cx| editor.set_placeholder(answer, cx));
@@ -1297,17 +1794,23 @@ impl Render for Composer {
         }
         // An answer's placeholder hands back to the next phrase.
         self.placeholder_was_visible = placeholder_visible && !self.writing_answer();
+        let suggestion = self.suggestion(cx);
+        self.editor
+            .update(cx, |editor, cx| editor.set_suggestion(suggestion, cx));
+        // Offline, the connection card says why; these would only repeat it.
+        let live = self.host(cx).is_some_and(|host| host.read(cx).is_live());
         let error = self
             .session
             .as_ref()
             .and_then(|session| session.read(cx).error.clone())
-            .or_else(|| self.notice.clone());
+            .or_else(|| self.notice.clone())
+            .filter(|_| live);
 
         let metadata_error = match &self.target {
             ComposerTarget::Thread { thread, .. } => self
                 .host(cx)
                 .and_then(|host| host.read(cx).thread_load_error(thread).map(str::to_owned)),
-            _ => None,
+            ComposerTarget::NewThread { .. } => None,
         };
         let controls = div()
             .id("composer-controls")
@@ -1319,7 +1822,7 @@ impl Render for Composer {
             .items_center()
             .justify_between()
             .gap(px(8.0))
-            .text_color(desktop.workspace_secondary.to_paint())
+            .text_color(desktop.text_muted.to_paint())
             .child(
                 div()
                     .flex()
@@ -1353,7 +1856,9 @@ impl Render for Composer {
         if let Some(panel) = self.render_questionnaires(&desktop, cx) {
             card = card.child(panel);
         }
-        if !self.writing_answer() && !self.attachments.is_empty() {
+        if !self.writing_answer()
+            && (self.attachments.iter().any(|a| a.shown) || !self.files.is_empty())
+        {
             card = card.child(self.render_attachments(&theme, cx));
         }
         card = card.child(self.editor.clone());
@@ -1362,25 +1867,49 @@ impl Render for Composer {
             card = card.child(menu);
         }
         card = card.child(controls);
+        // The tab frames only the card; the goal grows out of it. The shell
+        // casts the shadow, so a framed card keeps only its rims.
+        let tab = self.render_tab(&theme, &desktop, cx);
         let card = div()
             .id("composer")
             .w_full()
             .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.add_paths(paths.paths().to_vec(), cx);
             }))
-            .child(ComposerFrame::new(theme, card));
+            .on_drop::<DraggedThread>(cx.listener(|this, thread: &DraggedThread, window, cx| {
+                this.mention_thread(thread, window, cx);
+            }))
+            .child(ComposerFrame::new(theme, card).nested(tab.is_some()));
 
-        // The tab frames only the card; the goal grows out of it.
-        let card = match self.render_tab(&theme, &desktop, cx) {
+        let card = match tab {
             Some(tab) => {
                 let mut moving = false;
+                let this = cx.entity().downgrade();
+                let actions = goal_strip::StripActions {
+                    close_note: std::rc::Rc::new({
+                        let this = this.clone();
+                        move |_, cx| {
+                            this.update(cx, Self::close_note).ok();
+                        }
+                    }),
+                    clear_goal: std::rc::Rc::new({
+                        let this = this.clone();
+                        move |_, cx| {
+                            this.update(cx, |this, cx| this.clear_goal(cx)).ok();
+                        }
+                    }),
+                    unpark: std::rc::Rc::new(move |_, cx| {
+                        this.update(cx, |this, cx| this.unpark(cx)).ok();
+                    }),
+                };
                 let strip = self
                     .goal
                     .frame(
                         std::time::Instant::now(),
-                        theme,
+                        &theme,
                         cx.reduce_motion(),
                         &mut moving,
+                        &actions,
                     )
                     .map(|frame| TabCardStrip {
                         reveal: frame.reveal,
@@ -1401,14 +1930,14 @@ impl Render for Composer {
                 div()
                     .px(px(12.0))
                     .text_size(TypographyTokens::size(TextStep::XsMid))
-                    .text_color(theme.colors.destructive.to_paint())
+                    .text_color(theme.colors.destructive_text.to_paint())
                     .child(error),
             );
         }
         if let Some(session) = self
             .session
             .as_ref()
-            .filter(|session| session.read(cx).error.is_some())
+            .filter(|session| live && session.read(cx).error.is_some())
         {
             if session.read(cx).conflict {
                 let local = session.clone();
@@ -1420,14 +1949,14 @@ impl Render for Composer {
                         .child(
                             Button::text("draft-keep-local", theme, "Keep my draft").on_activate(
                                 move |_, _, cx| {
-                                    local.update(cx, |session, cx| session.keep_local(cx))
+                                    local.update(cx, |session, cx| session.keep_local(cx));
                                 },
                             ),
                         )
                         .child(
                             Button::text("draft-use-remote", theme, "Load other draft")
                                 .on_activate(move |_, _, cx| {
-                                    remote.update(cx, |session, cx| session.use_remote(cx))
+                                    remote.update(cx, draft_session::DraftSession::use_remote);
                                 }),
                         ),
                 );

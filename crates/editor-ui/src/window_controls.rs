@@ -12,7 +12,7 @@ pub struct WindowControls {
     maximized: bool,
 }
 impl WindowControls {
-    pub fn new(theme: ArtisanTheme, maximized: bool) -> Self {
+    pub const fn new(theme: ArtisanTheme, maximized: bool) -> Self {
         Self { theme, maximized }
     }
 }
@@ -39,21 +39,21 @@ enum Caption {
     Close,
 }
 impl Caption {
-    fn area(self) -> WindowControlArea {
+    const fn area(self) -> WindowControlArea {
         match self {
             Self::Minimize => WindowControlArea::Min,
             Self::Maximize(_) => WindowControlArea::Max,
             Self::Close => WindowControlArea::Close,
         }
     }
-    fn selector(self) -> &'static str {
+    const fn selector(self) -> &'static str {
         match self {
             Self::Minimize => "artisan-desktop-titlebar-minimize",
             Self::Maximize(_) => "artisan-desktop-titlebar-maximize",
             Self::Close => "artisan-desktop-titlebar-close",
         }
     }
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Minimize => "Minimize window",
             Self::Maximize(false) => "Maximize window",
@@ -67,16 +67,13 @@ impl Caption {
 fn caption_button(theme: &ArtisanTheme, caption: Caption, stroke: Pixels) -> Stateful<Div> {
     let (hover_background, hover_foreground): (Hsla, Hsla) = match caption {
         Caption::Close => (
-            gpui::rgb_to_hsla(gpui::rgb(0x00e8_1123)),
-            gpui::rgb_to_hsla(gpui::rgb(0x00ff_ffff)),
+            theme.colors.red.solid.to_paint(),
+            theme.colors.red.contrast.to_paint(),
         ),
-        Caption::Maximize(_) => (
-            theme.colors.selected.to_paint(),
-            theme.colors.workspace_foreground.to_paint(),
-        ),
-        _ => (
-            theme.colors.muted.with_alpha(0.5).to_paint(),
-            theme.colors.foreground.to_paint(),
+        Caption::Maximize(_) => (theme.colors.raised.to_paint(), theme.colors.text.to_paint()),
+        Caption::Minimize => (
+            theme.colors.surface.to_paint(),
+            theme.colors.text.to_paint(),
         ),
     };
     let glyph = match caption {
@@ -88,7 +85,11 @@ fn caption_button(theme: &ArtisanTheme, caption: Caption, stroke: Pixels) -> Sta
             .size(px(16.0))
             .into_any_element(),
     };
-    let focus_ring = theme.interaction.focus_ring_color.to_paint();
+    let focus_ring = theme
+        .colors
+        .ring
+        .at(crate::theme::Opacity::FocusRing)
+        .to_paint();
     let selector = caption.selector();
     div()
         .id(selector)
@@ -105,7 +106,7 @@ fn caption_button(theme: &ArtisanTheme, caption: Caption, stroke: Pixels) -> Sta
         .flex()
         .items_center()
         .justify_center()
-        .text_color(theme.colors.muted_foreground.to_paint())
+        .text_color(theme.colors.text_muted.to_paint())
         .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
         .window_control_area(caption.area())
         .on_click(move |event, window, _| {
@@ -133,7 +134,7 @@ fn maximize_glyph(theme: &ArtisanTheme, maximized: bool, stroke: Pixels) -> Div 
                     .h(px(7.0))
                     .border_t(stroke)
                     .border_r(stroke)
-                    .border_color(theme.colors.workspace_foreground.to_paint()),
+                    .border_color(theme.colors.text.to_paint()),
             )
             .child(
                 div()
@@ -143,12 +144,12 @@ fn maximize_glyph(theme: &ArtisanTheme, maximized: bool, stroke: Pixels) -> Div 
                     .w(px(7.0))
                     .h(px(7.0))
                     .border(stroke)
-                    .border_color(theme.colors.workspace_foreground.to_paint()),
+                    .border_color(theme.colors.text.to_paint()),
             );
     } else {
         glyph = glyph
             .border(stroke)
-            .border_color(theme.colors.workspace_foreground.to_paint());
+            .border_color(theme.colors.text.to_paint());
     }
     glyph
 }

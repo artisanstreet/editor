@@ -26,7 +26,7 @@ impl EmptyState {
         }
     }
     #[must_use]
-    pub fn variant(mut self, variant: EmptyStateVariant) -> Self {
+    pub const fn variant(mut self, variant: EmptyStateVariant) -> Self {
         self.variant = variant;
         self
     }
@@ -41,7 +41,7 @@ impl RenderOnce for EmptyState {
             .py(px(20.0))
             .px(px(12.0))
             .text_sm()
-            .text_color(theme.colors.muted_foreground.to_paint())
+            .text_color(theme.colors.text_muted.to_paint())
             .whitespace_normal()
             .when(framed, |el| {
                 el.min_h(px(72.0))
@@ -50,7 +50,7 @@ impl RenderOnce for EmptyState {
                     .justify_center()
                     .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .border_1()
-                    .border_color(theme.colors.foreground.with_alpha(0.1).to_paint())
+                    .border_color(theme.colors.line.to_paint())
             })
             .child(self.text)
     }

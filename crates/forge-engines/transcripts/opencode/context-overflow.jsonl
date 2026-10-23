@@ -1,5 +1,0 @@
-{"id": "evt_007", "type": "session.status", "data": {"sessionID": "ses_root", "status": {"type": "idle"}}}
-{"id": "evt_008", "type": "session.next.prompt.admitted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_009", "type": "session.next.prompted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_006", "type": "session.error", "data": {"sessionID": "ses_root", "error": {"name": "ContextOverflowError", "data": {"message": "too much context"}}}}
-{"id": "evt_010", "type": "session.status", "data": {"sessionID": "ses_root", "status": {"type": "idle"}}}

@@ -10,8 +10,11 @@
 //! POST   /threads                            CreateThread → Thread
 //! PATCH  /threads/{id}                       UpdateThread → Thread
 //! GET    /threads/{id}/items?before|after&limit   ItemsPage
+//! GET    /threads/{id}/transcript?before|after&limit   ItemsPage: rows + work spans
+//! GET    /threads/{id}/work?after&before&limit   ItemsPage: work in a span, newest first
 //! POST   /threads/{id}/messages              SendMessage → Item
 //! POST   /threads/{id}/cancel
+//! POST   /threads/{id}/goal/clear
 //! POST   /items/{id}/answer                  Answer
 //! GET    /drafts/{scope}   PUT /drafts/{scope}   JSON value
 //! PUT    /blobs  (raw WebP bytes)            BlobRef
@@ -24,8 +27,8 @@
 //! ```
 
 use crate::{
-    BlobHash, Decision, EngineConfig, EngineStatus, Item, ItemId, Project, ProjectId, Run, Seq,
-    Thread, ThreadId,
+    BlobHash, Decision, EngineConfig, EngineStatus, Item, ItemId, Project, ProjectId, Run, RunId,
+    Seq, Thread, ThreadId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +67,10 @@ pub struct Account {
     pub user: String,
     /// The host's name.
     pub host: String,
+    /// The WSL distribution Forge runs in, when it runs in one: lets a
+    /// Windows Editor start that distribution when Forge is unreachable.
+    #[serde(default)]
+    pub wsl_distro: Option<String>,
 }
 
 /// What git says about a project's folder, read when asked.
@@ -89,18 +96,30 @@ pub struct CreateProject {
     pub name: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateThread {
     pub id: ThreadId,
     pub project_id: ProjectId,
     pub config: EngineConfig,
     pub title: Option<String>,
     /// Hand off from another thread: the new one starts with a summary.
+    /// With `spawned_by`, the parent of an agent instead, which starts with
+    /// only its prompt.
     #[serde(default)]
     pub parent_thread_id: Option<ThreadId>,
+    /// The `Agent` item in the parent thread this thread runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_by: Option<ItemId>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// Opens or closes one of an engine's model groups in the picker.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelGroup {
+    pub name: String,
+    pub open: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateThread {
     pub title: Option<String>,
     pub archived: Option<bool>,
@@ -124,6 +143,26 @@ pub struct ItemsPage {
     pub runs: Vec<Run>,
     /// More items exist past the far end of this page.
     pub more: bool,
+    /// On a transcript page, the work between its rows that it did not
+    /// ship, by position.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work: Vec<WorkSpan>,
+}
+
+/// One run's unbroken stretch of work, summarised.
+///
+/// These are root items that fold into work (see
+/// [`crate::Item::folds_into_work`]): a closed work section is drawn from
+/// this alone, an open one loads its items through `/work`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkSpan {
+    pub run_id: Option<RunId>,
+    /// Positions of its oldest and newest item.
+    pub first: Seq,
+    pub last: Seq,
+    pub count: u32,
+    /// It holds a tool call, agent or plan, not only commentary.
+    pub worked: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +171,12 @@ pub struct ThreadsQuery {
     pub archived: bool,
     pub before_activity: Option<crate::Seq>,
     pub before_id: Option<ThreadId>,
+    /// The page just newer than this cursor instead: a window that dropped
+    /// its newest threads slides back up. Exclusive with `before_*`.
+    #[serde(default)]
+    pub after_activity: Option<crate::Seq>,
+    #[serde(default)]
+    pub after_id: Option<ThreadId>,
     pub limit: Option<u32>,
     pub query: Option<String>,
 }
@@ -144,13 +189,17 @@ pub struct ThreadCursor {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThreadsPage {
+    /// Newest first, whichever way the page was asked for.
     pub threads: Vec<Thread>,
     pub runs: Vec<Run>,
     pub next: Option<ThreadCursor>,
+    /// Asked with `after_*`: threads newer than this page exist.
+    #[serde(default)]
+    pub newer: bool,
 }
 
 /// Starts a run when the thread is idle, steers the live run otherwise.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendMessage {
     /// Client-made, so a retried send is the same message.
     pub id: ItemId,
@@ -164,13 +213,13 @@ pub struct SendMessage {
     pub draft: Option<DraftRevision>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftSnapshot {
     pub revision: u64,
     pub body: serde_json::Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteDraft {
     pub expected_revision: u64,
     pub body: serde_json::Value,
@@ -182,7 +231,7 @@ pub struct DraftRevision {
     pub revision: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftWriteResult {
     pub saved: bool,
     pub current: DraftSnapshot,
@@ -236,7 +285,7 @@ pub struct SettleThread {
     pub observed_seq: crate::Seq,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorSummary {
     #[serde(default)]
     pub goal: Option<ThreadGoal>,
@@ -245,12 +294,27 @@ pub struct InspectorSummary {
     pub revision: crate::Seq,
     pub terminals: Vec<InspectorTerminal>,
     pub agents: Vec<InspectorAgent>,
+    #[serde(default)]
+    pub workflows: Vec<InspectorWorkflow>,
     pub plan: crate::Collection<crate::PlanStep>,
     /// Totals of edit operations, not a net working-tree diff.
     pub edits: Option<EditTotals>,
+    /// The user's messages in the thread, in order: the map the navigator
+    /// draws, whatever part of the thread is loaded.
+    #[serde(default)]
+    pub outline: Vec<OutlineEntry>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// One of the user's messages, as the navigator lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutlineEntry {
+    pub id: ItemId,
+    pub position: crate::Seq,
+    /// Its first line, bounded.
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadGoal {
     pub objective: crate::TextContent,
     /// Bounded source-derived label for compact controls; full objective remains available.
@@ -263,31 +327,69 @@ pub struct ThreadGoal {
 pub enum ThreadGoalState {
     Active,
     Paused,
+    /// The engine stopped on something only the user can resolve.
+    Blocked,
+    /// The engine's usage limit stopped it.
+    UsageLimited,
+    /// The goal's token budget ran out.
+    BudgetLimited,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadQuestionnaire {
     pub id: ItemId,
     pub questions: crate::Collection<crate::Question>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorTerminal {
     pub id: ItemId,
     pub command: crate::TextContent,
     pub cwd: Option<String>,
     pub status: crate::Status,
+    /// Nothing waits on it: the engine started it in the background, or it
+    /// outlived its run.
+    #[serde(default)]
+    pub background: bool,
+    /// A watcher, reporting events rather than ending with a result.
+    #[serde(default)]
+    pub watch: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A workflow the engine runs in the background (Claude's `Workflow`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectorWorkflow {
+    pub id: ItemId,
+    /// Its name, when the engine gives one.
+    pub name: Option<String>,
+    pub status: crate::Status,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InspectorAgent {
     pub id: ItemId,
     pub label: String,
     pub description: crate::TextContent,
     pub status: crate::Status,
+    /// The harness it runs on: its own for a Forge-started agent, else the
+    /// thread's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<crate::EngineId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// How it runs: its own thread's settings for a Forge-started agent, else
+    /// the thread's with the agent's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<crate::EngineConfig>,
+    /// The thread a Forge-started agent runs in; opening it opens that thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadId>,
+    /// Nothing waits on it: started in the background, or it outlived its run.
+    #[serde(default)]
+    pub background: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditTotals {
     pub added: u64,
     pub removed: u64,

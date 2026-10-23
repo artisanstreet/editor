@@ -115,8 +115,8 @@ pub(super) fn start(
     // actual owner holds the permit until synchronous native shaping returns.
     let owner = super::budget::shaping()
         .try_acquire_owned()
-        .map_err(|_| StartError::Busy)?;
-    let system: Arc<TextSystem> = cx.text_system().clone();
+        .map_err(|_busy| StartError::Busy)?;
+    let system: Arc<TextSystem> = Arc::clone(cx.text_system());
     let (result, shaped) = futures::channel::oneshot::channel();
     let job = super::async_preparation::ShapeJob {
         work: Box::new(move || shape(owner, system, source, font_size, runs, width, window)),
@@ -138,6 +138,10 @@ pub(super) fn start(
 }
 
 /// Shapes the paragraph and projects the visual rows of `window`.
+#[expect(
+    clippy::used_underscore_binding,
+    reason = "the charge is attached once the page knows its own size"
+)]
 fn shape(
     owner: tokio::sync::OwnedSemaphorePermit,
     system: Arc<TextSystem>,
@@ -181,7 +185,7 @@ fn shape(
             .iter()
             .map(|line| {
                 Arc::new(WrappedLineLayout {
-                    unwrapped_layout: line.unwrapped_layout.clone(),
+                    unwrapped_layout: Arc::clone(&line.unwrapped_layout),
                     wrap_boundaries: line.wrap_boundaries.clone(),
                     wrap_width: line.wrap_width,
                 })
@@ -213,15 +217,21 @@ fn shape(
         }
         let capacity = Arc::new(
             super::budget::native_ready()
-                .try_acquire_many_owned(bytes as u32)
-                .map_err(|_| "Native paragraph presentation budget is occupied".to_owned())?,
+                .try_acquire_many_owned(super::budget::permits(bytes))
+                .map_err(|_occupied| {
+                    "Native paragraph presentation budget is occupied".to_owned()
+                })?,
         );
+        #[expect(
+            clippy::expect_used,
+            reason = "unpublished rows have exactly one owner"
+        )]
         for row in &mut ready.rows {
             // These rows have not escaped publication yet; there is exactly
             // one Arc owner. All later geometry clones inherit the charge.
             Arc::get_mut(row)
                 .expect("unpublished native row")
-                .ready_budget = Some(capacity.clone());
+                .ready_budget = Some(Arc::clone(&capacity));
         }
         ready._resident = Some(capacity);
         Ok(ready)

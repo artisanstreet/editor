@@ -1,7 +1,7 @@
 //! Drawing a span [`Layout`]: rows of bars over a time axis, row names on
 //! the left, markers as labelled rules, and a glass readout on hover.
 
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
+use crate::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens};
 use gpui::{
     AnyElement, App, ElementId, Entity, FontWeight, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, prelude::*, px, relative,
@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use super::super::super::kit;
 use super::super::frame::{self, PlotLabel, ReadoutRow, Tick};
-use super::super::scale::{Domain, f32_of, f64_of, nice_ticks};
+use super::super::scale::{Domain, f32_of, f32_of_count, f64_of, nice_ticks};
 use super::super::scene::{Probe, Shape, hrule, plot_canvas, probe, probed_width, vrule};
 use super::{Layout, Span};
 use crate::hover_card::hover_highlight_shadow;
@@ -48,7 +48,7 @@ struct Placement {
 impl Placement {
     /// The top of `row` as a fraction of the plot height.
     fn row_at(self, row: f32) -> f32 {
-        ((row - self.row_base as f32) * self.row_pitch) / self.height
+        ((row - f32_of_count(self.row_base)) * self.row_pitch) / self.height
     }
 }
 
@@ -80,7 +80,7 @@ impl SpansView {
             let x = place.domain.fraction(marker.at);
             shapes.push(vrule(
                 x,
-                theme.colors.foreground.with_alpha(0.55).to_paint(),
+                theme.colors.text.at(Opacity::EventRule).to_paint(),
                 true,
             ));
             if include_labels && !marker.label.is_empty() {
@@ -89,7 +89,7 @@ impl SpansView {
                     y: 0.0,
                     below: true,
                     text: marker.label.clone(),
-                    color: theme.colors.foreground.to_paint(),
+                    color: theme.colors.text.to_paint(),
                 });
             }
         }
@@ -105,6 +105,10 @@ struct SpansState {
 }
 
 impl RenderOnce for SpansView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let layout = &self.layout;
@@ -114,7 +118,7 @@ impl RenderOnce for SpansView {
         let state = kit::keyed(window, cx, kit::part(&self.id, "state"), || {
             let rows = gpui::UniformListScrollHandle::new();
             SpansState {
-                model: layout.clone(),
+                model: Arc::clone(layout),
                 rows,
                 hover: None,
                 probe: probe(),
@@ -123,7 +127,7 @@ impl RenderOnce for SpansView {
         state.update(cx, |state, _| {
             if !Arc::ptr_eq(&state.model, layout) {
                 let changed = *state.model != **layout;
-                state.model = layout.clone();
+                state.model = Arc::clone(layout);
                 if changed {
                     state.hover = None;
                     state.rows = gpui::UniformListScrollHandle::new();
@@ -132,7 +136,7 @@ impl RenderOnce for SpansView {
         });
         let (hover, plot_probe) = {
             let current = state.read(cx);
-            (current.hover, current.probe.clone())
+            (current.hover, std::rc::Rc::clone(&current.probe))
         };
         let width = probed_width(&plot_probe, FALLBACK_WIDTH);
         let ticks = if layout.dates {
@@ -144,7 +148,7 @@ impl RenderOnce for SpansView {
             .max(1.0);
             let first = (layout.domain.lo / step).ceil() * step;
             let values = (0..=200)
-                .map(|i| first + f64::from(i) * step)
+                .map(|i| f64::from(i).mul_add(step, first))
                 .take_while(|value| *value <= layout.domain.hi)
                 .collect();
             super::super::scale::Ticks {
@@ -242,7 +246,7 @@ impl RenderOnce for SpansView {
                                     .text_ellipsis()
                                     .pr(px(8.0))
                                     .text_size(theme.typography.control_text)
-                                    .text_color(theme.colors.muted_foreground.to_paint())
+                                    .text_color(theme.colors.text_muted.to_paint())
                                     .child(name),
                             )
                             .child(
@@ -261,7 +265,7 @@ impl RenderOnce for SpansView {
         )
         .track_scroll(&list_state)
         .w_full()
-        .h(theme.density.control_sm * layout.rows.min(10) as f32);
+        .h(theme.density.control_sm * f32_of_count(layout.rows.min(10)));
         let (readout, selection_label) = hover
             .and_then(|index| layout.spans.get(index))
             .map(|span| {
@@ -350,7 +354,7 @@ impl SpansView {
         } else {
             span.label.clone()
         };
-        let color = kit::series_color(span.color);
+        let color = kit::series_color(&theme, span.color);
         let hovering = state.clone();
         div()
             .id(kit::part(&self.id, format_args!("span-{index}")))
@@ -368,13 +372,17 @@ impl SpansView {
             .whitespace_nowrap()
             .rounded(RadiusTokens::value(RadiusStep::Xs))
             .bg(color
-                .with_alpha(if hovered { 0.75 } else { 0.55 })
+                .at(if hovered {
+                    Opacity::SpanHover
+                } else {
+                    Opacity::Span
+                })
                 .to_paint())
             .when(hovered, |bar| bar.shadow(hover_highlight_shadow(&theme)))
             .text_size(theme.typography.control_text)
             .line_height(px(place.row_pitch - 4.0))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.colors.foreground.to_paint())
+            .text_color(theme.colors.text.to_paint())
             .when(wide, |bar| bar.child(text))
             .on_hover(move |entered, _, cx| {
                 hovering.update(cx, |state, cx| {
@@ -399,7 +407,7 @@ impl SpansView {
         let theme = &self.theme;
         let mut rows = vec![
             ReadoutRow::new(
-                Some(kit::series_color(span.color).to_paint()),
+                Some(kit::series_color(theme, span.color).to_paint()),
                 "Length",
                 layout.duration(span),
             ),
@@ -442,7 +450,7 @@ mod native_window_tests {
                 .child(SpansView {
                     id: "native-spans".into(),
                     theme: ArtisanTheme::resolved(),
-                    layout: self.layout.clone(),
+                    layout: Arc::clone(&self.layout),
                 })
         }
     }

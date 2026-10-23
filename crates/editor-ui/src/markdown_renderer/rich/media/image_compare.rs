@@ -56,7 +56,7 @@ enum Mode {
 impl Mode {
     const ALL: [Self; 4] = [Self::Slider, Self::SideBySide, Self::Toggle, Self::Blend];
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Slider => "Slider",
             Self::SideBySide => "Side by side",
@@ -103,8 +103,8 @@ impl RichBlock for ImageCompare {
         std::mem::size_of::<Self>()
             + self.before.src.resident_bytes()
             + self.after.src.resident_bytes()
-            + budget::optional(&self.before.label)
-            + budget::optional(&self.after.label)
+            + budget::optional(self.before.label.as_ref())
+            + budget::optional(self.after.label.as_ref())
     }
 
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
@@ -253,8 +253,12 @@ fn corner(theme: &ArtisanTheme, text: SharedString, left: bool, hidden: bool) ->
 
 /// The divider line and its glass handle at `split`.
 fn divider(theme: &ArtisanTheme, split: f32) -> [Div; 2] {
-    let line = theme.colors.background.with_alpha(0.9).to_paint();
-    let ink = theme.colors.foreground.to_paint();
+    let line = theme
+        .colors
+        .background
+        .at(crate::theme::Opacity::Backdrop)
+        .to_paint();
+    let ink = theme.colors.text.to_paint();
     [
         div()
             .absolute()
@@ -426,7 +430,7 @@ impl CompareView {
             .track_focus(&focus)
             .map(|frame| match mode {
                 Mode::Toggle => frame.cursor_pointer(),
-                _ => frame.cursor_col_resize(),
+                Mode::Slider | Mode::SideBySide | Mode::Blend => frame.cursor_col_resize(),
             })
             .on_mouse_down(MouseButton::Left, press)
             .on_mouse_move(on_drag(state))

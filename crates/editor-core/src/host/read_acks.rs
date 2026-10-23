@@ -20,7 +20,7 @@ pub(super) struct ReadAcks {
 
 impl ReadAcks {
     /// Another observation starts: its first paint counts as new evidence.
-    pub(super) fn observation_changed(&mut self) {
+    pub(super) const fn observation_changed(&mut self) {
         self.observed = None;
     }
 }
@@ -72,7 +72,7 @@ impl HostData {
                         .map(|(id, seq)| (id.clone(), *seq))
                 });
                 let Ok(Some((id, seq))) = next else {
-                    let _ = this.update(cx, |host, _| host.read_acks.writer = None);
+                    this.update(cx, |host, _| host.read_acks.writer = None).ok();
                     break;
                 };
                 let update = UpdateThread {

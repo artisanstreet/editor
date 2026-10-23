@@ -41,6 +41,8 @@ fn images_sent_with_a_message_show_in_it(cx: &mut TestAppContext) {
             text: "Look at this".into(),
             images: vec![blob.hash.clone()],
             steer: true,
+            from_agent: None,
+            sender: None,
         },
     );
     wait(cx, "the steer", |cx| {
@@ -51,7 +53,7 @@ fn images_sent_with_a_message_show_in_it(cx: &mut TestAppContext) {
     // The steer is inside a collapsed work disclosure. Hidden attachments must
     // not start image downloads; opening the disclosure paints the message.
     conversation.update(cx, |conversation, cx| {
-        conversation.toggle_work(&RunId::from("run"), true, cx)
+        conversation.toggle_work(&RunId::from("run"), true, cx);
     });
     wait(cx, "the visible image", |cx| {
         draw(cx);
@@ -74,6 +76,10 @@ fn images_sent_with_a_message_show_in_it(cx: &mut TestAppContext) {
 /// Native ListState may measure a whole UserMessage while only a few of its
 /// attachments intersect the transcript clip. Only those tiles request blobs.
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: attachments scroll into view one by one and load once"
+)]
 fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
     // Pinned GPUI test selectors require static strings. This fixture has one
     // fixed canonical Item identity and exactly 32 attachments.
@@ -122,7 +128,7 @@ fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
         bytes.extend_from_slice(b"JUNK");
         bytes.extend_from_slice(&4u32.to_le_bytes());
         bytes.extend_from_slice(&index.to_le_bytes());
-        let length = (bytes.len() - 8) as u32;
+        let length = u32::try_from(bytes.len() - 8).unwrap();
         bytes[4..8].copy_from_slice(&length.to_le_bytes());
         hashes.push(
             forge
@@ -140,6 +146,8 @@ fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
             text: "".into(),
             images: hashes.clone(),
             steer: false,
+            from_agent: None,
+            sender: None,
         },
     );
     let dir = tempfile::tempdir().unwrap();
@@ -240,7 +248,7 @@ fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
     });
     // Newly visible tail tiles still load automatically through the existing
     // public navigation action; no permanent preview-admission pause is added.
-    conversation.update(cx, |c, cx| c.jump_to_latest(cx));
+    conversation.update(cx, super::super::Conversation::jump_to_latest);
     wait(cx, "newly painted tail attachment", |cx| {
         draw(cx);
         cx.read(|cx| {

@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 170
 expression: "replay(\"web-search-actions\")"
 ---
 [
@@ -104,6 +103,7 @@ expression: "replay(\"web-search-actions\")"
             error: Some(
                 "Provider rejected the request",
             ),
+            retry: None,
         },
     ),
 ]

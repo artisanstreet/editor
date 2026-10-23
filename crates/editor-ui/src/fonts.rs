@@ -3,7 +3,9 @@
 use gpui::{App, SharedString};
 
 /// Registers every face in [`editor_assets::fonts::ALL`] with the
-/// application's text system. The production Windows and Linux backends both
+/// application's text system.
+///
+/// The production Windows and Linux backends both
 /// use Cosmic, with static weight faces to preserve the same glyph shapes.
 ///
 /// Call once at startup; repeated registration can duplicate platform font

@@ -9,10 +9,10 @@ pub struct ProjectionLoad {
     task: Option<Task<()>>,
 }
 impl HostData {
-    pub fn prompt_load(&self) -> &ProjectionLoad {
+    pub const fn prompt_load(&self) -> &ProjectionLoad {
         &self.prompt_load
     }
-    pub fn catalog_load(&self) -> &ProjectionLoad {
+    pub const fn catalog_load(&self) -> &ProjectionLoad {
         &self.catalog_load
     }
 
@@ -29,7 +29,7 @@ impl HostData {
         let client = self.client.clone();
         self.prompt_load.task = Some(cx.spawn(async move |this, cx| {
             let result = client.global_prompt().await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.prompt_load = ProjectionLoad::default();
                 match result {
                     Ok(prompt) => {
@@ -55,7 +55,8 @@ impl HostData {
                         cx.notify();
                     }
                 }
-            });
+            })
+            .ok();
         }));
         cx.emit(HostEvent::Changed);
         cx.notify();
@@ -73,7 +74,7 @@ impl HostData {
         let client = self.client.clone();
         self.catalog_load.task = Some(cx.spawn(async move |this, cx| {
             let result = client.skill_catalog().await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.catalog_load = ProjectionLoad::default();
                 match result {
                     Ok(catalog) => this.remember_skill_catalog(catalog, cx),
@@ -83,7 +84,8 @@ impl HostData {
                         cx.notify();
                     }
                 }
-            });
+            })
+            .ok();
         }));
         cx.emit(HostEvent::Changed);
         cx.notify();
@@ -106,8 +108,7 @@ mod tests {
         let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
         cx.new(|cx| {
             let mut host = HostData::new(HostId("test".into()), "test".into(), client, cx);
-            host._connection.abort();
-            host._follow = gpui::Task::ready(());
+            host.stop_following();
             host.status = ConnectionStatus::Live;
             host
         })

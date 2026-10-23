@@ -5,10 +5,12 @@
 //! per-session stream, carries text deltas, permission and question requests
 //! and child sessions. Permissions come from agents Forge defines in its own
 //! config directory (one per access × approval mode) and are answered through
-//! the API. Native idle and step endings settle the root turn; typed context
-//! overflow stays recoverable while compaction starts.
+//! the API, questions through the forms OpenCode asks them with. The root
+//! session's execution events (`started`, `succeeded`, `failed`,
+//! `interrupted`) bound the turn; OpenCode compacts a full context itself.
 
 mod decoder;
+mod side;
 #[cfg(test)]
 mod tests;
 
@@ -17,7 +19,7 @@ use crate::{EngineEvent, Harness, Input, Outcome, RunIo, Turn, UserInput};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use artisan_api::Permissions;
 use base64::Engine as _;
-use decoder::Decoder;
+use decoder::{Decoder, Method};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -30,11 +32,16 @@ use tokio::sync::mpsc;
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Oversized events terminate the run instead of silently skipping state.
-const MAX_EVENT_BYTES: usize = process::MAX_LINE_BYTES;
+const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(process::MAX_LINE_BYTES).unwrap();
 
-pub(crate) struct OpenCodeHarness;
+pub struct OpenCodeHarness;
 
 impl Harness for OpenCodeHarness {
+    fn compact(&self, turn: Turn, cancel: tokio_util::sync::CancellationToken)
+        -> BoxFuture<'static, Result<crate::SideReply>> {
+        Box::pin(side::compact(turn, cancel))
+    }
+
     fn run(&self, turn: Turn, mut io: RunIo) -> BoxFuture<'static, Outcome> {
         Box::pin(async move {
             match run(&turn, &mut io).await {
@@ -59,7 +66,7 @@ async fn run(turn: &Turn, io: &mut RunIo) -> Result<Outcome> {
         result = async {
         let base = tokio::time::timeout(READY_TIMEOUT, ready(&mut server))
             .await
-            .map_err(|_| {
+            .map_err(|_elapsed| {
                 anyhow!(
                     "OpenCode did not start within {} s",
                     READY_TIMEOUT.as_secs()
@@ -78,20 +85,10 @@ async fn run(turn: &Turn, io: &mut RunIo) -> Result<Outcome> {
 }
 
 fn spawn(turn: &Turn, password: &str, config_dir: &Path) -> Result<EngineProcess> {
-    let home = &turn.home;
     let mut launch = turn.clone();
-    // The engine home holds OpenCode's config, data (auth, sessions) and
-    // caches; customisation's environment may override these.
-    let mut env: Vec<(String, String)> = [
-        ("XDG_CONFIG_HOME", home.join("config")),
-        ("XDG_DATA_HOME", home.join("data")),
-        ("XDG_CACHE_HOME", home.join("cache")),
-        ("XDG_STATE_HOME", home.join("state")),
-    ]
-    .into_iter()
-    .map(|(key, path)| (key.to_owned(), path.to_string_lossy().into_owned()))
-    .collect();
-    env.extend(turn.launch.env.iter().cloned());
+    // The launch environment already roots OpenCode's config, data (auth,
+    // sessions) and caches in the engine home (`engines::environment`).
+    let mut env = turn.launch.env.clone();
     env.extend(
         [
             ("OPENCODE_SERVER_PASSWORD", password),
@@ -165,7 +162,9 @@ async fn drive(
         id: session.clone(),
     })
     .await;
-    check_model(api, &session).await?;
+    if let Some(commands) = commands(api).await {
+        io.emit(EngineEvent::Commands(commands)).await;
+    }
 
     let mut decoder = Decoder::new(Some(session.clone()));
     let message = send_prompt(api, &session, &turn.input).await?;
@@ -205,10 +204,10 @@ async fn drive(
             },
         }
     }
-    Ok(match decoder.error.take() {
-        Some(error) => Outcome::failed(error),
-        None => Outcome::done(),
-    })
+    Ok(decoder
+        .error
+        .take()
+        .map_or_else(Outcome::done, Outcome::failed))
 }
 
 async fn handle_input(
@@ -225,17 +224,31 @@ async fn handle_input(
             let message = send_prompt(api, session, &input).await?;
             emit_all(io, decoder.prompt_sent(&message, Some(input.id))).await;
         }
+        // OpenCode has no goals.
+        Input::ClearGoal => {}
+        // The session's agent carries its rules; its next step asks by them.
+        Input::SetPermissions(permissions) => {
+            let agent = agent_name(permissions);
+            api.post(
+                &format!("/api/session/{session}/agent"),
+                Some(&json!({ "agent": agent })),
+            )
+            .await
+            .with_context(|| format!("switching OpenCode session {session} to agent {agent}"))?;
+        }
         Input::Answer { key, answer } => {
             let Some((reply, events)) = decoder.answer(&key, &answer) else {
                 tracing::warn!(session, key, "no pending OpenCode request for this answer");
                 return Ok(());
             };
             emit_all(io, events).await;
-            api.post(&reply.path, reply.body.as_ref())
-                .await
-                .with_context(|| {
-                    format!("answering OpenCode request {} for item {key}", reply.path)
-                })?;
+            let request = match reply.method {
+                Method::Post => api.post(&reply.path, reply.body.as_ref()).await,
+                Method::Delete => api.delete(&reply.path).await,
+            };
+            request.with_context(|| {
+                format!("answering OpenCode request {} for item {key}", reply.path)
+            })?;
         }
     }
     Ok(())
@@ -257,7 +270,7 @@ async fn send_prompt(api: &Api, session: &str, input: &UserInput) -> Result<Stri
             "name": path.file_name().map(|name| name.to_string_lossy().into_owned()),
         }));
     }
-    let body = json!({ "prompt": { "text": input.text, "files": files }, "delivery": "steer" });
+    let body = json!({ "text": input.text, "files": files, "delivery": "steer" });
     let admitted = api
         .post(&format!("/api/session/{session}/prompt"), Some(&body))
         .await
@@ -266,45 +279,6 @@ async fn send_prompt(api: &Api, session: &str, input: &UserInput) -> Result<Stri
         .as_str()
         .context("OpenCode admitted a prompt without a message id")?
         .to_owned())
-}
-
-/// OpenCode logs an unavailable model and goes idle without an event, which
-/// would leave the run waiting forever, so check the session's model first.
-async fn check_model(api: &Api, session: &str) -> Result<()> {
-    let info = api
-        .get(&format!("/api/session/{session}"))
-        .await
-        .context("reading the OpenCode session")?;
-    let (Some(id), Some(provider)) = (
-        info["data"]["model"]["id"].as_str(),
-        info["data"]["model"]["providerID"].as_str(),
-    ) else {
-        return Ok(());
-    };
-    let catalog = api
-        .get("/api/model")
-        .await
-        .context("listing OpenCode models")?;
-    let models = catalog["data"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    // A fresh server loads its catalog in the background; an empty one
-    // says nothing about the model.
-    if models.is_empty() {
-        return Ok(());
-    }
-    let available = models.iter().any(|model| {
-        model["id"].as_str() == Some(id)
-            && model["providerID"].as_str() == Some(provider)
-            && model["enabled"].as_bool() != Some(false)
-    });
-    ensure!(
-        available,
-        "OpenCode can't run {provider}/{id}: it is not among the {} models its session runner offers",
-        models.len()
-    );
-    Ok(())
 }
 
 async fn emit_all(io: &RunIo, events: Vec<EngineEvent>) {
@@ -324,7 +298,7 @@ fn model_ref(model: Option<&str>, variant: Option<&str>) -> Option<Value> {
     Some(model)
 }
 
-fn agent_name(permissions: Permissions) -> &'static str {
+const fn agent_name(permissions: Permissions) -> &'static str {
     match permissions {
         Permissions::Auto => "artisan-auto",
         Permissions::Full => "artisan-full",
@@ -359,6 +333,12 @@ fn write_agents(home: &Path) -> Result<PathBuf> {
             (agent_name(permissions).to_owned(), agent)
         })
         .collect();
+    let mut agents = agents;
+    agents.insert("artisan-summary".to_owned(), json!({
+        "mode": "primary", "hidden": true,
+        "description": "Summarize historical conversation without taking actions.",
+        "permission": { "*": "deny" },
+    }));
     let config = json!({ "$schema": "https://opencode.ai/config.json", "agent": agents });
     let bytes = serde_json::to_vec_pretty(&config)?;
     let path = dir.join("opencode.json");
@@ -382,6 +362,37 @@ struct Api {
     password: String,
 }
 
+/// The `/` commands this server reads, for the composer's menu; `None` when
+/// it won't say, which leaves the last list in place.
+async fn commands(api: &Api) -> Option<Vec<artisan_api::SlashCommand>> {
+    let mut listed = None;
+    for path in ["/api/command", "/command"] {
+        match api.get(path).await {
+            Ok(value) => {
+                listed = Some(value);
+                break;
+            }
+            Err(error) => tracing::debug!(path, error = format!("{error:#}"), "OpenCode commands"),
+        }
+    }
+    let listed = listed?;
+    let rows = listed.as_array().or_else(|| listed["data"].as_array())?;
+    Some(
+        rows.iter()
+            .filter_map(|command| {
+                Some(artisan_api::SlashCommand {
+                    name: command["name"].as_str()?.to_owned(),
+                    description: command["description"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    hint: None,
+                })
+            })
+            .collect(),
+    )
+}
+
 impl Api {
     fn new(base: String, password: String) -> Result<Self> {
         let client = reqwest::Client::builder()
@@ -399,6 +410,14 @@ impl Api {
         let request = self
             .client
             .get(format!("{}{path}", self.base))
+            .timeout(REQUEST_TIMEOUT);
+        self.send(request, path).await
+    }
+
+    async fn delete(&self, path: &str) -> Result<Value> {
+        let request = self
+            .client
+            .delete(format!("{}{path}", self.base))
             .timeout(REQUEST_TIMEOUT);
         self.send(request, path).await
     }
@@ -463,16 +482,14 @@ async fn subscribe(api: &Api) -> Result<mpsc::Receiver<String>> {
     )));
     let first = tokio::time::timeout(REQUEST_TIMEOUT, receiver.recv())
         .await
-        .map_err(|_| anyhow!("OpenCode's event stream sent nothing"))?
+        .map_err(|_elapsed| anyhow!("OpenCode's event stream sent nothing"))?
         .context("OpenCode's event stream closed at once")?;
     tracing::debug!(target: "engine_stdout", "{first}");
     Ok(receiver)
 }
 
 async fn read_events(response: reqwest::Response, sender: mpsc::Sender<String>) {
-    let mut stream = SseStream::with_decoder(SseDecoder::with_limit(
-        NonZeroUsize::new(MAX_EVENT_BYTES).unwrap(),
-    ));
+    let mut stream = SseStream::with_decoder(SseDecoder::with_limit(MAX_EVENT_BYTES));
     stream.attach(response.bytes_stream());
     loop {
         let event = tokio::select! {

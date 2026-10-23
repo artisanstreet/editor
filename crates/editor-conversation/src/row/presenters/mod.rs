@@ -18,11 +18,25 @@ pub(super) enum Action {
     OpenAgent(ItemId),
     RetryImage(BlobHash),
     LoadImage(BlobHash),
-    ToggleWork { run: RunId, open: bool },
-    ToggleChain { id: ItemId, open: bool },
-    ToggleItem { id: ItemId, expanded: bool },
-    Answer { id: ItemId, answer: Answer },
+    ToggleWork {
+        run: RunId,
+        open: bool,
+    },
+    ToggleChain {
+        id: ItemId,
+        open: bool,
+    },
+    ToggleItem {
+        id: ItemId,
+        expanded: bool,
+    },
+    Answer {
+        id: ItemId,
+        answer: Answer,
+    },
     LoadNewer,
+    /// Loads the next stretch of the unloaded work span at this position.
+    LoadEarlierWork(artisan_api::Seq),
 }
 #[derive(Clone)]
 pub(super) struct Actions {
@@ -32,27 +46,31 @@ pub(super) struct Actions {
     origin: SharedString,
 }
 impl Actions {
-    pub(super) fn new(target: WeakEntity<Conversation>, origin: SharedString) -> Self {
+    pub(super) const fn new(target: WeakEntity<Conversation>, origin: SharedString) -> Self {
         Self { target, origin }
     }
     fn dispatch(&self, action: &Action, cx: &mut App) {
-        let _ = self.target.update(cx, |this, cx| {
-            // A closed Conversation retains the last selection key. Check open
-            // state as well, so old actions cannot run after the scope closes.
-            if this.open.is_none() || self.origin.is_empty() || this.bodies.scope != self.origin {
-                return;
-            }
-            match action {
-                Action::OpenAgent(id) => this.open_agent(Some(id.clone()), cx),
-                Action::RetryImage(hash) => this.retry_image(hash, cx),
-                Action::LoadImage(hash) => this.load_image(hash, cx),
-                Action::ToggleWork { run, open } => this.toggle_work(run, *open, cx),
-                Action::ToggleChain { id, open } => this.toggle_chain(id, *open, cx),
-                Action::ToggleItem { id, expanded } => this.toggle_item(id, *expanded, cx),
-                Action::Answer { id, answer } => this.answer(id.clone(), answer.clone(), cx),
-                Action::LoadNewer => this.viewport(vec![Input::BottomReached], cx),
-            }
-        });
+        self.target
+            .update(cx, |this, cx| {
+                // A closed Conversation retains the last selection key. Check open
+                // state as well, so old actions cannot run after the scope closes.
+                if this.open.is_none() || self.origin.is_empty() || this.bodies.scope != self.origin
+                {
+                    return;
+                }
+                match action {
+                    Action::OpenAgent(id) => this.open_agent(Some(id.clone()), cx),
+                    Action::RetryImage(hash) => this.retry_image(hash, cx),
+                    Action::LoadImage(hash) => this.load_image(hash, cx),
+                    Action::ToggleWork { run, open } => this.toggle_work(run, *open, cx),
+                    Action::ToggleChain { id, open } => this.toggle_chain(id, *open, cx),
+                    Action::ToggleItem { id, expanded } => this.toggle_item(id, *expanded, cx),
+                    Action::Answer { id, answer } => this.answer(id.clone(), answer.clone(), cx),
+                    Action::LoadNewer => this.viewport(vec![Input::BottomReached], cx),
+                    Action::LoadEarlierWork(first) => this.load_work(*first, cx),
+                }
+            })
+            .ok();
     }
     pub(super) fn handler(&self, action: Action) -> impl Fn(&mut App) + 'static + use<> {
         let actions = self.clone();
@@ -60,7 +78,7 @@ impl Actions {
     }
     pub(super) fn button(
         &self,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         id: impl Into<SharedString>,
         label: &str,
         variant: ButtonVariant,
@@ -69,7 +87,7 @@ impl Actions {
     ) -> AnyElement {
         let activate = self.handler(action);
         let id: SharedString = id.into();
-        Button::text(id, theme, label.to_owned())
+        Button::text(id, *theme, label.to_owned())
             .variant(variant)
             .disabled(disabled)
             .on_activate(move |_, _, cx| activate(cx))
@@ -121,7 +139,7 @@ mod tests {
             assert_eq!(
                 this.view.as_ref().unwrap().ui[&reused_id].expanded,
                 Some(true)
-            )
+            );
         });
         for (current_host, current_thread, agent) in [
             (HostId("replacement-host".to_owned()), thread.clone(), None),
@@ -136,7 +154,7 @@ mod tests {
             });
             cx.update(|_, cx| old(cx));
             conversation.read_with(cx, |this, _| {
-                assert!(!this.view.as_ref().unwrap().ui.contains_key(&reused_id))
+                assert!(!this.view.as_ref().unwrap().ui.contains_key(&reused_id));
             });
             let current = conversation.read_with(cx, |this, _| {
                 Actions::new(weak.clone(), this.bodies.scope.clone()).handler(Action::ToggleItem {
@@ -149,7 +167,7 @@ mod tests {
                 assert_eq!(
                     this.view.as_ref().unwrap().ui[&reused_id].expanded,
                     Some(true)
-                )
+                );
             });
         }
         let before_close = conversation.read_with(cx, |this, _| {
@@ -164,7 +182,7 @@ mod tests {
         });
         cx.update(|_, cx| before_close(cx));
         conversation.read_with(cx, |this, _| {
-            assert!(!this.view.as_ref().unwrap().ui.contains_key(&reused_id))
+            assert!(!this.view.as_ref().unwrap().ui.contains_key(&reused_id));
         });
     }
 }

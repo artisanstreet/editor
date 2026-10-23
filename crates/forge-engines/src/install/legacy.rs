@@ -191,7 +191,7 @@ mod traversal_tests {
     async fn corrupted_legacy_directory_cannot_adopt_an_unrelated_source_tree() {
         let old = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
-        let home = old.path().join("grok");
+        let home = old.path().join("opencode2");
         fs::create_dir_all(&home).unwrap();
         fs::write(
             home.join("state.json"),
@@ -201,7 +201,7 @@ mod traversal_tests {
         let engines = crate::Engines::new(target.path());
         let error = engines.import_legacy(old.path()).await.unwrap_err();
         assert!(error.to_string().contains("one child directory"));
-        assert!(engines.binary(EngineId::Grok).is_none());
+        assert!(engines.binary(EngineId::OpenCode).is_none());
     }
     #[cfg(unix)]
     #[test]

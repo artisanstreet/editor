@@ -9,6 +9,7 @@ use artisan_api::{
 use editor_ui::{
     button::ButtonVariant,
     card::{CardStyle, compact_card, compact_card_content},
+    chat_bubble::{ChatBubbleSegment, SegmentPosition},
     theme::ArtisanTheme,
 };
 use gpui::{
@@ -42,13 +43,17 @@ impl RequestPresenter<'_> {
             .gap(self.text.theme.spacing.steps(2.0))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI builder keeps the approval card's parts in visual order"
+    )]
     pub(in crate::row) fn approval_card(
         &self,
         item: &Item,
         state: AnswerState,
     ) -> Option<AnyElement> {
         let theme = self.text.theme;
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let (approval, files) = match &item.kind {
             ItemKind::Tool { approval, tool, .. } => {
                 let files = match tool {
@@ -60,12 +65,28 @@ impl RequestPresenter<'_> {
                     } => {
                         vec![format!("{} file changes", source.count)]
                     }
-                    _ => Vec::new(),
+                    ToolKind::AgentMessage { .. }
+                    | ToolKind::Agents { .. }
+                    | ToolKind::Shell { .. }
+                    | ToolKind::Read { .. }
+                    | ToolKind::Search { .. }
+                    | ToolKind::WebFetch { .. }
+                    | ToolKind::WebSearch { .. }
+                    | ToolKind::Mcp { .. }
+                    | ToolKind::ViewImage { .. }
+                    | ToolKind::Other { .. } => Vec::new(),
                 };
                 (approval.as_ref(), files)
             }
             ItemKind::Plan { approval, .. } => (approval.as_ref(), Vec::new()),
-            _ => (None, Vec::new()),
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => (None, Vec::new()),
         };
         let approval = approval?;
         let mut details = self.details_column();
@@ -125,7 +146,7 @@ impl RequestPresenter<'_> {
             };
             let id = item.id.clone();
             actions = actions.child(self.actions.button(
-                self.text.theme,
+                &self.text.theme,
                 format!("approve-{}-{index}", item.id),
                 decision_label(decision),
                 variant,
@@ -139,16 +160,16 @@ impl RequestPresenter<'_> {
         if item.status == Status::AwaitingUser {
             details = details.child(actions);
         } else {
-            let outcome = approval
-                .decision
-                .map(decision_label)
-                .unwrap_or(match item.status {
+            let outcome = approval.decision.map_or(
+                match item.status {
                     Status::Done => "Resolved",
                     Status::Declined => "Declined",
                     Status::Cancelled => "Cancelled",
                     Status::Failed => "Failed",
-                    _ => "Pending",
-                });
+                    Status::Running | Status::AwaitingUser => "Pending",
+                },
+                decision_label,
+            );
             details = details.child(body_text(outcome, &theme).text_color(muted));
         }
         if let Some(error) = error {
@@ -179,6 +200,9 @@ impl RequestPresenter<'_> {
         else {
             return div().into_any_element();
         };
+        if answer_text.is_some() {
+            return self.answered(item, questions);
+        }
         let mut details = self.details_column().gap(theme.spacing.steps(2.0));
         match questions {
             Collection::Inline(questions) => {
@@ -192,30 +216,22 @@ impl RequestPresenter<'_> {
                     item.id.clone(),
                     source.clone(),
                     self.text.host.clone(),
-                    theme,
-                ))
+                    &theme,
+                ));
             }
         }
-        if answer_text.is_some() {
-            details = details.child(
-                div()
-                    .text_color(theme.colors.muted_foreground.to_paint())
-                    .child(self.text.answer(item)),
-            );
-        } else {
-            details = details.child(
-                body_text(
-                    if item.status == Status::AwaitingUser {
-                        "Answer it above the message box."
-                    } else {
-                        "Not answered."
-                    },
-                    &theme,
-                )
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .debug_selector(|| "question-status".to_owned()),
-            );
-        }
+        details = details.child(
+            body_text(
+                if item.status == Status::AwaitingUser {
+                    "Answer it above the message box."
+                } else {
+                    "Not answered."
+                },
+                &theme,
+            )
+            .text_color(theme.colors.text_muted.to_paint())
+            .debug_selector(|| "question-status".to_owned()),
+        );
         let heading = match answers {
             None => "Question",
             Some(Collection::Inline(answers)) if answers.iter().all(Option::is_none) => {
@@ -226,6 +242,52 @@ impl RequestPresenter<'_> {
         self.card(heading, details).into_any_element()
     }
 }
+impl RequestPresenter<'_> {
+    /// An answered question reads as the user's own message: what was asked,
+    /// muted, over their answer, in a dashed bubble on their side.
+    fn answered(&self, item: &Item, questions: &Collection<artisan_api::Question>) -> AnyElement {
+        let theme = self.text.theme;
+        let mut asked = div()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.steps(1.0))
+            .text_size(theme.typography.control_text)
+            .text_color(theme.colors.text_muted.to_paint());
+        match questions {
+            Collection::Inline(questions) => {
+                for (index, _) in questions.iter().enumerate() {
+                    asked = asked.child(self.text.content_text(item, SourceField::Question(index)));
+                }
+            }
+            Collection::Stored(source) => {
+                asked = asked.child(self.collections.question(
+                    item.id.clone(),
+                    source.clone(),
+                    self.text.host.clone(),
+                    &theme,
+                ));
+            }
+        }
+        let content = div()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.steps(2.0))
+            .child(asked)
+            .child(self.text.answer(item));
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_end()
+            .child(
+                ChatBubbleSegment::new(theme, SegmentPosition::Single, content)
+                    .answer()
+                    .debug_selector("question-answer"),
+            )
+            .into_any_element()
+    }
+}
+
 fn card_heading(title: &str, theme: &ArtisanTheme) -> Div {
     div()
         .w_full()
@@ -235,7 +297,7 @@ fn card_heading(title: &str, theme: &ArtisanTheme) -> Div {
         .child(title.to_owned())
 }
 
-fn decision_label(decision: Decision) -> &'static str {
+const fn decision_label(decision: Decision) -> &'static str {
     match decision {
         Decision::AllowOnce => "Approve",
         Decision::AllowAlways => "Always allow",
@@ -245,7 +307,7 @@ fn decision_label(decision: Decision) -> &'static str {
     }
 }
 
-pub(in crate::row) fn decision_note(decision: Decision) -> &'static str {
+pub(in crate::row) const fn decision_note(decision: Decision) -> &'static str {
     match decision {
         Decision::AllowOnce => "You approved this request.",
         Decision::AllowAlways => "You allowed this from now on.",

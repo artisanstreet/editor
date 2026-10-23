@@ -74,6 +74,32 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
+/// Whether `a` sorts strictly before `b`, bytewise like `str::cmp`.
+const fn str_lt(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut i = 0;
+    while i < a.len() && i < b.len() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+        i += 1;
+    }
+    a.len() < b.len()
+}
+
+// `lookup` binary-searches the catalog: a row out of order would make its
+// asset, and others, silently unfindable, so the order fails the build.
+const _: () = {
+    let mut i = 1;
+    while i < CATALOG_IDS.len() {
+        assert!(
+            str_lt(CATALOG_IDS[i - 1], CATALOG_IDS[i]),
+            "catalog! rows must be sorted by id"
+        );
+        i += 1;
+    }
+};
+
 /// Resolves a catalog key to its position in [`CATALOG_IDS`].
 ///
 /// # Compile-time-only invariant
@@ -82,6 +108,10 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// called only by the `catalog!` macro with `&'static str` literals. The
 /// panic below therefore fires during constant evaluation of a bad literal —
 /// a build failure — and can never be triggered by runtime or external input.
+#[expect(
+    clippy::panic,
+    reason = "evaluated at compile time: an unknown id fails the build"
+)]
 const fn locate(needle: &str) -> usize {
     let mut i = 0;
     while i < CATALOG_IDS.len() {
@@ -128,27 +158,27 @@ pub enum Family {
 
 impl Family {
     /// All families ordered by their id prefixes.
-    pub const ALL: [Family; 7] = [
-        Family::Artisan,
-        Family::Brand,
-        Family::Jetbrains,
-        Family::Lobe,
-        Family::SimpleIcons,
-        Family::Svgl,
-        Family::Tabler,
+    pub const ALL: [Self; 7] = [
+        Self::Artisan,
+        Self::Brand,
+        Self::Jetbrains,
+        Self::Lobe,
+        Self::SimpleIcons,
+        Self::Svgl,
+        Self::Tabler,
     ];
 
     /// Returns the id prefix used by every asset of this family.
     #[must_use]
     pub const fn prefix(self) -> &'static str {
         match self {
-            Family::Artisan => "artisan",
-            Family::Brand => "brands",
-            Family::Jetbrains => "jetbrains",
-            Family::Lobe => "lobe",
-            Family::SimpleIcons => "simple-icons",
-            Family::Svgl => "svgl",
-            Family::Tabler => "tabler",
+            Self::Artisan => "artisan",
+            Self::Brand => "brands",
+            Self::Jetbrains => "jetbrains",
+            Self::Lobe => "lobe",
+            Self::SimpleIcons => "simple-icons",
+            Self::Svgl => "svgl",
+            Self::Tabler => "tabler",
         }
     }
 }
@@ -291,32 +321,61 @@ macro_rules! catalog {
 catalog! {
     (ARTISAN_APP_ICON, "artisan.app-icon", Family::Artisan, Some("0 0 720 720"), false, "svg/artisan/app-icon.svg"),
     (ARTISAN_LOGO_GRADIENT, "artisan.logo-gradient", Family::Artisan, Some("0 0 720 720"), false, "svg/artisan/logo-gradient.svg"),
+    (ARTISAN_RAIL_BAG_BODY, "artisan.rail-bag-body", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bag-body.svg"),
+    (ARTISAN_RAIL_BAG_HANDLE, "artisan.rail-bag-handle", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bag-handle.svg"),
+    (ARTISAN_RAIL_BAG_ITEM_DOT, "artisan.rail-bag-item-dot", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bag-item-dot.svg"),
+    (ARTISAN_RAIL_BAG_ITEM_GEM, "artisan.rail-bag-item-gem", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bag-item-gem.svg"),
+    (ARTISAN_RAIL_BAG_ITEM_SPARK, "artisan.rail-bag-item-spark", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bag-item-spark.svg"),
+    (ARTISAN_RAIL_BARS_C1R1, "artisan.rail-bars-c1r1", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c1r1.svg"),
+    (ARTISAN_RAIL_BARS_C1R2, "artisan.rail-bars-c1r2", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c1r2.svg"),
+    (ARTISAN_RAIL_BARS_C1R3, "artisan.rail-bars-c1r3", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c1r3.svg"),
+    (ARTISAN_RAIL_BARS_C1R4, "artisan.rail-bars-c1r4", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c1r4.svg"),
+    (ARTISAN_RAIL_BARS_C1R5, "artisan.rail-bars-c1r5", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c1r5.svg"),
+    (ARTISAN_RAIL_BARS_C2R1, "artisan.rail-bars-c2r1", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c2r1.svg"),
+    (ARTISAN_RAIL_BARS_C2R2, "artisan.rail-bars-c2r2", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c2r2.svg"),
+    (ARTISAN_RAIL_BARS_C2R3, "artisan.rail-bars-c2r3", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c2r3.svg"),
+    (ARTISAN_RAIL_BARS_C2R4, "artisan.rail-bars-c2r4", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c2r4.svg"),
+    (ARTISAN_RAIL_BARS_C2R5, "artisan.rail-bars-c2r5", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c2r5.svg"),
+    (ARTISAN_RAIL_BARS_C3R1, "artisan.rail-bars-c3r1", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c3r1.svg"),
+    (ARTISAN_RAIL_BARS_C3R2, "artisan.rail-bars-c3r2", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c3r2.svg"),
+    (ARTISAN_RAIL_BARS_C3R3, "artisan.rail-bars-c3r3", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c3r3.svg"),
+    (ARTISAN_RAIL_BARS_C3R4, "artisan.rail-bars-c3r4", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c3r4.svg"),
+    (ARTISAN_RAIL_BARS_C3R5, "artisan.rail-bars-c3r5", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-bars-c3r5.svg"),
+    (ARTISAN_RAIL_PEN_NIB, "artisan.rail-pen-nib", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-pen-nib.svg"),
+    (ARTISAN_RAIL_PEN_PAGE, "artisan.rail-pen-page", Family::Artisan, Some("0 0 24 24"), true, "svg/artisan/rail-pen-page.svg"),
     (ARTISAN_STAR, "artisan.star", Family::Artisan, Some("0 0 100 100"), true, "svg/artisan/star.svg"),
+    (ARTISAN_STARBURST, "artisan.starburst", Family::Artisan, Some("0 0 40 40"), true, "svg/artisan/starburst.svg"),
     (ARTISAN_SUCCESS_CHECK, "artisan.success-check", Family::Artisan, Some("0 0 16 16"), true, "svg/artisan/success-check.svg"),
     (ARTISAN_WORDMARK_STACKED, "artisan.wordmark-stacked", Family::Artisan, Some("0 0 136.675 225.15"), true, "svg/artisan/wordmark-stacked.svg"),
     (BRANDS_KIMI, "brands.kimi", Family::Brand, Some("0 0 24 25"), false, "svg/brands/kimi.svg"),
-    (BRANDS_OPENCODE, "brands.opencode", Family::Brand, Some("0 0 240 300"), false, "svg/brands/opencode.svg"),
+    (BRANDS_OPENCODE, "brands.opencode", Family::Brand, Some("128 96 256 320"), false, "svg/brands/opencode.svg"),
+    (BRANDS_OPENCODE_LIGHT, "brands.opencode-light", Family::Brand, Some("128 96 256 320"), false, "svg/brands/opencode-light.svg"),
+    (BRANDS_REFLECTION, "brands.reflection", Family::Brand, Some("64 64 272 272"), true, "svg/brands/reflection.svg"),
     (BRANDS_ZAI, "brands.zai", Family::Brand, Some("0 0 30 30"), false, "svg/brands/zai.svg"),
     (JETBRAINS_SVELTE, "jetbrains.svelte", Family::Jetbrains, Some("0 0 256 308"), false, "svg/jetbrains/svelte.svg"),
     (JETBRAINS_TEXT, "jetbrains.text", Family::Jetbrains, Some("0 0 16 16"), true, "svg/jetbrains/text.svg"),
     (JETBRAINS_TS_TEST, "jetbrains.ts-test", Family::Jetbrains, Some("0 0 16 16"), false, "svg/jetbrains/ts-test.svg"),
     (JETBRAINS_TYPESCRIPT, "jetbrains.typescript", Family::Jetbrains, Some("0 0 16 16"), false, "svg/jetbrains/typescript.svg"),
+    (LOBE_GOOGLE, "lobe.google", Family::Lobe, Some("0 0 24 24"), true, "svg/lobe/google.svg"),
     (LOBE_MINIMAX, "lobe.minimax", Family::Lobe, Some("0 0 24 24"), true, "svg/lobe/minimax.svg"),
+    (LOBE_MISTRAL, "lobe.mistral", Family::Lobe, Some("0 0 24 24"), true, "svg/lobe/mistral.svg"),
     (LOBE_NVIDIA, "lobe.nvidia", Family::Lobe, Some("0 0 24 24"), true, "svg/lobe/nvidia.svg"),
+    (LOBE_STEPFUN, "lobe.stepfun", Family::Lobe, Some("0 0 24 24"), true, "svg/lobe/stepfun.svg"),
     (LOBE_TENCENT, "lobe.tencent", Family::Lobe, Some("0 0 24 24"), true, "svg/lobe/tencent.svg"),
+    (LOBE_XAI, "lobe.xai", Family::Lobe, Some("0 0 24 24"), true, "svg/lobe/xai.svg"),
     (LOBE_XIAOMI, "lobe.xiaomi", Family::Lobe, Some("0 0 24 24"), true, "svg/lobe/xiaomi.svg"),
     (SIMPLE_ICONS_BITBUCKET, "simple-icons.bitbucket", Family::SimpleIcons, Some("0 0 24 24"), true, "svg/simple-icons/bitbucket.svg"),
     (SIMPLE_ICONS_CODEBERG, "simple-icons.codeberg", Family::SimpleIcons, Some("0 0 24 24"), true, "svg/simple-icons/codeberg.svg"),
     (SIMPLE_ICONS_GITEA, "simple-icons.gitea", Family::SimpleIcons, Some("0 0 24 24"), true, "svg/simple-icons/gitea.svg"),
+    (SIMPLE_ICONS_MEITUAN, "simple-icons.meituan", Family::SimpleIcons, Some("0 0 24 24"), true, "svg/simple-icons/meituan.svg"),
     (SIMPLE_ICONS_SOURCEHUT, "simple-icons.sourcehut", Family::SimpleIcons, Some("0 0 24 24"), true, "svg/simple-icons/sourcehut.svg"),
+    (SIMPLE_ICONS_XIAOMI, "simple-icons.xiaomi", Family::SimpleIcons, Some("0 0 24 24"), true, "svg/simple-icons/xiaomi.svg"),
     (SVGL_CLAUDE_AI, "svgl.claude-ai", Family::Svgl, Some("0 0 256 257"), true, "svg/svgl/claude-ai.svg"),
-    (SVGL_CURSOR, "svgl.cursor", Family::Svgl, Some("0 0 466.73 532.09"), true, "svg/svgl/cursor.svg"),
     (SVGL_DEEPSEEK, "svgl.deepseek", Family::Svgl, Some("0 0 24 24"), true, "svg/svgl/deepseek.svg"),
     (SVGL_GEMINI, "svgl.gemini", Family::Svgl, Some("0 0 296 298"), false, "svg/svgl/gemini.svg"),
     (SVGL_GIT, "svgl.git", Family::Svgl, Some("0 0 256 256"), true, "svg/svgl/git.svg"),
     (SVGL_GITHUB, "svgl.github", Family::Svgl, Some("0 0 1024 1024"), true, "svg/svgl/github.svg"),
     (SVGL_GITLAB, "svgl.gitlab", Family::Svgl, Some("0 0 32 32"), false, "svg/svgl/gitlab.svg"),
-    (SVGL_GROK, "svgl.grok", Family::Svgl, Some("0 0 1024 1024"), true, "svg/svgl/grok.svg"),
     (SVGL_META, "svgl.meta", Family::Svgl, Some("0 0 256 171"), false, "svg/svgl/meta.svg"),
     (SVGL_MICROSOFT_AZURE, "svgl.microsoft-azure", Family::Svgl, Some("0 0 96 96"), false, "svg/svgl/microsoft-azure.svg"),
     (SVGL_OPENAI, "svgl.openai", Family::Svgl, Some("0 0 256 260"), true, "svg/svgl/openai.svg"),
@@ -324,16 +383,19 @@ catalog! {
     (TABLER_ALERT_TRIANGLE, "tabler.alert-triangle", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/alert-triangle.svg"),
     (TABLER_ARCHIVE, "tabler.archive", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/archive.svg"),
     (TABLER_ARROW_BAR_TO_DOWN, "tabler.arrow-bar-to-down", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/arrow-bar-to-down.svg"),
+    (TABLER_ARROW_NARROW_LEFT, "tabler.arrow-narrow-left", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/arrow-narrow-left.svg"),
     (TABLER_ARROW_RIGHT, "tabler.arrow-right", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/arrow-right.svg"),
     (TABLER_ARROW_UP, "tabler.arrow-up", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/arrow-up.svg"),
     (TABLER_ARROWS_HORIZONTAL, "tabler.arrows-horizontal", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/arrows-horizontal.svg"),
     (TABLER_ARROWS_MINIMIZE, "tabler.arrows-minimize", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/arrows-minimize.svg"),
     (TABLER_BELL, "tabler.bell", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/bell.svg"),
+    (TABLER_BELL_EXCLAMATION, "tabler.bell-exclamation", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/bell-exclamation.svg"),
     (TABLER_BOLT_FILLED, "tabler.bolt-filled", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/bolt-filled.svg"),
     (TABLER_BOT_ID, "tabler.bot-id", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/bot-id.svg"),
     (TABLER_BRAIN, "tabler.brain", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/brain.svg"),
     (TABLER_BRAND_VISUAL_STUDIO, "tabler.brand-visual-studio", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/brand-visual-studio.svg"),
     (TABLER_BUG, "tabler.bug", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/bug.svg"),
+    (TABLER_CHART_COLUMN, "tabler.chart-column", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/chart-column.svg"),
     (TABLER_CHECK, "tabler.check", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/check.svg"),
     (TABLER_CHECKLIST, "tabler.checklist", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/checklist.svg"),
     (TABLER_CHEVRON_DOWN, "tabler.chevron-down", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/chevron-down.svg"),
@@ -348,6 +410,7 @@ catalog! {
     (TABLER_DEVICE_LAPTOP, "tabler.device-laptop", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/device-laptop.svg"),
     (TABLER_DOWNLOAD, "tabler.download", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/download.svg"),
     (TABLER_EDIT, "tabler.edit", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/edit.svg"),
+    (TABLER_EYE, "tabler.eye", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/eye.svg"),
     (TABLER_FILE_DIFF, "tabler.file-diff", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/file-diff.svg"),
     (TABLER_FILE_OFF, "tabler.file-off", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/file-off.svg"),
     (TABLER_FILE_PENCIL, "tabler.file-pencil", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/file-pencil.svg"),
@@ -369,6 +432,7 @@ catalog! {
     (TABLER_MESSAGE_PLUS, "tabler.message-plus", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/message-plus.svg"),
     (TABLER_MESSAGES, "tabler.messages", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/messages.svg"),
     (TABLER_MINUS, "tabler.minus", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/minus.svg"),
+    (TABLER_MOON, "tabler.moon", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/moon.svg"),
     (TABLER_PALETTE, "tabler.palette", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/palette.svg"),
     (TABLER_PENCIL, "tabler.pencil", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/pencil.svg"),
     (TABLER_PLAYER_PAUSE_FILLED, "tabler.player-pause-filled", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/player-pause-filled.svg"),
@@ -381,14 +445,17 @@ catalog! {
     (TABLER_QUESTION_MARK, "tabler.question-mark", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/question-mark.svg"),
     (TABLER_REFRESH, "tabler.refresh", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/refresh.svg"),
     (TABLER_ROTATE_CLOCKWISE, "tabler.rotate-clockwise", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/rotate-clockwise.svg"),
+    (TABLER_RUN_SPRINT, "tabler.run-sprint", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/run-sprint.svg"),
     (TABLER_SEARCH, "tabler.search", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/search.svg"),
     (TABLER_SELECTOR, "tabler.selector", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/selector.svg"),
     (TABLER_SETTINGS, "tabler.settings", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/settings.svg"),
     (TABLER_SHIELD_LOCK, "tabler.shield-lock", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/shield-lock.svg"),
     (TABLER_SHOPPING_BAG, "tabler.shopping-bag", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/shopping-bag.svg"),
+    (TABLER_SITEMAP, "tabler.sitemap", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/sitemap.svg"),
     (TABLER_SPARKLES, "tabler.sparkles", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/sparkles.svg"),
     (TABLER_STAR, "tabler.star", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/star.svg"),
     (TABLER_STAR_FILLED, "tabler.star-filled", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/star-filled.svg"),
+    (TABLER_SUN, "tabler.sun", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/sun.svg"),
     (TABLER_TARGET_ARROW, "tabler.target-arrow", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/target-arrow.svg"),
     (TABLER_TERMINAL_2, "tabler.terminal-2", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/terminal-2.svg"),
     (TABLER_TEST_PIPE, "tabler.test-pipe", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/test-pipe.svg"),
@@ -480,19 +547,22 @@ pub const fn get(id: AssetId) -> &'static Asset {
 
 /// Resolves a dynamic string to its cataloged asset.
 ///
-/// Deterministic: [`ALL`] is sorted by key (proven externally), so this is a
+/// Deterministic: [`ALL`] is sorted by key (checked at compile time), so this is a
 /// plain binary search over the stable string keys.
 ///
 /// # Errors
 ///
 /// Returns [`UnknownAsset`] when `id` does not name a vendored asset.
 pub fn lookup(id: &str) -> Result<&'static Asset, UnknownAsset> {
-    match ALL.binary_search_by(|probe| probe.id.as_str().cmp(id)) {
-        Ok(index) => Ok(&ALL[index]),
-        Err(_) => Err(UnknownAsset {
-            id: String::from(id),
-        }),
-    }
+    ALL.binary_search_by(|probe| probe.id.as_str().cmp(id))
+        .map_or_else(
+            |_| {
+                Err(UnknownAsset {
+                    id: String::from(id),
+                })
+            },
+            |index| Ok(&ALL[index]),
+        )
 }
 
 /// Returns the embedded license/attribution document at `path`.

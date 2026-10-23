@@ -60,7 +60,7 @@ impl LeafLayout {
                     if let Some(x) = cluster_position(&row.clusters, index) {
                         return Some(
                             layout.bounds().origin
-                                + point(x, layout.line_height() * row.ordinal as f32),
+                                + point(x, layout.line_height() * crate::f32_of_count(row.ordinal)),
                         );
                     }
                 }
@@ -93,19 +93,19 @@ impl LeafLayout {
             Self::Native(layout, None) => layout.index_for_position(position),
             Self::Projected { row, bounds, .. } => {
                 let x = position.x - bounds.left();
-                if let Some(cell) = row
-                    .clusters
+                row.clusters
                     .iter()
                     .find(|cell| x >= cell.left && x < cell.right)
-                {
-                    if bounds.contains(&position) {
-                        Ok(cell.source.start)
-                    } else {
-                        Err(cell.source.start)
-                    }
-                } else {
-                    Err(self.caret(position))
-                }
+                    .map_or_else(
+                        || Err(self.caret(position)),
+                        |cell| {
+                            if bounds.contains(&position) {
+                                Ok(cell.source.start)
+                            } else {
+                                Err(cell.source.start)
+                            }
+                        },
+                    )
             }
         }
     }
@@ -134,7 +134,10 @@ impl LeafLayout {
             Self::Native(layout, Some(rows)) => {
                 for row in rows.iter() {
                     let origin = layout.bounds().origin
-                        + point(Pixels::ZERO, layout.line_height() * row.ordinal as f32);
+                        + point(
+                            Pixels::ZERO,
+                            layout.line_height() * crate::f32_of_count(row.ordinal),
+                        );
                     paint_cells(
                         &row.clusters,
                         origin,
@@ -166,7 +169,7 @@ impl LeafLayout {
                 }
             }
             Self::Native(layout, None) => {
-                super::paint_native_selection(layout, range, color, window)
+                super::paint_native_selection(layout, range, color, window);
             }
             Self::Projected {
                 row,
@@ -179,6 +182,11 @@ impl LeafLayout {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "y is clamped non-negative and the cast saturates"
+)]
 fn native_row<'a>(
     layout: &TextLayout,
     rows: &'a [VisualClusterRow],
@@ -289,7 +297,7 @@ mod tests {
             .iter()
             .map(|line| {
                 Arc::new(WrappedLineLayout {
-                    unwrapped_layout: line.unwrapped_layout.clone(),
+                    unwrapped_layout: Arc::clone(&line.unwrapped_layout),
                     wrap_boundaries: line.wrap_boundaries.clone(),
                     wrap_width: line.wrap_width,
                 })
@@ -312,7 +320,7 @@ mod tests {
         for row in rows {
             let row = Arc::new(row);
             let layout = LeafLayout::Projected {
-                row: row.clone(),
+                row: Arc::clone(&row),
                 bounds: Bounds::new(point(px(20.0), px(30.0)), size(row.layout.width, px(24.0))),
                 height: px(24.0),
             };
@@ -341,7 +349,7 @@ mod tests {
             .iter()
             .map(|line| {
                 Arc::new(WrappedLineLayout {
-                    unwrapped_layout: line.unwrapped_layout.clone(),
+                    unwrapped_layout: Arc::clone(&line.unwrapped_layout),
                     wrap_boundaries: line.wrap_boundaries.clone(),
                     wrap_width: line.wrap_width,
                 })

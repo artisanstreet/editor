@@ -1,0 +1,34 @@
+[package]
+name = "forge"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "Artisan Forge: runs the engines and serves threads to paired Editors."
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+test = false
+
+[features]
+# Records every heap allocation with its call stack and writes
+# dhat-heap.json in the data folder when Forge is asked to stop, while its
+# state is still live. Open it in DHAT's viewer
+# (https://nnethercote.github.io/dh_view/dh_view.html).
+dhat-heap = ["dep:dhat"]
+
+[dependencies]
+anyhow.workspace = true
+dhat = { workspace = true, optional = true }
+artisan-paths = { path = "../artisan-paths" }
+clap.workspace = true
+forge-http = { path = "../forge-http" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

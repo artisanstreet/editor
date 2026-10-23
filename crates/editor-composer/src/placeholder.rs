@@ -107,7 +107,7 @@ const VOCABULARY: [&str; 100] = [
 /// The placeholder phrase for one reveal generation. Walking the vocabulary
 /// in order never repeats a phrase twice in a row.
 #[must_use]
-pub(crate) fn phrase(generation: u64) -> &'static str {
+pub fn phrase(generation: u64) -> &'static str {
     let len = VOCABULARY.len() as u64;
     VOCABULARY[usize::try_from(generation % len).unwrap_or_default()]
 }

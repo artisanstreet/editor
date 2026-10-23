@@ -57,9 +57,10 @@ impl HostData {
         // The task is the request: a new observation or connection drops it.
         state.task = Some(cx.spawn(async move |this, cx| {
             let result = client.inspector(&thread).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.finish_thread_summary(thread, minimum, result, cx);
-            });
+            })
+            .ok();
         }));
         cx.emit(HostEvent::ThreadSummaryChanged {
             thread_id: summary.thread.clone(),
@@ -157,7 +158,9 @@ impl HostData {
             Event::Run { .. } | Event::ItemState { .. } => true,
             Event::Item { item } => matches!(
                 item.kind,
-                ItemKind::Agent { .. }
+                // The navigator's outline lists the user's messages.
+                ItemKind::UserMessage { .. }
+                    | ItemKind::Agent { .. }
                     | ItemKind::Plan { .. }
                     | ItemKind::Question { .. }
                     | ItemKind::Notice {
@@ -169,8 +172,18 @@ impl HostData {
                         ..
                     }
             ),
-            _ => false,
+            Event::Hello { .. }
+            | Event::Project { .. }
+            | Event::Thread { .. }
+            | Event::Setting { .. }
+            | Event::Live { .. }
+            | Event::Suggestion { .. }
+            | Event::Engine { .. }
+            | Event::EngineInstall { .. }
+            | Event::EditorCall { .. }
+            | Event::Reset => false,
         };
+
         if !relevant {
             return;
         }
@@ -238,12 +251,26 @@ fn summary_bytes(summary: &InspectorSummary) -> usize {
                     + terminal.cwd.as_ref().map_or(0, String::capacity)
             })
             .sum::<usize>()
+        + summary.outline.capacity() * std::mem::size_of::<artisan_api::OutlineEntry>()
+        + summary
+            .outline
+            .iter()
+            .map(|entry| entry.id.0.capacity() + entry.label.capacity())
+            .sum::<usize>()
         + summary.agents.capacity() * std::mem::size_of::<artisan_api::InspectorAgent>()
         + summary
             .agents
             .iter()
             .map(|agent| {
                 agent.id.0.capacity() + agent.label.capacity() + agent.description.resident_bytes()
+            })
+            .sum::<usize>()
+        + summary.workflows.capacity() * std::mem::size_of::<artisan_api::InspectorWorkflow>()
+        + summary
+            .workflows
+            .iter()
+            .map(|workflow| {
+                workflow.id.0.capacity() + workflow.name.as_ref().map_or(0, String::capacity)
             })
             .sum::<usize>()
         + summary.goal.as_ref().map_or(0, |goal| {
@@ -285,8 +312,7 @@ mod tests {
         let client = crate::ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
         cx.new(|cx| {
             let mut host = HostData::new(crate::HostId("test".into()), "test".into(), client, cx);
-            host._connection.abort();
-            host._follow = gpui::Task::ready(());
+            host.stop_following();
             host.summary = Some(ObservedSummary {
                 thread: "current".into(),
                 state: ThreadSummary {

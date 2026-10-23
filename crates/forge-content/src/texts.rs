@@ -63,7 +63,7 @@ macro_rules! item_texts {
                 for approval in approval { approval_texts!(approval, $visit $(,$mutable)?); }
             }
             ItemKind::Image { caption, .. } => { for text in caption { $visit(text)?; } }
-            ItemKind::Compaction { .. } => {}
+            ItemKind::Compaction { summary, .. } => { for text in summary { $visit(text)?; } }
         }
         Ok(())
     }};
@@ -147,7 +147,15 @@ impl ItemTexts for ItemKind {
                     None => {}
                 }
             }
-            _ => {}
+            Self::UserMessage { .. }
+            | Self::AssistantMessage { .. }
+            | Self::Tool { .. }
+            | Self::Agent { .. }
+            | Self::Plan { .. }
+            | Self::Image { .. }
+            | Self::Compaction { .. }
+            | Self::Notice { .. }
+            | Self::Error { .. } => {}
         }
         Ok(())
     }
@@ -183,7 +191,14 @@ impl ItemTexts for ItemKind {
                     crate::compact_collection(answers)?;
                 }
             }
-            _ => {}
+            Self::UserMessage { .. }
+            | Self::AssistantMessage { .. }
+            | Self::Tool { .. }
+            | Self::Agent { .. }
+            | Self::Image { .. }
+            | Self::Compaction { .. }
+            | Self::Notice { .. }
+            | Self::Error { .. } => {}
         }
         Ok(())
     }

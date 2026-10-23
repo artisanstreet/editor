@@ -147,7 +147,7 @@ impl From<ChartSpec> for ChartStyle {
 
 impl ChartStyle {
     /// Stacks when asked to, and always when normalizing to shares.
-    pub(super) fn stacks(&self) -> bool {
+    pub(super) const fn stacks(&self) -> bool {
         self.stacked || self.normalize
     }
 
@@ -211,7 +211,9 @@ impl RichBlock for Chart {
             XValue::Text(text) => text.capacity(),
             XValue::Number(_) => 0,
         };
-        let axis = |axis: &Axis| budget::optional(&axis.label) + budget::optional(&axis.unit);
+        let axis = |axis: &Axis| {
+            budget::optional(axis.label.as_ref()) + budget::optional(axis.unit.as_ref())
+        };
         std::mem::size_of::<Self>()
             + std::mem::size_of::<ChartStyle>()
             + std::mem::size_of::<model::Model>()

@@ -1,53 +1,29 @@
-# `nix run .#dev`: build, install and relaunch the development app.
+# `nix run .#dev`: build the apps and install them like a release.
 #
-# Builds `ae` and `artisan-editor` with Cargo in the checkout's dev shells
-# (`cargo-linux`, and `cargo-windows` for the Windows Editor), incremental
-# and unsandboxed, into target/dev/<platform>, then runs them as a separate
-# dev install that never touches a real one:
+# Builds `ae`, `forge` and `artisan-editor` with Cargo in the checkout's dev
+# shells (`cargo-linux`, and `cargo-windows` for the Windows Editor),
+# incremental and unsandboxed, into target/dev/<platform>, stages them in
+# target/dev/stage/<os>/ with a VERSION (`<version>-dev+<commit>`), and runs
+# `ae install --from target/dev/stage`. That is the one install on this
+# machine, the same as a release: Forge in Artisan Street with its service,
+# `ae` on PATH, the Editor with its Start menu entry. Inside WSL the Editor
+# is the Windows build, installed on Windows by the Windows `ae`.
 #
-#   ARTISAN_HOME        $XDG_DATA_HOME/artisan-dev (override: ARTISAN_DEV_HOME)
-#     bin/ae            the dev `ae` (also bin/artisan-editor on Linux)
-#     forge/            the dev Forge's data (ARTISAN_FORGE_DATA); forge.log, forge.pid
-#     editor/           the Linux Editor's data (ARTISAN_EDITOR_DATA)
-#     wsl-env.sh        sourced by the bash that `wsl.exe -- ae …` starts for
-#                       the dev Windows Editor (see below)
+#   nix run .#dev                     build and install everything, restart Forge, reopen the Editor
+#   nix run .#dev -- forge            build and install `ae` and Forge only
+#   nix run .#dev -- editor           build and install `ae` and the Editor only
+#   nix run .#dev -- build            build; nothing is installed
 #
-# The dev Forge listens on 127.0.0.1:47901 (ARTISAN_DEV_PORT), so it never
-# collides with an installed Forge on 47900. It runs detached (`setsid`, pid
-# file and log in forge/, like `ae forge start` without systemd); it is never
-# a systemd unit, because `ae forge restart` would act on the real
-# artisan-forge.service when one is installed.
-#
-# Inside WSL the Editor is the Windows build: copied to
-# %LOCALAPPDATA%\Artisan Dev\ with its data in editor\ there and started by
-# Explorer (outside WSL's interop job, so it outlives this terminal) through
-# launch.cmd, which you can also double-click. launch.cmd passes BASH_ENV
-# through WSLENV, so when the Editor's Home screen pairs with this
-# distribution (`wsl.exe -d <distro> -- ae forge pair --json`), that bash
-# sources wsl-env.sh and runs the dev `ae` against the dev Forge.
-#
-#   nix run .#dev                     build both, restart the dev Forge, relaunch the Editor
-#   nix run .#dev -- build            build both; running processes are untouched
-#   nix run .#dev -- run              build both, restart the dev Forge, relaunch the Editor
-#   nix run .#dev -- forge            build `ae`, restart the dev Forge only
-#   nix run .#dev -- editor           build and relaunch the Editor only
-#   nix run .#dev -- stop             stop the dev Forge and the dev Editor
-#   nix run .#dev -- import [--from DIR]
-#                                     one-time: copy the old Forge's threads, skills and
-#                                     engines into the dev Forge (`ae forge import`; the
-#                                     old database is only read). Default DIR:
-#                                     $XDG_DATA_HOME/Artisan Street Dev/data
-#   nix run .#dev -- ae <args>        the dev `ae` with the dev environment,
-#                                     e.g. `ae forge logs -f`, `ae forge devices`
-#
-#   --linux        inside WSL, run the Linux Editor (WSLg) instead of the Windows one
+#   --linux        inside WSL, install the Linux Editor (WSLg) instead of the Windows one
+#   --dhat         build the Editor and Forge with the dhat heap profiler; the
+#                  Editor writes logs/dhat-heap.json in its data folder when it
+#                  quits, Forge dhat-heap.json in its own when asked to stop
 #   ARTISAN_DEV_PROFILE   debug (default: dependencies optimised, workspace at
 #                         opt-level 1) or release (what ships; slow to build)
 #   CARGO_BUILD_JOBS      respected; the dev shell defaults to two jobs
 #
 #   nix run .#release [-- <command>] is the same loop with the release profile
 #   (Cargo's `release`, what ships), built into target/dev/<platform>/release.
-#   It replaces the same dev install; ARTISAN_DEV_PROFILE still overrides it.
 {
   pkgs,
   graphicsLibraryPath,
@@ -74,5 +50,5 @@ in
 {
   type = "app";
   program = "${runner}/bin/${runner.name}";
-  meta.description = "Build (${profile} profile), install and relaunch the dev Forge and Editor";
+  meta.description = "Build (${profile} profile) and install Forge, the Editor and ae";
 }

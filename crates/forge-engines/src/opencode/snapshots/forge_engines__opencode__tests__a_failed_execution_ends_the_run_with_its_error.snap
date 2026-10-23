@@ -1,0 +1,26 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"execution-failed\")"
+---
+[
+    Event(
+        Item {
+            key: "error:evt_15d762aac001pvix7abf5boPnL",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Api,
+                message: Inline(
+                    "Model unavailable: anthropic/claude-nonexistent",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+    RunError(
+        "Model unavailable: anthropic/claude-nonexistent",
+    ),
+]

@@ -8,7 +8,7 @@
 //! order.
 
 use crate::markdown_renderer::rich::budget;
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
+use crate::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::sync::Arc;
 
 use gpui::{
@@ -80,6 +80,20 @@ pub(super) struct AnnotatedCode(Arc<Model>);
 
 impl From<Spec> for AnnotatedCode {
     fn from(spec: Spec) -> Self {
+        const fn find(next: &mut [usize], mut index: usize) -> usize {
+            let origin = index;
+            while next[index] != index {
+                index = next[index];
+            }
+            let root = index;
+            index = origin;
+            while next[index] != index {
+                let parent = next[index];
+                next[index] = root;
+                index = parent;
+            }
+            root
+        }
         let lines = code_lines(&spec.code);
         let width = excerpt_width(&lines);
         let start = spec.start_line.max(1);
@@ -109,20 +123,6 @@ impl From<Spec> for AnnotatedCode {
         let mut owner = vec![None; lines.len()];
         let mut marker = vec![None; lines.len()];
         let mut next_free: Vec<usize> = (0..=lines.len()).collect();
-        fn find(next: &mut [usize], mut index: usize) -> usize {
-            let origin = index;
-            while next[index] != index {
-                index = next[index];
-            }
-            let root = index;
-            index = origin;
-            while next[index] != index {
-                let parent = next[index];
-                next[index] = root;
-                index = parent;
-            }
-            root
-        }
         for (index, note) in notes.iter().enumerate() {
             if note.span.end >= start {
                 let first = usize::try_from(note.span.start.saturating_sub(start))
@@ -185,7 +185,9 @@ impl RichBlock for AnnotatedCode {
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         AnnotatedView {
             key: cx.key("annotated"),
-            scope: cx.media.and_then(|provider| provider.resource_scope()),
+            scope: cx
+                .media
+                .and_then(super::super::media::MediaFetcher::resource_scope),
             theme: *cx.theme,
             model: Arc::clone(&self.0),
         }
@@ -251,7 +253,13 @@ fn badge(theme: &ArtisanTheme, number: usize, active: bool) -> Div {
         .text_size(TypographyTokens::size(TextStep::X3s))
         .line_height(px(16.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .bg(color.with_alpha(if active { 0.9 } else { 0.18 }).to_paint())
+        .bg(color
+            .at(if active {
+                Opacity::BadgeActive
+            } else {
+                Opacity::BadgeTint
+            })
+            .to_paint())
         .text_color(if active {
             theme.colors.background.to_paint()
         } else {
@@ -297,10 +305,10 @@ impl AnnotatedView {
                             .border_l_2()
                             .border_color(match (lit, owner.is_some()) {
                                 (true, _) => accent.to_paint(),
-                                (false, true) => accent.with_alpha(0.3).to_paint(),
-                                (false, false) => gpui::transparent_black(),
+                                (false, true) => accent.at(Opacity::AnnotationEdge).to_paint(),
+                                (false, false) => accent.at(Opacity::Clear).to_paint(),
                             })
-                            .when(lit, |row| row.bg(accent.with_alpha(0.1).to_paint()))
+                            .when(lit, |row| row.bg(accent.at(Opacity::ToneTint).to_paint()))
                             .when(has_notes, |row| {
                                 row.child(
                                     div()
@@ -329,7 +337,7 @@ impl AnnotatedView {
             })
             .w_full()
             .min_w(width)
-            .h(px(count.min(18) as f32 * 20.0));
+            .h(px(crate::f32_of_count(count.min(18)) * 20.0));
         code_panel(theme)
             .id(panel_id)
             .overflow_x_scroll()
@@ -338,6 +346,10 @@ impl AnnotatedView {
 
     /// The numbered notes under the code; a note opens its first line on
     /// click.
+    #[expect(
+        clippy::option_if_let_else,
+        reason = "a linked note and a plain note build different elements"
+    )]
     fn notes(
         &self,
         state: &Entity<HoverState>,
@@ -345,10 +357,10 @@ impl AnnotatedView {
         rows: gpui::ListState,
     ) -> Div {
         let theme = self.theme;
-        let model = self.model.clone();
+        let model = Arc::clone(&self.model);
         let view = self.clone();
         let state = state.clone();
-        let height = px(model.notes.len().min(6) as f32 * 40.0);
+        let height = px(crate::f32_of_count(model.notes.len().min(6)) * 40.0);
         div()
             .w_full()
             .min_w_0()
@@ -373,7 +385,7 @@ impl AnnotatedView {
                         .gap(px(8.0))
                         .rounded(RadiusTokens::value(RadiusStep::Sm))
                         .when(on, |row| {
-                            row.bg(Tone::Accent.color(&theme).with_alpha(0.08).to_paint())
+                            row.bg(Tone::Accent.color(&theme).at(Opacity::NoteHover).to_paint())
                         })
                         .child(div().pt(px(2.0)).child(badge(&theme, index + 1, on)))
                         .child(if let Some(path) = path {
@@ -384,7 +396,7 @@ impl AnnotatedView {
                             )
                             .variant(ButtonVariant::Ghost)
                             .on_activate(move |_, window, cx| {
-                                open_reference(&path, Some(line), scope.clone(), window, cx)
+                                open_reference(&path, Some(line), scope.clone(), window, cx);
                             })
                             .into_any_element()
                         } else {
@@ -396,7 +408,7 @@ impl AnnotatedView {
                                 .min_w_0()
                                 .text_size(TypographyTokens::size(TextStep::Sm))
                                 .line_height(px(20.0))
-                                .text_color(theme.colors.foreground.to_paint())
+                                .text_color(theme.colors.text.to_paint())
                                 .child(entry.text.clone()),
                         )
                         .on_hover(hover_slot(state.clone(), index, |state| &mut state.note))
@@ -426,14 +438,14 @@ impl AnnotatedView {
 impl RenderOnce for AnnotatedView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = kit::keyed(window, cx, self.id("hover"), || HoverState {
-            model: self.model.clone(),
+            model: Arc::clone(&self.model),
             notes: gpui::ListState::new(self.model.notes.len(), gpui::ListAlignment::Top, px(96.0)),
             line: None,
             note: None,
         });
         state.update(cx, |state, _| {
             if !Arc::ptr_eq(&state.model, &self.model) {
-                state.model = self.model.clone();
+                state.model = Arc::clone(&self.model);
                 state.notes.reset(self.model.notes.len());
                 state.line = None;
                 state.note = None;

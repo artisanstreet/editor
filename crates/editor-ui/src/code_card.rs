@@ -32,14 +32,17 @@ impl CodeCard {
             selector: None,
         }
     }
+    #[must_use]
     pub fn copy_action(mut self, action: impl IntoElement, placement: CopyPlacement) -> Self {
         self.copy = Some((action.into_any_element(), placement));
         self
     }
-    pub fn balanced_gutters(mut self) -> Self {
+    #[must_use]
+    pub const fn balanced_gutters(mut self) -> Self {
         self.balanced = true;
         self
     }
+    #[must_use]
     pub fn debug_selector(mut self, selector: SharedString) -> Self {
         self.selector = Some(selector);
         self
@@ -55,13 +58,13 @@ impl RenderOnce for CodeCard {
             .relative()
             .w_full()
             .min_w_0()
-            .text_color(theme.colors.foreground.to_paint())
+            .text_color(theme.colors.text.to_paint())
             .bg(glass_foreground_base(theme))
             .rounded(radius)
-            .shadow(glass_card_shadows())
+            .shadow(glass_card_shadows(theme, crate::theme::Elevation::Raised))
             .p(theme.density.card_padding_compact)
-            .child(glass_material_layer(GlassStrength::Quiet, radius))
-            .child(glass_highlight_layer(GlassStrength::Quiet, radius));
+            .child(glass_material_layer(theme, GlassStrength::Quiet, radius))
+            .child(glass_highlight_layer(theme, GlassStrength::Quiet, radius));
         if let Some((action, placement)) = self.copy {
             card = card.pr(gutter);
             if self.balanced {

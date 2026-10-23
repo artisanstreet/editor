@@ -1,0 +1,53 @@
+[package]
+name = "forge-computer"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "Computer use: an MCP server that lets agents see and drive a virtual display, served to every engine through Forge's gateway."
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api" }
+base64.workspace = true
+forge-mcp = { path = "../forge-mcp" }
+forge-runs = { path = "../forge-runs" }
+png = "=0.18.1"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+forge-store = { path = "../forge-store" }
+forge-engines = { path = "../forge-engines" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# The workspace forbids unsafe code; the Windows backend calls Win32 and
+# allows it in that one module, so this crate denies it instead.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+must_use_candidate = "allow"

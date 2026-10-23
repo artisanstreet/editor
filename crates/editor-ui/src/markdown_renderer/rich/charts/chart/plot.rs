@@ -10,7 +10,7 @@ use super::super::scale::{Domain, Ticks, f64_of, reading, ticks_within};
 use super::super::scene::{Shape, hover_band, hrule, vrule};
 use super::model::{Model, Track, XScale, y_ticks};
 use super::{Axis, ChartStyle, Mark};
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, Opacity};
 
 /// The interaction state a frame draws from.
 pub(super) struct Snapshot<'a> {
@@ -86,7 +86,7 @@ pub(super) fn layout(
         } else {
             shapes.push(vrule(
                 view.fraction(*hover),
-                theme.colors.foreground.with_alpha(0.3).to_paint(),
+                theme.colors.text.at(Opacity::ChartRule).to_paint(),
                 false,
             ));
         }
@@ -132,10 +132,10 @@ pub(super) fn layout(
             y0: 0.0,
             x1: view.fraction(to),
             y1: 1.0,
-            color: theme.colors.foreground.with_alpha(0.08).to_paint(),
+            color: theme.colors.text.at(Opacity::ChartSelection).to_paint(),
         });
     }
-    let end_labels = end_labels(spec, model, &tracks, view, &y, axis.unit.as_deref());
+    let end_labels = end_labels(theme, spec, model, &tracks, view, &y, axis.unit.as_deref());
     Geometry {
         shapes: shapes.into(),
         tracks,
@@ -168,7 +168,7 @@ pub(super) fn interaction(
         } else {
             shapes.push(vrule(
                 geometry.view.fraction(*x),
-                theme.colors.foreground.with_alpha(0.3).to_paint(),
+                theme.colors.text.at(Opacity::ChartRule).to_paint(),
                 false,
             ));
             Marks {
@@ -187,7 +187,7 @@ pub(super) fn interaction(
             y0: 0.0,
             x1: geometry.view.fraction(to),
             y1: 1.0,
-            color: theme.colors.foreground.with_alpha(0.08).to_paint(),
+            color: theme.colors.text.at(Opacity::ChartSelection).to_paint(),
         });
     }
     shapes
@@ -199,6 +199,7 @@ const END_LABEL_SERIES_MAX: usize = 8;
 /// Each visible line or area series named at its last value in view, so
 /// the reader does not shuttle between the plot and the legend.
 fn end_labels(
+    theme: &ArtisanTheme,
     spec: &ChartStyle,
     model: &Model,
     tracks: &[Track],
@@ -237,7 +238,7 @@ fn end_labels(
             Some(EndLabel {
                 y: y.domain.fraction_down(anchor).clamp(0.0, 1.0),
                 text: SharedString::from(format!("{name} {value}")),
-                color: kit::series_color(index).to_paint(),
+                color: kit::series_color(theme, index).to_paint(),
             })
         })
         .collect();
@@ -286,11 +287,15 @@ fn annotations(
     shapes: &mut Vec<Shape>,
     labels: &mut Vec<PlotLabel>,
 ) {
-    let color = theme.colors.muted_foreground.to_paint();
-    let rule = theme.colors.muted_foreground.with_alpha(0.7).to_paint();
+    let color = theme.colors.text_muted.to_paint();
+    let rule = theme
+        .colors
+        .text_muted
+        .at(Opacity::AnnotationRule)
+        .to_paint();
     // An event reads as a solid rule with its name in the foreground.
-    let event_rule = theme.colors.foreground.with_alpha(0.55).to_paint();
-    let event = theme.colors.foreground.to_paint();
+    let event_rule = theme.colors.text.at(Opacity::EventRule).to_paint();
+    let event = theme.colors.text.to_paint();
     for annotation in &spec.annotations {
         let text = SharedString::from(annotation.label.trim().to_owned());
         let start = annotation.x.as_ref().and_then(|x| model.resolve_x(x));
@@ -314,7 +319,7 @@ fn annotations(
                     y0: 0.0,
                     x1,
                     y1: 1.0,
-                    color: theme.colors.foreground.with_alpha(0.06).to_paint(),
+                    color: theme.colors.text.at(Opacity::AnnotationBand).to_paint(),
                 });
                 if !text.is_empty() {
                     labels.push(label(x0, 0.0, true));
@@ -359,7 +364,17 @@ struct Marks<'a> {
 
 impl Marks<'_> {
     fn color(&self, index: usize) -> Hsla {
-        kit::series_color(index).to_paint()
+        kit::series_color(self.theme, index).to_paint()
+    }
+
+    /// A series' area fill: translucent so overlapping areas show through.
+    fn series_fill(&self, index: usize) -> Hsla {
+        let purpose = if self.stacked {
+            Opacity::AreaStacked
+        } else {
+            Opacity::Area
+        };
+        kit::series_color(self.theme, index).at(purpose).to_paint()
     }
 
     fn point(&self, x: f64, y: f64) -> (f32, f32) {
@@ -384,10 +399,7 @@ impl Marks<'_> {
                     }));
                     shapes.push(Shape::Area {
                         points: outline,
-                        color: Hsla {
-                            alpha: if self.stacked { 0.55 } else { 0.22 },
-                            ..color
-                        },
+                        color: self.series_fill(index),
                     });
                 }
                 if let [(x, y)] = tops.as_slice() {
@@ -425,7 +437,7 @@ impl Marks<'_> {
                 } else {
                     let group = band * 0.8;
                     let lane_width = group / lanes;
-                    let left = x - group / 2.0 + f64_of(lane) * lane_width;
+                    let left = f64_of(lane).mul_add(lane_width, x - group / 2.0);
                     (left + lane_width * 0.06, left + lane_width * 0.94)
                 };
                 let base = if self.stacked { *base } else { floor };

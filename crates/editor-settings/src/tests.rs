@@ -8,8 +8,8 @@ use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use std::time::Duration;
 
 /// Runs GPUI until `check` holds; network work happens on real threads.
-pub(super) fn wait_for<T>(
-    cx: &mut VisualTestContext,
+pub fn wait_for<T>(
+    cx: &VisualTestContext,
     what: &str,
     check: impl Fn(&gpui::App) -> Option<T>,
 ) -> T {
@@ -41,7 +41,7 @@ fn pasted_pairing_string_adds_a_live_host_and_the_prompt_saves_to_forge(cx: &mut
     let address = server.local_addr().unwrap();
     let store = server.store().clone();
     forge.spawn(async move {
-        let _ = server.run().await;
+        server.run().await.ok();
     });
     let invite = forge.block_on(forge_http::invite(&store)).unwrap();
     let fingerprint = artisan_api::tls::fingerprint_of(&invite.forge_certificate).unwrap();
@@ -57,7 +57,7 @@ fn pasted_pairing_string_adds_a_live_host_and_the_prompt_saves_to_forge(cx: &mut
         core.navigate(Screen::Settings(SettingsPage::Hosts), cx);
     });
 
-    // What `ae forge pair` prints, pasted into the Hosts page.
+    // What `ae pair` prints, pasted into the Hosts page.
     let pasted = format!("{address} {} {fingerprint}", invite.code);
     settings.update(cx, |settings, cx| {
         settings
@@ -132,7 +132,7 @@ fn pasted_pairing_string_adds_a_live_host_and_the_prompt_saves_to_forge(cx: &mut
 /// Holds a completed real request before its view callback. Each fixture owns
 /// its gate; unrelated Settings instances and network work are unaffected.
 #[derive(Clone)]
-pub(super) struct CompletionGate(std::sync::Arc<GateState>);
+pub struct CompletionGate(std::sync::Arc<GateState>);
 struct GateState {
     entered: std::sync::atomic::AtomicBool,
     released: tokio::sync::Semaphore,
@@ -166,7 +166,7 @@ impl CompletionGate {
 #[path = "../../editor-ui/test_support/forge.rs"]
 mod forge_fixture;
 
-pub(super) struct SettingsFixture {
+pub struct SettingsFixture {
     pub(super) core: Entity<Core>,
     pub(super) hosts: [editor_core::HostId; 2],
     _runtime: tokio::runtime::Runtime,
@@ -193,7 +193,7 @@ impl SettingsFixture {
             let address = server.local_addr().unwrap().to_string();
             let store = server.store().clone();
             runtime.spawn(async move {
-                let _ = server.run().await;
+                server.run().await.ok();
             });
             let (paired_files, config) =
                 forge_fixture::pair(&store, &runtime, &address, &directory.path().join("editor"));
@@ -253,12 +253,12 @@ impl SettingsFixture {
         cx.run_until_parked();
     }
 }
-pub(super) fn wait_gate(cx: &mut VisualTestContext, gate: &CompletionGate) {
+pub fn wait_gate(cx: &VisualTestContext, gate: &CompletionGate) {
     wait_for(cx, "completed request at callback gate", |_| {
         gate.entered().then_some(())
     });
 }
-pub(super) fn finish_gate(cx: &mut VisualTestContext, gate: &CompletionGate) {
+pub fn finish_gate(cx: &VisualTestContext, gate: &CompletionGate) {
     gate.release();
     wait_for(cx, "released callback", |_| gate.finished().then_some(()));
     cx.run_until_parked();

@@ -9,9 +9,9 @@ use crate::{
 };
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnyElement, App, ColorExt as _, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled, Window, anchored,
-    deferred, div, point, px,
+    AnyElement, App, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels,
+    RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled, Window, anchored, deferred,
+    div, point, px,
 };
 use std::rc::Rc;
 
@@ -58,18 +58,19 @@ impl Dialog {
         }
     }
     #[must_use]
-    pub fn dismissible(mut self, dismissible: bool) -> Self {
+    pub const fn dismissible(mut self, dismissible: bool) -> Self {
         self.dismissible = dismissible;
         self
     }
     /// Keeps modal focus/dismissal ownership while the content supplies its
     /// established card face, without an extra heading or padded frame.
-    pub fn bare(mut self) -> Self {
+    #[must_use]
+    pub const fn bare(mut self) -> Self {
         self.bare = true;
         self
     }
     #[must_use]
-    pub fn max_width(mut self, width: Pixels) -> Self {
+    pub const fn max_width(mut self, width: Pixels) -> Self {
         self.max_width = width;
         self
     }
@@ -94,6 +95,10 @@ impl Dialog {
 }
 
 impl RenderOnce for Dialog {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let focus = overlay::begin(self.id.clone(), window, cx);
         overlay::retain(self.id.clone(), window, cx);
@@ -112,8 +117,8 @@ impl RenderOnce for Dialog {
                 handler(reason, window, cx);
             }
         });
-        let key_close = close.clone();
-        let button_close = close.clone();
+        let key_close = Rc::clone(&close);
+        let button_close = Rc::clone(&close);
         let panel = div()
             .id("dialog-panel")
             .role(Role::Dialog)
@@ -128,9 +133,9 @@ impl RenderOnce for Dialog {
                 panel
                     .p(px(20.0))
                     .rounded(RadiusTokens::value(RadiusStep::XlMid))
-                    .bg(theme.colors.popover.to_paint())
+                    .bg(theme.colors.raised.to_paint())
                     .border_1()
-                    .border_color(theme.colors.border.to_paint())
+                    .border_color(theme.colors.line.to_paint())
             })
             .flex()
             .flex_col()
@@ -155,7 +160,7 @@ impl RenderOnce for Dialog {
                                 .variant(ButtonVariant::Ghost)
                                 .disabled(!dismissible)
                                 .on_activate(move |_, window, cx| {
-                                    button_close(DialogDismissReason::CloseButton, window, cx)
+                                    button_close(DialogDismissReason::CloseButton, window, cx);
                                 }),
                         ),
                 )
@@ -173,11 +178,19 @@ impl RenderOnce for Dialog {
             .items_center()
             .justify_center()
             .bg(if self.bare {
-                gpui::hsla(0.0, 0.0, 0.0, 0.45)
+                theme
+                    .colors
+                    .black
+                    .at(crate::theme::Opacity::Shade)
+                    .to_paint()
             } else {
-                theme.colors.background.to_paint().opacity(0.9)
+                theme
+                    .colors
+                    .background
+                    .at(crate::theme::Opacity::Backdrop)
+                    .to_paint()
             })
-            .text_color(theme.colors.foreground.to_paint())
+            .text_color(theme.colors.text.to_paint())
             .occlude()
             .track_focus(&focus)
             .tab_group()

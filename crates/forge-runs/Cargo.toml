@@ -8,11 +8,16 @@ description = "Live runs: start, steer, answer and cancel engine runs, and turn 
 [dependencies]
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
+forge-content = { path = "../forge-content" }
 forge-engines = { path = "../forge-engines" }
 forge-store = { path = "../forge-store" }
+fs2.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
 tokio-util.workspace = true
+getrandom.workspace = true
+hex.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

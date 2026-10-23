@@ -1,7 +1,7 @@
 //! One canvas paints hierarchy marks; only readable labels build text elements.
 //! The plot owns pointer hit testing and the shared chart keyboard interaction.
 
-use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
+use crate::theme::{ArtisanTheme, Opacity, TextStep, TypographyTokens};
 use std::sync::Arc;
 
 use gpui::{
@@ -11,7 +11,7 @@ use gpui::{
 
 use super::super::super::kit;
 use super::super::frame::{self, ReadoutRow};
-use super::super::scale::percent;
+use super::super::scale::{f32_of_count, percent};
 use super::super::scene::{Probe, fractions, probe, probed_width};
 use super::{GROUP_HEADER, Layout, Tree, partition, treemap};
 
@@ -73,8 +73,8 @@ struct Geometry {
     levels: usize,
     width: f32,
     height: f32,
-    parts: Arc<Vec<Part>>,
-    nodes: Arc<Vec<usize>>,
+    parts: Arc<[Part]>,
+    nodes: Arc<[usize]>,
 }
 struct Spot {
     node: usize,
@@ -83,10 +83,18 @@ struct Spot {
 }
 
 impl RenderOnce for HierarchyView {
+    #[expect(
+        clippy::float_cmp,
+        reason = "the cached geometry is valid only for the exact width it was laid out at"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree; splitting it would only thread its locals through helpers"
+    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = kit::keyed(window, cx, kit::part(&self.id, "state"), || {
             HierarchyState {
-                model: self.tree.clone(),
+                model: Arc::clone(&self.tree),
                 focus: 0,
                 hover: None,
                 probe: probe(),
@@ -96,7 +104,7 @@ impl RenderOnce for HierarchyView {
         state.update(cx, |state, _| {
             if !Arc::ptr_eq(&state.model, &self.tree) {
                 let changed = *state.model != *self.tree;
-                state.model = self.tree.clone();
+                state.model = Arc::clone(&self.tree);
                 if !changed {
                     return;
                 }
@@ -107,7 +115,11 @@ impl RenderOnce for HierarchyView {
         });
         let (focus, hover, plot_probe) = {
             let current = state.read(cx);
-            (current.focus, current.hover, current.probe.clone())
+            (
+                current.focus,
+                current.hover,
+                std::rc::Rc::clone(&current.probe),
+            )
         };
         let width = probed_width(&plot_probe, FALLBACK_WIDTH);
         let geometry = state.update(cx, |state, _| {
@@ -117,7 +129,7 @@ impl RenderOnce for HierarchyView {
                 && geometry.levels == self.levels
                 && geometry.width == width
             {
-                return geometry.clone();
+                return Arc::clone(geometry);
             }
             let (height, parts) = match self.layout {
                 Layout::Treemap => {
@@ -140,7 +152,7 @@ impl RenderOnce for HierarchyView {
                 Layout::Icicle | Layout::Flame => {
                     let bars = partition(&self.tree, focus, self.levels);
                     let depth = bars.iter().map(|bar| bar.level).max().unwrap_or(0) + 1;
-                    let height = depth as f32 * LEVEL_PITCH;
+                    let height = f32_of_count(depth) * LEVEL_PITCH;
                     let parts = bars
                         .into_iter()
                         .map(|bar| {
@@ -153,7 +165,7 @@ impl RenderOnce for HierarchyView {
                             Part {
                                 node: bar.node,
                                 x: bar.x0,
-                                y: row as f32 * LEVEL_PITCH / height,
+                                y: f32_of_count(row) * LEVEL_PITCH / height,
                                 w: bar.x1 - bar.x0,
                                 h: LEVEL_HEIGHT / height,
                                 group: false,
@@ -168,15 +180,13 @@ impl RenderOnce for HierarchyView {
                     (height, parts)
                 }
             };
-            let parts = Arc::new(parts);
+            let parts: Arc<[Part]> = Arc::from(parts);
             let mut seen = std::collections::HashSet::new();
-            let nodes: Arc<Vec<usize>> = Arc::new(
-                parts
-                    .iter()
-                    .map(|part| part.node)
-                    .filter(|node| seen.insert(*node))
-                    .collect(),
-            );
+            let nodes: Arc<[usize]> = parts
+                .iter()
+                .map(|part| part.node)
+                .filter(|node| seen.insert(*node))
+                .collect();
             let geometry = Arc::new(Geometry {
                 layout: self.layout,
                 focus,
@@ -186,11 +196,11 @@ impl RenderOnce for HierarchyView {
                 parts,
                 nodes,
             });
-            state.geometry = Some(geometry.clone());
+            state.geometry = Some(Arc::clone(&geometry));
             geometry
         });
         let height = geometry.height;
-        let parts = geometry.parts.clone();
+        let parts = Arc::clone(&geometry.parts);
         let readout = hover
             .and_then(|node| parts.iter().find(|part| part.node == node))
             .map(|part| {
@@ -208,7 +218,7 @@ impl RenderOnce for HierarchyView {
                 .on_mouse_move(|_, _, cx| cx.stop_propagation())
                 .on_click(|_, _, cx| cx.stop_propagation())
         });
-        let nodes = geometry.nodes.clone();
+        let nodes = Arc::clone(&geometry.nodes);
         let selected = hover.and_then(|node| nodes.iter().position(|entry| *entry == node));
         let selection_label = hover.map(|node| {
             format!(
@@ -219,11 +229,11 @@ impl RenderOnce for HierarchyView {
         });
         let count = nodes.len();
         let keyboard = state.clone();
-        let tree = self.tree.clone();
+        let tree = Arc::clone(&self.tree);
         let labels = parts
             .iter()
             .filter_map(|part| self.label(part, width, height));
-        let painted = parts.clone();
+        let painted = Arc::clone(&parts);
         let colors: Vec<_> = parts
             .iter()
             .map(|part| {
@@ -232,22 +242,22 @@ impl RenderOnce for HierarchyView {
                         focus,
                         part.node,
                         if part.group {
-                            0.08
+                            Mark::Group
                         } else if hover == Some(part.node) {
-                            0.72
+                            Mark::LeafHover
                         } else {
-                            0.5
+                            Mark::Leaf
                         },
                     ),
-                    self.fill(focus, part.node, 0.35),
-                    self.fill(focus, part.node, 0.22),
+                    self.fill(focus, part.node, Mark::Edge),
+                    self.fill(focus, part.node, Mark::Header),
                 )
             })
             .collect();
-        let moving_parts = parts.clone();
-        let clicked_parts = parts.clone();
-        let moving_probe = plot_probe.clone();
-        let clicked_probe = plot_probe.clone();
+        let moving_parts = Arc::clone(&parts);
+        let clicked_parts = Arc::clone(&parts);
+        let moving_probe = std::rc::Rc::clone(&plot_probe);
+        let clicked_probe = std::rc::Rc::clone(&plot_probe);
         let moving = state.clone();
         let leaving = state.clone();
         let clicked = state.clone();
@@ -299,8 +309,12 @@ impl RenderOnce for HierarchyView {
                                 } else {
                                     mark_theme
                                         .colors
-                                        .foreground
-                                        .with_alpha(if selected { 0.13 } else { 0.0 })
+                                        .text
+                                        .at(if selected {
+                                            Opacity::HoverRing
+                                        } else {
+                                            Opacity::Clear
+                                        })
                                         .to_paint()
                                 };
                                 window.paint_quad(gpui::quad(
@@ -425,22 +439,56 @@ impl RenderOnce for HierarchyView {
     }
 }
 
+/// One painted part of a hierarchy mark.
+#[derive(Clone, Copy)]
+enum Mark {
+    Leaf,
+    LeafHover,
+    Group,
+    Edge,
+    Header,
+}
+
+impl Mark {
+    /// The opacity of this mark in a branch's series colour.
+    const fn branch(self) -> Opacity {
+        match self {
+            Self::Leaf => Opacity::TreemapLeaf,
+            Self::LeafHover => Opacity::TreemapLeafHover,
+            Self::Group => Opacity::TreemapGroup,
+            Self::Edge => Opacity::TreemapEdge,
+            Self::Header => Opacity::TreemapHeader,
+        }
+    }
+
+    /// The opacity of this mark in the text colour, for the focus itself.
+    const fn focus(self) -> Opacity {
+        match self {
+            Self::Leaf => Opacity::TreemapFocusLeaf,
+            Self::LeafHover => Opacity::TreemapFocusLeafHover,
+            Self::Group => Opacity::TreemapFocusGroup,
+            Self::Edge => Opacity::TreemapFocusEdge,
+            Self::Header => Opacity::TreemapFocusHeader,
+        }
+    }
+}
+
 impl HierarchyView {
     fn reading(&self, size: f64) -> String {
         kit::with_unit(&kit::format_number(size), self.unit.as_deref())
     }
 
-    /// The fill of `node` under `focus`, stronger when hovered.
-    fn fill(&self, focus: usize, node: usize, alpha: f32) -> gpui::Hsla {
-        match self.tree.branch(focus, node) {
-            Some(branch) => kit::series_color(branch).with_alpha(alpha).to_paint(),
-            None => self
-                .theme
-                .colors
-                .foreground
-                .with_alpha(alpha * 0.2)
-                .to_paint(),
-        }
+    /// The fill of `node` under `focus` for one mark: its branch's series
+    /// colour, or the text colour (five times fainter) for the focus itself.
+    fn fill(&self, focus: usize, node: usize, mark: Mark) -> gpui::Hsla {
+        self.tree.branch(focus, node).map_or_else(
+            || self.theme.colors.text.at(mark.focus()).to_paint(),
+            |branch| {
+                kit::series_color(&self.theme, branch)
+                    .at(mark.branch())
+                    .to_paint()
+            },
+        )
     }
 
     /// The path from the root to the focus; every step but the last zooms
@@ -471,7 +519,7 @@ impl HierarchyView {
                 .into_any_element();
                 let separator = (step > 0).then(|| {
                     div()
-                        .text_color(theme.colors.muted_foreground.with_alpha(0.6).to_paint())
+                        .text_color(theme.colors.text_faint.to_paint())
                         .child("/")
                         .into_any_element()
                 });
@@ -504,7 +552,7 @@ impl HierarchyView {
             .overflow_hidden()
             .text_size(TypographyTokens::size(TextStep::X2s))
             .line_height(px(14.0))
-            .text_color(self.theme.colors.foreground.to_paint())
+            .text_color(self.theme.colors.text.to_paint())
             .flex()
             .when(!part.group && self.layout == Layout::Treemap, |label| {
                 label.flex_col()
@@ -526,7 +574,7 @@ impl HierarchyView {
                         div()
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .text_color(self.theme.colors.muted_foreground.to_paint())
+                            .text_color(self.theme.colors.text_muted.to_paint())
                             .child(value),
                     )
                 },
@@ -538,7 +586,16 @@ impl HierarchyView {
         let node = self.tree.node(spot.node);
         let focused = self.tree.node(focus);
         let mut rows = vec![ReadoutRow::new(
-            Some(self.fill(focus, spot.node, 1.0)),
+            Some(self.tree.branch(focus, spot.node).map_or_else(
+                || {
+                    self.theme
+                        .colors
+                        .text
+                        .at(Opacity::TreemapFocusSwatch)
+                        .to_paint()
+                },
+                |branch| kit::series_color(&self.theme, branch).to_paint(),
+            )),
             "Size",
             self.reading(node.size),
         )];
@@ -665,7 +722,7 @@ mod geometry_cache_tests {
             let plot = HierarchyView {
                 id: "cached-hierarchy".into(),
                 theme: ArtisanTheme::resolved(),
-                tree: self.tree.clone(),
+                tree: Arc::clone(&self.tree),
                 layout: Layout::Treemap,
                 unit: None,
                 levels: 3,

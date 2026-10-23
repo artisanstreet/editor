@@ -15,7 +15,7 @@ use std::time::Duration;
 
 /// A Forge on its own runtime, so stopping it really drops every
 /// connection, like a restart.
-pub(crate) fn start_forge(
+pub fn start_forge(
     data: &Path,
     listen: SocketAddr,
 ) -> (SocketAddr, forge_store::Store, tokio::runtime::Runtime) {
@@ -33,7 +33,7 @@ pub(crate) fn start_forge(
     let address = server.local_addr().unwrap();
     let store = server.store().clone();
     forge.spawn(async move {
-        let _ = server.run().await;
+        server.run().await.ok();
     });
     (address, store, forge)
 }
@@ -41,7 +41,7 @@ pub(crate) fn start_forge(
 async fn next_matching(
     updates: &mut Receiver<Update>,
     stage: &str,
-    check: impl Fn(&Update) -> bool,
+    check: impl Fn(&Update) -> bool + Send + Sync,
 ) -> Update {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -60,6 +60,10 @@ fn project_created(update: &Update, path: &str) -> bool {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario: pair, follow, restart Forge, resume"
+)]
 fn follows_forge_across_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("forge");
@@ -173,16 +177,17 @@ fn follows_forge_across_a_restart() {
         project_created(&update, &second),
         "the first stored change after reconnecting is the missed one: {update:?}"
     );
+    drop(update);
 }
 
 /// The renderer opens 512 logical paragraphs over paired HTTPS without fetching
 /// the full 20 MiB source. Counters surround actual ForgeClient calls, not Store.
 #[gpui::test]
-fn sparse_stored_renderer_bootstrap_uses_three_paired_https_requests(
-    cx: &mut gpui::TestAppContext,
-) {
-    // The fixture intentionally exercises the real HTTP and Markdown worker threads.
-    cx.executor().allow_parking();
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario from a stored thread to a prepared leaf"
+)]
+fn sparse_stored_renderer_bootstrap_uses_three_paired_https_requests(cx: &gpui::TestAppContext) {
     use artisan_api::{
         CreateThread, EngineConfig, EngineId, ItemId, ItemKind, Phase, Status, TextContent,
         ThreadId,
@@ -195,6 +200,8 @@ fn sparse_stored_renderer_bootstrap_uses_three_paired_https_requests(
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    // The fixture intentionally exercises the real HTTP and Markdown worker threads.
+    cx.executor().allow_parking();
     let dir = tempfile::tempdir().unwrap();
     let (address, store, forge) = start_forge(
         &dir.path().join("isolated-source-forge"),
@@ -229,6 +236,7 @@ fn sparse_stored_renderer_bootstrap_uses_three_paired_https_requests(
             config: EngineConfig::new(EngineId::Codex),
             title: None,
             parent_thread_id: None,
+            spawned_by: None,
         }))
         .unwrap();
     let text = format!(
@@ -260,12 +268,12 @@ fn sparse_stored_renderer_bootstrap_uses_three_paired_https_requests(
     let calls = Arc::new(AtomicUsize::new(0));
     let bytes = Arc::new(AtomicUsize::new(0));
     let raw_client = client.clone();
-    let raw_calls = calls.clone();
-    let raw_bytes = bytes.clone();
+    let raw_calls = Arc::clone(&calls);
+    let raw_bytes = Arc::clone(&bytes);
     let raw: MarkdownContentFetch = Arc::new(move |reference, offset, limit| {
         let client = raw_client.clone();
-        let calls = raw_calls.clone();
-        let bytes = raw_bytes.clone();
+        let calls = Arc::clone(&raw_calls);
+        let bytes = Arc::clone(&raw_bytes);
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
             let range = client
@@ -276,10 +284,10 @@ fn sparse_stored_renderer_bootstrap_uses_three_paired_https_requests(
             Ok(range)
         })
     });
-    let index_calls = calls.clone();
+    let index_calls = Arc::clone(&calls);
     let index: MarkdownSourceIndexFetch = Arc::new(move |reference, format, offset, limit| {
         let client = client.clone();
-        let calls = index_calls.clone();
+        let calls = Arc::clone(&index_calls);
         Box::pin(async move {
             calls.fetch_add(1, Ordering::SeqCst);
             client
@@ -296,8 +304,8 @@ fn sparse_stored_renderer_bootstrap_uses_three_paired_https_requests(
                 "remote-index".into(),
                 reference.clone(),
                 artisan_api::SourceIndexFormat::Markdown,
-                raw.clone(),
-                index.clone(),
+                Arc::clone(&raw),
+                Arc::clone(&index),
                 cx,
                 |_| {},
             )
@@ -352,6 +360,8 @@ fn sparse_stored_renderer_bootstrap_uses_three_paired_https_requests(
     assert!(renderer.is_stored_leaf_prepared(&"remote-leaf".into(), &source, 511));
     // Preparation is intentionally separate from actual body paint/read evidence.
     cx.update(|cx| renderer.clear(cx));
+    drop(renderer);
     drop(store);
+
     forge.shutdown_timeout(Duration::from_secs(5));
 }

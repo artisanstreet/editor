@@ -5,6 +5,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod context_meter;
+#[cfg(feature = "dhat-heap")]
+mod heap_profile;
 mod home;
 mod logging;
 mod notifications;
@@ -15,6 +17,7 @@ mod resource_preview;
 mod script;
 mod workspace;
 
+use actions::{GoBack, NewThread, OpenPalette, OpenSettings, Quit, ToggleInspector, ToggleSidebar};
 use editor_core::Screen;
 use gpui::{
     App, AppContext as _, Bounds, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
@@ -22,21 +25,26 @@ use gpui::{
 };
 use workspace::Workspace;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-gpui::actions!(
-    artisan,
-    [
-        Quit,
-        OpenPalette,
-        ToggleSidebar,
-        ToggleInspector,
-        GoBack,
-        OpenSettings,
-        NewThread
-    ]
-);
+/// The app's actions, in their own module so the expectation below covers
+/// only the macro's derives.
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui's actions! macro chooses the derives"
+    )]
+    gpui::actions!(
+        artisan,
+        [
+            Quit,
+            OpenPalette,
+            ToggleSidebar,
+            ToggleInspector,
+            GoBack,
+            OpenSettings,
+            NewThread
+        ]
+    );
+}
 
 /// The window's opening height.
 const LAUNCH_WINDOW_HEIGHT: f32 = 900.0;
@@ -48,7 +56,7 @@ const MIN_WINDOW_HEIGHT: f32 = 420.0;
 fn launch_window_geometry(cx: &App) -> (Bounds<Pixels>, Size<Pixels>) {
     let min_size = size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT));
     let mut launch = size(
-        px(workspace::CHAT_MIN_WIDTH + 2.0 * workspace::COLUMN_WIDTH),
+        px(2.0f32.mul_add(workspace::COLUMN_WIDTH, workspace::CHAT_MIN_WIDTH)),
         px(LAUNCH_WINDOW_HEIGHT),
     );
     if let Some(display) = cx.primary_display() {
@@ -59,12 +67,18 @@ fn launch_window_geometry(cx: &App) -> (Bounds<Pixels>, Size<Pixels>) {
     (Bounds::centered(None, launch, cx), min_size)
 }
 
-fn main() {
+/// Logs to stderr and, when it opens, the rotating log file.
+fn init_logging() {
     use tracing_subscriber::fmt::writer::MakeWriterExt as _;
     let file = logging::file().map(std::sync::Mutex::new);
     let filter = || {
         tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "info,gpui=warn".into())
+            // `gpui` prefixes every GPUI crate; the adapter and device
+            // recovery lines are what explain a slow window.
+            .unwrap_or_else(|_| {
+                "info,gpui=warn,gpui_ce_windows::directx_devices=info,gpui_ce_windows::platform=info"
+                    .into()
+            })
     };
     match file {
         Some(file) => tracing_subscriber::fmt()
@@ -78,6 +92,12 @@ fn main() {
             .with_ansi(false)
             .init(),
     }
+}
+
+fn main() {
+    init_logging();
+    #[cfg(feature = "dhat-heap")]
+    heap_profile::start();
     // `artisan-editor artisan://thread/<host>/<thread>` opens that screen.
     let link = std::env::args()
         .skip(1)
@@ -90,10 +110,16 @@ fn main() {
             if let Err(error) = editor_ui::fonts::register_bundled_fonts(cx) {
                 tracing::warn!("using system fonts; the bundled ones didn't load: {error}");
             }
-            editor_ui::theme::install(cx);
+            editor_ui::theme::install(editor_ui::theme::ThemeMode::Dark, cx);
             editor_sources::init(cx);
             bind_keys(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
+            #[cfg(feature = "dhat-heap")]
+            cx.on_app_quit(|_| {
+                heap_profile::finish();
+                async {}
+            })
+            .detach();
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -104,10 +130,10 @@ fn main() {
             let (core, failure) = editor_core::init(cx);
             let failure = failure
                 .map(|error| format!("Couldn't read this device's Artisan files: {error:#}"));
-            if let Some(screen) = link.clone() {
+            if let Some(screen) = link {
                 core.update(cx, |core, cx| core.navigate(screen, cx));
             }
-            cx.set_app_identity("com.artisanstreet.editor", "Artisan");
+            cx.set_app_identity("com.artisanstreet.editor", "Artisan Editor");
             let notified_core = core.downgrade();
             cx.on_system_notification_response(move |response, cx| {
                 let (Some((host, thread)), Some(core)) = (
@@ -117,21 +143,26 @@ fn main() {
                     return;
                 };
                 core.update(cx, |core, cx| {
-                    core.navigate(Screen::Thread { host, thread }, cx)
+                    core.navigate(Screen::Thread { host, thread }, cx);
                 });
                 if let Some(window) = cx.windows().first() {
-                    let _ = window.update(cx, |_, window, _| window.activate_window());
+                    window
+                        .update(cx, |_, window, _| window.activate_window())
+                        .ok();
                 }
                 cx.activate(true);
             });
 
             let (launch, min_size) = launch_window_geometry(cx);
-            #[allow(unused_mut)]
+            #[cfg_attr(
+                not(feature = "capture"),
+                expect(unused_mut, reason = "only the capture feature adjusts the options")
+            )]
             let mut options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(launch)),
                 window_min_size: Some(min_size),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Artisan".into()),
+                    title: Some("Artisan Editor".into()),
                     appears_transparent: true,
                     ..TitlebarOptions::default()
                 }),
@@ -166,11 +197,14 @@ fn main() {
                 }
             }
         });
+    #[cfg(feature = "dhat-heap")]
+    heap_profile::finish();
 }
 
 fn bind_keys(cx: &mut App) {
     editor_ui::focus_navigation::bind_actions(cx);
     editor_ui::text_editor::TextEditor::bind_actions(cx);
+    editor_ui::selectable_text::bind_copy(cx);
     let context = Some(workspace::KEY_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("ctrl-q", Quit, None),

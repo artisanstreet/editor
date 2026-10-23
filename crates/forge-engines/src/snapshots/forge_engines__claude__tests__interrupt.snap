@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/claude.rs
-assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -84,6 +83,7 @@ expression: "(events, outcome)"
         Outcome {
             status: Cancelled,
             error: None,
+            retry: None,
         },
     ),
 )

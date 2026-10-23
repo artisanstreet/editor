@@ -7,15 +7,17 @@ use super::super::kit;
 
 /// A plot fraction from a data fraction.
 #[expect(clippy::cast_possible_truncation, reason = "plot fractions fit an f32")]
-pub(super) fn f32_of(value: f64) -> f32 {
+pub(super) const fn f32_of(value: f64) -> f32 {
     value as f32
 }
 
 /// A count as a float.
 #[expect(clippy::cast_precision_loss, reason = "counts stay far below 2^52")]
-pub(super) fn f64_of(count: usize) -> f64 {
+pub(super) const fn f64_of(count: usize) -> f64 {
     count as f64
 }
+
+pub(super) use crate::f32_of_count;
 
 /// The floor of `value` as an index; 0 for negative or non-finite values.
 pub(super) fn index_of(value: f64) -> usize {
@@ -127,7 +129,7 @@ impl Domain {
 
     /// The value at fraction `t`.
     pub(super) fn value_at(self, t: f32) -> f64 {
-        self.lo + f64::from(t) * self.span()
+        f64::from(t).mul_add(self.span(), self.lo)
     }
 }
 
@@ -202,7 +204,7 @@ pub(super) fn quantile(sorted: &[f64], q: f64) -> Option<f64> {
     let below = index_of(position).min(last);
     let above = (below + 1).min(last);
     let t = position - f64_of(below);
-    Some(sorted[below] * (1.0 - t) + sorted[above] * t)
+    Some(sorted[above].mul_add(t, sorted[below] * (1.0 - t)))
 }
 
 /// The finite values, sorted.

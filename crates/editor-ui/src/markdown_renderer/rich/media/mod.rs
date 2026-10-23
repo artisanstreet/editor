@@ -26,6 +26,10 @@ pub use source::{MediaFetch, MediaFetcher, MediaRequest};
 
 /// The actual fetch/decode future owns its permit, including synchronous native
 /// parsing. Dropping a view cannot admit replacement work while that poll runs.
+#[expect(
+    clippy::expect_used,
+    reason = "the media pool is static and never closed"
+)]
 async fn work_permit() -> tokio::sync::OwnedSemaphorePermit {
     super::budget::media_work()
         .acquire_owned()

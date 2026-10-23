@@ -70,7 +70,7 @@ impl ResidentBytes for ToolKind {
                     + payload(change.diff.as_ref())
                     + match &change.op {
                         FileOp::Move { from } => from.capacity(),
-                        _ => 0,
+                        FileOp::Add | FileOp::Modify | FileOp::Delete => 0,
                     }
             }),
             Self::Search { pattern, path, .. } => pattern.capacity() + optional(path.as_ref()),
@@ -194,7 +194,9 @@ impl ResidentBytes for Item {
                     + match kind {
                         NoticeKind::Goal { state } => state.capacity(),
                         NoticeKind::Reroute { model } => model.capacity(),
-                        NoticeKind::Safety | NoticeKind::Info => 0,
+                        NoticeKind::YouShouldKnow { .. }
+                        | NoticeKind::Safety
+                        | NoticeKind::Info => 0,
                     }
             }
             ItemKind::Error { message, .. } => message.resident_bytes(),

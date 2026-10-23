@@ -30,7 +30,7 @@ pub(super) const ROOT_SLOT: Slot = 0;
 
 /// One normalized content revision and its UI style memos.
 #[derive(Debug)]
-pub(crate) struct PreparedMarkdown {
+pub struct PreparedMarkdown {
     root: PreparedBlocks,
     flow: Vec<FlowRow>,
 }
@@ -83,7 +83,7 @@ impl PreparedParts {
             for block in blocks {
                 match block {
                     Block::Heading { spans, .. } | Block::Paragraph { spans, .. } => {
-                        result.inline.push_back(flatten_inline_with_swatches(spans))
+                        result.inline.push_back(flatten_inline_with_swatches(spans));
                     }
                     Block::Code(fence) => result
                         .fences
@@ -120,9 +120,9 @@ impl PreparedParts {
 
 impl PreparedMarkdown {
     #[cfg(test)]
-    fn new(document: MarkdownDocument) -> Self {
-        let parts = PreparedParts::new(&document, None);
-        Self::from_indexed_parts(&document, parts, None)
+    fn new(document: &MarkdownDocument) -> Self {
+        let parts = PreparedParts::new(document, None);
+        Self::from_indexed_parts(document, parts, None)
     }
     pub(super) fn from_indexed_parts(
         document: &MarkdownDocument,
@@ -164,7 +164,7 @@ impl PreparedMarkdown {
                     ));
                 }
             }
-            row.gap = style.context.spacing.iter().map(indexed_gap).sum();
+            row.gap = style.context.spacing.iter().copied().map(indexed_gap).sum();
         }
         Self { root, flow }
     }
@@ -189,7 +189,7 @@ impl PreparedMarkdown {
                 .sum::<usize>()
     }
 
-    pub(crate) fn block_count(&self) -> usize {
+    pub(crate) const fn block_count(&self) -> usize {
         self.flow.len()
     }
 
@@ -209,9 +209,11 @@ impl PreparedMarkdown {
                 && let PreparedKind::Code(code) = &block.kind
                 && let Some(diagram) = &code.fence.diagram
             {
-                let image = diagram.image.clone();
+                let images = [Arc::clone(&diagram.dark), Arc::clone(&diagram.light)];
                 cx.defer(move |cx| {
-                    cx.drop_image(image, None);
+                    for image in images {
+                        cx.drop_image(image, None);
+                    }
                     // Other owners may still draw this image in cached scenes.
                     cx.refresh_windows();
                 });
@@ -224,7 +226,7 @@ impl PreparedMarkdown {
     }
 }
 
-fn indexed_gap(spacing: &crate::markdown::LeafSpacing) -> f32 {
+fn indexed_gap(spacing: crate::markdown::LeafSpacing) -> f32 {
     use crate::markdown::{BlockShape, LeafSpacing};
     let shape = |shape: BlockShape| match shape {
         BlockShape::Paragraph => Block::Paragraph {
@@ -267,16 +269,16 @@ fn indexed_gap(spacing: &crate::markdown::LeafSpacing) -> f32 {
             current,
             in_item,
         } => {
-            let scope = if *in_item {
+            let scope = if in_item {
                 BlockScope::Item
             } else {
                 BlockScope::Root
             };
-            let bottom = super::block_margins(&shape(*previous), scope).1;
+            let bottom = super::block_margins(&shape(previous), scope).1;
             if matches!(previous, BlockShape::Heading(2..=4)) {
                 bottom
             } else {
-                bottom.max(super::block_margins(&shape(*current), scope).0)
+                bottom.max(super::block_margins(&shape(current), scope).0)
             }
         }
     }
@@ -298,14 +300,14 @@ fn collect_selection(
             order,
             text: presentation.text.clone(),
             separator,
-            copies: presentation.copies.clone(),
+            copies: Rc::clone(&presentation.copies),
         });
     };
     for block in &blocks.blocks {
         match &block.kind {
             PreparedKind::Heading { leaf: content, .. }
             | PreparedKind::Paragraph { leaf: content } => {
-                leaf(block.selector, &content.base, separator, output)
+                leaf(block.selector, &content.base, separator, output);
             }
             PreparedKind::Html { id, source } => {
                 let mut order = prefix.to_vec();
@@ -428,7 +430,7 @@ fn flatten_flow(root: &PreparedBlocks) -> Vec<FlowRow> {
                     for row in 0..table.rows.len() {
                         output.push(FlowRow {
                             kind: FlowKind::TableRow {
-                                block: block.clone(),
+                                block: Rc::clone(block),
                                 row,
                             },
                             indent,
@@ -437,8 +439,11 @@ fn flatten_flow(root: &PreparedBlocks) -> Vec<FlowRow> {
                         });
                     }
                 }
-                _ => output.push(FlowRow {
-                    kind: FlowKind::Block(block.clone()),
+                PreparedKind::Heading { .. }
+                | PreparedKind::Paragraph { .. }
+                | PreparedKind::Code(_)
+                | PreparedKind::Html { .. } => output.push(FlowRow {
+                    kind: FlowKind::Block(Rc::clone(block)),
                     indent,
                     markers: Vec::new(),
                     gap: 0.0,
@@ -460,7 +465,7 @@ struct SlotTable {
 }
 
 impl SlotTable {
-    fn push(&mut self) -> Slot {
+    const fn push(&mut self) -> Slot {
         let slot = self.count;
         self.count += 1;
         slot
@@ -579,6 +584,10 @@ fn prepare_block(
             text: slots.push(),
             copy_state: slots.push(),
             copy: slots.push(),
+            #[expect(
+                clippy::expect_used,
+                reason = "normalization yields one fence per code block, in order"
+            )]
             fence: PreparedFence::new(parts.fences.pop_front().expect("normalized code fence")),
         })),
         Block::Html { source } => PreparedKind::Html {
@@ -686,6 +695,10 @@ impl PreparedLeaf {
     fn resident_bytes(&self) -> usize {
         std::mem::size_of::<LeafPresentation>() + self.base.heap_bytes()
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "normalization yields one inline leaf per leaf block, in order"
+    )]
     fn new(parts: &mut PreparedParts) -> Self {
         Self {
             base: Rc::new(LeafPresentation::from_flat(
@@ -694,7 +707,7 @@ impl PreparedLeaf {
         }
     }
     pub(super) fn presentation(&self) -> Rc<LeafPresentation> {
-        self.base.clone()
+        Rc::clone(&self.base)
     }
 }
 
@@ -813,9 +826,9 @@ impl LeafPresentation {
         let mono_family = theme.typography.mono.family;
         let key = (
             [
-                theme.colors.foreground,
-                theme.colors.muted_foreground,
-                theme.colors.banner_info,
+                theme.colors.text,
+                theme.colors.text_muted,
+                theme.colors.link,
             ],
             mono_family,
         );
@@ -858,7 +871,7 @@ impl LeafPresentation {
 /// Number of [`CodeTokenKind`] variants, for the resolved kind palette.
 const CODE_TOKEN_KINDS: usize = 7;
 
-fn kind_index(kind: CodeTokenKind) -> usize {
+const fn kind_index(kind: CodeTokenKind) -> usize {
     match kind {
         CodeTokenKind::Comment => 0,
         CodeTokenKind::Str => 1,
@@ -1027,7 +1040,8 @@ impl PreparedFenceData {
                 .sum::<usize>()
             + rich
             + self.diagram.as_ref().map_or(0, |diagram| {
-                super::rich::image_resident_bytes(&diagram.image)
+                super::rich::image_resident_bytes(&diagram.dark)
+                    + super::rich::image_resident_bytes(&diagram.light)
             })
     }
     fn new(fence: &CodeFence, renderer: Option<&gpui::SvgRenderer>) -> Self {
@@ -1075,7 +1089,7 @@ impl PreparedFenceData {
 }
 
 impl PreparedFence {
-    fn new(data: PreparedFenceData) -> Self {
+    const fn new(data: PreparedFenceData) -> Self {
         Self {
             data,
             resolved: RefCell::new(None),
@@ -1086,13 +1100,13 @@ impl PreparedFence {
     /// resolves unchanged.
     pub(super) fn highlights(&self, theme: &ArtisanTheme) -> Rc<[(Range<usize>, HighlightStyle)]> {
         let key = [
-            theme.colors.muted_foreground,
-            theme.colors.banner_success,
-            theme.colors.banner_warning,
-            theme.colors.accent_foreground,
-            theme.colors.primary,
-            theme.colors.question_to,
-            theme.colors.foreground,
+            theme.colors.syntax.comment,
+            theme.colors.syntax.string,
+            theme.colors.syntax.number,
+            theme.colors.syntax.keyword,
+            theme.colors.syntax.r#type,
+            theme.colors.syntax.function,
+            theme.colors.text,
         ];
         let mut memo = self.resolved.borrow_mut();
         if let Some(resolved) = memo.as_ref()
@@ -1125,7 +1139,7 @@ mod fence_color_tests {
             .unwrap()
             .parse_document("- first\n  - nested\n- last\n\n| a | b |\n| --- | --- |\n| x | y |\n")
             .unwrap();
-        let prepared = PreparedMarkdown::new(document);
+        let prepared = PreparedMarkdown::new(&document);
         assert_eq!(prepared.block_count(), 5);
         assert_eq!(
             prepared

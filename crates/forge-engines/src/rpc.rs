@@ -5,7 +5,7 @@ use crate::process::{self, EngineProcess};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-pub(crate) struct Session {
+pub struct Session {
     process: EngineProcess,
     next_id: u64,
 }
@@ -66,12 +66,12 @@ impl Session {
 }
 
 /// JSON-RPC's "invalid params": a request Artisan can't read.
-pub(crate) const INVALID_PARAMS: i64 = -32602;
+pub const INVALID_PARAMS: i64 = -32602;
 /// JSON-RPC's "method not found": a request Artisan doesn't serve.
-pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
+pub const METHOD_NOT_FOUND: i64 = -32601;
 
 #[derive(Debug)]
-pub(crate) struct Response {
+pub struct Response {
     pub id: u64,
     pub method: String,
     pub result: Result<Value, RpcError>,
@@ -80,7 +80,7 @@ pub(crate) struct Response {
 /// A JSON-RPC error response: the engine's code, when it gave one, and its
 /// message with any detail it added.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RpcError {
+pub struct RpcError {
     pub code: Option<i64>,
     pub message: String,
 }
@@ -93,30 +93,24 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
-/// Correlation and wire queues shared by ACP and Codex; provider semantics stay
-/// in their decoders. No process/task lifecycle is hidden in this value.
+/// Codex's correlation and wire queues; provider semantics stay in its
+/// decoder. No process/task lifecycle is hidden in this value.
 #[derive(Default)]
-pub(crate) struct State {
-    jsonrpc: bool,
+pub struct State {
     pub next_id: u64,
     requests: std::collections::HashMap<u64, String>,
     pub outbox: Vec<Value>,
     pub responses: Vec<Response>,
 }
 impl State {
-    pub fn acp() -> Self {
-        Self {
-            jsonrpc: true,
-            ..Self::default()
-        }
-    }
     pub fn request(&mut self, method: &str, params: Value) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        let mut message = json!({ "id": id, "method": method, "params": params });
-        if self.jsonrpc {
-            message["jsonrpc"] = json!("2.0");
-        }
+        let mut fields = serde_json::Map::new();
+        fields.insert("id".to_owned(), id.into());
+        fields.insert("method".to_owned(), method.into());
+        fields.insert("params".to_owned(), params);
+        let message = Value::Object(fields);
         self.sent(&message);
         self.outbox.push(message);
         id
@@ -139,30 +133,9 @@ impl State {
 
     fn answer(&mut self, rpc: Value, field: &str, value: Value) {
         let mut message = serde_json::Map::new();
-        if self.jsonrpc {
-            message.insert("jsonrpc".to_owned(), Value::from("2.0"));
-        }
         message.insert("id".to_owned(), rpc);
         message.insert(field.to_owned(), value);
         self.outbox.push(Value::Object(message));
-    }
-
-    pub fn notify(&mut self, method: &str, params: Option<Value>) {
-        let mut message = json!({ "method": method });
-        if self.jsonrpc {
-            message["jsonrpc"] = json!("2.0");
-        }
-        if let Some(params) = params {
-            message["params"] = params;
-        }
-        self.outbox.push(message);
-    }
-    pub fn response(&mut self, message: &Value) -> Option<Response> {
-        self.respond(
-            &message["id"],
-            message.get("result").cloned(),
-            message.get("error"),
-        )
     }
 
     /// Correlates a response from its parts.
@@ -177,25 +150,28 @@ impl State {
             tracing::warn!(id, "engine answered an unknown RPC request");
             return None;
         };
-        let result = if let Some(error) = error {
-            let message = error["message"].as_str().unwrap_or("engine error");
-            let detail = error["data"]["message"]
-                .as_str()
-                .or_else(|| error["data"].as_str());
-            Err(RpcError {
-                code: error["code"].as_i64(),
-                message: match detail {
-                    Some(detail) if detail.starts_with(message) => detail.to_owned(),
-                    Some(detail) => format!("{message}: {detail}"),
-                    None => message.to_owned(),
-                },
-            })
-        } else {
-            result.ok_or_else(|| RpcError {
-                code: None,
-                message: "engine RPC response omitted result".to_owned(),
-            })
-        };
+        let result = error.map_or_else(
+            || {
+                result.ok_or_else(|| RpcError {
+                    code: None,
+                    message: "engine RPC response omitted result".to_owned(),
+                })
+            },
+            |error| {
+                let message = error["message"].as_str().unwrap_or("engine error");
+                let detail = error["data"]["message"]
+                    .as_str()
+                    .or_else(|| error["data"].as_str());
+                Err(RpcError {
+                    code: error["code"].as_i64(),
+                    message: match detail {
+                        Some(detail) if detail.starts_with(message) => detail.to_owned(),
+                        Some(detail) => format!("{message}: {detail}"),
+                        None => message.to_owned(),
+                    },
+                })
+            },
+        );
         Some(Response { id, method, result })
     }
 }
@@ -208,19 +184,25 @@ mod tests {
         let mut state = State::default();
         let first = state.request("first", json!({}));
         let second = state.request("second", json!({}));
-        assert!(
-            state
-                .response(&json!({ "id": 999, "result": {} }))
-                .is_none()
-        );
+        assert!(state.respond(&json!(999), Some(json!({})), None).is_none());
         assert_eq!(
             state
-                .response(&json!({ "id": second, "result": { "ok": true } }))
+                .respond(&json!(second), Some(json!({ "ok": true })), None)
                 .unwrap()
                 .method,
             "second"
         );
-        assert_eq!(state.response(&json!({ "id": first, "error": { "message": "rejected", "data": { "message": "details" } } })).unwrap().result, Err(RpcError { code: None, message: "rejected: details".into() }));
+        let error = json!({ "message": "rejected", "data": { "message": "details" } });
+        assert_eq!(
+            state
+                .respond(&json!(first), None, Some(&error))
+                .unwrap()
+                .result,
+            Err(RpcError {
+                code: None,
+                message: "rejected: details".into()
+            })
+        );
         assert!(state.requests.is_empty());
     }
 }

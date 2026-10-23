@@ -19,17 +19,33 @@
 //! The same strip carries a provider safety system's word on the current
 //! run (a held response, a reroute, a refusal), ahead of the goal: it says
 //! why the turn changed course, which the reader needs before anything else.
+//!
+//! It also carries the latest turn's note ("You should know", "Heads up")
+//! ahead of the goal, until the next turn starts or the reader closes it:
+//! the bell on its left turns into a close mark under the pointer. The
+//! note's explanation runs as a ticker after its title.
+//!
+//! A parked thread, whose failed turn Forge picks up again by itself (the
+//! provider was overloaded, or the usage limit resets), says when ahead of
+//! everything else: the thread is stopped until then, and nothing else on
+//! the strip matters before it goes. Its close mark cancels the pickup.
+//!
+//! A goal that stopped short (blocked, paused, out of usage or budget) says
+//! so in a tinted pill after the objective, and a blocked goal's target
+//! takes the warning tone. A close mark at the strip's end clears the goal
+//! at any time.
 
 use editor_ui::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::time::{Duration, Instant};
 
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
+use editor_ui::glass::tinted_card_shadows;
 use editor_ui::motion::MotionCurve;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Filter, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    Styled as _, div, px,
+    StatefulInteractiveElement as _, Styled as _, div, px,
 };
 
 const GROW: Duration = Duration::from_millis(400);
@@ -46,15 +62,31 @@ pub enum ComposerGoalState {
     Active,
     /// Paused, by the reader or by the engine waiting on a decision.
     Paused,
+    /// Stopped on something only the reader can resolve.
+    Blocked,
+    /// Stopped by the engine's usage limit.
+    UsageLimited,
+    /// Its token budget ran out.
+    BudgetLimited,
     /// The provider holds the response back while it runs a safety check.
     SafetyHolding,
     /// The provider moved the request to a more conservative model.
     SafetyRerouted,
     /// The provider refused to serve the request.
     SafetyRefused,
+    /// The latest turn's note: something to understand.
+    Note,
+    /// The latest turn's note: a decision or risk to judge.
+    HeadsUp,
+    /// Forge picks the thread's failed turn up again at a set time.
+    Parked,
 }
 
 impl ComposerGoalState {
+    const fn is_note(self) -> bool {
+        matches!(self, Self::Note | Self::HeadsUp)
+    }
+
     const fn is_safety(self) -> bool {
         matches!(
             self,
@@ -72,9 +104,21 @@ pub struct ComposerGoal {
     pub detail: Option<SharedString>,
 }
 
+/// What one of the strip's close marks does.
+pub type StripAction = std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
+
+/// The strip's close marks: one closes the note, one clears the goal and
+/// one cancels a parked turn's pickup.
+#[derive(Clone)]
+pub struct StripActions {
+    pub(crate) close_note: StripAction,
+    pub(crate) clear_goal: StripAction,
+    pub(crate) unpark: StripAction,
+}
+
 /// The strip's motion, retained by the composer across renders.
 #[derive(Debug, Default)]
-pub(crate) struct GoalStrip {
+pub struct GoalStrip {
     /// The goal painted now; while retracting, the one leaving.
     shown: Option<ComposerGoal>,
     /// When the strip started growing, while it grows.
@@ -86,7 +130,7 @@ pub(crate) struct GoalStrip {
 }
 
 /// One frame of the strip.
-pub(crate) struct GoalStripFrame {
+pub struct GoalStripFrame {
     /// How far the strip has grown out of the tab, eased.
     pub(crate) reveal: f32,
     /// The strip's content.
@@ -94,7 +138,9 @@ pub(crate) struct GoalStripFrame {
 }
 
 impl GoalStrip {
-    /// Follows the thread's goal; returns whether anything changed.
+    /// Follows the thread's goal; returns whether anything changed. With
+    /// `reduced` (reduced motion, or a thread just opened) it places and
+    /// removes the strip at once.
     pub(crate) fn set(&mut self, goal: Option<ComposerGoal>, now: Instant, reduced: bool) -> bool {
         match (goal, self.shown.clone()) {
             (None, None) => false,
@@ -141,9 +187,10 @@ impl GoalStrip {
     pub(crate) fn frame(
         &mut self,
         now: Instant,
-        theme: ArtisanTheme,
+        theme: &ArtisanTheme,
         reduced: bool,
         moving: &mut bool,
+        actions: &StripActions,
     ) -> Option<GoalStripFrame> {
         if reduced {
             if self.leaving_at.is_some() {
@@ -191,51 +238,101 @@ impl GoalStrip {
                 let swap = progress(elapsed, Duration::ZERO, SWAP_HALF * 2);
                 if swap >= 1.0 {
                     self.swap = None;
-                    goal_label(&goal, theme, label, 0.0)
+                    goal_label(&goal, theme, label, 0.0, actions)
                 } else {
                     *moving = true;
                     if swap < 0.5 {
                         let out = eased(MotionCurve::EaseInOut, swap * 2.0);
-                        goal_label(&from, theme, 1.0 - out, -4.0 * out)
+                        goal_label(&from, theme, 1.0 - out, -4.0 * out, actions)
                     } else {
                         let enter = eased(MotionCurve::EaseInOut, swap * 2.0 - 1.0);
-                        goal_label(&goal, theme, enter, 4.0 * (1.0 - enter))
+                        goal_label(&goal, theme, enter, 4.0 * (1.0 - enter), actions)
                     }
                 }
             }
-            None => goal_label(&goal, theme, label, 4.0 * (1.0 - label)),
+            None => goal_label(&goal, theme, label, 4.0 * (1.0 - label), actions),
         };
         Some(GoalStripFrame { reveal, content })
     }
 }
 
 /// The strip's label: what the goal is and where it stands.
-fn goal_label(goal: &ComposerGoal, theme: ArtisanTheme, opacity: f32, rise: f32) -> AnyElement {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the label is one element tree: glyph, objective, state, pill and close mark"
+)]
+fn goal_label(
+    goal: &ComposerGoal,
+    theme: &ArtisanTheme,
+    opacity: f32,
+    rise: f32,
+    actions: &StripActions,
+) -> AnyElement {
+    if goal.state.is_note() {
+        return note_label(goal, theme, opacity, rise, &actions.close_note);
+    }
+    // A goal that stopped short wears its state as a pill; a safety notice
+    // and an active goal's detail stay plain text.
+    let pill = match goal.state {
+        ComposerGoalState::Paused => Some(("Paused", theme.colors.banner_info)),
+        ComposerGoalState::Blocked => Some(("Blocked", theme.colors.banner_warning)),
+        ComposerGoalState::UsageLimited => {
+            Some(("Usage limit reached", theme.colors.banner_warning))
+        }
+        ComposerGoalState::BudgetLimited => Some(("Budget spent", theme.colors.banner_warning)),
+        ComposerGoalState::Active
+        | ComposerGoalState::SafetyHolding
+        | ComposerGoalState::SafetyRerouted
+        | ComposerGoalState::SafetyRefused
+        | ComposerGoalState::Note
+        | ComposerGoalState::HeadsUp
+        | ComposerGoalState::Parked => None,
+    };
     let state = match goal.state {
-        ComposerGoalState::Paused => Some(SharedString::from("Paused")),
         ComposerGoalState::Active
         | ComposerGoalState::SafetyHolding
         | ComposerGoalState::SafetyRerouted
         | ComposerGoalState::SafetyRefused => goal.detail.clone(),
+        ComposerGoalState::Paused
+        | ComposerGoalState::Blocked
+        | ComposerGoalState::UsageLimited
+        | ComposerGoalState::BudgetLimited
+        | ComposerGoalState::Note
+        | ComposerGoalState::HeadsUp
+        | ComposerGoalState::Parked => None,
     };
     let (glyph, tone) = match goal.state {
-        ComposerGoalState::Active | ComposerGoalState::Paused => (
+        ComposerGoalState::Blocked => (
             AssetId::TABLER_TARGET_ARROW,
-            theme.colors.workspace_secondary.to_paint(),
+            theme.colors.banner_warning.text.to_paint(),
+        ),
+        ComposerGoalState::Active
+        | ComposerGoalState::Paused
+        | ComposerGoalState::UsageLimited
+        | ComposerGoalState::BudgetLimited
+        | ComposerGoalState::Note
+        | ComposerGoalState::HeadsUp => (
+            AssetId::TABLER_TARGET_ARROW,
+            theme.colors.text_muted.to_paint(),
         ),
         ComposerGoalState::SafetyHolding | ComposerGoalState::SafetyRerouted => (
             AssetId::TABLER_SHIELD_LOCK,
-            theme.colors.banner_warning.to_paint(),
+            theme.colors.banner_warning.text.to_paint(),
         ),
         ComposerGoalState::SafetyRefused => (
             AssetId::TABLER_SHIELD_LOCK,
-            theme.colors.banner_error.to_paint(),
+            theme.colors.banner_error.text.to_paint(),
+        ),
+        // In the sidebar dot's amber.
+        ComposerGoalState::Parked => (
+            AssetId::TABLER_RUN_SPRINT,
+            theme.colors.banner_warning.text.to_paint(),
         ),
     };
     let headline = if goal.state.is_safety() {
         tone
     } else {
-        theme.colors.workspace_foreground.to_paint()
+        theme.colors.text.to_paint()
     };
     let blur = (rise.abs() / 2.0).min(2.0);
     div()
@@ -243,8 +340,8 @@ fn goal_label(goal: &ComposerGoal, theme: ArtisanTheme, opacity: f32, rise: f32)
         .relative()
         .top(px(rise))
         .h_full()
-        .pl(px(18.0))
-        .pr(px(14.0))
+        .pl(px(6.0))
+        .pr(px(12.0))
         .flex()
         .items_center()
         .gap(px(6.0))
@@ -273,13 +370,114 @@ fn goal_label(goal: &ComposerGoal, theme: ArtisanTheme, opacity: f32, rise: f32)
             }
         })
         .children(state.map(|state| {
-            let state = div().truncate().text_color(theme.colors.workspace_secondary.to_paint()).child(state);
+            let state = div().truncate().text_color(theme.colors.text_muted.to_paint()).child(state);
             if goal.state.is_safety() {
                 state.min_w_0()
             } else {
                 state.flex_shrink_0()
             }
         }))
+        .children(pill.map(|(label, tone)| {
+            div()
+                .debug_selector(|| "composer-goal-state".into())
+                .flex_shrink_0()
+                .h(px(18.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .rounded(px(5.0))
+                .shadow(tinted_card_shadows(theme, tone.text))
+                .bg(tone.bg.to_paint())
+                .text_size(TypographyTokens::size(TextStep::Xs))
+                .text_color(tone.text.to_paint())
+                .child(label)
+        }))
+        // A safety notice belongs to the run, not the goal: nothing to clear.
+        .when(goal.state == ComposerGoalState::Parked, |label| {
+            label
+                .child(div().flex_1())
+                .child(close_mark("composer-park-cancel", theme, &actions.unpark))
+        })
+        .when(
+            !goal.state.is_safety() && goal.state != ComposerGoalState::Parked,
+            |label| {
+                label
+                    .child(div().flex_1())
+                    .child(close_mark("composer-goal-clear", theme, &actions.clear_goal))
+            },
+        )
+        .into_any_element()
+}
+
+/// A close mark at the strip's end.
+fn close_mark(id: &'static str, theme: &ArtisanTheme, action: &StripAction) -> impl IntoElement {
+    let action = std::rc::Rc::clone(action);
+    let foreground = theme.colors.text.to_paint();
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .flex_shrink_0()
+        .size(px(15.0))
+        .cursor_pointer()
+        .text_color(theme.colors.text_muted.to_paint())
+        .hover(move |style| style.text_color(foreground))
+        .on_click(move |_, window, cx| action(window, cx))
+        .child(asset_glyph(AssetId::TABLER_X).size(px(15.0)))
+}
+
+/// A note: the bell, the note as a ticker, and a close mark at the end.
+fn note_label(
+    goal: &ComposerGoal,
+    theme: &ArtisanTheme,
+    opacity: f32,
+    rise: f32,
+    close: &StripAction,
+) -> AnyElement {
+    let tone = match goal.state {
+        ComposerGoalState::HeadsUp => theme.colors.banner_warning.text.to_paint(),
+        ComposerGoalState::Active
+        | ComposerGoalState::Paused
+        | ComposerGoalState::Blocked
+        | ComposerGoalState::UsageLimited
+        | ComposerGoalState::BudgetLimited
+        | ComposerGoalState::SafetyHolding
+        | ComposerGoalState::SafetyRerouted
+        | ComposerGoalState::SafetyRefused
+        | ComposerGoalState::Note
+        | ComposerGoalState::Parked => theme.colors.banner_info.text.to_paint(),
+    };
+    let blur = (rise.abs() / 2.0).min(2.0);
+    let foreground = theme.colors.text.to_paint();
+    let closer = close_mark("composer-note-close", theme, close);
+    div()
+        .debug_selector(|| "composer-note-label".into())
+        .relative()
+        .top(px(rise))
+        .h_full()
+        .min_w_0()
+        .pl(px(6.0))
+        .pr(px(12.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(TypographyTokens::size(TextStep::XsMid))
+        .opacity(opacity)
+        .when(blur > 0., |label| {
+            label.filter(vec![Filter::Blur(px(blur))])
+        })
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(tone)
+                .child(asset_glyph(AssetId::TABLER_BELL_EXCLAMATION).size(px(15.0))),
+        )
+        .child(
+            div().flex_1().min_w_0().child(
+                editor_ui::marquee::marquee("composer-note-ticker", goal.objective.clone())
+                    .color(foreground),
+            ),
+        )
+        .child(closer)
         .into_any_element()
 }
 
@@ -307,10 +505,24 @@ mod tests {
         }
     }
 
+    fn no_close() -> StripActions {
+        StripActions {
+            close_note: std::rc::Rc::new(|_, _| {}),
+            clear_goal: std::rc::Rc::new(|_, _| {}),
+            unpark: std::rc::Rc::new(|_, _| {}),
+        }
+    }
+
     fn reveal(strip: &mut GoalStrip, at: Instant) -> Option<(f32, bool)> {
         let mut moving = false;
         strip
-            .frame(at, ArtisanTheme::resolved(), false, &mut moving)
+            .frame(
+                at,
+                &ArtisanTheme::resolved(),
+                false,
+                &mut moving,
+                &no_close(),
+            )
             .map(|frame| (frame.reveal, moving))
     }
 
@@ -389,6 +601,10 @@ mod tests {
         ));
     }
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "reduced motion snaps the reveal to exactly 1.0"
+    )]
     fn enabling_reduced_motion_finishes_an_in_progress_transition() {
         let start = Instant::now();
         let mut strip = GoalStrip::default();
@@ -401,9 +617,10 @@ mod tests {
         let frame = strip
             .frame(
                 start + GROW / 2,
-                ArtisanTheme::resolved(),
+                &ArtisanTheme::resolved(),
                 true,
                 &mut moving,
+                &no_close(),
             )
             .unwrap();
         assert_eq!(frame.reveal, 1.0);
@@ -411,7 +628,13 @@ mod tests {
         strip.set(None, start, false);
         assert!(
             strip
-                .frame(start, ArtisanTheme::resolved(), true, &mut moving)
+                .frame(
+                    start,
+                    &ArtisanTheme::resolved(),
+                    true,
+                    &mut moving,
+                    &no_close()
+                )
                 .is_none()
         );
     }

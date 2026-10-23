@@ -4,7 +4,9 @@
 use crate::AssetId;
 use crate::asset_seam::asset_glyph;
 use crate::hover_card::{glass_hover_card, hover_card_text};
-use crate::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens};
+use crate::theme::{
+    ActiveTheme as _, ArtisanTheme, BannerColors, Oklch, Opacity, RadiusStep, RadiusTokens,
+};
 use gpui::prelude::*;
 use gpui::{Context, Div, SharedString, Window, div, px};
 
@@ -72,11 +74,10 @@ pub fn chips_row(theme: &ArtisanTheme, chips: &[EngineChip], row_key: &str) -> D
 fn engine_chip(theme: &ArtisanTheme, chip: &EngineChip, row_key: &str) -> impl IntoElement {
     let tone = tone_color(theme, chip.tone);
     let detail = chip.detail.clone();
-    let tooltip_theme = *theme;
     let selector = format!("marketplace-chip-{row_key}-{}", chip.key);
     div()
         .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector.clone())
+        .debug_selector(move || selector)
         .flex()
         .flex_row()
         .items_center()
@@ -84,54 +85,60 @@ fn engine_chip(theme: &ArtisanTheme, chip: &EngineChip, row_key: &str) -> impl I
         .h(px(20.0))
         .px(px(7.0))
         .rounded(RadiusTokens::value(RadiusStep::Lg))
-        .bg(tone.with_alpha(0.10).to_paint())
+        .bg(tone.at(Opacity::ToneTint).to_paint())
         .text_xs()
         .text_color(tone.to_paint())
         .child(
             asset_glyph(chip.icon)
                 .size(px(11.0))
-                .text_color(tone.with_alpha(0.8).to_paint()),
+                .text_color(tone.at(Opacity::ToneIcon).to_paint()),
         )
         .child(format!("{} \u{b7} {}", chip.engine, chip.label))
         .tooltip(move |_window, cx| {
             let detail = detail.clone();
-            cx.new(|_| ChipTooltip {
-                theme: tooltip_theme,
-                text: detail,
-            })
-            .into()
+            cx.new(|_| ChipTooltip { text: detail }).into()
         })
 }
 
 /// The hover text of one chip.
 struct ChipTooltip {
-    theme: ArtisanTheme,
     text: String,
 }
 
 impl Render for ChipTooltip {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *cx.theme();
         div().max_w(px(280.0)).child(glass_hover_card(
-            &self.theme,
-            div().px(px(12.0)).py(px(8.0)).child(hover_card_text(
-                &self.theme,
-                self.text.clone(),
-                &[],
-            )),
+            &theme,
+            div()
+                .px(px(12.0))
+                .py(px(8.0))
+                .child(hover_card_text(&theme, self.text.clone(), &[])),
         ))
     }
 }
 
-/// A tone's colour. Text at full strength, icons at 80%, tinted
-/// backgrounds at 10%.
+/// A tone's colour. Text at full strength, icons at [`Opacity::ToneIcon`],
+/// tinted backgrounds at [`Opacity::ToneTint`].
 #[must_use]
 pub const fn tone_color(theme: &ArtisanTheme, tone: ChipTone) -> Oklch {
+    tone_colors(theme, tone).text
+}
+
+/// A tone's tinted background, border, and text and icon colour.
+#[must_use]
+pub const fn tone_colors(theme: &ArtisanTheme, tone: ChipTone) -> BannerColors {
+    let colors = &theme.colors;
     match tone {
-        ChipTone::Success => theme.colors.banner_success,
-        ChipTone::Info => theme.colors.banner_info,
-        ChipTone::Warning => theme.colors.banner_warning,
-        ChipTone::Danger => theme.colors.destructive,
-        ChipTone::Muted => theme.colors.muted_foreground,
+        ChipTone::Success => colors.banner_success,
+        ChipTone::Info => colors.banner_info,
+        ChipTone::Warning => colors.banner_warning,
+        ChipTone::Danger => colors.banner_error,
+        ChipTone::Muted => BannerColors {
+            bg: colors.raised,
+            border: colors.line,
+            text: colors.text_muted,
+        },
     }
 }
 

@@ -5,7 +5,7 @@ use gpui::{App, AppContext as _, Asset, EntityId, Task, Window};
 use std::any::{Any, TypeId};
 use std::collections::{HashSet, VecDeque};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -56,12 +56,19 @@ impl Default for ResourceCache {
     }
 }
 impl ResourceCache {
-    pub(super) fn id(&self) -> u64 {
+    pub(super) const fn id(&self) -> u64 {
         self.id
+    }
+    #[expect(
+        clippy::expect_used,
+        reason = "nothing panics while holding the lock, so a poisoned cache is a bug"
+    )]
+    fn entries(&self) -> MutexGuard<'_, VecDeque<Entry>> {
+        self.entries.lock().expect("resource cache lock")
     }
     pub(super) fn clear(&self, cx: &mut App) {
         self.closed.store(true, Ordering::Release);
-        let entries = std::mem::take(&mut *self.entries.lock().expect("resource cache lock"));
+        let entries = std::mem::take(&mut *self.entries());
         for entry in entries {
             (entry.release)(cx);
         }
@@ -70,11 +77,19 @@ impl ResourceCache {
         clippy::too_many_arguments,
         reason = "one resource load: its key, owner, source, budget and callbacks"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential pass; splitting it would only thread its locals through helpers"
+    )]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "the entry borrowed from the guard is used to the end"
+    )]
     pub(super) fn load<A: Asset>(
         self: &Arc<Self>,
         owner: &Arc<[u64]>,
         source: &A::Source,
-        window: &mut Window,
+        window: &Window,
         cx: &mut App,
         source_bytes: usize,
         bytes: impl Fn(&A::Output) -> usize + Send + 'static,
@@ -88,14 +103,13 @@ impl ResourceCache {
             return None;
         }
         let loader = TypeId::of::<A>();
-        let mut entries = self.entries.lock().expect("resource cache lock");
+        let mut entries = self.entries();
         let index = entries.iter().position(|entry| {
             entry.loader == loader && entry.source.downcast_ref::<A::Source>() == Some(source)
         });
-        if let Some(index) = index {
-            let mut entry = entries.remove(index).expect("existing cache entry");
+        if let Some(mut entry) = index.and_then(|index| entries.remove(index)) {
             if !entry.owners.iter().any(|known| known == owner) {
-                entry.owners.push(owner.clone());
+                entry.owners.push(Arc::clone(owner));
             }
             if entry.output.is_none() && !entry.waiters.contains(&window.current_view()) {
                 entry.waiters.push(window.current_view());
@@ -126,7 +140,7 @@ impl ResourceCache {
             if output.is_some() {
                 return output;
             }
-            entries = self.entries.lock().expect("resource cache lock");
+            entries = self.entries();
         } else {
             if entries
                 .iter()
@@ -150,24 +164,28 @@ impl ResourceCache {
                     + membership_bytes
                     > MAX_BYTES
             {
-                let Some(index) = entries.iter().position(|entry| entry.output.is_some()) else {
+                let Some(ready) = entries
+                    .iter()
+                    .position(|entry| entry.output.is_some())
+                    .and_then(|index| entries.remove(index))
+                else {
                     drop(entries);
                     for entry in removed {
                         (entry.release)(cx);
                     }
                     return None;
                 };
-                removed.push(entries.remove(index).expect("existing ready entry"));
+                removed.push(ready);
             }
             drop(entries);
             for entry in removed {
                 (entry.release)(cx);
             }
-            entries = self.entries.lock().expect("resource cache lock");
+            entries = self.entries();
             let asset_source = source.clone();
             entries.push_back(Entry {
                 loader,
-                owners: vec![owner.clone()],
+                owners: vec![Arc::clone(owner)],
                 waiters: vec![window.current_view()],
                 source: Box::new(source.clone()),
                 output: None,
@@ -178,34 +196,30 @@ impl ResourceCache {
         }
         drop(entries);
         let (task, _) = cx.fetch_asset::<A>(source);
-        let output = match task.clone().now_or_never() {
-            Some(output) => output,
-            None => {
-                let mut entries = self.entries.lock().expect("resource cache lock");
-                let entry = entries.iter_mut().find(|entry| {
-                    entry.loader == loader
-                        && entry.source.downcast_ref::<A::Source>() == Some(source)
-                })?;
-                if entry.task.is_none() {
-                    let cache = Arc::downgrade(self);
-                    let source = source.clone();
-                    entry.task = Some(cx.spawn(async move |cx| {
-                        let output = task.await;
-                        cx.update(|cx| {
-                            // Publish even when the loading block has left the viewport.
-                            // This task never keeps the thread cache alive by itself.
-                            if let Some(cache) = cache.upgrade() {
-                                let cost = bytes(&output).saturating_add(source_bytes);
-                                cache.publish::<A>(&source, &output, cost, release, cx);
-                            } else {
-                                cx.remove_asset::<A>(&source);
-                                release(&output, cx);
-                            }
-                        });
-                    }));
-                }
-                return None;
+        let Some(output) = task.clone().now_or_never() else {
+            let mut entries = self.entries();
+            let entry = entries.iter_mut().find(|entry| {
+                entry.loader == loader && entry.source.downcast_ref::<A::Source>() == Some(source)
+            })?;
+            if entry.task.is_none() {
+                let cache = Arc::downgrade(self);
+                let source = source.clone();
+                entry.task = Some(cx.spawn(async move |cx| {
+                    let output = task.await;
+                    cx.update(|cx| {
+                        // Publish even when the loading block has left the viewport.
+                        // This task never keeps the thread cache alive by itself.
+                        if let Some(cache) = cache.upgrade() {
+                            let cost = bytes(&output).saturating_add(source_bytes);
+                            cache.publish::<A>(&source, &output, cost, release, cx);
+                        } else {
+                            cx.remove_asset::<A>(&source);
+                            release(&output, cx);
+                        }
+                    });
+                }));
             }
+            return None;
         };
         let cost = bytes(&output).saturating_add(source_bytes);
         self.publish::<A>(source, &output, cost, release, cx);
@@ -225,7 +239,7 @@ impl ResourceCache {
     {
         let loader = TypeId::of::<A>();
         let owned = output.clone();
-        let mut entries = self.entries.lock().expect("resource cache lock");
+        let mut entries = self.entries();
         let index = entries.iter().position(|entry| {
             entry.loader == loader && entry.source.downcast_ref::<A::Source>() == Some(source)
         });
@@ -244,7 +258,7 @@ impl ResourceCache {
         entry.release = Box::new(move |cx| release(&owned, cx));
         drop(entries);
         cx.remove_asset::<A>(source);
-        let mut entries = self.entries.lock().expect("resource cache lock");
+        let mut entries = self.entries();
         let mut removed: Vec<Entry> = Vec::new();
         while entries.len() > MAX_ENTRIES
             || entries.iter().map(Entry::resident_bytes).sum::<usize>() > MAX_BYTES
@@ -268,7 +282,7 @@ impl ResourceCache {
     /// Native rows can have deeper prefixes, so membership uses the Item prefix.
     pub(super) fn retain_owners(&self, owners: &[Vec<u64>], cx: &mut App) {
         let owners: HashSet<&[u64]> = owners.iter().map(Vec::as_slice).collect();
-        let mut entries = self.entries.lock().expect("resource cache lock");
+        let mut entries = self.entries();
         let mut removed = Vec::new();
         let mut retained = VecDeque::new();
         for mut entry in entries.drain(..) {
@@ -337,7 +351,7 @@ mod tests {
     impl Render for Fixture {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             if self.showing {
-                let released = self.released.clone();
+                let released = Arc::clone(&self.released);
                 self.cache.load::<GatedLoader>(
                     &Arc::from([42u64, 9]),
                     &self.source,
@@ -378,7 +392,7 @@ mod tests {
     impl Render for Consumer {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             if self.showing {
-                let released = self.released.clone();
+                let released = Arc::clone(&self.released);
                 self.output = self.fetcher.resources.load::<SharedLoader>(
                     &self.fetcher.owner,
                     &self.source,
@@ -411,7 +425,7 @@ mod tests {
     ) {
         let (send, receive) = oneshot::channel();
         let provider = MediaFetcher::new("forge/thread", |_| Box::pin(async { None }));
-        let cache = provider.resources.clone();
+        let cache = Arc::clone(&provider.resources);
         let source = GatedSource {
             id: 3,
             gate: Arc::new(Mutex::new(Some(receive))),
@@ -434,14 +448,14 @@ mod tests {
                     source: first_source,
                     showing: true,
                     output: None,
-                    released: released.clone(),
+                    released: Arc::clone(&released),
                 }),
                 second: cx.new(|_| Consumer {
                     fetcher: second_fetcher,
                     source: second_source,
                     showing: true,
                     output: None,
-                    released: released.clone(),
+                    released: Arc::clone(&released),
                 }),
             }
         });
@@ -508,7 +522,7 @@ mod tests {
     fn last_pending_membership_cancels_shared_worker(cx: &mut TestAppContext) {
         let (send, receive) = oneshot::channel();
         let provider = MediaFetcher::new("forge/thread", |_| Box::pin(async { None }));
-        let cache = provider.resources.clone();
+        let cache = Arc::clone(&provider.resources);
         let source = GatedSource {
             id: 4,
             gate: Arc::new(Mutex::new(Some(receive))),
@@ -524,7 +538,7 @@ mod tests {
                     source,
                     showing: true,
                     output: None,
-                    released: released.clone(),
+                    released: Arc::clone(&released),
                 })
             };
             SharedFixture {
@@ -562,13 +576,13 @@ mod tests {
         let cache = Arc::new(ResourceCache::default());
         let released = Arc::new(AtomicUsize::new(0));
         let (view, cx) = cx.add_window_view(|_, _| Fixture {
-            cache: cache.clone(),
+            cache: Arc::clone(&cache),
             source: GatedSource {
                 id: 1,
                 gate: Arc::new(Mutex::new(Some(receive))),
             },
             showing: true,
-            released: released.clone(),
+            released: Arc::clone(&released),
         });
         cx.run_until_parked();
         assert_eq!(cache.entries.lock().unwrap().len(), 1);
@@ -624,13 +638,13 @@ mod pending_tests {
         let cache = Arc::new(ResourceCache::default());
         let released = Arc::new(AtomicUsize::new(0));
         let (view, cx) = cx.add_window_view(|_, _| Fixture {
-            cache: cache.clone(),
+            cache: Arc::clone(&cache),
             source: GatedSource {
                 id: 2,
                 gate: Arc::new(Mutex::new(Some(receive))),
             },
             showing: true,
-            released: released.clone(),
+            released: Arc::clone(&released),
         });
         cx.run_until_parked();
         let source = view.read_with(cx, |view, _| view.source.clone());

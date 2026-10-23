@@ -4,7 +4,7 @@
 //! Tick labels are divs placed at the same fractions the canvas paints at,
 //! so labels and marks share one scale without measuring text.
 
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
+use crate::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::rc::Rc;
 
 use gpui::{
@@ -89,7 +89,7 @@ impl Frame {
     /// `plot` framed by its tick labels and titles. `plot` should fill its
     /// parent and position its own overlays.
     pub(super) fn wrap(self, theme: &ArtisanTheme, plot: impl IntoElement) -> Div {
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let y_labels = self.y_ticks.into_iter().map(|tick| {
             div()
                 .absolute()
@@ -162,7 +162,7 @@ impl Frame {
 
 /// Shared bounded x-axis text placement for fixed and windowed plot rows.
 pub(super) fn x_tick_strip(theme: &ArtisanTheme, ticks: Vec<Tick>) -> Div {
-    let muted = theme.colors.muted_foreground.to_paint();
+    let muted = theme.colors.text_muted.to_paint();
     div()
         .relative()
         .h(px(16.0))
@@ -330,7 +330,11 @@ pub(super) fn legend(
         .items_center()
         .gap(px(12.0))
         .children(entries.into_iter().enumerate().map(|(index, entry)| {
-            let alpha = if entry.hidden { 0.35 } else { 1.0 };
+            let alpha = if entry.hidden {
+                Opacity::LegendHidden.alpha()
+            } else {
+                1.0
+            };
             let swatch = div()
                 .flex_shrink_0()
                 .w(px(12.0))
@@ -355,7 +359,7 @@ pub(super) fn legend(
                     .opacity(alpha)
                     .text_size(TypographyTokens::size(TextStep::Xs))
                     .line_height(px(16.0))
-                    .text_color(theme.colors.foreground.to_paint())
+                    .text_color(theme.colors.text.to_paint())
                     .child(swatch)
                     .child(entry.name)
                     .into_any_element(),
@@ -434,7 +438,7 @@ pub(super) fn plot_label(theme: &ArtisanTheme, label: PlotLabel) -> Div {
         .whitespace_nowrap()
         .px(px(4.0))
         .rounded(RadiusTokens::value(RadiusStep::Xs))
-        .bg(theme.colors.background.with_alpha(0.7).to_paint())
+        .bg(theme.colors.background.at(Opacity::LabelBacking).to_paint())
         .text_size(TypographyTokens::size(TextStep::X2s))
         .line_height(px(16.0))
         .text_color(color)

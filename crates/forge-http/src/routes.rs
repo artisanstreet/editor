@@ -19,9 +19,12 @@ use forge_runs::Hub;
 use serde::Deserialize;
 use sha2::Digest as _;
 use std::sync::Arc;
+use tower_http::CompressionLevel;
+use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 
 #[derive(Clone)]
-pub(crate) struct App {
+pub struct App {
     pub hub: Hub,
     pub forge_version: String,
     pub shutdown: tokio_util::sync::CancellationToken,
@@ -32,11 +35,11 @@ pub(crate) struct App {
 
 /// The connection's client certificate (base64 DER).
 #[derive(Clone)]
-pub(crate) struct Client {
+pub struct Client {
     pub certificate: String,
 }
 
-pub(crate) fn router(app: App) -> Router {
+pub fn router(app: App) -> Router {
     let authorized = Router::new()
         .route("/state", get(state))
         .route("/events", get(events::stream))
@@ -49,19 +52,39 @@ pub(crate) fn router(app: App) -> Router {
         .route("/threads/{id}/settle", post(settle_thread))
         .route("/threads/{id}/unread", post(mark_unread))
         .route("/threads/{id}/items", get(items))
+        .route("/threads/{id}/transcript", get(transcript))
+        .route("/threads/{id}/work", get(work))
         .route("/threads/{id}/agents/{agent}/items", get(agent_items))
         .route("/threads/{id}/inspector", get(inspector))
         .route("/threads/{id}/resource", get(resource))
         .route("/threads/{id}/messages", post(send_message))
         .route("/threads/{id}/cancel", post(cancel))
+        .route("/threads/{id}/continue", post(continue_turn))
+        .route("/threads/{id}/goal/clear", post(clear_goal))
         .route("/items/{id}/answer", post(answer))
+        .route("/editor/calls/{id}", post(editor_reply))
         .route("/items/{id}", get(item))
         .route("/content/{id}", get(content_range))
         .route("/content/{id}/index", get(source_index))
         .route("/content/{id}/records", get(collection_range))
         .route("/settings/{key}", put(set_setting))
         .route("/mcp", patch(mutate_mcp))
+        .route(
+            "/mcp/sign-in/start",
+            post(crate::extensions::mcp_sign_in_start),
+        )
+        .route(
+            "/mcp/sign-in/finish",
+            post(crate::extensions::mcp_sign_in_finish),
+        )
+        .route(
+            "/mcp/sign-in/cancel",
+            post(crate::extensions::mcp_sign_in_cancel),
+        )
+        .route("/mcp/sign-out", post(crate::extensions::mcp_sign_out))
         .route("/engines/{engine}/default-model", put(set_default_model))
+        .route("/engines/{engine}/model-config", put(set_model_config))
+        .route("/engines/{engine}/model-groups", put(set_model_group))
         .route("/drafts/{scope}", get(draft).put(set_draft))
         .route("/blobs", put(put_blob))
         .route("/blobs/{hash}", get(get_blob))
@@ -74,6 +97,14 @@ pub(crate) fn router(app: App) -> Router {
             post(crate::extensions::skill_action),
         )
         .route(
+            "/marketplace/search",
+            get(crate::extensions::marketplace_search),
+        )
+        .route(
+            "/marketplace/install",
+            post(crate::extensions::marketplace_install),
+        )
+        .route(
             "/prompt",
             get(crate::extensions::prompt).put(crate::extensions::save_prompt),
         )
@@ -84,8 +115,23 @@ pub(crate) fn router(app: App) -> Router {
         .route("/pair", post(pair))
         .merge(authorized)
         .layer(DefaultBodyLimit::max(forge_store::MAX_BLOB_BYTES + 1024))
+        .layer(compression())
         .layer(middleware::from_fn(log_internal))
         .with_state(app)
+}
+
+/// zstd for clients that ask for it: the Editor does on remote hosts, where
+/// item pages and content ranges shrink 3-9x. Small bodies, images and the
+/// event stream stay as they are.
+fn compression() -> CompressionLayer<impl Predicate> {
+    CompressionLayer::new()
+        .quality(CompressionLevel::Fastest)
+        .compress_when(
+            SizeAbove::new(1024)
+                .and(NotForContentType::IMAGES)
+                .and(NotForContentType::SSE)
+                .and(NotForContentType::GRPC),
+        )
 }
 
 /// Only paired devices get past here.
@@ -109,7 +155,7 @@ async fn authorize(
     }
 }
 
-pub(crate) struct Failure(anyhow::Error, StatusCode, ErrorCode);
+pub struct Failure(anyhow::Error, StatusCode, ErrorCode);
 
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
@@ -146,7 +192,7 @@ fn not_found(what: impl std::fmt::Display) -> Failure {
     )
 }
 
-fn bad_request(error: anyhow::Error) -> Failure {
+const fn bad_request(error: anyhow::Error) -> Failure {
     Failure(error, StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
 }
 
@@ -187,7 +233,7 @@ async fn log_internal(request: Request, next: Next) -> Response {
     response
 }
 
-pub(crate) type Result<T> = std::result::Result<T, Failure>;
+pub type Result<T> = std::result::Result<T, Failure>;
 
 async fn state(AppState(app): AppState<App>) -> Result<Json<State>> {
     let snapshot = app.hub.store().state().await?;
@@ -231,7 +277,18 @@ fn account() -> artisan_api::Account {
             } else {
                 host
             };
-            artisan_api::Account { user, host }
+            // WSL sets this in every session's environment, so a Forge
+            // started from a shell has it; a systemd unit doesn't, and the
+            // Editor falls back to the default distribution.
+            let wsl_distro = std::env::var("WSL_DISTRO_NAME")
+                .ok()
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty());
+            artisan_api::Account {
+                user,
+                host,
+                wsl_distro,
+            }
         })
         .clone()
 }
@@ -324,19 +381,18 @@ async fn project_icon(
         return Ok(Json(None));
     };
     let source = IconSource::Avatar(sha2::Sha256::digest(&bytes).into());
-    let icon = match app.icons.get(&source, store) {
-        Some(icon) => icon,
-        None => {
-            let icon = match store.put_image(bytes).await {
-                Ok(blob) => Icon::Blob(blob),
-                Err(error) => {
-                    tracing::info!(project = %id, "unusable repository avatar: {error:#}");
-                    Icon::Unusable
-                }
-            };
-            app.icons.insert(source, icon.clone());
-            icon
-        }
+    let icon = if let Some(icon) = app.icons.get(&source, store) {
+        icon
+    } else {
+        let icon = match store.put_image(bytes).await {
+            Ok(blob) => Icon::Blob(blob),
+            Err(error) => {
+                tracing::info!(project = %id, "unusable repository avatar: {error:#}");
+                Icon::Unusable
+            }
+        };
+        app.icons.insert(source, icon.clone());
+        icon
     };
     Ok(Json(match icon {
         Icon::Blob(blob) => Some(blob),
@@ -361,11 +417,23 @@ async fn project_repository(
     Ok(Json(repository))
 }
 
+/// A thread the user starts names the project the next one starts in.
 async fn create_thread(
     AppState(app): AppState<App>,
     Json(request): Json<CreateThread>,
 ) -> Result<Json<Thread>> {
-    Ok(Json(app.hub.store().create_thread(request).await?))
+    let started_by_user = request.parent_thread_id.is_none() && request.spawned_by.is_none();
+    let thread = app.hub.store().create_thread(request).await?;
+    if started_by_user {
+        app.hub
+            .store()
+            .set_setting(
+                artisan_api::LAST_PROJECT_KEY.into(),
+                serde_json::Value::String(thread.project_id.as_str().to_owned()),
+            )
+            .await?;
+    }
+    Ok(Json(thread))
 }
 
 async fn threads_page(
@@ -396,7 +464,7 @@ async fn update_thread(
     Json(update): Json<UpdateThread>,
 ) -> Result<Json<Thread>> {
     let id = ThreadId(id);
-    let thread = app.hub.store().update_thread(&id, update).await?;
+    let thread = app.hub.update_thread(&id, update).await?;
     Ok(Json(
         thread.ok_or_else(|| not_found(format!("thread {id}")))?,
     ))
@@ -438,6 +506,27 @@ async fn items(
             .transcript_page(&ThreadId(id), None, query)
             .await?,
     ))
+}
+
+async fn transcript(
+    AppState(app): AppState<App>,
+    Path(id): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<ItemsPage>> {
+    Ok(Json(
+        app.hub
+            .store()
+            .transcript_rows(&ThreadId(id), query)
+            .await?,
+    ))
+}
+
+async fn work(
+    AppState(app): AppState<App>,
+    Path(id): Path<String>,
+    Query(query): Query<ItemsQuery>,
+) -> Result<Json<ItemsPage>> {
+    Ok(Json(app.hub.store().work_page(&ThreadId(id), query).await?))
 }
 
 async fn agent_items(
@@ -552,6 +641,7 @@ async fn resource(
     Query(query): Query<ResourceQuery>,
 ) -> Result<Bytes> {
     use tokio::io::AsyncReadExt as _;
+    const LIMIT: usize = 32 * 1024 * 1024;
     let thread = app
         .hub
         .store()
@@ -577,15 +667,8 @@ async fn resource(
     } else if path.is_absolute() {
         path
     } else {
-        let project = app
-            .hub
-            .store()
-            .project(&thread.project_id)
-            .await?
-            .ok_or_else(|| not_found(format!("project {}", thread.project_id)))?;
-        std::path::Path::new(&project.path).join(path)
+        app.hub.thread_folder(&thread).await?.join(path)
     };
-    const LIMIT: usize = 32 * 1024 * 1024;
     // Reject directories, devices and FIFOs before open. Opening a FIFO can
     // otherwise wait indefinitely for a writer before the byte limit applies.
     let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
@@ -651,6 +734,32 @@ async fn cancel(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Carries on the thread's stopped turn with no new message.
+async fn continue_turn(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<StatusCode> {
+    app.hub.continue_turn(&ThreadId(id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Clears the thread's goal.
+async fn clear_goal(AppState(app): AppState<App>, Path(id): Path<String>) -> Result<StatusCode> {
+    app.hub.clear_goal(&ThreadId(id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// An Editor answers a call Forge made for an agent.
+async fn editor_reply(
+    AppState(app): AppState<App>,
+    Path(id): Path<String>,
+    Json(reply): Json<artisan_api::EditorReply>,
+) -> StatusCode {
+    if app.hub.answer_editor_call(&id, reply) {
+        StatusCode::NO_CONTENT
+    } else {
+        // Another Editor answered first, or the call gave up waiting.
+        StatusCode::GONE
+    }
+}
+
 async fn answer(
     AppState(app): AppState<App>,
     Path(id): Path<String>,
@@ -660,13 +769,57 @@ async fn answer(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Every Forge setting is saved through its own validated route; an
-/// Editor keeps its own preferences on the device.
-async fn set_setting(Path(key): Path<String>) -> Result<StatusCode> {
+/// Forge settings with structure are saved through their own validated
+/// routes; plain switches are saved here. An Editor keeps its own
+/// preferences on the device.
+async fn set_setting(
+    AppState(app): AppState<App>,
+    Path(key): Path<String>,
+    Json(value): Json<serde_json::Value>,
+) -> Result<StatusCode> {
+    if key == artisan_api::TRANSPORT_KEY {
+        let Some(transport) = value.as_str().filter(|transport| {
+            [artisan_api::CLAUDE_CODE, artisan_api::CLAUDE_AI].contains(transport)
+        }) else {
+            return Err(bad_request(anyhow::anyhow!(
+                "setting {key} is {} or {}",
+                artisan_api::CLAUDE_CODE,
+                artisan_api::CLAUDE_AI
+            )));
+        };
+        app.hub
+            .store()
+            .set_setting(key, serde_json::Value::String(transport.to_owned()))
+            .await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let switches = [
+        forge_runs::SUGGESTIONS_KEY,
+        forge_runs::YOU_SHOULD_KNOW_KEY,
+        forge_runs::SUMMARY_TITLES_KEY,
+        forge_store::CONTINUE_AFTER_RESTART_KEY,
+        forge_store::RETRY_WHEN_OVERLOADED_KEY,
+        forge_store::CONTINUE_AFTER_USAGE_LIMIT_KEY,
+    ];
+    if switches.contains(&key.as_str()) {
+        let Some(enabled) = value.as_bool() else {
+            return Err(bad_request(anyhow::anyhow!(
+                "setting {key} is true or false"
+            )));
+        };
+        app.hub
+            .store()
+            .set_setting(key, serde_json::Value::Bool(enabled))
+            .await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let route = match key.as_str() {
         "global_prompt" => "PUT /prompt",
         "mcp_servers" => "PATCH /mcp",
         "default_engine_config" => "PUT /engines/{engine}/default-model",
+        artisan_api::MODEL_CONFIGS_KEY => "PUT /engines/{engine}/model-config",
+        artisan_api::MODEL_GROUPS_KEY => "PUT /engines/{engine}/model-groups",
+        artisan_api::LAST_PROJECT_KEY => "POST /threads",
         "disabled_skills" => "POST /skills/{id}/{action}",
         _ => {
             return Err(bad_request(anyhow::anyhow!(
@@ -683,12 +836,16 @@ async fn mutate_mcp(
     AppState(app): AppState<App>,
     Json(mutation): Json<artisan_api::McpMutation>,
 ) -> Result<Json<Vec<artisan_api::McpServer>>> {
-    app.hub
+    let servers = app
+        .hub
         .store()
         .mutate_mcp(mutation)
         .await
-        .map(Json)
-        .map_err(bad_request)
+        .map_err(bad_request)?;
+    // The card shows whether a new or changed server needs a sign-in.
+    let hub = app.hub.clone();
+    app.tasks.spawn(async move { hub.check_mcp_auth().await });
+    Ok(Json(servers))
 }
 
 async fn set_default_model(
@@ -708,6 +865,45 @@ async fn set_default_model(
     Ok(Json(
         app.hub.store().set_default_model(engine, model).await?,
     ))
+}
+
+/// Remembers the config chosen for one of the engine's models.
+async fn set_model_config(
+    AppState(app): AppState<App>,
+    Path(engine): Path<EngineId>,
+    Json(config): Json<artisan_api::EngineConfig>,
+) -> Result<Json<artisan_api::EngineConfig>> {
+    if config.engine != engine {
+        return Err(bad_request(anyhow::anyhow!(
+            "config for {} sent to {engine}",
+            config.engine
+        )));
+    }
+    let id = config
+        .model
+        .clone()
+        .ok_or_else(|| bad_request(anyhow::anyhow!("config names no model")))?;
+    let model = app
+        .hub
+        .engines()
+        .status(engine)
+        .models
+        .iter()
+        .find(|model| model.id == id)
+        .cloned()
+        .ok_or_else(|| bad_request(anyhow::anyhow!("model {id} is unavailable")))?;
+    Ok(Json(
+        app.hub.store().set_model_config(config, &model).await?,
+    ))
+}
+
+async fn set_model_group(
+    AppState(app): AppState<App>,
+    Path(engine): Path<EngineId>,
+    Json(group): Json<artisan_api::ModelGroup>,
+) -> Result<StatusCode> {
+    app.hub.store().set_model_group(engine, group).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn draft(
@@ -775,8 +971,8 @@ async fn engine_action(
     Path(engine): Path<EngineId>,
     Json(command): Json<artisan_api::EngineCommand>,
 ) -> Result<Json<EngineStatus>> {
-    let engines = app.hub.engines().clone();
     use artisan_api::EngineCommand as Command;
+    let engines = app.hub.engines().clone();
     if let Command::Use { version } = &command {
         forge_engines::Engines::validate_version(engine, version).map_err(bad_request)?;
     }
@@ -793,7 +989,16 @@ async fn engine_action(
                         Command::Update {} => engines.update(engine).await.map(drop),
                         Command::Rollback {} => engines.rollback(engine).await.map(drop),
                         Command::Use { version } => engines.use_version(engine, &version).await,
-                        _ => unreachable!("only installation commands spawn a worker"),
+                        Command::Login { .. }
+                        | Command::LoginCode { .. }
+                        | Command::CancelLogin { .. }
+                        | Command::Logout { .. }
+                        | Command::Refresh { .. }
+                        | Command::Versions { .. }
+                        | Command::ClaudeAiSignIn { .. }
+                        | Command::ClaudeAiSignOut { .. } => {
+                            unreachable!("only installation commands spawn a worker")
+                        }
                     } } => result,
                 };
                 match result {
@@ -819,6 +1024,25 @@ async fn engine_action(
             .map_err(bad_request)?,
         Command::CancelLogin {} => engines.cancel_login(engine),
         Command::Logout {} => engines.logout(engine).map_err(bad_request)?,
+        Command::ClaudeAiSignIn { session } => {
+            if engine != EngineId::Claude {
+                return Err(bad_request(anyhow::anyhow!(
+                    "only Claude signs in to claude.ai"
+                )));
+            }
+            engines
+                .claude_ai_sign_in(session)
+                .await
+                .map_err(bad_request)?;
+        }
+        Command::ClaudeAiSignOut {} => {
+            if engine != EngineId::Claude {
+                return Err(bad_request(anyhow::anyhow!(
+                    "only Claude signs in to claude.ai"
+                )));
+            }
+            engines.claude_ai_sign_out().map_err(bad_request)?;
+        }
         Command::Refresh {} => engines.refresh(engine).await,
         Command::Versions {} => {
             engines.list_versions(engine).await.map_err(bad_request)?;

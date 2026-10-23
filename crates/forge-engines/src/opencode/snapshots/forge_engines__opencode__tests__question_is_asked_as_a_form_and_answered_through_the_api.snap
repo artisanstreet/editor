@@ -1,0 +1,411 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"question\")"
+---
+[
+    Event(
+        Model {
+            id: "opencode-go/minimax-m3.1-flash-free",
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d735e9e70a0884e10c2",
+            parent: None,
+            status: AwaitingUser,
+            kind: Question {
+                blocking: true,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "q0",
+                            header: Some(
+                                "Colour preference",
+                            ),
+                            text: Inline(
+                                "Which colour do you prefer?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: Some(
+                                            Inline(
+                                                "Choose Red as your preferred colour",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Blue",
+                                        description: Some(
+                                            Inline(
+                                                "Choose Blue as your preferred colour",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: None,
+                answer_text: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d735e9e70a0884e10c2",
+            parent: None,
+            status: Done,
+            kind: Question {
+                blocking: true,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "q0",
+                            header: Some(
+                                "Colour preference",
+                            ),
+                            text: Inline(
+                                "Which colour do you prefer?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: Some(
+                                            Inline(
+                                                "Choose Red as your preferred colour",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Blue",
+                                        description: Some(
+                                            Inline(
+                                                "Choose Blue as your preferred colour",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: Some(
+                    Inline(
+                        [
+                            Some(
+                                Choices {
+                                    ids: Inline(
+                                        [
+                                            "option-1",
+                                        ],
+                                    ),
+                                },
+                            ),
+                        ],
+                    ),
+                ),
+                answer_text: None,
+            },
+        },
+    ),
+    Reply(
+        Reply {
+            method: Post,
+            path: "/api/session/ses_ea28ed706ffeIjmWlwiN403xfs/form/frm_15d7365e3001VMJRJc3t1Rbyqg/reply",
+            body: Some(
+                Object {
+                    "answer": Object {
+                        "q0": String("Blue"),
+                    },
+                },
+            ),
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 127,
+                output: 128,
+                reasoning: 0,
+                cache_read: 10297,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    10424,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d73a61d001vYR1YpE3RQ5LVH/0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d73a61d001vYR1YpE3RQ5LVH/0",
+            },
+            text: "You chose **Blue**.\n\nNow, back to the previous task — creating the todo list. Let me check the directory first.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d73b83476eb8d809125",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "ls -la",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d73a61d001vYR1YpE3RQ5LVH/0",
+            },
+            text: "You chose **Blue**.\n\nNow, back to the previous task — creating the todo list. Let me check the directory first.",
+            append: false,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d73b83476eb8d809125",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "ls -la",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "total 0\ndrwxrwxr-x 1 user user   8 Oct 21 09:50 .\ndrwxrwxr-x 1 user user 110 Oct 21 09:51 ..\ndrwxrwxr-x 1 user user  82 Oct 21 09:50 .git\n",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: Some(
+                    0,
+                ),
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 296,
+                output: 182,
+                reasoning: 0,
+                cache_read: 20721,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    10593,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d73a61d001vYR1YpE3RQ5LVH/0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "You chose **Blue**.\n\nNow, back to the previous task — creating the todo list. Let me check the directory first.",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d73cb3d707a8463684e",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/work/TODO.md",
+                                op: Add,
+                                diff: None,
+                            },
+                        ],
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d73cb3d707a8463684e",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/work/TODO.md",
+                                op: Add,
+                                diff: None,
+                            },
+                        ],
+                    ),
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "Created file successfully: TODO.md",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 433,
+                output: 265,
+                reasoning: 0,
+                cache_read: 31314,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    10730,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d73d3a50019HZU0VqiQDKg6Q/0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d73d3a50019HZU0VqiQDKg6Q/0",
+            },
+            text: "done\n\n- Ran `echo hello-probe` → output: `hello-probe`\n- Created `TODO.md` with two items (shell probe check, todo list recorded)\n- Colour preference captured: **Blue**",
+            append: true,
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d73d3a50019HZU0VqiQDKg6Q/0",
+            },
+            text: "done\n\n- Ran `echo hello-probe` → output: `hello-probe`\n- Created `TODO.md` with two items (shell probe check, todo list recorded)\n- Colour preference captured: **Blue**",
+            append: false,
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 537,
+                output: 311,
+                reasoning: 0,
+                cache_read: 42044,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    10834,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d73d3a50019HZU0VqiQDKg6Q/0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "done\n\n- Ran `echo hello-probe` → output: `hello-probe`\n- Created `TODO.md` with two items (shell probe check, todo list recorded)\n- Colour preference captured: **Blue**",
+                ),
+                phase: Final,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+]

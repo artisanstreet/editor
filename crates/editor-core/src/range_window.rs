@@ -138,11 +138,11 @@ impl<R: RangePage> RangeWindow<R> {
         this
     }
 
-    pub fn source(&self) -> &R::Source {
+    pub const fn source(&self) -> &R::Source {
         &self.source
     }
 
-    pub fn state(&self) -> &RangeState<R> {
+    pub const fn state(&self) -> &RangeState<R> {
         &self.state
     }
 
@@ -175,13 +175,13 @@ impl<R: RangePage> RangeWindow<R> {
         }
         if let Some(index) = self.pages.iter().position(|page| {
             page.start() <= offset && (offset < page.end() || offset == page.total())
-        }) {
-            let page = self.pages.remove(index).expect("position is in range");
-            self.pages.push_back(page.clone());
+        }) && let Some(page) = self.pages.remove(index)
+        {
+            self.pages.push_back(Arc::clone(&page));
             self.state = RangeState::Ready(page);
             self.requested = offset;
             self.read = None;
-            self.changed(cx);
+            Self::changed(cx);
             return;
         }
         self.load(offset, cx);
@@ -197,16 +197,16 @@ impl<R: RangePage> RangeWindow<R> {
         let Some(host) = self.host.upgrade() else {
             self.read = None;
             self.state = RangeState::Failed("This Forge is no longer connected.".into());
-            self.changed(cx);
+            Self::changed(cx);
             return;
         };
         let read = R::fetch(&host.read(cx).client, &self.source, offset);
         self.state = RangeState::Loading;
         self.read = Some(cx.spawn(async move |this, cx| {
             let result = read.await;
-            let _ = this.update(cx, |this, cx| this.finish(result, cx));
+            this.update(cx, |this, cx| this.finish(result, cx)).ok();
         }));
-        self.changed(cx);
+        Self::changed(cx);
     }
 
     fn finish(&mut self, result: anyhow::Result<R>, cx: &mut Context<Self>) {
@@ -215,7 +215,7 @@ impl<R: RangePage> RangeWindow<R> {
             Ok(page) => {
                 let page = Arc::new(page);
                 self.pages.retain(|old| old.start() != page.start());
-                self.pages.push_back(page.clone());
+                self.pages.push_back(Arc::clone(&page));
                 while self.pages.len() > R::KEPT {
                     self.pages.pop_front();
                 }
@@ -223,10 +223,10 @@ impl<R: RangePage> RangeWindow<R> {
             }
             Err(error) => RangeState::Failed(format!("{}: {error:#}", R::FAILURE)),
         };
-        self.changed(cx);
+        Self::changed(cx);
     }
 
-    fn changed(&self, cx: &mut Context<Self>) {
+    fn changed(cx: &mut Context<Self>) {
         cx.emit(RangeWindowEvent);
         cx.notify();
     }

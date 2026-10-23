@@ -1,11 +1,11 @@
 //! Pure mapping from Claude's stream-json lines onto items.
 
 use super::tools::{questions, todo_steps, tool_kind, validate_input};
-use crate::{EngineEvent, LiveKind, Outcome};
+use crate::{EngineEvent, LiveKind, Outcome, Retry};
 use anyhow::Context as _;
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Decision, ErrorKind, ItemId, ItemKind, MessageDirection,
-    Output, Phase, RunStatus, Status, ToolKind, Usage,
+    NoticeKind, Output, Phase, RunStatus, Status, Timestamp, ToolKind, Usage,
 };
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -20,6 +20,10 @@ const TITLE_REQUEST_ID: &str = "artisan-title";
 /// Decodes one Claude process's output. Holds just enough to settle items
 /// and answer the CLI; `feed` never does I/O.
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the session, not one state in disguise"
+)]
 pub struct ClaudeDecoder {
     reasoning_summary: crate::reasoning::Summary,
     session: Option<String>,
@@ -38,6 +42,9 @@ pub struct ClaudeDecoder {
     titled: bool,
     usage: Usage,
     refused: bool,
+    /// The usage limit the CLI said it hit, from a rejected
+    /// `rate_limit_event` until the turn's `result`.
+    limit_reached: Option<LimitReached>,
     result_seen: bool,
     /// The main session is mid-turn: its own frames arrived since the last
     /// `result`. Subagent frames don't count.
@@ -51,6 +58,8 @@ pub struct ClaudeDecoder {
     waiting_agents: HashSet<String>,
     /// Agent tool calls by the task id the CLI gives them.
     agent_tasks: HashMap<String, String>,
+    /// Every task's tool call, for a task moved to the background later.
+    task_tools: HashMap<String, String>,
     outcome: Option<Outcome>,
     compacting: Option<String>,
     counter: u32,
@@ -120,6 +129,7 @@ impl ClaudeDecoder {
             "result" => self.result(frame, &mut out),
             "control_request" => self.control_request(frame, &mut out),
             "control_response" => self.control_response(frame, &mut out),
+            "rate_limit_event" => self.rate_limit(&frame["rate_limit_info"]),
             _ => tracing::debug!(
                 kind = frame["type"].as_str(),
                 "ignored unsupported Claude frame"
@@ -165,24 +175,7 @@ impl ClaudeDecoder {
                     ..
                 },
             ) => {
-                let mut map = Map::new();
-                for (question, answer) in questions
-                    .inline()
-                    .expect("native question validated before mutation")
-                    .iter()
-                    .zip(&native)
-                {
-                    if let Some(labels) = answer.as_ref().filter(|labels| !labels.is_empty()) {
-                        map.insert(
-                            question
-                                .text
-                                .inline()
-                                .expect("adapter question is inline before storage")
-                                .to_owned(),
-                            Value::String(labels.join(", ")),
-                        );
-                    }
-                }
+                let map = answer_map(questions, &native);
                 *given = Some(answers.clone().into());
                 if map.is_empty() {
                     (
@@ -283,7 +276,7 @@ impl ClaudeDecoder {
     /// Whether a `result` arrived since the last call.
     /// Whether background agents or workflows are still running.
     #[must_use]
-    pub fn background_running(&self) -> bool {
+    pub const fn background_running(&self) -> bool {
         self.background > 0
     }
 
@@ -298,7 +291,7 @@ impl ClaudeDecoder {
 
     /// Whether the main session is mid-turn.
     #[must_use]
-    pub fn in_turn(&self) -> bool {
+    pub const fn in_turn(&self) -> bool {
         self.in_turn
     }
 
@@ -311,17 +304,17 @@ impl ClaudeDecoder {
         self.session.as_deref()
     }
 
-    pub fn finish_title(&mut self) {
+    pub const fn finish_title(&mut self) {
         self.title_pending = false;
     }
 
     #[must_use]
-    pub fn titled(&self) -> bool {
+    pub const fn titled(&self) -> bool {
         self.titled
     }
 
     /// How the last turn ended, once a `result` arrived.
-    pub fn take_outcome(&mut self) -> Option<Outcome> {
+    pub const fn take_outcome(&mut self) -> Option<Outcome> {
         self.outcome.take()
     }
 
@@ -433,6 +426,16 @@ impl ClaudeDecoder {
                 });
             }
             "task_started" => self.task_started(frame, out),
+            // A foreground command past its timeout moves to the background
+            // just before its tool result says so.
+            "task_updated" if frame["patch"]["is_backgrounded"].as_bool() == Some(true) => {
+                if let Some(tool) = str_at(frame, "task_id")
+                    .and_then(|task| self.task_tools.get(task))
+                    .cloned()
+                {
+                    self.backgrounded(&tool, out);
+                }
+            }
             "task_notification" => self.task_notification(frame, out),
             _ => {}
         }
@@ -440,6 +443,9 @@ impl ClaudeDecoder {
 
     /// A background task started: an agent's id, a backgrounded tool.
     fn task_started(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
+        if let (Some(task), Some(tool)) = (str_at(frame, "task_id"), str_at(frame, "tool_use_id")) {
+            self.task_tools.insert(task.to_owned(), tool.to_owned());
+        }
         if let (Some(task), Some(tool)) = (str_at(frame, "task_id"), str_at(frame, "tool_use_id"))
             && str_at(frame, "task_type") == Some("local_agent")
         {
@@ -462,6 +468,8 @@ impl ClaudeDecoder {
                     key: tool.to_owned(),
                     parent: None,
                     kind: ItemKind::Agent {
+                        engine: None,
+                        thread: None,
                         name: str_at(frame, "subagent_type").map(str::to_owned),
                         description: (str_at(frame, "description").unwrap_or_default().to_owned())
                             .into(),
@@ -480,9 +488,17 @@ impl ClaudeDecoder {
                 self.tools.insert(tool.key.clone(), tool);
             }
         }
-        let backgrounded = frame["is_backgrounded"].as_bool() == Some(true);
-        if let Some(tool) = str_at(frame, "tool_use_id").and_then(|id| self.tools.get_mut(id))
-            && backgrounded
+        if frame["is_backgrounded"].as_bool() == Some(true)
+            && let Some(tool) = str_at(frame, "tool_use_id")
+        {
+            self.backgrounded(tool, out);
+        }
+    }
+
+    /// The tool runs on in the background: its result only says so, and its
+    /// task notification ends it.
+    fn backgrounded(&mut self, tool: &str, out: &mut Vec<EngineEvent>) {
+        if let Some(tool) = self.tools.get_mut(tool)
             && !tool.background
         {
             tool.background = true;
@@ -533,7 +549,15 @@ impl ClaudeDecoder {
                 }
             }
             _ if tool.status.is_terminal() => return,
-            _ => {}
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Tool { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => {}
         }
         tool.status = status;
         out.push(tool.event());
@@ -574,6 +598,65 @@ impl ClaudeDecoder {
         }
     }
 
+    /// A content block opens.
+    fn block_start(&self, event: &Value, out: &mut Vec<EngineEvent>) {
+        let Some(id) = self.current.clone() else {
+            return;
+        };
+        let Ok(IndexedBlock { index }) = <IndexedBlock as serde::Deserialize>::deserialize(event)
+        else {
+            tracing::warn!(session = ?self.session, message = %id, "Claude content block omitted a valid index");
+            return;
+        };
+        match str_at(&event["content_block"], "type") {
+            Some("text") => out.push(EngineEvent::Item {
+                key: format!("{id}:{index}"),
+                parent: None,
+                status: Status::Running,
+                kind: ItemKind::AssistantMessage {
+                    text: (String::new()).into(),
+                    phase: Phase::Commentary,
+                },
+            }),
+            Some("thinking") => out.push(EngineEvent::Live {
+                target: LiveKind::Reasoning,
+                text: String::new(),
+                append: false,
+            }),
+            _ => {}
+        }
+    }
+
+    /// A content block grows.
+    fn block_delta(&self, event: &Value, out: &mut Vec<EngineEvent>) {
+        let Some(id) = self.current.as_deref() else {
+            return;
+        };
+        let Ok(IndexedBlock { index }) = <IndexedBlock as serde::Deserialize>::deserialize(event)
+        else {
+            tracing::warn!(session = ?self.session, message = %id, "Claude content delta omitted a valid index");
+            return;
+        };
+        let delta = &event["delta"];
+        let (target, text) = match str_at(delta, "type") {
+            Some("text_delta") => (
+                LiveKind::Text {
+                    key: format!("{id}:{index}"),
+                },
+                str_at(delta, "text"),
+            ),
+            Some("thinking_delta") => (LiveKind::Reasoning, str_at(delta, "thinking")),
+            _ => return,
+        };
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            out.push(EngineEvent::Live {
+                target,
+                text: text.to_owned(),
+                append: true,
+            });
+        }
+    }
+
     fn stream_event(&mut self, event: &Value, out: &mut Vec<EngineEvent>) {
         match str_at(event, "type").unwrap_or_default() {
             "message_start" => {
@@ -582,63 +665,8 @@ impl ClaudeDecoder {
                     self.current = Some(id.to_owned());
                 }
             }
-            "content_block_start" => {
-                let Some(id) = self.current.clone() else {
-                    return;
-                };
-                let Ok(IndexedBlock { index }) =
-                    <IndexedBlock as serde::Deserialize>::deserialize(event)
-                else {
-                    tracing::warn!(session = ?self.session, message = %id, "Claude content block omitted a valid index");
-                    return;
-                };
-                match str_at(&event["content_block"], "type") {
-                    Some("text") => out.push(EngineEvent::Item {
-                        key: format!("{id}:{index}"),
-                        parent: None,
-                        status: Status::Running,
-                        kind: ItemKind::AssistantMessage {
-                            text: (String::new()).into(),
-                            phase: Phase::Commentary,
-                        },
-                    }),
-                    Some("thinking") => out.push(EngineEvent::Live {
-                        target: LiveKind::Reasoning,
-                        text: String::new(),
-                        append: false,
-                    }),
-                    _ => {}
-                }
-            }
-            "content_block_delta" => {
-                let Some(id) = self.current.as_deref() else {
-                    return;
-                };
-                let Ok(IndexedBlock { index }) =
-                    <IndexedBlock as serde::Deserialize>::deserialize(event)
-                else {
-                    tracing::warn!(session = ?self.session, message = %id, "Claude content delta omitted a valid index");
-                    return;
-                };
-                let delta = &event["delta"];
-                let (target, text) = match str_at(delta, "type") {
-                    Some("text_delta") => (
-                        LiveKind::Text {
-                            key: format!("{id}:{index}"),
-                        },
-                        str_at(delta, "text"),
-                    ),
-                    Some("thinking_delta") => (LiveKind::Reasoning, str_at(delta, "thinking")),
-                    _ => return,
-                };
-                if let Some(text) = text.filter(|text| !text.is_empty()) {
-                    out.push(EngineEvent::Live {
-                        target,
-                        text: text.to_owned(),
-                        append: true,
-                    });
-                }
-            }
+            "content_block_start" => self.block_start(event, out),
+            "content_block_delta" => self.block_delta(event, out),
             "message_delta" => {
                 let Some(id) = self.current.clone() else {
                     return;
@@ -675,6 +703,39 @@ impl ClaudeDecoder {
 
     fn assistant(&mut self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
         let message = &frame["message"];
+        // The CLI's own reply to `/goal` is the goal, for the goal strip; it
+        // isn't the model talking.
+        if frame["local_command_run"]["command"] == "goal" {
+            let text = message["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|block| str_at(block, "text"))
+                .or_else(|| str_at(message, "content"))
+                .unwrap_or_default()
+                .trim();
+            let goal = [("Goal set:", "active"), ("Goal cleared:", "cleared")]
+                .into_iter()
+                .find_map(|(prefix, state)| Some((state, text.strip_prefix(prefix)?.trim())));
+            // A status line or usage reply changes nothing.
+            if let Some((state, objective)) = goal {
+                let key = parent
+                    .as_ref()
+                    .map_or_else(|| "goal".to_owned(), |parent| format!("goal:{parent}"));
+                out.push(EngineEvent::Item {
+                    key,
+                    parent,
+                    status: Status::Done,
+                    kind: ItemKind::Notice {
+                        kind: NoticeKind::Goal {
+                            state: state.to_owned(),
+                        },
+                        text: objective.into(),
+                    },
+                });
+            }
+            return;
+        }
         let Some(id) = str_at(message, "id")
             .or_else(|| str_at(frame, "uuid"))
             .map(str::to_owned)
@@ -767,6 +828,8 @@ impl ClaudeDecoder {
             "Task" | "Agent" => (
                 id.to_owned(),
                 ItemKind::Agent {
+                    engine: None,
+                    thread: None,
                     name: text("subagent_type"),
                     description: (text("description").unwrap_or_default()).into(),
                     prompt: (text("prompt")).map(Into::into),
@@ -829,7 +892,9 @@ impl ClaudeDecoder {
                 Status::Running,
             ),
         };
-        let background = input["run_in_background"].as_bool() == Some(true);
+        // A watcher and a workflow always run in the background.
+        let background = input["run_in_background"].as_bool() == Some(true)
+            || matches!(name, "Monitor" | "Workflow");
         let tool = Tool {
             key,
             parent,
@@ -883,7 +948,14 @@ impl ClaudeDecoder {
                         tool.status = settled;
                     }
                 }
-                _ => tool.status = settled,
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => tool.status = settled,
             }
             out.push(tool.event());
         }
@@ -891,7 +963,7 @@ impl ClaudeDecoder {
 
     /// A message that came in from one of this session's agents (`from` is
     /// its id) or from another session (`name` is the session's).
-    fn peer_message(&mut self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
+    fn peer_message(&self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
         let origin = &frame["origin"];
         let Some(body) = str_at(origin, "body").filter(|body| !body.trim().is_empty()) else {
             return;
@@ -991,21 +1063,43 @@ impl ClaudeDecoder {
                 "error_during_execution" => ErrorKind::Execution,
                 _ => ErrorKind::Api,
             };
-            let retryable = frame["api_error_status"]
-                .as_u64()
-                .is_some_and(|code| code == 429 || code >= 500);
+            let status = frame["api_error_status"].as_u64();
+            let retryable = status.is_some_and(|code| code == 429 || code >= 500);
             let key = self.next_key("error");
             out.push(error_item(key, kind, message.clone(), retryable));
-            Outcome::failed(message)
+            match self.limit_reached.take() {
+                Some(LimitReached { resets_at }) => {
+                    Outcome::retryable(message, Retry::UsageLimit { resets_at })
+                }
+                None if usage_limit_text(&message) => {
+                    Outcome::retryable(message, Retry::UsageLimit { resets_at: None })
+                }
+                None if retryable || message.to_lowercase().contains("overloaded") => {
+                    Outcome::retryable(message, Retry::Overloaded)
+                }
+                None => Outcome::failed(message),
+            }
         } else if self.refused {
             Outcome {
                 status: RunStatus::Refused,
                 error: None,
+                retry: None,
             }
         } else {
             Outcome::done()
         };
+        self.limit_reached = None;
         self.outcome = Some(outcome);
+    }
+
+    /// The CLI's word on the account's limits before each request. Only a
+    /// rejection matters: the turn that follows fails, and carries on once
+    /// the window it names resets.
+    fn rate_limit(&mut self, info: &Value) {
+        if str_at(info, "status") == Some("rejected") {
+            let resets_at = info["resetsAt"].as_i64().map(|seconds| seconds * 1_000);
+            self.limit_reached = Some(LimitReached { resets_at });
+        }
     }
 
     fn control_request(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
@@ -1057,19 +1151,8 @@ impl ClaudeDecoder {
                 approval,
                 ..
             } => {
-                let request = match kind {
-                    ToolKind::Shell { command, cwd, .. } => ApprovalRequest::Command {
-                        command: command.clone(),
-                        cwd: cwd.clone(),
-                    },
-                    ToolKind::Edit { .. } => ApprovalRequest::FileChange,
-                    _ => ApprovalRequest::Action {
-                        description: (reason.clone().unwrap_or_else(|| format!("Use {name}")))
-                            .into(),
-                    },
-                };
                 *approval = Some(Approval {
-                    request,
+                    request: approval_request(kind, name, reason.as_deref()),
                     reason: reason.map(Into::into),
                     options,
                     decision: None,
@@ -1085,7 +1168,14 @@ impl ClaudeDecoder {
                     decision: None,
                 });
             }
-            _ => {}
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => {}
         }
         tool.status = Status::AwaitingUser;
         out.push(tool.event());
@@ -1177,14 +1267,69 @@ impl Tool {
     }
 }
 
+/// What a `can_use_tool` request asks of the user for a `name` tool call.
+fn approval_request(kind: &ToolKind, name: &str, reason: Option<&str>) -> ApprovalRequest {
+    match kind {
+        ToolKind::Shell { command, cwd, .. } => ApprovalRequest::Command {
+            command: command.clone(),
+            cwd: cwd.clone(),
+        },
+        ToolKind::Edit { .. } => ApprovalRequest::FileChange,
+        ToolKind::AgentMessage { .. }
+        | ToolKind::Agents { .. }
+        | ToolKind::Read { .. }
+        | ToolKind::Search { .. }
+        | ToolKind::WebFetch { .. }
+        | ToolKind::WebSearch { .. }
+        | ToolKind::Mcp { .. }
+        | ToolKind::ViewImage { .. }
+        | ToolKind::Other { .. } => ApprovalRequest::Action {
+            description: (reason.map_or_else(|| format!("Use {name}"), str::to_owned)).into(),
+        },
+    }
+}
+
+/// Claude's `answers` input: question text to the chosen labels, skipped
+/// questions left out.
+#[expect(
+    clippy::expect_used,
+    reason = "native_collection_answers already proved the questions inline"
+)]
+fn answer_map(
+    questions: &artisan_api::Collection<artisan_api::Question>,
+    native: &[Option<Vec<String>>],
+) -> Map<String, Value> {
+    let mut map = Map::new();
+    for (question, answer) in questions
+        .inline()
+        .expect("native question validated before mutation")
+        .iter()
+        .zip(native)
+    {
+        if let Some(labels) = answer.as_ref().filter(|labels| !labels.is_empty()) {
+            map.insert(
+                question
+                    .text
+                    .inline()
+                    .expect("adapter question is inline before storage")
+                    .to_owned(),
+                Value::String(labels.join(", ")),
+            );
+        }
+    }
+    map
+}
+
 fn compaction(key: &str, status: Status, before: Option<u64>, after: Option<u64>) -> EngineEvent {
     EngineEvent::Item {
         key: key.to_owned(),
         parent: None,
         status,
         kind: ItemKind::Compaction {
+            summary: None,
             tokens_before: before,
             tokens_after: after,
+            switch: None,
         },
     }
 }
@@ -1204,4 +1349,17 @@ fn error_item(key: String, kind: ErrorKind, message: String, retryable: bool) ->
 
 pub(super) fn str_at<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     value.get(field).and_then(Value::as_str)
+}
+
+/// A usage limit the CLI hit: when it resets, ms, if it said.
+#[derive(Clone, Copy)]
+struct LimitReached {
+    resets_at: Option<Timestamp>,
+}
+
+/// Claude's words for an exhausted plan ("Claude AI usage limit reached",
+/// "You've hit your limit · resets 3pm").
+fn usage_limit_text(message: &str) -> bool {
+    let message = message.to_lowercase();
+    message.contains("usage limit") || message.contains("hit your limit")
 }

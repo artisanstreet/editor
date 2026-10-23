@@ -640,6 +640,7 @@ impl Old {
             })
             .unwrap_or(EngineId::Claude);
         let run = Run {
+            config: config.clone(),
             id: RunId(id),
             thread_id: thread_id.clone(),
             engine,
@@ -655,6 +656,7 @@ impl Old {
             input_cutoff: 0, // Imported displayed user messages are terminal; none are pending.
             started_at,
             ended_at: ended_at.or(Some(started_at)),
+            continuation: None,
         };
         Ok(Some(OldRun { run, config }))
     }

@@ -15,8 +15,10 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: Compaction {
+                summary: None,
                 tokens_before: None,
                 tokens_after: None,
+                switch: None,
             },
         },
         Item {
@@ -24,12 +26,14 @@ expression: "(events, outcome)"
             parent: None,
             status: Done,
             kind: Compaction {
+                summary: None,
                 tokens_before: Some(
                     967306,
                 ),
                 tokens_after: Some(
                     7389,
                 ),
+                switch: None,
             },
         },
         Usage(
@@ -55,6 +59,7 @@ expression: "(events, outcome)"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
 )

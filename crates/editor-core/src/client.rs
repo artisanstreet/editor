@@ -27,6 +27,8 @@ impl ForgeClient {
         let http = reqwest::Client::builder()
             .use_preconfigured_tls(tls)
             .connect_timeout(std::time::Duration::from_secs(10))
+            // Compressing costs more than it saves over loopback.
+            .zstd(!is_loopback(address))
             .build()
             .context("build the HTTP client")?;
         Ok(Self {
@@ -39,7 +41,7 @@ impl ForgeClient {
         format!("{}{path}", self.base)
     }
 
-    pub(crate) fn raw(&self) -> &reqwest::Client {
+    pub(crate) const fn raw(&self) -> &reqwest::Client {
         &self.http
     }
 
@@ -121,14 +123,36 @@ impl ForgeClient {
     }
 
     pub async fn state(&self) -> Result<State> {
-        self.call_decoded(self.http.get(self.url("/state")), decode_state)
-            .await
+        self.call_decoded(self.http.get(self.url("/state")), |bytes| {
+            decode_state(&bytes)
+        })
+        .await
     }
 
     pub async fn items(&self, thread: &ThreadId, query: &ItemsQuery) -> Result<ItemsPage> {
         self.call(
             self.http
                 .get(self.url(&format!("/threads/{thread}/items")))
+                .query(query),
+        )
+        .await
+    }
+
+    /// The root transcript in rows, the work between them as spans.
+    pub async fn transcript(&self, thread: &ThreadId, query: &ItemsQuery) -> Result<ItemsPage> {
+        self.call(
+            self.http
+                .get(self.url(&format!("/threads/{thread}/transcript")))
+                .query(query),
+        )
+        .await
+    }
+
+    /// Root work between `after` and `before`, newest first.
+    pub async fn work(&self, thread: &ThreadId, query: &ItemsQuery) -> Result<ItemsPage> {
+        self.call(
+            self.http
+                .get(self.url(&format!("/threads/{thread}/work")))
                 .query(query),
         )
         .await
@@ -196,6 +220,36 @@ impl ForgeClient {
             .await
     }
 
+    /// Starts signing in an HTTP MCP server; Forge answers the page to open.
+    pub async fn mcp_sign_in_start(
+        &self,
+        start: &artisan_api::McpSignInStart,
+    ) -> Result<artisan_api::McpSignInStarted> {
+        self.call(self.json(reqwest::Method::POST, "/mcp/sign-in/start", start))
+            .await
+    }
+
+    /// Hands Forge the code a sign-in's redirect brought back; answers the
+    /// server's name.
+    pub async fn mcp_sign_in_finish(&self, finish: &artisan_api::McpSignInFinish) -> Result<String> {
+        self.call(self.json(reqwest::Method::POST, "/mcp/sign-in/finish", finish))
+            .await
+    }
+
+    pub async fn mcp_sign_in_cancel(&self, state: &str) -> Result<()> {
+        self.call_empty(self.json(
+            reqwest::Method::POST,
+            "/mcp/sign-in/cancel",
+            &serde_json::json!({ "state": state }),
+        ))
+        .await
+    }
+
+    pub async fn mcp_sign_out(&self, out: &artisan_api::McpSignOut) -> Result<()> {
+        self.call_empty(self.json(reqwest::Method::POST, "/mcp/sign-out", out))
+            .await
+    }
+
     pub async fn set_default_model(
         &self,
         engine: EngineId,
@@ -207,6 +261,39 @@ impl ForgeClient {
             &model,
         ))
         .await
+    }
+
+    /// Remembers the config chosen for one of `engine`'s models.
+    pub async fn set_model_config(
+        &self,
+        config: &artisan_api::EngineConfig,
+    ) -> Result<artisan_api::EngineConfig> {
+        self.call(self.json(
+            reqwest::Method::PUT,
+            &format!("/engines/{}/model-config", config.engine),
+            config,
+        ))
+        .await
+    }
+
+    /// Remembers whether one of `engine`'s model groups is open.
+    pub async fn set_model_group(
+        &self,
+        engine: EngineId,
+        group: &artisan_api::ModelGroup,
+    ) -> Result<()> {
+        self.call_empty(self.json(
+            reqwest::Method::PUT,
+            &format!("/engines/{engine}/model-groups"),
+            group,
+        ))
+        .await
+    }
+
+    /// Saves one of Forge's plain settings: a switch, or Claude's transport.
+    pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
+        self.call_empty(self.json(reqwest::Method::PUT, &format!("/settings/{key}"), value))
+            .await
     }
 
     pub async fn create_project(&self, request: &CreateProject) -> Result<Project> {
@@ -258,6 +345,10 @@ impl ForgeClient {
 
     /// One immutable UTF-8 source window. Exact identity and progress are checked
     /// before a caller can cache or append it.
+    #[expect(
+        clippy::suspicious_operation_groupings,
+        reason = "range totals are checked against the reference's byte count on purpose"
+    )]
     pub async fn content_range(
         &self,
         source: &artisan_api::ContentRef,
@@ -279,7 +370,7 @@ impl ForgeClient {
                     limit: Some(limit),
                 }),
             limit as usize * 6 + 4096,
-            Some(source_ranges().clone()),
+            Some(std::sync::Arc::clone(source_ranges())),
             move |bytes| {
                 let mut range: artisan_api::ContentRange = serde_json::from_slice(&bytes)?;
                 anyhow::ensure!(
@@ -303,6 +394,10 @@ impl ForgeClient {
 
     /// One canonical collection page. Full count stays visible while callers
     /// mount only fetched records; a missing range is an error, never an empty Vec.
+    #[expect(
+        clippy::suspicious_operation_groupings,
+        reason = "range totals are checked against the reference's record count on purpose"
+    )]
     pub async fn collection_range<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
         reference: &artisan_api::CollectionRef,
@@ -324,7 +419,7 @@ impl ForgeClient {
                     limit: Some(limit),
                 }),
             artisan_api::COLLECTION_RANGE_BYTES * 6 + 4096,
-            Some(source_ranges().clone()),
+            Some(std::sync::Arc::clone(source_ranges())),
             move |bytes| {
                 let range: artisan_api::CollectionRange<T> = serde_json::from_slice(&bytes)?;
                 anyhow::ensure!(
@@ -345,6 +440,10 @@ impl ForgeClient {
     }
 
     /// A bounded immutable semantic topology page; absent offset selects the tail.
+    #[expect(
+        clippy::suspicious_operation_groupings,
+        reason = "leaf offsets are checked against the source's byte count on purpose"
+    )]
     pub async fn source_index_range(
         &self,
         source: &artisan_api::ContentRef,
@@ -352,15 +451,15 @@ impl ForgeClient {
         offset: Option<u64>,
         limit: u32,
     ) -> Result<artisan_api::SourceIndexRange> {
+        static INDEX_REQUESTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
         anyhow::ensure!(
             source.id.is_valid() && (1..=artisan_api::SOURCE_INDEX_PAGE_LEAVES).contains(&limit),
             "invalid semantic source query"
         );
-        static INDEX_REQUESTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-            std::sync::OnceLock::new();
-        let admission = INDEX_REQUESTS
-            .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
-            .clone();
+        let admission = std::sync::Arc::clone(
+            INDEX_REQUESTS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4))),
+        );
         let expected = source.clone();
         self.call_decoded_limited(
             self.http
@@ -499,6 +598,34 @@ impl ForgeClient {
         .await
     }
 
+    /// Carries on the thread's stopped turn with no new message.
+    pub async fn continue_turn(&self, thread: &ThreadId) -> Result<()> {
+        self.call_empty(
+            self.http
+                .post(self.url(&format!("/threads/{thread}/continue"))),
+        )
+        .await
+    }
+
+    /// Clears the thread's goal: the engine stops working toward it.
+    pub async fn clear_goal(&self, thread: &ThreadId) -> Result<()> {
+        self.call_empty(
+            self.http
+                .post(self.url(&format!("/threads/{thread}/goal/clear"))),
+        )
+        .await
+    }
+
+    /// Answers a call Forge made for an agent ([`artisan_api::EditorCall`]).
+    pub async fn reply_editor_call(
+        &self,
+        id: &str,
+        reply: &artisan_api::EditorReply,
+    ) -> Result<()> {
+        self.call_empty(self.json(reqwest::Method::POST, &format!("/editor/calls/{id}"), reply))
+            .await
+    }
+
     pub async fn answer(&self, item: &ItemId, answer: &Answer) -> Result<()> {
         self.call_empty(self.json(
             reqwest::Method::POST,
@@ -531,6 +658,7 @@ impl ForgeClient {
     pub async fn blob(&self, hash: &BlobHash) -> Result<Vec<u8>> {
         let request = self.http.get(self.url(&format!("/blobs/{hash}")));
         AbortOnDropHandle::new(runtime().spawn(async move {
+            use futures::StreamExt as _;
             let response = check(
                 request
                     .timeout(std::time::Duration::from_secs(30))
@@ -539,9 +667,9 @@ impl ForgeClient {
                     .context("reach Forge")?,
             )
             .await?;
+
             let mut stream = response.bytes_stream();
             let mut bytes = Vec::new();
-            use futures::StreamExt as _;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.context("read blob")?;
                 anyhow::ensure!(
@@ -617,6 +745,23 @@ impl ForgeClient {
         .await
     }
 
+    /// skills.sh's skills for `query`, through Forge.
+    pub async fn marketplace_search(&self, query: &str) -> Result<Vec<artisan_api::Listing>> {
+        self.call(
+            self.http
+                .get(self.url("/marketplace/search"))
+                .query(&[("q", query)]),
+        )
+        .await
+    }
+
+    /// Installs a listed skill; answers the catalog after.
+    pub async fn marketplace_install(&self, id: &str) -> Result<Vec<artisan_api::CatalogSkill>> {
+        let install = artisan_api::InstallListing { id: id.to_owned() };
+        self.call(self.json(reqwest::Method::POST, "/marketplace/install", &install))
+            .await
+    }
+
     /// The global prompt with its version and where it stands per engine.
     pub async fn global_prompt(&self) -> Result<artisan_api::GlobalPrompt> {
         self.call(self.http.get(self.url("/prompt"))).await
@@ -652,7 +797,7 @@ impl ForgeClient {
     }
 }
 
-pub(crate) async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
+pub async fn check(response: reqwest::Response) -> Result<reqwest::Response> {
     if response.status().is_success() {
         return Ok(response);
     }
@@ -669,14 +814,14 @@ pub(crate) async fn check(response: reqwest::Response) -> Result<reqwest::Respon
     Err(anyhow!(error))
 }
 
-fn decode_state(bytes: Vec<u8>) -> Result<State> {
+fn decode_state(bytes: &[u8]) -> Result<State> {
     // Probe compatibility before reading DTO fields that changed between protocols.
     #[derive(Deserialize)]
     struct Version {
         protocol: u32,
         forge_version: String,
     }
-    let version: Version = serde_json::from_slice(&bytes).context("read Forge protocol")?;
+    let version: Version = serde_json::from_slice(bytes).context("read Forge protocol")?;
     if version.protocol != artisan_api::PROTOCOL_VERSION {
         return Err(anyhow!(ApiError {
             code: artisan_api::ErrorCode::VersionMismatch,
@@ -686,10 +831,19 @@ fn decode_state(bytes: Vec<u8>) -> Result<State> {
             ),
         }));
     }
-    serde_json::from_slice(&bytes).context("read Forge state")
+    serde_json::from_slice(bytes).context("read Forge state")
 }
 
-pub(crate) async fn read_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+fn is_loopback(address: &str) -> bool {
+    let host = address.rsplit_once(':').map_or(address, |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+pub async fn read_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     use futures::StreamExt as _;
     anyhow::ensure!(
         response
@@ -721,16 +875,17 @@ mod tests {
     use super::*;
     #[gpui::test]
     fn source_admission_and_release_progress_without_polling_the_ui_again(
-        cx: &mut gpui::TestAppContext,
+        cx: &gpui::TestAppContext,
     ) {
-        // This fixture deliberately uses actual network/decoder threads.
-        cx.executor().allow_parking();
         use std::io::{Read as _, Write as _};
         use std::sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
         };
         use std::time::{Duration, Instant};
+        // This fixture deliberately uses actual network/decoder threads.
+        cx.executor().allow_parking();
+
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -759,10 +914,10 @@ mod tests {
             }
         });
         let admission = Arc::new(tokio::sync::Semaphore::new(1));
-        let held = admission.clone().try_acquire_owned().unwrap();
+        let held = Arc::clone(&admission).try_acquire_owned().unwrap();
         let decoded = Arc::new(AtomicBool::new(false));
-        let decoded_by_request = decoded.clone();
-        let admitted = admission.clone();
+        let decoded_by_request = Arc::clone(&decoded);
+        let admitted = Arc::clone(&admission);
         let http = reqwest::Client::new();
         let client = ForgeClient {
             http: http.clone(),
@@ -800,7 +955,7 @@ mod tests {
         let bytes =
             br#"{"protocol":0,"forge_version":"old","threads":"an obsolete representation"}"#
                 .to_vec();
-        let error = decode_state(bytes).unwrap_err();
+        let error = decode_state(&bytes).unwrap_err();
         assert_eq!(
             error.downcast_ref::<ApiError>().unwrap().code,
             artisan_api::ErrorCode::VersionMismatch
@@ -813,7 +968,7 @@ mod tests {
             artisan_api::PROTOCOL_VERSION
         )
         .into_bytes();
-        let error = decode_state(bytes).unwrap_err();
+        let error = decode_state(&bytes).unwrap_err();
         assert!(error.downcast_ref::<serde_json::Error>().is_some());
     }
 }

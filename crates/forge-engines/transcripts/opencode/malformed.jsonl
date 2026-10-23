@@ -1,5 +1,5 @@
-{"id": "evt_001", "type": "session.next.prompt.admitted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_002", "type": "session.next.prompted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
+{"id": "evt_001", "type": "session.inbox.enqueued", "data": {"sessionID": "ses_root", "inboxID": "msg_1", "item": {"type": "user"}}}
+{"id": "evt_002", "type": "session.execution.started", "data": {"sessionID": "ses_root"}}
 {broken-json
 null
 []

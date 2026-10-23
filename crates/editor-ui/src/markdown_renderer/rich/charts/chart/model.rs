@@ -8,8 +8,8 @@ use super::super::scale::{Domain, Ticks, exact, f64_of, index_of, nice_ticks};
 use super::{Axis, ChartSpec, Mark, XValue, series_name};
 
 /// How x positions read: category indices, or numbers.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum XScale {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum XScale {
     /// Position `i` is category `i`.
     Category(Vec<String>),
     Number,
@@ -17,17 +17,17 @@ pub(crate) enum XScale {
 
 /// One series as `(x, y)` points sorted by x; a `None` y breaks the line.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Series {
+pub struct Series {
     pub(crate) name: String,
     pub(crate) points: Vec<(f64, Option<f64>)>,
 }
 
 /// Per x of a series: where its mark spans, base to top, or a gap.
-pub(crate) type Track = Vec<(f64, Option<(f64, f64)>)>;
+pub type Track = Vec<(f64, Option<(f64, f64)>)>;
 
 /// The resolved chart data.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Model {
+pub struct Model {
     pub(crate) x: XScale,
     /// Every x any series has, sorted and distinct; every category index
     /// on a category scale.
@@ -137,7 +137,7 @@ impl Model {
                     .flatten()
                     .filter_map(|(x, y)| match x {
                         XValue::Number(x) if x.is_finite() => Some((*x, finite(*y))),
-                        _ => None,
+                        XValue::Number(_) | XValue::Text(_) => None,
                     })
                     .collect(),
             })
@@ -149,7 +149,7 @@ impl Model {
         }
     }
 
-    pub(crate) fn is_categorical(&self) -> bool {
+    pub(crate) const fn is_categorical(&self) -> bool {
         matches!(self.x, XScale::Category(_))
     }
 
@@ -362,13 +362,7 @@ impl Model {
 
 /// The y ticks for `tracks` seen through x `view`. Bars and areas, and
 /// stacks, keep their bases in view; `axis` pins either end.
-pub(crate) fn y_ticks(
-    tracks: &[Track],
-    view: Domain,
-    mark: Mark,
-    stacked: bool,
-    axis: &Axis,
-) -> Ticks {
+pub fn y_ticks(tracks: &[Track], view: Domain, mark: Mark, stacked: bool, axis: &Axis) -> Ticks {
     let with_base = stacked || matches!(mark, Mark::Bar | Mark::Area);
     let values = tracks
         .iter()

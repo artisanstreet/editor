@@ -6,7 +6,7 @@
 //! Reading a thread never moves it. Live work, an open question or an
 //! unseen outcome brings a settled thread back to the top.
 
-use artisan_api::{ProjectId, RunStatus, ThreadId, Timestamp};
+use artisan_api::{Project, ProjectId, RunStatus, Thread, ThreadId, Timestamp};
 use editor_core::HostData;
 use gpui::SharedString;
 
@@ -16,7 +16,7 @@ const DAY: i64 = 24 * HOUR;
 /// What a row's trailing dot says. At most one shows; waiting on the user
 /// outranks the work it blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RowState {
+pub enum RowState {
     Idle,
     Working,
     Waiting,
@@ -24,10 +24,13 @@ pub(crate) enum RowState {
     Unread,
     /// Unread, and the latest run failed.
     Failed,
+    /// Its failed turn waits for Forge to pick it up again (the provider
+    /// was overloaded, or the usage limit resets).
+    Parked,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RowData {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowData {
     pub id: ThreadId,
     pub title: SharedString,
     /// The repository's `owner/name`, else the project's name.
@@ -43,7 +46,7 @@ pub(crate) struct RowData {
 /// How long ago a History thread was last active. The youngest
 /// group has no heading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AgeGroup {
+pub enum AgeGroup {
     LastDay,
     LastThreeDays,
     LastMonth,
@@ -86,14 +89,14 @@ impl AgeGroup {
 }
 
 /// One non-empty age group of History.
-pub(crate) struct HistoryGroup {
+pub struct HistoryGroup {
     pub age: AgeGroup,
     /// Newest turn first.
     pub rows: Vec<RowData>,
 }
 
 #[derive(Default)]
-pub(crate) struct Lists {
+pub struct Lists {
     /// Threads not yet settled, newest turn first.
     pub inbox: Vec<RowData>,
     /// Settled threads in non-empty age groups, newest first.
@@ -102,14 +105,50 @@ pub(crate) struct Lists {
     pub next_tick: Option<Timestamp>,
 }
 
-impl Lists {
-    pub fn history_len(&self) -> usize {
-        self.history.iter().map(|group| group.rows.len()).sum()
+/// Subagent and handed-off threads live inside their parent.
+pub const fn listed(thread: &Thread) -> bool {
+    !thread.archived && thread.parent_thread_id.is_none()
+}
+
+/// What a thread's dot says; waiting on the user outranks the work it
+/// blocks, and work outranks a parked turn.
+pub fn row_state(host: &HostData, thread: &Thread) -> RowState {
+    if host.is_waiting(&thread.id) {
+        RowState::Waiting
+    } else if host.is_working(&thread.id) {
+        RowState::Working
+    } else if thread.parked_until.is_some() {
+        RowState::Parked
+    } else if thread.is_unread() {
+        match host.runs.get(&thread.id).map(|run| run.status) {
+            Some(RunStatus::Failed | RunStatus::Interrupted | RunStatus::Refused) => {
+                RowState::Failed
+            }
+            _ => RowState::Unread,
+        }
+    } else {
+        RowState::Idle
     }
 }
 
+pub fn title(thread: &Thread) -> SharedString {
+    thread
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| "New thread".to_owned())
+        .into()
+}
+
+/// The repository's `owner/name`, else the project's name.
+pub fn subtitle(host: &HostData, project: &Project) -> String {
+    host.repository(&project.id)
+        .and_then(|repository| repository.web_url.as_deref())
+        .map_or_else(|| project.name.clone(), qualified_label)
+}
+
 /// Match Forge's summary cursor ordering. Read acknowledgements do not change activity_seq.
-fn by_latest_turn(host: &HostData) -> Vec<&artisan_api::Thread> {
+pub fn by_latest_turn(host: &HostData) -> Vec<&Thread> {
     let mut threads: Vec<_> = host.threads.values().collect();
     threads.sort_by(|a, b| {
         b.activity_seq
@@ -120,7 +159,7 @@ fn by_latest_turn(host: &HostData) -> Vec<&artisan_api::Thread> {
 }
 
 /// Project and thread metadata determine rows; only visible rows request icons.
-pub(crate) fn lists(host: &HostData, open: Option<&ThreadId>, now: Timestamp) -> Lists {
+pub fn lists(host: &HostData, open: Option<&ThreadId>, now: Timestamp) -> Lists {
     let mut lists = Lists::default();
     let mut history: [Vec<RowData>; AgeGroup::ALL.len()] = Default::default();
     let mut tick = |at: Timestamp| {
@@ -130,53 +169,35 @@ pub(crate) fn lists(host: &HostData, open: Option<&ThreadId>, now: Timestamp) ->
     };
     let mut inbox = Vec::new();
     for thread in by_latest_turn(host) {
-        // Subagent and handed-off threads live inside their parent.
-        if thread.archived || thread.parent_thread_id.is_some() {
+        if !listed(thread) {
             continue;
         }
         let Some(project) = host.projects.get(&thread.project_id) else {
             continue;
         };
         let selected = open == Some(&thread.id);
-        let run = host.runs.get(&thread.id);
-        let state = if host.is_waiting(&thread.id) {
-            RowState::Waiting
-        } else if host.is_working(&thread.id) {
-            RowState::Working
-        } else if thread.is_unread() {
-            match run.map(|run| run.status) {
-                Some(RunStatus::Failed | RunStatus::Interrupted | RunStatus::Refused) => {
-                    RowState::Failed
-                }
-                _ => RowState::Unread,
-            }
-        } else {
-            RowState::Idle
-        };
+        let state = row_state(host, thread);
         let active_at = thread.activity_at;
         let elapsed = now.saturating_sub(active_at);
-        let repository = host.repository(&project.id);
-        let subtitle = repository
-            .and_then(|repository| repository.web_url.as_deref())
-            .map_or_else(|| project.name.clone(), qualified_label);
         let is_settled = thread.settled_seq > 0 && thread.settled_seq >= thread.activity_seq;
         let quiet = elapsed >= DAY;
         // Settling files the current outcome without claiming that its content was read.
-        let in_inbox = matches!(state, RowState::Working | RowState::Waiting)
-            || (!is_settled && (state != RowState::Idle || !quiet));
+        let in_inbox = matches!(
+            state,
+            RowState::Working | RowState::Waiting | RowState::Parked
+        ) || (!is_settled && (state != RowState::Idle || !quiet));
         let row = RowData {
             id: thread.id.clone(),
-            title: thread
-                .title
-                .clone()
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| "New thread".to_owned())
-                .into(),
-            subtitle: subtitle.into(),
+            title: title(thread),
+            subtitle: subtitle(host, project).into(),
             project: project.id.clone(),
             state,
             selected,
-            settleable: in_inbox && state != RowState::Working && state != RowState::Waiting,
+            settleable: in_inbox
+                && !matches!(
+                    state,
+                    RowState::Working | RowState::Waiting | RowState::Parked
+                ),
         };
         let group = AgeGroup::of(elapsed);
         if let Some(bound) = group.upper_bound() {
@@ -199,7 +220,7 @@ pub(crate) fn lists(host: &HostData, open: Option<&ThreadId>, now: Timestamp) ->
 }
 
 /// The innermost `owner/name` of a repository's web page.
-pub(crate) fn qualified_label(web_url: &str) -> String {
+pub fn qualified_label(web_url: &str) -> String {
     let path = web_url
         .split_once("://")
         .map_or(web_url, |(_, rest)| rest)

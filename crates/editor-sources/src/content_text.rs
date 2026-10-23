@@ -1,7 +1,7 @@
 //! Shared bounded raw-source viewer. Its selection scope is the loaded raw page,
 //! separate from a transcript's formatted semantic selection.
 use artisan_api::ContentRef;
-use editor_core::{ContentWindow, HostData, RangeState, RangeWindowEvent};
+use editor_core::{ContentWindow, HostData, RangeState, RangeWindow, RangeWindowEvent};
 use editor_ui::selectable_text::{SelectableText, SelectionSource, register_selection_source};
 use editor_ui::{button::Button, code_card::CodeCard, theme::ArtisanTheme};
 use gpui::{
@@ -69,7 +69,7 @@ impl ContentText {
             .update(cx, |window, cx| window.set_source(source, cx));
         self.sync(cx);
     }
-    fn sync(&mut self, cx: &mut Context<Self>) {
+    fn sync(&mut self, cx: &Context<Self>) {
         let RangeState::Ready(page) = self.window.read(cx).state() else {
             self.page = None;
             self.rows.clear();
@@ -80,7 +80,7 @@ impl ContentText {
         if self.page.as_ref().is_some_and(|old| Arc::ptr_eq(old, page)) {
             return;
         }
-        self.page = Some(page.clone());
+        self.page = Some(Arc::clone(page));
         self.text = page.text.clone().into();
         self.rows = raw_rows(&self.text);
         self.selection = Some(SelectionSource::single(
@@ -102,12 +102,14 @@ impl ContentText {
             // Native clipboard writes need one complete allocation. Share a single
             // copy slot across source views, including the final UI transfer.
             static COPIES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+            #[expect(clippy::expect_used, reason = "COPIES is static and never closed")]
             let _copy = COPIES
                 .acquire()
                 .await
                 .expect("clipboard copy semaphore stays open");
             let result = client.copy_content(&source, 32 * 1024 * 1024).await;
-            let _ = this.update(cx, |this, cx| {
+            // A closed viewer has no one to report the result to.
+            this.update(cx, |this, cx| {
                 if this.source(cx) != &source {
                     return;
                 }
@@ -117,7 +119,8 @@ impl ContentText {
                     Err(error) => this.error = Some(format!("Couldn't copy source: {error:#}")),
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         }));
         cx.notify();
     }
@@ -137,7 +140,8 @@ impl ContentText {
                 Ok::<_, anyhow::Error>(())
             }
             .await;
-            let _ = this.update(cx, |this, cx| {
+            // A closed viewer has no one to report the result to.
+            this.update(cx, |this, cx| {
                 if this.source(cx) != &source {
                     return;
                 }
@@ -146,14 +150,15 @@ impl ContentText {
                     this.error = Some(format!("Couldn't export source: {error:#}"));
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         }));
         cx.notify();
     }
 }
 // A raw page has bounded selectable fragments, including one giant line. This
 // viewer makes no claim to preserve Markdown wrapping or formatted leaf geometry.
-pub(crate) fn raw_rows(text: &str) -> Vec<Range<usize>> {
+pub fn raw_rows(text: &str) -> Vec<Range<usize>> {
     let mut rows = Vec::new();
     let mut start = 0;
     while start < text.len() {
@@ -184,9 +189,9 @@ impl Render for ContentText {
             RangeState::Loading => body = body.child("Loading source…"),
             RangeState::Failed(error) => {
                 body = body.child(error.clone()).child(
-                    Button::text("source-retry", theme, "Retry").on_activate(cx.listener(
-                        |this, _, _, cx| this.window.update(cx, |window, cx| window.retry(cx)),
-                    )),
+                    Button::text("source-retry", theme, "Retry").on_activate(
+                        cx.listener(|this, _, _, cx| this.window.update(cx, RangeWindow::retry)),
+                    ),
                 );
             }
             RangeState::Ready(page) => {
@@ -241,15 +246,15 @@ impl Render for ContentText {
                                                 artisan_api::CONTENT_RANGE_BYTES,
                                             )),
                                             cx,
-                                        )
-                                    })
+                                        );
+                                    });
                                 })),
                         )
                         .child(
                             Button::text("source-next", theme, "Next")
                                 .disabled(end == total)
                                 .on_activate(cx.listener(move |this, _, _, cx| {
-                                    this.window.update(cx, |window, cx| window.request(end, cx))
+                                    this.window.update(cx, |window, cx| window.request(end, cx));
                                 })),
                         ),
                 );

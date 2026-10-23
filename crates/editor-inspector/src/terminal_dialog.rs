@@ -14,7 +14,7 @@ use editor_ui::{
         glass_highlight_layer, glass_material_layer,
     },
     terminal_text::{TerminalPalette, highlights},
-    theme::{ArtisanTheme, RadiusStep, RadiusTokens},
+    theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens},
 };
 use gpui::{
     AnyElement, AppContext, ClipboardItem, Context, FollowMode, InteractiveElement as _,
@@ -81,10 +81,7 @@ fn home_relative(path: &str) -> String {
             (user_len > 0).then_some(prefix.len() + user_len)
         })
     };
-    match home_end {
-        Some(end) => format!("~{}", &path[end..]),
-        None => path.to_owned(),
-    }
+    home_end.map_or_else(|| path.to_owned(), |end| format!("~{}", &path[end..]))
 }
 
 struct Job {
@@ -105,7 +102,7 @@ struct Job {
     output_source: Option<gpui::Entity<editor_sources::ContentText>>,
 }
 impl Job {
-    fn missing(&self) -> bool {
+    const fn missing(&self) -> bool {
         self.unverified
             || self.shell.screen.cleared_earlier()
             || self.shell.screen.truncated_line_count() > 0
@@ -129,10 +126,10 @@ impl Layout {
             cleared: job.shell.screen.cleared_line_count(),
         }
     }
-    fn total(self) -> usize {
+    const fn total(self) -> usize {
         self.lead + self.lines + 1
     }
-    fn output(self) -> Range<usize> {
+    const fn output(self) -> Range<usize> {
         self.lead..self.lead + self.lines
     }
 }
@@ -194,10 +191,10 @@ impl TerminalDialog {
         let list = ListState::new(0, ListAlignment::Top, px(OUTPUT_LINE_HEIGHT * 20.0));
         let owner = cx.entity().downgrade();
         list.set_scroll_handler(move |_, _, cx| {
-            let _ = owner.update(cx, Self::note_scroll);
+            owner.update(cx, Self::note_scroll).ok();
         });
         let subscription = cx.subscribe(&conversation, |this, _, _: &ConversationEvent, cx| {
-            this.follow(cx)
+            this.follow(cx);
         });
         Self {
             core,
@@ -235,14 +232,22 @@ impl TerminalDialog {
                     HostEvent::Item(item)
                         if item.id == watched && item.thread_id == watched_thread =>
                     {
-                        this.set_item(item.clone());
+                        this.set_item(Arc::clone(item));
                         this.sync(cx);
                     }
                     HostEvent::Reset => {
                         this.fetch(cx);
                         this.sync(cx);
                     }
-                    _ => {}
+                    HostEvent::ImagesChanged
+                    | HostEvent::EngineInstall { .. }
+                    | HostEvent::ThreadSummaryChanged { .. }
+                    | HostEvent::Changed
+                    | HostEvent::WslDistro { .. }
+                    | HostEvent::ThreadChanged { .. }
+                    | HostEvent::Item(_)
+                    | HostEvent::Live { .. }
+                    | HostEvent::EditorCall { .. } => {}
                 }),
             );
         self.generation = self.generation.wrapping_add(1);
@@ -288,14 +293,16 @@ impl TerminalDialog {
         self.error = None;
         if self.job.take().is_some() {
             if let Some(window) = self.overlay_window.take() {
-                let _ = window.update(cx, |_, window, cx| {
-                    editor_ui::overlay::dismiss(TERMINAL_DIALOG_SELECTOR, window, cx)
-                });
+                window
+                    .update(cx, |_, window, cx| {
+                        editor_ui::overlay::dismiss(TERMINAL_DIALOG_SELECTOR, window, cx);
+                    })
+                    .ok();
             }
             cx.notify();
         }
     }
-    pub fn is_open(&self) -> bool {
+    pub const fn is_open(&self) -> bool {
         self.job.is_some()
     }
     fn follow(&mut self, cx: &mut Context<Self>) {
@@ -320,7 +327,7 @@ impl TerminalDialog {
         self.error = None;
         self.load = cx.spawn(async move |this, cx| {
             let result = client.item(&id).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
                 }
@@ -331,11 +338,12 @@ impl TerminalDialog {
                         this.sync(cx);
                     }
                     Err(error) => {
-                        this.error = Some(format!("Couldn't load shell output: {error:#}"))
+                        this.error = Some(format!("Couldn't load shell output: {error:#}"));
                     }
                 }
                 cx.notify();
-            });
+            })
+            .ok();
         });
     }
     fn set_item(&mut self, item: Arc<Item>) {
@@ -381,10 +389,9 @@ impl TerminalDialog {
                 )
             })
             .flatten();
-        let (epoch, length) = streamed
-            .as_ref()
-            .map(|stream| (Some(stream.epoch), stream.text.len_bytes()))
-            .unwrap_or((None, 0));
+        let (epoch, length) = streamed.as_ref().map_or((None, 0), |stream| {
+            (Some(stream.epoch), stream.text.len_bytes())
+        });
         let source = (epoch, length, item.seq);
         if job.source == Some(source) {
             return;
@@ -505,10 +512,11 @@ impl TerminalDialog {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.copied = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COPY_FEEDBACK_WINDOW).await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 this.copied = None;
                 cx.notify();
-            });
+            })
+            .ok();
         }));
         cx.notify();
     }
@@ -547,7 +555,7 @@ impl TerminalDialog {
                     .into_any_element()
             }
             Some(Row::Missing) => row
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .child(if job.unverified {
                     "Live output only; Forge supplied no final snapshot."
                 } else {
@@ -560,7 +568,7 @@ impl TerminalDialog {
                     let runs = highlights(
                         line,
                         &palette,
-                        theme.colors.foreground.to_paint(),
+                        theme.colors.text.to_paint(),
                         gpui::transparent_black(),
                     );
                     row.child(
@@ -575,11 +583,10 @@ impl TerminalDialog {
             Some(Row::Status) => {
                 if job.status == Status::Running {
                     row.child(
-                        div().w(px(7.5)).h(px(15.0)).bg(theme
-                            .colors
-                            .foreground
-                            .with_alpha(0.8)
-                            .to_paint()),
+                        div()
+                            .w(px(7.5))
+                            .h(px(15.0))
+                            .bg(theme.colors.text_muted.to_paint()),
                     )
                     .into_any_element()
                 } else {
@@ -592,6 +599,10 @@ impl TerminalDialog {
     }
 }
 impl Render for TerminalDialog {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the dialog's header, output list and footer build one element tree"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(job) = &self.job else {
             return div().into_any_element();
@@ -621,7 +632,7 @@ impl Render for TerminalDialog {
                 .variant(ButtonVariant::Ghost)
                 .disabled(job.output_source.is_some())
                 .on_activate(move |_, _, cx| {
-                    let _ = owner.update(cx, Self::copy_output);
+                    owner.update(cx, Self::copy_output).ok();
                 }),
             );
         let mut content = div().relative().flex().flex_col().py(px(14.0));
@@ -629,7 +640,7 @@ impl Render for TerminalDialog {
             let owner = cx.entity().downgrade();
             content = content.child(error.clone()).child(
                 Button::text("terminal-retry", theme, "Retry").on_activate(move |_, _, cx| {
-                    let _ = owner.update(cx, Self::fetch);
+                    owner.update(cx, Self::fetch).ok();
                 }),
             );
         } else if self.loading && job.data.is_none() {
@@ -665,7 +676,7 @@ impl Render for TerminalDialog {
                     )
                     .variant(ButtonVariant::Ghost)
                     .on_activate(move |_, _, cx| {
-                        let _ = owner.update(cx, Self::jump_to_latest);
+                        owner.update(cx, Self::jump_to_latest).ok();
                     }),
                 ),
             );
@@ -680,12 +691,15 @@ impl Render for TerminalDialog {
             .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
             .bg(glass_foreground_base(&theme))
             .border_1()
-            .border_color(theme.colors.border.to_paint())
-            .shadow(glass_card_shadows())
+            .border_color(theme.colors.text.at(Opacity::GlassBorder).to_paint())
+            .shadow(glass_card_shadows(
+                &theme,
+                editor_ui::theme::Elevation::Overlay,
+            ))
             .overflow_hidden()
             .occlude()
-            .child(glass_material_layer(GlassStrength::Strong, radius))
-            .child(glass_highlight_layer(GlassStrength::Strong, radius))
+            .child(glass_material_layer(&theme, GlassStrength::Strong, radius))
+            .child(glass_highlight_layer(&theme, GlassStrength::Strong, radius))
             .child(content);
         let owner = cx.entity().downgrade();
         let dialog = Dialog::new(TERMINAL_DIALOG_SELECTOR, theme, "Terminal output", card)
@@ -697,7 +711,7 @@ impl Render for TerminalDialog {
             )
             .debug_selector(TERMINAL_DIALOG_SELECTOR)
             .on_dismiss(move |_, window, cx| {
-                let _ = owner.update(cx, |this, cx| this.close(window, cx));
+                owner.update(cx, |this, cx| this.close(window, cx)).ok();
             });
         dialog.into_any_element()
     }

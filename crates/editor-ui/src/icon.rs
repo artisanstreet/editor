@@ -4,7 +4,10 @@
 
 // The `Icon*` prefix is deliberate: these types are the crate's public icon
 // vocabulary and read better fully qualified at call sites.
-#![allow(clippy::module_name_repetitions)]
+#![expect(
+    clippy::module_name_repetitions,
+    reason = "public names stay self-describing at use sites"
+)]
 
 use editor_assets::AssetId;
 use gpui::{Hsla, Pixels, Styled};
@@ -74,9 +77,7 @@ impl IconStyle {
     pub fn resolve(theme: ArtisanTheme, id: AssetId, size: IconSize, tint: IconTint) -> Self {
         let presentation = asset_glyph(id).presentation();
         let color = match (presentation, tint) {
-            (Presentation::Tinted, IconTint::Muted) => {
-                Some(theme.colors.muted_foreground.to_paint())
-            }
+            (Presentation::Tinted, IconTint::Muted) => Some(theme.colors.text_muted.to_paint()),
             (Presentation::Tinted, IconTint::Inherit) | (Presentation::FullColor, _) => None,
         };
         Self {

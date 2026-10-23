@@ -2,7 +2,7 @@
 //! cumulative height frontier clips the group; children never compress together.
 use crate::{
     Conversation,
-    fold::{Row, RowKey},
+    fold::{self, Row, RowKey},
 };
 use artisan_api::ItemId;
 use editor_ui::motion::MotionCurve;
@@ -17,22 +17,26 @@ const MAX_FLIGHTS: usize = 8;
 const MAX_ROWS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct RowClip {
+pub struct RowClip {
     pub height: Pixels,
     pub opacity: f32,
 }
 
 /// What the disclosures in flight do to one row this frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct RowDisclosure {
+pub struct RowDisclosure {
     /// The clip a flight draws it at.
     pub clip: Option<RowClip>,
     /// A flight header's open fraction (its chevron turns with it).
     pub fraction: Option<f32>,
     /// The row belongs to a group in flight.
     pub hidden: bool,
+    /// The row follows a group in flight: the space above it, eased from
+    /// its closed spacing (under the header) to its open spacing (under
+    /// the group's last row), so nothing below moves when the flight ends.
+    pub gap: Option<f32>,
 }
-pub(crate) struct Flight {
+pub struct Flight {
     members: HashSet<ItemId>,
     retained: Vec<(Row, u64)>,
     keys: Vec<RowKey>,
@@ -40,21 +44,33 @@ pub(crate) struct Flight {
     open: bool,
     from: f32,
     started: Option<Instant>,
+    /// The last frame painted the end state with the clips of the frame
+    /// before, so the list's layout has caught up with it.
+    landed: bool,
 }
 impl Flight {
     fn fraction(&self, now: Instant) -> f32 {
         let run = self.started.map_or(0.0, |started| {
             now.saturating_duration_since(started).as_secs_f64() / CLOCK.as_secs_f64()
         });
-        let eased = MotionCurve::SmoothOut.sample(run.clamp(0.0, 1.0)) as f32;
-        self.from + ((if self.open { 1.0 } else { 0.0 }) - self.from) * eased
+        let target = if self.open { 1.0 } else { 0.0 };
+        if run >= 1.0 {
+            // Exactly the end state, which ends the flight.
+            return target;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "an eased fraction in 0..=1 needs no f64 precision"
+        )]
+        let eased = MotionCurve::SmoothOut.sample(run.max(0.0)) as f32;
+        (target - self.from).mul_add(eased, self.from)
     }
     pub(crate) fn admits(&self, header: &RowKey, row: &Row) -> bool {
         let key = row.key();
         key == *header || !self.includes(row) || self.keys.contains(&key)
     }
-    fn includes(&self, row: &Row) -> bool {
-        row.anchor().is_some_and(|id| self.members.contains(id))
+    pub(crate) fn includes(&self, row: &Row) -> bool {
+        row.member().is_some_and(|id| self.members.contains(id))
     }
 }
 impl Conversation {
@@ -68,6 +84,7 @@ impl Conversation {
                 .unwrap_or_else(|| flight.fraction(now));
             flight.open = open;
             flight.started = None;
+            flight.landed = false;
             return;
         }
         if self.disclosures.len() >= MAX_FLIGHTS {
@@ -77,16 +94,32 @@ impl Conversation {
             return;
         };
         let members: HashSet<_> = match &self.rows[index].0 {
-            Row::Work { entries, .. } => entries.iter().cloned().collect(),
+            Row::Work {
+                entries, unloaded, ..
+            } => entries
+                .iter()
+                .cloned()
+                .chain(unloaded.iter().map(|first| fold::span_member(*first)))
+                .collect(),
             Row::Chain { ids, .. } => ids.iter().cloned().collect(),
-            _ => return,
+            Row::Projected { .. }
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Text { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => return,
         };
         let heights = &self.row_heights;
         let mut retained = Vec::new();
         let mut captured = HashMap::new();
         let mut seen = HashSet::new();
-        for (row, version) in self.rows[index + 1..].iter() {
-            if !row.anchor().is_some_and(|id| members.contains(id)) {
+        for (row, version) in &self.rows[index + 1..] {
+            if !row.member().is_some_and(|id| members.contains(id)) {
                 break;
             }
             let Some(height) = heights.get(&row.key()).copied() else {
@@ -114,6 +147,7 @@ impl Conversation {
                 open,
                 from: if open { 0.0 } else { 1.0 },
                 started: None,
+                landed: false,
             },
         );
     }
@@ -138,7 +172,7 @@ impl Conversation {
                     .iter()
                     .filter(|(row, _)| !present.contains(&row.key()))
                     .cloned();
-                rows.splice(index + 1..index + 1, retained);
+                rows.splice((index + 1)..=index, retained);
             }
         }
         rows
@@ -157,6 +191,10 @@ impl Conversation {
         }
     }
     /// Every changed row uses ListState's anchor-preserving, bounded invalidation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one frame of every disclosure flight, measured and spliced together"
+    )]
     pub(crate) fn advance_disclosures(&mut self, cx: &mut Context<Self>) -> bool {
         if self.disclosures.is_empty() && self.disclosure_clips.is_empty() {
             return false;
@@ -169,12 +207,9 @@ impl Conversation {
         let completed: Vec<_> = self
             .disclosures
             .iter()
-            .filter(|(_, flight)| {
-                cx.reduce_motion()
-                    || flight
-                        .started
-                        .is_some_and(|started| now.saturating_duration_since(started) >= CLOCK)
-            })
+            // A flight ends only once the list laid out its end state, so
+            // the refold that follows moves nothing.
+            .filter(|(_, flight)| cx.reduce_motion() || flight.landed)
             .map(|(key, _)| key.clone())
             .collect();
         let refold = !completed.is_empty();
@@ -188,6 +223,7 @@ impl Conversation {
         let mut clips: HashMap<RowKey, RowClip> = HashMap::new();
         let mut hidden = HashSet::new();
         let mut fractions = HashMap::new();
+        let mut gaps = HashMap::new();
         {
             let heights = &self.row_heights;
             for (header, flight) in &mut self.disclosures {
@@ -200,6 +236,11 @@ impl Conversation {
                 }
                 let fraction = flight.fraction(now);
                 fractions.insert(header.clone(), fraction);
+                if let Some((key, gap)) =
+                    trailing_gap(self.view.as_ref(), &self.rows, header, flight, fraction)
+                {
+                    gaps.insert(key, gap);
+                }
                 hidden.extend(flight.members.iter().cloned());
                 let full: Pixels = flight
                     .keys
@@ -233,7 +274,23 @@ impl Conversation {
                 .cloned()
                 .collect()
         };
+        let respaced: Vec<_> = {
+            let old = &self.disclosure_gaps;
+            old.keys()
+                .chain(gaps.keys())
+                .filter(|key| old.get(*key) != gaps.get(*key))
+                .cloned()
+                .collect()
+        };
+        for (header, flight) in &mut self.disclosures {
+            let target = if flight.open { 1.0 } else { 0.0 };
+            flight.landed = fractions.get(header) == Some(&target)
+                && self.disclosure_fractions.get(header) == Some(&target)
+                && !flight.keys.iter().any(|key| changed.contains(key))
+                && !respaced.iter().any(|key| gaps.contains_key(key));
+        }
         self.disclosure_clips = clips;
+        self.disclosure_gaps = gaps;
         self.disclosure_hidden = hidden;
         self.disclosure_fractions = fractions;
         // Old clip keys can vanish during native-window paging. Their dropped
@@ -249,7 +306,7 @@ impl Conversation {
             let disclosure = self.row_disclosure(&self.rows[index].0);
             view.update(cx, |view, cx| view.set_disclosure(disclosure, cx));
         }
-        for key in changed {
+        for key in changed.into_iter().chain(respaced) {
             if let Some(index) = self.row_context.key_rows.get(&key).copied() {
                 self.list.remeasure_items(index..index + 1);
             }
@@ -278,12 +335,13 @@ impl Conversation {
             clip: self.disclosure_clips.get(&key).copied(),
             fraction: self.disclosure_fractions.get(&key).copied(),
             hidden: row
-                .anchor()
+                .member()
                 .is_some_and(|id| self.disclosure_hidden.contains(id)),
+            gap: self.disclosure_gaps.get(&key).copied(),
         }
     }
 
-    pub(crate) fn row_height_changed(&mut self, key: &RowKey, cx: &mut Context<Self>) {
+    pub(crate) fn row_height_changed(&self, key: &RowKey, cx: &mut Context<Self>) {
         if let Some(index) = self.row_context.key_rows.get(key).copied() {
             self.list.remeasure_items(index..index + 1);
             cx.notify();
@@ -291,10 +349,41 @@ impl Conversation {
     }
 }
 
+/// The row after `header`'s group and the space above it at `fraction`:
+/// its spacing under the group's last row, eased toward its spacing under
+/// the header alone. `None` when nothing follows or the two agree.
+#[expect(
+    clippy::float_cmp,
+    reason = "both gaps come from the same spacing table; only an exact match means no motion"
+)]
+fn trailing_gap(
+    view: Option<&crate::thread::ThreadView>,
+    rows: &[(Row, u64)],
+    header: &RowKey,
+    flight: &Flight,
+    fraction: f32,
+) -> Option<(RowKey, f32)> {
+    let view = view?;
+    let index = rows.iter().position(|(row, _)| row.key() == *header)?;
+    let members = rows[index + 1..]
+        .iter()
+        .take_while(|(row, _)| flight.includes(row))
+        .count();
+    let after = index + 1 + members;
+    let trailing = rows.get(after)?;
+    let closed = fold::gap(view, &[rows[index].clone(), trailing.clone()], 1);
+    let open = fold::gap(view, &rows[after - 1..=after], 1);
+    (closed != open).then(|| (trailing.0.key(), (open - closed).mul_add(fraction, closed)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "a reversed flight starts from exactly the fraction it painted"
+    )]
     fn interrupted_flight_reverses_from_the_painted_fraction() {
         let now = Instant::now();
         let mut flight = Flight {
@@ -304,7 +393,8 @@ mod tests {
             heights: HashMap::new(),
             open: false,
             from: 1.0,
-            started: Some(now - Duration::from_millis(100)),
+            started: Some(now.checked_sub(Duration::from_millis(100)).unwrap()),
+            landed: false,
         };
         let painted = flight.fraction(now);
         flight.from = painted;

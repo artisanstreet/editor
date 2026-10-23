@@ -34,15 +34,21 @@ pub fn turn_phase<S: BuildHasher>(
     if items.iter().any(|item| item.status == Status::AwaitingUser) {
         return Phase::WaitingOnYou;
     }
+    // A compaction holds the run until it ends, even with a steer sent
+    // after it: the divider says so, and no status line competes with it.
+    if items.iter().any(|item| {
+        item.parent_id.is_none()
+            && item.status == Status::Running
+            && matches!(item.kind, ItemKind::Compaction { .. })
+    }) {
+        return Phase::Compacting;
+    }
     let latest = items
         .iter()
         .filter(|item| item.parent_id.is_none())
         .max_by_key(|item| item.position);
     if let Some(item) = latest {
         match &item.kind {
-            ItemKind::Compaction { .. } if item.status == Status::Running => {
-                return Phase::Compacting;
-            }
             ItemKind::AssistantMessage { .. }
                 if item.status == Status::Running
                     || live.contains_key(&LiveTarget::Text {
@@ -51,7 +57,16 @@ pub fn turn_phase<S: BuildHasher>(
             {
                 return Phase::Replying;
             }
-            _ => {}
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Tool { .. }
+            | ItemKind::Agent { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => {}
         }
     }
     let running = |item: &&&Item| item.status == Status::Running;
@@ -62,7 +77,14 @@ pub fn turn_phase<S: BuildHasher>(
         }
         | ItemKind::Agent { background, .. } => !background,
         ItemKind::Tool { .. } => true,
-        _ => false,
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Question { .. }
+        | ItemKind::Plan { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => false,
     });
     if foreground {
         return Phase::Working;
@@ -96,38 +118,48 @@ pub fn turn_phase<S: BuildHasher>(
     Phase::Thinking
 }
 
-/// The live status line; `None` while the reply itself shows progress.
+/// The live status line; `None` while the reply or the compaction divider
+/// itself shows progress.
 #[must_use]
-pub(crate) fn status_copy(phase: Phase) -> Option<&'static str> {
+pub const fn status_copy(phase: Phase) -> Option<&'static str> {
     match phase {
         Phase::Thinking => Some("Thinking"),
         Phase::Working => Some("Working"),
-        Phase::Compacting => Some("Compacting the conversation…"),
         Phase::WaitingOnYou => Some("Waiting for you"),
         Phase::Background => Some("Waiting for background work…"),
-        Phase::Unknown | Phase::Replying | Phase::Settled(_) => None,
+        // The compaction divider says it, once.
+        Phase::Unknown | Phase::Replying | Phase::Compacting | Phase::Settled(_) => None,
     }
 }
 
 /// A work section's header: what the run is doing, or how it ended. Never
-/// a generic title. The verb comes from what the run did, not from this
-/// moment: a run that used a tool or an agent is "Working"/"Worked" all
-/// through, so the header doesn't flip each time it goes back to thinking;
-/// one that only thought is "Thinking"/"Thought".
+/// a generic title. Settled, it is one of four: "Worked", "Thought",
+/// "Stopped" or "Failed", each for (or after) its time. The verb comes from
+/// what the run did, not from this moment: a run that used a tool or an
+/// agent is "Working"/"Worked" all through, so the header doesn't flip each
+/// time it goes back to thinking; one that only thought is
+/// "Thinking"/"Thought".
 #[must_use]
-pub(crate) fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
+pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
     let elapsed = format_elapsed(elapsed_ms);
     match phase {
-        Phase::Unknown if worked => "Work".to_owned(),
+        // No canonical run: no time to give.
+        Phase::Unknown if worked => "Worked".to_owned(),
         Phase::Unknown => "Thought".to_owned(),
-        Phase::WaitingOnYou => "Waiting for you".to_owned(),
         Phase::Settled(RunStatus::Done) if worked => format!("Worked for {elapsed}"),
         Phase::Settled(RunStatus::Done) => format!("Thought for {elapsed}"),
+        Phase::Settled(RunStatus::Failed | RunStatus::Refused) => {
+            format!("Failed after {elapsed}")
+        }
+        Phase::Settled(RunStatus::Cancelled | RunStatus::Interrupted) => {
+            format!("Stopped after {elapsed}")
+        }
         Phase::Thinking
         | Phase::Working
         | Phase::Replying
         | Phase::Compacting
         | Phase::Background
+        | Phase::WaitingOnYou
         | Phase::Settled(RunStatus::Running)
             if worked =>
         {
@@ -138,16 +170,13 @@ pub(crate) fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> Stri
         | Phase::Replying
         | Phase::Compacting
         | Phase::Background
+        | Phase::WaitingOnYou
         | Phase::Settled(RunStatus::Running) => format!("Thinking for {elapsed}"),
-        Phase::Settled(RunStatus::Failed) => "Failed".to_owned(),
-        Phase::Settled(RunStatus::Cancelled) => "Cancelled".to_owned(),
-        Phase::Settled(RunStatus::Interrupted) => "Interrupted".to_owned(),
-        Phase::Settled(RunStatus::Refused) => "Refused".to_owned(),
     }
 }
 
 #[must_use]
-pub(crate) fn format_elapsed(millis: u64) -> String {
+pub fn format_elapsed(millis: u64) -> String {
     let total = millis / 1_000;
     let (hours, minutes, seconds) = (total / 3_600, (total % 3_600) / 60, total % 60);
     if hours > 0 {

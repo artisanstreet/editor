@@ -1,9 +1,0 @@
-{"dir": "note", "text": "synthesized from the ACP schema: shapes as Cursor sends them, values made up; todos merge by id, and a bad batch changes nothing"}
-{"dir": "out", "line": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "s", "prompt": [{"type": "text", "text": "go"}]}}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 20, "method": "cursor/create_plan", "params": {"plan": "# Native plan", "todos": [{"id": "one", "content": "Same", "status": "pending"}, {"id": "two", "content": "Same", "status": "pending"}]}}}
-{"dir": "answer", "key": "plan", "answer": {"type": "approval", "decision": "allow_once"}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 21, "method": "cursor/update_todos", "params": {"merge": true, "todos": [{"id": "two", "content": "Same", "status": "completed"}]}}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 22, "method": "cursor/update_todos", "params": {"merge": true, "todos": [{"id": "two", "content": "Renamed", "status": "in_progress"}]}}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 23, "method": "cursor/update_todos", "params": {"merge": true, "todos": [{"id": "one", "content": "Same", "status": "completed"}, {"id": "broken", "status": "completed"}]}}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 24, "method": "cursor/update_todos", "params": {"merge": true, "todos": [{"id": "one", "content": "Task", "status": "future"}]}}}
-{"dir": "in", "line": {"jsonrpc": "2.0", "id": 25, "method": "cursor/update_todos", "params": {"merge": false, "todos": []}}}

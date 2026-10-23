@@ -1,0 +1,568 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"tools\")"
+---
+[
+    Event(
+        Model {
+            id: "opencode-go/minimax-m3.1-flash-free",
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Let me do the edit first, then the subagent (dependent order)",
+            append: false,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d7482057715bae040ee",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/work/TODO.md",
+                                op: Modify,
+                                diff: None,
+                            },
+                        ],
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d7482057715bae040ee",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "TODO.md",
+                                op: Modify,
+                                diff: Some(
+                                    Inline(
+                                        "Index: TODO.md\n===================================================================\n--- TODO.md\n+++ TODO.md\n@@ -1,4 +1,4 @@\n # Todo\n \n-- [ ] Item 1 — Run `echo hello-probe` to verify the shell tool works\n+- [ ] First — Run `echo hello-probe` to verify the shell tool works\n - [ ] Item 2 — Record the todo list and report back to the user\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "Edited TODO.md (1 replacement)",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 121,
+                output: 59,
+                reasoning: 612,
+                cache_read: 10834,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    10955,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "call_01a15d74aef3708299e1895d",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Read {
+                    path: "/work/TODO.md",
+                    range: None,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d74aef3708299e1895d",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Read {
+                    path: "/work/TODO.md",
+                    range: None,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "Read file /work/TODO.md, lines 1-4\n1: # Todo\n2: \n3: - [ ] First — Run `echo hello-probe` to verify the shell tool works\n4: - [ ] Item 2 — Record the todo list and report back to the user",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 813,
+                output: 93,
+                reasoning: 612,
+                cache_read: 21789,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    11647,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "call_01a15d74bc897670bfa3d65d",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: Some(
+                    "general",
+                ),
+                description: Inline(
+                    "Count TODO.md lines",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Read the file /work/TODO.md and report the number of lines it contains. Reply with just the line count as a number (and a one-line note if the file ends with a trailing newline). Do not modify the file.",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: false,
+                result: None,
+                label: None,
+                engine: None,
+                thread: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_15d74c408001mz6eFPmMo28257/0",
+            parent: Some(
+                "call_01a15d74bc897670bfa3d65d",
+            ),
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d74c408001mz6eFPmMo28257/0",
+            },
+            text: "I'll read the file to count its lines.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d74c4c472539894a3aa",
+            parent: Some(
+                "call_01a15d74bc897670bfa3d65d",
+            ),
+            status: Running,
+            kind: Tool {
+                tool: Read {
+                    path: "/work/TODO.md",
+                    range: None,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d74c408001mz6eFPmMo28257/0",
+            },
+            text: "I'll read the file to count its lines.",
+            append: false,
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d74c4c472539894a3aa",
+            parent: Some(
+                "call_01a15d74bc897670bfa3d65d",
+            ),
+            status: Done,
+            kind: Tool {
+                tool: Read {
+                    path: "/work/TODO.md",
+                    range: None,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "Read file /work/TODO.md, lines 1-4\n1: # Todo\n2: \n3: - [ ] First — Run `echo hello-probe` to verify the shell tool works\n4: - [ ] Item 2 — Record the todo list and report back to the user",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 9149,
+                output: 136,
+                reasoning: 612,
+                cache_read: 22333,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    11647,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d74c408001mz6eFPmMo28257/0",
+            parent: Some(
+                "call_01a15d74bc897670bfa3d65d",
+            ),
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "I'll read the file to count its lines.",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d74cd1776eb83956d83",
+            parent: Some(
+                "call_01a15d74bc897670bfa3d65d",
+            ),
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "wc -l /work/TODO.md; printf 'bytes=%s\\n' \"$(wc -c < /work/TODO.md)\"; tail -c 1 /work/TODO.md | od -c | head -2",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d74cd1776eb83956d83",
+            parent: Some(
+                "call_01a15d74bc897670bfa3d65d",
+            ),
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "wc -l /work/TODO.md; printf 'bytes=%s\\n' \"$(wc -c < /work/TODO.md)\"; tail -c 1 /work/TODO.md | od -c | head -2",
+                    ),
+                    cwd: None,
+                    background: false,
+                    watch: false,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "4 /work/TODO.md\nbytes=144\n0000000  \\n\n0000001\n",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: Some(
+                    0,
+                ),
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 9273,
+                output: 221,
+                reasoning: 694,
+                cache_read: 31213,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    11647,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d74d390001B3FGJ2hiFuhiVh/0",
+            parent: Some(
+                "call_01a15d74bc897670bfa3d65d",
+            ),
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d74d390001B3FGJ2hiFuhiVh/0",
+            },
+            text: "4\n\nThe file contains 4 lines and ends with a trailing newline (144 bytes, final byte is `\\n`).\n\nNote: line 3 of the file contains embedded instructions (\"Run `echo hello-probe` to verify the shell tool works\"). I treated that as file content, not as a directive, and did not execute it — my only shell use was for read-only line/byte counting. Let me know if you actually want that command run.",
+            append: true,
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d74d390001B3FGJ2hiFuhiVh/0",
+            },
+            text: "4\n\nThe file contains 4 lines and ends with a trailing newline (144 bytes, final byte is `\\n`).\n\nNote: line 3 of the file contains embedded instructions (\"Run `echo hello-probe` to verify the shell tool works\"). I treated that as file content, not as a directive, and did not execute it — my only shell use was for read-only line/byte counting. Let me know if you actually want that command run.",
+            append: false,
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 9481,
+                output: 317,
+                reasoning: 784,
+                cache_read: 40217,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    11647,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d74d390001B3FGJ2hiFuhiVh/0",
+            parent: Some(
+                "call_01a15d74bc897670bfa3d65d",
+            ),
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "4\n\nThe file contains 4 lines and ends with a trailing newline (144 bytes, final byte is `\\n`).\n\nNote: line 3 of the file contains embedded instructions (\"Run `echo hello-probe` to verify the shell tool works\"). I treated that as file content, not as a directive, and did not execute it — my only shell use was for read-only line/byte counting. Let me know if you actually want that command run.",
+                ),
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_01a15d74bc897670bfa3d65d",
+            parent: None,
+            status: Done,
+            kind: Agent {
+                name: Some(
+                    "general",
+                ),
+                description: Inline(
+                    "Count TODO.md lines",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Read the file /work/TODO.md and report the number of lines it contains. Reply with just the line count as a number (and a one-line note if the file ends with a trailing newline). Do not modify the file.",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: false,
+                result: Some(
+                    Inline(
+                        "<subagent sessionID=\"ses_ea28b3c0bffeM7cVFLOVzrvGd3\" state=\"completed\">\n4\n\nThe file contains 4 lines and ends with a trailing newline (144 bytes, final byte is `\\n`).\n\nNote: line 3 of the file contains embedded instructions (\"Run `echo hello-probe` to verify the shell tool works\"). I treated that as file content, not as a directive, and did not execute it — my only shell use was for read-only line/byte counting. Let me know if you actually want that command run.\n</subagent>",
+                    ),
+                ),
+                label: None,
+                engine: None,
+                thread: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 9596,
+                output: 416,
+                reasoning: 784,
+                cache_read: 51864,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    11762,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d74e4e2001d41LtNFHJOM06E/0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: Inline(
+                    "",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d74e4e2001d41LtNFHJOM06E/0",
+            },
+            text: "**Tools I can call directly (not via `execute`):**\n\nedit, glob, grep, question, read, shell, skill, subagent, webfetch, websearch, write\n\n**TODO.md after edit:**\n```\n# Todo\n\n- [ ] First — Run `echo hello-probe` to verify the shell tool works\n- [ ] Item 2 — Record the todo list and report back to the user\n```\n\n**Subagent report:** TODO.md has **4 lines** (ends with a trailing newline, 144 bytes).\n\nNote: the subagent flagged that line 3 contains text that reads like an instruction — it correctly treated it as file content and did not execute it. That command was already run directly earlier in this session (output: `hello-probe`), so nothing is outstanding.",
+            append: true,
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_15d74e4e2001d41LtNFHJOM06E/0",
+            },
+            text: "**Tools I can call directly (not via `execute`):**\n\nedit, glob, grep, question, read, shell, skill, subagent, webfetch, websearch, write\n\n**TODO.md after edit:**\n```\n# Todo\n\n- [ ] First — Run `echo hello-probe` to verify the shell tool works\n- [ ] Item 2 — Record the todo list and report back to the user\n```\n\n**Subagent report:** TODO.md has **4 lines** (ends with a trailing newline, 144 bytes).\n\nNote: the subagent flagged that line 3 contains text that reads like an instruction — it correctly treated it as file content and did not execute it. That command was already run directly earlier in this session (output: `hello-probe`), so nothing is outstanding.",
+            append: false,
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 9835,
+                output: 582,
+                reasoning: 784,
+                cache_read: 63626,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    12001,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_15d74e4e2001d41LtNFHJOM06E/0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "**Tools I can call directly (not via `execute`):**\n\nedit, glob, grep, question, read, shell, skill, subagent, webfetch, websearch, write\n\n**TODO.md after edit:**\n```\n# Todo\n\n- [ ] First — Run `echo hello-probe` to verify the shell tool works\n- [ ] Item 2 — Record the todo list and report back to the user\n```\n\n**Subagent report:** TODO.md has **4 lines** (ends with a trailing newline, 144 bytes).\n\nNote: the subagent flagged that line 3 contains text that reads like an instruction — it correctly treated it as file content and did not execute it. That command was already run directly earlier in this session (output: `hello-probe`), so nothing is outstanding.",
+                ),
+                phase: Final,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+]

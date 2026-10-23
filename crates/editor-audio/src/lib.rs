@@ -76,7 +76,7 @@ impl Player {
         let spawned = thread::Builder::new()
             .name("artisan-audio-decode".to_owned())
             .spawn(move || match decode() {
-                Ok(decoder) => stream::play(decoder_shared, generation, decoder),
+                Ok(decoder) => stream::play(&decoder_shared, generation, decoder),
                 Err(error) => decoder_shared.lock().fail(generation, error),
             });
         if let Err(error) = spawned {
@@ -121,7 +121,7 @@ impl Default for Player {
 }
 
 /// What the player is doing, for rendering transport controls.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     /// The file last asked to play, until `stop`.
     pub track: Option<PathBuf>,

@@ -40,7 +40,7 @@ struct NodeSpec {
     #[serde(default)]
     value: Option<f64>,
     #[serde(default)]
-    children: Vec<NodeSpec>,
+    children: Vec<Self>,
 }
 
 /// How the tree is drawn.
@@ -260,6 +260,10 @@ fn place(tree: &Tree, parent: usize, rect: Rect, levels: usize, cells: &mut Vec<
 
 /// Squarified treemap layout (Bruls, Huizing, van Wijk): `items` are areas
 /// in square pixels, largest first, summing to `rect`'s area.
+#[expect(
+    clippy::suspicious_operation_groupings,
+    reason = "the squarified aspect ratio: max(w²·max/s², s²/(w²·min))"
+)]
 pub(super) fn squarify<T: Copy>(items: &[(T, f64)], rect: Rect) -> Vec<(T, Rect)> {
     let mut out = Vec::with_capacity(items.len());
     let mut rect = rect;
@@ -428,7 +432,7 @@ impl RichBlock for Hierarchy {
     fn resident_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + std::mem::size_of::<Tree>()
-            + budget::optional(&self.unit)
+            + budget::optional(self.unit.as_ref())
             + budget::vector(&self.tree.nodes)
             + self
                 .tree

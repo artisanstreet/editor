@@ -14,8 +14,10 @@ use crate::glass::{
     GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
     glass_highlight_layer, glass_material_layer,
 };
-use crate::gradient::hover_fill_gradient;
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
+use crate::gradient::{hover_fill_stops, vertical_gradient};
+use crate::theme::{
+    ArtisanTheme, Oklch, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens,
+};
 
 /// Line height of hover card prose.
 pub const HOVER_CARD_LINE_HEIGHT_PX: f32 = 19.0;
@@ -23,8 +25,12 @@ pub const HOVER_CARD_LINE_HEIGHT_PX: f32 = 19.0;
 /// The hairline inset ring that edges the hover fill.
 #[must_use]
 pub(crate) fn hover_highlight_shadow(theme: &ArtisanTheme) -> Vec<BoxShadow> {
+    hover_ring(HoverColors::new(theme, HoverTone::Neutral).ring)
+}
+
+fn hover_ring(color: Oklch) -> Vec<BoxShadow> {
     vec![BoxShadow {
-        color: theme.colors.foreground.with_alpha(0.13).to_paint(),
+        color: color.to_paint(),
         offset: point(px(0.0), px(0.0)),
         blur_radius: px(0.0),
         spread_radius: px(0.5),
@@ -42,16 +48,81 @@ pub enum HoverFill {
     Edged,
 }
 
-/// The pointer's hover fill. The one entry point for it: inside a
+/// The hue of the hover fill under a row.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HoverTone {
+    /// The text colour.
+    #[default]
+    Neutral,
+    /// The text colour's lightness in the destructive red: rows that
+    /// archive, delete or stop.
+    Destructive,
+}
+
+/// The hover fill's colours in one tone: the gradient's stops and the
+/// edging ring.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HoverColors {
+    top: Oklch,
+    bottom: Oklch,
+    ring: Oklch,
+}
+
+impl HoverColors {
+    #[must_use]
+    pub const fn new(theme: &ArtisanTheme, tone: HoverTone) -> Self {
+        let ink = match tone {
+            HoverTone::Neutral => theme.colors.text,
+            HoverTone::Destructive => theme.colors.text.in_hue_of(theme.colors.destructive_text),
+        };
+        let (top, bottom) = hover_fill_stops(theme, ink);
+        Self {
+            top,
+            bottom,
+            ring: ink.at(Opacity::HoverRing),
+        }
+    }
+
+    /// Part-way to `to` while the pill flies between tones.
+    #[must_use]
+    pub fn animate_to(self, to: Self, progress: f32) -> Self {
+        Self {
+            top: self.top.animate_to(to.top, progress),
+            bottom: self.bottom.animate_to(to.bottom, progress),
+            ring: self.ring.animate_to(to.ring, progress),
+        }
+    }
+
+    /// Paints `element` with these colours.
+    #[must_use]
+    pub fn paint<E: Styled>(self, element: E, fill: HoverFill) -> E {
+        let element = element.bg(vertical_gradient(self.top, self.bottom));
+        match fill {
+            HoverFill::Plain => element,
+            HoverFill::Edged => element.shadow(hover_ring(self.ring)),
+        }
+    }
+}
+
+/// The pointer's hover fill.
+///
+/// The one entry point for it: inside a
 /// `.hover(…)` refinement, or on the element the pointer is over now. Never
 /// for selected or keyboard-highlighted state; that is [`highlight_fill`].
 #[must_use]
 pub fn hover_fill<E: Styled>(element: E, theme: &ArtisanTheme, fill: HoverFill) -> E {
-    let element = element.bg(hover_fill_gradient(*theme));
-    match fill {
-        HoverFill::Plain => element,
-        HoverFill::Edged => element.shadow(hover_highlight_shadow(theme)),
-    }
+    hover_fill_toned(element, theme, fill, HoverTone::Neutral)
+}
+
+/// [`hover_fill`] in `tone`.
+#[must_use]
+pub fn hover_fill_toned<E: Styled>(
+    element: E,
+    theme: &ArtisanTheme,
+    fill: HoverFill,
+    tone: HoverTone,
+) -> E {
+    HoverColors::new(theme, tone).paint(element, fill)
 }
 
 /// The keyboard's highlighted row (a select option, a completion): the
@@ -59,8 +130,8 @@ pub fn hover_fill<E: Styled>(element: E, theme: &ArtisanTheme, fill: HoverFill) 
 #[must_use]
 pub fn highlight_fill<E: Styled>(element: E, theme: &ArtisanTheme) -> E {
     element
-        .bg(theme.colors.accent.to_paint())
-        .text_color(theme.colors.accent_foreground.to_paint())
+        .bg(theme.colors.selected.to_paint())
+        .text_color(theme.colors.text.to_paint())
 }
 
 /// A tooltip shows once the pointer rests this long.
@@ -68,8 +139,10 @@ pub const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
 /// The room between a tooltip and the element it belongs to.
 const TOOLTIP_GAP_PX: f32 = 8.0;
 
-/// A tooltip keyed by the element it belongs to: mounted hidden, shown once
-/// the pointer has rested for [`TOOLTIP_DELAY`]. Its owner measures the
+/// A tooltip keyed by the element it belongs to.
+///
+/// Mounted hidden, shown once the pointer has rested for [`TOOLTIP_DELAY`].
+/// Its owner measures the
 /// pending element with a [`crate::measure::Measured`] probe and places it
 /// with [`place_tooltip`].
 pub struct DelayedTooltip<T> {
@@ -106,13 +179,16 @@ impl<T: 'static> DelayedTooltip<T> {
         self.visible = false;
         self.task = Some(cx.spawn(async move |owner, cx| {
             cx.background_executor().timer(TOOLTIP_DELAY).await;
-            let _ = owner.update(cx, |owner, cx| {
-                let tooltip = slot(owner);
-                if tooltip.generation == generation && tooltip.pending.is_some() {
-                    tooltip.visible = true;
-                    cx.notify();
-                }
-            });
+            // A released view has nothing left to update.
+            owner
+                .update(cx, |owner, cx| {
+                    let tooltip = slot(owner);
+                    if tooltip.generation == generation && tooltip.pending.is_some() {
+                        tooltip.visible = true;
+                        cx.notify();
+                    }
+                })
+                .ok();
         }));
     }
 
@@ -157,6 +233,7 @@ pub enum TooltipPlacement {
 }
 
 /// Places a tooltip against `anchor` (the element's measured bounds).
+///
 /// `surface` builds the tooltip for the width it may take; `fixed` asks it
 /// to take exactly that width (beside) rather than at most (above).
 pub fn place_tooltip(
@@ -211,6 +288,68 @@ pub fn place_tooltip(
         .into_any_element()
 }
 
+/// Where an element last painted, for a tooltip laid against it. Record it
+/// with [`TooltipAnchor::probe`] as a child of the element.
+#[derive(Clone, Default)]
+pub struct TooltipAnchor(std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>);
+
+impl TooltipAnchor {
+    /// A child that fills the element and records its bounds each frame.
+    #[must_use]
+    pub fn probe(&self) -> impl IntoElement {
+        let cell = std::rc::Rc::clone(&self.0);
+        gpui::canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, (), _, _| {})
+            .absolute()
+            .size_full()
+    }
+
+    /// A native tooltip (GPUI owns its delay and dismissal) laid against
+    /// the element instead of the pointer: beside it, centred, on the side
+    /// with room.
+    pub fn tooltip(
+        &self,
+        content: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
+        cx: &mut App,
+    ) -> gpui::AnyView {
+        let anchor = std::rc::Rc::clone(&self.0);
+        tooltip(
+            move |window, cx| {
+                let content = content(window, cx);
+                let Some(bounds) = anchor.get() else {
+                    return content;
+                };
+                let right = f32::from(window.viewport_size().width) - f32::from(bounds.right())
+                    >= f32::from(bounds.left());
+                let (corner, position, offset) = if right {
+                    (
+                        Anchor::LeftCenter,
+                        point(bounds.right(), bounds.center().y),
+                        point(px(TOOLTIP_GAP_PX), px(0.0)),
+                    )
+                } else {
+                    (
+                        Anchor::RightCenter,
+                        point(bounds.left(), bounds.center().y),
+                        point(px(-TOOLTIP_GAP_PX), px(0.0)),
+                    )
+                };
+                // GPUI roots the tooltip at the pointer; the card itself
+                // sits against the element.
+                div()
+                    .child(
+                        anchored()
+                            .anchor(corner)
+                            .position(position)
+                            .offset(offset)
+                            .child(content),
+                    )
+                    .into_any_element()
+            },
+            cx,
+        )
+    }
+}
+
 /// The glass tooltip frame: strong glass, 12 px text, padded; `fixed`
 /// takes exactly `width`, otherwise at most.
 #[must_use]
@@ -229,7 +368,7 @@ pub fn glass_tooltip(
         .text_size(TypographyTokens::size(TextStep::Xs))
         .line_height(px(16.0))
         .whitespace_normal()
-        .text_color(theme.colors.foreground.to_paint())
+        .text_color(theme.colors.text.to_paint())
 }
 
 enum GlassShape {
@@ -321,16 +460,16 @@ fn glass_surface(
         .backdrop_blur(glass_blur_radius(strength))
         .bg(glass_foreground_base(theme))
         .border_1()
-        .border_color(theme.colors.border.to_paint())
-        .shadow(glass_card_shadows())
+        .border_color(theme.colors.text.at(Opacity::GlassBorder).to_paint())
+        .shadow(glass_card_shadows(theme, crate::theme::Elevation::Overlay))
         .font_family(theme.typography.sans.family)
-        .child(glass_material_layer(strength, radius))
-        .child(glass_highlight_layer(strength, radius))
+        .child(glass_material_layer(theme, strength, radius))
+        .child(glass_highlight_layer(theme, strength, radius))
         .child(
             div()
                 .relative()
-                .when(fill, |element| element.size_full())
-                .text_color(theme.colors.popover_foreground.to_paint())
+                .when(fill, gpui::Styled::size_full)
+                .text_color(theme.colors.text.to_paint())
                 .child(content),
         )
 }
@@ -340,6 +479,7 @@ fn glass_surface(
 pub fn hover_card_title(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()
         .text_size(theme.typography.control_text)
+        .line_height(px(18.0))
         .font_weight(FontWeight::SEMIBOLD)
         .child(text.into())
 }
@@ -353,7 +493,7 @@ pub fn hover_card_text(
 ) -> Div {
     let text = text.into();
     let foreground = HighlightStyle {
-        color: Some(theme.colors.foreground.to_paint()),
+        color: Some(theme.colors.text.to_paint()),
         ..HighlightStyle::default()
     };
     let mut highlights: Vec<(Range<usize>, HighlightStyle)> = facts
@@ -368,7 +508,7 @@ pub fn hover_card_text(
     div()
         .text_size(theme.typography.label_text)
         .line_height(px(HOVER_CARD_LINE_HEIGHT_PX))
-        .text_color(theme.colors.muted_foreground.to_paint())
+        .text_color(theme.colors.text_muted.to_paint())
         .child(StyledText::new(text).with_highlights(highlights))
 }
 
@@ -399,13 +539,13 @@ pub fn hover_card_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_color(theme.colors.muted_foreground.to_paint())
+                .text_color(theme.colors.text_muted.to_paint())
                 .child(label.into()),
         )
         .child(
             div()
                 .flex_shrink_0()
-                .text_color(theme.colors.foreground.to_paint())
+                .text_color(theme.colors.text.to_paint())
                 .child(value.into()),
         )
 }

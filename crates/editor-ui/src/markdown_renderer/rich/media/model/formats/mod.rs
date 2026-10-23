@@ -32,7 +32,7 @@ pub(in super::super) enum Format {
 }
 
 impl Format {
-    pub(super) fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Obj => "OBJ",
             Self::Fbx => "FBX",
@@ -44,7 +44,7 @@ impl Format {
 
     /// The up axis files of this format use unless they say otherwise:
     /// STL comes from CAD and printing, which are Z up.
-    fn default_up(self) -> Up {
+    const fn default_up(self) -> Up {
         match self {
             Self::Stl => Up::Z,
             Self::Obj | Self::Fbx | Self::Ply | Self::Gltf => Up::Y,
@@ -125,7 +125,7 @@ pub(super) fn parse_for_renderer(
             format.default_up()
         }
         Format::Obj => {
-            let text = std::str::from_utf8(bytes).map_err(|_| "the OBJ is not text")?;
+            let text = std::str::from_utf8(bytes).map_err(|_not_utf8| "the OBJ is not text")?;
             obj::parse(text, &mut builder)?;
             format.default_up()
         }
@@ -139,10 +139,10 @@ pub(super) fn parse_for_renderer(
         mesh.colors = None;
     }
     Ok(Model {
-        gpu,
         mesh,
-        format,
+        gpu,
         triangles,
+        format,
     })
 }
 

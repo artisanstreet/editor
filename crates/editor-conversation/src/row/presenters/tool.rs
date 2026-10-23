@@ -1,17 +1,22 @@
 //! Canonical tool and plan presentation. Expansion/live inputs are supplied by the row.
-use super::super::{LINE, body_line, body_text, icon};
+use super::super::{LINE, body_text};
 use super::request::decision_note;
 use super::text::TextPresenter;
 use super::{Action, Actions};
 use crate::{activity, content::SourceField};
-use artisan_api::{Collection, Item, ItemKind, Output, StepStatus, TextContent, ToolKind};
-use editor_ui::AssetId;
+use artisan_api::{Collection, Item, ItemKind, Output, TextContent, ToolKind};
+use editor_ui::code_card::CodeCard;
+use editor_ui::terminal_text::{TerminalPalette, TerminalScreen, highlights};
 use editor_ui::theme::{ProseTypography, RadiusStep, RadiusTokens};
+use gpui::StyledText;
 use gpui::{
     AnyElement, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px,
 };
 use std::collections::HashMap;
+/// Output a command's terminal parses: its newest bytes, as a terminal's
+/// scrollback keeps its newest lines.
+const TERMINAL_BYTES: usize = 256 * 1024;
 pub(in crate::row) struct ToolPresenter<'a> {
     pub text: TextPresenter<'a>,
     pub collections: &'a crate::collections::CollectionOwners,
@@ -32,7 +37,7 @@ impl ToolPresenter<'_> {
         }
         let message = activity::agent_message(item);
         let words = activity::line(item, agents);
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let object = div()
             .min_w_0()
             .flex_1()
@@ -46,10 +51,9 @@ impl ToolPresenter<'_> {
                     .text_size(theme.typography.control_text)
             })
             .child(words.object.clone());
-        let tail = words.tail.as_ref().map(|tail| tail_element(tail, &theme));
         let has_details = details_available(item, message.as_ref(), live);
         let expanded = has_details && expanded;
-        let mut line = div()
+        let mut sentence = div()
             .id(SharedString::from(format!("activity-{}", item.id)))
             .debug_selector(|| "work-activity".to_owned())
             .w_full()
@@ -58,7 +62,7 @@ impl ToolPresenter<'_> {
             .text_size(px(ProseTypography::BODY_SIZE_PX))
             .line_height(px(LINE))
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .tracking(ProseTypography::TRACKING_EM)
+            .tracking(theme.typography.tracking_em)
             .text_color(muted)
             .child(
                 div()
@@ -70,11 +74,10 @@ impl ToolPresenter<'_> {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_color(theme.colors.foreground.to_paint())
+                            .text_color(theme.colors.text.to_paint())
                             .child(words.verb.clone()),
                     )
-                    .child(object)
-                    .children(tail),
+                    .child(object),
             )
             .children(crate::row::test_mark(format!(
                 "work-activity-text:{} {}",
@@ -86,9 +89,9 @@ impl ToolPresenter<'_> {
                 id,
                 expanded: !expanded,
             });
-            line = line.cursor_pointer().on_click(move |_, _, cx| flip(cx));
+            sentence = sentence.cursor_pointer().on_click(move |_, _, cx| flip(cx));
         }
-        let mut block = div().w_full().min_w_0().flex().flex_col().child(line);
+        let mut block = div().w_full().min_w_0().flex().flex_col().child(sentence);
         if expanded {
             block = block.child(match &item.kind {
                 // A message opens on its text, a row of its own.
@@ -100,7 +103,15 @@ impl ToolPresenter<'_> {
                         .child(self.tool_details(item, tool, output.as_ref(), streamed, preview))
                         .into_any_element()
                 }
-                _ => div().into_any_element(),
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Agent { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => div().into_any_element(),
             });
         }
         block.into_any_element()
@@ -116,6 +127,9 @@ impl ToolPresenter<'_> {
         live: Option<&str>,
         preview: Option<AnyElement>,
     ) -> AnyElement {
+        if matches!(tool, ToolKind::Shell { .. }) {
+            return self.terminal(item, output, live);
+        }
         if live.is_none()
             && let Some(preview) = preview
         {
@@ -125,7 +139,7 @@ impl ToolPresenter<'_> {
         let mut panel = div()
             .p(px(12.0))
             .rounded(RadiusTokens::value(RadiusStep::Lg))
-            .bg(theme.colors.muted.to_paint())
+            .bg(theme.colors.raised.to_paint())
             .font_family(theme.typography.mono.family)
             .tracking(0.0)
             .text_size(px(12.5))
@@ -135,15 +149,6 @@ impl ToolPresenter<'_> {
             .gap(px(6.0))
             .overflow_hidden();
         match tool {
-            ToolKind::Shell { .. } => {
-                panel = panel.child(
-                    div()
-                        .text_color(theme.colors.foreground.to_paint())
-                        .whitespace_normal()
-                        .child("$ ")
-                        .child(self.text.inherited_content(item, SourceField::Command)),
-                );
-            }
             ToolKind::Edit {
                 changes: Collection::Stored(source),
             } => {
@@ -151,7 +156,7 @@ impl ToolPresenter<'_> {
                     item.id.clone(),
                     source.clone(),
                     self.text.host.clone(),
-                    theme,
+                    &theme,
                 ));
             }
             ToolKind::Edit {
@@ -168,7 +173,16 @@ impl ToolPresenter<'_> {
             ToolKind::Mcp { input: Some(_), .. } | ToolKind::Other { input: Some(_), .. } => {
                 panel = panel.child(self.text.inherited_content(item, SourceField::Input));
             }
-            _ => {}
+            ToolKind::AgentMessage { .. }
+            | ToolKind::Agents { .. }
+            | ToolKind::Shell { .. }
+            | ToolKind::Read { .. }
+            | ToolKind::Search { .. }
+            | ToolKind::WebFetch { .. }
+            | ToolKind::WebSearch { .. }
+            | ToolKind::Mcp { .. }
+            | ToolKind::ViewImage { .. }
+            | ToolKind::Other { .. } => {}
         }
         if let Some(live) = live {
             panel = panel.child(self.text.output(item, live));
@@ -187,152 +201,63 @@ impl ToolPresenter<'_> {
         panel.into_any_element()
     }
 
-    /// A compaction during the run, a line of its work: what it did and how
-    /// far it shrank the context, or that it failed.
-    pub(in crate::row) fn compaction_entry(&self, item: &Item) -> AnyElement {
+    /// A command as a terminal shows it: the prompt line, then its output in
+    /// the colours it printed, live while it runs.
+    fn terminal(&self, item: &Item, output: Option<&Output>, live: Option<&str>) -> AnyElement {
         let theme = self.text.theme;
-        let ItemKind::Compaction {
-            tokens_before,
-            tokens_after,
-        } = &item.kind
-        else {
-            return div().into_any_element();
-        };
-        let (verb, object) = match item.status {
-            artisan_api::Status::Running => ("Compacting", "the conversation".to_owned()),
-            artisan_api::Status::Done => (
-                "Compacted",
-                match (tokens_before, tokens_after) {
-                    (Some(before), Some(after)) => format!(
-                        "the conversation \u{b7} {} \u{2192} {} tokens",
-                        compact_count(*before),
-                        compact_count(*after)
-                    ),
-                    _ => "the conversation".to_owned(),
-                },
-            ),
-            artisan_api::Status::Cancelled | artisan_api::Status::Declined => {
-                ("Stopped compacting", "the conversation".to_owned())
-            }
-            _ => ("Compaction failed", String::new()),
-        };
-        let failed = object.is_empty();
-        div()
-            .debug_selector(|| "work-compaction".to_owned())
+        let foreground = theme.colors.text.to_paint();
+        let mut body = div()
             .w_full()
             .min_w_0()
-            .py(theme.spacing.steps(0.5))
             .flex()
-            .flex_row()
-            .items_center()
-            .gap(theme.spacing.steps(2.0))
-            .text_size(px(ProseTypography::BODY_SIZE_PX))
-            .line_height(px(LINE))
-            .font_weight(ProseTypography::BODY_WEIGHT)
-            .tracking(ProseTypography::TRACKING_EM)
-            .text_color(theme.colors.muted_foreground.to_paint())
+            .flex_col()
+            .font_family(theme.typography.mono.family)
+            .text_size(px(ProseTypography::CODE_SIZE_PX))
+            .line_height(px(ProseTypography::CODE_LINE_PX))
+            .tracking(0.0)
+            .text_color(foreground)
             .child(
                 div()
-                    .flex_shrink_0()
-                    .text_color(if failed {
-                        theme.colors.destructive.to_paint()
-                    } else {
-                        theme.colors.foreground.to_paint()
-                    })
-                    .child(verb),
-            )
-            .when(!failed, |line| {
-                line.child(div().min_w_0().flex_1().truncate().child(object.clone()))
-            })
-            .children(crate::row::test_mark(format!(
-                "work-compaction-text:{}",
-                [verb, object.as_str()].join(" ").trim_end()
-            )))
+                    .whitespace_normal()
+                    .child("$ ")
+                    .child(self.text.inherited_content(item, SourceField::Command)),
+            );
+        let text = live.or_else(|| output.and_then(|output| output.text.inline()));
+        if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+            // A terminal keeps its newest lines; so does this one.
+            let start = text.len().saturating_sub(TERMINAL_BYTES);
+            let start = (start..text.len())
+                .find(|at| text.is_char_boundary(*at))
+                .unwrap_or(text.len());
+            let mut screen = TerminalScreen::new();
+            screen.feed(&text.as_bytes()[start..]);
+            let palette = TerminalPalette::for_theme(&theme);
+            for line in screen.lines() {
+                let runs = highlights(line, &palette, foreground, gpui::transparent_black());
+                body = body.child(div().min_h(px(ProseTypography::CODE_LINE_PX)).child(
+                    StyledText::new(SharedString::from(line.text.clone())).with_highlights(runs),
+                ));
+            }
+        } else if output.is_some_and(|output| !output.is_empty()) {
+            body = body.child(self.text.content_text(item, SourceField::Output));
+        }
+        CodeCard::new(theme, body)
+            .debug_selector(format!("terminal-{}", item.id).into())
             .into_any_element()
     }
 
     pub(in crate::row) fn plan_entry(&self, item: &Item) -> AnyElement {
-        let ItemKind::Plan {
-            steps, approval, ..
-        } = &item.kind
-        else {
+        // The steps themselves live in the inspector's checklist.
+        let ItemKind::Plan { approval, .. } = &item.kind else {
             return div().into_any_element();
         };
         let mut body = div();
-        if let Collection::Stored(source) = steps {
-            body = body.child(self.collections.plan(
-                item.id.clone(),
-                source.clone(),
-                self.text.host.clone(),
-                self.text.theme,
-            ));
-        }
         if let Some(decision) = approval.as_ref().and_then(|approval| approval.decision) {
             body = body.child(body_text(decision_note(decision), &self.text.theme));
         }
         body.into_any_element()
     }
-
-    pub(in crate::row) fn plan_step(&self, item: &Item, index: usize) -> AnyElement {
-        let ItemKind::Plan { steps, .. } = &item.kind else {
-            return div().into_any_element();
-        };
-        let Some(step) = steps.inline().and_then(|steps| steps.get(index)) else {
-            return div().into_any_element();
-        };
-        let theme = self.text.theme;
-        let muted = theme.colors.muted_foreground.to_paint();
-        let (asset, color) = match step.status {
-            StepStatus::Done => (AssetId::TABLER_CIRCLE_CHECK, muted),
-            StepStatus::InProgress => {
-                (AssetId::TABLER_LOADER_2, theme.colors.foreground.to_paint())
-            }
-            StepStatus::Cancelled => (AssetId::TABLER_CIRCLE_X, muted),
-            StepStatus::Pending => (AssetId::TABLER_CHECKLIST, muted),
-        };
-        body_line(div(), &theme)
-            .flex()
-            .items_center()
-            .gap(theme.spacing.steps(2.0))
-            .text_color(color)
-            .when(step.status == StepStatus::Done, gpui::Styled::line_through)
-            .child(icon(asset, color))
-            .child(
-                self.text
-                    .inherited_content(item, SourceField::PlanStep(index)),
-            )
-            .into_any_element()
-    }
 }
-/// What an edit changed, or why a call didn't finish, after its object.
-fn tail_element(tail: &activity::Tail, theme: &editor_ui::theme::ArtisanTheme) -> gpui::Div {
-    match tail {
-        activity::Tail::Changed { added, removed } => div()
-            .flex()
-            .flex_shrink_0()
-            .gap(theme.spacing.steps(1.0))
-            .font_features(crate::motion::tabular_figures())
-            .when(*added > 0, |tail| {
-                tail.child(
-                    div()
-                        .text_color(theme.colors.banner_success.to_paint())
-                        .child(format!("+{added}")),
-                )
-            })
-            .when(*removed > 0, |tail| {
-                tail.child(
-                    div()
-                        .text_color(theme.colors.destructive.to_paint())
-                        .child(format!("\u{2212}{removed}")),
-                )
-            }),
-        activity::Tail::Failed(why) => div()
-            .flex_shrink_0()
-            .text_color(theme.colors.destructive.to_paint())
-            .child(why.clone()),
-    }
-}
-
 fn details_available(
     item: &Item,
     message: Option<&activity::AgentMessage>,
@@ -350,23 +275,15 @@ fn details_available(
                 || matches!(tool, ToolKind::Edit { changes } if !changes.is_empty())
                 || live.is_some()
         }
-        _ => false,
-    }
-}
-
-/// A token count as the work line says it: 966k, 1.2M, 512.
-fn compact_count(count: u64) -> String {
-    if count >= 1_000_000 {
-        let tenths = (count + 50_000) / 100_000;
-        if tenths.is_multiple_of(10) {
-            format!("{}M", tenths / 10)
-        } else {
-            format!("{}.{}M", tenths / 10, tenths % 10)
-        }
-    } else if count >= 1_000 {
-        format!("{}k", (count + 500) / 1_000)
-    } else {
-        count.to_string()
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Agent { .. }
+        | ItemKind::Question { .. }
+        | ItemKind::Plan { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => false,
     }
 }
 

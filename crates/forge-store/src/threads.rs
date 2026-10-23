@@ -47,7 +47,7 @@ impl Store {
         update: UpdateThread,
     ) -> Result<Option<Thread>> {
         let id = id.clone();
-        self.write(move |tx| tx.update_thread(id, update)).await
+        self.write(move |tx| tx.update_thread(&id, update)).await
     }
 
     pub async fn threads_page(
@@ -216,6 +216,86 @@ impl Store {
         let thread = thread.clone();
         self.read(move |conn| read::inspector(conn, &thread)).await
     }
+
+    /// Every titled thread's id and title, the most recently active first:
+    /// what `@title` mentions resolve against.
+    pub async fn thread_titles(&self) -> Result<Vec<(ThreadId, String)>> {
+        self.read(move |conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT id, json_extract(body,'$.title') FROM threads
+                    WHERE json_extract(body,'$.title') IS NOT NULL
+                    ORDER BY json_extract(body,'$.activity_seq') DESC, seq DESC",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((ThreadId::from(row.get::<_, String>(0)?), row.get(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("read the thread titles")
+        })
+        .await
+    }
+
+    /// The threads running agents a thread started (`spawned_by` set).
+    pub async fn agent_threads(&self, parent: &ThreadId) -> Result<Vec<Thread>> {
+        let parent = parent.clone();
+        self.read(move |conn| {
+            read::many(
+                conn,
+                "SELECT body FROM threads WHERE json_extract(body,'$.parent_thread_id')=?1
+                    AND json_extract(body,'$.spawned_by') IS NOT NULL ORDER BY seq",
+                [parent.as_str()],
+            )
+        })
+        .await
+    }
+
+    /// Every agent item still marked working, across threads.
+    pub async fn working_agents(&self) -> Result<Vec<artisan_api::Item>> {
+        self.read(|conn| {
+            read::items(
+                conn,
+                "SELECT body FROM items WHERE kind_type='agent' AND status IN ('running','awaiting_user')
+                    AND json_extract(body,'$.kind.thread') IS NOT NULL",
+                [],
+            )
+        })
+        .await
+    }
+
+    /// The thread's latest top-level reply, resolved.
+    pub async fn last_reply(&self, thread: &ThreadId) -> Result<Option<String>> {
+        let thread = thread.clone();
+        let item = self
+            .read(move |conn| {
+                Ok(read::items(
+                    conn,
+                    "SELECT body FROM items WHERE thread_id=?1 AND kind_type='assistant_message'
+                        AND parent_id IS NULL ORDER BY position DESC LIMIT 1",
+                    [thread.as_str()],
+                )?
+                .pop())
+            })
+            .await?;
+        match item.map(|item| item.kind) {
+            Some(artisan_api::ItemKind::AssistantMessage { text, .. }) => {
+                Ok(Some(self.resolve_text(&text).await?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Whether anything in the thread waits on the user.
+    pub async fn awaits_user(&self, thread: &ThreadId) -> Result<bool> {
+        let thread = thread.clone();
+        self.read(move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM items WHERE thread_id=?1 AND status='awaiting_user')",
+                [thread.as_str()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -226,6 +306,7 @@ mod activity_time_tests {
     use artisan_api::{EngineConfig, EngineId, ItemId, RunStatus, SendMessage, Usage};
 
     #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
     async fn only_accepted_activity_changes_thread_recency() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -245,6 +326,7 @@ mod activity_time_tests {
                     title: None,
                     config: EngineConfig::new(EngineId::Codex),
                     parent_thread_id: None,
+                    spawned_by: None,
                 },
                 Stamp {
                     created_at: 10,
@@ -258,6 +340,7 @@ mod activity_time_tests {
         let run = store
             .upsert_run_at(
                 Run {
+                    config: None,
                     id: RunId::new(),
                     thread_id: thread.id.clone(),
                     engine: EngineId::Codex,
@@ -270,6 +353,7 @@ mod activity_time_tests {
                     seq: 0,
                     started_at: 20,
                     ended_at: None,
+                    continuation: None,
                 },
                 Stamp {
                     created_at: 20,

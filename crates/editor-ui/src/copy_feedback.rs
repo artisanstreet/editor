@@ -73,7 +73,9 @@ pub fn copy_feedback_icon(copied: f32) -> Div {
         if opacity < 1.0 {
             face = face.blur(px(2.0 * (1.0 - opacity)));
         }
-        face.child(asset_glyph(asset).size(px(COPY_FEEDBACK_ICON_PX * (0.25 + 0.75 * opacity))))
+        face.child(
+            asset_glyph(asset).size(px(COPY_FEEDBACK_ICON_PX * 0.75f32.mul_add(opacity, 0.25))),
+        )
     };
     let mut icon = div().relative().size(px(COPY_FEEDBACK_ICON_PX));
     // A fully faded face paints nothing; leaving it out spares every idle

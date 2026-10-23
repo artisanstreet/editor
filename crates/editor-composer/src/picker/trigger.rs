@@ -7,10 +7,14 @@ impl Composer {
 
     /// The model selector's trigger: engine glyph, model name, its muted
     /// details (context, effort) and the selector mark.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one element tree for the trigger, ported from the old Editor"
+    )]
     pub(crate) fn render_model_trigger(
         &self,
         theme: &ArtisanTheme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = *theme;
         let config = self.effective_config(cx);
@@ -26,7 +30,7 @@ impl Composer {
                 .find(|model| &model.id == id)
                 .cloned()
         });
-        let muted = theme.colors.muted_foreground.to_paint();
+        let muted = theme.colors.text_muted.to_paint();
         let token = || {
             div()
                 .truncate()
@@ -60,7 +64,12 @@ impl Composer {
                 if let Some(effort) = &config.effort {
                     body = body.child(token().text_color(muted).child(humanize(effort)));
                 }
-                body = body.children(variant_and_speed_tokens(config, model.as_ref(), muted));
+                body = body.children(variant_and_speed_tokens(
+                    config,
+                    model.as_ref(),
+                    muted,
+                    &theme.colors,
+                ));
             }
             None => body = body.child(token().child("No model")),
         }
@@ -80,10 +89,10 @@ impl Composer {
             .rounded(RadiusTokens::value(RadiusStep::Lg))
             .cursor_pointer()
             .hover(move |style| hover_fill(style, &theme, HoverFill::Plain))
-            .text_color(theme.colors.foreground.to_paint())
+            .text_color(theme.colors.text.to_paint())
             .when_some(config.as_ref(), |trigger, config| {
                 trigger.child(
-                    asset_glyph(engine_icon(config.engine))
+                    asset_glyph(engine_icon(&theme, config.engine))
                         .size(px(16.0))
                         .flex_shrink_0(),
                 )
@@ -125,7 +134,7 @@ impl Composer {
         &self,
         theme: &ArtisanTheme,
         desktop: &ColorTokens,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let theme = *theme;
         let host = self.host(cx)?;
@@ -140,7 +149,7 @@ impl Composer {
                 .items_center()
                 .gap(px(6.0))
                 .text_size(TypographyTokens::size(TextStep::XsMid))
-                .text_color(desktop.workspace_secondary.to_paint())
+                .text_color(desktop.text_muted.to_paint())
                 .child(asset_glyph(AssetId::TABLER_FOLDER).size(px(15.0)))
                 .child(div().truncate().max_w(px(240.0)).child(label))
         };
@@ -156,11 +165,11 @@ impl Composer {
             crate::ComposerTarget::NewThread { .. } => {
                 let open = self.menu == Some(Menu::Project);
                 let label: SharedString = self
-                    .project()
+                    .project(cx)
                     .as_ref()
                     .and_then(project_name)
                     .map_or_else(|| "Choose a project".into(), Into::into);
-                let foreground = desktop.workspace_foreground.to_paint();
+                let foreground = desktop.text.to_paint();
                 let trigger = div()
                     .id("composer-project")
                     .role(gpui::Role::Button)
@@ -177,9 +186,9 @@ impl Composer {
                     .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .text_size(TypographyTokens::size(TextStep::XsMid))
                     .text_color(if open {
-                        desktop.workspace_foreground.to_paint()
+                        desktop.text.to_paint()
                     } else {
-                        desktop.workspace_secondary.to_paint()
+                        desktop.text_muted.to_paint()
                     })
                     .cursor_pointer()
                     .hover(move |style| style.text_color(foreground))
@@ -214,6 +223,7 @@ fn variant_and_speed_tokens(
     config: &EngineConfig,
     model: Option<&Model>,
     muted: gpui::Hsla,
+    colors: &ColorTokens,
 ) -> Vec<AnyElement> {
     let token = || {
         div()
@@ -225,10 +235,9 @@ fn variant_and_speed_tokens(
     let Some(model) = model else {
         return tokens;
     };
-    if let Some(variant) = config
-        .variant
-        .as_ref()
-        .and_then(|id| model.variants.iter().find(|variant| &variant.id == id))
+    if let Some(variant) = model
+        .variant_for(config.variant.as_deref())
+        .and_then(|id| model.variants.iter().find(|variant| variant.id == id))
     {
         tokens.push(
             token()
@@ -247,7 +256,7 @@ fn variant_and_speed_tokens(
         tokens.push(
             token()
                 .debug_selector(|| "composer-model-speed".to_owned())
-                .child(match speed_gradient(speed) {
+                .child(match speed_gradient(speed, colors) {
                     Some(gradient) => gradient_text(label, gradient),
                     None => StyledText::new(label),
                 })
@@ -258,31 +267,26 @@ fn variant_and_speed_tokens(
 }
 
 /// The glyph gradient of an accelerated tier (`speed_label_gradient`):
-/// amber into yellow for Fast, neon green into pink for Superfast.
-fn speed_gradient(speed: &Speed) -> Option<(u32, u32)> {
+/// amber into yellow for Fast, green into pink for Superfast.
+fn speed_gradient(speed: &Speed, colors: &ColorTokens) -> Option<(Oklch, Oklch)> {
     if speed.id == "superfast" {
-        Some((0x00_FF_66, 0xFF_00_C8))
+        Some((colors.palette[7], colors.palette[3]))
     } else if speed.id == "fast" || speed.label.eq_ignore_ascii_case("fast") {
-        Some((0xFF_B3_00, 0xFF_EE_00))
+        Some((colors.palette[1], colors.palette[4]))
     } else {
         None
     }
 }
 
-/// `text` with its glyphs walking from one colour to the other, left to
-/// right (`gradient_label_text`).
-#[allow(
+/// `text` with its glyphs walking from one token to the other, left to
+/// right (`gradient_label_text`): a two-token gradient laid across glyphs,
+/// which a background gradient can't colour.
+#[expect(
     clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
+    reason = "a label has far fewer glyphs than f32 counts exactly"
 )]
-fn gradient_text(text: String, (start, end): (u32, u32)) -> StyledText {
+fn gradient_text(text: String, (start, end): (Oklch, Oklch)) -> StyledText {
     let count = text.chars().count();
-    let channel = |shift: u32, progress: f32| {
-        let from = ((start >> shift) & 0xff) as f32;
-        let to = ((end >> shift) & 0xff) as f32;
-        (from + (to - from) * progress).round().clamp(0.0, 255.0) as u32
-    };
     let mut highlights = Vec::with_capacity(count);
     let mut at = 0;
     for (index, character) in text.chars().enumerate() {
@@ -291,13 +295,11 @@ fn gradient_text(text: String, (start, end): (u32, u32)) -> StyledText {
         } else {
             0.0
         };
-        let color =
-            (channel(16, progress) << 16) | (channel(8, progress) << 8) | channel(0, progress);
         let next = at + character.len_utf8();
         highlights.push((
             at..next,
             HighlightStyle {
-                color: Some(gpui::rgb_to_hsla(gpui::rgb(color))),
+                color: Some(start.animate_to(end, progress).to_paint()),
                 ..HighlightStyle::default()
             },
         ));

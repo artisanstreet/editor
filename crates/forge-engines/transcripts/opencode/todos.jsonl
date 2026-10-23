@@ -1,5 +1,0 @@
-{"id": "evt_034", "type": "session.next.prompt.admitted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_035", "type": "session.next.prompted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
-{"id": "evt_036", "type": "todo.updated", "data": {"sessionID": "ses_root", "todos": [{"content": "Task", "status": "pending"}]}}
-{"id": "evt_037", "type": "todo.updated", "data": {"sessionID": "ses_root", "todos": [{"content": "Valid", "status": "completed"}, {"status": "pending"}]}}
-{"id": "evt_038", "type": "session.next.compaction.started", "data": {"sessionID": "ses_root"}}

@@ -186,7 +186,7 @@ async fn perform(step: Step, target: AnyWindowHandle, cx: &mut AsyncApp) -> Resu
         window.on_next_frame(move |_, _| {
             let _ = send.send(());
         });
-        window.request_animation_frame();
+        window.refresh();
     })?;
     cx.background_executor()
         .spawn(async move {
@@ -290,7 +290,7 @@ mod tests {
         });
         core.update(cx, |core, cx| {
             core.navigate(
-                editor_core::Screen::Settings(editor_core::SettingsPage::Appearance),
+                editor_core::Screen::Settings(editor_core::SettingsPage::General),
                 cx,
             )
         });

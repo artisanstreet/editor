@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 163
 expression: "replay(\"malformed-items\")"
 ---
 [
@@ -173,6 +172,7 @@ expression: "replay(\"malformed-items\")"
         Outcome {
             status: Done,
             error: None,
+            retry: None,
         },
     ),
 ]

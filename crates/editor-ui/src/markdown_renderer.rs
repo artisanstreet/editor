@@ -1,11 +1,10 @@
 //! Native Markdown presentation with bounded asynchronous preparation.
+//!
 //! The worker normalizes syntax, inline text, rich specs, and code presentation.
 //! The transcript constructs only visible semantic rows; nested lists and
 //! tables flatten into that same row stream. Ordinary code uses a bounded
 //! native line viewport, shared CodeCard chrome, and source-owned selection.
 //! Shared media components load through the scoped Forge provider.
-
-#![allow(clippy::module_name_repetitions)]
 
 use crate::theme::{ArtisanTheme, Oklch, ProseTypography, TextStep, TypographyTokens};
 use std::cell::RefCell;
@@ -45,7 +44,7 @@ pub use reveal::PreparedReveal;
 mod rich;
 mod table;
 
-use code_copy::CodeCopyButton;
+pub use code_copy::CodeCopyButton;
 use inline::flatten_inline;
 pub(crate) use prepared::PreparedMarkdown;
 use prepared::{
@@ -84,7 +83,7 @@ impl std::fmt::Debug for SelectionEntry {
         f.debug_struct("SelectionEntry")
             .field("scope", &self.scope)
             .field("prefix", &self.prefix)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -143,8 +142,34 @@ impl MarkdownRenderer {
         cx: &mut gpui::App,
         notify: impl Fn(&mut gpui::App) + 'static,
     ) -> MarkdownPreparation {
-        self.preparation
-            .prepare(key, async_preparation::Source::Text(source), cx, notify)
+        self.preparation.prepare(
+            key,
+            async_preparation::Source::Text(source),
+            None,
+            cx,
+            notify,
+        )
+    }
+    /// Like [`Self::prepare_source`] for a user's message: `command`, the
+    /// special `/command` it starts with, paints as the composer paints it.
+    pub fn prepare_message(
+        &self,
+        key: SharedString,
+        source: Arc<str>,
+        command: Option<Range<usize>>,
+        cx: &mut gpui::App,
+        notify: impl Fn(&mut gpui::App) + 'static,
+    ) -> MarkdownPreparation {
+        let command = command
+            .and_then(|range| source.get(range))
+            .map(str::to_owned);
+        self.preparation.prepare(
+            key,
+            async_preparation::Source::Text(source),
+            command,
+            cx,
+            notify,
+        )
     }
     /// Publishes only admitted native hot glyph windows. The caller supplies
     /// its actual resolved layout width and stable immutable TextRuns identity.
@@ -233,8 +258,9 @@ impl MarkdownRenderer {
                 reference: source.reference.clone(),
                 metadata: index.header.metadata.clone(),
                 descriptor,
-                fetcher: source.fetcher.clone(),
+                fetcher: Arc::clone(&source.fetcher),
             },
+            None,
             cx,
             notify,
         )
@@ -271,8 +297,8 @@ impl MarkdownRenderer {
             key,
             source.reference.clone(),
             source.format,
-            source.fetcher.clone(),
-            source.index_fetcher.clone(),
+            Arc::clone(&source.fetcher),
+            Arc::clone(&source.index_fetcher),
             Some(offset),
             cx,
             notify,
@@ -295,8 +321,13 @@ impl MarkdownRenderer {
         cx: &mut gpui::App,
         notify: impl Fn(&mut gpui::App) + 'static,
     ) -> MarkdownPreparation {
-        self.preparation
-            .prepare(key, async_preparation::Source::Rope(source), cx, notify)
+        self.preparation.prepare(
+            key,
+            async_preparation::Source::Rope(source),
+            None,
+            cx,
+            notify,
+        )
     }
     pub fn is_rope_source_prepared(&self, key: &SharedString, source: &Arc<ropey::Rope>) -> bool {
         self.preparation.is_rope_prepared(key, source)
@@ -335,13 +366,36 @@ impl MarkdownRenderer {
         tone: MarkdownBodyTone,
     ) -> AnyElement {
         self.render_prepared(
-            prepared.presentation.clone(),
+            &prepared.presentation,
             prepared.revision(),
             &theme,
             &selector.into(),
             tone,
             range,
             None,
+            true,
+        )
+    }
+
+    /// Like [`Self::render_prepared_range`], without copy actions on code:
+    /// a tool call's preview, which nobody copies from.
+    pub fn render_preview_range(
+        &self,
+        prepared: &PreparedSource,
+        range: Range<usize>,
+        theme: ArtisanTheme,
+        selector: impl Into<SharedString>,
+        tone: MarkdownBodyTone,
+    ) -> AnyElement {
+        self.render_prepared(
+            &prepared.presentation,
+            prepared.revision(),
+            &theme,
+            &selector.into(),
+            tone,
+            range,
+            None,
+            false,
         )
     }
 
@@ -357,13 +411,14 @@ impl MarkdownRenderer {
         reveal: &PreparedReveal,
     ) -> AnyElement {
         self.render_prepared(
-            prepared.presentation.clone(),
+            &prepared.presentation,
             prepared.revision(),
             &theme,
             &selector.into(),
             tone,
             range,
             Some(reveal),
+            true,
         )
     }
 
@@ -373,6 +428,7 @@ impl MarkdownRenderer {
         scope: &SharedString,
         prefix: &[u64],
     ) -> Rc<crate::selectable_text::SelectionSource> {
+        const SELECTION_SOURCE_BYTES: usize = 32 * 1024 * 1024;
         let mut sources = self.selection_sources.borrow_mut();
         sources.retain(|entry| entry.prepared.strong_count() > 0);
         let index = sources
@@ -381,7 +437,7 @@ impl MarkdownRenderer {
         if let Some(index) = index {
             let entry = sources.remove(index);
             if entry.prepared.ptr_eq(&Rc::downgrade(prepared)) {
-                let source = entry.source.clone();
+                let source = Rc::clone(&entry.source);
                 sources.push(entry);
                 return source;
             }
@@ -392,7 +448,6 @@ impl MarkdownRenderer {
             .saturating_add(std::mem::size_of::<SelectionEntry>())
             .saturating_add(std::mem::size_of_val(prefix))
             .saturating_add(scope.len());
-        const SELECTION_SOURCE_BYTES: usize = 32 * 1024 * 1024;
         while !sources.is_empty()
             && (sources.len() >= 48
                 || sources
@@ -413,7 +468,7 @@ impl MarkdownRenderer {
             scope: scope.clone(),
             prefix: prefix.to_vec(),
             prepared: Rc::downgrade(prepared),
-            source: source.clone(),
+            source: Rc::clone(&source),
             bytes,
         });
         source
@@ -428,7 +483,7 @@ impl MarkdownRenderer {
     /// the prose measure here, instead of bounding the container itself.
     /// Without a measure every block fills the container.
     #[must_use]
-    pub fn with_prose_measure(mut self, measure: Pixels) -> Self {
+    pub const fn with_prose_measure(mut self, measure: Pixels) -> Self {
         self.prose_measure = Some(measure);
         self
     }
@@ -439,13 +494,14 @@ impl MarkdownRenderer {
     )]
     fn render_prepared(
         &self,
-        prepared: Rc<PreparedMarkdown>,
+        prepared: &Rc<PreparedMarkdown>,
         revision: u64,
         theme: &ArtisanTheme,
         selector: &SharedString,
         tone: MarkdownBodyTone,
         range: Range<usize>,
         reveal: Option<&PreparedReveal>,
+        copy: bool,
     ) -> AnyElement {
         let selection_prefix = self.selection_prefix.borrow();
         let media = self
@@ -454,8 +510,7 @@ impl MarkdownRenderer {
             .clone()
             .map(|media| media.owned_by(&selection_prefix, revision));
         let selection_scope = self.selection_scope.borrow();
-        let selection_source =
-            self.selection_source(&prepared, &selection_scope, &selection_prefix);
+        let selection_source = self.selection_source(prepared, &selection_scope, &selection_prefix);
         let render = RenderContext {
             theme,
             media: media.as_ref(),
@@ -464,9 +519,17 @@ impl MarkdownRenderer {
             tone,
             selector,
             reveal,
+            copy,
         };
         let mut root = markdown_root(render.id(ROOT_SLOT), theme, tone);
         let flow = prepared.flow();
+        if let Some(reveal) = reveal {
+            reveal.set_tail(
+                flow.last()
+                    .filter(|_| range.end >= flow.len())
+                    .and_then(tail_slot),
+            );
+        }
         for row in flow
             .iter()
             .skip(range.start)
@@ -495,7 +558,9 @@ impl MarkdownRenderer {
                 .relative()
                 .w_full()
                 .min_w_0()
-                .pl(px(row.indent as f32 * ProseTypography::LIST_INDENT_PX))
+                .pl(px(
+                    crate::f32_of_count(row.indent) * ProseTypography::LIST_INDENT_PX
+                ))
                 .child(content);
             if let (Some(reveal), prepared::FlowKind::Block(block)) = (reveal, &row.kind)
                 && matches!(
@@ -509,9 +574,11 @@ impl MarkdownRenderer {
             for (indent, marker, ordered) in &row.markers {
                 let mut label = div()
                     .absolute()
-                    .left(px(*indent as f32 * ProseTypography::LIST_INDENT_PX))
+                    .left(px(
+                        crate::f32_of_count(*indent) * ProseTypography::LIST_INDENT_PX
+                    ))
                     .top_0()
-                    .text_color(theme.colors.muted_foreground.to_paint());
+                    .text_color(theme.colors.text_muted.to_paint());
                 if *ordered {
                     label = label.font_weight(FontWeight::NORMAL);
                 }
@@ -559,6 +626,8 @@ struct RenderContext<'a> {
     /// Namespace for stable prepared ordinals.
     selector: &'a SharedString,
     reveal: Option<&'a PreparedReveal>,
+    /// Code carries a copy action.
+    copy: bool,
 }
 
 impl RenderContext<'_> {
@@ -583,6 +652,12 @@ impl Default for MarkdownRenderer {
     }
 }
 
+/// A byte offset or count from the wire as an index; saturates where
+/// `usize` is narrower than 64 bits, so a bounds check rejects it.
+fn wire_index(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
 fn markdown_root(selector: SharedString, theme: &ArtisanTheme, tone: MarkdownBodyTone) -> Div {
     // No container gap: inter-block spacing lives in per-block margins so
     // collapsing behavior matches the reference.
@@ -602,6 +677,8 @@ pub enum MarkdownBodyTone {
     Muted,
     /// Assistant reply body in the foreground token.
     Foreground,
+    /// A preview in a card: foreground mono at code size, like a terminal.
+    Code,
 }
 
 /// Returns the theme body color for one markdown body tone.
@@ -609,23 +686,31 @@ pub enum MarkdownBodyTone {
 /// Span-level recipes (strong, code, links, headings) carry their own exact
 /// tokens and never consult this; only untagged body text inherits it.
 #[must_use]
-pub fn markdown_body_text_color(tone: MarkdownBodyTone, theme: ArtisanTheme) -> Oklch {
+pub const fn markdown_body_text_color(tone: MarkdownBodyTone, theme: ArtisanTheme) -> Oklch {
     match tone {
-        MarkdownBodyTone::Muted => theme.colors.muted_foreground,
-        MarkdownBodyTone::Foreground => theme.colors.foreground,
+        MarkdownBodyTone::Muted => theme.colors.text_muted,
+        MarkdownBodyTone::Foreground | MarkdownBodyTone::Code => theme.colors.text,
     }
 }
 
 fn body_container(theme: &ArtisanTheme, tone: MarkdownBodyTone) -> Div {
-    div()
+    let body = div()
         .w_full()
         .min_w_0()
-        .text_size(px(ProseTypography::BODY_SIZE_PX))
+        .text_color(markdown_body_text_color(tone, *theme).to_paint())
+        .whitespace_normal();
+    if tone == MarkdownBodyTone::Code {
+        return body
+            .font_family(theme.typography.mono.family)
+            .text_size(px(ProseTypography::CODE_SIZE_PX))
+            .line_height(px(ProseTypography::CODE_LINE_PX))
+            .font_weight(FontWeight::NORMAL)
+            .tracking(0.0);
+    }
+    body.text_size(px(ProseTypography::BODY_SIZE_PX))
         .line_height(px(ProseTypography::BODY_LINE_PX))
         .font_weight(ProseTypography::BODY_WEIGHT)
-        .tracking(ProseTypography::TRACKING_EM)
-        .text_color(markdown_body_text_color(tone, *theme).to_paint())
-        .whitespace_normal()
+        .tracking(theme.typography.tracking_em)
 }
 
 /// Which margin recipe a block uses: root blocks take plugin margins,
@@ -640,7 +725,7 @@ pub enum BlockScope {
 }
 
 /// Reference top/bottom margins for one block in px.
-fn block_margins(block: &Block, scope: BlockScope) -> (f32, f32) {
+const fn block_margins(block: &Block, scope: BlockScope) -> (f32, f32) {
     match block {
         Block::Heading { level, .. } => {
             let heading = ProseTypography::heading(*level);
@@ -739,8 +824,8 @@ fn render_block(prepared: &PreparedBlock, render: &RenderContext<'_>) -> AnyElem
                 .font_weight(ProseTypography::HEADING_WEIGHT)
                 .text_size(px(heading.size_px))
                 .line_height(px(heading.line_px))
-                .letter_spacing(px(heading.tracking_px))
-                .text_color(theme.colors.foreground.to_paint())
+                .letter_spacing(px(theme.typography.heading_tracking_px(&heading)))
+                .text_color(theme.colors.text.to_paint())
                 .child(render_leaf(leaf, prepared.selector, "\n\n", render));
         }
         PreparedKind::Paragraph { leaf } => {
@@ -787,6 +872,32 @@ fn item_marker(ordered: bool, base: u64, position: usize, task: Option<bool>) ->
     }
 }
 
+/// The slot of the last leaf `row` draws, where a streamed source ends.
+fn tail_slot(row: &prepared::FlowRow) -> Option<Slot> {
+    match &row.kind {
+        prepared::FlowKind::Block(block) => match &block.kind {
+            PreparedKind::Heading { .. } | PreparedKind::Paragraph { .. } => Some(block.selector),
+            PreparedKind::Code(_)
+            | PreparedKind::Html { .. }
+            | PreparedKind::List(_)
+            | PreparedKind::Table(_) => None,
+        },
+        prepared::FlowKind::TableRow { block, row } => {
+            let PreparedKind::Table(table) = &block.kind else {
+                return None;
+            };
+            table
+                .rows
+                .get(*row)?
+                .iter()
+                .rev()
+                .find(|cell| cell.leaf.is_some())
+                .map(|cell| cell.selector)
+        }
+        prepared::FlowKind::Empty { slot, .. } => Some(*slot),
+    }
+}
+
 /// Renders one prepared inline leaf under `selector`.
 fn render_leaf(
     leaf: &PreparedLeaf,
@@ -816,6 +927,10 @@ fn render_leaf(
 /// Text, resolved runs, overrides, and link data are shared with the cached
 /// presentation, so nothing here copies the leaf's content. Only a leaf
 /// with shared highlights avoids rebuilding style ranges.
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the flagged bindings are references or plain values, not guards"
+)]
 fn selectable_leaf(
     id: impl Into<gpui::ElementId>,
     presentation: &LeafPresentation,
@@ -827,8 +942,8 @@ fn selectable_leaf(
 ) -> AnyElement {
     let (highlights, overrides) = presentation.resolved(theme);
     let highlights = reveal.map_or_else(
-        || highlights.clone(),
-        |(reveal, slot)| reveal.highlights(slot, &presentation.text, highlights.clone()),
+        || Rc::clone(&highlights),
+        |(reveal, slot)| reveal.highlights(slot, &presentation.text, Rc::clone(&highlights)),
     );
     let mut element = SelectableText::retained(id, presentation.text.clone(), *theme, Vec::new())
         .selection_order(order, separator)
@@ -897,12 +1012,14 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
     } else {
         crate::code_card::CopyPlacement::CenterRight
     };
-    let copy = CodeCopyButton::new(
-        render.id(code.copy),
-        render.element_id(code.copy_state),
-        source.clone(),
-        theme,
-    );
+    let copy = render.copy.then(|| {
+        CodeCopyButton::new(
+            render.id(code.copy),
+            render.element_id(code.copy_state),
+            source.clone(),
+            theme,
+        )
+    });
     let text_id = render.element_id(code.text);
     let text_order = render.selection_order(code.text);
     let diagram = fence.diagram.as_ref();
@@ -913,7 +1030,7 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
         .line_height(px(ProseTypography::CODE_LINE_PX))
         .font_weight(FontWeight::NORMAL)
         .letter_spacing(px(0.0))
-        .text_color(theme.colors.foreground.to_paint());
+        .text_color(theme.colors.text.to_paint());
     body = match diagram {
         // The diagram centers between gutters as wide as the copy action's,
         // and claims its laid-out aspect before the image rasterizes, so
@@ -923,7 +1040,7 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
                 .w_full()
                 .max_w(px(diagram.width))
                 .aspect_ratio(diagram.width / diagram.height)
-                .child(img(Arc::clone(&diagram.image)).size_full()),
+                .child(img(Arc::clone(diagram.image(theme.colors.mode))).size_full()),
         ),
         None => body.child(fence_text(
             text_id,
@@ -934,9 +1051,10 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
             render.selection_scope.clone(),
         )),
     };
-    let mut card = crate::code_card::CodeCard::new(*theme, body)
-        .copy_action(copy, placement)
-        .debug_selector(selector);
+    let mut card = crate::code_card::CodeCard::new(*theme, body).debug_selector(selector);
+    if let Some(copy) = copy {
+        card = card.copy_action(copy, placement);
+    }
     if diagram.is_some() {
         card = card.balanced_gutters();
     }
@@ -953,7 +1071,7 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
                 div()
                     .text_size(TypographyTokens::size(TextStep::XsMid))
                     .line_height(px(20.0))
-                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .text_color(theme.colors.text_muted.to_paint())
                     .child(note),
             )
             .into_any_element(),
@@ -963,6 +1081,10 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
 
 /// Ordinary code has a bounded native line viewport; source-owned selection
 /// includes every line even when the native list has not painted it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one sequential pass; splitting it would only thread its locals through helpers"
+)]
 fn fence_text(
     id: impl Into<gpui::ElementId>,
     fence: &prepared::PreparedFence,
@@ -972,13 +1094,13 @@ fn fence_text(
     scope: SharedString,
 ) -> AnyElement {
     let id = id.into();
-    let lines = fence.lines.clone();
+    let lines = Arc::clone(&fence.lines);
     let colors = fence.colors.clone();
     let count = lines.len();
     let theme = *theme;
     let line_px = ProseTypography::CODE_LINE_PX;
     let line_namespace = SharedString::from(id.to_string());
-    let list_id = id.clone();
+    let list_id = id;
     gpui::uniform_list(list_id, count, move |range, _, _| {
         range
             .filter_map(|index| {
@@ -1071,7 +1193,7 @@ fn fence_text(
             .collect::<Vec<_>>()
     })
     .w_full()
-    .h(px(count.min(24) as f32 * line_px))
+    .h(px(crate::f32_of_count(count.min(24)) * line_px))
     .into_any_element()
 }
 
@@ -1089,7 +1211,10 @@ fn render_rich(
     };
     let content = rich::render_content(prepared, &cx);
     let padding = match prepared.chrome() {
-        rich::Chrome::Card => return rich_card(code, render, content, prepared.copy()),
+        rich::Chrome::Card => {
+            let copy = prepared.copy().filter(|_| render.copy);
+            return rich_card(code, render, content, copy);
+        }
         rich::Chrome::Open => 4.0,
         rich::Chrome::Bare => 0.0,
     };
@@ -1098,7 +1223,7 @@ fn render_rich(
         .w_full()
         .min_w_0()
         .py(px(padding))
-        .text_color(render.theme.colors.foreground.to_paint())
+        .text_color(render.theme.colors.text.to_paint())
         .child(content)
         .debug_selector(move || selector.to_string())
         .into_any_element()
@@ -1146,8 +1271,10 @@ fn valid_code_range(token: &CodeToken, source: &str) -> Option<(Range<usize>, Co
     .then_some((range, token.kind))
 }
 
-/// One openable link run: its byte range in the flattened source plus the
-/// verbatim absolute destination it opens. Carried separately from the
+/// One openable link run.
+///
+/// Its byte range in the flattened source plus the verbatim absolute
+/// destination it opens. Carried separately from the
 /// highlight runs so click handling and the future selection consumer share
 /// one metadata source.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1185,6 +1312,7 @@ pub struct InlinePresentation {
 }
 
 /// Flattens inline spans into text and source-ordered, nonoverlapping runs.
+///
 /// Nested styles inherit their parent through [`HighlightStyle::highlight`];
 /// one linear traversal emits the combined ranges consumed by StyledText.
 ///
@@ -1290,6 +1418,15 @@ fn is_openable_link_destination(destination: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }
 
+fn command_style(theme: &ArtisanTheme) -> HighlightStyle {
+    // As the composer paints a special command.
+    HighlightStyle {
+        color: Some(theme.colors.mention_command.to_paint()),
+        font_weight: Some(FontWeight::MEDIUM),
+        ..Default::default()
+    }
+}
+
 fn code_style(theme: &ArtisanTheme, in_link: bool) -> HighlightStyle {
     // Reference inline code reads 400 muted with no wash (`prose.css`
     // inline-code over plugin `code`), except inside a link where `a code`
@@ -1303,7 +1440,7 @@ fn code_style(theme: &ArtisanTheme, in_link: bool) -> HighlightStyle {
         color: if in_link {
             None
         } else {
-            Some(theme.colors.muted_foreground.to_paint())
+            Some(theme.colors.text_muted.to_paint())
         },
         font_weight: Some(FontWeight::NORMAL),
         ..Default::default()
@@ -1318,7 +1455,7 @@ fn strong_style(theme: &ArtisanTheme, in_link: bool) -> HighlightStyle {
         color: if in_link {
             None
         } else {
-            Some(theme.colors.foreground.to_paint())
+            Some(theme.colors.text.to_paint())
         },
         font_weight: Some(ProseTypography::STRONG_WEIGHT),
         ..Default::default()
@@ -1333,9 +1470,9 @@ fn emphasis_style() -> HighlightStyle {
 }
 
 fn link_style(theme: &ArtisanTheme) -> HighlightStyle {
-    // Links use the shared information color and authored label.
+    // Links use the link token and authored label.
     HighlightStyle {
-        color: Some(theme.colors.banner_info.to_paint()),
+        color: Some(theme.colors.link.to_paint()),
         font_weight: Some(ProseTypography::LINK_WEIGHT),
         ..Default::default()
     }
@@ -1343,13 +1480,13 @@ fn link_style(theme: &ArtisanTheme) -> HighlightStyle {
 
 fn code_token_style(theme: &ArtisanTheme, kind: CodeTokenKind) -> HighlightStyle {
     let color = match kind {
-        CodeTokenKind::Comment => theme.colors.muted_foreground,
-        CodeTokenKind::Str => theme.colors.banner_success,
-        CodeTokenKind::Number => theme.colors.banner_warning,
-        CodeTokenKind::Keyword => theme.colors.accent_foreground,
-        CodeTokenKind::Type => theme.colors.primary,
-        CodeTokenKind::Function => theme.colors.question_to,
-        CodeTokenKind::Plain => theme.colors.foreground,
+        CodeTokenKind::Comment => theme.colors.syntax.comment,
+        CodeTokenKind::Str => theme.colors.syntax.string,
+        CodeTokenKind::Number => theme.colors.syntax.number,
+        CodeTokenKind::Keyword => theme.colors.syntax.keyword,
+        CodeTokenKind::Type => theme.colors.syntax.r#type,
+        CodeTokenKind::Function => theme.colors.syntax.function,
+        CodeTokenKind::Plain => theme.colors.text,
     };
     HighlightStyle {
         color: Some(color.to_paint()),

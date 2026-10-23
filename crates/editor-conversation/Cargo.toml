@@ -8,6 +8,7 @@ description = "The open thread: the item window, the transcript and the live run
 [dependencies]
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
+artisan-mentions = { path = "../artisan-mentions" }
 editor-ui = { path = "../editor-ui" }
 editor-composer = { path = "../editor-composer" }
 editor-core = { path = "../editor-core" }

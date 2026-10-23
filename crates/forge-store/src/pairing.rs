@@ -22,7 +22,7 @@ pub struct Device {
 /// set reloads only when SQLite's `data_version` says another connection
 /// committed: this Forge's writer, or `ae forge devices revoke` in another
 /// process, whose revocation must refuse the device's next request.
-pub(crate) struct Devices {
+pub struct Devices {
     conn: Connection,
     data_version: i64,
     keys: HashMap<String, DeviceId>,
@@ -125,7 +125,8 @@ impl Store {
             })
             .await?;
         if revoked {
-            let _ = self.inner.revocations.send(id.clone());
+            // No open connections means nothing to close.
+            self.inner.revocations.send(id.clone()).ok();
         }
         Ok(revoked)
     }
@@ -163,7 +164,8 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         for revoked in devices.refresh()? {
-            let _ = self.inner.revocations.send(revoked);
+            // No open connections means nothing to close.
+            self.inner.revocations.send(revoked).ok();
         }
         Ok(devices.keys.get(public_key).cloned())
     }

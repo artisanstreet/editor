@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/opencode/tests.rs
-assertion_line: 136
 expression: "replay(\"malformed\")"
 ---
 [

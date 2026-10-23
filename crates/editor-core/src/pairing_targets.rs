@@ -10,7 +10,7 @@ pub struct PairingTargets {
     task: Option<Task<()>>,
 }
 impl Core {
-    pub fn pairing_targets(&self) -> &PairingTargets {
+    pub const fn pairing_targets(&self) -> &PairingTargets {
         &self.pairing_targets
     }
     pub fn load_pairing_targets(&mut self, retry: bool, cx: &mut Context<Self>) {
@@ -22,7 +22,7 @@ impl Core {
         state.error = None;
         state.task = Some(cx.spawn(async move |this, cx| {
             let result = crate::hosts::wsl_distros().await;
-            let _ = this.update(cx, |this, cx| {
+            this.update(cx, |this, cx| {
                 let state = &mut this.pairing_targets;
                 state.task = None;
                 state.loading = false;
@@ -35,7 +35,8 @@ impl Core {
                 }
                 cx.emit(CoreEvent::HostsChanged);
                 cx.notify();
-            });
+            })
+            .ok();
         }));
         cx.notify();
     }
