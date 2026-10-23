@@ -298,7 +298,14 @@ let
     cargoExtraArgs = "--locked --offline --workspace --all-targets";
   };
   checkDeps = craneLib.buildDepsOnly (
-    checkBase // rerunnableBuild // { pname = "artisan-workspace-dependencies"; }
+    checkBase
+    // rerunnableBuild
+    // {
+      pname = "artisan-workspace-dependencies";
+      # The build already covers every target; Crane's check adds a second
+      # --all-targets and Cargo rejects the duplicated option.
+      cargoCheckCommand = "true";
+    }
   );
   checks = {
     # Cargo.toml owns lint policy.
