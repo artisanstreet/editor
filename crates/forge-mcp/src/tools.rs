@@ -153,7 +153,7 @@ fn thread_tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "thread_create",
-            description: "Starts a new top-level thread the user will see in the sidebar, and sends it the prompt. Harness, model, effort and permissions default to this thread's; anything changed or filled in comes back as a warning. For work you need back, use agent_spawn instead.",
+            description: "Starts a new top-level thread the user will see in the sidebar, and sends it the prompt. Harness, model, effort, speed, variant, context window, engine options and permissions default to this thread's; anything changed or filled in comes back as a warning. For work you need back, use agent_spawn instead.",
             properties: || {
                 json!({
                     "title": { "type": "string" },
@@ -161,8 +161,11 @@ fn thread_tools() -> Vec<Tool> {
                     "project": { "type": "string", "description": "Default this thread's project." },
                     "harness": { "type": "string", "description": HARNESS },
                     "model": { "type": "string" },
-                    "effort": { "type": "string" },
-                    "speed": { "type": "string" },
+                    "effort": { "type": "string", "description": "An effort id from harnesses. For OpenCode reasoning choices use variant." },
+                    "speed": { "type": "string", "description": "A speed id from harnesses." },
+                    "variant": { "type": "string", "description": "A variant id from harnesses (including OpenCode reasoning choices)." },
+                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100000000, "description": "A context_windows override_tokens value from harnesses. Use options.context_window=null to restore the standard window." },
+                    "options": { "type": "object", "additionalProperties": true, "description": "Engine-specific options, merged over inherited options for the same harness and model. context_window takes precedence over options.context_window." },
                     "permissions": { "type": "string", "enum": ["auto", "full"] },
                 })
             },
@@ -223,7 +226,7 @@ fn agent_tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "harnesses",
-            description: "Each harness with whether it is installed and signed in, its default model, and its models with their efforts, speeds and context windows. Pick agent_spawn's harness and model from here.",
+            description: "Each harness with whether it is installed and signed in, its default model, and its complete model catalog: efforts and notes, speeds, variants, defaults, exact context windows and override values, image support, descriptions, labs and gateways. OpenCode reasoning choices are variants, not efforts. Pick agent_spawn's harness and model from here.",
             properties: || json!({}),
             required: &[],
             read_only: true,
@@ -238,8 +241,11 @@ fn agent_tools() -> Vec<Tool> {
                     "prompt": { "type": "string" },
                     "harness": { "type": "string", "description": HARNESS },
                     "model": { "type": "string" },
-                    "effort": { "type": "string" },
-                    "speed": { "type": "string" },
+                    "effort": { "type": "string", "description": "An effort id from harnesses. For OpenCode reasoning choices use variant." },
+                    "speed": { "type": "string", "description": "A speed id from harnesses." },
+                    "variant": { "type": "string", "description": "A variant id from harnesses (including OpenCode reasoning choices)." },
+                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100000000, "description": "A context_windows override_tokens value from harnesses. Use options.context_window=null to restore the standard window." },
+                    "options": { "type": "object", "additionalProperties": true, "description": "Engine-specific options, merged over inherited options for the same harness and model. context_window takes precedence over options.context_window." },
                     "permissions": { "type": "string", "enum": ["auto", "full"] },
                     "background": { "type": "boolean" },
                 })
@@ -929,6 +935,9 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 model: Option<String>,
                 effort: Option<String>,
                 speed: Option<String>,
+                variant: Option<String>,
+                context_window: Option<u64>,
+                options: Option<serde_json::Map<String, Value>>,
                 permissions: Option<String>,
             }
             let create: Create = args(arguments)?;
@@ -943,6 +952,9 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         model: create.model,
                         effort: create.effort,
                         speed: create.speed,
+                        variant: create.variant,
+                        context_window: create.context_window,
+                        options: create.options,
                         permissions: permissions(create.permissions.as_deref())?,
                         background: false,
                     },
@@ -1106,35 +1118,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 if !installed || status.models.is_empty() {
                     continue;
                 }
-                out.push_str("| Model | Efforts | Speeds | Context |\n|---|---|---|---|\n");
-                for model in status.models.iter() {
-                    let efforts: Vec<String> = model
-                        .efforts
-                        .iter()
-                        .map(|effort| {
-                            if model.default_effort.as_ref() == Some(effort) {
-                                format!("**{effort}**")
-                            } else {
-                                effort.clone()
-                            }
-                        })
-                        .collect();
-                    let speeds: Vec<&str> =
-                        model.speeds.iter().map(|speed| speed.id.as_str()).collect();
-                    writeln!(
-                        out,
-                        "| {} `{}` | {} | {} | {} |",
-                        format::cell(&model.name),
-                        model.id,
-                        efforts.join(", "),
-                        speeds.join(", "),
-                        model
-                            .context_window
-                            .map(|tokens| format!("{}K", tokens / 1_000))
-                            .unwrap_or_default(),
-                    )?;
-                }
-                out.push('\n');
+                out.push_str(&format::models(&status.models)?);
             }
             Ok(out.trim_end().to_owned())
         }
@@ -1147,6 +1131,9 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 model: Option<String>,
                 effort: Option<String>,
                 speed: Option<String>,
+                variant: Option<String>,
+                context_window: Option<u64>,
+                options: Option<serde_json::Map<String, Value>>,
                 permissions: Option<String>,
                 #[serde(default)]
                 background: bool,
@@ -1163,6 +1150,9 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         model: spawn.model,
                         effort: spawn.effort,
                         speed: spawn.speed,
+                        variant: spawn.variant,
+                        context_window: spawn.context_window,
+                        options: spawn.options,
                         permissions: permissions(spawn.permissions.as_deref())?,
                         background: spawn.background,
                     },

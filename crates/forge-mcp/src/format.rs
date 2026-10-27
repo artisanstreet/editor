@@ -8,6 +8,18 @@ use forge_runs::{AgentInfo, AgentState, Hub};
 use forge_store::{GrepPage, SearchPage, Touch};
 use std::fmt::Write as _;
 
+/// Serialize the shared catalog directly so new model settings are exposed
+/// without maintaining a second, incomplete representation for MCP.
+pub fn models(models: &[artisan_api::Model]) -> anyhow::Result<String> {
+    Ok(format!(
+        "Use effort, speed and variant ids exactly as listed. OpenCode reasoning choices use variant. \
+         Defaults are default_effort, default_variant and speeds[].default. \
+         context_window is the standard token count; context_windows[].override_tokens is the \
+         value to request an alternate window. Omitted optional fields mean none are advertised.\n\n```json\n{}\n```\n\n",
+        serde_json::to_string_pretty(models)?
+    ))
+}
+
 /// Who an indexed item's text is from.
 fn who(kind: &str) -> &'static str {
     match kind {
@@ -60,7 +72,8 @@ pub fn search(page: &SearchPage, offset: u32) -> String {
             time(hit.created_at),
             one_line(&hit.snippet),
             hit.item_id,
-        ).ok();
+        )
+        .ok();
     }
     if let Some(next) = page.next {
         writeln!(out, "\nMore hits: call again with offset {next}.").ok();
@@ -88,7 +101,8 @@ pub fn grep(page: &GrepPage) -> String {
             time(found.created_at),
             found.line,
             found.item_id,
-        ).ok();
+        )
+        .ok();
         for line in found.before.iter().chain([&found.text]).chain(&found.after) {
             writeln!(out, "> {line}").ok();
         }
@@ -98,7 +112,8 @@ pub fn grep(page: &GrepPage) -> String {
         writeln!(
             out,
             "Older items not searched yet: call again with cursor {next}."
-        ).ok();
+        )
+        .ok();
     }
     out.trim().to_owned()
 }
@@ -125,7 +140,8 @@ pub fn touches(touches: &[Touch]) -> String {
             touch.path,
             time(touch.created_at),
             touch.item_id
-        ).ok();
+        )
+        .ok();
     }
     out.trim_start().to_owned()
 }
@@ -191,7 +207,12 @@ pub fn agent(info: &AgentInfo) -> String {
         AgentState::Failed => "failed",
         AgentState::Cancelled => "stopped",
     };
-    let setup: Vec<&str> = [info.model.as_deref(), info.effort.as_deref()]
+    let reasoning = if info.harness == artisan_api::EngineId::OpenCode {
+        info.variant.as_deref()
+    } else {
+        info.effort.as_deref()
+    };
+    let setup: Vec<&str> = [info.model.as_deref(), reasoning]
         .into_iter()
         .flatten()
         .collect();
@@ -227,4 +248,65 @@ pub fn agents(infos: &[AgentInfo]) -> String {
 /// A markdown table cell: one line, pipes escaped.
 pub fn cell(text: &str) -> String {
     one_line(text).replace('|', "\\|")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn opencode_agent_reports_variant_even_with_legacy_effort() {
+        let mut info = forge_runs::AgentInfo {
+            agent: artisan_api::ItemId::new(),
+            thread: artisan_api::ThreadId::new(),
+            task: "Review".into(),
+            harness: artisan_api::EngineId::OpenCode,
+            model: Some("opencode-go/muse".into()),
+            effort: Some("medium".into()),
+            variant: Some("xhigh".into()),
+            permissions: artisan_api::Permissions::Auto,
+            state: forge_runs::AgentState::Working,
+            result: None,
+            error: None,
+            warnings: Vec::new(),
+        };
+        let output = super::agent(&info);
+        assert!(output.contains("opencode-go/muse, xhigh"));
+        assert!(!output.contains("medium"));
+        info.variant = None;
+        assert!(!super::agent(&info).contains("medium"));
+        info.harness = artisan_api::EngineId::Codex;
+        assert!(super::agent(&info).contains("medium"));
+    }
+
+    #[test]
+    fn catalog_exposes_variant_ids_defaults_and_exact_context_choices() {
+        let models: Vec<artisan_api::Model> = serde_json::from_value(serde_json::json!([{
+            "id": "opencode/muse", "name": "Muse", "efforts": [], "default_effort": null,
+            "variants": [{"id": "xhigh", "label": "Extra high"}], "default_variant": "xhigh",
+            "context_window": 262144,
+            "context_windows": [{"tokens": 262144}, {"tokens": 1048576, "override_tokens": 1000000}],
+            "supports_images": true, "description": "Contributor", "lab": "Meta", "group": "OpenCode",
+            "speeds": [{"id": "fast", "label": "Fast", "description": "Lower latency", "default": true}],
+            "effort_notes": [{"effort": "max", "special": true, "advisory": "More usage", "description": "Maximum effort"}]
+        }])).unwrap();
+        let output = super::models(&models).unwrap();
+        assert!(output.contains("OpenCode reasoning choices use variant"));
+        let json = output
+            .split("```json\n")
+            .nth(1)
+            .unwrap()
+            .split("\n```")
+            .next()
+            .unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(catalog[0]["variants"][0]["id"], "xhigh");
+        assert_eq!(catalog[0]["default_variant"], "xhigh");
+        assert_eq!(catalog[0]["context_window"], 262144);
+        assert_eq!(catalog[0]["context_windows"][1]["override_tokens"], 1000000);
+        assert_eq!(catalog[0]["speeds"][0]["default"], true);
+        assert_eq!(catalog[0]["effort_notes"][0]["advisory"], "More usage");
+        assert_eq!(catalog[0]["supports_images"], true);
+        assert_eq!(catalog[0]["description"], "Contributor");
+        assert_eq!(catalog[0]["lab"], "Meta");
+        assert_eq!(catalog[0]["group"], "OpenCode");
+    }
 }

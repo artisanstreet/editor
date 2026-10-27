@@ -116,8 +116,8 @@ Raw tool output is indexed apart from the conversation and searched only when as
 
 | Tool | Does |
 |---|---|
-| `harnesses` | Each harness with sign-in state, models, efforts, speeds and context windows, from the same catalog as the composer. |
-| `agent_spawn` | Starts a child thread: `task` (the label), `prompt`, `harness`, `model`, `effort`, `permissions` (at most the caller's), `background`. Omitted fields inherit from the parent (see Defaults). Returns the agent id at once, with warnings for anything it filled in. |
+| `harnesses` | Each harness with sign-in state, the complete model catalog as JSON: efforts and notes, speeds, variants, defaults, exact context windows and override values, image support, descriptions, labs and gateways, from the same catalog as the composer. OpenCode reasoning choices use `variant`, not `effort`. |
+| `agent_spawn` | Starts a child thread: `task` (the label), `prompt`, `harness`, `model`, `effort`, `speed`, `variant`, `context_window`, `options`, `permissions` (at most the caller's), `background`. Omitted fields inherit from the parent (see Defaults). Returns the agent id at once, with warnings for anything it filled in. |
 | `agent_wait` | Waits up to a timeout for one or more agents; returns each one's state and, when done, its final reply. |
 | `agent_message` | Sends a follow-up to a running or finished agent. |
 | `agent_read` | Reads an agent's thread (same shape as `thread_read`). |
@@ -181,8 +181,15 @@ if it meant something else:
 | permissions above the parent's | the parent's | "permissions capped at auto (the parent's)" |
 | a harness that isn't signed in | nothing; the spawn fails | an error saying to sign in |
 
+Model settings on `agent_spawn` and `thread_create` use the ids advertised by `harnesses`.
+`context_window` takes a catalog `context_windows[].override_tokens` value, not the displayed
+window size. `options` merges over inherited engine options only for the same harness and model;
+explicit options can also be supplied when switching. A top-level `context_window` wins over
+`options.context_window`; `options.context_window: null` restores the standard window.
+Unsupported variants and context overrides fall back to the model's defaults with warnings.
+
 **Codex gets configurable subagents.** Through `agent_spawn`, a Codex agent picks any harness,
-model, effort and permission level the user has, instead of inheriting its parent.
+model, effort, speed, variant, context window and engine options the user has, instead of inheriting its parent.
 
 **Results.** `agent_spawn` returns at once. A parent that needs the answer calls `agent_wait`,
 which blocks up to its timeout (under every harness's MCP call timeout) and can be called again. A
