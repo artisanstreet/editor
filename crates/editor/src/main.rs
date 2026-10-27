@@ -7,6 +7,7 @@
 mod context_meter;
 #[cfg(feature = "dhat-heap")]
 mod heap_profile;
+mod entry;
 mod home;
 mod logging;
 mod notifications;
@@ -18,12 +19,12 @@ mod script;
 mod workspace;
 
 use actions::{GoBack, NewThread, OpenPalette, OpenSettings, Quit, ToggleInspector, ToggleSidebar};
-use editor_core::Screen;
+use editor_core::{Core, EntryGate, Screen};
+use entry::EntryRoot;
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
-    WindowOptions, px, size,
+    App, AppContext as _, Bounds, Entity, KeyBinding, Pixels, Size, TitlebarOptions,
+    WindowBounds, WindowOptions, px, size,
 };
-use workspace::Workspace;
 
 /// The app's actions, in their own module so the expectation below covers
 /// only the macro's derives.
@@ -94,6 +95,35 @@ fn init_logging() {
     }
 }
 
+/// Opens a deep link only when the gate is already `Ready`; a locked
+/// window stays on the entry surface instead of navigating behind it.
+fn maybe_open_link(link: Option<Screen>, core: &Entity<editor_core::Core>, cx: &mut App) {
+    if let Some(screen) = link {
+        let ready = matches!(core.read(cx).entry_gate(cx), EntryGate::Ready { .. });
+        if ready {
+            core.update(cx, |core, cx| core.navigate(screen, cx));
+        }
+    }
+}
+
+/// Follows a tapped system notification into its thread, but only through
+/// the entry gate: locked windows ignore notification taps.
+fn follow_notification(
+    core: &Entity<Core>,
+    response: &gpui::SystemNotificationResponse,
+    cx: &mut App,
+) {
+    if !matches!(core.read(cx).entry_gate(cx), EntryGate::Ready { .. }) {
+        return;
+    }
+    let Some((host, thread)) = notifications::parse_tag(&response.tag) else {
+        return;
+    };
+    core.update(cx, |core, cx| {
+        core.navigate(Screen::Thread { host, thread }, cx);
+    });
+}
+
 fn main() {
     init_logging();
     #[cfg(feature = "dhat-heap")]
@@ -130,21 +160,13 @@ fn main() {
             let (core, failure) = editor_core::init(cx);
             let failure = failure
                 .map(|error| format!("Couldn't read this device's Artisan files: {error:#}"));
-            if let Some(screen) = link {
-                core.update(cx, |core, cx| core.navigate(screen, cx));
-            }
+            maybe_open_link(link, &core, cx);
             cx.set_app_identity("com.artisanstreet.editor", "Artisan Editor");
             let notified_core = core.downgrade();
             cx.on_system_notification_response(move |response, cx| {
-                let (Some((host, thread)), Some(core)) = (
-                    notifications::parse_tag(&response.tag),
-                    notified_core.upgrade(),
-                ) else {
-                    return;
-                };
-                core.update(cx, |core, cx| {
-                    core.navigate(Screen::Thread { host, thread }, cx);
-                });
+                if let Some(core) = notified_core.upgrade() {
+                    follow_notification(&core, &response, cx);
+                }
                 if let Some(window) = cx.windows().first() {
                     window
                         .update(cx, |_, window, _| window.activate_window())
@@ -176,7 +198,7 @@ fn main() {
                 script::window_options(&mut options);
             }
             let opened = cx.open_window(options, move |window, cx| {
-                cx.new(|cx| Workspace::new(core, failure, window, cx))
+                cx.new(|cx| EntryRoot::new(core, failure, window, cx))
             });
             match opened {
                 Ok(handle) => {
@@ -225,7 +247,7 @@ fn bind_keys(cx: &mut App) {
 }
 
 #[cfg(feature = "capture")]
-fn capture(handle: gpui::WindowHandle<Workspace>, cx: &mut App) {
+fn capture(handle: gpui::WindowHandle<EntryRoot>, cx: &mut App) {
     let Some(path) = std::env::var_os("ARTISAN_EDITOR_CAPTURE") else {
         return;
     };

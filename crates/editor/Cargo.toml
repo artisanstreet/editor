@@ -4,6 +4,7 @@ edition.workspace = true
 license-file.workspace = true
 version.workspace = true
 description = "The Artisan Editor window: layout, titlebar, command palette, notices, pairing."
+autotests = false
 
 [[bin]]
 name = "artisan-editor"
@@ -43,6 +44,7 @@ file-rotate = "0.8.0"
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
+editor-core = { path = "../editor-core", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]
