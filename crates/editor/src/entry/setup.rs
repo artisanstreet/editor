@@ -62,8 +62,6 @@ impl SetupView {
     }
 
     fn refresh_binding(&self, cx: &mut Context<Self>) {
-        let account = self.core.read(cx).account().clone();
-        account.update(cx, editor_core::Account::refresh_local_binding);
         controller::forge_status(&self.core, cx);
     }
 
@@ -271,6 +269,21 @@ impl Render for SetupView {
                     .as_deref()
                     .is_some_and(|id| id == account_id)
         });
+        let claimed_here = binding
+            .as_ref()
+            .and_then(|binding| binding.claimed_by.clone())
+            .is_some_and(|id| id == account_id);
+        let claimed_elsewhere = binding
+            .as_ref()
+            .and_then(|binding| binding.claimed_by.clone())
+            .is_some_and(|id| id != account_id);
+        let bound_elsewhere = binding.as_ref().is_some_and(|binding| {
+            binding.enrolled
+                && binding
+                    .account_id
+                    .as_deref()
+                    .is_some_and(|id| id != account_id)
+        });
         let pair_core = self.core.clone();
         if bound_here {
             rows.push(
@@ -291,7 +304,7 @@ impl Render for SetupView {
                     )
                     .into_any_element(),
             );
-        } else if binding.as_ref().is_some_and(|binding| binding.enrolled) {
+        } else if claimed_here {
             let confirm_core = self.core.clone();
             rows.push(
                 div()
@@ -306,7 +319,7 @@ impl Render for SetupView {
                     .child(
                         div()
                             .text_color(theme.colors.text_muted.to_paint())
-                            .child("This Forge is enrolled but not paired here yet.")
+                            .child(format!("This Forge is claimed for {email}."))
                             .into_any_element(),
                     )
                     .child(
@@ -314,7 +327,6 @@ impl Render for SetupView {
                             .flex()
                             .flex_row()
                             .justify_end()
-                            .gap(px(8.0))
                             .child(
                                 Button::text(
                                     "entry-forge-confirm",
@@ -327,16 +339,28 @@ impl Render for SetupView {
                                     controller::forge_confirm(&confirm_core, cx);
                                 })
                                 .into_any_element(),
-                            )
-                            .child(
-                                Button::text("entry-refresh-binding", theme, "Check again")
-                                    .variant(ButtonVariant::Ghost)
-                                    .debug_selector("entry-refresh-binding")
-                                    .on_activate(cx.listener(|this, _, _, cx| {
-                                        this.refresh_binding(cx);
-                                    }))
-                                    .into_any_element(),
                             ),
+                    )
+                    .into_any_element(),
+            );
+        } else if claimed_elsewhere || bound_elsewhere {
+            rows.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_color(theme.colors.text.to_paint())
+                            .child("This Forge"),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.colors.destructive_text.to_paint())
+                            .child(
+                                "This Forge belongs to a different account. Switch accounts below.",
+                            )
+                            .into_any_element(),
                     )
                     .into_any_element(),
             );
@@ -355,7 +379,6 @@ impl Render for SetupView {
                         div()
                             .text_color(theme.colors.text_muted.to_paint())
                             .child("This Forge isn't paired yet.")
-                            .into_any_element(),
                     )
                     .child(
                         div()
@@ -449,6 +472,35 @@ impl Render for SetupView {
                     .into_any_element(),
             );
         }
-        div().flex().flex_col().children(rows)
+        rows.push(
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap(px(8.0))
+                .child(
+                    Button::text("entry-setup-refresh", theme, "Check again")
+                        .variant(ButtonVariant::Ghost)
+                        .debug_selector("entry-setup-refresh")
+                        .on_activate(cx.listener(|this, _, _, cx| this.refresh_binding(cx)))
+                        .into_any_element(),
+                )
+                .child(
+                    Button::text("entry-setup-use-another", theme, "Use another account")
+                        .variant(ButtonVariant::Ghost)
+                        .debug_selector("entry-setup-use-another")
+                        .on_activate(cx.listener(|this, _, _, cx| {
+                            controller::sign_out(&this.core, false, cx);
+                        }))
+                        .into_any_element(),
+                )
+                .into_any_element(),
+        );
+        div()
+            .id("entry-setup")
+            .debug_selector(|| "entry-setup".into())
+            .flex()
+            .flex_col()
+            .children(rows)
     }
 }

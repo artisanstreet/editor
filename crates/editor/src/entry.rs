@@ -5,8 +5,8 @@ use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens};
 use editor_ui::window_controls::WindowControls;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window,
-    WindowControlArea, div, px,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, WindowControlArea, div, px,
 };
 use gpui::prelude::FluentBuilder as _;
 
@@ -129,6 +129,9 @@ impl EntryRoot {
     fn shell(&self, title: &str, body: AnyElement, window: &Window, cx: &App) -> AnyElement {
         let theme = *cx.theme();
         let narrow = window.viewport_size().width < px(640.0);
+        // Tall setup content must stay reachable on short windows: cap the
+        // card below the viewport and let it scroll internally.
+        let max_h = (window.viewport_size().height - px(96.0)).max(px(200.0));
         let column = div()
             .flex()
             .flex_col()
@@ -165,11 +168,14 @@ impl EntryRoot {
                     .justify_center()
                     .child(
                         div()
+                            .id("entry-card")
                             .bg(theme.colors.background.to_paint())
                             .border_1()
                             .border_color(theme.colors.line.to_paint())
                             .rounded(RadiusTokens::value(RadiusStep::X2l))
                             .p(px(24.0))
+                            .max_h(max_h)
+                            .overflow_y_scroll()
                             .when(!narrow, |card| card.w(px(560.0)))
                             .when(narrow, |card| card.w_full().mx(px(16.0)))
                             .child(column),

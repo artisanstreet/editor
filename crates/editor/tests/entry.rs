@@ -137,6 +137,16 @@ pub(crate) struct EntryFixture {
 
 impl EntryFixture {
     pub(crate) fn new(cx: &mut gpui::TestAppContext) -> Self {
+        Self::new_impl(cx, true)
+    }
+
+    /// Same session but no durable onboarding record: resume lands in
+    /// NeedsSetup instead of Ready.
+    pub(crate) fn new_without_record(cx: &mut gpui::TestAppContext) -> Self {
+        Self::new_impl(cx, false)
+    }
+
+    fn new_impl(cx: &mut gpui::TestAppContext, with_record: bool) -> Self {
         let stub = StubCore::new();
         let dir = tempfile::tempdir().unwrap();
         let editor_dir = dir.path().join("editor");
@@ -150,20 +160,22 @@ impl EntryFixture {
             .to_string(),
         )
         .unwrap();
-        let record = serde_json::json!({
-            "account_id": ACCOUNT_ID,
-            "base_url": stub.base_url,
-            "machine_id": MACHINE_ID,
-            "method": "Relay",
-            "completed_at": "2026-10-26T00:00:00.000Z",
-        });
-        let name = format!(
-            "{}-{ACCOUNT_ID}.json",
-            base64_url_no_pad(stub.base_url.as_bytes())
-        );
-        let accounts = editor_dir.join("accounts");
-        std::fs::create_dir_all(&accounts).unwrap();
-        std::fs::write(accounts.join(name), record.to_string()).unwrap();
+        if with_record {
+            let record = serde_json::json!({
+                "account_id": ACCOUNT_ID,
+                "base_url": stub.base_url,
+                "machine_id": MACHINE_ID,
+                "method": "Relay",
+                "completed_at": "2026-10-26T00:00:00.000Z",
+            });
+            let name = format!(
+                "{}-{ACCOUNT_ID}.json",
+                base64_url_no_pad(stub.base_url.as_bytes())
+            );
+            let accounts = editor_dir.join("accounts");
+            std::fs::create_dir_all(&accounts).unwrap();
+            std::fs::write(accounts.join(name), record.to_string()).unwrap();
+        }
         let core = cx.new(|cx| {
             Core::new(
                 EditorFiles {
@@ -196,6 +208,22 @@ fn wait_for(
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("timed out waiting for {what}");
+}
+
+/// Blocks until the fixture account validates and the gate reports NeedsSetup.
+pub(crate) fn wait_needs_setup(cx: &mut gpui::TestAppContext, core: &gpui::Entity<Core>) {
+    for _ in 0..400 {
+        cx.executor().allow_parking();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        if core.read_with(cx, |core, cx| {
+            matches!(core.entry_gate(cx), EntryGate::NeedsSetup { .. })
+        }) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for the entry gate to report NeedsSetup");
 }
 
 /// Blocks until the fixture account validates and the gate reports Ready.
@@ -259,6 +287,48 @@ fn sign_out_drops_mounted_workspace_back_to_entry(cx: &mut gpui::TestAppContext)
     assert!(
         matches!(gate, EntryGate::SignedOut),
         "sign-out must relock the gate, got {gate:?}"
+    );
+}
+
+/// A signed-in account without onboarding stays gated: retry revalidates
+/// without unlocking, and the setup surface offers switching accounts.
+#[gpui::test]
+fn needs_setup_offers_sign_out_and_retry_without_unlocking(cx: &mut gpui::TestAppContext) {
+    cx.executor().allow_parking();
+    let fixture = EntryFixture::new_without_record(cx);
+    wait_needs_setup(cx, &fixture.core);
+    let core = fixture.core.clone();
+    let (_entry, cx) = cx.add_window_view(move |window, cx| {
+        EntryRoot::new(core, None, window, cx)
+    });
+    wait_for(cx, "the setup surface to render", |cx| {
+        cx.debug_bounds("entry-setup").is_some()
+    });
+    assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
+    let core = fixture.core.clone();
+    cx.update(|_, cx| controller::refresh(&core, cx));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("entry-setup").is_some(),
+        "retry must keep the setup surface, not unlock"
+    );
+    assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
+    let switcher = cx
+        .debug_bounds("entry-setup-use-another")
+        .expect("the setup surface offers switching accounts");
+    cx.simulate_click(switcher.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
+    assert!(
+        cx.debug_bounds("sign-in-submit").is_some(),
+        "switching accounts returns to sign-in"
+    );
+    let gate = fixture
+        .core
+        .read_with(cx, |core, cx| core.entry_gate(cx));
+    assert!(
+        matches!(gate, EntryGate::SignedOut),
+        "switching accounts must relock the gate, got {gate:?}"
     );
 }
 
