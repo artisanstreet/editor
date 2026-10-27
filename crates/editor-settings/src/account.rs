@@ -5,12 +5,15 @@
 //! identifiers are ever pasted or displayed. Enrollment codes are the one
 //! exception — they are single-use, short-lived, and shown only to claim.
 
+pub mod controller;
+pub mod sign_in;
+
 use crate::Settings;
 use crate::page;
 use crate::ui::{card, error_text, header, note, row, section_shell};
-use editor_core::{AccountEvent, AccountPhase, SettingsPage};
+use editor_core::{AccountEvent, SettingsPage};
 use editor_ui::button::ButtonVariant;
-use editor_ui::text_editor::{TextEditor, TextEditorEvent};
+use editor_ui::text_editor::TextEditor;
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
     AnyElement, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
@@ -19,45 +22,28 @@ use gpui::{
 
 pub struct AccountForm {
     core: Entity<editor_core::Core>,
-    email: Entity<TextEditor>,
-    second_factor: Entity<TextEditor>,
+    sign_in: Entity<sign_in::SignInView>,
     claim_code: Entity<TextEditor>,
-    _subscriptions: Vec<Subscription>,
+    _claim_submit: Subscription,
     account_subscription: Option<Subscription>,
 }
 
 impl AccountForm {
     pub(crate) fn new(core: Entity<editor_core::Core>, cx: &mut Context<Settings>) -> Self {
-        let email = cx.new(|cx| TextEditor::new("", "you@example.com", cx).single_line());
-        let second_factor = cx.new(|cx| TextEditor::new("", "6-digit code", cx).single_line());
+        let sign_in = cx.new(|cx| sign_in::SignInView::new(core.clone(), cx));
         let claim_code = cx.new(|cx| TextEditor::new("", "Code from this Forge", cx).single_line());
-        let email_submit =
-            cx.subscribe(&email, |this, _, event: &TextEditorEvent, cx| match event {
-                TextEditorEvent::Submitted => this.account.request_link(cx),
-                TextEditorEvent::Changed => cx.notify(),
-            });
-        let factor_submit =
-            cx.subscribe(
-                &second_factor,
-                |this, _, event: &TextEditorEvent, cx| match event {
-                    TextEditorEvent::Submitted => this.account.finish_sign_in(cx),
-                    TextEditorEvent::Changed => cx.notify(),
-                },
-            );
-        let claim_submit =
-            cx.subscribe(
-                &claim_code,
-                |this, _, event: &TextEditorEvent, cx| match event {
-                    TextEditorEvent::Submitted => this.account.claim_code(cx),
-                    TextEditorEvent::Changed => cx.notify(),
-                },
-            );
+        let claim_submit = cx.subscribe(&claim_code, |this, _, event: &editor_ui::text_editor::TextEditorEvent, cx| {
+            if *event == editor_ui::text_editor::TextEditorEvent::Submitted {
+                this.account.claim_code(cx);
+            } else {
+                cx.notify();
+            }
+        });
         Self {
             core,
-            email,
-            second_factor,
+            sign_in,
             claim_code,
-            _subscriptions: vec![email_submit, factor_submit, claim_submit],
+            _claim_submit: claim_submit,
             account_subscription: None,
         }
     }
@@ -74,113 +60,40 @@ impl AccountForm {
             }));
     }
 
-    pub(crate) fn request_link(&self, cx: &mut Context<Settings>) {
-        let email = self.email.read(cx).text().to_owned();
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account()
-                .update(cx, |account, cx| account.request_link(email, cx));
-        });
-    }
-
-    pub(crate) fn cancel(&self, cx: &mut Context<Settings>) {
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account().update(cx, |account, cx| {
-                account.dismiss_error(cx);
-            });
-        });
-    }
-
-    pub(crate) fn finish_sign_in(&self, cx: &mut Context<Settings>) {
-        let code = self.second_factor.read(cx).text().trim().to_owned();
-        let (totp, recovery) = if code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()) {
-            (Some(code), None)
-        } else if code.is_empty() {
-            (None, None)
-        } else {
-            (None, Some(code))
-        };
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account()
-                .update(cx, |account, cx| account.finish_sign_in(totp, recovery, cx));
-        });
-        self.second_factor.update(cx, |editor, cx| {
-            editor.set_text("", cx);
-        });
-    }
-
     pub(crate) fn sign_out(&self, revoke_all: bool, cx: &mut Context<Settings>) {
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account().update(cx, |account, cx| {
-                if revoke_all {
-                    account.sign_out_everywhere(cx);
-                } else {
-                    account.sign_out(cx);
-                }
-            });
-        });
+        controller::sign_out(&self.core, revoke_all, cx);
     }
 
     pub(crate) fn refresh(&self, cx: &mut Context<Settings>) {
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account().update(cx, editor_core::Account::refresh);
-        });
+        controller::refresh(&self.core, cx);
     }
 
     pub(crate) fn claim_code(&self, cx: &mut Context<Settings>) {
         let code = self.claim_code.read(cx).text().to_owned();
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account()
-                .update(cx, |account, cx| account.claim_code(code, cx));
-        });
+        controller::claim_code(&self.core, &code, cx);
         self.claim_code.update(cx, |editor, cx| {
             editor.set_text("", cx);
         });
     }
 
     pub(crate) fn enroll_this_forge(&self, cx: &mut Context<Settings>) {
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account()
-                .update(cx, editor_core::Account::enroll_this_forge);
-        });
+        controller::enroll_this_forge(&self.core, cx);
     }
 
     pub(crate) fn forge_status(&self, cx: &mut Context<Settings>) {
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account()
-                .update(cx, editor_core::Account::forge_status);
-        });
+        controller::forge_status(&self.core, cx);
     }
 
     pub(crate) fn forge_confirm(&self, cx: &mut Context<Settings>) {
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account()
-                .update(cx, editor_core::Account::forge_confirm);
-        });
+        controller::forge_confirm(&self.core, cx);
     }
 
-    pub(crate) fn connect_machine(&self, machine_id: String, cx: &mut Context<Settings>) {
-        let core_entity = self.core.clone();
-        let account = core_entity.read_with(cx, |core, _| core.account().clone());
-        account.update(cx, |account, cx| {
-            account.connect_machine(machine_id, &core_entity, cx);
-        });
+    pub(crate) fn connect_machine(&self, machine_id: &str, cx: &mut Context<Settings>) {
+        controller::connect_machine(&self.core, machine_id, cx);
     }
 
-    pub(crate) fn remove_machine(&self, machine_id: String, cx: &mut Context<Settings>) {
-        let core_entity = self.core.clone();
-        core_entity.update(cx, |core, cx| {
-            core.account()
-                .update(cx, |account, cx| account.remove_machine(machine_id, cx));
-        });
+    pub(crate) fn remove_machine(&self, machine_id: &str, cx: &mut Context<Settings>) {
+        controller::remove_machine(&self.core, machine_id, cx);
     }
 }
 
@@ -199,32 +112,31 @@ pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>)
         ))
         .debug_selector(|| "settings-account".to_owned());
     match phase {
-        AccountPhase::SignedOut | AccountPhase::Requesting | AccountPhase::Error { .. } => {
-            page = page.child(render_sign_in(settings, theme, &phase, cx));
-        }
-        AccountPhase::Pending { ref email, .. } => {
-            page = page.child(render_waiting(
-                settings,
+        AccountPhase::SignedOut
+        | AccountPhase::Restoring
+        | AccountPhase::Requesting
+        | AccountPhase::Error { .. }
+        | AccountPhase::Pending { .. }
+        | AccountPhase::EmailApproved { .. }
+        | AccountPhase::Finalizing => {
+            page = page.child(section_shell(
                 theme,
-                &format!("Check {email} for the sign-in link, then open it."),
-                "Waiting for the email approval…",
-                cx,
-            ));
-        }
-        AccountPhase::EmailApproved {
-            ref email,
-            totp_required,
-            ..
-        } => {
-            page = page.child(render_finish(settings, theme, email, totp_required, cx));
-        }
-        AccountPhase::Finalizing => {
-            page = page.child(render_waiting(
-                settings,
-                theme,
-                "Finishing the sign-in…",
-                "Talking to the account service.",
-                cx,
+                "Account sign-in",
+                Some("Sign in with a link sent to your email."),
+                None,
+                card(
+                    theme,
+                    vec![
+                        row(
+                            theme,
+                            "Sign in with email",
+                            "We email you a one-time sign-in link. Open it to approve this device, then finish signing in here.",
+                            None,
+                        )
+                        .into_any_element(),
+                        settings.account.sign_in.clone().into_any_element(),
+                    ],
+                ),
             ));
         }
         AccountPhase::Authenticated { .. } => {
@@ -240,166 +152,6 @@ pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>)
         page = page.child(error_text(theme, error));
     }
     page
-}
-
-fn render_sign_in(
-    settings: &Settings,
-    theme: &ArtisanTheme,
-    phase: &AccountPhase,
-    cx: &Context<Settings>,
-) -> AnyElement {
-    let busy = matches!(phase, AccountPhase::Requesting);
-    let form = div()
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(settings.account.email.clone()),
-        )
-        .child(div().flex().flex_row().justify_end().child(settings.button(
-            "account-sign-in",
-            if busy {
-                "Sending…"
-            } else {
-                "Email me a sign-in link"
-            },
-            ButtonVariant::Default,
-            busy || settings.account.email.read(cx).text().trim().is_empty(),
-            cx.listener(|this, _, _, cx| this.account.request_link(cx)),
-        )));
-    let mut children = vec![
-        row(
-            theme,
-            "Sign in with email",
-            "We email you a one-time sign-in link. Open it to approve this device, then finish signing in here.",
-            None,
-        )
-        .into_any_element(),
-        form.into_any_element(),
-    ];
-    if let AccountPhase::Error { message } = phase {
-        children.push(error_text(theme, message.clone()).into_any_element());
-        children.push(
-            div()
-                .flex()
-                .flex_row()
-                .justify_end()
-                .child(settings.button(
-                    "account-retry",
-                    "Try again",
-                    ButtonVariant::Ghost,
-                    false,
-                    cx.listener(|this, _, _, cx| this.account.cancel(cx)),
-                ))
-                .into_any_element(),
-        );
-    }
-    section_shell(
-        theme,
-        "Account sign-in",
-        Some("Sign in with a link sent to your email."),
-        None,
-        card(theme, children),
-    )
-    .into_any_element()
-}
-
-fn render_waiting(
-    settings: &Settings,
-    theme: &ArtisanTheme,
-    title: &str,
-    detail: &str,
-    cx: &Context<Settings>,
-) -> AnyElement {
-    section_shell(
-        theme,
-        "Waiting for the email",
-        None,
-        None,
-        card(
-            theme,
-            vec![
-                row(theme, title, detail, None).into_any_element(),
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .child(settings.button(
-                        "account-cancel",
-                        "Start over",
-                        ButtonVariant::Ghost,
-                        false,
-                        cx.listener(|this, _, _, cx| this.account.cancel(cx)),
-                    ))
-                    .into_any_element(),
-            ],
-        ),
-    )
-    .into_any_element()
-}
-
-fn render_finish(
-    settings: &Settings,
-    theme: &ArtisanTheme,
-    email: &str,
-    totp_required: bool,
-    cx: &Context<Settings>,
-) -> AnyElement {
-    let mut rows: Vec<AnyElement> = vec![
-        row(
-            theme,
-            format!("Approved for {email}"),
-            if totp_required {
-                "Enter the 6-digit code from the authenticator app, or a recovery code instead."
-            } else {
-                "Finish signing in on this device."
-            },
-            None,
-        )
-        .into_any_element(),
-    ];
-    if totp_required {
-        rows.push(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(settings.account.second_factor.clone())
-                .into_any_element(),
-        );
-    }
-    rows.push(
-        div()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .gap(px(8.0))
-            .child(settings.button(
-                "account-back",
-                "Back",
-                ButtonVariant::Ghost,
-                false,
-                cx.listener(|this, _, _, cx| this.account.cancel(cx)),
-            ))
-            .child(settings.button(
-                "account-finish",
-                "Finish sign-in",
-                ButtonVariant::Default,
-                false,
-                cx.listener(|this, _, _, cx| this.account.finish_sign_in(cx)),
-            ))
-            .into_any_element(),
-    );
-    section_shell(
-        theme,
-        "Finish signing in",
-        Some("This step binds the sign-in to this device."),
-        None,
-        card(theme, rows),
-    )
-    .into_any_element()
 }
 
 #[expect(
@@ -485,7 +237,7 @@ fn render_profile(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settin
             "Connect",
             ButtonVariant::Default,
             machine.revoked_at.is_some(),
-            cx.listener(move |this, _, _, cx| this.account.connect_machine(id.clone(), cx)),
+            cx.listener(move |this, _, _, cx| this.account.connect_machine(&id, cx)),
         );
         let id = machine.id.clone();
         let remove = settings.button(
@@ -493,7 +245,7 @@ fn render_profile(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settin
             "Remove",
             ButtonVariant::Ghost,
             machine.revoked_at.is_some(),
-            cx.listener(move |this, _, _, cx| this.account.remove_machine(id.clone(), cx)),
+            cx.listener(move |this, _, _, cx| this.account.remove_machine(&id, cx)),
         );
         machine_rows.push(
             row(
