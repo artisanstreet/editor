@@ -1900,17 +1900,17 @@ fn model_picker_wheel_glides_once_and_hides_hover_outside_the_list(cx: &mut Test
         });
         composer.open_menu(crate::Menu::Model, cx);
     });
-    let mut viewport = None;
-    wait(vcx, "the scrollable model list", |vcx| {
-        viewport = vcx.debug_bounds("composer-model-viewport");
-        viewport.is_some()
-    });
-    let viewport = viewport.unwrap();
-    vcx.simulate_mouse_move(viewport.center(), None, gpui::Modifiers::none());
     let handle = composer.read_with(vcx, |composer, _| {
         composer.picker.model_scroll.0.borrow().base_handle.clone()
     });
     let step = vcx.update(|window, _| f32::from(window.line_height()) * 3.0);
+    let mut viewport = None;
+    wait(vcx, "the scrollable model list", |vcx| {
+        viewport = vcx.debug_bounds("composer-model-viewport");
+        viewport.is_some() && f32::from(handle.max_offset().y) >= step * 2.0
+    });
+    let viewport = viewport.unwrap();
+    vcx.simulate_mouse_move(viewport.center(), None, gpui::Modifiers::none());
     vcx.simulate_event(gpui::ScrollWheelEvent {
         position: viewport.center(),
         delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),
