@@ -347,6 +347,67 @@ mod tests {
         );
     }
 
+    /// The signed-out Account settings page renders its root in an isolated
+    /// window (`Screen::Settings(Account)` → `settings-account`). Pixel
+    /// capture is best-effort: headless test platforms configure no
+    /// HeadlessRenderer, so `render_to_image` fails there and the scene
+    /// bounds below are the render proof; where a renderer exists the PNG
+    /// lands at `$ARTISAN_EDITOR_CAPTURE`.
+    #[gpui::test]
+    fn account_settings_signed_out_renders_and_captures(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let dir = tempfile::tempdir().unwrap();
+        let core = cx.new(|cx| {
+            editor_core::Core::new(
+                editor_core::EditorFiles {
+                    dir: dir.path().join("preferences"),
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        core.update(cx, |core, cx| {
+            core.navigate(
+                editor_core::Screen::Settings(editor_core::SettingsPage::Account),
+                cx,
+            )
+        });
+        let (_workspace, cx) = cx.add_window_view(|window, cx| {
+            crate::workspace::Workspace::new(core.clone(), None, window, cx)
+        });
+        println!("rendering signed-out Account settings in isolated test window");
+        cx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(800.0)));
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("settings-account");
+        assert!(
+            bounds.is_some(),
+            "the Account settings page renders its root"
+        );
+        let out = std::env::var_os("ARTISAN_EDITOR_CAPTURE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from("/tmp/opencode/account-settings-signed-out.png")
+            });
+        match cx.update(|window, _| window.render_to_image()) {
+            Ok(image) => {
+                if let Some(parent) = out.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                image.save(&out).unwrap();
+                println!(
+                    "saved {} ({}x{})",
+                    out.display(),
+                    image.width(),
+                    image.height()
+                );
+                assert!(out.is_file(), "saved {}", out.display());
+            }
+            Err(error) => {
+                println!("pixel capture unavailable in this environment: {error:#}");
+            }
+        }
+    }
+
     #[test]
     fn rejects_non_finite_script_input() {
         for line in [

@@ -11,6 +11,9 @@ pub const fn description(page: SettingsPage) -> &'static str {
     match page {
         SettingsPage::General => "How this Editor behaves on this device.",
         SettingsPage::Hosts => "The Forges this Editor is paired with.",
+        SettingsPage::Account => {
+            "Your AST account: sign in, sessions, and the Forges on the account."
+        }
         SettingsPage::About => "Which build of Artisan is running and where it is installed.",
         SettingsPage::Threads => {
             "What the host does around your threads, and the ones you archived."

@@ -13,8 +13,9 @@ use gpui::{
 };
 
 /// The Editor's own pages, kept in this device's `settings.json`.
-const EDITOR_PAGES: [(SettingsPage, AssetId); 3] = [
+const EDITOR_PAGES: [(SettingsPage, AssetId); 4] = [
     (SettingsPage::General, AssetId::TABLER_SETTINGS),
+    (SettingsPage::Account, AssetId::TABLER_SHIELD_LOCK),
     (SettingsPage::Hosts, AssetId::TABLER_DEVICE_LAPTOP),
     (SettingsPage::About, AssetId::TABLER_LIST_DETAILS),
 ];

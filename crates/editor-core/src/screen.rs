@@ -40,14 +40,18 @@ pub enum SettingsPage {
     Threads,
     GlobalPrompt,
     Extensions,
+    /// The AST account: sign-in, sessions, and machines. Needs no paired
+    /// host; works signed out.
+    Account,
     /// One engine's installation and sign-in on the active host.
     Engine(EngineId),
 }
 
 impl SettingsPage {
     /// Every page, with its link name.
-    pub const ALL: [(Self, &'static str); 7] = [
+    pub const ALL: [(Self, &'static str); 8] = [
         (Self::General, "general"),
+        (Self::Account, "account"),
         (Self::Hosts, "hosts"),
         (Self::About, "about"),
         (Self::Threads, "threads"),
@@ -63,6 +67,7 @@ impl SettingsPage {
             Self::General => "General",
             Self::Hosts => "Hosts",
             Self::About => "About",
+            Self::Account => "Account",
             Self::Threads => "Threads",
             Self::GlobalPrompt => "Global prompt",
             Self::Extensions => "Extensions",

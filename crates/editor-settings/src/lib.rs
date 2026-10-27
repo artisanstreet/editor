@@ -2,6 +2,7 @@
 //! It retains form drafts and pending-action state only.
 
 mod about;
+mod account;
 mod engines;
 mod extensions;
 pub mod frame_rate;
@@ -38,6 +39,7 @@ pub struct Settings {
     theme: ArtisanTheme,
     build: BuildInfo,
     engines: engines::EnginesForm,
+    account: account::AccountForm,
     extensions: extensions::ExtensionsForm,
     prompt: prompt::PromptForm,
     hosts: hosts::HostsForm,
@@ -71,10 +73,11 @@ impl Settings {
         let mut settings = Self {
             #[cfg(test)]
             completion_gate: None,
-            core,
+            core: core.clone(),
             theme: *cx.theme(),
             build,
             engines: engines::EnginesForm::new(cx),
+            account: account::AccountForm::new(core.clone(), cx),
             extensions: extensions::ExtensionsForm::new(cx),
             prompt: prompt::PromptForm::new(cx),
             hosts: hosts::HostsForm::new(cx),
@@ -84,6 +87,7 @@ impl Settings {
         };
         settings.watch_hosts(cx);
         settings.sync_host(cx);
+        settings.account.watch_account(cx);
         settings
     }
 
@@ -170,6 +174,7 @@ impl Settings {
             }
             (SettingsPage::About, _) => about::render(&self.build, theme).into_any_element(),
             (SettingsPage::Hosts, _) => hosts::render(self, theme, cx).into_any_element(),
+            (SettingsPage::Account, _) => account::render(self, theme, cx).into_any_element(),
             (_, None) => div()
                 .flex()
                 .flex_col()
