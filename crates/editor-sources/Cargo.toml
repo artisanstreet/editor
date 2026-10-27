@@ -1,7 +1,7 @@
 [package]
 name = "editor-sources"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Bounded viewers for stored Forge sources: raw text pages and record collections, shared by the composer, conversation and inspector."
 

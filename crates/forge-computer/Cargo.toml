@@ -1,7 +1,7 @@
 [package]
 name = "forge-computer"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Computer use: an MCP server that lets agents see and drive a virtual display, served to every engine through Forge's gateway."
 
