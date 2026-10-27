@@ -76,6 +76,8 @@ impl MachineKeypair {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_id: Option<String>,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
@@ -83,6 +85,8 @@ pub struct PairStatus {
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// Enrollment operator key fingerprint for display.

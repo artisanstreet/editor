@@ -2,9 +2,9 @@
 //!
 //! The stub enforces the wire rules the real Core enforces: unknown JSON
 //! fields are rejected with the Core error envelope, required camelCase
-//! fields are mandatory, and the session token only travels in
-//! `Set-Cookie`. A test that passes here would fail loudly against
-//! drifted DTOs instead of silently.
+//! request fields are mandatory, responses are snake_case, and the session
+//! token only travels in `Set-Cookie`. A test that passes here would fail
+//! loudly against drifted DTOs instead of silently.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::sync::{Arc, Mutex};
@@ -96,12 +96,12 @@ fn envelope(code: &str) -> (u16, Vec<(String, String)>, String) {
     (
         400,
         vec![],
-        serde_json::json!({"error": {"code": code, "message": "stub", "requestId": "req-test"}})
+        serde_json::json!({"error": {"code": code, "message": "stub", "request_id": "req-test"}})
             .to_string(),
     )
 }
 
-/// Strict Core mock: exact camelCase shapes in, Core error envelope out.
+/// Strict Core mock: exact camelCase request shapes in, snake_case responses out.
 #[allow(
     clippy::too_many_lines,
     reason = "one strict stub covering every Core route the controller exercises"
@@ -135,9 +135,9 @@ fn strict_core() -> Handler {
                     return envelope("bad_request");
                 }
                 ok(serde_json::json!({
-                    "requestId": "logreq_00000000000000000000000001",
-                    "requestSecret": "SECRET-ONE",
-                    "expiresAt": "2026-10-26T00:15:00.000Z",
+                    "request_id": "logreq_00000000000000000000000001",
+                    "request_secret": "SECRET-ONE",
+                    "expires_at": "2026-10-26T00:15:00.000Z",
                 }))
             }
             ("POST", "/v1/auth/magic/status") => {
@@ -145,11 +145,11 @@ fn strict_core() -> Handler {
                     return envelope("bad_request");
                 }
                 ok(serde_json::json!({
-                    "requestId": "logreq_00000000000000000000000001",
+                    "request_id": "logreq_00000000000000000000000001",
                     "status": "email_approved",
-                    "totpRequired": false,
+                    "totp_required": false,
                     "email": "op@example.invalid",
-                    "expiresAt": "2026-10-26T00:15:00.000Z",
+                    "expires_at": "2026-10-26T00:15:00.000Z",
                 }))
             }
             ("POST", "/v1/auth/magic/finalize") => {
@@ -163,28 +163,28 @@ fn strict_core() -> Handler {
                         "ast_session=STUB-SESSION; Path=/; HttpOnly".to_owned(),
                     )],
                     serde_json::json!({
-                        "sessionId": "sess_00000000000000000000000001",
-                        "accountId": "acct_00000000000000000000000000",
-                        "expiresAt": "2026-10-26T01:15:00.000Z",
-                        "totpVerified": false,
+                        "session_id": "sess_00000000000000000000000001",
+                        "account_id": "acct_00000000000000000000000000",
+                        "expires_at": "2026-10-26T01:15:00.000Z",
+                        "totp_verified": false,
                     })
                     .to_string(),
                 )
             }
             ("GET", "/v1/me") => ok(serde_json::json!({
-                "accountId": "acct_00000000000000000000000000",
+                "account_id": "acct_00000000000000000000000000",
                 "email": "op@example.invalid",
-                "displayName": "Op",
-                "totpEnrolled": false,
+                "display_name": "Op",
+                "totp_enrolled": false,
                 "machines": [
                     {"id": "mch_11111111111111111111111111", "label": "server",
-                     "publicKey": {"kty": "OKP", "crv": "Ed25519",
+                     "public_key": {"kty": "OKP", "crv": "Ed25519",
                                   "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
-                     "createdAt": "2026-10-26T00:00:00.000Z",
-                     "revokedAt": null, "lastSeenAt": null}
+                     "created_at": "2026-10-26T00:00:00.000Z",
+                     "revoked_at": null, "last_seen_at": null}
                 ],
-                "providerConnections": [],
-                "latestConfigVersion": 3,
+                "provider_connections": [],
+                "latest_config_version": 3,
             })),
             ("GET", "/v1/sessions") => ok(serde_json::json!({"sessions": []})),
             ("POST", "/v1/sessions/current/revoke") => ok(serde_json::json!({"revoked": true})),
@@ -193,7 +193,7 @@ fn strict_core() -> Handler {
                     return envelope("bad_request");
                 }
                 ok(serde_json::json!({
-                    "enrollmentId": "enr_22222222222222222222222222",
+                    "enrollment_id": "enr_22222222222222222222222222",
                     "status": "claimed",
                 }))
             }
@@ -203,7 +203,7 @@ fn strict_core() -> Handler {
                 }
                 ok(serde_json::json!({
                     "token": "grant.jwt.stub",
-                    "expiresAt": "2026-10-26T00:05:00.000Z",
+                    "expires_at": "2026-10-26T00:05:00.000Z",
                 }))
             }
             ("POST", "/v1/machines/enrollments") => {
@@ -214,10 +214,10 @@ fn strict_core() -> Handler {
                     201,
                     vec![],
                     serde_json::json!({
-                        "enrollmentId": "enr_22222222222222222222222222",
+                        "enrollment_id": "enr_22222222222222222222222222",
                         "code": "ABCDEFGH",
-                        "expiresAt": "2026-10-26T00:10:00.000Z",
-                        "keyFingerprint": "fp",
+                        "expires_at": "2026-10-26T00:10:00.000Z",
+                        "key_fingerprint": "fp",
                     })
                     .to_string(),
                 )
@@ -383,7 +383,7 @@ fn snake_case_requests_are_rejected(_cx: &TestAppContext) {
         });
     assert_eq!(status, 400);
     assert_eq!(body["error"]["code"], "bad_request");
-    assert!(body["error"]["requestId"].is_string());
+    assert!(body["error"]["request_id"].is_string());
 }
 
 /// Sign-out immediately drops account Relay inventory while a direct host

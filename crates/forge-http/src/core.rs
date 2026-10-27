@@ -300,12 +300,9 @@ pub fn proof_headers_for(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnrollmentCreated {
-    #[serde(rename = "enrollmentId")]
     pub enrollment_id: String,
     pub code: String,
-    #[serde(rename = "expiresAt")]
     pub expires_at: String,
-    #[serde(rename = "keyFingerprint")]
     pub key_fingerprint: String,
 }
 
@@ -313,9 +310,7 @@ pub struct EnrollmentCreated {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmedMachine {
-    #[serde(rename = "machineId")]
     pub machine_id: String,
-    #[serde(rename = "accountId")]
     pub account_id: String,
 }
 
@@ -324,7 +319,6 @@ pub struct ConfirmedMachine {
 #[serde(deny_unknown_fields)]
 pub struct GrantToken {
     pub token: String,
-    #[serde(rename = "expiresAt")]
     pub expires_at: String,
 }
 
@@ -350,10 +344,10 @@ pub struct Jwks {
 }
 
 /// One machine entry (forward-compatible: ignores future fields).
+/// Matches Core `MachineInfo` (`id`, not `machine_id`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineEntry {
-    #[serde(rename = "machineId")]
-    pub machine_id: String,
+    pub id: String,
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -379,10 +373,10 @@ mod tests {
         assert!(request["proof"].as_str().is_some());
         // The proof body is over enrollment-request + JWK x + label + ts.
         axum::Json(serde_json::json!({
-            "enrollmentId": "enr_00000000000000000000000001",
+            "enrollment_id": "enr_00000000000000000000000001",
             "code": "ABCDEFGH",
-            "expiresAt": "2026-10-26T20:10:00.000Z",
-            "keyFingerprint": "fp",
+            "expires_at": "2026-10-26T20:10:00.000Z",
+            "key_fingerprint": "fp",
         }))
     }
 
@@ -402,10 +396,12 @@ mod tests {
         let authorization = headers["authorization"].to_str().unwrap();
         assert!(authorization.starts_with("AST-Machine "));
         axum::Json(serde_json::json!({
+            "enrollment_id": "enr_00000000000000000000000001",
             "status": "claimed",
             "account_id": "acct_00000000000000000000000000",
             "email": "op@example.invalid",
             "display_name": "Op",
+            "expires_at": "2026-10-26T20:10:00.000Z",
         }))
     }
 
@@ -420,8 +416,8 @@ mod tests {
         );
         assert!(request["confirmation"].as_str().is_some());
         axum::Json(serde_json::json!({
-            "machineId": "mch_11111111111111111111111111",
-            "accountId": "acct_00000000000000000000000000",
+            "machine_id": "mch_11111111111111111111111111",
+            "account_id": "acct_00000000000000000000000000",
         }))
     }
 
@@ -435,7 +431,7 @@ mod tests {
         assert_eq!(request["audience"], "ast-relay");
         axum::Json(serde_json::json!({
             "token": "grant.jwt.token",
-            "expiresAt": "2026-10-26T20:05:00.000Z",
+            "expires_at": "2026-10-26T20:05:00.000Z",
         }))
     }
 
@@ -445,8 +441,9 @@ mod tests {
     ) -> impl axum::response::IntoResponse {
         assert!(headers.contains_key("authorization"));
         // Forward-compatible entries may carry future fields.
+        // Matches Core `MachineInfo` (`id`, not `machine_id`).
         axum::Json(serde_json::json!([
-            {"machineId": "mch_11111111111111111111111111", "label": "srv", "future": 1},
+            {"id": "mch_11111111111111111111111111", "label": "srv", "future": 1},
         ]))
     }
 
