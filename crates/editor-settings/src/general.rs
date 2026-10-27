@@ -1,39 +1,44 @@
-//! General: this device's theme, notifications and redraw controls, kept
-//! in its `settings.json`, and how the selected host's Forge carries
-//! threads on by itself.
+//! Device preferences: appearance, streaming, notifications and performance.
 use crate::ui::{PageBlock, card, header, row, section_shell};
-use crate::{Settings, frame_rate, page, threads};
-use editor_core::{FONT_SET_KEY, HostData, OUTLINE_TEXT_KEY, SettingsPage};
+use crate::{Settings, frame_rate, page};
+use editor_core::{FONT_SET_KEY, OUTLINE_TEXT_KEY, STREAMING_MODE_KEY, SettingsSection};
 use editor_ui::{
     select::{Select, SelectEntry},
+    streaming::StreamingMode,
     theme::{self as theme_tokens, ArtisanTheme, FontSet, ThemeMode},
 };
-use gpui::{
-    AnyElement, Context, Div, Entity, IntoElement, ParentElement as _, Styled as _, div, px,
-};
+use gpui::{AnyElement, Context, Div, IntoElement, ParentElement as _, Styled as _, div, px};
 use serde_json::Value;
 
 /// System notifications when a thread finishes, fails or asks; default on.
 pub const NOTIFICATIONS_KEY: &str = "notifications";
 
-pub fn render(
-    settings: &Settings,
-    host: Option<&Entity<HostData>>,
-    theme: &ArtisanTheme,
-    cx: &mut Context<Settings>,
-) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .child(header(
+pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> Div {
+    let page = settings.page(cx);
+    let mut content =
+        div()
+            .flex()
+            .flex_col()
+            .child(header(theme, page.label(), page::description(page)));
+    if page.shows(SettingsSection::Appearance) {
+        content = content.child(render_appearance(settings, theme, cx));
+    }
+    if page.shows(SettingsSection::Streaming) {
+        content = content.child(section_shell(
             theme,
-            page::label(SettingsPage::General),
-            page::description(SettingsPage::General),
-        ))
-        .child(render_appearance(settings, theme, cx))
-        .child(render_notifications(settings, theme, cx))
-        .children(host.map(|host| render_behaviour(settings, host, theme, cx)))
-        .child(render_performance(settings, theme, cx))
+            "Text Streaming",
+            None,
+            None,
+            card(theme, vec![streaming_row(settings, theme, cx)]),
+        ));
+    }
+    if page.shows(SettingsSection::Notifications) {
+        content = content.child(render_notifications(settings, theme, cx));
+    }
+    if page.shows(SettingsSection::Performance) {
+        content = content.child(render_performance(settings, theme, cx));
+    }
+    content
 }
 
 /// Appearance: light or dark, the font set and how text is rasterized.
@@ -97,15 +102,15 @@ fn render_appearance(
             vec![
                 row(
                     theme,
-                    "Dark mode",
-                    "Draw the Editor dark. The sun and moon in the profile menu switch it too.",
+                    "Dark Mode",
+                    "Whether to draw Artisan Editor in a dark theme.",
                     Some(dark),
                 )
                 .into_any_element(),
                 row(
                     theme,
                     "Fontset",
-                    "Spline Sans and Spline Sans Mono, bundled and tuned for the Editor, or this system's UI and monospace fonts. Choose System to match your other apps.",
+                    "Choose what set of fonts to Artisan Editor will render in.",
                     Some(
                         div()
                             .w(px(144.0))
@@ -160,8 +165,8 @@ fn render_notifications(
             vec![
                 row(
                     theme,
-                    "Notify me",
-                    "Posts a system notification when a thread finishes, fails, or needs an answer from you. It clears itself after a few seconds; an approval or a question keeps waiting in its thread.",
+                    "Notify Me",
+                    "Uses your operating systems notification scheduler to alert you when threads finish, is stuck or out right failed.",
                     Some(switch),
                 )
                 .into_any_element(),
@@ -171,117 +176,39 @@ fn render_notifications(
     .debug_selector("settings-section-notifications")
 }
 
-/// Behaviour: when the host's Forge carries a thread's turn on by itself.
-/// All are Forge settings; each uses its declared default.
-fn render_behaviour(
-    settings: &Settings,
-    host: &Entity<HostData>,
-    theme: &ArtisanTheme,
-    cx: &mut Context<Settings>,
-) -> PageBlock {
-    let switch = |id: &'static str, key: &'static str, cx: &mut Context<Settings>| {
-        let enabled = host
-            .read(cx)
-            .setting(key)
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| {
-                artisan_api::setting_decl(key)
-                    .and_then(|decl| decl.default_value().as_bool())
-                    .unwrap_or(true)
-            });
-        let host = host.clone();
-        settings.switch(
-            id,
-            enabled,
-            Box::new(move |checked, _, cx| {
-                threads::save_switch(&host, key, checked, cx);
-            }),
-        )
-    };
-    let overloaded = switch(
-        "settings-switch-retry-overloaded",
-        "retry_when_overloaded",
-        cx,
-    );
-    let usage = switch(
-        "settings-switch-continue-usage-limit",
-        "continue_after_usage_limit",
-        cx,
-    );
-    let restart = switch(
-        "settings-switch-continue-restart",
-        "continue_after_restart",
-        cx,
-    );
-    let enhanced = native_claude_switch(settings, host, cx);
-    section_shell(
+/// This device's streaming mode, as a dropdown.
+fn streaming_row(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> AnyElement {
+    let mode = settings.core.read(cx).streaming_mode();
+    let core = settings.core.clone();
+    let select = Select::new(
+        "settings-streaming-mode",
+        *theme,
+        Some(mode),
+        StreamingMode::ALL
+            .iter()
+            .map(|mode| SelectEntry::item(*mode, mode.label()))
+            .collect(),
+    )
+    .label("Text Streaming")
+    .debug_selector("settings-streaming-mode")
+    .on_change(move |mode: StreamingMode, _, _, cx| {
+        core.update(cx, |core, cx| {
+            core.set_setting(STREAMING_MODE_KEY, Value::from(mode.key()), cx);
+        });
+    });
+    row(
         theme,
-        "Behaviour",
-        None,
-        None,
-        card(
-            theme,
-            vec![
-                row(
-                    theme,
-                    "Keep retrying when the provider is overloaded",
-                    "When a turn fails because the model is at capacity or the provider has a server error, the thread waits and tries again: after 15 seconds, then twice as long each time up to every 5 minutes, until it goes through.",
-                    Some(overloaded),
-                )
+        "Text Streaming",
+        "How conversations in Artisan Editor streams. We recommend you leave it at smooth, but for models with higher TPS we recommend you should try the others.",
+        Some(
+            div()
+                .w(px(144.0))
+                .flex_shrink_0()
+                .child(select)
                 .into_any_element(),
-                row(
-                    theme,
-                    "Continue when my usage limit resets",
-                    "When you run out of usage, the thread waits for the limit to reset and then carries on where it stopped. If the reset time is unknown, it tries again every 15 minutes.",
-                    Some(usage),
-                )
-                .into_any_element(),
-                row(
-                    theme,
-                    "Continue after a restart",
-                    "When Forge restarts for an update or after a crash, threads that were working carry on where they stopped.",
-                    Some(restart),
-                )
-                .into_any_element(),
-                row(
-                    theme,
-                    "Native Claude Mode",
-                    "Runs Claude's turns on claude.ai's backend: the same files, commands, skills, MCP servers and subagents on your machine, plus the provider's own thinking recaps. If you run into issues with Claude, turn this off.",
-                    Some(enhanced),
-                )
-                .into_any_element(),
-            ],
         ),
     )
-    .debug_selector("settings-section-behaviour")
-}
-
-/// The account's Claude transport choice, shared by every Claude thread.
-fn native_claude_switch(
-    settings: &Settings,
-    host: &Entity<HostData>,
-    cx: &Context<Settings>,
-) -> AnyElement {
-    let on = artisan_api::transport_of(host.read(cx).setting(artisan_api::TRANSPORT_KEY))
-        == artisan_api::CLAUDE_AI;
-    let host = host.clone();
-    settings.switch(
-        "settings-switch-enhanced-claude",
-        on,
-        Box::new(move |checked, _, cx| {
-            let transport = if checked {
-                artisan_api::CLAUDE_AI
-            } else {
-                artisan_api::CLAUDE_CODE
-            };
-            threads::save_value(
-                &host,
-                artisan_api::TRANSPORT_KEY,
-                Value::String(transport.to_owned()),
-                cx,
-            );
-        }),
-    )
+    .into_any_element()
 }
 
 /// Performance (`native_frame_rate`): the lower refresh rate.

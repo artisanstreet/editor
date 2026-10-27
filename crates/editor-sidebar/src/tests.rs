@@ -280,6 +280,16 @@ fn history_opens_below_its_row_without_a_heading_for_the_last_day(cx: &mut TestA
     let history = cx.debug_bounds("sidebar-history").expect("the History row");
     cx.simulate_click(history.center(), Modifiers::none());
     cx.run_until_parked();
+    // The native test window needs the display frames that the expanding
+    // History requests before its rows have moved into the viewport.
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(8));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+    }
     let shown = cx.debug_bounds(row).expect("the settled row shows");
     for heading in [
         "sidebar-history-last-24-hours",
@@ -1083,4 +1093,47 @@ fn a_parked_thread_stays_in_the_inbox_with_its_own_dot(cx: &mut TestAppContext) 
         assert!(!row.settleable);
         assert_eq!(host.attention().stopped, 0, "it carries on by itself");
     });
+}
+
+#[gpui::test]
+fn settings_categories_expand_a_rail_and_children_navigate(cx: &mut TestAppContext) {
+    use editor_core::{SettingsPage, SettingsSection};
+    let setup = Setup::new(cx);
+    cx.update(|cx| cx.set_reduce_motion(true));
+    setup.core.update(cx, |core, cx| {
+        core.navigate(Screen::Settings(SettingsPage::General), cx);
+    });
+    let mut visual = VisualTestContext::from_window(setup.window.into(), cx);
+    visual.simulate_resize(gpui::size(gpui::px(300.0), gpui::px(1000.0)));
+    visual.run_until_parked();
+    let appearance = visual
+        .debug_bounds("sidebar-settings-section-General-appearance")
+        .expect("expanded General rail");
+    visual.simulate_click(appearance.center(), Modifiers::none());
+    assert_eq!(
+        setup
+            .core
+            .read_with(&visual, |core, _| core.screen().clone()),
+        Screen::Settings(SettingsPage::Section(SettingsSection::Appearance))
+    );
+    let about = visual
+        .debug_bounds("sidebar-settings-about")
+        .expect("About category");
+    visual.simulate_click(about.center(), Modifiers::none());
+    assert!(
+        visual
+            .debug_bounds("sidebar-settings-section-General-appearance")
+            .is_none(),
+        "leaving a category collapses its rail"
+    );
+    let general = visual
+        .debug_bounds("sidebar-settings-general")
+        .expect("General category");
+    visual.simulate_click(general.center(), Modifiers::none());
+    assert!(
+        visual
+            .debug_bounds("sidebar-settings-section-General-appearance")
+            .is_some(),
+        "returning expands the category"
+    );
 }

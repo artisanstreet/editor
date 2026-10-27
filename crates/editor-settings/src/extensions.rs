@@ -6,13 +6,15 @@ use crate::Settings;
 use crate::page;
 use crate::ui::{PageBlock, card, error_text, header, row, section_shell};
 use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpMutation, McpServer};
-use editor_core::{HostData, HostId, McpSignIn, McpSignInPhase, Screen, SettingsPage};
+#[cfg(test)]
+use editor_core::SettingsPage;
+use editor_core::{HostData, HostId, McpSignIn, McpSignInPhase, Screen};
 use editor_ui::button::ButtonVariant;
 use editor_ui::text_editor::TextEditor;
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Div, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, div, px,
+    AnyElement, AppContext as _, ClipboardItem, Context, Div, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, SharedString, Styled as _, div, px,
 };
 
 pub const MCP_SERVERS_KEY: &str = "mcp_servers";
@@ -207,7 +209,9 @@ impl Settings {
         self.extensions.mcp_error = None;
         // A failure lands on the card; nothing waits for the answer here.
         self.core
-            .update(cx, |core, cx| core.start_mcp_sign_in(&host, server, true, cx))
+            .update(cx, |core, cx| {
+                core.start_mcp_sign_in(&host, server, true, cx)
+            })
             .detach();
     }
 
@@ -305,16 +309,19 @@ pub fn render(
     theme: &ArtisanTheme,
     cx: &Context<Settings>,
 ) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .child(header(
-            theme,
-            page::label(SettingsPage::Extensions),
-            page::description(SettingsPage::Extensions),
-        ))
-        .child(mcp_section(settings, host, theme, cx))
-        .child(skills_section(settings, theme, cx))
+    let page = settings.page(cx);
+    let mut content =
+        div()
+            .flex()
+            .flex_col()
+            .child(header(theme, page.label(), page::description(page)));
+    if page.shows(editor_core::SettingsSection::McpServers) {
+        content = content.child(mcp_section(settings, host, theme, cx));
+    }
+    if page.shows(editor_core::SettingsSection::Skills) {
+        content = content.child(skills_section(settings, theme, cx));
+    }
+    content
 }
 
 /// The skills live in the Marketplace, which shows where each stands in
@@ -388,7 +395,13 @@ fn mcp_section(
             .flex_row()
             .flex_wrap()
             .gap(px(6.0))
-            .children(sign_in_controls(settings, &server.name, status, sign_in, cx))
+            .children(sign_in_controls(
+                settings,
+                &server.name,
+                status,
+                sign_in,
+                cx,
+            ))
             .child(settings.button(
                 SharedString::from(format!("mcp-edit-{}", server.name)),
                 "Edit",
@@ -486,7 +499,13 @@ fn sign_in_controls(
 ) -> Vec<AnyElement> {
     let id = |what: &str| SharedString::from(format!("mcp-{what}-{name}"));
     let busy = |label: &'static str| {
-        settings.button(id("busy"), label, ButtonVariant::Outline, true, |_, _, _| {})
+        settings.button(
+            id("busy"),
+            label,
+            ButtonVariant::Outline,
+            true,
+            |_, _, _| {},
+        )
     };
     let start = |label: &'static str| {
         let server = name.to_owned();

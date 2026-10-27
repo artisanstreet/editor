@@ -9,6 +9,42 @@ pub const fn label(page: SettingsPage) -> &'static str {
 
 pub const fn description(page: SettingsPage) -> &'static str {
     match page {
+        SettingsPage::Section(section) => match section {
+            editor_core::SettingsSection::Appearance => {
+                "Theme, fonts and text rendering on this device."
+            }
+            editor_core::SettingsSection::Streaming => {
+                "How replies appear while an agent is working."
+            }
+            editor_core::SettingsSection::Notifications => {
+                "When the Editor sends system notifications."
+            }
+            editor_core::SettingsSection::Performance => {
+                "Animation and refresh rate on this device."
+            }
+            editor_core::SettingsSection::Automation => {
+                "When threads retry and carry on automatically on this host."
+            }
+            editor_core::SettingsSection::Assistance => {
+                "Suggestions, notes and titles for threads on this host."
+            }
+            editor_core::SettingsSection::Archive => {
+                "Find and restore archived threads on this host."
+            }
+            editor_core::SettingsSection::ClaudeAi => {
+                "Use claude.ai for Claude turns and manage its session on this host."
+            }
+            editor_core::SettingsSection::Installation(_) => {
+                "Install, update and choose an engine version on this host."
+            }
+            editor_core::SettingsSection::Account(_) => {
+                "Manage this engine’s account on this host."
+            }
+            editor_core::SettingsSection::McpServers => {
+                "Tools shared with every engine on this host."
+            }
+            editor_core::SettingsSection::Skills => "Manage the skills available to your engines.",
+        },
         SettingsPage::General => "How this Editor behaves on this device.",
         SettingsPage::Hosts => "The Forges this Editor is paired with.",
         SettingsPage::Account => {

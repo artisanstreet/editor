@@ -1,10 +1,12 @@
-//! Archived thread index, refreshed from host metadata and rendered as visible rows.
+//! Thread recovery, assistance and the archived thread index.
 
 use crate::Settings;
 use crate::page;
 use crate::ui::{PageBlock, card, error_text, header, row, section_shell};
 use artisan_api::{ThreadId, Timestamp, UpdateThread};
-use editor_core::{HostData, HostId, SettingsPage};
+#[cfg(test)]
+use editor_core::SettingsPage;
+use editor_core::{HostData, HostId, SettingsSection};
 use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
@@ -106,16 +108,31 @@ pub fn render(
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
 ) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .child(header(
-            theme,
-            page::label(SettingsPage::Threads),
-            page::description(SettingsPage::Threads),
-        ))
-        .child(render_assistance(settings, host, theme, cx))
-        .child(render_archived(settings, host, theme, cx))
+    let page = settings.page(cx);
+    let mut content =
+        div()
+            .flex()
+            .flex_col()
+            .child(header(theme, page.label(), page::description(page)));
+    if page.shows(SettingsSection::Automation) {
+        content = content.child(
+            section_shell(
+                theme,
+                "Recovery & continuation",
+                None,
+                None,
+                card(theme, recovery_rows(settings, host, theme, cx)),
+            )
+            .debug_selector("settings-section-automation"),
+        );
+    }
+    if page.shows(SettingsSection::Assistance) {
+        content = content.child(render_assistance(settings, host, theme, cx));
+    }
+    if page.shows(SettingsSection::Archive) {
+        content = content.child(render_archived(settings, host, theme, cx));
+    }
+    content
 }
 
 /// The archive table.
@@ -365,6 +382,72 @@ fn span(millis: Timestamp) -> String {
     }
 }
 
+/// The Forge's own behaviour switches for `host`.
+fn recovery_rows(
+    settings: &Settings,
+    host: &Entity<HostData>,
+    theme: &ArtisanTheme,
+    cx: &mut Context<Settings>,
+) -> Vec<AnyElement> {
+    let switch = |id: &'static str, key: &'static str, cx: &mut Context<Settings>| {
+        let enabled = host
+            .read(cx)
+            .setting(key)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or_else(|| {
+                artisan_api::setting_decl(key)
+                    .and_then(|decl| decl.default_value().as_bool())
+                    .unwrap_or(true)
+            });
+        let host = host.clone();
+        settings.switch(
+            id,
+            enabled,
+            Box::new(move |checked, _, cx| {
+                save_switch(&host, key, checked, cx);
+            }),
+        )
+    };
+    let overloaded = switch(
+        "settings-switch-retry-overloaded",
+        "retry_when_overloaded",
+        cx,
+    );
+    let usage = switch(
+        "settings-switch-continue-usage-limit",
+        "continue_after_usage_limit",
+        cx,
+    );
+    let restart = switch(
+        "settings-switch-continue-restart",
+        "continue_after_restart",
+        cx,
+    );
+    vec![
+                row(
+                    theme,
+                    "Keep retrying when the provider is overloaded",
+                    "Artisan Editor indefintely reschedules a thread which its model's capacityis overloaded  to continue until theturn finishes.",
+                    Some(overloaded),
+                )
+                .into_any_element(),
+                row(
+                    theme,
+                    "Continue when my usage limit resets",
+                    "Artisan Editor marks a thread that stopped because of session depletage to continue when its session is replenished.",
+                    Some(usage),
+                )
+                .into_any_element(),
+                row(
+                    theme,
+                    "Continue after a restart",
+                    "Artisan Editor automatically continues threads that were stopped because of a system shutdown, restart or similiar.",
+                    Some(restart),
+                )
+                .into_any_element(),
+    ]
+}
+
 /// What Forge asks a thread's engine on the side after each turn, and
 /// whether threads take the titles their engines write. All are Forge
 /// settings, on unless turned off; the side questions cost a little of the
@@ -430,13 +513,13 @@ fn render_assistance(
 
 /// Shows the switch's new state at once and saves it to Forge, whose
 /// setting event confirms it; a failed save puts it back.
-pub(crate) fn save_switch(host: &Entity<HostData>, key: &'static str, checked: bool, cx: &mut App) {
-    save_value(host, key, serde_json::Value::Bool(checked), cx)
+pub fn save_switch(host: &Entity<HostData>, key: &'static str, checked: bool, cx: &mut App) {
+    save_value(host, key, serde_json::Value::Bool(checked), cx);
 }
 
 /// Saves a setting to Forge, showing its new state at once; a failed save
 /// puts it back.
-pub(crate) fn save_value(
+pub fn save_value(
     host: &Entity<HostData>,
     key: &'static str,
     value: serde_json::Value,

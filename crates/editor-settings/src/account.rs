@@ -23,7 +23,7 @@ pub struct AccountForm {
     second_factor: Entity<TextEditor>,
     claim_code: Entity<TextEditor>,
     _subscriptions: Vec<Subscription>,
-    _account_subscription: Option<Subscription>,
+    account_subscription: Option<Subscription>,
 }
 
 impl AccountForm {
@@ -58,41 +58,41 @@ impl AccountForm {
             second_factor,
             claim_code,
             _subscriptions: vec![email_submit, factor_submit, claim_submit],
-            _account_subscription: None,
+            account_subscription: None,
         }
     }
 
     pub(crate) fn watch_account(&mut self, cx: &mut Context<Settings>) {
-        if self._account_subscription.is_some() {
+        if self.account_subscription.is_some() {
             return;
         }
         let account = self.core.read(cx).account().clone();
-        self._account_subscription =
+        self.account_subscription =
             Some(cx.subscribe(&account, |this, _, _: &AccountEvent, cx| {
                 let _ = this;
                 cx.notify();
             }));
     }
 
-    pub(crate) fn request_link(&mut self, cx: &mut Context<Settings>) {
+    pub(crate) fn request_link(&self, cx: &mut Context<Settings>) {
         let email = self.email.read(cx).text().to_owned();
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account()
                 .update(cx, |account, cx| account.request_link(email, cx));
         });
     }
 
-    pub(crate) fn cancel(&mut self, cx: &mut Context<Settings>) {
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+    pub(crate) fn cancel(&self, cx: &mut Context<Settings>) {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account().update(cx, |account, cx| {
                 account.dismiss_error(cx);
             });
         });
     }
 
-    pub(crate) fn finish_sign_in(&mut self, cx: &mut Context<Settings>) {
+    pub(crate) fn finish_sign_in(&self, cx: &mut Context<Settings>) {
         let code = self.second_factor.read(cx).text().trim().to_owned();
         let (totp, recovery) = if code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()) {
             (Some(code), None)
@@ -101,8 +101,8 @@ impl AccountForm {
         } else {
             (None, Some(code))
         };
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account()
                 .update(cx, |account, cx| account.finish_sign_in(totp, recovery, cx));
         });
@@ -111,9 +111,9 @@ impl AccountForm {
         });
     }
 
-    pub(crate) fn sign_out(&mut self, revoke_all: bool, cx: &mut Context<Settings>) {
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+    pub(crate) fn sign_out(&self, revoke_all: bool, cx: &mut Context<Settings>) {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account().update(cx, |account, cx| {
                 if revoke_all {
                     account.sign_out_everywhere(cx);
@@ -124,17 +124,17 @@ impl AccountForm {
         });
     }
 
-    pub(crate) fn refresh(&mut self, cx: &mut Context<Settings>) {
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
-            core.account().update(cx, |account, cx| account.refresh(cx));
+    pub(crate) fn refresh(&self, cx: &mut Context<Settings>) {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
+            core.account().update(cx, editor_core::Account::refresh);
         });
     }
 
-    pub(crate) fn claim_code(&mut self, cx: &mut Context<Settings>) {
+    pub(crate) fn claim_code(&self, cx: &mut Context<Settings>) {
         let code = self.claim_code.read(cx).text().to_owned();
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account()
                 .update(cx, |account, cx| account.claim_code(code, cx));
         });
@@ -143,41 +143,41 @@ impl AccountForm {
         });
     }
 
-    pub(crate) fn enroll_this_forge(&mut self, cx: &mut Context<Settings>) {
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+    pub(crate) fn enroll_this_forge(&self, cx: &mut Context<Settings>) {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account()
-                .update(cx, |account, cx| account.enroll_this_forge(cx));
+                .update(cx, editor_core::Account::enroll_this_forge);
         });
     }
 
-    pub(crate) fn forge_status(&mut self, cx: &mut Context<Settings>) {
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+    pub(crate) fn forge_status(&self, cx: &mut Context<Settings>) {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account()
-                .update(cx, |account, cx| account.forge_status(cx));
+                .update(cx, editor_core::Account::forge_status);
         });
     }
 
-    pub(crate) fn forge_confirm(&mut self, cx: &mut Context<Settings>) {
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+    pub(crate) fn forge_confirm(&self, cx: &mut Context<Settings>) {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account()
-                .update(cx, |account, cx| account.forge_confirm(cx));
+                .update(cx, editor_core::Account::forge_confirm);
         });
     }
 
-    pub(crate) fn connect_machine(&mut self, machine_id: String, cx: &mut Context<Settings>) {
-        let core = self.core.clone();
-        let account = core.read_with(cx, |core, _| core.account().clone());
+    pub(crate) fn connect_machine(&self, machine_id: String, cx: &mut Context<Settings>) {
+        let core_entity = self.core.clone();
+        let account = core_entity.read_with(cx, |core, _| core.account().clone());
         account.update(cx, |account, cx| {
-            account.connect_machine(machine_id, &core, cx)
+            account.connect_machine(machine_id, &core_entity, cx);
         });
     }
 
-    pub(crate) fn remove_machine(&mut self, machine_id: String, cx: &mut Context<Settings>) {
-        let core = self.core.clone();
-        core.update(cx, |core, cx| {
+    pub(crate) fn remove_machine(&self, machine_id: String, cx: &mut Context<Settings>) {
+        let core_entity = self.core.clone();
+        core_entity.update(cx, |core, cx| {
             core.account()
                 .update(cx, |account, cx| account.remove_machine(machine_id, cx));
         });
@@ -185,7 +185,7 @@ impl AccountForm {
 }
 
 /// Renders the account page for the current sign-in state.
-pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> Div {
+pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> Div {
     use editor_core::AccountPhase;
     let account = settings.core.read(cx).account().clone();
     let phase = account.read_with(cx, |account, _| account.phase().clone());
@@ -246,7 +246,7 @@ fn render_sign_in(
     settings: &Settings,
     theme: &ArtisanTheme,
     phase: &AccountPhase,
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> AnyElement {
     let busy = matches!(phase, AccountPhase::Requesting);
     let form = div()
@@ -312,7 +312,7 @@ fn render_waiting(
     theme: &ArtisanTheme,
     title: &str,
     detail: &str,
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> AnyElement {
     section_shell(
         theme,
@@ -346,7 +346,7 @@ fn render_finish(
     theme: &ArtisanTheme,
     email: &str,
     totp_required: bool,
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> AnyElement {
     let mut rows: Vec<AnyElement> = vec![
         row(
@@ -402,7 +402,11 @@ fn render_finish(
     .into_any_element()
 }
 
-fn render_profile(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> Div {
+#[expect(
+        clippy::too_many_lines,
+        reason = "signed-in account, machines and pairing read as one page"
+    )]
+fn render_profile(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> Div {
     let account = settings.core.read(cx).account().clone();
     let (email, display_name, machines, notice_pending) = account
         .read_with(cx, |account, _| {
@@ -419,7 +423,7 @@ fn render_profile(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Se
     let _ = notice_pending;
     let mut page = div().flex().flex_col().gap(px(10.0));
     let who = if display_name.is_empty() {
-        email.clone()
+        email
     } else {
         format!("{display_name} ({email})")
     };
@@ -532,10 +536,14 @@ fn render_profile(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Se
     page
 }
 
+#[expect(
+        clippy::too_many_lines,
+        reason = "pairing status, code entry and confirmation read as one flow"
+    )]
 fn render_pair_this_machine(
     settings: &Settings,
     theme: &ArtisanTheme,
-    cx: &mut Context<Settings>,
+    cx: &Context<Settings>,
 ) -> AnyElement {
     let output: Option<String> = settings
         .core

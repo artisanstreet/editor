@@ -165,7 +165,30 @@ impl Palette {
         }
         for (label, page) in [
             ("Settings", SettingsPage::General),
-            ("Notifications and performance", SettingsPage::General),
+            (
+                "Appearance",
+                SettingsPage::Section(editor_core::SettingsSection::Appearance),
+            ),
+            (
+                "Text Streaming",
+                SettingsPage::Section(editor_core::SettingsSection::Streaming),
+            ),
+            (
+                "Notifications",
+                SettingsPage::Section(editor_core::SettingsSection::Notifications),
+            ),
+            (
+                "Performance",
+                SettingsPage::Section(editor_core::SettingsSection::Performance),
+            ),
+            (
+                "Recovery and continuation",
+                SettingsPage::Section(editor_core::SettingsSection::Automation),
+            ),
+            (
+                "claude.ai mode",
+                SettingsPage::Section(editor_core::SettingsSection::ClaudeAi),
+            ),
             ("Hosts and devices", SettingsPage::Hosts),
             ("About", SettingsPage::About),
             ("Threads and archive", SettingsPage::Threads),

@@ -220,11 +220,20 @@ pub fn render(
     theme: &ArtisanTheme,
     cx: &Context<Settings>,
 ) -> Div {
+    let selected = settings.page(cx);
     let label = page::engine_label(engine);
     let mut page = div().flex().flex_col().child(header(
         theme,
-        label,
-        format!("{label}'s installation and sign-in on this host."),
+        if selected == selected.parent() {
+            label.to_owned()
+        } else {
+            format!("{label} · {}", selected.label())
+        },
+        if selected == selected.parent() {
+            format!("{label}'s installation and sign-in on this host.")
+        } else {
+            page::description(selected).to_owned()
+        },
     ));
     let data = host.read(cx);
     let Some(status) = data.engines.get(&engine).cloned() else {
@@ -242,9 +251,15 @@ pub fn render(
         );
     };
     let busy = settings.engines.busy.contains(&engine);
-    page = page
-        .child(render_installation(settings, &status, busy, theme, cx))
-        .child(render_account(settings, &status, busy, theme, cx));
+    if selected.shows(editor_core::SettingsSection::Installation(engine)) {
+        page = page.child(render_installation(settings, &status, busy, theme, cx));
+    }
+    if selected.shows(editor_core::SettingsSection::Account(engine)) {
+        page = page.child(render_account(settings, &status, busy, theme, cx));
+    }
+    if engine == EngineId::Claude && selected.shows(editor_core::SettingsSection::ClaudeAi) {
+        page = page.child(render_claude_ai(settings, host, &status, busy, theme, cx));
+    }
     if let Some(error) = settings.engines.errors.get(&engine) {
         page = page.child(div().mt(px(12.0)).child(error_text(theme, error.clone())));
     }
@@ -712,9 +727,6 @@ fn render_account(
         }
         SignInState::Unknown | SignInState::SignedOut | SignInState::Failed { .. } => {}
     }
-    if engine == EngineId::Claude {
-        blocks.push(claude_ai_session(settings, status, busy, theme, cx));
-    }
     section_shell(
         theme,
         "Account",
@@ -731,7 +743,60 @@ fn render_account(
     .debug_selector("settings-section-account")
 }
 
-/// The claude.ai session Native Claude Mode runs on: where it stands, and
+/// The account's Claude transport choice, shared by every Claude thread.
+fn claude_ai_switch(
+    settings: &Settings,
+    host: &Entity<HostData>,
+    cx: &Context<Settings>,
+) -> AnyElement {
+    let on = artisan_api::transport_of(host.read(cx).setting(artisan_api::TRANSPORT_KEY))
+        == artisan_api::CLAUDE_AI;
+    let host = host.clone();
+    settings.switch(
+        "settings-switch-enhanced-claude",
+        on,
+        Box::new(move |checked, _, cx| {
+            let transport = if checked {
+                artisan_api::CLAUDE_AI
+            } else {
+                artisan_api::CLAUDE_CODE
+            };
+            crate::threads::save_value(
+                &host,
+                artisan_api::TRANSPORT_KEY,
+                serde_json::Value::String(transport.to_owned()),
+                cx,
+            );
+        }),
+    )
+}
+/// Claude's web transport switch and its session live together.
+fn render_claude_ai(
+    settings: &Settings,
+    host: &Entity<HostData>,
+    status: &EngineStatus,
+    busy: bool,
+    theme: &ArtisanTheme,
+    cx: &Context<Settings>,
+) -> PageBlock {
+    section_shell(
+        theme,
+        "claude.ai mode",
+        None,
+        None,
+        card(theme, vec![
+            row(
+                theme,
+                "claude.ai mode",
+                "Run Claude through claude.ai with local files, commands, skills, MCP servers and subagents. Turn this off to use Claude Code.",
+                Some(claude_ai_switch(settings, host, cx)),
+            ).into_any_element(),
+            claude_ai_session(settings, status, busy, theme, cx),
+        ]),
+    ).debug_selector("settings-section-claude-ai")
+}
+
+/// The claude.ai session: where it stands, and
 /// signing in or out. Signing in opens a browser on this device.
 fn claude_ai_session(
     settings: &Settings,
@@ -793,8 +858,7 @@ fn claude_ai_session(
             cx.listener(|this, _, _, cx| this.sign_in_to_claude_ai(cx)),
         )
     };
-    row(theme, "claude.ai session (Native Claude Mode)", description, Some(button))
-        .into_any_element()
+    row(theme, "claude.ai session", description, Some(button)).into_any_element()
 }
 
 #[cfg(test)]

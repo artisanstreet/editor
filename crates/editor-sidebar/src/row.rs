@@ -126,7 +126,7 @@ impl Render for ThreadRow {
         let dot = match data.state {
             RowState::Idle => None,
             RowState::Working => Some(colors.text),
-            RowState::Waiting => Some(colors.primary),
+            RowState::Waiting => Some(colors.needs_answer),
             RowState::Unread => Some(colors.unread),
             RowState::Failed => Some(colors.red.solid),
             RowState::Parked => Some(colors.amber.solid),

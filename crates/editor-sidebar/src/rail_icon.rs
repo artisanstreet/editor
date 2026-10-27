@@ -163,7 +163,10 @@ const BAG_FLIGHT: f32 = 0.6;
 fn bag(progress: Option<f32>) -> Vec<AnyElement> {
     let p = progress.unwrap_or(1.0);
     let squash = (PI * (p / 0.5).min(1.0)).sin();
-    let body = Transformation::scale(size(0.05f32.mul_add(squash, 1.0), 0.07f32.mul_add(-squash, 1.0)));
+    let body = Transformation::scale(size(
+        0.05f32.mul_add(squash, 1.0),
+        0.07f32.mul_add(-squash, 1.0),
+    ));
     let mut layers = vec![
         moved(AssetId::ARTISAN_RAIL_BAG_BODY, body),
         moved(AssetId::ARTISAN_RAIL_BAG_HANDLE, body),
@@ -185,13 +188,15 @@ fn bag(progress: Option<f32>) -> Vec<AnyElement> {
                 .inset_0()
                 .opacity(opacity)
                 .child(
-                    asset_glyph(item).size(px(RAIL_ICON_SIZE)).with_transformation(
-                        Transformation::translate(point(
-                            px(x * travel * UNIT),
-                            px(y * travel * UNIT),
-                        ))
-                        .with_scaling(size(grow, grow)),
-                    ),
+                    asset_glyph(item)
+                        .size(px(RAIL_ICON_SIZE))
+                        .with_transformation(
+                            Transformation::translate(point(
+                                px(x * travel * UNIT),
+                                px(y * travel * UNIT),
+                            ))
+                            .with_scaling(size(grow, grow)),
+                        ),
                 )
                 .into_any_element(),
         );

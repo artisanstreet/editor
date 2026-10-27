@@ -623,7 +623,17 @@ impl Render for Account {
         // menu's other separators.
         body = body.child(
             actions
-                .child(div().h(px(1.0)).my(px(4.0)).mx(px(-4.0)).bg(separator))
+                // The line above the actions sits 4 px over the group's 4 px
+                // padding, 8 px from Settings; this one gets the same 8 px
+                // below Usage, then 4 px over the theme row as before.
+                .child(
+                    div()
+                        .h(px(1.0))
+                        .mt(px(8.0))
+                        .mb(px(4.0))
+                        .mx(px(-4.0))
+                        .bg(separator),
+                )
                 .child(self.theme_row(&theme)),
         );
         if let Some(tooltip) = usage_visual::tooltip(self, &reports, &theme, &theme.colors) {

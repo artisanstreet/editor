@@ -129,6 +129,7 @@ fn splice_entries(list: &gpui::ListState, old: &[Entry], new: &[Entry]) -> bool 
 )]
 pub struct Sidebar {
     core: Entity<Core>,
+    workspace_background: bool,
     host: Option<Entity<HostData>>,
     open: Option<ThreadId>,
     lists: Lists,
@@ -142,7 +143,11 @@ pub struct Sidebar {
     threads_glide: editor_ui::wheel_glide::WheelGlide,
     threads_glide_scheduled: bool,
     history_open: bool,
+    history_fraction: f32,
+    history_motion: Option<(std::time::Instant, f32)>,
     nav_hover: HoverSurface,
+    /// The settings rail's caret, so it slides between subsections.
+    settings_caret: RefCell<settings_nav::SettingsCaret>,
     threads_hover: HoverSurface,
     menu_hover: HoverSurface,
     /// Cached thread rows the list laid out since the last render; the
@@ -195,6 +200,7 @@ impl Sidebar {
         });
         let mut this = Self {
             core,
+            workspace_background: false,
             host: None,
             open: None,
             lists: Lists::default(),
@@ -208,7 +214,10 @@ impl Sidebar {
             threads_glide: editor_ui::wheel_glide::WheelGlide::default(),
             threads_glide_scheduled: false,
             history_open: false,
+            history_fraction: 0.0,
+            history_motion: None,
             nav_hover: HoverSurface::default(),
+            settings_caret: RefCell::default(),
             threads_hover: HoverSurface::default(),
             menu_hover: HoverSurface::default(),
             rows: HashMap::new(),
@@ -237,13 +246,22 @@ impl Sidebar {
         this.sync(cx);
         this
     }
+    #[must_use]
+    pub const fn for_workspace_background(mut self) -> Self {
+        self.workspace_background = true;
+        self
+    }
     pub const fn core(&self) -> &Entity<Core> {
         &self.core
     }
     fn sync(&mut self, cx: &mut Context<Self>) {
         let core = self.core.read(cx);
         let host = core.active_host().cloned();
-        let open = match core.screen() {
+        let open = match if self.workspace_background {
+            core.workspace_screen()
+        } else {
+            core.screen()
+        } {
             Screen::Thread { thread, .. } => Some(thread.clone()),
             Screen::Home
             | Screen::NewThread { .. }
@@ -349,7 +367,7 @@ impl Sidebar {
         if !self.lists.history.is_empty() {
             self.entries.push(Entry::Spacer);
             self.entries.push(Entry::History);
-            if self.history_open {
+            if self.history_open || self.history_motion.is_some() {
                 self.entries.push(Entry::Gap(2.0));
                 for (index, group) in self.lists.history.iter().enumerate() {
                     if index > 0 {
@@ -414,8 +432,60 @@ impl Sidebar {
         ]
     }
     fn history_spacer(&self) -> f32 {
-        (self.threads_height - self.entries.iter().map(Self::entry_height).sum::<f32>()).max(12.0)
+        let mut history = false;
+        let mut before = 0.0;
+        let mut after = 0.0;
+        for entry in &self.entries {
+            if history {
+                after += Self::entry_height(entry);
+            } else {
+                before += Self::entry_height(entry);
+            }
+            history |= matches!(entry, Entry::History);
+        }
+        let closed = (self.threads_height - before).max(12.0);
+        let open = (self.threads_height - before - after).max(12.0);
+        (open - closed).mul_add(self.history_fraction, closed)
     }
+    fn is_history_entry(&self, index: usize) -> bool {
+        self.entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::History))
+            .is_some_and(|history| index > history)
+    }
+
+    fn advance_history(&mut self, window: &Window, cx: &Context<Self>) {
+        let Some((started, from)) = self.history_motion else {
+            return;
+        };
+        let duration = if self.history_open { 0.4 } else { 0.35 };
+        let progress = if cx.reduce_motion() {
+            1.0
+        } else {
+            (started.elapsed().as_secs_f64() / duration).min(1.0)
+        };
+        let target = if self.history_open { 1.0 } else { 0.0 };
+        self.history_fraction = (target - from).mul_add(
+            editor_ui::motion::MotionCurve::SmoothOut.sample_f32(progress),
+            from,
+        );
+        if progress >= 1.0 {
+            self.history_motion = None;
+            self.rebuild_entries();
+        } else {
+            window.request_animation_frame();
+        }
+        // Move the History header by resizing its spacer. History rows keep
+        // their full height so even a very large archive stays virtualized.
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| matches!(entry, Entry::Spacer))
+        {
+            self.threads_list.remeasure_items(index..index + 1);
+        }
+    }
+
     fn threads_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -798,6 +868,9 @@ impl Sidebar {
         // The History separator runs edge to edge; everything else keeps the
         // column's inset.
         let inset = !matches!(entry, Entry::History);
+        let history_height = self
+            .is_history_entry(index)
+            .then(|| Self::entry_height(&entry));
         let content = match entry {
             Entry::Thread(data) => {
                 self.load_visible_projects(std::slice::from_ref(&data.project), cx);
@@ -864,15 +937,16 @@ impl Sidebar {
                         )
                         .child(div().flex_1())
                         .child(
-                            asset_glyph(if self.history_open {
-                                AssetId::TABLER_CHEVRON_DOWN
-                            } else {
-                                AssetId::TABLER_CHEVRON_RIGHT
-                            })
-                            .size(px(12.0))
-                            .text_color(cx.theme().colors.text_muted.to_paint()),
+                            asset_glyph(AssetId::TABLER_CHEVRON_RIGHT)
+                                .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                    self.history_fraction * std::f32::consts::FRAC_PI_2,
+                                )))
+                                .size(px(12.0))
+                                .text_color(cx.theme().colors.text_muted.to_paint()),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
+                            this.history_motion =
+                                Some((std::time::Instant::now(), this.history_fraction));
                             this.history_open = !this.history_open;
                             // Closed, History's pages are out of view: the window
                             // returns to the newest threads in one page.
@@ -895,6 +969,22 @@ impl Sidebar {
                     ),
                 )
                 .into_any_element(),
+        };
+        let content = if let Some(height) = history_height {
+            div()
+                .h(px(height))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .h(px(height))
+                        .relative()
+                        .top(px(8.0 * (1.0 - self.history_fraction)))
+                        .opacity(self.history_fraction)
+                        .child(content),
+                )
+                .into_any_element()
+        } else {
+            content
         };
         div()
             .id(gpui::SharedString::from(format!("sidebar-entry-{index}")))
@@ -1246,11 +1336,18 @@ impl Render for Sidebar {
         reason = "the sidebar's root element tree, ported from the old Editor"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.advance_history(window, cx);
         // Rows the list did not lay out last frame are off screen.
         let laid_out = std::mem::take(&mut self.laid_out);
         self.rows.retain(|id, _| laid_out.contains(id));
         let theme = *cx.theme();
-        let screen = self.core.read(cx).screen().clone();
+        let core = self.core.read(cx);
+        let screen = if self.workspace_background {
+            core.workspace_screen()
+        } else {
+            core.screen()
+        }
+        .clone();
         let settings_page = match screen {
             Screen::Settings(page) => Some(page),
             Screen::Home
@@ -1259,6 +1356,35 @@ impl Render for Sidebar {
             | Screen::Marketplace
             | Screen::Usage => None,
         };
+        if let Some(page) = settings_page {
+            // The triggers share the sidebar's sliding hover pill, measured
+            // against this surface, so it glides from row to row here too.
+            return div()
+                .id("settings-dialog-nav")
+                .size_full()
+                .overflow_y_scroll()
+                .p(px(16.0))
+                .child(
+                    div()
+                        .id("settings-dialog-nav-surface")
+                        .relative()
+                        .child(self.nav_hover.surface_probe())
+                        .child(self.nav_hover.pill(
+                            "settings-dialog-nav",
+                            &theme,
+                            px(8.0),
+                            cx.reduce_motion(),
+                        ))
+                        .child(self.render_settings_nav(page, cx))
+                        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                            if !*hovered {
+                                this.nav_hover.clear();
+                                cx.notify();
+                            }
+                        })),
+                )
+                .into_any_element();
+        }
         // The rail's destinations, above the avatar.
         let [pen, bag, bars] = self.rail_icons.clone();
         let destinations = div()
@@ -1585,6 +1711,7 @@ impl Render for Sidebar {
             .children(rename)
             .children(picker)
             .children(profile)
+            .into_any_element()
     }
 }
 
@@ -1643,7 +1770,6 @@ fn rail_button(
                             .px(px(10.0))
                             .py(px(6.0))
                             .text_size(TypographyTokens::size(TextStep::Sm))
-                            .text_color(theme.colors.text.to_paint())
                             .child(label),
                     )
                     .into_any_element()

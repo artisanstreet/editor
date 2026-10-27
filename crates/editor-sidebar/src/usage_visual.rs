@@ -5,20 +5,16 @@
 
 use crate::usage::Account;
 use artisan_api::{EngineId, Timestamp, UsageLimits, UsageWindow};
-use editor_ui::glass::{
-    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
-};
+use editor_ui::glass::card_shadows;
+use editor_ui::hover_card::glass_tooltip;
 use editor_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use editor_ui::measure::Measured;
 use editor_ui::picker_motion::HoverRect;
-use editor_ui::theme::{
-    ArtisanTheme, ColorTokens, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens,
-};
+use editor_ui::theme::{ArtisanTheme, ColorTokens, Opacity};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Context, Div, Hsla, InteractiveElement as _, ParentElement as _, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    Context, Div, HighlightStyle, Hsla, InteractiveElement as _, ParentElement as _, SharedString,
+    Stateful, StatefulInteractiveElement as _, Styled as _, StyledText, div, px,
 };
 
 /// Ticks in a meter, as the previous Editor quantized it.
@@ -102,13 +98,20 @@ pub fn groups(usage: &UsageLimits) -> Vec<(Cadence, Vec<Meter>)> {
 /// "3 hours", once every window of a group has a future reset; the latest
 /// one counts.
 pub fn reset_duration(meters: &[Meter], now: Timestamp) -> Option<String> {
-    const MINUTE: i64 = 60_000;
     let mut latest: Option<Timestamp> = None;
     for meter in meters {
         let at = meter.resets_at.filter(|at| *at > now)?;
         latest = Some(latest.map_or(at, |latest| latest.max(at)));
     }
-    let minutes = latest?.saturating_sub(now).saturating_add(MINUTE - 1) / MINUTE;
+    reset_remaining(latest?, now)
+}
+
+fn reset_remaining(at: Timestamp, now: Timestamp) -> Option<String> {
+    const MINUTE: i64 = 60_000;
+    if at <= now {
+        return None;
+    }
+    let minutes = at.saturating_sub(now).saturating_add(MINUTE - 1) / MINUTE;
     let minutes = minutes.max(1);
     let (amount, unit) = if minutes < 60 {
         (minutes, "minute")
@@ -271,16 +274,28 @@ fn engine_row(
         .aria_label(format!("{} usage", engine.display_name()))
         .when(hovered, |row| row.child(sidebar.ui.tip_anchor.track()))
         .child(
-            div().text_color(desktop.text.to_paint()).child(
-                icon(IconStyle::resolve(
-                    *theme,
-                    editor_ui::engine_icon(theme, engine),
-                    IconSize::Default,
-                    IconTint::Inherit,
-                ))
+            div()
                 .size(px(16.0))
-                .flex_shrink_0(),
-            ),
+                .flex()
+                .items_center()
+                .justify_center()
+                .flex_shrink_0()
+                .text_color(desktop.text.to_paint())
+                .child(
+                    icon(IconStyle::resolve(
+                        *theme,
+                        editor_ui::engine_icon(theme, engine),
+                        IconSize::Default,
+                        IconTint::Inherit,
+                    ))
+                    .w(px(if engine == EngineId::OpenCode {
+                        12.8
+                    } else {
+                        16.0
+                    }))
+                    .h(px(16.0))
+                    .flex_shrink_0(),
+                ),
         )
         .child(
             div()
@@ -307,8 +322,8 @@ fn engine_row(
         }))
 }
 
-/// "12% used of your session limit. Resets at 15:00."
-pub fn tooltip_text(window: &UsageWindow) -> String {
+/// "12% used of your session limit. Resets in 3 hours."
+pub fn tooltip_text(window: &UsageWindow, now: Timestamp) -> String {
     let limit = match window.cadence {
         artisan_api::UsageCadence::Session => "session",
         artisan_api::UsageCadence::Week => "weekly",
@@ -318,10 +333,13 @@ pub fn tooltip_text(window: &UsageWindow) -> String {
     let used = 100 - remaining_percent(window.used_percent);
     let mut text = format!("{used}% used of your {limit} limit.");
     if let Some(at) = window.resets_at {
-        text.push_str(&format!(
-            " Resets at {}.",
-            editor_ui::local_time::moment(at)
-        ));
+        if let Some(duration) = reset_remaining(at, now) {
+            text.push_str(" Resets in ");
+            text.push_str(&duration);
+            text.push('.');
+        } else {
+            text.push_str(" Reset time reached.");
+        }
     }
     text
 }
@@ -341,35 +359,32 @@ pub fn tooltip(
         .1
         .windows
         .get(key.1)?;
-    let radius = RadiusTokens::value(RadiusStep::X2l);
+    let text = tooltip_text(window, artisan_api::now());
+    let numbers: Vec<_> = text
+        .match_indices(|ch: char| ch.is_ascii_digit() || ch == '%')
+        .map(|(start, digit)| {
+            (
+                start..start + digit.len(),
+                HighlightStyle {
+                    color: Some(desktop.text.to_paint()),
+                    ..HighlightStyle::default()
+                },
+            )
+        })
+        .collect();
     Some(
-        div()
-            .id("artisan-profile-usage-tooltip")
-            .debug_selector(|| "artisan-profile-usage-tooltip".to_owned())
-            .absolute()
-            .left(px(anchor.left + anchor.width + TOOLTIP_OFFSET))
-            .top(px(anchor.top))
-            .max_w(px(TOOLTIP_WIDTH))
-            .rounded(radius)
-            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-            .bg(glass_foreground_base(theme))
-            .border_1()
-            .border_color(desktop.line.to_paint())
-            .shadow(glass_card_shadows(
-                theme,
-                editor_ui::theme::Elevation::Overlay,
-            ))
-            .child(glass_material_layer(theme, GlassStrength::Quiet, radius))
-            .child(glass_highlight_layer(theme, GlassStrength::Quiet, radius))
-            .child(
-                div()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .text_size(TypographyTokens::size(TextStep::Xs))
-                    .line_height(px(16.0))
-                    .text_color(desktop.text.to_paint())
-                    .child(tooltip_text(window)),
-            ),
+        glass_tooltip(
+            "artisan-profile-usage-tooltip",
+            theme,
+            px(TOOLTIP_WIDTH),
+            false,
+        )
+        .debug_selector(|| "artisan-profile-usage-tooltip".to_owned())
+        .absolute()
+        .left(px(anchor.left + anchor.width + TOOLTIP_OFFSET))
+        .top(px(anchor.top))
+        .shadow(card_shadows(theme))
+        .child(StyledText::new(text).with_highlights(numbers)),
     )
 }
 
@@ -414,8 +429,36 @@ mod tests {
         assert_eq!(headline(&codex).map(|(index, _)| index), Some(0));
         assert_eq!(headline(&opencode).map(|(index, _)| index), Some(1));
         assert_eq!(
-            tooltip_text(&codex.windows[0]),
+            tooltip_text(&codex.windows[0], 0),
             "70% used of your weekly limit."
+        );
+    }
+
+    #[test]
+    fn tooltip_reset_times_are_relative_and_round_up() {
+        const NOW: Timestamp = 1_700_000_000_000;
+        let mut window = window(UsageCadence::Session, None, 12.0);
+        for (remaining, expected) in [
+            (1, "Resets in 1 minute."),
+            (60_000, "Resets in 1 minute."),
+            (60_001, "Resets in 2 minutes."),
+            (3_600_000, "Resets in 1 hour."),
+            (2 * 3_600_000 + 1, "Resets in 3 hours."),
+            (86_400_000, "Resets in 1 day."),
+            (3 * 86_400_000 + 1, "Resets in 4 days."),
+            (0, "Reset time reached."),
+            (-1, "Reset time reached."),
+        ] {
+            window.resets_at = Some(NOW + remaining);
+            assert_eq!(
+                tooltip_text(&window, NOW),
+                format!("12% used of your session limit. {expected}")
+            );
+        }
+        window.resets_at = None;
+        assert_eq!(
+            tooltip_text(&window, NOW),
+            "12% used of your session limit."
         );
     }
 }
