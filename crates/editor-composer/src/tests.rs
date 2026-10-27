@@ -89,6 +89,27 @@ impl Harness for Engine {
             })
         })
     }
+
+    /// Handoff summaries must pass the `## Objective` compaction gate.
+    /// Preserve the `hold` signal so a continued `hold the run` turn goes
+    /// live again instead of completing immediately.
+    fn compact(
+        &self,
+        turn: Turn,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<forge_engines::SideReply>> {
+        Box::pin(async move {
+            let objective = if turn.input.text.contains("hold") {
+                turn.input.text.clone()
+            } else {
+                "hold the run".to_owned()
+            };
+            Ok(forge_engines::SideReply {
+                text: format!("## Objective\n- {objective}"),
+                usage: forge_engines::SideUsage::default(),
+            })
+        })
+    }
 }
 
 pub struct Fixture {
