@@ -13,6 +13,9 @@
 #   nix run .#dev -- forge            build and install `ae` and Forge only
 #   nix run .#dev -- editor           build and install `ae` and the Editor only
 #   nix run .#dev -- build            build; nothing is installed
+#   nix run .#devfast [-- <command>]   same pipeline, with Blaze for Linux builds
+#                                      (Windows cross-builds still use Cargo;
+#                                      Linux output stays in target/devfast)
 #
 #   --linux        inside WSL, install the Linux Editor (WSLg) instead of the Windows one
 #   --dhat         build the Editor and Forge with the dhat heap profiler; the
@@ -28,10 +31,17 @@
   pkgs,
   graphicsLibraryPath,
   profile ? "debug",
+  blazePackage ? null,
 }:
 let
   runner = pkgs.writeShellApplication {
-    name = if profile == "debug" then "dev" else "dev-${profile}";
+    name =
+      if blazePackage != null then
+        "devfast"
+      else if profile == "debug" then
+        "dev"
+      else
+        "dev-${profile}";
     runtimeInputs = with pkgs; [
       git
       coreutils
@@ -43,6 +53,7 @@ let
     text = ''
       ARTISAN_DEV_GRAPHICS_LIBRARY_PATH=${pkgs.lib.escapeShellArg graphicsLibraryPath}
       : "''${ARTISAN_DEV_PROFILE:=${profile}}"
+      ARTISAN_DEV_BLAZE=${if blazePackage == null then "" else "${blazePackage}/bin/blaze"}
     ''
     + builtins.readFile ./dev.sh;
   };
@@ -50,5 +61,7 @@ in
 {
   type = "app";
   program = "${runner}/bin/${runner.name}";
-  meta.description = "Build (${profile} profile) and install Forge, the Editor and ae";
+  meta.description = "Build (${profile} profile) and install Forge, the Editor and ae${
+    if blazePackage == null then "" else " with Blaze"
+  }";
 }

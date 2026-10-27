@@ -10,6 +10,7 @@
   pkgs,
   windowsPkgs,
   crane,
+  blaze,
 }:
 let
   inherit (pkgs) lib;
@@ -370,6 +371,42 @@ let
     );
   };
   dev = import ./dev.nix { inherit pkgs graphicsLibraryPath; };
+  # Upstream release packaging rejects Nix glibc; build its pinned source here.
+  devfast = import ./dev.nix {
+    inherit pkgs graphicsLibraryPath;
+    blazePackage =
+      let
+        upstream = import blaze.inputs.nixpkgs {
+          system = pkgs.stdenv.hostPlatform.system;
+          overlays = [ blaze.inputs.rust-overlay.overlays.default ];
+        };
+        pin = upstream.lib.removePrefix "nightly-" (
+          upstream.lib.trim (builtins.readFile "${blaze.outPath}/harness/toolchain")
+        );
+        toolchain = upstream.rust-bin.nightly.${pin}.default.override { extensions = [ "rust-src" ]; };
+        platform = upstream.makeRustPlatform {
+          cargo = toolchain;
+          rustc = toolchain;
+        };
+      in
+      platform.buildRustPackage {
+        pname = "artisan-blaze";
+        version = "0.1.0";
+        src = blaze.outPath;
+        cargoLock.lockFile = "${blaze.outPath}/Cargo.lock";
+        cargoBuildFlags = [
+          "-p"
+          "ra-jit"
+        ];
+        doCheck = false;
+        nativeBuildInputs = [ upstream.makeWrapper ];
+        postFixup = ''
+          for bin in "$out"/bin/*; do
+            wrapProgram "$bin" --prefix PATH : ${toolchain}/bin
+          done
+        '';
+      };
+  };
   # `nix run .#release`: the dev loop with Cargo's release profile. The
   # signed release archives stay `nix build .#release` (packages, not apps).
   devRelease = import ./dev.nix {
@@ -412,7 +449,7 @@ in
   // release;
   apps = {
     default = dev;
-    inherit dev;
+    inherit dev devfast;
     release = devRelease;
   };
 }

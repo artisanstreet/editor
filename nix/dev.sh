@@ -2,6 +2,7 @@
 # The dev loop behind `nix run .#dev`; usage is in nix/dev.nix.
 # nix/dev.nix prepends ARTISAN_DEV_GRAPHICS_LIBRARY_PATH.
 : "${ARTISAN_DEV_GRAPHICS_LIBRARY_PATH:=}"
+: "${ARTISAN_DEV_BLAZE:=}"
 
 say() { echo "dev: $*" >&2; }
 die() {
@@ -45,18 +46,37 @@ esac
 # The default dev shell caps Cargo at two jobs for interactive use.
 unset CARGO_TARGET_DIR CARGO_BUILD_TARGET
 
+# Blaze uses a different Rust toolchain, so its output and staging are isolated.
+output_root="$root/target/dev"
+if [[ -n "$ARTISAN_DEV_BLAZE" ]]; then
+    output_root="$root/target/devfast"
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+fi
+
 # cargo_build <dev shell> <platform> <cargo args>: each platform has its own
 # target directory, since the shells' environments differ.
 cargo_build() {
     local shell="$1" platform="$2"
     shift 2
-    say "building $* ($profile, $platform)"
-    (cd "$root" && nix develop "$root#$shell" --command \
-        cargo build --profile "$profile" --target-dir "$root/target/dev/$platform" "$@")
+    local builder=cargo target_dir="$output_root/$platform"
+    if [[ -n "$ARTISAN_DEV_BLAZE" && "$platform" == linux ]]; then builder="$ARTISAN_DEV_BLAZE"; fi
+    if [[ -n "$ARTISAN_DEV_BLAZE" && "$platform" == windows ]]; then
+        say "using Cargo and the regular dev cache for the Windows cross-build"
+        target_dir="$root/target/dev/windows"
+    fi
+    say "building $* ($profile, $platform, $(basename "$builder"))"
+    if [[ "$builder" != cargo && "$profile" == dev ]]; then
+        (cd "$root" && CARGO_TARGET_DIR="$target_dir" nix develop "$root#$shell" --command \
+            "$builder" build "$@")
+    else
+        (cd "$root" && nix develop "$root#$shell" --command \
+            "$builder" build --profile "$profile" --target-dir "$target_dir" "$@")
+    fi
 }
-linux_out="$root/target/dev/linux/$profile_dir"
-windows_out="$root/target/dev/windows/x86_64-pc-windows-gnu/$profile_dir"
-stage="$root/target/dev/stage"
+linux_out="$output_root/linux/$profile_dir"
+windows_out="$output_root/windows/x86_64-pc-windows-gnu/$profile_dir"
+if [[ -n "$ARTISAN_DEV_BLAZE" ]]; then windows_out="$root/target/dev/windows/x86_64-pc-windows-gnu/$profile_dir"; fi
+stage="$output_root/stage"
 
 # What gets built and where the Editor goes.
 want_forge=true
@@ -74,7 +94,20 @@ fi
 editor_args=(-p editor --bin artisan-editor)
 if [[ "$dhat" == true ]]; then editor_args+=(--features editor/dhat-heap); fi
 if [[ "$want_editor" == true && "$windows" == false ]]; then linux_args+=("${editor_args[@]}"); fi
-cargo_build cargo-linux linux "${linux_args[@]}"
+if [[ -n "$ARTISAN_DEV_BLAZE" ]]; then
+    # Blaze's incremental path accepts one package per invocation.
+    cargo_build cargo-linux linux -p ae --bin ae
+    if [[ "$want_forge" == true ]]; then
+        forge_args=(-p forge --bin forge)
+        if [[ "$dhat" == true ]]; then forge_args+=(--features forge/dhat-heap); fi
+        cargo_build cargo-linux linux "${forge_args[@]}"
+    fi
+    if [[ "$want_editor" == true && "$windows" == false ]]; then
+        cargo_build cargo-linux linux "${editor_args[@]}"
+    fi
+else
+    cargo_build cargo-linux linux "${linux_args[@]}"
+fi
 if [[ "$windows" == true ]]; then
     windows_args=(-p ae --bin ae)
     if [[ "$want_editor" == true ]]; then windows_args+=("${editor_args[@]}"); fi
@@ -82,7 +115,7 @@ if [[ "$windows" == true ]]; then
 fi
 
 if [[ "$command" == build ]]; then
-    say "build complete; binaries are in target/dev (nothing installed)"
+    say "build complete; binaries are in $output_root (nothing installed)"
     exit 0
 fi
 
