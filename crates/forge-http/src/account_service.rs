@@ -31,29 +31,31 @@ pub const ENROLLMENT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Production Relay used when deployment config does not name one.
 pub const DEFAULT_RELAY_URL: &str = "wss://relay.editor.artisan.st";
 
-/// Relay URL: explicit `AST_RELAY_URL` when set and non-empty, the
-/// production default when unset, and `None` when explicitly emptied
-/// (set but blank): empty means the connector stays off while config
-/// sync still runs.
+/// Relay URL for the Forge connector.
+///
+/// Explicit `AST_RELAY_URL` when set and non-empty, the production default
+/// when unset, and `None` when explicitly emptied (set but blank): empty
+/// means the connector stays off while config sync still runs.
 pub fn relay_url() -> Option<String> {
-    match std::env::var("AST_RELAY_URL") {
-        Err(_) => Some(DEFAULT_RELAY_URL.to_owned()),
-        Ok(url) => {
+    std::env::var("AST_RELAY_URL").map_or_else(
+        |_| Some(DEFAULT_RELAY_URL.to_owned()),
+        |url| {
             let url = url.trim().to_owned();
             if url.is_empty() {
                 None
             } else {
                 Some(url)
             }
-        }
-    }
+        },
+    )
 }
 
-/// Core issuer the Forge expects in grants: explicit `AST_CORE_ISSUER`,
-/// else the configured Core base URL (a dev `AST_CORE_BASE_URL` override
-/// stays a dev issuer; the production default yields the production
-/// issuer). Must match Core's `CORE_JWT_ISSUER` exactly; never derived
-/// from a token claim.
+/// Core issuer the Forge expects in grants.
+///
+/// Explicit `AST_CORE_ISSUER`, else the configured Core base URL (a dev
+/// `AST_CORE_BASE_URL` override stays a dev issuer; the production default
+/// yields the production issuer). Must match Core's `CORE_JWT_ISSUER`
+/// exactly; never derived from a token claim.
 pub fn core_issuer() -> String {
     std::env::var("AST_CORE_ISSUER")
         .ok()
