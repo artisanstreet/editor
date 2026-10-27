@@ -13,6 +13,7 @@ test = true
 
 [dependencies]
 anyhow.workspace = true
+artisan-account = { path = "../artisan-account" }
 artisan-api = { path = "../artisan-api" }
 artisan-paths = { path = "../artisan-paths" }
 base64.workspace = true
@@ -21,9 +22,11 @@ cliclack = "=0.5.6"
 ed25519-dalek.workspace = true
 flate2.workspace = true
 forge-engines = { path = "../forge-engines" }
+forge-runs = { path = "../forge-runs" }
 claude-ai-browser = { path = "../claude-ai-browser" }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
+gethostname.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

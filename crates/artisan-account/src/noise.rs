@@ -1003,6 +1003,47 @@ mod tests {
     }
 
     #[test]
+    fn enrolled_identity_key_must_not_pin_the_noise_peer() {
+        // Production passes None for the Noise peer static (the Forge uses
+        // a fresh X25519 static per channel) and binds identity at confirm
+        // via the enrolled Ed25519 key. This locks that shape: substituting
+        // the enrolled Ed25519 bytes into the X25519 pin slot fails at m2
+        // even though both are 32 bytes, so the confusion can never
+        // silently pass (it failed live handshakes exactly this way).
+        let enrolled = cnf_public(&[0x66_u8; 32]);
+        let (init_sec, _, resp_sec, _) = statics();
+        let resp_noise_pub = *StaticKeypair::from_secret(resp_sec).unwrap().public();
+        assert_ne!(resp_noise_pub, enrolled);
+        let mut pinned = NoiseChannel::initiator(&init_sec, Some(enrolled), ctx()).unwrap();
+        let mut resp = NoiseChannel::responder(&resp_sec, None, ctx()).unwrap();
+        let mut m1 = Vec::new();
+        pinned.next_handshake_message(&mut m1).unwrap();
+        resp.receive_handshake_message(&m1).unwrap();
+        let mut m2 = Vec::new();
+        resp.next_handshake_message(&mut m2).unwrap();
+        assert_eq!(
+            pinned.receive_handshake_message(&m2).unwrap_err(),
+            NoiseError::PeerStatic
+        );
+        assert_eq!(pinned.phase(), Phase::Closed);
+        // The production shape (no pin on either side) opens cleanly
+        // against the fresh static; identity binds at confirm, not here.
+        let mut init = NoiseChannel::initiator(&init_sec, None, ctx()).unwrap();
+        let mut resp = NoiseChannel::responder(&resp_sec, None, ctx()).unwrap();
+        let mut m1 = Vec::new();
+        init.next_handshake_message(&mut m1).unwrap();
+        resp.receive_handshake_message(&mut m1).unwrap();
+        let mut m2 = Vec::new();
+        resp.next_handshake_message(&mut m2).unwrap();
+        init.receive_handshake_message(&m2).unwrap();
+        let mut m3 = Vec::new();
+        init.next_handshake_message(&mut m3).unwrap();
+        resp.receive_handshake_message(&m3).unwrap();
+        assert_eq!(init.phase(), Phase::Confirm);
+        assert_eq!(resp.phase(), Phase::Confirm);
+    }
+
+    #[test]
     fn replay_destroys_the_session() {
         let (mut init, mut resp) = open_pair();
         let ct = init.seal(b"once").unwrap();
@@ -1127,10 +1168,12 @@ mod relay_fixture_tests {
         let raw = std::fs::read_to_string(fixture_path()).unwrap();
         let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(fixture["protocol"], NOISE_PROTOCOL);
+        // Context comes from the fixture itself (`ctx`), never hardcoded:
+        // the vectors pin exact bytes for whatever IDs the fixture used.
         let ctx = ChannelCtx {
-            account: "fixture-acct".into(),
-            machine: "fixture-forge".into(),
-            channel: "fixture-ch".into(),
+            account: fixture["ctx"]["account"].as_str().unwrap().into(),
+            machine: fixture["ctx"]["machine"].as_str().unwrap().into(),
+            channel: fixture["ctx"]["channel"].as_str().unwrap().into(),
         };
         assert_eq!(hex(&prologue_bytes(&ctx)), fixture["prologue_hex"].as_str().unwrap());
 
@@ -1192,8 +1235,8 @@ mod relay_fixture_tests {
             expected_iss: "https://core.test/ast".into(),
             expected_aud: crate::grant::AUD_RELAY.into(),
             max_ttl_s: crate::GRANT_MAX_TTL_S,
-            expected_sub: "fixture-acct".into(),
-            expected_mid: "fixture-forge".into(),
+            expected_sub: fixture["ctx"]["account"].as_str().unwrap().into(),
+            expected_mid: fixture["ctx"]["machine"].as_str().unwrap().into(),
             now_sec: 2_000_000_000,
         };
         let claims =

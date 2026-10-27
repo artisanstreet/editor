@@ -15,8 +15,58 @@
 use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{CoreSessionClient, SessionToken};
+
+/// Terminal close signal shared by every handle of one channel.
+///
+/// `tokio::sync::watch::Sender::send` drops the value when no receiver
+/// exists yet, so a bare `send(true)` can miss a reader that subscribes
+/// just after [`close`]. [`close`] therefore uses `send_replace`, which
+/// retains the terminal state regardless of receivers, and [`aborted`]
+/// checks the atomic flag too — a close-before-subscribe or
+/// close-while-waiting race always resolves to closed, never to a stream
+/// timeout.
+#[derive(Clone, Debug)]
+struct CloseSignal {
+    closed: Arc<AtomicBool>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+}
+
+impl CloseSignal {
+    fn new() -> Self {
+        Self {
+            closed: Arc::new(AtomicBool::new(false)),
+            shutdown: tokio::sync::watch::Sender::new(false),
+        }
+    }
+
+    /// Record the terminal state. Idempotent; safe from any executor.
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.shutdown.send_replace(true);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Completes once [`close`] ran — including a close that happened
+    /// before this waiter subscribed.
+    async fn aborted(&self) {
+        if self.is_closed() {
+            return;
+        }
+        let mut rx = self.shutdown.subscribe();
+        // Re-check after subscribing: `send_replace` retains the terminal
+        // value, so a close racing the subscribe is still observed here.
+        if *rx.borrow() || self.is_closed() {
+            return;
+        }
+        let _ = rx.changed().await;
+    }
+}
 
 /// Everything the Relay dialer needs beyond one prepared request: where
 /// the Relay lives plus the session-authed Core client for grant refresh.
@@ -72,6 +122,11 @@ pub struct RelayClient {
     unary: RelayChannel,
     ctx_account: String,
     ctx_machine: String,
+    /// Weak handles to every event channel opened by
+    /// [`RelayClient::subscribe`], so [`RelayClient::close_all`]
+    /// terminates streams as well as unary. Lock is never held across
+    /// an await; dead entries are pruned on close.
+    streams: Arc<std::sync::Mutex<Vec<std::sync::Weak<RelayChannelInner>>>>,
 }
 
 impl Clone for RelayClient {
@@ -80,6 +135,7 @@ impl Clone for RelayClient {
             unary: self.unary.clone(),
             ctx_account: self.ctx_account.clone(),
             ctx_machine: self.ctx_machine.clone(),
+            streams: Arc::clone(&self.streams),
         }
     }
 }
@@ -116,7 +172,45 @@ impl RelayClient {
             unary,
             ctx_account: account_id.to_owned(),
             ctx_machine: machine_id.to_owned(),
+            streams: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
+    }
+
+    /// Promptly terminate the unary channel; in-flight and future calls
+    /// fail fast, blocked reads wake at once. See [`RelayChannel::close`]:
+    /// synchronous, idempotent, callable from any executor.
+    pub fn close(&self) {
+        self.unary.close();
+    }
+
+    /// Promptly terminate the unary channel and every stream opened by
+    /// [`RelayClient::subscribe`]. Sign-out calls this when dropping
+    /// account hosts so views briefly holding clones stop at once, and no
+    /// grant refresh, reconnect, or new subscription can start afterwards
+    /// (those paths check the closed signal first). Synchronous,
+    /// idempotent, callable from any executor.
+    pub fn close_all(&self) {
+        self.close();
+        let channels = self
+            .streams
+            .lock()
+            .map(|mut open| {
+                open.retain(|weak| weak.upgrade().is_some());
+                open.iter()
+                    .filter_map(|weak| weak.upgrade())
+                    .map(|inner| RelayChannel { inner })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for channel in channels {
+            channel.close();
+        }
+    }
+
+    /// Whether [`RelayClient::close_all`] (or [`RelayClient::close`]) ran.
+    /// New subscriptions are refused once closed.
+    pub fn is_closed(&self) -> bool {
+        self.unary.is_closed()
     }
 
     /// Connect snapshot over the tunnel (same shape as direct `/state`).
@@ -186,14 +280,24 @@ impl RelayClient {
     /// stream id and a live envelope receiver. Oversized envelopes arrive
     /// chunked and reassembled; a lagged broadcast or full queue ends the
     /// stream with `Reset` (caller re-subscribes from its `since` cursor).
+    /// Refused once [`RelayClient::close_all`] ran.
     pub async fn subscribe(&self, path: &str) -> Result<RelayEventStream> {
-        RelayEventStream::open(
+        // Signal first: no new subscriptions after close.
+        if self.is_closed() {
+            anyhow::bail!("relay connection closed");
+        }
+        let stream = RelayEventStream::open(
             &self.unary,
             &self.ctx_account,
             &self.ctx_machine,
             path,
         )
-        .await
+        .await?;
+        if let Ok(mut open) = self.streams.lock() {
+            open.retain(|weak| weak.upgrade().is_some());
+            open.push(std::sync::Arc::downgrade(&stream.channel.inner));
+        }
+        Ok(stream)
     }
 }
 
@@ -302,6 +406,8 @@ struct RelayChannelInner {
     core: CoreSessionClient,
     session: SessionToken,
     state: tokio::sync::Mutex<ChannelState>,
+    /// Terminal close signal shared by every handle of this channel.
+    close: CloseSignal,
 }
 
 struct ChannelState {
@@ -374,6 +480,20 @@ impl RelaySendWindow {
         self.unacked_bytes = self.unacked_bytes.saturating_add(body_len as u64);
     }
 
+    /// Baseline after a handshake/confirm exchange whose frames traveled
+    /// outside this window: seqs `0..=acked` count as sent AND acked, so
+    /// the first tracked app frame (seq `acked + 1`, e.g. 3 after m1/m3/
+    /// confirm) has exact cumulative accounting. Late handshake acks
+    /// (`seq <= acked`) are then ignored rather than misread as credit —
+    /// without this, `on_ack(3)` would release one entry yet leave
+    /// `acked_high` at 0 and the ack wait would never complete.
+    fn acknowledged_through(acked: u64) -> Self {
+        let mut window = Self::new();
+        window.sent_high = Some(acked);
+        window.acked_high = Some(acked);
+        window
+    }
+
     /// Release everything up to `ack_seq` (cumulative). Mirrors the room:
     /// duplicates and ahead-of-sent acks are ignored. Releases exactly the
     /// frames implied by the previous cursor, bounded by the actual queue —
@@ -442,7 +562,7 @@ async fn open_channel_state(
     admit(&mut sink, &mut stream, grant_jwt, cnf_secret).await?;
     open_channel(&mut sink, &mut stream, channel).await?;
     let (mut noise, send_seq, recv_seq) =
-        handshake_channel(&mut sink, &mut stream, account, machine, channel, forge_pub).await?;
+        handshake_channel(&mut sink, &mut stream, account, machine, channel).await?;
     let (send_seq, recv_seq) = confirm_channel(
         &mut sink,
         &mut stream,
@@ -461,7 +581,9 @@ async fn open_channel_state(
         noise,
         send_seq,
         recv_seq,
-        window: RelaySendWindow::new(),
+        // m1/m3/confirm used seqs 0..send_seq outside the window; baseline
+        // the cursor so the first tracked app frame acks exactly.
+        window: RelaySendWindow::acknowledged_through(send_seq.saturating_sub(1)),
         reassembly: artisan_api::Reassembly::new(),
         stashed: Vec::new(),
         grant_jwt: grant_jwt.to_owned(),
@@ -507,11 +629,31 @@ impl RelayChannel {
                 core,
                 session,
                 state: tokio::sync::Mutex::new(state),
+                close: CloseSignal::new(),
             }),
         })
     }
 
-    /// Unary call: seal (chunking when large), paced send, reassembled answer.
+    /// Promptly terminate the channel: in-flight and future calls fail
+    /// fast, blocked reads wake immediately, no new frames are sealed.
+    /// Synchronous and idempotent — safe to call from sign-out on any
+    /// executor, even while views still hold clones. Dropping the last
+    /// handle then closes the socket; no grant semantics change (remote
+    /// session revoke keeps its ≤300 s tail, but the local client stops
+    /// at once).
+    pub fn close(&self) {
+        self.inner.close.close();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.close.is_closed()
+    }
+
+    /// Completes the moment [`RelayChannel::close`] runs (or immediately
+    /// when already closed).
+    async fn aborted(&self) {
+        self.inner.close.aborted().await;
+    }
 
     /// Unary call: seal (chunking when large), paced send, reassembled answer.
     async fn call(
@@ -528,6 +670,10 @@ impl RelayChannel {
             body,
         };
         let bytes = serde_json::to_vec(&request).context("encode the tunneled call")?;
+        // Signal first: never wait on the mutex of a closed channel.
+        if self.is_closed() {
+            anyhow::bail!("relay connection closed");
+        }
         let mut guard = self.inner.state.lock().await;
         self.ensure_fresh_locked(&mut guard).await?;
         if bytes.len() > artisan_api::TUNNEL_PLAINTEXT_BUDGET {
@@ -542,6 +688,11 @@ impl RelayChannel {
     }
 
     async fn ensure_fresh_locked(&self, conn: &mut ChannelState) -> Result<()> {
+        // Never refresh or reconnect a closed channel: close_all wins over
+        // grant rotation, so logout cannot resurrect a channel mid-teardown.
+        if self.is_closed() {
+            anyhow::bail!("relay connection closed");
+        }
         if grant_fresh_enough(&conn.grant_jwt) {
             return Ok(());
         }
@@ -623,11 +774,20 @@ impl RelayChannel {
             if conn.window.acked_high.is_some_and(|acked| acked >= seq) {
                 return Ok(());
             }
-            let frame = tokio::time::timeout(deadline, read_server_frame(&mut conn.stream))
-                .await
-                .map_err(|_| anyhow!("the Relay did not answer"))??;
-            if let Some(response) = self.handle_frame_locked(conn, frame).await? {
-                conn.stashed.push(response);
+            // Abort wins over the 30 s pacing wait: logout never stalls here.
+            let abort = self.aborted();
+            tokio::select! {
+                biased;
+                () = abort => {
+                    anyhow::bail!("relay connection closed");
+                }
+                result = tokio::time::timeout(deadline, read_server_frame(&mut conn.stream)) => {
+                    let frame = result
+                        .map_err(|_| anyhow!("the Relay did not answer"))??;
+                    if let Some(response) = self.handle_frame_locked(conn, frame).await? {
+                        conn.stashed.push(response);
+                    }
+                }
             }
         }
     }
@@ -642,14 +802,23 @@ impl RelayChannel {
         }
         let deadline = tokio::time::Duration::from_secs(120);
         loop {
-            let frame = tokio::time::timeout(deadline, read_server_frame(&mut conn.stream))
-                .await
-                .map_err(|_| anyhow!("the Forge did not answer"))??;
-            if let Some(response) = self.handle_frame_locked(conn, frame).await? {
-                if response.id == id {
-                    return Ok(response);
+            // Abort wins over the 120 s idle wait: logout never stalls here.
+            let abort = self.aborted();
+            tokio::select! {
+                biased;
+                () = abort => {
+                    anyhow::bail!("relay connection closed");
                 }
-                conn.stashed.push(response);
+                result = tokio::time::timeout(deadline, read_server_frame(&mut conn.stream)) => {
+                    let frame = result
+                        .map_err(|_| anyhow!("the Forge did not answer"))??;
+                    if let Some(response) = self.handle_frame_locked(conn, frame).await? {
+                        if response.id == id {
+                            return Ok(response);
+                        }
+                        conn.stashed.push(response);
+                    }
+                }
             }
         }
     }
@@ -682,15 +851,22 @@ impl RelayChannel {
                         .feed(&self.inner.channel, &chunk)
                         .map_err(|_| anyhow!("reassemble the Forge reply"))?
                     {
-                        let response: artisan_api::TunnelResponse =
-                            serde_json::from_slice(&done).context("read Forge's answer")?;
-                        return Ok(Some(response));
+                        match classify_frame_body(&done)? {
+                            FrameBody::Response(response) => return Ok(Some(response)),
+                            // Live $event interleaved while a call is in
+                            // flight (e.g. UNSUBSCRIBE racing backlog/live
+                            // mail on an event channel): not the awaited
+                            // answer — skip it and keep waiting.
+                            FrameBody::LiveEvent => return Ok(None),
+                        }
                     }
                     return Ok(None);
                 }
-                let response: artisan_api::TunnelResponse =
-                    serde_json::from_slice(&plaintext).context("read Forge's answer")?;
-                Ok(Some(response))
+                match classify_frame_body(&plaintext)? {
+                    FrameBody::Response(response) => Ok(Some(response)),
+                    // Same interleave as above on the unchunked path.
+                    FrameBody::LiveEvent => Ok(None),
+                }
             }
             ServerFrame::Ack(ack) => {
                 conn.window.on_ack(ack.seq);
@@ -716,6 +892,35 @@ fn decode_32_or_bytes(b64u: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(b64u.as_bytes())
         .context("read the Relay frame")
+}
+
+/// What one assembled plaintext holds: a tunneled response, or a live
+/// `$event` envelope that interleaved on an event channel while a call
+/// was in flight.
+enum FrameBody {
+    Response(artisan_api::TunnelResponse),
+    LiveEvent,
+}
+
+/// Split an assembled plaintext without losing error detail. A live
+/// `$event` (object with `$event`, no top-level `id`) is normal traffic
+/// on event channels — e.g. backlog/live mail racing UNSUBSCRIBE — and
+/// must skip the response wait, not fail it. Anything else that is not a
+/// `TunnelResponse` keeps the exact serde error via `{e:#}` upstream.
+fn classify_frame_body(body: &[u8]) -> Result<FrameBody> {
+    match serde_json::from_slice::<artisan_api::TunnelResponse>(body) {
+        Ok(response) => Ok(FrameBody::Response(response)),
+        Err(decode_error) => {
+            let is_event = serde_json::from_slice::<serde_json::Value>(body)
+                .map(|value| value.get("$event").is_some())
+                .unwrap_or(false);
+            if is_event {
+                Ok(FrameBody::LiveEvent)
+            } else {
+                Err(anyhow!(decode_error).context("read Forge's answer"))
+            }
+        }
+    }
 }
 
 async fn admit(sink: &mut WsSink, stream: &mut WsStream, grant_jwt: &str, cnf_secret: &[u8; 32]) -> Result<()> {
@@ -792,7 +997,6 @@ async fn handshake_channel(
     account: &str,
     machine: &str,
     channel: &str,
-    forge_pub: &[u8; 32],
 ) -> Result<(crate::NoiseChannel, u64, u64)> {
     let static_secret = fresh_noise_secret()?;
     let ctx = crate::ChannelCtx {
@@ -800,8 +1004,15 @@ async fn handshake_channel(
         machine: machine.to_owned(),
         channel: channel.to_owned(),
     };
-    let mut noise = crate::NoiseChannel::initiator(&static_secret, Some(*forge_pub), ctx)
+    let mut noise = crate::NoiseChannel::initiator(&static_secret, None, ctx)
         .map_err(|_| anyhow!("start the Noise handshake"))?;
+    // NOTE: no X25519 peer pinning here — there is intentionally no static
+    // registry. The Forge generates a fresh Noise static per channel, so the
+    // enrolled Ed25519 identity key MUST NOT be passed as the Noise peer
+    // static (different key system AND different value; pinning it fails
+    // every handshake at m2). Forge identity binds one step later: the
+    // initiator confirm carries the Core grant JWT, and the responder
+    // confirm signature is verified against the enrolled key.
     let mut out = Vec::new();
     noise
         .next_handshake_message(&mut out)
@@ -825,7 +1036,7 @@ async fn handshake_channel(
                 let raw = decode_32_or_bytes(&data.body)?;
                 noise
                     .receive_handshake_message(&raw)
-                    .map_err(|_| anyhow!("shake hands with the Forge"))?;
+                    .map_err(|error| anyhow!("shake hands with the Forge: {error}"))?;
                 if noise.phase() != crate::Phase::Handshake {
                     break;
                 }
@@ -867,7 +1078,7 @@ async fn confirm_channel(
 ) -> Result<(u64, u64)> {
     let confirm = noise
         .emit_initiator_confirm(cnf_secret, grant_jwt.as_bytes())
-        .map_err(|_| anyhow!("confirm the Relay session"))?;
+        .map_err(|error| anyhow!("confirm the Relay session: {error}"))?;
     send_data_frame(sink, channel, send_seq, &b64u_encode(&confirm)).await?;
     send_seq = send_seq.saturating_add(1);
     for _ in 0..8 {
@@ -884,7 +1095,7 @@ async fn confirm_channel(
                 let raw = decode_32_or_bytes(&data.body)?;
                 noise
                     .receive_responder_confirm(&raw, forge_pub)
-                    .map_err(|_| anyhow!("confirm the Relay session"))?;
+                    .map_err(|error| anyhow!("confirm the Relay session: {error}"))?;
                 return Ok((send_seq, recv_seq));
             }
             crate::ServerFrame::Ack(_) => {}
@@ -1052,14 +1263,27 @@ impl RelayEventStream {
         if self.ended.is_some() {
             return Ok(None);
         }
+        // Signal first: never wait on the mutex of a closed stream.
+        if self.channel.is_closed() {
+            anyhow::bail!("relay connection closed");
+        }
         let mut guard = self.channel.inner.state.lock().await;
         loop {
-            let frame = tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                read_server_frame(&mut guard.stream),
-            )
-            .await
-            .map_err(|_| anyhow!("the Forge event stream stalled"))??;
+            // Abort wins over the 120 s idle wait: logout never stalls here.
+            let abort = self.channel.aborted();
+            let frame = tokio::select! {
+                biased;
+                () = abort => {
+                    anyhow::bail!("relay connection closed");
+                }
+                result = tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    read_server_frame(&mut guard.stream),
+                ) => {
+                    result
+                        .map_err(|_| anyhow!("the Forge event stream stalled"))??
+                }
+            };
             let channel_name = self.channel.inner.channel.clone();
             match frame {
                 crate::ServerFrame::Data(data) => {
@@ -1129,6 +1353,13 @@ impl RelayEventStream {
             .await?;
         Ok(())
     }
+
+    /// Promptly terminate the stream's channel; in-flight `next_event`
+    /// fails fast. Synchronous, idempotent; closing the client via
+    /// [`RelayClient::close_all`] covers streams the caller dropped.
+    pub fn close(&self) {
+        self.channel.close();
+    }
 }
 
 /// One decoded `$event` frame: a live envelope, or the terminal `end`
@@ -1160,3 +1391,114 @@ fn decode_event(plaintext: &[u8]) -> Result<StreamFrame> {
 }
 
 
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test setup; failures fail the test"
+)]
+mod tests {
+    use super::*;
+
+    async fn completes(signal: &CloseSignal) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), signal.aborted())
+            .await
+            .expect("close must resolve, never hang on a stream timeout");
+    }
+
+    #[tokio::test]
+    async fn close_before_subscribe_still_wakes() {
+        // The race: close() runs while no reader exists yet (watch send
+        // would drop the value), then a reader subscribes. send_replace
+        // retains the terminal state, so the late subscriber still wakes.
+        let signal = CloseSignal::new();
+        signal.close();
+        completes(&signal).await;
+        assert!(signal.is_closed());
+    }
+
+    #[tokio::test]
+    async fn repeated_close_stays_closed() {
+        let signal = CloseSignal::new();
+        signal.close();
+        signal.close();
+        completes(&signal).await;
+        assert!(signal.is_closed());
+    }
+
+    #[tokio::test]
+    async fn close_wakes_a_blocked_reader() {
+        let signal = CloseSignal::new();
+        let waiter = tokio::spawn({
+            let signal = signal.clone();
+            async move {
+                signal.aborted().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        signal.close();
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("close must wake a blocked reader")
+            .unwrap();
+        assert!(signal.is_closed());
+    }
+
+    #[test]
+    fn first_tracked_app_frame_after_handshake_baseline_acks() {
+        // Handshake (m1, m3) + confirm used seqs 0..=2 outside the window.
+        // The first tracked app frame has seq 3, not 0: a cumulative
+        // ack(3) must release exactly it and advance the cursor to 3.
+        // (Without the baseline, ack(3) released one entry yet left
+        // acked_high at 0 and the ack wait never completed.)
+        let mut window = RelaySendWindow::acknowledged_through(2);
+        assert_eq!(window.acked_high, Some(2));
+        assert_eq!(window.unacked_frames(), 0);
+        // A late handshake ack is ignored, never credit.
+        window.on_ack(1);
+        assert_eq!(window.acked_high, Some(2));
+        assert_eq!(window.unacked_bytes, 0);
+        // First tracked app frame: seq 3.
+        assert!(window.has_space(100));
+        window.noted_sent(3, 100);
+        assert_eq!(window.unacked_frames(), 1);
+        window.on_ack(3);
+        assert_eq!(window.acked_high, Some(3));
+        assert_eq!(window.unacked_bytes, 0);
+        assert_eq!(window.unacked_frames(), 0);
+    }
+
+    #[test]
+    fn response_frames_classify_as_responses() {
+        let body = br#"{"id":"rs2","status":200,"body":{"unsubscribed":true}}"#;
+        let classified = classify_frame_body(body).unwrap();
+        assert!(
+            matches!(&classified, FrameBody::Response(response) if response.id == "rs2" && response.status == 200),
+            "response misclassified as event"
+        );
+    }
+
+    #[test]
+    fn queued_event_frames_skip_the_response_wait() {
+        // The exact interleaving that failed native UNSUBSCRIBE: a live
+        // $event queued ahead of the response has no top-level `id` and
+        // must not fail the wait with "missing field `id`".
+        let body = br#"{"$event":{"stream":"events-1","envelope":{"seq":9,"live_revision":0,"type":"setting","key":"label","value":"x"}}}"#;
+        let classified = classify_frame_body(body).unwrap();
+        assert!(
+            matches!(classified, FrameBody::LiveEvent),
+            "event misclassified as response"
+        );
+    }
+
+    #[test]
+    fn malformed_frames_keep_the_exact_decode_error() {
+        // Not a response and not an event: the caller must see the real
+        // serde error via `{e:#}`, not a generic failure.
+        let body = br#"{"id":1,"status":"bogus"}"#;
+        let result = classify_frame_body(body);
+        assert!(result.is_err(), "garbage classified as a frame");
+        let text = format!("{:#}", result.err().unwrap());
+        assert!(text.contains("read Forge's answer"), "lost context: {text}");
+    }
+}

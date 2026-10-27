@@ -4,6 +4,7 @@
 //! In a terminal it asks what it needs to know; every question has a flag,
 //! so agents and scripts run it without one.
 
+mod account;
 mod editor;
 mod engine;
 mod forge;
@@ -91,6 +92,8 @@ enum Command {
         #[command(subcommand)]
         command: Option<DevicesCommand>,
     },
+    /// Enroll this Forge machine into an AST account.
+    Account(account::AccountArgs),
     /// Forge's engines: list, install, sign in.
     Engine {
         #[command(subcommand)]
@@ -187,6 +190,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Forge { .. }
             | Command::Pair { .. }
             | Command::Devices { .. }
+            | Command::Account(_)
             | Command::Engine { .. }
     ) && !matches!(
         cli.command,
@@ -232,6 +236,7 @@ fn run(cli: Cli) -> Result<()> {
             None => forge::devices(json),
             Some(DevicesCommand::Revoke { id, yes }) => forge::revoke(id.as_deref(), yes),
         },
+        Command::Account(args) => account::run(&args),
         Command::Engine { command } => engine::run(command),
     }
 }

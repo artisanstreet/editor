@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/ae",
+    "crates/artisan-account",
     "crates/artisan-api",
     "crates/artisan-markdown-index",
     "crates/artisan-paths",
@@ -126,7 +127,7 @@ tar = "=0.4.46"
 tempfile = "=3.27.0"
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", default-features = false }
-tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "=1.1.4"
 unicode-segmentation = "=1.13.3"
 uuid = { version = "=1.26.0", default-features = false, features = ["std", "v7"] }

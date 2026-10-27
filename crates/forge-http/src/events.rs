@@ -71,6 +71,213 @@ pub struct Since {
     thread: Option<artisan_api::ThreadId>,
 }
 
+impl Since {
+    pub(crate) fn tunnel(since: Seq, summary: bool, thread: Option<artisan_api::ThreadId>) -> Self {
+        Self {
+            since,
+            summary,
+            thread,
+        }
+    }
+
+    pub(crate) fn parse_events_path(path: &str) -> Option<Self> {
+        let (_, query) = path.split_once('?')?;
+        let mut since = 0;
+        let mut summary = false;
+        let mut thread = None;
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=')?;
+            match key {
+                "since" => since = value.parse().ok()?,
+                "summary" => summary = value == "true",
+                "thread" => thread = Some(artisan_api::ThreadId(value.into())),
+                _ => return None,
+            }
+        }
+        Some(Self::tunnel(since, summary, thread))
+    }
+}
+
+/// Forward stored + live envelopes into a bounded tunneled stream.
+///
+/// Same backlog/live/cursor semantics as [`stream`] (subscribe first, skip
+/// durable overlap by seq, memory overlap by publication revision, Reset
+/// when the backlog is gone or the broadcast lags). Ends when the receiver
+/// is gone (channel closed/cancelled) or a terminal Reset is sent. The
+/// caller frames each [`Envelope`] as a `$event` DATA frame; envelopes that
+/// would exceed the Noise plaintext cap are chunked by the caller.
+pub async fn forward_tunnel(
+    app: &App,
+    scope: &Since,
+    sender: &tokio::sync::mpsc::Sender<Envelope>,
+) -> anyhow::Result<()> {
+    let send = async |envelope: Envelope| -> anyhow::Result<()> {
+        sender.send(envelope).await.map_err(|_| anyhow::anyhow!("stream gone"))?;
+        Ok(())
+    };
+    let since = scope.since;
+    let store = app.hub.store();
+    let mut changes = store.subscribe();
+    let head = store.head();
+    send(Envelope {
+        seq: None,
+        live_revision: 0,
+        event: Event::Hello {
+            head,
+            protocol: artisan_api::PROTOCOL_VERSION,
+            forge_version: app.forge_version.clone(),
+        },
+    })
+    .await?;
+    let mut last = since;
+    let (mut completed_items, mut completed_runs) = (HashSet::new(), HashSet::new());
+    if let Some(backlog) = store
+        .changes_since_scoped(since, BACKLOG_LIMIT, scope.summary, scope.thread.clone())
+        .await?
+    {
+        for envelope in backlog {
+            match &envelope.event {
+                Event::Item { item } if item.status.is_terminal() => {
+                    completed_items.insert(item.id.clone());
+                }
+                Event::Run { run } if !run.status.is_live() => {
+                    completed_runs.insert(run.id.clone());
+                }
+                Event::Hello { .. }
+                | Event::Project { .. }
+                | Event::Thread { .. }
+                | Event::Item { .. }
+                | Event::Run { .. }
+                | Event::ItemState { .. }
+                | Event::Setting { .. }
+                | Event::Live { .. }
+                | Event::Suggestion { .. }
+                | Event::Engine { .. }
+                | Event::EngineInstall { .. }
+                | Event::EditorCall { .. }
+                | Event::Reset => {}
+            }
+            last = last.max(envelope.seq.unwrap_or(last));
+            if let Some(envelope) = scoped(envelope, scope) {
+                send(envelope).await?;
+            }
+        }
+    } else {
+        send(Envelope {
+            seq: None,
+            live_revision: 0,
+            event: Event::Reset,
+        })
+        .await?;
+        return Ok(());
+    }
+    let live_revision =
+        send_live_tunnel_snapshot(app, scope, sender, &completed_items, &completed_runs).await?;
+    let mut cursor = Cursor {
+        last,
+        live_revision,
+    };
+    send_engine_tunnel_statuses(app, sender).await?;
+    loop {
+        match changes.recv().await {
+            Ok(mut envelope) => {
+                if !cursor.accept(&envelope) {
+                    continue;
+                }
+                match &mut envelope.event {
+                    Event::Engine { status } => *status = app.hub.engines().status(status.engine),
+                    Event::EngineInstall { engine, install } => {
+                        *install = app.hub.engines().install_state(*engine);
+                    }
+                    Event::Hello { .. }
+                    | Event::Project { .. }
+                    | Event::Thread { .. }
+                    | Event::Item { .. }
+                    | Event::Run { .. }
+                    | Event::ItemState { .. }
+                    | Event::Setting { .. }
+                    | Event::Live { .. }
+                    | Event::Suggestion { .. }
+                    | Event::EditorCall { .. }
+                    | Event::Reset => {}
+                }
+                if let Some(envelope) = scoped(envelope, scope) {
+                    send(envelope).await?;
+                }
+            }
+            // Fell behind: the client refetches the state and reconnects.
+            Err(RecvError::Lagged(_)) => {
+                send(Envelope {
+                    seq: None,
+                    live_revision: 0,
+                    event: Event::Reset,
+                })
+                .await?;
+                return Ok(());
+            }
+            Err(RecvError::Closed) => return Ok(()),
+        }
+    }
+}
+
+async fn send_live_tunnel_snapshot(
+    app: &App,
+    scope: &Since,
+    sender: &tokio::sync::mpsc::Sender<Envelope>,
+    completed_items: &HashSet<artisan_api::ItemId>,
+    completed_runs: &HashSet<artisan_api::RunId>,
+) -> anyhow::Result<u64> {
+    let (live_revision, snapshot) = app.hub.live_snapshot();
+    for event in snapshot {
+        if let Event::Live { target, .. } = &event {
+            let completed = match target {
+                LiveTarget::Text { item_id }
+                | LiveTarget::Shell { item_id }
+                | LiveTarget::Progress { item_id } => completed_items.contains(item_id),
+                LiveTarget::Reasoning { run_id } | LiveTarget::Status { run_id } => {
+                    completed_runs.contains(run_id)
+                }
+            };
+            if completed {
+                continue;
+            }
+        }
+        if let Some(envelope) = scoped(
+            Envelope {
+                seq: None,
+                live_revision: 0,
+                event,
+            },
+            scope,
+        ) {
+            sender
+                .send(envelope)
+                .await
+                .map_err(|_| anyhow::anyhow!("stream gone"))?;
+        }
+    }
+    Ok(live_revision)
+}
+
+async fn send_engine_tunnel_statuses(
+    app: &App,
+    sender: &tokio::sync::mpsc::Sender<Envelope>,
+) -> anyhow::Result<()> {
+    for engine in artisan_api::EngineId::ALL {
+        sender
+            .send(Envelope {
+                seq: None,
+                live_revision: 0,
+                event: Event::Engine {
+                    status: app.hub.engines().status(engine),
+                },
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("stream gone"))?;
+    }
+    Ok(())
+}
+
 pub async fn stream(
     State(app): State<App>,
     Query(scope): Query<Since>,

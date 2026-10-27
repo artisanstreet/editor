@@ -148,6 +148,13 @@ pub const TRANSFER_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// Per-connection aggregate cap across all in-progress chunk transfers
 /// (bounds base64 expansion + JSON overhead, not only each transfer).
 pub const REASSEMBLY_MAX_BYTES_PER_CONN: u64 = 64 * 1024 * 1024;
+/// Maximum chunk parts per transfer: `TRANSFER_MAX_BYTES` split into
+/// `CHUNK_RAW_BYTES` pieces, rounded up. Validated BEFORE allocating the
+/// parts vector, so a corrupt `total` can never trigger a huge allocation.
+pub const TRANSFER_MAX_PARTS: u32 = (TRANSFER_MAX_BYTES / CHUNK_RAW_BYTES as u64 + 1) as u32;
+/// Maximum concurrent in-progress chunk transfers per reassembly scope.
+/// Bounds memory when many partial transfers arrive without completing.
+pub const REASSEMBLY_MAX_IN_FLIGHT: usize = 64;
 
 /// Split bytes into [`TunnelChunk`] frames for one transfer.
 #[must_use]

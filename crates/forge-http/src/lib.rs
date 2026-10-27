@@ -7,6 +7,11 @@ mod extensions;
 mod gateway;
 mod repository;
 mod routes;
+pub mod account_auth;
+pub mod account_service;
+pub mod core;
+pub mod relay;
+pub mod sync;
 pub mod tls;
 
 use anyhow::{Context, Result};
@@ -145,6 +150,14 @@ pub async fn start_with_harness(
         // Failed binds must leave durable inputs untouched, without launching
         // a controller that will never accept its paired clients.
         gateway::start(&hub, shutdown.clone(), &tasks).await?;
+        // Account services (config sync + Relay connector) start only for
+        // enrolled machines; accountless Forges are untouched.
+        tasks.spawn(account_service::run(
+            config.data_dir.clone(),
+            hub.clone(),
+            shutdown.clone(),
+            tasks.clone(),
+        ));
         hub.resume_pending();
         let auth = hub.clone();
         tasks.spawn(async move { auth.check_mcp_auth().await });

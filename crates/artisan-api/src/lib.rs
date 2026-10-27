@@ -15,6 +15,8 @@ mod request;
 mod settings;
 mod source_index;
 mod thread;
+mod tunnel;
+mod reassembly;
 #[cfg(feature = "tls")]
 pub mod tls;
 pub mod transport;
@@ -31,6 +33,8 @@ pub use settings::*;
 pub use source_index::*;
 pub use thread::*;
 pub use transport::*;
+pub use tunnel::*;
+pub use reassembly::*;
 
 /// Milliseconds since the Unix epoch.
 pub type Timestamp = i64;

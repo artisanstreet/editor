@@ -85,6 +85,17 @@ arrive in order):
 - 32 MiB of raw bytes per transfer max (matches Forge blob/source ceilings,
   so a large transcript never becomes silently unreadable — oversize is an
   explicit error, not truncation).
+- At most 820 parts per transfer (`TRANSFER_MAX_PARTS` = 32 MiB in 40 KiB
+  pieces, rounded up). Receivers validate `total` against this cap BEFORE
+  allocating the parts table, so a corrupt `total` fails closed instead of
+  attempting a huge allocation. A standard 32 MiB / 40 KiB transfer (820
+  parts) is fully supported; 40 KiB remains the sender's chunk size and
+  sane part sizes are still accepted.
+- At most 64 concurrent in-progress transfers per reassembly scope
+  (`REASSEMBLY_MAX_IN_FLIGHT`); further first-chunks are rejected until
+  one completes. Completed transfers are removed and their budget released
+  immediately, so back-to-back large responses (even reusing a transfer
+  name) each reassemble cleanly and the 64 MiB aggregate never leaks.
 - Chunked request: first reassembled bytes must parse as `TunnelRequest`.
   Chunked response: reassembled bytes parse as `TunnelResponse`.
 

@@ -8,8 +8,10 @@ description = "Forge's HTTPS API: mutual-TLS auth, JSON routes and the event str
 [dependencies]
 dirs.workspace = true
 anyhow.workspace = true
+artisan-account = { path = "../artisan-account" }
 artisan-api = { path = "../artisan-api", features = ["tls"] }
 axum = { workspace = true }
+base64.workspace = true
 forge-engines = { path = "../forge-engines" }
 forge-computer = { path = "../forge-computer" }
 forge-mcp = { path = "../forge-mcp" }
@@ -20,15 +22,17 @@ futures.workspace = true
 gethostname.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+tempfile.workspace = true
 hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["server", "server-auto", "http1", "http2", "service", "tokio"] }
-reqwest = { workspace = true, features = ["stream"] }
+reqwest = { workspace = true, features = ["stream", "json"] }
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "rt", "macros", "time", "fs", "io-util", "process"] }
 tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true }
 tokio-util.workspace = true
 tower = { workspace = true }
 tower-http = { workspace = true, features = ["compression-zstd"] }
@@ -39,6 +43,7 @@ url.workspace = true
 reqwest = { workspace = true, features = ["json", "zstd"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+ed25519-dalek.workspace = true
 
 [lints]
 workspace = true

@@ -52,6 +52,17 @@ impl ForgeClient {
         self.relay.as_ref()
     }
 
+    /// Promptly terminate the Relay route: unary plus every event stream
+    /// stop at once and later calls fail fast, even while views still hold
+    /// clones of this client. Synchronous and idempotent — call it when
+    /// dropping account hosts on sign-out. Direct clients ignore it.
+    /// Remote revocation keeps its grant TTL tail; local logout is immediate.
+    pub fn close_relay(&self) {
+        if let Some(relay) = &self.relay {
+            relay.close_all();
+        }
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }
@@ -1203,5 +1214,70 @@ mod tests {
         .into_bytes();
         let error = decode_state(&bytes).unwrap_err();
         assert!(error.downcast_ref::<serde_json::Error>().is_some());
+    }
+
+    /// Polling the actual dialer / `via_relay` from a thread with no Tokio
+    /// reactor must surface an ordinary connection failure, never a reactor
+    /// panic. The transport hops onto the network runtime itself; without
+    /// that hop this test would fail with "no reactor running" instead of
+    /// the refused endpoint below. No live Relay needed: the port is closed
+    /// on purpose, so any reactor-shaped error is the regression signal.
+    ///
+    /// NOTE: do NOT `block_on` the GPUI Task here — the test scheduler's
+    /// virtual background executor only pumps while awaited from the test
+    /// executor, so blocking on it from outside hangs forever.
+    #[gpui::test]
+    async fn relay_dial_without_tokio_reactor_fails_with_connection_refused(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Real OS network wait below: allow parking like the neighboring
+        // source-admission test (GPUI forbids parking by default).
+        cx.executor().allow_parking();
+        use base64::Engine as _;
+        let closed = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let forge_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42_u8; 32]);
+        let ctx = artisan_account::relay_client::RelayDialContext {
+            relay_base_url: format!("ws://127.0.0.1:{closed}"),
+            core: artisan_account::CoreSessionClient::new("http://127.0.0.1:1").unwrap(),
+            session: artisan_account::SessionToken::new("test-session".to_owned()),
+        };
+        let request = || crate::account::RelayDialRequest {
+            account_id: "acct_00000000000000000000000000".to_owned(),
+            machine_id: "mch_11111111111111111111111111".to_owned(),
+            machine_label: "fixture".to_owned(),
+            forge_ed25519_b64u: forge_key.clone(),
+            grant_jwt: "bogus.grant.jwt".to_owned(),
+            cnf_secret: [0x77_u8; 32],
+        };
+        // Through the real dialer (GPUI Task, awaited by the test executor
+        // with no Tokio reactor in scope).
+        let dialer = relay_dialer(ctx.clone(), cx.background_executor.clone());
+        let result = dialer(request()).await;
+        assert!(result.is_err(), "dial to a closed port must fail");
+        if let Err(error) = result {
+            let text = format!("{error:#}");
+            assert!(
+                text.contains("connect to the Relay"),
+                "expected a refused endpoint, got: {text}"
+            );
+            assert!(
+                !text.to_lowercase().contains("reactor"),
+                "reactor leaked into the dial path: {text}"
+            );
+        }
+        // And through the constructor directly: same expectation.
+        let result = ForgeClient::via_relay(request(), &ctx).await;
+        assert!(result.is_err(), "dial to a closed port must fail");
+        if let Err(error) = result {
+            let text = format!("{error:#}");
+            assert!(
+                text.contains("connect to the Relay"),
+                "expected a refused endpoint, got: {text}"
+            );
+        }
     }
 }

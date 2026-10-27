@@ -39,6 +39,14 @@ pub struct Client {
     pub certificate: String,
 }
 
+/// A Core-verified grant authorizing one tunneled channel. Inserted only
+/// by the Relay connector after independent JWT verification at channel
+/// confirmation; never accepted from the network directly.
+#[derive(Clone)]
+pub struct TunnelAuth {
+    pub claims: artisan_account::GrantClaims,
+}
+
 pub fn router(app: App) -> Router {
     let authorized = Router::new()
         .route("/state", get(state))
@@ -134,13 +142,41 @@ fn compression() -> CompressionLayer<impl Predicate> {
         )
 }
 
-/// Only paired devices get past here.
+/// Devices pair with certificates; tunneled Relay calls instead carry a
+/// Core-verified grant (checked at channel confirmation). Both identify
+/// the caller; neither path weakens the other.
 async fn authorize(
     AppState(app): AppState<App>,
-    Extension(client): Extension<Client>,
+    client: Option<Extension<Client>>,
+    tunnel: Option<Extension<TunnelAuth>>,
     mut request: Request,
     next: Next,
 ) -> Response {
+    if let Some(Extension(tunnel)) = tunnel {
+        // Verified at channel confirmation (signature, iss/aud, binding);
+        // re-check scope and expiry on every call. Core times are seconds;
+        // artisan_api::now() is millis.
+        let now_sec = artisan_api::now().div_euclid(1000);
+        let live = tunnel.claims.exp > now_sec
+            && tunnel
+                .claims
+                .scope
+                .contains(&artisan_account::Scope::ForgeExecute);
+        if live {
+            request.extensions_mut().insert(artisan_api::DeviceId(
+                format!("tunnel-{}", tunnel.claims.sub),
+            ));
+            return next.run(request).await;
+        }
+        return error(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Unauthorized,
+            "this tunneled call is not authorized",
+        );
+    }
+    let Some(Extension(client)) = client else {
+        return internal(anyhow::anyhow!("missing client certificate"));
+    };
     match app.hub.store().is_authorized(&client.certificate) {
         Ok(Some(device)) => {
             request.extensions_mut().insert(device);
