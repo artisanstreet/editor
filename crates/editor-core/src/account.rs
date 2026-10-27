@@ -154,17 +154,16 @@ impl std::fmt::Debug for RelayDialRequest {
 
 impl Drop for RelayDialRequest {
     fn drop(&mut self) {
-        for byte in &mut self.cnf_secret {
-            *byte = 0;
-        }
+        self.cnf_secret.fill(0);
     }
 }
 
-/// Opens a Relay channel for a prepared request and returns a connected
-/// Forge client, which the controller puts into the existing (ephemeral,
-/// never persisted) host inventory via `Core::connect_ephemeral`.
-/// Provided by Vilde's transport (`ForgeClient::via_relay` or equivalent);
-/// it owns grant refresh from here on.
+/// Opens a Relay channel for a prepared request.
+///
+/// Returns a connected Forge client, which the controller puts into the
+/// existing (ephemeral, never persisted) host inventory via
+/// `Core::connect_ephemeral`. Provided by Vilde's transport
+/// (`ForgeClient::via_relay` or equivalent); it owns grant refresh from here on.
 pub type RelayDialer =
     Arc<dyn Fn(RelayDialRequest) -> Task<Result<(HostConfig, ForgeClient)>> + Send + Sync>;
 
@@ -307,6 +306,10 @@ impl Account {
         Self::with_base_url(files, None, cx)
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "reqwest client with only timeouts builds unless TLS is broken; Account holds a client, not a Result"
+    )]
     pub fn with_base_url(
         files: EditorFiles,
         base_url: Option<String>,
@@ -314,7 +317,7 @@ impl Account {
     ) -> Self {
         let stored = load_account_file(&account_path(&files)).unwrap_or_default();
         let base_url = base_url
-            .or(stored.base_url.clone())
+            .or_else(|| stored.base_url.clone())
             .unwrap_or_else(|| core_base_url(None));
         let http = CoreSessionClient::new(&base_url).expect("Core HTTP client builds");
         // Install Vilde's Relay dialer factory up front so login/resume can
@@ -422,10 +425,15 @@ impl Account {
 
     /// The signed-in profile, if any.
     #[must_use]
-    pub fn profile(&self) -> Option<&AccountProfile> {
+    pub const fn profile(&self) -> Option<&AccountProfile> {
         match &self.phase {
             AccountPhase::Authenticated { profile } => Some(profile),
-            _ => None,
+            AccountPhase::SignedOut
+            | AccountPhase::Requesting
+            | AccountPhase::Pending { .. }
+            | AccountPhase::EmailApproved { .. }
+            | AccountPhase::Finalizing
+            | AccountPhase::Error { .. } => None,
         }
     }
 
@@ -433,6 +441,10 @@ impl Account {
 
     /// Starts a magic-link request. The secret stays in memory; only the
     /// emailed token leaves the device, and it alone can never sign in.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers hand over an owned email string; the public controller API keeps String"
+    )]
     pub fn request_link(&mut self, email: String, cx: &mut Context<Self>) {
         let email = email.trim().to_owned();
         if !valid_email(&email) {
@@ -472,14 +484,19 @@ impl Account {
 
     /// Polls the request until approval, completion, or expiry. Replacing
     /// the poll task cancels the previous loop: exactly one runs at a time.
-    fn poll_status(&mut self, cx: &mut Context<Self>) {
+    fn poll_status(&mut self, cx: &Context<Self>) {
         let (request_id, secret) = match &self.phase {
             AccountPhase::Pending {
                 request_id,
                 request_secret,
                 ..
             } => (request_id.clone(), request_secret.clone()),
-            _ => return,
+            AccountPhase::SignedOut
+            | AccountPhase::Requesting
+            | AccountPhase::EmailApproved { .. }
+            | AccountPhase::Finalizing
+            | AccountPhase::Authenticated { .. }
+            | AccountPhase::Error { .. } => return,
         };
         let http = self.http.clone();
         self.poll = Some(cx.spawn(async move |this, cx| {
@@ -548,7 +565,12 @@ impl Account {
                 request_secret,
                 ..
             } => (request_id.clone(), request_secret.clone()),
-            _ => return,
+            AccountPhase::SignedOut
+            | AccountPhase::Requesting
+            | AccountPhase::Pending { .. }
+            | AccountPhase::Finalizing
+            | AccountPhase::Authenticated { .. }
+            | AccountPhase::Error { .. } => return,
         };
         let http = self.http.clone();
         self.set_phase(AccountPhase::Finalizing, cx);
@@ -629,12 +651,11 @@ impl Account {
         self.set_phase(AccountPhase::Requesting, cx);
         cx.spawn(async move |this, cx| {
             let profile = run_http(async move { http.me(&session).await }).await;
-            this.update(cx, |this, cx| match profile {
-                Ok(profile) => {
+            this.update(cx, |this, cx| {
+                if let Ok(profile) = profile {
                     this.install_relay_dialer();
                     this.set_phase(AccountPhase::Authenticated { profile }, cx);
-                }
-                Err(_) => {
+                } else {
                     this.session = None;
                     this.dialer = None;
                     this.clear_session_file();
@@ -692,9 +713,10 @@ impl Account {
         let http = self.http.clone();
         cx.spawn(async move |this, cx| {
             let result = run_http(async move { http.revoke_all_sessions(&session).await }).await;
-            this.update(cx, |this, cx| match result {
-                Err(error) => this.fail(&error, cx),
-                Ok(()) => {
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.fail(&error, cx);
+                } else {
                     this.session = None;
                     this.dialer = None;
                     this.relay_error = None;
@@ -709,6 +731,10 @@ impl Account {
 
     /// Claims an enrollment code from `ae account enroll` into this account.
     /// Shows the exact account it lands in; the Forge still confirms locally.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers hand over an owned code string; the public controller API keeps String"
+    )]
     pub fn claim_code(&mut self, code: String, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
@@ -822,6 +848,10 @@ impl Account {
     /// registered dialer, and puts the connected host into the existing
     /// inventory. Until the dialer is registered the button explains the
     /// Relay path is still arriving; direct pairing is unaffected.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers hand over an owned machine id; the public controller API keeps String"
+    )]
     pub fn connect_machine(
         &mut self,
         machine_id: String,
@@ -861,19 +891,16 @@ impl Account {
         let http = self.http.clone();
         let core = core.clone();
         cx.spawn(async move |this, cx| {
-            let keypair = match artisan_account::MachineKeypair::generate() {
-                Ok(keypair) => keypair,
-                Err(_) => {
-                    this.update(cx, |this, cx| {
-                        this.relay_error =
-                            Some("This device could not make a connection key.".to_owned());
-                        this.notice = None;
-                        cx.emit(AccountEvent::Changed);
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
+            let Ok(keypair) = artisan_account::MachineKeypair::generate() else {
+                this.update(cx, |this, cx| {
+                    this.relay_error =
+                        Some("This device could not make a connection key.".to_owned());
+                    this.notice = None;
+                    cx.emit(AccountEvent::Changed);
+                    cx.notify();
+                })
+                .ok();
+                return;
             };
             let public_b64u = keypair.public_b64u();
             let secret = *keypair.secret();
@@ -909,9 +936,9 @@ impl Account {
                 }
             };
             let task = dialer(request);
-            let dialed = task.await;
+            let completed = task.await;
             this.update(cx, |this, cx| {
-                match dialed {
+                match completed {
                     Ok((config, client)) => {
                         core.update(cx, |core, cx| {
                             core.connect_with_client(config, client, cx);
@@ -1053,47 +1080,48 @@ where
 }
 
 /// Runs `ae account enroll` on this machine and returns the printed code.
+///
 /// The human output is parsed defensively; unparseable output surfaces
-/// verbatim so nothing is silently misread. (Vilde: an `ae account enroll
-/// --json` flag would remove this parsing; requested via root.)
-fn run_ae_enroll() -> impl std::future::Future<Output = Result<String>> {
-    async move {
-        use crate::runtime::runtime;
-        let output = runtime()
-            .spawn(async move {
-                tokio::process::Command::new("ae")
-                    .args(["account", "enroll"])
-                    .output()
-                    .await
-            })
-            .await?;
-        let output = output?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "`ae account enroll` failed: {}",
-                stderr.trim().lines().next().unwrap_or("unknown error")
-            );
-        }
-        for line in stdout.lines() {
-            if let Some(rest) = line.split("Claim this code").nth(1) {
-                let code: String = rest
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric())
-                    .take(16)
-                    .collect();
-                let code = normalise_code(&code);
-                if valid_code_shape(&code) {
-                    return Ok(code);
-                }
+/// verbatim so nothing is silently misread.
+///
+/// (Vilde: an `ae account enroll --json` flag would remove this parsing;
+/// requested via root.)
+async fn run_ae_enroll() -> Result<String> {
+    use crate::runtime::runtime;
+    let output = runtime()
+        .spawn(async move {
+            tokio::process::Command::new("ae")
+                .args(["account", "enroll"])
+                .output()
+                .await
+        })
+        .await?;
+    let output = output?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "`ae account enroll` failed: {}",
+            stderr.trim().lines().next().unwrap_or("unknown error")
+        );
+    }
+    for line in stdout.lines() {
+        if let Some(rest) = line.split("Claim this code").nth(1) {
+            let code: String = rest
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .take(16)
+                .collect();
+            let code = normalise_code(&code);
+            if valid_code_shape(&code) {
+                return Ok(code);
             }
         }
-        bail!(
-            "started the enrollment but could not read its code; the Forge printed: {}",
-            stdout.trim()
-        )
     }
+    bail!(
+        "started the enrollment but could not read its code; the Forge printed: {}",
+        stdout.trim()
+    )
 }
 
 fn valid_email(email: &str) -> bool {

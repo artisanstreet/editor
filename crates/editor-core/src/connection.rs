@@ -224,6 +224,10 @@ async fn session(
 /// `since` cursor semantics as direct SSE. Re-subscribing from the last
 /// `seq` is the only bookkeeping; oversized envelopes arrive chunked and
 /// reassembled by the transport.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "session, cursor, channels, and budget travel together; boxing them would churn the hot reconnect path"
+)]
 async fn relay_session(
     client: &ForgeClient,
     head: &Seq,
@@ -234,11 +238,12 @@ async fn relay_session(
     attempt: &mut u32,
     budget: &Arc<tokio::sync::Semaphore>,
 ) -> Result<End> {
-    let relay = client.relay().context("Relay transport missing")?.clone();
+    let relay = Arc::clone(client.relay().context("Relay transport missing")?);
     let observation = observed.borrow_and_update().clone();
     let mut path = format!("/events?since={head}&summary=true");
     if let Some(thread) = observation {
-        path.push_str(&format!("&thread={thread}"));
+        path.push_str("&thread=");
+        path.push_str(&thread.to_string());
     }
     let mut stream = relay.subscribe(&path).await?;
     updates

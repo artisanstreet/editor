@@ -11,8 +11,8 @@ mod client;
 mod connection;
 mod host;
 pub mod hosts;
-pub mod media_http;
 mod mcp_sign_in;
+pub mod media_http;
 mod pairing_targets;
 mod range_window;
 mod resident;
@@ -28,18 +28,18 @@ pub use account::{
 pub use artisan_account::network::SessionToken;
 
 pub use client::{ForgeClient, relay_dialer_factory};
-pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
 pub use connection::ConnectionStatus;
 pub use host::{
     Attention, BlobImage, HostData, HostEvent, ImageDecoder, LiveSnapshot, ProjectionLoad,
     ThreadPage, ThreadPageDirection, ThreadSummary,
 };
 pub use hosts::{EditorFiles, EditorSettings, HostConfig, HostId, HostKind, LocalTarget};
+pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
 pub use range_window::{
     CollectionWindow, ContentWindow, RangePage, RangeState, RangeWindow, RangeWindowEvent,
 };
 pub use ropey::Rope;
-pub use screen::{DraggedThread, Screen, SettingsPage};
+pub use screen::{DraggedThread, Screen, SettingsPage, SettingsSection};
 
 use anyhow::{Context as _, Result};
 use artisan_api::tls::Identity;
@@ -145,6 +145,7 @@ impl Core {
         editor_ui::theme::set_mode(theme_mode(&core.settings), cx);
         editor_ui::theme::set_fonts(font_set(&core.settings), cx);
         set_outline_text(outline_text(&core.settings), cx);
+        editor_ui::streaming::set_mode(streaming_mode(&core.settings), cx);
         Ok(core)
     }
 
@@ -249,7 +250,7 @@ impl Core {
 
     /// The AST account controller: sign-in state, sessions, machines.
     #[must_use]
-    pub fn account(&self) -> &Entity<Account> {
+    pub const fn account(&self) -> &Entity<Account> {
         &self.account
     }
 
@@ -271,6 +272,10 @@ impl Core {
     /// the machine inventory is re-discovered on login and the route
     /// re-establishes on Connect, so no stale relay address is ever
     /// direct-dialed. Direct pairing still uses `add_host`.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers hand over an owned host entry; the saved inventory keeps its own clone"
+    )]
     pub fn connect_with_client(
         &mut self,
         config: HostConfig,
@@ -312,9 +317,8 @@ impl Core {
         let stale: Vec<HostId> = self
             .account_hosts
             .iter()
-            .filter_map(|(id, owner)| {
-                (rotated || Some(owner) != current.as_ref()).then(|| id.clone())
-            })
+            .filter(|&(_, owner)| rotated || Some(owner) != current.as_ref())
+            .map(|(id, _)| id.clone())
             .collect();
         if stale.is_empty() {
             return;
@@ -413,6 +417,23 @@ impl Core {
         cx.notify();
     }
 
+    /// The workspace visible behind the settings dialog.
+    pub fn screen_behind_settings(&self) -> Option<&Screen> {
+        self.back
+            .iter()
+            .rev()
+            .find(|screen| !matches!(screen, Screen::Settings(_)))
+    }
+
+    /// The workspace route underneath settings, or the current route otherwise.
+    pub fn workspace_screen(&self) -> &Screen {
+        if matches!(self.screen, Screen::Settings(_)) {
+            self.screen_behind_settings().unwrap_or(&self.screen)
+        } else {
+            &self.screen
+        }
+    }
+
     /// Returns to the screen Settings was opened from, past the settings
     /// pages visited since; else to a new thread on the active host.
     pub fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -484,6 +505,9 @@ impl Core {
         if key == OUTLINE_TEXT_KEY {
             set_outline_text(outline_text(&self.settings), cx);
         }
+        if key == STREAMING_MODE_KEY {
+            editor_ui::streaming::set_mode(streaming_mode(&self.settings), cx);
+        }
         cx.emit(CoreEvent::SettingsChanged);
         cx.notify();
     }
@@ -505,12 +529,28 @@ impl Core {
     pub fn outline_text(&self) -> bool {
         outline_text(&self.settings)
     }
+
+    /// How this device reveals a streaming reply.
+    #[must_use]
+    pub fn streaming_mode(&self) -> editor_ui::streaming::StreamingMode {
+        streaming_mode(&self.settings)
+    }
 }
 
 /// `"spline"` or `"system"`: the families text is drawn in.
 pub const FONT_SET_KEY: &str = "font_set";
 /// Draw text from unhinted outlines in grayscale (`TextRenderingMode::Outline`).
 pub const OUTLINE_TEXT_KEY: &str = "outline_text";
+/// `"smooth"`, `"swift"` or `"instant"`: how a streaming reply appears.
+pub const STREAMING_MODE_KEY: &str = "streaming_mode";
+
+fn streaming_mode(settings: &EditorSettings) -> editor_ui::streaming::StreamingMode {
+    editor_ui::streaming::StreamingMode::from_key(
+        settings
+            .get(STREAMING_MODE_KEY)
+            .and_then(serde_json::Value::as_str),
+    )
+}
 
 fn font_set(settings: &EditorSettings) -> editor_ui::theme::FontSet {
     editor_ui::theme::FontSet::from_key(
@@ -581,7 +621,7 @@ pub fn init(cx: &mut App) -> (Entity<Core>, Option<anyhow::Error>) {
                 )),
                 account_hosts: HashMap::new(),
                 account_session: None,
-            }
+                }
         }
     });
     (core, failure)

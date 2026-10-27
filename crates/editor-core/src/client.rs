@@ -48,7 +48,7 @@ impl ForgeClient {
 
     /// The Relay transport behind a `via_relay` client, if any.
     #[must_use]
-    pub fn relay(&self) -> Option<&Arc<artisan_account::relay_client::RelayClient>> {
+    pub const fn relay(&self) -> Option<&Arc<artisan_account::relay_client::RelayClient>> {
         self.relay.as_ref()
     }
 
@@ -893,10 +893,12 @@ pub fn relay_dialer(
     })
 }
 
-/// Build the account dialer factory Emily registers once via
-/// `set_relay_dialer_factory`: the controller calls it on every login and
-/// resumed session with the live session token + Relay URL, and it returns
-/// the session-bound dialer (or `None` when the URL is empty).
+/// Build the account dialer factory.
+///
+/// Emily registers it once via `set_relay_dialer_factory`: the controller
+/// calls it on every login and resumed session with the live session token
+/// + Relay URL, and it returns the session-bound dialer (or `None` when the
+///   URL is empty).
 pub fn relay_dialer_factory(
     core: artisan_account::CoreSessionClient,
     executor: gpui::BackgroundExecutor,
@@ -1227,13 +1229,21 @@ mod tests {
     /// virtual background executor only pumps while awaited from the test
     /// executor, so blocking on it from outside hangs forever.
     #[gpui::test]
+    #[allow(
+        clippy::future_not_send,
+        reason = "gpui TestAppContext is !Send by design; the test executor polls this future"
+    )]
+    #[allow(
+        clippy::needless_pass_by_ref_mut,
+        reason = "gpui test harness hands &mut TestAppContext; the test only reads from it"
+    )]
     async fn relay_dial_without_tokio_reactor_fails_with_connection_refused(
         cx: &mut gpui::TestAppContext,
     ) {
+        use base64::Engine as _;
         // Real OS network wait below: allow parking like the neighboring
         // source-admission test (GPUI forbids parking by default).
         cx.executor().allow_parking();
-        use base64::Engine as _;
         let closed = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()

@@ -5,7 +5,7 @@
 use super::HostData;
 use artisan_api::{EngineConfig, EngineId, ModelGroup};
 use gpui::{Context, Task};
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
 
 /// What one remembered choice is about; a newer value replaces the unsent one.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -22,7 +22,7 @@ enum Preference {
 
 #[derive(Default)]
 pub(super) struct Preferences {
-    pending: BTreeMap<Choice, Preference>,
+    pending: VecDeque<(Choice, Preference)>,
     writer: Option<Task<()>>,
 }
 
@@ -37,6 +37,18 @@ impl HostData {
             model,
         };
         self.remember(choice, Preference::ModelConfig(config), cx);
+    }
+
+    /// The newest choice while Forge is still saving it.
+    pub fn pending_harness_config(&self, engine: EngineId) -> Option<&EngineConfig> {
+        self.preferences
+            .pending
+            .iter()
+            .rev()
+            .find_map(|(_, preference)| match preference {
+                Preference::ModelConfig(config) if config.engine == engine => Some(config),
+                Preference::ModelConfig(_) | Preference::ModelGroup { .. } => None,
+            })
     }
 
     /// Forge remembers whether one of `engine`'s model groups is open.
@@ -56,7 +68,10 @@ impl HostData {
     }
 
     fn remember(&mut self, choice: Choice, preference: Preference, cx: &Context<Self>) {
-        self.preferences.pending.insert(choice, preference);
+        // Keep choices in user order: each write also updates the harness's
+        // last model, so sorting by model id would remember the wrong one.
+        self.preferences.pending.retain(|(key, _)| key != &choice);
+        self.preferences.pending.push_back((choice, preference));
         if self.preferences.writer.is_some() {
             return;
         }
@@ -67,7 +82,7 @@ impl HostData {
                     let next = host
                         .preferences
                         .pending
-                        .first_key_value()
+                        .front()
                         .map(|(choice, preference)| (choice.clone(), preference.clone()));
                     if next.is_none() {
                         host.preferences.writer = None;
@@ -94,8 +109,8 @@ impl HostData {
                         );
                     }
                     // A newer value chosen meanwhile is still to send.
-                    if host.preferences.pending.get(&choice) == Some(&preference) {
-                        host.preferences.pending.remove(&choice);
+                    if host.preferences.pending.front() == Some(&(choice, preference)) {
+                        host.preferences.pending.pop_front();
                     }
                 });
                 if host.is_err() {

@@ -32,7 +32,7 @@ impl StubCore {
         let thread = std::thread::spawn(move || {
             for stream in listener.incoming().take(50) {
                 let Ok(stream) = stream else { break };
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                drop(stream.set_read_timeout(Some(Duration::from_secs(10))));
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut head = String::new();
                 loop {
@@ -70,7 +70,10 @@ impl StubCore {
                     response_body.len()
                 );
                 for (name, value) in headers {
-                    response.push_str(&format!("{name}: {value}\r\n"));
+                    response.push_str(&name);
+                    response.push_str(": ");
+                    response.push_str(&value);
+                    response.push_str("\r\n");
                 }
                 response.push_str("\r\n");
                 response.push_str(&response_body);
@@ -78,7 +81,7 @@ impl StubCore {
                 if stream.write_all(response.as_bytes()).is_err() {
                     break;
                 }
-                let _ = stream.flush();
+                drop(stream.flush());
             }
         });
         Self {
@@ -99,6 +102,10 @@ fn envelope(code: &str) -> (u16, Vec<(String, String)>, String) {
 }
 
 /// Strict Core mock: exact camelCase shapes in, Core error envelope out.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one strict stub covering every Core route the controller exercises"
+)]
 fn strict_core() -> Handler {
     Box::new(|method: &str, path: &str, body: &str| {
         let ok = |value: serde_json::Value| (200, vec![], value.to_string());
@@ -113,8 +120,7 @@ fn strict_core() -> Handler {
         let check_keys = |allowed: &[&str]| -> bool {
             parsed
                 .as_object()
-                .map(|object| object.keys().all(|key| allowed.contains(&key.as_str())))
-                .unwrap_or(false)
+                .is_some_and(|object| object.keys().all(|key| allowed.contains(&key.as_str())))
         };
         match (method, path) {
             ("POST", "/v1/auth/magic/request") => {
@@ -222,7 +228,7 @@ fn strict_core() -> Handler {
 }
 
 fn wait_for<T>(
-    cx: &mut TestAppContext,
+    cx: &TestAppContext,
     what: &str,
     check: impl Fn(&TestAppContext) -> Option<T>,
 ) -> T {
@@ -242,6 +248,10 @@ fn wait_for<T>(
 /// Full sign-in against the stub: request → poll approves → finalize →
 /// session cookie → `/v1/me` → Authenticated with machines.
 #[gpui::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one end-to-end sign-in scenario with strict stub assertions"
+)]
 fn sign_in_flow_reaches_authenticated(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let stub = StubCore::new(strict_core());
@@ -249,7 +259,7 @@ fn sign_in_flow_reaches_authenticated(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account.update(cx, |account, cx| {
@@ -353,9 +363,9 @@ fn debug_output_redacts_secrets() {
 /// Snake-case requests are rejected before they reach Core semantics: the
 /// stub enforces Core's strict shape, so drifted DTOs fail here first.
 #[gpui::test]
-fn snake_case_requests_are_rejected(_cx: &mut TestAppContext) {
+fn snake_case_requests_are_rejected(_cx: &TestAppContext) {
     let stub = StubCore::new(strict_core());
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let (status, body) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -381,6 +391,10 @@ fn snake_case_requests_are_rejected(_cx: &mut TestAppContext) {
 /// session, and grant expiry is never the cleanup path, so this asserts
 /// right after the sign-out transition.
 #[gpui::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one sign-out scenario: Relay inventory cleared, direct host kept"
+)]
 fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let stub = StubCore::new(strict_core());
@@ -388,7 +402,7 @@ fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account.update(cx, |account, cx| {
@@ -447,7 +461,7 @@ fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
         address: String::new(),
         fingerprint: String::new(),
         kind: HostKind::Account {
-            account: owner.clone(),
+            account: owner,
             machine: "mch_11111111111111111111111111".to_owned(),
         },
     };
@@ -465,7 +479,7 @@ fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
 
     // Sign out: the account entry, its screens, and its bookkeeping go
     // immediately; the direct host and its persisted pairing stay.
-    account.update(cx, |account, cx| account.sign_out(cx));
+    account.update(cx, super::Account::sign_out);
     wait_for(cx, "the account inventory to clear", |cx| {
         core.read_with(cx, |core, _| core.host(&machine.id).is_none().then_some(()))
     });
