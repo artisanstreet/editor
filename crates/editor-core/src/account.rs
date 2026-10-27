@@ -298,6 +298,8 @@ pub type AccountMachine = artisan_account::network::MachineEntry;
 
 mod enrollment;
 
+pub use enrollment::{AeOutcome, AeRunner};
+
 pub struct Account {
     files: EditorFiles,
     http: CoreSessionClient,
@@ -330,6 +332,12 @@ pub struct Account {
     /// `refresh_local_binding` (user action / onboarding step), never per
     /// render, so the hot path does no disk IO.
     cached_binding: Option<crate::access::LocalForgeBinding>,
+    /// Test seam replacing the `ae` subprocess (portable canned results).
+    /// Always `None` in production: the ordinary `ae` binary runs there.
+    ae_runner: Option<enrollment::AeRunner>,
+    /// Binding refresh epoch. Bumped on every `refresh_local_binding` so a
+    /// superseded read can never overwrite a newer confirmed binding.
+    binding_epoch: u64,
 }
 
 impl Account {
@@ -374,6 +382,8 @@ impl Account {
             generation: 0,
             auth_epoch: 0,
             cached_binding: None,
+            ae_runner: None,
+            binding_epoch: 0,
         };
         if this.session.is_some() {
             this.resume(cx);
@@ -387,6 +397,13 @@ impl Account {
     pub fn set_relay_dialer_factory(&mut self, factory: RelayDialerFactory) {
         self.dialer_factory = Some(factory);
         self.install_relay_dialer();
+    }
+
+    /// Test seam: canned `ae` results for this controller (portable, no
+    /// fixture binaries, no real user files). Production never sets this:
+    /// the ordinary `ae` binary always runs.
+    pub fn set_ae_runner(&mut self, runner: enrollment::AeRunner) {
+        self.ae_runner = Some(runner);
     }
 
     /// Session-authed Core client backing the Relay grant refresh.
@@ -501,6 +518,7 @@ impl Account {
         self.session = None;
         self.dialer = None;
         self.relay_error = None;
+        self.cached_binding = None;
         self.clear_session_file();
         self.bump_generation();
         self.auth_epoch = self.auth_epoch.wrapping_add(1);
@@ -739,6 +757,7 @@ impl Account {
                             Ok(profile) => {
                                 this.install_relay_dialer();
                                 this.set_phase(AccountPhase::Authenticated { profile }, cx);
+                                this.refresh_local_binding(cx);
                             }
                             Err(error) => this.fail(&error, cx),
                         }
@@ -799,6 +818,7 @@ impl Account {
                     Ok(profile) => {
                         this.install_relay_dialer();
                         this.set_phase(AccountPhase::Authenticated { profile }, cx);
+                        this.refresh_local_binding(cx);
                     }
                     Err(error) if crate::access::is_session_invalid(&error) => {
                         this.clear_session_locked(cx);
@@ -840,6 +860,7 @@ impl Account {
                 Ok(profile) => {
                     this.install_relay_dialer();
                     this.set_phase(AccountPhase::Authenticated { profile }, cx);
+                    this.refresh_local_binding(cx);
                 }
                 Err(error) if crate::access::is_session_invalid(&error) => {
                     this.clear_session_locked(cx);
@@ -936,6 +957,7 @@ impl Account {
                                 "Code claimed for {email}. On the Forge, check `ae account status`, verify the account shown there, then confirm."
                             )
                         });
+                        this.refresh_local_binding(cx);
                     }
                     Err(error) => {
                         this.notice = Some(plain_failure(&error));
@@ -964,8 +986,9 @@ impl Account {
         let http = self.http.clone();
         let base_url = self.base_url.clone();
         let generation = self.generation;
+        let runner = self.ae_runner.clone();
         cx.spawn(async move |this, cx| {
-            let enrollment = enrollment::run_ae_enroll(&base_url).await;
+            let enrollment = enrollment::run_ae_enroll(runner, &base_url).await;
             this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
@@ -973,7 +996,13 @@ impl Account {
                 match (enrollment, session) {
                     (Ok(code), Some(session)) => {
                         cx.spawn(async move |this, cx| {
-                            let claimed = http.claim_enrollment(&session, &code).await;
+                            let claimed = run_http({
+                                let http = http.clone();
+                                let code = code.clone();
+                                let session = session.clone();
+                                async move { http.claim_enrollment(&session, &code).await }
+                            })
+                            .await;
                             this.update(cx, |this, cx| {
                                 if this.generation != generation {
                                     return;
@@ -985,14 +1014,17 @@ impl Account {
                                             .map(|profile| profile.email.clone())
                                             .unwrap_or_default();
                                         this.notice = Some(format!(
-                                            "Code {code} claimed for {email}. On this Forge run `ae account status`, verify the account shown there, then `ae account confirm`."
+                                            "Claimed for {email}. Confirm this Forge below."
                                         ));
+                                        this.refresh_local_binding(cx);
                                     }
                                     Err(error) => {
-                                        this.notice = Some(format!(
-                                            "The Forge printed code {code}, but claiming it failed: {}.",
-                                            plain_failure(&error)
-                                        ));
+                                        tracing::warn!(
+                                            "Forge enrollment claim failed for code {code}: {error:#}"
+                                        );
+                                        this.notice = Some(
+                                            "Could not claim the enrollment.".to_owned(),
+                                        );
                                     }
                                 }
                                 cx.emit(AccountEvent::Changed);
@@ -1179,21 +1211,80 @@ impl Account {
         .detach();
     }
 
-    /// Shows this Forge's enrollment state (`ae account status`, read-only).
-    /// The operator still approves and confirms on the Forge itself.
-    /// Passes the explicit Core origin so a saved custom Core is used.
+    /// Shows this Forge's enrollment state and refreshes the live machine
+    /// inventory in one bounded operation (one CLI call plus, when signed
+    /// in, one `/v1/me` call): a Forge confirmed on another machine appears
+    /// without restart or sign-out. Profile applies first so status notices
+    /// survive its phase application; failures keep friendly text.
     pub fn forge_status(&mut self, cx: &mut Context<Self>) {
         self.forge_status_output = Some("Checking the Forge…".to_owned());
         cx.notify();
         let base_url = self.base_url.clone();
         let generation = self.generation;
+        self.binding_epoch = self.binding_epoch.wrapping_add(1);
+        let binding_epoch = self.binding_epoch;
+        let runner = self.ae_runner.clone();
+        let session = self.session.clone();
+        let http = self.http.clone();
         cx.spawn(async move |this, cx| {
-            let output = enrollment::run_ae(&["account", "--core", &base_url, "status"]).await;
+            let output = enrollment::run_ae(
+                runner,
+                &["account", "--core", &base_url, "status", "--json"],
+            )
+            .await;
+            let profile = match session {
+                Some(session) => Some(run_http(async move { http.me(&session).await }).await),
+                None => None,
+            };
             this.update(cx, |this, cx| {
-                if this.generation != generation {
+                if this.generation != generation || this.binding_epoch != binding_epoch {
                     return;
                 }
-                this.forge_status_output = Some(output);
+                if let Some(profile) = profile {
+                    match profile {
+                        Ok(profile) => {
+                            this.install_relay_dialer();
+                            this.set_phase(AccountPhase::Authenticated { profile }, cx);
+                        }
+                        Err(error) if crate::access::is_session_invalid(&error) => {
+                            // Dead session locks everything: return before
+                            // the CLI answer below can cache a binding for
+                            // a session that no longer exists.
+                            this.clear_session_locked(cx);
+                            return;
+                        }
+                        Err(error) => {
+                            // Transient failure keeps the session but must
+                            // stay visible: a successful CLI answer below
+                            // must not mask it.
+                            this.fail_operational(&error, cx);
+                            return;
+                        }
+                    }
+                }
+                match output {
+                    Ok(stdout) => match enrollment::parse_ae_status(&stdout) {
+                        Ok(binding) => {
+                            let text = enrollment::render_binding_status(binding.as_ref());
+                            this.notice = Some(text.clone());
+                            this.forge_status_output = Some(text);
+                            this.cached_binding = binding;
+                        }
+                        Err(error) => {
+                            tracing::warn!("Forge status unreadable: {error:#}");
+                            let text =
+                                "Could not read the Forge enrollment state.".to_owned();
+                            this.notice = Some(text.clone());
+                            this.forge_status_output = Some(text);
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!("Forge status failed: {error:#}");
+                        let text = "Could not reach the Forge account state.".to_owned();
+                        this.notice = Some(text.clone());
+                        this.forge_status_output = Some(text);
+                    }
+                }
                 cx.emit(AccountEvent::Changed);
                 cx.notify();
             })
@@ -1214,16 +1305,20 @@ impl Account {
         cx.notify();
         let base_url = self.base_url.clone();
         let generation = self.generation;
+        let runner = self.ae_runner.clone();
         cx.spawn(async move |this, cx| {
-            let output = enrollment::run_ae(&[
-                "account",
-                "--core",
-                &base_url,
-                "confirm",
-                "--yes",
-                "--account-id",
-                &expected,
-            ])
+            let output = enrollment::run_ae(
+                runner,
+                &[
+                    "account",
+                    "--core",
+                    &base_url,
+                    "confirm",
+                    "--yes",
+                    "--account-id",
+                    &expected,
+                ],
+            )
             .await;
             this.update(cx, |this, cx| {
                 if this.generation != generation {
@@ -1237,10 +1332,23 @@ impl Account {
                 if !still_expected {
                     return;
                 }
-                this.forge_status_output = Some(output);
+                match output {
+                    Ok(_) => {
+                        let text = "This Forge is enrolled.".to_owned();
+                        this.notice = Some(text.clone());
+                        this.forge_status_output = Some(text);
+                        this.refresh(cx);
+                        this.refresh_local_binding(cx);
+                    }
+                    Err(error) => {
+                        tracing::warn!("Forge confirm failed: {error:#}");
+                        let text = "Could not confirm on the Forge.".to_owned();
+                        this.notice = Some(text.clone());
+                        this.forge_status_output = Some(text);
+                    }
+                }
                 cx.emit(AccountEvent::Changed);
                 cx.notify();
-                this.refresh(cx);
             })
             .ok();
         })

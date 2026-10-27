@@ -26,8 +26,8 @@ pub use resident::{CollectionBytes, ResidentBytes};
 
 pub use access::{EntryGate, LocalForgeBinding, OnboardingRecord};
 pub use account::{
-    Account, AccountEvent, AccountPhase, RelayDialRequest, RelayDialer, RelayDialerFactory,
-    CORE_BASE_URL_DEFAULT, RELAY_BASE_URL_DEFAULT,
+    Account, AccountEvent, AccountPhase, AeOutcome, AeRunner, RelayDialRequest, RelayDialer,
+    RelayDialerFactory, CORE_BASE_URL_DEFAULT, RELAY_BASE_URL_DEFAULT,
 };
 pub use artisan_account::network::SessionToken;
 

@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use editor_core::{
-    Account, AccountPhase, Core, EditorFiles, EntryGate, ForgeClient, HostConfig, HostId,
-    HostKind, RelayDialRequest, Screen,
+    Account, AccountPhase, AeOutcome, AeRunner, Core, EditorFiles, EntryGate, ForgeClient,
+    HostConfig, HostId, HostKind, RelayDialRequest, Screen,
 };
 use gpui::{AppContext as _, TestAppContext};
 
@@ -297,6 +297,16 @@ fn gate_of(cx: &TestAppContext, core: &gpui::Entity<Core>) -> EntryGate {
     core.read_with(cx, Core::entry_gate)
 }
 
+/// Canned `ae` runner that fails closed: installed in every fixture before
+/// any async work runs, so no test ever shells out to a real `ae`.
+fn failing_ae_runner() -> AeRunner {
+    std::sync::Arc::new(|_| AeOutcome {
+        success: false,
+        stdout: String::new(),
+        stderr: "test runner: no ae subprocess".to_owned(),
+    })
+}
+
 #[gpui::test]
 fn fresh_device_signed_out_never_autoconnects_legacy(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
@@ -359,6 +369,10 @@ fn restoring_holds_without_flash_on_transport(cx: &mut TestAppContext) {
         dir: dir.path().join("editor"),
     };
     let core = cx.new(|cx| Core::new(files, cx).unwrap());
+    let account = core.read_with(cx, |core, _| core.account().clone());
+    account.update(cx, |account, _| {
+        account.set_ae_runner(failing_ae_runner());
+    });
     // Restoring, not SignedOut: no workspace flash, no host connects.
     assert!(matches!(gate_of(cx, &core), EntryGate::Restoring));
     cx.run_until_parked();
@@ -396,6 +410,7 @@ fn login_reaches_needs_setup_with_hidden_inventory(cx: &mut TestAppContext) {
                 Some(base_url),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
         core
     });
@@ -469,6 +484,7 @@ fn setup_rejects_placeholders_without_live_relay(cx: &mut TestAppContext) {
                 Some(base_url),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
         core
     });
@@ -529,6 +545,7 @@ fn add_host_rejects_unverified_direct_in_needssetup(cx: &mut TestAppContext) {
                 Some(base_url),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
         core
     });
@@ -581,6 +598,7 @@ fn restart_with_bound_record_ready_and_autoconnects(cx: &mut TestAppContext) {
                 Some(base_url.clone()),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
         core
     });
@@ -627,6 +645,7 @@ fn restart_with_bound_record_ready_and_autoconnects(cx: &mut TestAppContext) {
                 Some(base_url2),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
         core
     });
@@ -760,6 +779,7 @@ fn switch_account_drops_previous_inventory(cx: &mut TestAppContext) {
                 Some(base_a),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
         core
     });
@@ -787,6 +807,7 @@ fn switch_account_drops_previous_inventory(cx: &mut TestAppContext) {
                 Some(base_b),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
     });
     let (_account_b, account_id) = sign_in(cx, &core, "op@example.invalid");
@@ -822,6 +843,7 @@ fn stale_connect_after_signout_never_repopulates(cx: &mut TestAppContext) {
                 Some(base_url),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
         core
     });
@@ -907,6 +929,7 @@ fn revocation_locks_and_clears_dead_session(cx: &mut TestAppContext) {
                 Some(base_url),
                 cx,
             );
+            account.set_ae_runner(failing_ae_runner());
         });
         core
     });

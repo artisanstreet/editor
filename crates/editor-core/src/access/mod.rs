@@ -40,14 +40,19 @@ pub struct OnboardingRecord {
     pub completed_at: String,
 }
 
-/// Structured local Forge binding. Read from the local Forge data dir where
-/// available; never parsed from human CLI text as a gate.
+/// Structured local Forge binding.
+///
+/// Read through `ae account status --json` (never the data file directly,
+/// so the Editor sees the same identity `ae` acts on, including across
+/// WSL); never parsed from human CLI text as a gate. `enrolled` means
+/// confirmed (machine plus account recorded), never merely claimed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalForgeBinding {
     pub machine_id: Option<String>,
     pub account_id: Option<String>,
     pub enrolled: bool,
     pub claimed_by: Option<String>,
+    pub claimed_email: Option<String>,
 }
 
 /// Scope onboarding files by Core origin so dev/prod account ids collide
