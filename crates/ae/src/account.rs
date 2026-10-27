@@ -36,6 +36,9 @@ pub enum AccountCommand {
         /// Approve without asking (the account was already shown + approved).
         #[arg(long, short)]
         yes: bool,
+        /// Only confirm into this account id; refuse on mismatch before the RPC.
+        #[arg(long)]
+        account_id: Option<String>,
     },
     /// Fetch and apply the latest account config bundle now.
     Sync,
@@ -111,7 +114,9 @@ pub fn run(args: &AccountArgs) -> Result<()> {
     match &args.command {
         AccountCommand::Enroll { label } => enroll(args.core.as_deref(), label.as_deref()),
         AccountCommand::Status => status(args.core.as_deref()),
-        AccountCommand::Confirm { yes } => confirm(args.core.as_deref(), *yes),
+        AccountCommand::Confirm { yes, account_id } => {
+            confirm(args.core.as_deref(), *yes, account_id.as_deref())
+        }
         AccountCommand::Sync => sync_config_now(args.core.as_deref()),
     }
 }
@@ -226,9 +231,10 @@ fn status(core: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn confirm(core: Option<&str>, yes: bool) -> Result<()> {
+fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Result<()> {
     let mut account = load_account()?;
     if let Some(machine_id) = account.machine_id.clone() {
+        check_expected_account(expected_account, account.account_id.as_deref())?;
         println!("Already enrolled as {machine_id}.");
         return Ok(());
     }
@@ -245,6 +251,7 @@ fn confirm(core: Option<&str>, yes: bool) -> Result<()> {
     let account_id = status.account_id.clone().context(
         "the enrollment is not claimed yet; claim the code in a signed-in session first",
     )?;
+    check_expected_account(expected_account, Some(&account_id))?;
     println!("Enrollment claimed by account: {account_id}");
     if let Some(email) = status.email.as_deref() {
         println!("Verified email: {email}");
@@ -283,6 +290,26 @@ fn confirm(core: Option<&str>, yes: bool) -> Result<()> {
         confirmed.machine_id
     ));
     Ok(())
+}
+
+/// Refuses to confirm into an unexpected account. `None` expected means no
+/// constraint (standalone CLI); a blank flag never silently disables the
+/// check, and a missing stored/claimed id never satisfies a constraint.
+fn check_expected_account(expected: Option<&str>, actual: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let expected = expected.trim();
+    if expected.is_empty() {
+        bail!("--account-id must not be blank");
+    }
+    match actual {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => bail!(
+            "account mismatch: expected {expected}, found {actual}; refusing to confirm"
+        ),
+        None => bail!("account mismatch: expected {expected}, found none; refusing to confirm"),
+    }
 }
 
 fn ask(account_id: &str) -> Result<bool> {
@@ -358,5 +385,17 @@ mod tests {
         let read: AccountFile =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(read, account);
+    }
+
+    #[test]
+    fn expected_account_gate_rejects_mismatch_before_rpc() {
+        assert!(check_expected_account(None, None).is_ok());
+        assert!(check_expected_account(None, Some("acct_a")).is_ok());
+        assert!(check_expected_account(Some("acct_a"), Some("acct_a")).is_ok());
+        assert!(check_expected_account(Some(" acct_a "), Some("acct_a")).is_ok());
+        assert!(check_expected_account(Some("acct_a"), Some("acct_b")).is_err());
+        assert!(check_expected_account(Some("acct_a"), None).is_err());
+        assert!(check_expected_account(Some(""), Some("acct_a")).is_err());
+        assert!(check_expected_account(Some("   "), Some("acct_a")).is_err());
     }
 }
