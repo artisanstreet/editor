@@ -740,10 +740,10 @@ mod core_fixture_tests {
     fn core_issued_grant_verifies_byte_exact() {
         let fixture = fixture();
         let token = fixture["grant"].as_str().unwrap();
-        assert_eq!(crate::grant::unverified_kid(token).unwrap(), "core-202610-89at");
         // Issuer key comes from the fixture JWKS (kid-selected, as prod does).
         let jwks_key = fixture["jwks"]["keys"][0].clone();
-        assert_eq!(jwks_key["kid"], "core-202610-89at");
+        let fixture_kid = jwks_key["kid"].as_str().unwrap().to_owned();
+        assert_eq!(crate::grant::unverified_kid(token).unwrap(), fixture_kid);
         let issuer = {
             use base64::Engine as _;
             let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -751,6 +751,18 @@ mod core_fixture_tests {
                 .unwrap();
             <[u8; 32]>::try_from(raw).unwrap()
         };
+        // now_sec comes from the token itself (iat == nbf in the fixture):
+        // keeps the test byte-exact without hardcoding Core's emission time.
+        let payload_bytes = {
+            use base64::Engine as _;
+            let part = token.split('.').nth(1).unwrap();
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(part.as_bytes())
+                .unwrap()
+        };
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        let fixture_iat = payload["iat"].as_i64().unwrap();
+        let fixture_jti = payload["jti"].as_str().unwrap().to_owned();
         let expected = &fixture["expected"];
         let params = VerifyParams {
             expected_iss: expected["iss"].as_str().unwrap().into(),
@@ -759,7 +771,7 @@ mod core_fixture_tests {
             expected_sub: expected["sub"].as_str().unwrap().into(),
             expected_mid: expected["mid"].as_str().unwrap().into(),
             // nowSec inside the grant window (iat == nbf here).
-            now_sec: 1_793_056_834,
+            now_sec: fixture_iat,
         };
         let claims = parse_and_verify_jwt(token, &issuer, &params).unwrap();
         assert_eq!(claims.v, 1);
@@ -770,17 +782,17 @@ mod core_fixture_tests {
             claims.scope,
             vec![Scope::RelayConnect, Scope::ForgeExecute]
         );
-        assert_eq!(claims.iat, 1_793_056_834);
-        assert_eq!(claims.nbf, Some(1_793_056_834));
+        assert_eq!(claims.iat, fixture_iat);
+        assert_eq!(claims.nbf, Some(fixture_iat));
         assert_eq!(claims.exp - claims.iat, 300);
-        assert_eq!(claims.jti, "tkn_01M5X881B3RJZR6K6Q63EASF2M");
+        assert_eq!(claims.jti, fixture_jti);
         // v1 has NO rev claim: present-in-fixture would fail strict reads,
         // and our parser must accept its absence.
         assert_eq!(claims.rev, None);
         let cnf = cnf_public_key(&claims).unwrap();
         assert_eq!(
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cnf),
-            "gmxYVHSD234eTW6JSPZd6FjwZFllI8-Ue7gBKtkALOM"
+            expected["cnf"]["jwk"]["jwk"]["x"].as_str().unwrap()
         );
     }
 
@@ -790,7 +802,7 @@ mod core_fixture_tests {
         let fixture = fixture();
         let proof = &fixture["machineProof"];
         let headers = &proof["headers"];
-        let body = proof["rawBody"].as_str().unwrap().as_bytes();
+        let body = proof["raw_body"].as_str().unwrap().as_bytes();
         // Body hash matches the signed canonical string.
         assert_eq!(
             crate::machine_proof::body_hash_hex(body),
@@ -828,7 +840,7 @@ mod core_fixture_tests {
                 .unwrap()
                 .strip_prefix("AST-Machine ")
                 .unwrap(),
-            now_sec: 1_793_056_834,
+            now_sec: headers["x-ast-timestamp"].as_str().unwrap().parse().unwrap(),
         };
         crate::machine_proof::verify_machine_proof(&request).unwrap();
         let _ = canonical;
