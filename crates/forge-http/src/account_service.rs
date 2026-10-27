@@ -22,24 +22,38 @@ pub const CONFIG_SYNC_INTERVAL: Duration = Duration::from_mins(5);
 pub const RELAY_BACKOFF_MIN: Duration = Duration::from_secs(1);
 pub const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
-/// Relay URL comes from deployment config (`AST_RELAY_URL`,
-/// e.g. `wss://relay.example.invalid`). No default: without an explicit
-/// relay the connector stays off while config sync still runs.
+/// Production Relay used when deployment config does not name one.
+pub const DEFAULT_RELAY_URL: &str = "wss://relay.editor.artisan.st";
+
+/// Relay URL: explicit `AST_RELAY_URL` when set and non-empty, the
+/// production default when unset, and `None` when explicitly emptied
+/// (set but blank): empty means the connector stays off while config
+/// sync still runs.
 pub fn relay_url() -> Option<String> {
-    std::env::var("AST_RELAY_URL")
-        .ok()
-        .map(|url| url.trim().to_owned())
-        .filter(|url| !url.is_empty())
+    match std::env::var("AST_RELAY_URL") {
+        Err(_) => Some(DEFAULT_RELAY_URL.to_owned()),
+        Ok(url) => {
+            let url = url.trim().to_owned();
+            if url.is_empty() {
+                None
+            } else {
+                Some(url)
+            }
+        }
+    }
 }
 
-/// Core issuer the Forge expects in grants (`AST_CORE_ISSUER`, defaulting
-/// to the Core dev issuer). Must match Core's `CORE_JWT_ISSUER` exactly.
+/// Core issuer the Forge expects in grants: explicit `AST_CORE_ISSUER`,
+/// else the configured Core base URL (a dev `AST_CORE_BASE_URL` override
+/// stays a dev issuer; the production default yields the production
+/// issuer). Must match Core's `CORE_JWT_ISSUER` exactly; never derived
+/// from a token claim.
 pub fn core_issuer() -> String {
     std::env::var("AST_CORE_ISSUER")
         .ok()
         .map(|issuer| issuer.trim().to_owned())
         .filter(|issuer| !issuer.is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:8787".into())
+        .unwrap_or_else(|| crate::core::core_base_url(None).trim().to_owned())
 }
 
 /// Run account services until `shutdown`. Returns immediately for
@@ -69,7 +83,7 @@ pub async fn run(
         CONFIG_SYNC_INTERVAL,
     ));
     let Some(url) = relay_url() else {
-        tracing::info!("no AST_RELAY_URL configured; Relay connector stays off");
+        tracing::info!("AST_RELAY_URL explicitly empty; Relay connector stays off");
         return;
     };
     let Some(account_id) = identity.account_id else {
