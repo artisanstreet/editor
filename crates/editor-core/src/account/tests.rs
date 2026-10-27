@@ -32,6 +32,10 @@ struct StubCore {
 }
 
 impl StubCore {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one strict stub covering every Core route the controller exercises"
+    )]
     fn new(handler: Handler) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -77,9 +81,8 @@ impl StubCore {
                     .unwrap()
                     .push((method.clone(), path.clone(), body.clone()));
                 if method == "GET" && path == "/v1/me" {
-                    if let Some((status, response_body)) =
-                        overridden.lock().unwrap().clone()
-                    {
+                    let overridden = overridden.lock().unwrap().clone();
+                    if let Some((status, response_body)) = overridden {
                         let mut response = format!(
                             "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             response_body.len()
@@ -509,7 +512,7 @@ fn sign_out_locks_every_host_route(cx: &mut TestAppContext) {
     });
     let direct_client = ForgeClient::new(&direct.address, &direct.fingerprint, &identity).unwrap();
     core.update(cx, |core, cx| {
-        core.add_test_host(direct.clone(), direct_client, cx);
+        core.add_test_host(&direct, direct_client, cx);
     });
 
     // An account Relay entry with a harmless unconnected client: building
@@ -527,7 +530,7 @@ fn sign_out_locks_every_host_route(cx: &mut TestAppContext) {
         },
     };
     core.update(cx, |core, cx| {
-        core.connect_with_client(machine.clone(), relay, cx);
+        core.connect_with_client(&machine, relay, cx);
         core.navigate(
             Screen::NewThread {
                 host: machine.id.clone(),
@@ -749,7 +752,7 @@ fn remove_machine_failure_preserves_authenticated(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let stub = StubCore::new(strict_core());
     let dir = tempfile::tempdir().unwrap();
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(
             EditorFiles {
@@ -810,7 +813,7 @@ fn superseded_request_result_ignored_after_new_flow_or_cancel(cx: &mut TestAppCo
     cx.executor().allow_parking();
     let stub = StubCore::new(strict_core());
     let dir = tempfile::tempdir().unwrap();
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(
             EditorFiles {
@@ -844,11 +847,18 @@ fn superseded_request_result_ignored_after_new_flow_or_cancel(cx: &mut TestAppCo
                 AccountPhase::Pending { email, .. } if email == "second@example.invalid" => {
                     Some(())
                 }
-                _ => None,
+                AccountPhase::SignedOut
+                | AccountPhase::Restoring
+                | AccountPhase::Requesting
+                | AccountPhase::Pending { .. }
+                | AccountPhase::EmailApproved { .. }
+                | AccountPhase::Finalizing
+                | AccountPhase::Authenticated { .. }
+                | AccountPhase::Error { .. } => None,
             })
     });
     // Cancel drops the in-flight reply instead of landing on Pending/Error.
-    account.update(cx, |account, cx| account.dismiss_error(cx));
+    account.update(cx, super::Account::dismiss_error);
     cx.run_until_parked();
     std::thread::sleep(Duration::from_millis(50));
     cx.run_until_parked();

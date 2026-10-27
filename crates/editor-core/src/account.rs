@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use artisan_account::network::{AccountProfile, CoreSessionClient, NetworkError, SessionToken};
 use artisan_account::normalise_code;
 use gpui::{Context, Entity, Task};
@@ -182,13 +182,13 @@ pub const RELAY_BASE_URL_DEFAULT: &str = "wss://relay.editor.artisan.st";
 /// an unset variable returns the production default so stock installs can
 /// connect account Forges without extra configuration.
 pub fn relay_url_from_env() -> Option<String> {
-    match std::env::var("AST_RELAY_URL") {
-        Ok(url) => {
+    std::env::var("AST_RELAY_URL")
+        .ok()
+        .and_then(|url| {
             let trimmed = url.trim().to_owned();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
-        }
-        Err(_) => Some(RELAY_BASE_URL_DEFAULT.to_owned()),
-    }
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+        .or_else(|| Some(RELAY_BASE_URL_DEFAULT.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +295,8 @@ pub fn valid_code_shape(code: &str) -> bool {
 /// One enrolled Forge as `/v1/me` reports it. Reuses the existing network
 /// DTO directly; no new shape.
 pub type AccountMachine = artisan_account::network::MachineEntry;
+
+mod enrollment;
 
 pub struct Account {
     files: EditorFiles,
@@ -471,7 +473,7 @@ impl Account {
     }
 
     /// Invalidates all in-flight callbacks from the previous session.
-    fn bump_generation(&mut self) {
+    const fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
 
@@ -546,64 +548,6 @@ impl Account {
         })
     }
 
-    /// Explicit mock sign-in for unrelated component tests only. Installs a
-    /// session plus an authenticated fixture profile with no network, so the
-    /// entry gate reads a genuine `Ready` once the fixture onboarding record
-    /// is present. Never compiled into production; native entry/gate tests
-    /// use the real HTTP fixture.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn test_authenticate(
-        &mut self,
-        profile: AccountProfile,
-        session: SessionToken,
-        cx: &mut Context<Self>,
-    ) {
-        self.session = Some(session);
-        self.bump_generation();
-        self.install_relay_dialer();
-        self.set_phase(AccountPhase::Authenticated { profile }, cx);
-    }
-
-    /// Cached local Forge binding. Refreshed only by explicit
-    /// `refresh_local_binding`, never per render.
-    #[must_use]
-    pub fn local_binding(&self) -> Option<crate::access::LocalForgeBinding> {
-        self.cached_binding.clone()
-    }
-
-    /// Reads the binding file once for the cached value.
-    fn read_local_binding_file() -> Option<crate::access::LocalForgeBinding> {
-        let path = artisan_paths::App::Forge.data().ok()?.join("ast_account.json");
-        let bytes = std::fs::read(path).ok()?;
-        let parsed: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        let machine_id = parsed
-            .get("machine_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        let account_id = parsed
-            .get("account_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        let public_key = parsed
-            .get("public_b64u")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        Some(crate::access::LocalForgeBinding {
-            enrolled: machine_id.is_some(),
-            claimed_by: None,
-            machine_id,
-            account_id,
-            public_key,
-        })
-    }
-
-    /// Re-reads the local Forge binding once (explicit user/onboarding
-    /// action) and caches it. The hot path (`local_binding`) never hits disk.
-    pub fn refresh_local_binding(&mut self, cx: &mut Context<Self>) {
-        self.cached_binding = Self::read_local_binding_file();
-        cx.emit(AccountEvent::Changed);
-        cx.notify();
-    }
 
     // -- sign-in ------------------------------------------------------
 
@@ -862,11 +806,11 @@ impl Account {
                     Err(_) => {
                         // Offline or transient Core failure: keep the saved
                         // session and stay Restoring, never flash signed-out.
-                        if !matches!(this.phase(), AccountPhase::Restoring) {
-                            this.set_phase(AccountPhase::Restoring, cx);
-                        } else {
+                        if matches!(this.phase(), AccountPhase::Restoring) {
                             cx.emit(AccountEvent::Changed);
                             cx.notify();
+                        } else {
+                            this.set_phase(AccountPhase::Restoring, cx);
                         }
                     }
                 }
@@ -1021,7 +965,7 @@ impl Account {
         let base_url = self.base_url.clone();
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let enrollment = run_ae_enroll(&base_url).await;
+            let enrollment = enrollment::run_ae_enroll(&base_url).await;
             this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
@@ -1082,6 +1026,10 @@ impl Account {
     /// registered dialer, and puts the connected host into the existing
     /// inventory. Without a configured Relay route the button says so
     /// plainly with retry guidance; there is no accountless fallback.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one grant-dial-insert flow: splitting would hide the stale-generation guards"
+    )]
     #[expect(
         clippy::needless_pass_by_value,
         reason = "callers hand over an owned machine id; the public controller API keeps String"
@@ -1223,8 +1171,8 @@ impl Account {
                 .ok()
                 .flatten();
             if let Some((config, client)) = to_insert {
-                let _ = core.update(cx, |core, cx| {
-                    core.connect_with_client(config, client, cx);
+                core.update(cx, |core, cx| {
+                    core.connect_with_client(&config, client, cx);
                 });
             }
         })
@@ -1240,7 +1188,7 @@ impl Account {
         let base_url = self.base_url.clone();
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let output = run_ae(&["account", "--core", &base_url, "status"]).await;
+            let output = enrollment::run_ae(&["account", "--core", &base_url, "status"]).await;
             this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
@@ -1267,7 +1215,7 @@ impl Account {
         let base_url = self.base_url.clone();
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let output = run_ae(&[
+            let output = enrollment::run_ae(&[
                 "account",
                 "--core",
                 &base_url,
@@ -1339,37 +1287,6 @@ impl Account {
     }
 }
 
-/// Runs `ae …` and returns human-readable output (stdout, else the last
-/// stderr line). Used only for the local Forge's account commands.
-async fn run_ae(args: &[&str]) -> String {
-    use crate::runtime::runtime;
-    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
-    let result = runtime()
-        .spawn(async move {
-            tokio::process::Command::new("ae")
-                .args(&args)
-                .output()
-                .await
-        })
-        .await;
-    match result {
-        Err(error) => format!("Could not run `ae`: {error:#}"),
-        Ok(Err(error)) => format!("Could not run `ae`: {error:#}"),
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            if output.status.success() && !stdout.is_empty() {
-                return stdout;
-            }
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            stderr
-                .trim()
-                .lines()
-                .next_back()
-                .unwrap_or("The `ae` command failed with no message.")
-                .to_owned()
-        }
-    }
-}
 
 /// Runs Core HTTP on the shared Tokio runtime (never on a GPUI executor
 /// thread, which has no reactor). Callers await the joined result back on
@@ -1392,53 +1309,6 @@ where
     }
 }
 
-/// Runs `ae account --core <base> enroll` on this machine and returns the
-/// printed code. The explicit origin keeps a saved custom Core from
-/// diverging via environment inheritance.
-///
-/// The human output is parsed defensively; unparseable output surfaces
-/// verbatim so nothing is silently misread.
-///
-/// (Vilde: an `ae account enroll --json` flag would remove this parsing;
-/// requested via root.)
-async fn run_ae_enroll(base_url: &str) -> Result<String> {
-    use crate::runtime::runtime;
-    let base_url = base_url.to_owned();
-    let output = runtime()
-        .spawn(async move {
-            tokio::process::Command::new("ae")
-                .args(["account", "--core", &base_url, "enroll"])
-                .output()
-                .await
-        })
-        .await?;
-    let output = output?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "`ae account enroll` failed: {}",
-            stderr.trim().lines().next().unwrap_or("unknown error")
-        );
-    }
-    for line in stdout.lines() {
-        if let Some(rest) = line.split("Claim this code").nth(1) {
-            let code: String = rest
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .take(16)
-                .collect();
-            let code = normalise_code(&code);
-            if valid_code_shape(&code) {
-                return Ok(code);
-            }
-        }
-    }
-    bail!(
-        "started the enrollment but could not read its code; the Forge printed: {}",
-        stdout.trim()
-    )
-}
 
 fn valid_email(email: &str) -> bool {
     let email = email.trim();

@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use artisan_account::network::NetworkError;
 
+pub mod gate;
+
 /// Where the Editor may show workspace content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntryGate {
@@ -27,33 +29,15 @@ pub enum EntryGate {
     Ready { account_id: String },
 }
 
-/// How onboarding was proven. Relay requires a live account route;
-/// Direct requires a locally enrolled Forge plus a live usable connection.
-/// Metadata alone never completes setup.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OnboardingMethod {
-    Relay,
-    Direct,
-}
-
-/// Durable per-account/device onboarding. One file per `(base_url,
-/// account_id)`; the machine must still be present and non-revoked in the
-/// live profile for `Ready`. Direct records bind the verified host
-/// (`host_id` + TLS `fingerprint`); only mapped entries reconnect.
+/// Durable per-account/device onboarding: the machine whose live Relay
+/// route proved setup, scoped by Core origin. The machine must still be
+/// present and non-revoked in the live profile for `Ready`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnboardingRecord {
     pub account_id: String,
     pub base_url: String,
     pub machine_id: String,
-    pub method: OnboardingMethod,
     pub completed_at: String,
-    /// Direct only: the adopted `HostId` in `hosts.json`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_id: Option<String>,
-    /// Direct only: the adopted host's TLS fingerprint at setup time.
-    /// Reconnects require the saved pairing to still pin the same cert.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fingerprint: Option<String>,
 }
 
 /// Structured local Forge binding. Read from the local Forge data dir where
@@ -64,9 +48,6 @@ pub struct LocalForgeBinding {
     pub account_id: Option<String>,
     pub enrolled: bool,
     pub claimed_by: Option<String>,
-    /// Enrolled Ed25519 key (`public_b64u`); matched against the live
-    /// profile machine key so a binding file alone never completes setup.
-    pub public_key: Option<String>,
 }
 
 /// Scope onboarding files by Core origin so dev/prod account ids collide
@@ -134,29 +115,14 @@ pub fn save_onboarding(data_dir: &Path, record: &OnboardingRecord) -> anyhow::Re
 
 /// Session-invalidating Core failures: the saved session is dead and the UI
 /// must lock. Transport and other codes keep the existing session.
-/// Resume and profile validation (`resume`/`refresh`) use this; no
-/// business operation clears on it unconditionally.
 #[must_use]
 pub fn is_session_invalid(error: &NetworkError) -> bool {
-    match error {
-        NetworkError::Core { code, .. } => match code.as_str() {
-            "unauthorized" | "forbidden" | "gone" => true,
-            _ => false,
-        },
-        NetworkError::Transport => false,
-    }
+    matches!(error, NetworkError::Core { code, .. } if matches!(code.as_str(), "unauthorized" | "forbidden" | "gone"))
 }
 
 /// Session death for business operations: only an explicit unauthorized or
-/// expired session clears. `forbidden` may mean step-up, never an implicit
-/// logout.
+/// expired session clears.
 #[must_use]
 pub fn is_session_dead(error: &NetworkError) -> bool {
-    match error {
-        NetworkError::Core { code, .. } => match code.as_str() {
-            "unauthorized" | "gone" => true,
-            _ => false,
-        },
-        NetworkError::Transport => false,
-    }
+    matches!(error, NetworkError::Core { code, .. } if matches!(code.as_str(), "unauthorized" | "gone"))
 }

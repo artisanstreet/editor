@@ -29,6 +29,10 @@ struct StubCore {
 }
 
 impl StubCore {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "behavioral test fixture; a failure fails the test"
+    )]
     fn new(account_id: &str) -> Self {
         let account_id = account_id.to_owned();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -81,73 +85,8 @@ impl StubCore {
                     .unwrap_or(0);
                 let mut raw = vec![0_u8; content_length];
                 reader.read_exact(&mut raw).unwrap_or(());
-                let (status, headers, response_body): (u16, Vec<(String, String)>, String) =
-                    match (method.as_str(), path.as_str()) {
-                        ("POST", "/v1/auth/magic/request") => (
-                            200,
-                            vec![],
-                            serde_json::json!({
-                                "request_id": "logreq_00000000000000000000000001",
-                                "request_secret": "SECRET-ONE",
-                                "expires_at": "2026-10-26T00:15:00.000Z",
-                            })
-                            .to_string(),
-                        ),
-                        ("POST", "/v1/auth/magic/status") => (
-                            200,
-                            vec![],
-                            serde_json::json!({
-                                "request_id": "logreq_00000000000000000000000001",
-                                "status": "email_approved",
-                                "totp_required": false,
-                                "email": "op@example.invalid",
-                                "expires_at": "2026-10-26T00:15:00.000Z",
-                            })
-                            .to_string(),
-                        ),
-                        ("POST", "/v1/auth/magic/finalize") => (
-                            200,
-                            vec![(
-                                "Set-Cookie".to_owned(),
-                                "ast_session=STUB-SESSION; Path=/; HttpOnly".to_owned(),
-                            )],
-                            serde_json::json!({
-                                "session_id": "sess_00000000000000000000000001",
-                                "account_id": account_id,
-                                "expires_at": "2026-10-26T01:15:00.000Z",
-                                "totp_verified": false,
-                            })
-                            .to_string(),
-                        ),
-                        ("GET", "/v1/me") => {
-                            if let Some((status, body)) = overridden.lock().unwrap().clone() {
-                                (status, vec![], body)
-                            } else {
-                                (200, vec![], me_body.clone())
-                            }
-                        }
-                        ("POST", "/v1/grants/issue") => (
-                            200,
-                            vec![],
-                            serde_json::json!({
-                                "token": "grant.jwt.stub",
-                                "expires_at": "2026-10-26T00:05:00.000Z",
-                            })
-                            .to_string(),
-                        ),
-                        ("POST", "/v1/sessions/current/revoke")
-                        | ("POST", "/v1/sessions/revoke-all") => (
-                            200,
-                            vec![],
-                            serde_json::json!({"revoked": true}).to_string(),
-                        ),
-                        _ => (
-                            404,
-                            vec![],
-                            serde_json::json!({"error": {"code": "not_found", "message": "stub", "request_id": "req-test"}})
-                                .to_string(),
-                        ),
-                    };
+                let (status, headers, response_body) =
+                    respond(&method, &path, &me_body, &account_id, &overridden);
                 let mut response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
                     response_body.len()
@@ -175,6 +114,88 @@ impl StubCore {
     }
 }
 
+/// One stubbed Core answer. The `me` override is read outside the
+/// response match so no lock guard lives across the match.
+#[expect(clippy::unwrap_used, reason = "behavioral test fixture; a failure fails the test")]
+fn respond(
+    method: &str,
+    path: &str,
+    me_body: &str,
+    account_id: &str,
+    me_override: &Arc<Mutex<Option<(u16, String)>>>,
+) -> (u16, Vec<(String, String)>, String) {
+    if method == "GET" && path == "/v1/me" {
+        let overridden = me_override.lock().unwrap().clone();
+        if let Some((status, body)) = overridden {
+            return (status, vec![], body);
+        }
+        return (200, vec![], me_body.to_owned());
+    }
+    match (method, path) {
+        ("POST", "/v1/auth/magic/request") => (
+            200,
+            vec![],
+            serde_json::json!({
+                "request_id": "logreq_00000000000000000000000001",
+                "request_secret": "SECRET-ONE",
+                "expires_at": "2026-10-26T00:15:00.000Z",
+            })
+            .to_string(),
+        ),
+        ("POST", "/v1/auth/magic/status") => (
+            200,
+            vec![],
+            serde_json::json!({
+                "request_id": "logreq_00000000000000000000000001",
+                "status": "email_approved",
+                "totp_required": false,
+                "email": "op@example.invalid",
+                "expires_at": "2026-10-26T00:15:00.000Z",
+            })
+            .to_string(),
+        ),
+        ("POST", "/v1/auth/magic/finalize") => (
+            200,
+            vec![(
+                "Set-Cookie".to_owned(),
+                "ast_session=STUB-SESSION; Path=/; HttpOnly".to_owned(),
+            )],
+            serde_json::json!({
+                "session_id": "sess_00000000000000000000000001",
+                "account_id": account_id,
+                "expires_at": "2026-10-26T01:15:00.000Z",
+                "totp_verified": false,
+            })
+            .to_string(),
+        ),
+        ("POST", "/v1/grants/issue") => (
+            200,
+            vec![],
+            serde_json::json!({
+                "token": "grant.jwt.stub",
+                "expires_at": "2026-10-26T00:05:00.000Z",
+            })
+            .to_string(),
+        ),
+        ("POST", path)
+            if path == "/v1/sessions/current/revoke" || path == "/v1/sessions/revoke-all" =>
+        {
+            (
+                200,
+                vec![],
+                serde_json::json!({"revoked": true}).to_string(),
+            )
+        }
+        _ => (
+            404,
+            vec![],
+            serde_json::json!({"error": {"code": "not_found", "message": "stub", "request_id": "req-test"}})
+                .to_string(),
+        ),
+    }
+}
+
+#[expect(clippy::panic, reason = "behavioral test fixture; a failure fails the test")]
 fn wait_for<T>(
     cx: &TestAppContext,
     what: &str,
@@ -253,6 +274,7 @@ fn insertable_dialer(
 
 /// Writes a Relay onboarding record the way a proven setup persists it:
 /// `accounts/{base64url(base)}-{account}.json` under the Editor data dir.
+#[expect(clippy::unwrap_used, reason = "behavioral test fixture; a failure fails the test")]
 fn write_relay_record(data_dir: &std::path::Path, base_url: &str, account_id: &str) {
     use base64::Engine as _;
     let scope = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(base_url.as_bytes());
@@ -262,9 +284,7 @@ fn write_relay_record(data_dir: &std::path::Path, base_url: &str, account_id: &s
         "account_id": account_id,
         "base_url": base_url,
         "machine_id": MACHINE_A,
-        "method": "Relay",
         "completed_at": "1",
-        "host_id": MACHINE_A,
     });
     std::fs::write(
         dir.join(format!("{scope}-{account_id}.json")),
@@ -274,7 +294,7 @@ fn write_relay_record(data_dir: &std::path::Path, base_url: &str, account_id: &s
 }
 
 fn gate_of(cx: &TestAppContext, core: &gpui::Entity<Core>) -> EntryGate {
-    core.read_with(cx, |core, cx| core.entry_gate(cx))
+    core.read_with(cx, Core::entry_gate)
 }
 
 #[gpui::test]
@@ -365,7 +385,7 @@ fn login_reaches_needs_setup_with_hidden_inventory(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account().update(cx, |account, cx| {
@@ -391,7 +411,9 @@ fn login_reaches_needs_setup_with_hidden_inventory(cx: &mut TestAppContext) {
     // Authenticated but not onboarded: setup, with public inventory hidden.
     match gate_of(cx, &core) {
         EntryGate::NeedsSetup { account_id, .. } => assert_eq!(account_id, ACCOUNT_A),
-        gate => panic!("expected NeedsSetup, got {gate:?}"),
+        gate @ (EntryGate::Restoring | EntryGate::SignedOut | EntryGate::Ready { .. }) => {
+            panic!("expected NeedsSetup, got {gate:?}")
+        }
     }
     // The real stub connect path inserts (grant + dial + guarded insertion,
     // no borrow panic) while staying publicly hidden until Ready.
@@ -436,7 +458,7 @@ fn setup_rejects_placeholders_without_live_relay(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account().update(cx, |account, cx| {
@@ -496,7 +518,7 @@ fn add_host_rejects_unverified_direct_in_needssetup(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account().update(cx, |account, cx| {
@@ -537,6 +559,10 @@ fn add_host_rejects_unverified_direct_in_needssetup(cx: &mut TestAppContext) {
 /// A proven Relay record restores to Ready on restart and auto-reconnects
 /// the recorded machine through the account; legacy pairings stay dark.
 #[gpui::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one restart scenario: record, resume, auto-connect, lock"
+)]
 fn restart_with_bound_record_ready_and_autoconnects(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let stub = StubCore::new(ACCOUNT_A);
@@ -544,7 +570,7 @@ fn restart_with_bound_record_ready_and_autoconnects(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account().update(cx, |account, cx| {
@@ -585,12 +611,12 @@ fn restart_with_bound_record_ready_and_autoconnects(cx: &mut TestAppContext) {
     )
     .unwrap();
     // Simulate the proven setup having persisted its record earlier.
-    write_relay_record(&dir.path().join("editor"), &stub.base_url, ACCOUNT_A);
+    write_relay_record(&dir.path().join("editor"), &base_url, ACCOUNT_A);
     // Restart: same device dir, same session file.
     let files2 = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url2 = stub.base_url.clone();
+    let base_url2 = base_url.clone();
     let core2 = cx.new(|cx| {
         let core = Core::new(files2, cx).unwrap();
         core.account().update(cx, |account, cx| {
@@ -723,7 +749,7 @@ fn switch_account_drops_previous_inventory(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_a = stub_a.base_url.clone();
+    let base_a = stub_a.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account().update(cx, |account, cx| {
@@ -751,7 +777,7 @@ fn switch_account_drops_previous_inventory(cx: &mut TestAppContext) {
         matches!(gate_of(cx, &core), EntryGate::SignedOut).then_some(())
     });
     // Switch identity: a fresh controller on Core B in the same device dir.
-    let base_b = stub_b.base_url.clone();
+    let base_b = stub_b.base_url;
     core.update(cx, |core, cx| {
         core.account().update(cx, |account, cx| {
             *account = Account::with_base_url(
@@ -767,7 +793,9 @@ fn switch_account_drops_previous_inventory(cx: &mut TestAppContext) {
     assert_eq!(account_id, ACCOUNT_B);
     match gate_of(cx, &core) {
         EntryGate::NeedsSetup { account_id, .. } => assert_eq!(account_id, ACCOUNT_B),
-        gate => panic!("expected NeedsSetup for B, got {gate:?}"),
+        gate @ (EntryGate::Restoring | EntryGate::SignedOut | EntryGate::Ready { .. }) => {
+            panic!("expected NeedsSetup for B, got {gate:?}")
+        }
     }
     assert!(core.read_with(cx, |core, _| core.hosts().next().is_none()));
     assert!(
@@ -783,7 +811,7 @@ fn stale_connect_after_signout_never_repopulates(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account().update(cx, |account, cx| {
@@ -818,7 +846,7 @@ fn stale_connect_after_signout_never_repopulates(cx: &mut TestAppContext) {
                     executor.spawn(async move {
                         let rx = parked.lock().unwrap().take();
                         if let Some(rx) = rx {
-                            let _ = rx.await;
+                            drop(rx.await);
                         }
                         let client =
                             ForgeClient::new("127.0.0.1:9", &"00".repeat(32), &identity)?;
@@ -868,7 +896,7 @@ fn revocation_locks_and_clears_dead_session(cx: &mut TestAppContext) {
     let files = EditorFiles {
         dir: dir.path().join("editor"),
     };
-    let base_url = stub.base_url.clone();
+    let base_url = stub.base_url;
     let core = cx.new(|cx| {
         let core = Core::new(files, cx).unwrap();
         core.account().update(cx, |account, cx| {
@@ -915,12 +943,10 @@ fn onboarding_records_scope_by_core_origin() {
             "account_id": ACCOUNT_A,
             "base_url": base,
             "machine_id": MACHINE_A,
-            "method": "Relay",
             "completed_at": "1",
-            "host_id": MACHINE_A,
         });
         std::fs::write(
-            accounts.join(format!("{scope}-{}.json", ACCOUNT_A)),
+            accounts.join(format!("{scope}-{ACCOUNT_A}.json")),
             serde_json::to_vec_pretty(&record).unwrap(),
         )
         .unwrap();
