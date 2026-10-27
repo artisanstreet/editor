@@ -76,7 +76,6 @@ struct CoreErrorDetail {
     code: String,
     #[allow(dead_code, reason = "Core message kept for exact shape; user text uses code only")]
     message: String,
-    #[serde(rename = "requestId")]
     request_id: String,
 }
 
@@ -91,16 +90,13 @@ pub struct Jwk {
 /// One enrolled Forge, as `/v1/me` and `/v1/machines` report it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MachineEntry {
-    #[serde(rename = "id")]
     pub id: String,
     pub label: String,
-    #[serde(rename = "publicKey")]
     pub public_key: Jwk,
-    #[serde(rename = "createdAt")]
     pub created_at: String,
-    #[serde(default, rename = "revokedAt")]
+    #[serde(default)]
     pub revoked_at: Option<String>,
-    #[serde(default, rename = "lastSeenAt")]
+    #[serde(default)]
     pub last_seen_at: Option<String>,
 }
 
@@ -112,16 +108,13 @@ struct MachinesResponse {
 /// The verified profile behind `GET /v1/me`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountProfile {
-    #[serde(rename = "accountId")]
     pub account_id: String,
     pub email: String,
-    #[serde(rename = "displayName")]
     pub display_name: String,
-    #[serde(rename = "totpEnrolled")]
     pub totp_enrolled: bool,
     #[serde(default)]
     pub machines: Vec<MachineEntry>,
-    #[serde(rename = "latestConfigVersion", default)]
+    #[serde(default)]
     pub latest_config_version: Option<u64>,
 }
 
@@ -129,13 +122,13 @@ pub struct AccountProfile {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEntry {
     pub id: String,
-    #[serde(default, rename = "deviceName")]
+    #[serde(default)]
     pub device_name: Option<String>,
     #[serde(default)]
     pub created_at: Option<String>,
-    #[serde(default, rename = "expiresAt")]
+    #[serde(default)]
     pub expires_at: Option<String>,
-    #[serde(default, rename = "revokedAt")]
+    #[serde(default)]
     pub revoked_at: Option<String>,
 }
 
@@ -186,7 +179,6 @@ pub type GrantCnf = Jwk;
 #[derive(Clone, Debug, Deserialize)]
 pub struct GrantToken {
     pub token: String,
-    #[serde(rename = "expiresAt")]
     pub expires_at: String,
 }
 
@@ -195,7 +187,6 @@ pub struct GrantToken {
 #[derive(Clone, Debug, Deserialize)]
 pub struct BundleHead {
     pub version: u64,
-    #[serde(rename = "contentHash")]
     pub content_hash: String,
 }
 
@@ -567,9 +558,7 @@ impl CoreSessionClient {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TotpEnrollResponse {
-    #[serde(rename = "otpauthUrl")]
     pub otpauth_url: String,
-    #[serde(rename = "recoveryCodes")]
     pub recovery_codes: Vec<String>,
 }
 
@@ -590,7 +579,6 @@ pub struct TotpDisableRequest {
 /// `POST /v1/machines/enrollments/claim` answer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimedEnrollment {
-    #[serde(rename = "enrollmentId")]
     pub enrollment_id: String,
 }
 
@@ -618,11 +606,11 @@ mod tests {
     #[test]
     fn responses_tolerate_future_fields() {
         let raw = serde_json::json!({
-            "requestId": "logreq_1",
+            "request_id": "logreq_1",
             "status": "pending",
-            "totpRequired": false,
+            "totp_required": false,
             "email": "a@example.invalid",
-            "expiresAt": "t",
+            "expires_at": "t",
             "future": [1],
         });
         let status: MagicStatusResponse = serde_json::from_value(raw).unwrap();

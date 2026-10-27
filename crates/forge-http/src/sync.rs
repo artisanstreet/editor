@@ -4,12 +4,12 @@
 //! stub those same routes (same paths, same auth, same envelope names).
 //!
 //! Config: `GET /v1/config/bundles/latest` (machine proof or session;
-//! `ETag: "<contentHash>"`, `304` after auth on `If-None-Match`) answers
-//! `{bundle: {id, version, contentHash, r2Key, createdAt} | null,
+//! `ETag: "<content_hash>"`, `304` after auth on `If-None-Match`) answers
+//! `{bundle: {id, version, content_hash, r2_key, created_at} | null,
 //! manifest?}`. The canonical manifest bytes come from
 //! `GET /v1/config/bundles/:version/manifest` (same ETag scheme,
 //! `X-Content-Sha256`, immutable). The Forge hashes THOSE bytes and
-//! compares to `bundle.contentHash` — never a hash of the wrapper body
+//! compares to `bundle.content_hash` — never a hash of the wrapper body
 //! against a field inside it. Verified bundles apply through the Hub
 //! (global prompt, MCP servers, skills) and report via
 //! `POST /v1/config/state`; `304` or same version+hash never reapplies.
@@ -122,11 +122,8 @@ fn write_state(data_dir: &Path, state: &ConfigState) -> Result<()> {
 pub struct BundleInfo {
     pub id: String,
     pub version: u64,
-    #[serde(rename = "contentHash")]
     pub content_hash: String,
-    #[serde(rename = "r2Key")]
     pub r2_key: String,
-    #[serde(rename = "createdAt")]
     pub created_at: String,
 }
 
@@ -144,11 +141,11 @@ pub struct BundleLatest {
 #[serde(deny_unknown_fields)]
 pub struct EditorManifest {
     pub format: String,
-    #[serde(rename = "mcpServers", default)]
+    #[serde(default)]
     pub mcp_servers: Vec<ManifestMcpServer>,
     #[serde(default)]
     pub skills: Vec<ManifestSkill>,
-    #[serde(rename = "globalPrompt", default)]
+    #[serde(default)]
     pub global_prompt: Option<String>,
 }
 
@@ -185,7 +182,6 @@ pub struct ManifestSkill {
 #[serde(deny_unknown_fields)]
 pub struct SkillBundleFile {
     pub path: String,
-    #[serde(rename = "contentBase64")]
     pub content_base64: String,
     pub sha256: String,
 }
@@ -291,7 +287,7 @@ pub async fn sync_config(
     let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
     if sha256 != bundle.content_hash {
         report_state(http, core_base_url, machine_id, secret, &bundle.id, "failed", "manifest hash mismatch").await.ok();
-        anyhow::bail!("manifest bytes do not match bundle.contentHash: not applying");
+        anyhow::bail!("manifest bytes do not match bundle.content_hash: not applying");
     }
     let manifest: EditorManifest =
         serde_json::from_slice(&bytes).context("read the canonical manifest")?;
@@ -856,7 +852,6 @@ pub struct ArtifactFile {
     pub path: String,
     pub mode: String,
     pub sha256: String,
-    #[serde(rename = "contentBase64")]
     pub content_base64: String,
 }
 
@@ -866,9 +861,7 @@ pub struct EngineArtifactEnvelope {
     pub format: String,
     pub engine: String,
     pub kind: String,
-    #[serde(rename = "exportedAt")]
     pub exported_at: String,
-    #[serde(rename = "expiresAt")]
     pub expires_at: Option<String>,
     pub files: Vec<ArtifactFile>,
 }
@@ -921,7 +914,7 @@ pub enum AuthStatus {
 }
 
 /// Download an assigned envelope (machine proof) and verify every file's
-/// `sha256` + mode. Expiry is enforced: a past `expiresAt` is
+/// `sha256` + mode. Expiry is enforced: a past `expires_at` is
 /// do-not-apply. Nothing is written here.
 pub async fn download_artifact(
     http: &reqwest::Client,
@@ -1167,9 +1160,9 @@ mod tests {
     fn manifest_bytes() -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "format": "ast-editor-config/1",
-            "mcpServers": [{"name": "s", "command": "srv"}],
+            "mcp_servers": [{"name": "s", "command": "srv"}],
             "skills": [],
-            "globalPrompt": "synced prompt",
+            "global_prompt": "synced prompt",
         }))
         .unwrap()
     }
@@ -1185,7 +1178,7 @@ mod tests {
     fn skill_file(path: &str, contents: &[u8]) -> serde_json::Value {
         serde_json::json!({
             "path": path,
-            "contentBase64": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(contents),
+            "content_base64": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(contents),
             "sha256": hex::encode(sha2::Sha256::digest(contents)),
         })
     }
@@ -1219,9 +1212,9 @@ mod tests {
             "bundle": {
                 "id": "bundle_000000000000000000000001",
                 "version": 3,
-                "contentHash": hash,
-                "r2Key": "cfg/acct/bundle-3.json",
-                "createdAt": "2026-10-26T20:00:00.000Z",
+                "content_hash": hash,
+                "r2_key": "cfg/acct/bundle-3.json",
+                "created_at": "2026-10-26T20:00:00.000Z",
             },
             "manifest": serde_json::from_slice::<serde_json::Value>(&manifest_bytes()).unwrap(),
         }))
@@ -1248,10 +1241,10 @@ mod tests {
         assert!(request.get("bundleId").is_some());
         stub.reports.lock().unwrap().push(request);
         axum::Json(serde_json::json!({
-            "machineId": MACHINE,
-            "bundleId": "bundle_000000000000000000000001",
+            "machine_id": MACHINE,
+            "bundle_id": "bundle_000000000000000000000001",
             "status": "applied",
-            "appliedAt": "2026-10-26T20:01:00.000Z",
+            "applied_at": "2026-10-26T20:01:00.000Z",
         }))
     }
 
@@ -1321,7 +1314,7 @@ mod tests {
         assert_eq!(stub.reports.lock().unwrap().len(), 1, "no second report on 304");
     }
 
-    /// Manifest bytes that do not hash to `bundle.contentHash` are rejected
+    /// Manifest bytes that do not hash to `bundle.content_hash` are rejected
     /// before anything applies; last-good stays absent and `failed` reports.
     #[tokio::test]
     async fn config_sync_rejects_tampered_manifest_bytes() {
@@ -1453,9 +1446,9 @@ mod tests {
 fn skill_manifest(skill: &serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "format": "ast-editor-config/1",
-        "mcpServers": [{"name": "s", "command": "srv"}],
+        "mcp_servers": [{"name": "s", "command": "srv"}],
         "skills": [skill],
-        "globalPrompt": "synced prompt",
+        "global_prompt": "synced prompt",
     }))
     .unwrap()
 }
