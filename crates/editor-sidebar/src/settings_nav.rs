@@ -23,9 +23,8 @@ const EDITOR_PAGES: [(SettingsPage, AssetId); 4] = [
 ];
 
 /// The active host's pages, kept by its Forge.
-const HOST_PAGES: [(SettingsPage, AssetId); 3] = [
+const HOST_PAGES: [(SettingsPage, AssetId); 2] = [
     (SettingsPage::Threads, AssetId::TABLER_MESSAGES),
-    (SettingsPage::GlobalPrompt, AssetId::TABLER_FILE_TEXT),
     (SettingsPage::Extensions, AssetId::TABLER_PLUG_CONNECTED),
 ];
 
@@ -60,6 +59,14 @@ const fn engine_need(status: &EngineStatus) -> Option<&'static str> {
 }
 
 impl Sidebar {
+    fn settings_children(parent: SettingsPage) -> Vec<SettingsPage> {
+        let prompt = (parent == SettingsPage::Threads).then_some(SettingsPage::GlobalPrompt);
+        prompt
+            .into_iter()
+            .chain(parent.sections().into_iter().map(SettingsPage::Section))
+            .collect()
+    }
+
     /// A group's heading, as the history's day headings are drawn.
     fn settings_heading(label: impl Into<SharedString>, theme: &ArtisanTheme) -> Div {
         div()
@@ -87,7 +94,7 @@ impl Sidebar {
             label.to_lowercase().replace(' ', "-")
         );
         let expanded = target == current.parent();
-        let sections = target.sections();
+        let sections = Self::settings_children(target);
         let theme = *cx.theme();
         // An open category keeps the foreground label and only the shared
         // hover pill; the chevron and its children say it is open.
@@ -125,7 +132,7 @@ impl Sidebar {
         cx: &Context<Self>,
     ) -> Div {
         let theme = *cx.theme();
-        let sections = parent.sections();
+        let sections = Self::settings_children(parent);
         let height = f32::from(u16::try_from(sections.len()).unwrap_or(u16::MAX)) * SECTION_ROW;
         let mut rail = div()
             .id(SharedString::from(format!(
@@ -147,16 +154,20 @@ impl Sidebar {
                     .w(px(1.0))
                     .bg(theme.colors.line.to_paint()),
             );
-        for &section in &sections {
-            let target = SettingsPage::Section(section);
+        for &target in &sections {
             let selected = current == target;
-            let id = format!("sidebar-settings-section-{:?}-{}", parent, section.name());
+            let name = if let SettingsPage::Section(section) = target {
+                section.name()
+            } else {
+                "global-prompt"
+            };
+            let id = format!("sidebar-settings-section-{parent:?}-{name}");
             rail = rail.child(
                 div()
                     .id(SharedString::from(id.clone()))
                     .debug_selector(move || id)
                     .role(gpui::Role::Button)
-                    .aria_label(section.label())
+                    .aria_label(target.label())
                     .aria_selected(selected)
                     .focusable()
                     .tab_index(0)
@@ -177,7 +188,7 @@ impl Sidebar {
                     // Children only lift their text; the triggers own the
                     // pill.
                     .hover(move |style| style.text_color(theme.colors.text.to_paint()))
-                    .child(section.label())
+                    .child(target.label())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.navigate(Screen::Settings(target), cx);
                     })),
@@ -188,9 +199,7 @@ impl Sidebar {
         }
         // One caret for the rail: it grows in on the row it lands on when the
         // category opens, then slides from step to step.
-        let index = sections
-            .iter()
-            .position(|section| current == SettingsPage::Section(*section));
+        let index = sections.iter().position(|target| current == *target);
         let caret = {
             let mut caret = self.settings_caret.borrow_mut();
             if caret.parent != Some(parent) {
@@ -209,7 +218,8 @@ impl Sidebar {
         };
         if let Some(to) = caret.to {
             let row_top = |index: usize| {
-                f32::from(u16::try_from(index).unwrap_or(u16::MAX)).mul_add(SECTION_ROW, CARET_INSET)
+                f32::from(u16::try_from(index).unwrap_or(u16::MAX))
+                    .mul_add(SECTION_ROW, CARET_INSET)
             };
             let marker = div()
                 .absolute()
