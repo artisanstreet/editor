@@ -78,6 +78,7 @@ fn status_suffix(status: artisan_api::Status) -> String {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one transcript block per item kind")]
 async fn block(store: &Store, item: &Item, options: &Options) -> Result<String> {
     let status = status_suffix(item.status);
     let head = |kind: &str| {

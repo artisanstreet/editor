@@ -561,7 +561,15 @@ pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
                             known_tool.clone_into(tool);
                         }
                     }
-                    _ => {}
+                    ToolKind::AgentMessage { .. }
+                    | ToolKind::Agents { .. }
+                    | ToolKind::Read { .. }
+                    | ToolKind::Edit { .. }
+                    | ToolKind::Search { .. }
+                    | ToolKind::WebFetch { .. }
+                    | ToolKind::WebSearch { .. }
+                    | ToolKind::ViewImage { .. }
+                    | ToolKind::Other { .. } => {}
                 }
                 ItemKind::Tool {
                     tool,
@@ -1044,6 +1052,7 @@ fn search(
 /// like any other. Behind the user's HTTP proxy the proxy connects
 /// instead (see [`client_for`]). `local_ok` lets tests reach a server on
 /// loopback; `vars` reads the environment's proxy settings.
+#[expect(clippy::too_many_lines, reason = "fetch/redirect/proxy in one vetted hop")]
 async fn web_fetch(
     call: &Call,
     rules: &Rules,
@@ -2142,6 +2151,7 @@ mod tests {
     }
 
     /// Rules from a project settings file holding `permissions`.
+    #[allow(clippy::needless_pass_by_value, reason = "test helper takes owned JSON literals")]
     fn project_rules(home: &Path, project: &Path, permissions: Value) -> Rules {
         let dir = project.join(".claude");
         std::fs::create_dir_all(&dir).expect("the settings dir");
@@ -2523,9 +2533,9 @@ mod tests {
         tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut request = vec![0u8; 8192];
-                let _ = socket.read(&mut request).await;
-                let _ = socket.write_all(response).await;
-                let _ = socket.shutdown().await;
+                drop(socket.read(&mut request).await);
+                drop(socket.write_all(response).await);
+                drop(socket.shutdown().await);
             }
         });
         format!("http://{address}/")

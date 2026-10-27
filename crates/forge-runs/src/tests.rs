@@ -364,9 +364,9 @@ fn transport_of(config: &artisan_api::EngineConfig) -> Option<&str> {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_claude_transport_setting_reaches_every_claude_turn() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let asked = seen.clone();
+    let asked = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, _io| {
-        let asked = asked.clone();
+        let asked = Arc::clone(&asked);
         Box::pin(async move {
             asked.lock().unwrap().push(turn.config.clone());
             Outcome::done()
@@ -395,9 +395,9 @@ async fn the_claude_transport_setting_reaches_every_claude_turn() {
 #[tokio::test(flavor = "multi_thread")]
 async fn enhanced_claude_without_a_session_runs_on_claude_code_and_says_so() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let asked = seen.clone();
+    let asked = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, _io| {
-        let asked = asked.clone();
+        let asked = Arc::clone(&asked);
         Box::pin(async move {
             asked.lock().unwrap().push(turn.config.clone());
             Outcome::done()
@@ -424,9 +424,9 @@ async fn enhanced_claude_without_a_session_runs_on_claude_code_and_says_so() {
 #[tokio::test(flavor = "multi_thread")]
 async fn turning_enhanced_claude_on_moves_a_thread_to_claude_ai() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let asked = seen.clone();
+    let asked = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, io| {
-        let asked = asked.clone();
+        let asked = Arc::clone(&asked);
         Box::pin(async move {
             asked
                 .lock()
@@ -476,10 +476,10 @@ async fn turning_enhanced_claude_on_moves_a_thread_to_claude_ai() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cleared_session_runs_the_message_again_on_a_fresh_one() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let asked = seen.clone();
+    let asked = Arc::clone(&seen);
     // This engine says itself what it delivered, as the real ones do.
     let harness: Arc<dyn Harness> = Arc::new(Unscripted(Arc::new(move |turn, io| {
-        let asked = asked.clone();
+        let asked = Arc::clone(&asked);
         Box::pin(async move {
             let first = {
                 let mut asked = asked.lock().unwrap();
@@ -534,9 +534,9 @@ async fn a_cleared_session_runs_the_message_again_on_a_fresh_one() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_turn_without_the_transport_setting_runs_claude_code() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let asked = seen.clone();
+    let asked = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, _io| {
-        let asked = asked.clone();
+        let asked = Arc::clone(&asked);
         Box::pin(async move {
             asked.lock().unwrap().push(turn.config.clone());
             Outcome::done()
@@ -555,6 +555,7 @@ async fn a_claude_turn_without_the_transport_setting_runs_claude_code() {
         seen[0].options.get("transport").is_none(),
         "no setting, no transport: the official way"
     );
+    drop(seen);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1545,13 +1546,13 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
         ))
         .await
         .unwrap();
-    let status = super::run::drive(
+    let status = Box::pin(super::run::drive(
         &fixture.hub,
         &fixture.thread_id,
         RunId::new(),
         receiver,
         CancellationToken::new(),
-    )
+    ))
     .await
     .unwrap();
     assert_eq!(status, RunStatus::Done);

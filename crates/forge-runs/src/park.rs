@@ -26,7 +26,7 @@ const UNKNOWN_RESET: Duration = FIRST_RETRY.saturating_mul(60);
 const RESET_SLACK: Duration = FIRST_RETRY.saturating_mul(2);
 
 /// When the failed `run` should be picked up again, if it should.
-pub(crate) async fn plan(hub: &Hub, run: &Run, outcome: &Outcome) -> Option<Park> {
+pub async fn plan(hub: &Hub, run: &Run, outcome: &Outcome) -> Option<Park> {
     let now = artisan_api::now();
     match outcome.retry? {
         Retry::Overloaded => {
@@ -99,7 +99,7 @@ fn millis(duration: Duration) -> Timestamp {
 }
 
 /// Waits until the earliest parked turn is due; forever when none is.
-pub(crate) async fn until_next(hub: &Hub) -> impl Future<Output = ()> + use<> {
+pub async fn until_next(hub: &Hub) -> impl Future<Output = ()> + use<> {
     let next = hub.store().next_parked().await.unwrap_or_else(|error| {
         tracing::error!("read the next parked turn: {error:#}");
         None

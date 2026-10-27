@@ -29,7 +29,7 @@ enum Reply {
     Refuses(Refusal),
     /// The reply made from what the request sent, for a reply that names
     /// something only the run knows (a shell's id).
-    From(Box<dyn FnOnce(&Request) -> Reply + Send>),
+    From(Box<dyn FnOnce(&Request) -> Self + Send>),
 }
 
 #[derive(Default)]
@@ -993,6 +993,7 @@ async fn todos_become_one_plan_item_replaced_in_place() {
     );
 }
 
+#[expect(clippy::too_many_lines, reason = "one task-agent journey step by step")]
 #[tokio::test]
 async fn a_task_runs_its_own_conversation_and_reports_back() {
     let work = tempfile::tempdir().expect("a dir");
@@ -1427,6 +1428,7 @@ async fn compaction_uses_a_temporary_conversation_and_never_runs_tools() {
         assert_eq!(sent[0].model, "claude-haiku-5-5");
         assert!(sent[0].tools.is_empty());
         assert!(sent[0].parent.is_none());
+        drop(sent);
     }
     assert!(script.active.lock().unwrap().is_empty());
     assert_eq!(*script.deleted.lock().unwrap(), vec!["conv-1"]);

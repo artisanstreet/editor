@@ -568,7 +568,10 @@ mod tests {
         );
         let limited =
             json!({"usage":{"rolling":{"status":"rate-limited","percent":97,"resetsAt":null}}});
-        assert_eq!(parse_go_usage(&limited)[0].used_percent, 100.0);
+        assert!(
+            (parse_go_usage(&limited)[0].used_percent - 100.0).abs() < f64::EPSILON,
+            "rate-limited usage reads as 100%"
+        );
     }
 
     #[test]

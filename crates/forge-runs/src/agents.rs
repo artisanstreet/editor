@@ -97,6 +97,7 @@ pub struct AgentInfo {
 
 /// The config an agent runs with: `request` over the parent's, checked
 /// against the harness's catalog. Returns what was filled in or changed.
+#[expect(clippy::too_many_lines, reason = "variant/context/options fallbacks in one resolve")]
 fn resolve(
     parent: &EngineConfig,
     request: &SpawnAgent,

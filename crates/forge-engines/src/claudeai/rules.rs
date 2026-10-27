@@ -257,7 +257,10 @@ impl Rules {
             .components()
             .filter_map(|component| match component {
                 Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
-                _ => None,
+                Component::Prefix(_)
+                | Component::RootDir
+                | Component::CurDir
+                | Component::ParentDir => None,
             })
             .collect();
         names.iter().any(|name| name == ".claude")
@@ -403,7 +406,9 @@ fn normalize(path: &Path) -> PathBuf {
                     out.push("..");
                 }
             }
-            other => out.push(other),
+            other @ (Component::Prefix(_) | Component::RootDir | Component::Normal(_)) => {
+                out.push(other);
+            }
         }
     }
     out
@@ -541,7 +546,6 @@ fn parse(text: &str, kind: List, anchors: &Anchors<'_>, file: &Path) -> Option<R
     }
     let spec = match (tool, spec) {
         (_, None) => Some(Spec::Any),
-        (_, Some(None)) => None,
         ("Bash", Some(Some(spec))) => bash_spec(spec),
         (
             "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "Glob" | "Grep",
@@ -606,20 +610,23 @@ fn one_command(text: &str) -> Option<Vec<String>> {
 /// root, `./x` and `x` at the working directory; a pattern with no `/`
 /// inside matches at any depth.
 fn path_spec(spec: &str, anchors: &Anchors<'_>) -> Option<Spec> {
-    let (base, pattern, anchored) = if let Some(rest) = spec.strip_prefix("//") {
-        absolute(rest)
-    } else if spec == "~" {
-        (anchors.user_home.to_path_buf(), "**", true)
-    } else if let Some(rest) = spec.strip_prefix("~/") {
-        (anchors.user_home.to_path_buf(), rest, true)
-    } else if let Some(rest) = spec.strip_prefix('/') {
-        (anchors.root.to_path_buf(), rest, true)
-    } else if let Some(rest) = spec.strip_prefix("./") {
-        (anchors.cwd.to_path_buf(), rest, true)
-    } else {
-        let anchored = spec.trim_end_matches('/').contains('/');
-        (anchors.cwd.to_path_buf(), spec, anchored)
-    };
+    let (base, pattern, anchored) = spec.strip_prefix("//").map_or_else(
+        || {
+            if spec == "~" {
+                (anchors.user_home.to_path_buf(), "**", true)
+            } else if let Some(rest) = spec.strip_prefix("~/") {
+                (anchors.user_home.to_path_buf(), rest, true)
+            } else if let Some(rest) = spec.strip_prefix('/') {
+                (anchors.root.to_path_buf(), rest, true)
+            } else if let Some(rest) = spec.strip_prefix("./") {
+                (anchors.cwd.to_path_buf(), rest, true)
+            } else {
+                let anchored = spec.trim_end_matches('/').contains('/');
+                (anchors.cwd.to_path_buf(), spec, anchored)
+            }
+        },
+        absolute,
+    );
     let pattern = pattern.trim_end_matches('/');
     let pattern = match (pattern.is_empty(), anchored) {
         (true, _) => "**".to_owned(),
@@ -658,10 +665,10 @@ fn domain_spec(spec: &str) -> Option<Spec> {
         .trim()
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    let (domain, subdomains_only) = match domain.strip_prefix("*.") {
-        Some(rest) => (rest.to_owned(), true),
-        None => (domain.trim_start_matches('.').to_owned(), false),
-    };
+    let (domain, subdomains_only) = domain.strip_prefix("*.").map_or_else(
+        || (domain.trim_start_matches('.').to_owned(), false),
+        |rest| (rest.to_owned(), true),
+    );
     if domain.is_empty() || domain.contains(['*', '/', ':', ' ', '@']) {
         return None;
     }
@@ -1068,14 +1075,13 @@ impl Lexer<'_> {
                         Some(c @ ('\\' | '\'' | '"')) => Some(c),
                         _ => None,
                     };
-                    match plain {
-                        Some(c) => self.push(c),
-                        None => {
-                            self.push('\\');
-                            self.dynamic = true;
-                            if let Some(c) = self.peek(1) {
-                                self.push(c);
-                            }
+                    if let Some(c) = plain {
+                        self.push(c);
+                    } else {
+                        self.push('\\');
+                        self.dynamic = true;
+                        if let Some(c) = self.peek(1) {
+                            self.push(c);
                         }
                     }
                     self.at += 2;
@@ -1166,6 +1172,7 @@ impl Lexer<'_> {
     }
 
     /// The rest of the line cannot be read.
+    #[allow(clippy::missing_const_for_fn, reason = "mutates the parser state")]
     fn unreadable(&mut self) {
         self.out.complete = false;
         self.at = self.chars.len();
@@ -1286,7 +1293,7 @@ impl Lexer<'_> {
             self.out.complete = false;
         }
         let words = std::mem::take(&mut self.words);
-        let shell = simple(words, self.depth, self.out);
+        let shell = simple(&words, self.depth, self.out);
         for heredoc in &mut self.heredocs[self.heredocs_from..] {
             heredoc.shell = shell;
         }
@@ -1297,7 +1304,7 @@ impl Lexer<'_> {
 /// Records one simple command and the commands it runs itself. Returns
 /// whether its program is a shell (so a here-document it reads is
 /// commands too).
-fn simple(words: Vec<Word>, depth: usize, out: &mut Shell) -> bool {
+fn simple(words: &[Word], depth: usize, out: &mut Shell) -> bool {
     let Some(start) = words
         .iter()
         .position(|word| !(is_assignment(&word.text) || KEYWORDS.contains(&word.text.as_str())))
@@ -1358,7 +1365,7 @@ fn nested(words: &[String], depth: usize, out: &mut Shell) -> bool {
                         dynamic: false,
                     })
                     .collect();
-                simple(command, depth + 1, out);
+                simple(&command, depth + 1, out);
                 rest = &after[end.min(after.len())..];
                 if rest.is_empty() {
                     break;

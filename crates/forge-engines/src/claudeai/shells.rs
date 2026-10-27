@@ -278,7 +278,7 @@ impl Decoder {
                         .max_utf8_buffer_length(bytes.len())
                         .unwrap_or(bytes.len() * 3 + 16),
                 );
-                let _ = fallback.decode_to_string(bytes, &mut out, last);
+                drop(fallback.decode_to_string(bytes, &mut out, last));
                 return out;
             }
             out.reserve(
@@ -310,6 +310,7 @@ impl Decoder {
 /// The code page a command's non-UTF-8 output is read in: the OEM code
 /// page on Windows, when `encoding_rs` has it (866, 874, 932, 936, 949,
 /// 950 and the 125x pages; not 437 or 850, whose ASCII still reads right).
+#[allow(clippy::unused_async, reason = "Windows path awaits spawn_blocking")]
 pub(super) async fn legacy_encoding() -> Option<&'static Encoding> {
     #[cfg(windows)]
     {
@@ -353,7 +354,7 @@ fn oem_code_page() -> Option<&'static Encoding> {
 }
 
 /// The `encoding_rs` encoding of a Windows code page, when it has one.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(windows), allow(dead_code, reason = "only used on Windows"))]
 fn code_page(page: u16) -> Option<&'static Encoding> {
     Some(match page {
         866 => encoding_rs::IBM866,

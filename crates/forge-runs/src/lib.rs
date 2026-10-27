@@ -755,8 +755,14 @@ impl Hub {
         );
         let hub = self.clone();
         self.inner.tasks.spawn(async move {
-            let outcome =
-                run::drive(&hub, &thread_id, run_id.clone(), receiver, cancel.clone()).await;
+            let outcome = Box::pin(run::drive(
+                &hub,
+                &thread_id,
+                run_id.clone(),
+                receiver,
+                cancel.clone(),
+            ))
+            .await;
             if let Err(error) = &outcome {
                 tracing::error!(thread = %thread_id, run = %run_id, "run failed: {error:#}");
             }

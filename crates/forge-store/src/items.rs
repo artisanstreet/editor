@@ -45,7 +45,15 @@ impl Store {
                         .as_ref()
                         .filter(|label| !label.trim().is_empty())
                         .cloned(),
-                    _ => None,
+                    ItemKind::UserMessage { .. }
+                    | ItemKind::AssistantMessage { .. }
+                    | ItemKind::Tool { .. }
+                    | ItemKind::Question { .. }
+                    | ItemKind::Plan { .. }
+                    | ItemKind::Image { .. }
+                    | ItemKind::Compaction { .. }
+                    | ItemKind::Notice { .. }
+                    | ItemKind::Error { .. } => None,
                 });
                 if label.is_none() {
                     let taken = read::agent_labels(tx, &new.thread_id)?;

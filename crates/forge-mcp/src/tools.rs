@@ -164,7 +164,7 @@ fn thread_tools() -> Vec<Tool> {
                     "effort": { "type": "string", "description": "An effort id from harnesses. For OpenCode reasoning choices use variant." },
                     "speed": { "type": "string", "description": "A speed id from harnesses." },
                     "variant": { "type": "string", "description": "A variant id from harnesses (including OpenCode reasoning choices)." },
-                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100000000, "description": "A context_windows override_tokens value from harnesses. Use options.context_window=null to restore the standard window." },
+                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100_000_000, "description": "A context_windows override_tokens value from harnesses. Use options.context_window=null to restore the standard window." },
                     "options": { "type": "object", "additionalProperties": true, "description": "Engine-specific options, merged over inherited options for the same harness and model. context_window takes precedence over options.context_window." },
                     "permissions": { "type": "string", "enum": ["auto", "full"] },
                 })
@@ -244,7 +244,7 @@ fn agent_tools() -> Vec<Tool> {
                     "effort": { "type": "string", "description": "An effort id from harnesses. For OpenCode reasoning choices use variant." },
                     "speed": { "type": "string", "description": "A speed id from harnesses." },
                     "variant": { "type": "string", "description": "A variant id from harnesses (including OpenCode reasoning choices)." },
-                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100000000, "description": "A context_windows override_tokens value from harnesses. Use options.context_window=null to restore the standard window." },
+                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100_000_000, "description": "A context_windows override_tokens value from harnesses. Use options.context_window=null to restore the standard window." },
                     "options": { "type": "object", "additionalProperties": true, "description": "Engine-specific options, merged over inherited options for the same harness and model. context_window takes precedence over options.context_window." },
                     "permissions": { "type": "string", "enum": ["auto", "full"] },
                     "background": { "type": "boolean" },

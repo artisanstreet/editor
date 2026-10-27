@@ -18,7 +18,7 @@ use tokio::sync::oneshot;
 const ANSWER_WITHIN: Duration = Duration::from_mins(9);
 
 /// A card Forge showed itself, waiting for its answer.
-pub(crate) struct OwnApproval {
+pub struct OwnApproval {
     thread: ThreadId,
     /// A permission Full access gives; otherwise only the user answers.
     permission: bool,
