@@ -692,7 +692,9 @@ impl Sidebar {
             })
             .unwrap_or_default();
         let editor = cx.new(|cx| {
-            let mut editor = TextEditor::new(&title, "Thread title", cx).single_line();
+            let mut editor = TextEditor::new(&title, "Thread title", cx)
+                .single_line()
+                .inset();
             editor.select_whole_text(cx);
             editor
         });
@@ -1493,9 +1495,10 @@ impl Render for Sidebar {
             Dialog::new(
                 "sidebar-rename",
                 theme,
-                "Rename thread",
+                "Rename Thread",
                 rename.editor.clone(),
             )
+            .glass()
             .on_dismiss(move |_, _, cx| {
                 owner
                     .update(cx, |this, cx| {
