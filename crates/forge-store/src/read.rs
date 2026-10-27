@@ -729,18 +729,7 @@ pub fn inspector(conn: &Connection, thread: &ThreadId) -> Result<artisan_api::In
         status: row.status,
     })
     .collect();
-    let plan = conn
-        .query_row(
-            "SELECT json_extract(body,'$.kind.steps') FROM items
-        WHERE thread_id=?1 AND kind_type='plan'
-            AND parent_id IS NULL ORDER BY position DESC LIMIT 1",
-            [thread.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .map(|body| from_body(&body))
-        .transpose()?
-        .unwrap_or_default();
+    let plan = current_plan(conn, thread)?;
     let goal = current_goal(conn, thread)?;
     let questions = many(conn,
         "SELECT json_object('id',id,'questions',json(json_extract(body,'$.kind.questions'))) FROM items
@@ -866,6 +855,59 @@ fn workflow_name(input: &str) -> Option<String> {
 /// The user's own messages in `thread`, in order, each labelled by its first
 /// line. A steer sits inside its run's work, and an agent's result Forge
 /// delivered reads as that agent's report, so neither is one.
+/// The checklist the inspector shows: the thread's newest top-level plan,
+/// until it is finished and the user has sent a message after it. A
+/// finished checklist stays through the turn that finished it, so the
+/// reader sees it complete; the next request starts without it.
+fn current_plan(
+    conn: &Connection,
+    thread: &ThreadId,
+) -> Result<artisan_api::Collection<artisan_api::PlanStep>> {
+    let Some((position, steps)) = conn
+        .query_row(
+            "SELECT position,json_extract(body,'$.kind.steps') FROM items
+             WHERE thread_id=?1 AND kind_type='plan'
+                AND parent_id IS NULL ORDER BY position DESC LIMIT 1",
+            [thread.as_str()],
+            |row| Ok((row.get::<_, Seq>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(artisan_api::Collection::default());
+    };
+    let plan: artisan_api::Collection<artisan_api::PlanStep> = from_body(&steps)?;
+    // The same user messages the navigator counts: not steers, not agents.
+    let asked_since: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM items
+         WHERE thread_id=?1 AND kind_type='user_message' AND position>?2
+            AND json_extract(body,'$.parent_id') IS NULL
+            AND NOT (run_id IS NOT NULL AND json_extract(body,'$.kind.steer')=1)
+            AND json_extract(body,'$.kind.from_agent') IS NULL)",
+        params![thread.as_str(), position],
+        |row| row.get(0),
+    )?;
+    if !asked_since {
+        return Ok(plan);
+    }
+    let finished = |steps: &[artisan_api::PlanStep]| {
+        steps.iter().all(|step| {
+            matches!(
+                step.status,
+                artisan_api::StepStatus::Done | artisan_api::StepStatus::Cancelled
+            )
+        })
+    };
+    let done = match plan.inline() {
+        Some(steps) => finished(steps),
+        None => finished(&crate::collection::resolve(conn, &plan)?),
+    };
+    Ok(if done {
+        artisan_api::Collection::default()
+    } else {
+        plan
+    })
+}
+
 fn outline(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::OutlineEntry>> {
     let mut statement = conn.prepare_cached(
         "SELECT id,position,json_quote(json_extract(body,'$.kind.text')) FROM items

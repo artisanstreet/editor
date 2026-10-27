@@ -50,6 +50,28 @@ impl Store {
         self.write(move |tx| tx.update_thread(&id, update)).await
     }
 
+    /// Replaces a fallback title only if it has not changed while generation ran.
+    /// `None` means the thread disappeared or another title won the race.
+    pub async fn replace_thread_title(
+        &self,
+        id: &ThreadId,
+        expected: Option<String>,
+        title: String,
+    ) -> Result<Option<Thread>> {
+        let id = id.clone();
+        self.write(move |tx| {
+            let Some(mut thread) = read::thread(tx, &id)? else {
+                return Ok(None);
+            };
+            if thread.title != expected {
+                return Ok(None);
+            }
+            thread.title = Some(title);
+            tx.save_thread(thread).map(Some)
+        })
+        .await
+    }
+
     pub async fn threads_page(
         &self,
         query: artisan_api::ThreadsQuery,

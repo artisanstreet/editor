@@ -1364,6 +1364,77 @@ async fn edit_totals_replace_instead_of_double_counting_item_updates() {
 }
 
 #[tokio::test]
+async fn agents_get_unique_stable_names_across_harnesses_and_tool_promotions() {
+    let dir = TempDir::new();
+    let (store, thread) = test_store(&dir.0).await;
+    let mut labels = std::collections::HashSet::new();
+    for engine in EngineId::ALL {
+        for promoted in [false, true] {
+            let id = format!("{engine}-{promoted}");
+            let mut agent = message(&thread, &id, "");
+            agent.status = Status::Running;
+            let initial = if promoted {
+                agent.kind = ItemKind::Tool {
+                    tool: ToolKind::Other {
+                        name: "spawn_agent".into(),
+                        input: None,
+                    },
+                    title: None,
+                    output: None,
+                    exit_code: None,
+                    approval: None,
+                };
+                Some(store.upsert_item(agent.clone()).await.unwrap())
+            } else {
+                None
+            };
+            agent.kind = ItemKind::Agent {
+                engine: Some(engine),
+                thread: None,
+                name: Some(engine.display_name().into()),
+                description: "Review the diff".into(),
+                prompt: None,
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: false,
+                result: None,
+                label: None,
+            };
+            let named = store.upsert_item(agent.clone()).await.unwrap();
+            let ItemKind::Agent {
+                label: Some(label), ..
+            } = &named.kind
+            else {
+                panic!("{engine} agent was not assigned a name (promoted: {promoted})");
+            };
+            assert!(artisan_api::AGENT_NAMES.contains(&label.as_str()));
+            assert!(labels.insert(label.clone()), "agent name reused: {label}");
+            if let Some(initial) = initial {
+                assert_eq!(named.position, initial.position);
+                assert_eq!(named.created_at, initial.created_at);
+            }
+            // Replayed adapter updates must keep the reserved name, even
+            // when they contain a blank label.
+            assert_eq!(
+                store
+                    .upsert_item(agent.clone())
+                    .await
+                    .unwrap()
+                    .agent_label(),
+                Some(label.clone())
+            );
+            if let ItemKind::Agent { label, .. } = &mut agent.kind {
+                *label = Some("  ".into());
+            }
+            store.upsert_item(agent).await.unwrap();
+            let saved = store.item(&named.id).await.unwrap().unwrap();
+            assert_eq!(saved.agent_label(), Some(label.clone()));
+        }
+    }
+}
+
+#[tokio::test]
 async fn canonical_agent_message_appears_in_both_pages_without_another_row() {
     let dir = TempDir::new();
     let (store, thread) = test_store(&dir.0).await;

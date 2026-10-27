@@ -32,7 +32,30 @@ impl Store {
         let (id, thread_id) = (new.id.clone(), new.thread_id.clone());
         self.write(move |tx| {
             let native_id = new.native_id.clone();
-            let item = if let Some(old) = read::item(tx, &new.id)? {
+            let old = read::item(tx, &new.id)?;
+            let mut new = new;
+            // Name agents on every upsert: adapters can first stream a tool
+            // and only later recognise it as an agent. Keep a name already
+            // reserved for this item before choosing another one.
+            if let ItemKind::Agent { label, .. } = &mut new.kind
+                && label.as_ref().is_none_or(|label| label.trim().is_empty())
+            {
+                *label = old.as_ref().and_then(|item| match &item.kind {
+                    ItemKind::Agent { label, .. } => label
+                        .as_ref()
+                        .filter(|label| !label.trim().is_empty())
+                        .cloned(),
+                    _ => None,
+                });
+                if label.is_none() {
+                    let taken = read::agent_labels(tx, &new.thread_id)?;
+                    *label = Some(artisan_api::choose_agent_name(
+                        new.id.as_str(),
+                        taken.iter().map(String::as_str),
+                    ));
+                }
+            }
+            let item = if let Some(old) = old {
                 ensure!(
                     old.thread_id == new.thread_id,
                     "item belongs to thread {}",
@@ -95,18 +118,6 @@ impl Store {
                 tx.save_item(item, Some(old))?
             } else {
                 let created_at = tx.created_at();
-                let mut new = new;
-                // A new subagent gets a name no other in its thread has.
-                if let ItemKind::Agent {
-                    label: slot @ None, ..
-                } = &mut new.kind
-                {
-                    let taken = read::agent_labels(tx, &new.thread_id)?;
-                    *slot = Some(artisan_api::choose_agent_name(
-                        new.id.as_str(),
-                        taken.iter().map(String::as_str),
-                    ));
-                }
                 tx.save_item(fresh_item(new, created_at), None)?
             };
             tx.set_native_id(&item.id, native_id.as_deref())?;

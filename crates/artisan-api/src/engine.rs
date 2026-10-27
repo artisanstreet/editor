@@ -221,6 +221,9 @@ impl Model {
 /// ones `engine/model`.
 pub const MODEL_CONFIGS_KEY: &str = "model_engine_configs";
 
+/// The Forge setting holding the last chosen config for each harness, keyed by engine.
+pub const HARNESS_CONFIGS_KEY: &str = "harness_engine_configs";
+
 /// The Forge setting naming the project the user last started a thread in.
 pub const LAST_PROJECT_KEY: &str = "last_project";
 
@@ -281,7 +284,7 @@ pub struct EngineStatus {
     /// (the `versions` engine action).
     #[serde(default, skip_serializing_if = "<[PublishedVersion]>::is_empty")]
     pub versions: std::sync::Arc<[PublishedVersion]>,
-    /// The claude.ai session Native Claude Mode runs on. Claude only.
+    /// The claude.ai session claude.ai mode runs on. Claude only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_ai: Option<crate::ClaudeAiState>,
 }

@@ -112,7 +112,9 @@ impl Store {
                 .and_then(|configs| artisan_api::saved_model_config(&configs, engine, &model.id));
             let mut config = match saved {
                 Some(config) => config,
-                None => read::setting(tx, "default_engine_config")?
+                None => read::setting(tx, artisan_api::HARNESS_CONFIGS_KEY)?
+                    .and_then(|configs| configs.get(engine.as_str()).cloned())
+                    .or(read::setting(tx, "default_engine_config")?)
                     .map(serde_json::from_value::<artisan_api::EngineConfig>)
                     .transpose()?
                     .filter(|config| config.engine == engine)
@@ -392,6 +394,60 @@ mod context_window_tests {
             .await
             .unwrap();
         assert!(!saved.options.contains_key("context_window"));
+    }
+
+    #[tokio::test]
+    async fn each_harness_remembers_its_model_and_preferences_after_reopening() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let mut opencode = EngineConfig::new(EngineId::OpenCode);
+        let muse = Model {
+            id: "gateway/muse-spark-1.3".into(),
+            ..Model::default()
+        };
+        opencode.model = Some(muse.id.clone());
+        opencode.permissions = artisan_api::Permissions::Full;
+        opencode
+            .options
+            .insert("custom".into(), serde_json::json!(true));
+        let opencode = store.set_model_config(opencode, &muse).await.unwrap();
+        let claude = store
+            .set_default_model(
+                EngineId::Claude,
+                Model {
+                    id: "opus".into(),
+                    ..Model::default()
+                },
+            )
+            .await
+            .unwrap();
+        // A new model in OpenCode inherits its own harness preferences,
+        // even though Claude is now the global default.
+        let other = store
+            .set_default_model(
+                EngineId::OpenCode,
+                Model {
+                    id: "gateway/other".into(),
+                    ..Model::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(other.permissions, opencode.permissions);
+        assert_eq!(other.options, opencode.options);
+        store
+            .set_model_config(opencode.clone(), &muse)
+            .await
+            .unwrap();
+        drop(store);
+        let store = Store::open(directory.path()).unwrap();
+        let saved = store
+            .setting(artisan_api::HARNESS_CONFIGS_KEY)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved["opencode"], serde_json::to_value(opencode).unwrap());
+        assert_eq!(saved["claude"], serde_json::to_value(claude).unwrap());
     }
 
     #[tokio::test]

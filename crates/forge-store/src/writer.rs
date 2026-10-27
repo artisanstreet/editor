@@ -496,6 +496,15 @@ impl Tx<'_> {
         &mut self,
         config: &artisan_api::EngineConfig,
     ) -> Result<()> {
+        let mut harnesses = match read::setting(self, artisan_api::HARNESS_CONFIGS_KEY)? {
+            Some(serde_json::Value::Object(configs)) => configs,
+            _ => serde_json::Map::new(),
+        };
+        harnesses.insert(config.engine.to_string(), serde_json::to_value(config)?);
+        self.save_setting(
+            artisan_api::HARNESS_CONFIGS_KEY.into(),
+            serde_json::Value::Object(harnesses),
+        )?;
         let Some(model) = &config.model else {
             return Ok(());
         };
