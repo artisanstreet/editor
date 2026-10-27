@@ -80,10 +80,10 @@ fn resolved_title_preserves_formatted_authored_label() {
         "bold label"
     );
 
-    // Relative links stay inert labels and never consult the lookup.
-    let relative = present_inline(&link_spans("/docs/page", "relative label"), theme);
+    // Relative file links retain their authored labels and are openable.
+    let relative = present_inline(&link_spans("docs/page", "relative label"), theme);
     assert_eq!(relative.source, "see relative label end");
-    assert!(relative.links.is_empty());
+    assert_eq!(relative.links[0].destination, "docs/page");
 }
 
 #[test]
@@ -205,4 +205,182 @@ fn a_message_paints_its_leading_command_and_keeps_its_markdown() {
         panic!("one paragraph");
     };
     assert_eq!(spans, &vec![Span::Text("see /goal later".to_owned())]);
+}
+
+#[test]
+fn file_links_show_labels_and_keep_absolute_destinations() {
+    let theme = ArtisanTheme::resolved();
+    for destination in [
+        "/tmp/audit/report.md",
+        "/tmp/audit/report.md:42:3",
+        "file:///tmp/audit/report.md#L42",
+    ] {
+        let shown = present_inline(&link_spans(destination, "Full report"), theme);
+        assert_eq!(shown.source, "see Full report end");
+        assert_eq!(shown.links[0].destination, destination);
+        assert_eq!(&shown.source[shown.links[0].range.clone()], "Full report");
+        assert!(shown.highlights.iter().any(|(range, style)| {
+            range == &shown.links[0].range && *style == link_style(&theme)
+        }));
+    }
+}
+
+#[test]
+fn file_links_reserve_icons_without_putting_them_in_copied_text() {
+    let flat = inline::flatten_inline_with_swatches(&link_spans(
+        "/tmp/hello world/report.ts",
+        "Full report",
+    ));
+    assert_eq!(flat.file_icons.len(), 1);
+    assert_eq!(
+        flat.file_icons[0].1,
+        (
+            editor_assets::file_icons::file(std::path::Path::new("report.ts"), false),
+            editor_assets::file_icons::file(std::path::Path::new("report.ts"), true)
+        )
+    );
+    let (slot, icon) = (flat.file_slots[0].clone(), flat.file_icons[0].0);
+    assert!(slot.contains(&icon));
+    assert_eq!(&flat.source[slot.end..], "Full report end");
+    assert_eq!(
+        &flat.source[flat.links[0].range.clone()],
+        format!("{}\u{00a0}Full report", inline::SWATCH_SLOT)
+    );
+}
+
+#[test]
+fn file_uris_decode_spaces_and_reject_remote_authorities() {
+    assert_eq!(
+        file_link_path("file:///tmp/hello%20world/report.md"),
+        Some("/tmp/hello world/report.md".into())
+    );
+    assert_eq!(
+        file_link_path("docs/report.md:42"),
+        Some("docs/report.md".into())
+    );
+    assert_eq!(file_link_line("docs/report.md:42:3"), Some(42));
+    assert_eq!(file_link_line("file:///tmp/report.md#L42"), Some(42));
+    for destination in [
+        "file://other-computer/tmp/report.md",
+        "//other-computer/report.md",
+        "javascript:alert(1)",
+    ] {
+        assert!(file_link_path(destination).is_none(), "{destination}");
+        assert!(!is_openable_link_destination(destination), "{destination}");
+    }
+}
+
+struct FileLinkGallery {
+    mentions: Option<crate::text_editor::Tokenizer>,
+    renderer: MarkdownRenderer,
+    prepared: Rc<PreparedMarkdown>,
+}
+impl gpui::Render for FileLinkGallery {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        self.renderer.render_prepared(
+            &self.prepared,
+            0,
+            &ArtisanTheme::resolved(),
+            &"file-links".into(),
+            MarkdownBodyTone::Foreground,
+            0..self.prepared.block_count(),
+            None,
+            false,
+            self.mentions.as_ref(),
+        )
+    }
+}
+
+#[gpui::test]
+fn file_link_icons_paint_in_native_selectable_text(cx: &mut gpui::TestAppContext) {
+    let document = crate::markdown::MarkdownEngine::new().unwrap().parse_document(
+        "[Full report](/tmp/report.md) · [Query inventory](/tmp/queries.csv) · [Code](/tmp/example.ts)"
+    ).unwrap();
+    let parts = prepared::PreparedParts::new(&document, None);
+    let prepared = PreparedMarkdown::from_indexed_parts(&document, parts, None);
+    let (_, cx) = cx.add_window_view(|_, _| FileLinkGallery {
+        mentions: None,
+        renderer: MarkdownRenderer::new(),
+        prepared: Rc::new(prepared),
+    });
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("file-links-md-0").unwrap();
+    assert!(bounds.size.height > px(0.0));
+    cx.simulate_click(
+        bounds.origin + gpui::point(px(8.0), px(12.0)),
+        gpui::Modifiers::none(),
+    );
+    for key in ["ctrl-a", "ctrl-c"] {
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(
+        copied.as_deref(),
+        Some("Full report · Query inventory · Code")
+    );
+}
+
+#[gpui::test]
+fn skill_glyphs_preserve_the_sigil_when_selected_and_copied(cx: &mut gpui::TestAppContext) {
+    let source = "界 $review then $review.";
+    let document = crate::markdown::MarkdownEngine::new()
+        .unwrap()
+        .parse_document(source)
+        .unwrap();
+    let parts = prepared::PreparedParts::new(&document, None);
+    let prepared = PreparedMarkdown::from_indexed_parts(&document, parts, None);
+    let (_, cx) = cx.add_window_view(|_, _| FileLinkGallery {
+        renderer: MarkdownRenderer::new(),
+        prepared: Rc::new(prepared),
+        mentions: Some(Rc::new(|text| {
+            text.match_indices("$review")
+                .map(|(start, name)| crate::text_editor::Token {
+                    range: start..start + name.len(),
+                    glyph: Some(crate::AssetId::TABLER_FILE_SPARK),
+                    style: HighlightStyle {
+                        color: Some(ArtisanTheme::resolved().colors.mention_skill.to_paint()),
+                        font_weight: Some(FontWeight::MEDIUM),
+                        ..Default::default()
+                    },
+                })
+                .collect()
+        })),
+    });
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("file-links-md-0").unwrap();
+    cx.simulate_click(
+        bounds.origin + gpui::point(px(8.0), px(12.0)),
+        gpui::Modifiers::none(),
+    );
+    for key in ["ctrl-a", "ctrl-c"] {
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some(source));
 }

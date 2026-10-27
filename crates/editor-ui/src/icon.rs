@@ -110,3 +110,12 @@ pub fn icon(style: IconStyle) -> AssetGlyph {
     }
     glyph
 }
+
+/// Light and dark artwork for a file, resolved using the bundled theme.
+#[must_use]
+pub fn file_icon(path: &std::path::Path) -> (AssetId, AssetId) {
+    (
+        editor_assets::file_icons::file(path, false),
+        editor_assets::file_icons::file(path, true),
+    )
+}

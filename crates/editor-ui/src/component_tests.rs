@@ -163,6 +163,7 @@ impl Render for ImageGallery {
 }
 #[gpui::test]
 fn actual_decoded_attachment_preserves_geometry_and_opens_by_keyboard(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
     let (gallery, cx) = cx.add_window_view(|_, _| ImageGallery {
         image: None,
         error: false,
@@ -478,6 +479,198 @@ fn caption_state_and_keyboard_focus_preserve_geometry(cx: &mut TestAppContext) {
 }
 
 struct PreviewOnly;
+
+fn preview_test_image(width: u32) -> std::sync::Arc<gpui::RenderImage> {
+    std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+        image::RgbaImage::from_pixel(width, 120, image::Rgba([10, 20, 30, 255])),
+    )]))
+}
+
+#[gpui::test]
+fn image_preview_gallery_navigates_by_buttons_keys_and_swipes(cx: &mut TestAppContext) {
+    use crate::overlay;
+    use gpui::{MouseButton, point};
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (_, cx) = cx.add_window_view(|_, _| PreviewOnly);
+    cx.simulate_resize(gpui::size(px(600.0), px(500.0)));
+    let images = std::rc::Rc::new([
+        preview_test_image(200),
+        preview_test_image(240),
+        preview_test_image(280),
+    ]);
+    let sources = std::rc::Rc::clone(&images);
+    cx.update(|window, cx| {
+        overlay::show_gallery(
+            std::sync::Arc::clone(&images[1]),
+            overlay::ImageGallery {
+                index: 1,
+                count: 3,
+                forward: true,
+                load: std::rc::Rc::new(move |index, _, _| {
+                    overlay::PreviewLoad::Ready(std::sync::Arc::clone(&sources[index]))
+                }),
+            },
+            window,
+            cx,
+        );
+        window.draw(cx).clear(cx);
+    });
+    let next = cx.debug_bounds("image-preview-next").unwrap();
+    let picture = cx.debug_bounds("image-preview-image").unwrap();
+    assert!(
+        next.left() > picture.right(),
+        "navigation is outside the image"
+    );
+    cx.simulate_click(next.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|window, cx| assert_eq!(overlay::gallery(window, cx).unwrap().index, 2));
+    // A disabled end arrow must not dismiss the dialog.
+    cx.simulate_click(next.center(), gpui::Modifiers::none());
+    assert!(cx.debug_bounds("image-preview").is_some());
+    press_key(cx, "left");
+    cx.update(|window, cx| assert_eq!(overlay::gallery(window, cx).unwrap().index, 1));
+    for (distance, expected) in [(-80.0, 2), (80.0, 1), (8.0, 1)] {
+        let start = cx.debug_bounds("image-preview-image").unwrap().center();
+        let end = start + point(px(distance), px(0.0));
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: end,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: gpui::Modifiers::none(),
+                }),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+        });
+        let moved = cx.debug_bounds("image-preview-image").unwrap();
+        assert!((moved.center().x - start.x - px(distance)).abs() < px(1.0));
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    position: end,
+                    button: MouseButton::Left,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert_eq!(overlay::gallery(window, cx).unwrap().index, expected);
+            let (image, _) = overlay::preview(window, cx).unwrap();
+            assert!(std::sync::Arc::ptr_eq(&image.unwrap(), &images[expected]));
+        });
+    }
+    press_key(cx, "escape");
+    assert!(cx.debug_bounds("image-preview").is_none());
+}
+
+#[gpui::test]
+fn image_preview_two_image_gallery_survives_loading_and_failed_neighbors(cx: &mut TestAppContext) {
+    use crate::overlay;
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (_, cx) = cx.add_window_view(|_, _| PreviewOnly);
+    let failed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let loading = std::rc::Rc::clone(&failed);
+    let first = preview_test_image(200);
+    let source = std::sync::Arc::clone(&first);
+    cx.update(|window, cx| {
+        overlay::show_gallery(
+            first,
+            overlay::ImageGallery {
+                index: 0,
+                count: 2,
+                forward: true,
+                load: std::rc::Rc::new(move |index, _, _| {
+                    if index == 0 {
+                        overlay::PreviewLoad::Ready(std::sync::Arc::clone(&source))
+                    } else if loading.get() {
+                        overlay::PreviewLoad::Failed
+                    } else {
+                        overlay::PreviewLoad::Loading
+                    }
+                }),
+            },
+            window,
+            cx,
+        );
+        window.draw(cx).clear(cx);
+    });
+    press_key(cx, "right");
+    assert!(cx.debug_bounds("image-preview").is_some());
+    cx.update(|window, cx| assert!(overlay::preview(window, cx).unwrap().0.is_none()));
+    failed.set(true);
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    assert!(cx.debug_bounds("image-preview").is_some());
+    press_key(cx, "left");
+    assert!(cx.debug_bounds("image-preview-image").is_some());
+    press_key(cx, "escape");
+    assert!(cx.debug_bounds("image-preview").is_none());
+}
+
+#[gpui::test]
+#[expect(
+    clippy::float_cmp,
+    reason = "presence snaps to exactly 1 once the entrance settles"
+)]
+fn image_preview_close_animates_and_cannot_dismiss_a_new_preview(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| PreviewOnly);
+    cx.update(|window, cx| {
+        crate::image_preview::open(preview_test_image(200), window, cx);
+        window.draw(cx).clear(cx);
+    });
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(250));
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        assert_eq!(
+            crate::overlay::preview_motion(window, cx)
+                .unwrap()
+                .presence(cx.background_executor().now()),
+            1.0
+        );
+        crate::image_preview::close(window, cx);
+    });
+    assert!(
+        cx.debug_bounds("image-preview").is_some(),
+        "exit remains mounted"
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(75));
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        let presence = crate::overlay::preview_motion(window, cx)
+            .unwrap()
+            .presence(cx.background_executor().now());
+        assert!(presence > 0.0 && presence < 1.0);
+        crate::image_preview::open(preview_test_image(240), window, cx);
+    });
+    settle_menu(cx);
+    assert!(
+        cx.debug_bounds("image-preview").is_some(),
+        "an earlier exit cannot close a new preview"
+    );
+    crate::component_tests::press_key(cx, "escape");
+    settle_menu(cx);
+    assert!(cx.debug_bounds("image-preview").is_none());
+}
+
 impl Render for PreviewOnly {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().children(crate::image_preview::overlay(
@@ -489,6 +682,7 @@ impl Render for PreviewOnly {
 }
 #[gpui::test]
 fn replacing_and_closing_previews_release_reuploaded_textures(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
     let (_, cx) = cx.add_window_view(|_, _| PreviewOnly);
     let image = || {
         std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
@@ -525,6 +719,7 @@ fn replacing_and_closing_previews_release_reuploaded_textures(cx: &mut TestAppCo
 
 #[gpui::test]
 fn closing_a_preview_repaints_an_image_retained_by_another_window(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
     let image = std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
         image::RgbaImage::from_pixel(16, 12, image::Rgba([10, 20, 30, 255])),
     )]));

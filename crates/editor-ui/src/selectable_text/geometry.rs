@@ -53,6 +53,13 @@ impl LeafLayout {
             Self::Projected { height, .. } => *height,
         }
     }
+    /// Position a glyph at the start of its visual row when it wraps.
+    pub(super) fn glyph_position(&self, index: usize) -> Option<Point<Pixels>> {
+        match self {
+            Self::Native(layout, _) => crate::text_editor::visual_position(layout, index),
+            Self::Projected { .. } => self.position_for_index(index),
+        }
+    }
     pub(super) fn position_for_index(&self, index: usize) -> Option<Point<Pixels>> {
         match self {
             Self::Native(layout, Some(rows)) => {

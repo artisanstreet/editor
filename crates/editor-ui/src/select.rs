@@ -1,19 +1,18 @@
-//! A typed value picker on the composer's dropdown recipe: a raised
+//! A typed value picker on the composer's dropdown recipe: a bordered
 //! trigger, and a glass menu that fades in under it with the shared hover
 //! pill. Opening, keyboard navigation and scrolling belong here.
 
 use crate::AssetId;
 use crate::asset_seam::asset_glyph;
-use crate::glass::card_shadows;
 use crate::hover_card::highlight_fill;
 use crate::picker_motion::{HoverSurface, MenuEntrance, MenuMotion, animate_menu};
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
+use crate::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AnchoredPositionMode, App, BoxShadow, ClickEvent, Context, ElementId, FocusHandle,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseDownEvent, ParentElement, RenderOnce, Role,
-    ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, UniformListScrollHandle,
-    Window, anchored, deferred, div, point, px, uniform_list,
+    App, BoxShadow, ClickEvent, Context, ElementId, FocusHandle, InteractiveElement, IntoElement,
+    KeyDownEvent, MouseDownEvent, ParentElement, RenderOnce, Role, ScrollStrategy, SharedString,
+    StatefulInteractiveElement, Styled, UniformListScrollHandle, Window, deferred, div, point, px,
+    uniform_list,
 };
 use std::cell::RefCell;
 use std::{
@@ -63,6 +62,7 @@ struct State<V> {
     scroll: UniformListScrollHandle,
     query: String,
     typed_at: Instant,
+    trigger_bounds: crate::measure::Measured,
 }
 
 impl<V: 'static> State<V> {
@@ -237,6 +237,7 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
             scroll: UniformListScrollHandle::new(),
             query: String::new(),
             typed_at: Instant::now(),
+            trigger_bounds: crate::measure::Measured::default(),
         });
         state.update(cx, |state, _| {
             reconcile(state, &self.entries, self.selected.as_ref());
@@ -258,6 +259,7 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
             )
         };
         let muted = theme.colors.text_muted.to_paint();
+        let trigger_bounds = state.read(cx).trigger_bounds.clone();
         let display = entries
             .iter()
             .find(|entry| self.selected.as_ref() == Some(&entry.value))
@@ -268,12 +270,14 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
             .aria_label(self.label)
             .aria_value(display.clone())
             .aria_expanded(open)
+            .relative()
             .w_full()
             .h(theme.density.control_default)
             .px(px(10.0))
             .rounded(RadiusTokens::value(RadiusStep::Md))
-            .bg(theme.colors.raised.to_paint())
-            .shadow(card_shadows(&theme))
+            .border_1()
+            .border_color(theme.colors.text.at(Opacity::GlassBorder).to_paint())
+            .bg(theme.colors.text.at(Opacity::GlassBase).to_paint())
             .text_color(theme.colors.text.to_paint())
             .text_size(TypographyTokens::size(TextStep::Sm))
             .flex()
@@ -312,6 +316,12 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
             .track_focus(&focus)
             .tab_index(0)
             .cursor_pointer()
+            .hover(move |style| style.bg(theme.colors.text.at(Opacity::HoverBottom).to_paint()))
+            .when(open, |trigger| {
+                trigger
+                    .bg(theme.colors.text.at(Opacity::HoverBottom).to_paint())
+                    .border_color(theme.colors.text.at(Opacity::HoverRing).to_paint())
+            })
             .focus_visible(move |style| {
                 style
                     .border_color(theme.colors.ring.to_paint())
@@ -435,10 +445,15 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                     cx.stop_propagation();
                 }
             });
-        let mut root = div().id(self.id.clone()).relative().w_full().child(trigger);
+        let mut root = div()
+            .id(self.id.clone())
+            .relative()
+            .w_full()
+            .child(trigger_bounds.track())
+            .child(trigger);
         if shown {
             let popup_priority = crate::overlay::popup_priority(window, cx);
-            let popup_height = (window.viewport_size().height - px(16.0)).max(px(1.0));
+            let bounds = trigger_bounds.get();
             let list_state = state.clone();
             let list_entries = Rc::clone(&entries);
             let list_hover = hover.clone();
@@ -531,8 +546,7 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                     .collect()
             })
             .h((px(OPTION_HEIGHT) * crate::f32_of_count(count.max(1)))
-                .min(theme.density.command_list_max_height)
-                .min(popup_height))
+                .min(theme.density.command_list_max_height))
             .track_scroll(&scroll);
             let outside = state.clone();
             let popup_bounds = crate::measure::Measured::default();
@@ -544,8 +558,9 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                     el.debug_selector(move || format!("{selector}-popup"))
                 })
                 .relative()
-                .min_w(px(MENU_MIN_WIDTH))
-                .max_w((window.viewport_size().width - px(16.0)).max(px(1.0)))
+                .w(bounds.map_or(px(MENU_MIN_WIDTH), |bounds| {
+                    bounds.size.width.max(px(MENU_MIN_WIDTH))
+                }))
                 .p(px(4.0))
                 .child(popup_bounds.record())
                 .child(hover.surface_probe())
@@ -564,13 +579,16 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                     outside.update(cx, |state, cx| state.set_open(false, cx));
                 });
             }
+            // Keep the popup in the trigger's layout coordinate system, even
+            // inside scrolling content. Deferred painting lets it overflow its
+            // ancestors; the window clips it without moving or resizing it.
             root = root.child(
-                deferred(
-                    anchored()
-                        .position_mode(AnchoredPositionMode::Local)
-                        .snap_to_window_with_margin(px(8.0))
-                        .position(point(px(0.0), theme.density.control_default + px(6.0)))
-                        .child(div().id("select-listbox").child(animate_menu(
+                div()
+                    .absolute()
+                    .top(theme.density.control_default + px(6.0))
+                    .left_0()
+                    .child(
+                        deferred(div().id("select-listbox").child(animate_menu(
                             panel,
                             &motion,
                             "select",
@@ -579,9 +597,9 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                             },
                             MENU_MOTION,
                             MENU_MOTION,
-                        ))),
-                )
-                .with_priority(popup_priority),
+                        )))
+                        .with_priority(popup_priority),
+                    ),
             );
         }
         root
@@ -591,6 +609,114 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Render, TestAppContext};
+
+    struct PlacementGallery {
+        top: f32,
+        count: usize,
+    }
+
+    impl Render for PlacementGallery {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("placement-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .child(
+                    div().relative().w_full().h(px(1000.0)).child(
+                        div()
+                            .absolute()
+                            .top(px(self.top))
+                            .left(px(80.0))
+                            .w(px(200.0))
+                            .child(
+                                Select::new(
+                                    "placement-select",
+                                    ArtisanTheme::resolved(),
+                                    Some(0),
+                                    (0..self.count)
+                                        .map(|i| SelectEntry::item(i, format!("Option {i}")))
+                                        .collect(),
+                                )
+                                .debug_selector("placement-select"),
+                            ),
+                    ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn popup_follows_trigger_width_and_opens_below(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| PlacementGallery {
+            top: 80.0,
+            count: 2,
+        });
+        cx.simulate_resize(gpui::size(px(480.0), px(420.0)));
+        let trigger = cx
+            .debug_bounds("placement-select-trigger")
+            .expect("trigger");
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        let popup = cx.debug_bounds("placement-select-popup").expect("popup");
+        assert_eq!(popup.left(), trigger.left());
+        assert_eq!(popup.top(), trigger.bottom() + px(6.0));
+        assert_eq!(popup.size.width, trigger.size.width);
+    }
+
+    #[gpui::test]
+    fn popup_stays_attached_when_its_page_scrolls(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| PlacementGallery {
+            top: 140.0,
+            count: 2,
+        });
+        cx.simulate_resize(gpui::size(px(480.0), px(420.0)));
+        let before = cx
+            .debug_bounds("placement-select-trigger")
+            .expect("trigger");
+        cx.simulate_click(before.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                    position: point(px(400.0), px(200.0)),
+                    delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let trigger = cx
+            .debug_bounds("placement-select-trigger")
+            .expect("scrolled trigger");
+        let popup = cx
+            .debug_bounds("placement-select-popup")
+            .expect("scrolled popup");
+        assert!(trigger.top() < before.top());
+        assert_eq!(popup.left(), trigger.left());
+        assert_eq!(popup.top(), trigger.bottom() + px(6.0));
+        assert_eq!(popup.size.width, trigger.size.width);
+    }
+
+    #[gpui::test]
+    fn tall_popup_overflows_the_window_without_moving_or_shrinking(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| PlacementGallery {
+            top: 340.0,
+            count: 30,
+        });
+        cx.simulate_resize(gpui::size(px(480.0), px(420.0)));
+        let trigger = cx
+            .debug_bounds("placement-select-trigger")
+            .expect("trigger");
+        cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+        let popup = cx.debug_bounds("placement-select-popup").expect("popup");
+        assert_eq!(popup.left(), trigger.left());
+        assert_eq!(popup.top(), trigger.bottom() + px(6.0));
+        assert!(popup.bottom() > px(420.0));
+        assert_eq!(
+            popup.size.height,
+            ArtisanTheme::resolved().density.command_list_max_height + px(8.0)
+        );
+    }
+
     #[gpui::test]
     #[expect(
         clippy::needless_pass_by_ref_mut,
@@ -611,6 +737,7 @@ mod tests {
                 scroll: UniformListScrollHandle::new(),
                 query: String::new(),
                 typed_at: Instant::now(),
+                trigger_bounds: crate::measure::Measured::default(),
             };
             let entries = vec![SelectEntry::item(1, "One"), SelectEntry::item(2, "Two")];
             reconcile(&mut state, &entries, Some(&2));

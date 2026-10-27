@@ -35,6 +35,7 @@ pub struct Dialog {
     max_width: Pixels,
     dismissible: bool,
     bare: bool,
+    soft_backdrop: bool,
 }
 
 impl Dialog {
@@ -55,6 +56,7 @@ impl Dialog {
             max_width: px(560.0),
             dismissible: true,
             bare: false,
+            soft_backdrop: false,
         }
     }
     #[must_use]
@@ -67,6 +69,12 @@ impl Dialog {
     #[must_use]
     pub const fn bare(mut self) -> Self {
         self.bare = true;
+        self
+    }
+    /// A lightly tinted, blurred backdrop for large workspace dialogs.
+    #[must_use]
+    pub const fn soft_backdrop(mut self) -> Self {
+        self.soft_backdrop = true;
         self
     }
     #[must_use]
@@ -177,18 +185,37 @@ impl RenderOnce for Dialog {
             .flex()
             .items_center()
             .justify_center()
-            .bg(if self.bare {
-                theme
-                    .colors
-                    .black
-                    .at(crate::theme::Opacity::Shade)
-                    .to_paint()
-            } else {
-                theme
-                    .colors
-                    .background
-                    .at(crate::theme::Opacity::Backdrop)
-                    .to_paint()
+            .relative()
+            .when(!self.soft_backdrop, |root| {
+                root.bg(if self.bare {
+                    theme
+                        .colors
+                        .black
+                        .at(crate::theme::Opacity::Shade)
+                        .to_paint()
+                } else {
+                    theme
+                        .colors
+                        .background
+                        .at(crate::theme::Opacity::Backdrop)
+                        .to_paint()
+                })
+            })
+            .when(self.soft_backdrop, |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top(px(48.0))
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .backdrop_blur(px(4.0))
+                        .bg(theme
+                            .colors
+                            .black
+                            .at(crate::theme::Opacity::SettingsBackdrop)
+                            .to_paint()),
+                )
             })
             .text_color(theme.colors.text.to_paint())
             .occlude()

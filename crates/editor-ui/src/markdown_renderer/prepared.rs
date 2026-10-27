@@ -60,6 +60,8 @@ impl PreparedParts {
                             .map(|link| link.destination.capacity())
                             .sum::<usize>()
                         + rich::budget::vector(&flat.code_ranges)
+                        + rich::budget::vector(&flat.file_icons)
+                        + rich::budget::vector(&flat.file_slots)
                         + rich::budget::vector(&flat.colors)
                         + flat
                             .colors
@@ -204,20 +206,14 @@ impl PreparedMarkdown {
     }
 
     pub(super) fn release_images(&self, cx: &mut gpui::App) {
-        for row in &self.flow {
-            if let FlowKind::Block(block) = &row.kind
-                && let PreparedKind::Code(code) = &block.kind
-                && let Some(diagram) = &code.fence.diagram
-            {
-                let images = [Arc::clone(&diagram.dark), Arc::clone(&diagram.light)];
-                cx.defer(move |cx| {
-                    for image in images {
-                        cx.drop_image(image, None);
-                    }
-                    // Other owners may still draw this image in cached scenes.
-                    cx.refresh_windows();
-                });
-            }
+        // Raster images belong to mounted diagram viewports now. Refreshing
+        // retires unmounted keyed states, whose release hooks drop textures.
+        if self.flow.iter().any(|row| {
+            matches!(&row.kind,
+            FlowKind::Block(block) if matches!(&block.kind,
+                PreparedKind::Code(code) if code.fence.diagram.is_some()))
+        }) {
+            cx.refresh_windows();
         }
     }
 
@@ -720,6 +716,7 @@ pub(super) struct LeafPresentation {
     chains: Box<[Box<[InlineLayer]>]>,
     pub(super) link_ranges: Rc<[Range<usize>]>,
     pub(super) link_destinations: Rc<[SharedString]>,
+    pub(super) file_icons: Rc<[(usize, (editor_assets::AssetId, editor_assets::AssetId))]>,
     /// Color values the text writes, outside links: right-clicking one
     /// offers it in every notation. Each range covers its swatch, plus the
     /// value when the value shows.
@@ -730,7 +727,7 @@ pub(super) struct LeafPresentation {
     pub(super) swatches: Rc<[InlineSwatch]>,
     /// What each swatch slot copies as in a text selection.
     pub(super) copies: Rc<[(Range<usize>, SharedString)]>,
-    code_ranges: Box<[Range<usize>]>,
+    pub(super) code_ranges: Box<[Range<usize>]>,
     resolved: RefCell<Option<ResolvedLeaf>>,
 }
 
@@ -753,6 +750,7 @@ impl LeafPresentation {
                 .sum::<usize>()
             + std::mem::size_of_val(self.link_ranges.as_ref())
             + rich::budget::shared(&self.link_destinations)
+            + std::mem::size_of_val(self.file_icons.as_ref())
             + std::mem::size_of_val(self.color_ranges.as_ref())
             + rich::budget::shared(&self.color_values)
             + std::mem::size_of_val(self.swatches.as_ref())
@@ -784,7 +782,7 @@ impl LeafPresentation {
             })
             .collect();
         // A lone swatch copies as its value; one beside its value as nothing.
-        let copies = colors
+        let mut copies: Vec<_> = colors
             .iter()
             .map(|color| {
                 let copy = if color.alone {
@@ -795,7 +793,14 @@ impl LeafPresentation {
                 (color.slot.clone(), copy)
             })
             .collect();
+        copies.extend(
+            flat.file_slots
+                .into_iter()
+                .map(|slot| (slot, SharedString::default())),
+        );
+        copies.sort_by_key(|(range, _)| range.start);
         Self {
+            file_icons: flat.file_icons.into(),
             text: SharedString::from(flat.source),
             runs: flat.runs.into_boxed_slice(),
             color_ranges: colors.iter().map(|color| color.range.clone()).collect(),
@@ -804,7 +809,7 @@ impl LeafPresentation {
                 .map(|color| SharedString::from(color.value))
                 .collect(),
             swatches,
-            copies,
+            copies: copies.into(),
             chains: flat.chains.into_iter().map(Vec::into_boxed_slice).collect(),
             link_ranges: flat.links.iter().map(|link| link.range.clone()).collect(),
             link_destinations: flat
@@ -902,11 +907,13 @@ pub(super) struct PreparedFenceData {
     pub(super) multiline: bool,
     /// Whether the fence is a closed `mermaid` block, drawn as a diagram
     /// when its source renders.
-    pub(super) diagram: Option<super::diagram::MermaidDiagram>,
+    pub(super) diagram: Option<Arc<super::diagram::MermaidDiagram>>,
     /// The rich block an `artisan-*` fence draws, parsed once here.
     pub(super) rich: Option<RichFence>,
     /// Assembled display byte ranges and retained text per native code line.
     pub(super) lines: Arc<[(Range<usize>, SharedString)]>,
+    /// Native horizontal scrolling measures this line, including offscreen lines.
+    pub(super) widest_line: usize,
     /// The fence's color values, their swatches, and what each slot copies
     /// as, addressing assembled display byte offsets.
     pub(super) colors: FenceColors,
@@ -915,6 +922,7 @@ pub(super) struct PreparedFenceData {
 
 #[derive(Debug)]
 pub(super) struct PreparedFence {
+    pub(super) scroll: gpui::UniformListScrollHandle,
     data: PreparedFenceData,
     resolved: RefCell<Option<ResolvedFence>>,
 }
@@ -1039,10 +1047,10 @@ impl PreparedFenceData {
                 .map(|(_, text)| text.len())
                 .sum::<usize>()
             + rich
-            + self.diagram.as_ref().map_or(0, |diagram| {
-                super::rich::image_resident_bytes(&diagram.dark)
-                    + super::rich::image_resident_bytes(&diagram.light)
-            })
+            + self
+                .diagram
+                .as_ref()
+                .map_or(0, |diagram| diagram.resident_bytes)
     }
     fn new(fence: &CodeFence, renderer: Option<&gpui::SvgRenderer>) -> Self {
         let rich = rich::prepare(
@@ -1061,7 +1069,8 @@ impl PreparedFenceData {
         let diagram = fence
             .diagram
             .as_ref()
-            .and_then(|svg| super::diagram::image(svg, renderer?.clone()));
+            .and_then(|svg| super::diagram::image(svg, renderer?))
+            .map(Arc::new);
         // Rich blocks and diagrams draw something else; plain code shows
         // its colors.
         let starts = if rich.is_none() && diagram.is_none() {
@@ -1076,12 +1085,19 @@ impl PreparedFenceData {
         } else {
             decorate_colors(display, &starts, tokens)
         };
+        let lines = code_lines(&shown);
+        let widest_line = lines
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (_, text))| unicode_width::UnicodeWidthStr::width(text.as_ref()))
+            .map_or(0, |(index, _)| index);
         Self {
             multiline: display.contains('\n'),
             diagram,
             rich,
             source,
-            lines: code_lines(&shown),
+            lines,
+            widest_line,
             colors,
             tokens: tokens.into_boxed_slice(),
         }
@@ -1089,8 +1105,9 @@ impl PreparedFenceData {
 }
 
 impl PreparedFence {
-    const fn new(data: PreparedFenceData) -> Self {
+    fn new(data: PreparedFenceData) -> Self {
         Self {
+            scroll: gpui::UniformListScrollHandle::new(),
             data,
             resolved: RefCell::new(None),
         }

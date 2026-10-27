@@ -61,6 +61,27 @@ fn image_takes_one_src_or_several() {
 }
 
 #[test]
+fn image_gallery_accepts_paths_and_mixed_entries() {
+    for json in [
+        r#"{"images": ["a.png", "b.png"]}"#,
+        r#"{"paths": ["a.png", "b.png", "c.png"]}"#,
+        r#"{"src": "first.png", "images": ["a.png", {"src": "b.png", "alt": "Side", "caption": "Detail"}]}"#,
+    ] {
+        let _gallery = ready("image", json);
+    }
+    assert!(invalid("image", r#"{"paths": ["", "  "]}"#).contains("src"));
+    assert!(invalid("image", r#"{"images": [42]}"#).contains("match"));
+    for (count, valid) in [(16, true), (17, false)] {
+        let json = serde_json::json!({"images": vec!["a.png"; count]}).to_string();
+        if valid {
+            let _gallery = ready("image", &json);
+        } else {
+            assert!(invalid("image", &json).contains("16"));
+        }
+    }
+}
+
+#[test]
 fn audio_takes_one_src_or_tracks() {
     let _one = ready("audio", r#"{"src": "out/take-2.wav"}"#);
     let _tracks = ready(

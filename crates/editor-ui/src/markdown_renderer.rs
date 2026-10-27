@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement, Pixels,
-    SharedString, Styled, div, img, prelude::InteractiveElement as _, px,
+    AnyElement, AppContext as _, Div, FontStyle, FontWeight, HighlightStyle, IntoElement,
+    ParentElement, Pixels, SharedString, Styled, div, prelude::InteractiveElement as _, px,
 };
 
 use crate::markdown::{Block, CodeToken, CodeTokenKind, Span};
@@ -374,6 +374,30 @@ impl MarkdownRenderer {
             range,
             None,
             true,
+            None,
+        )
+    }
+
+    /// Renders a user's message with catalog-backed inline mentions.
+    pub fn render_message_range(
+        &self,
+        prepared: &PreparedSource,
+        range: Range<usize>,
+        theme: ArtisanTheme,
+        selector: impl Into<SharedString>,
+        tone: MarkdownBodyTone,
+        mentions: &crate::text_editor::Tokenizer,
+    ) -> AnyElement {
+        self.render_prepared(
+            &prepared.presentation,
+            prepared.revision(),
+            &theme,
+            &selector.into(),
+            tone,
+            range,
+            None,
+            true,
+            Some(mentions),
         )
     }
 
@@ -396,6 +420,7 @@ impl MarkdownRenderer {
             range,
             None,
             false,
+            None,
         )
     }
 
@@ -419,6 +444,7 @@ impl MarkdownRenderer {
             range,
             Some(reveal),
             true,
+            None,
         )
     }
 
@@ -502,6 +528,7 @@ impl MarkdownRenderer {
         range: Range<usize>,
         reveal: Option<&PreparedReveal>,
         copy: bool,
+        mentions: Option<&crate::text_editor::Tokenizer>,
     ) -> AnyElement {
         let selection_prefix = self.selection_prefix.borrow();
         let media = self
@@ -520,6 +547,7 @@ impl MarkdownRenderer {
             selector,
             reveal,
             copy,
+            mentions,
         };
         let mut root = markdown_root(render.id(ROOT_SLOT), theme, tone);
         let flow = prepared.flow();
@@ -618,6 +646,7 @@ impl gpui::RenderOnce for SelectionRegistration {
 
 /// Everything one render pass threads through the block tree.
 struct RenderContext<'a> {
+    mentions: Option<&'a crate::text_editor::Tokenizer>,
     selection_prefix: &'a [u64],
     selection_scope: &'a SharedString,
     media: Option<&'a MediaFetcher>,
@@ -905,19 +934,8 @@ fn render_leaf(
     separator: &'static str,
     render: &RenderContext<'_>,
 ) -> AnyElement {
-    let selector = render.element_id(slot);
-    let order = render.selection_order(slot);
-    let theme = render.theme;
     let presentation = leaf.presentation();
-    selectable_leaf(
-        selector,
-        &presentation,
-        theme,
-        order,
-        separator,
-        render.selection_scope.clone(),
-        render.reveal.map(|reveal| (reveal, slot)),
-    )
+    selectable_leaf(&presentation, slot, separator, render)
 }
 
 /// Renders one flattened leaf as retained selectable text.
@@ -932,14 +950,17 @@ fn render_leaf(
     reason = "the flagged bindings are references or plain values, not guards"
 )]
 fn selectable_leaf(
-    id: impl Into<gpui::ElementId>,
     presentation: &LeafPresentation,
-    theme: &ArtisanTheme,
-    order: Vec<u64>,
+    slot: Slot,
     separator: &'static str,
-    scope: SharedString,
-    reveal: Option<(&PreparedReveal, usize)>,
+    render: &RenderContext<'_>,
 ) -> AnyElement {
+    let id = render.element_id(slot);
+    let theme = render.theme;
+    let order = render.selection_order(slot);
+    let scope = render.selection_scope.clone();
+    let reveal = render.reveal.map(|reveal| (reveal, slot));
+    let reference_scope = render.media.and_then(MediaFetcher::resource_scope);
     let (highlights, overrides) = presentation.resolved(theme);
     let highlights = reveal.map_or_else(
         || Rc::clone(&highlights),
@@ -949,7 +970,38 @@ fn selectable_leaf(
         .selection_order(order, separator)
         .selection_scope(scope)
         .with_shared_highlights(highlights)
-        .with_shared_text_run_overrides(overrides);
+        .with_shared_text_run_overrides(overrides)
+        .with_inline_file_icons(
+            presentation
+                .file_icons
+                .iter()
+                .map(|(offset, (light, dark))| {
+                    (
+                        *offset,
+                        if theme.colors.mode.is_dark() {
+                            *dark
+                        } else {
+                            *light
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        )
+        .with_copy_substitutions(Rc::clone(&presentation.copies));
+    if let Some(mentions) = render.mentions {
+        let tokens = mentions(&presentation.text)
+            .into_iter()
+            .filter(|token| {
+                !presentation
+                    .code_ranges
+                    .iter()
+                    .chain(presentation.link_ranges.iter())
+                    .any(|range| range.start < token.range.end && token.range.start < range.end)
+            })
+            .collect();
+        element = element.with_tokens(tokens);
+    }
     if let Some((reveal, slot)) = reveal {
         let end = reveal.visible_end(slot, &presentation.text);
         if end < presentation.text.len() {
@@ -962,7 +1014,6 @@ fn selectable_leaf(
         let values = Rc::clone(&presentation.color_values);
         element = element
             .with_inline_swatches(Rc::clone(&presentation.swatches))
-            .with_copy_substitutions(Rc::clone(&presentation.copies))
             .shared_context_ranges(
                 Rc::clone(&presentation.color_ranges),
                 move |index, position, window, cx| {
@@ -979,9 +1030,20 @@ fn selectable_leaf(
     element
         .shared_links(
             Rc::clone(&presentation.link_ranges),
-            move |index, _window, cx| {
+            move |index, window, cx| {
                 if let Some(destination) = destinations.get(index) {
-                    cx.open_url(destination);
+                    if let Some(path) = file_link_path(destination) {
+                        let line = file_link_line(destination);
+                        rich::open_reference(
+                            &path.to_string_lossy(),
+                            line,
+                            reference_scope.clone(),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        cx.open_url(destination);
+                    }
                 }
             },
         )
@@ -993,6 +1055,13 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
     let fence = &code.fence;
     let note = match &fence.rich {
         Some(rich::RichFence::Ready(prepared)) => return render_rich(code, prepared, render),
+        // Instant streaming draws an unfinished block as its source.
+        Some(rich::RichFence::Pending { .. })
+            if crate::streaming::StreamingMode::current()
+                == crate::streaming::StreamingMode::Instant =>
+        {
+            None
+        }
         Some(rich::RichFence::Pending { kind }) => {
             // Most blocks draw without a card, so the placeholder has none.
             return div()
@@ -1032,16 +1101,11 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
         .letter_spacing(px(0.0))
         .text_color(theme.colors.text.to_paint());
     body = match diagram {
-        // The diagram centers between gutters as wide as the copy action's,
-        // and claims its laid-out aspect before the image rasterizes, so
-        // the card never resizes under the transcript.
-        Some(diagram) => body.flex().justify_center().child(
-            div()
-                .w_full()
-                .max_w(px(diagram.width))
-                .aspect_ratio(diagram.width / diagram.height)
-                .child(img(Arc::clone(diagram.image(theme.colors.mode))).size_full()),
-        ),
+        Some(diagram) => body.child(diagram::DiagramView::new(
+            render.element_id(code.code),
+            Arc::clone(diagram),
+            theme,
+        )),
         None => body.child(fence_text(
             text_id,
             fence,
@@ -1101,7 +1165,8 @@ fn fence_text(
     let line_px = ProseTypography::CODE_LINE_PX;
     let line_namespace = SharedString::from(id.to_string());
     let list_id = id;
-    gpui::uniform_list(list_id, count, move |range, _, _| {
+    let scroll = fence.scroll.0.borrow().base_handle.clone();
+    let list = gpui::uniform_list(list_id, count, move |range, _, _| {
         range
             .filter_map(|index| {
                 lines.get(index).map(|(range, text)| {
@@ -1183,7 +1248,9 @@ fn fence_text(
                                 }
                             });
                     }
+                    let line_selector = format!("{line_namespace}-line-{index}");
                     div()
+                        .debug_selector(move || line_selector)
                         .h(px(line_px))
                         .whitespace_nowrap()
                         .overflow_hidden()
@@ -1193,8 +1260,53 @@ fn fence_text(
             .collect::<Vec<_>>()
     })
     .w_full()
-    .h(px(crate::f32_of_count(count.min(24)) * line_px))
-    .into_any_element()
+    .track_scroll(&fence.scroll)
+    .with_width_from_item(Some(fence.widest_line))
+    .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+    .h(px(crate::f32_of_count(count.min(24)) * line_px));
+    let viewport = div().relative().w_full().min_w_0().child(list).child(
+        gpui::canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
+            move |_, hitbox, window, _| {
+                let view = window.current_view();
+                let scroll = scroll.clone();
+                window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture || !hitbox.should_handle_scroll(window)
+                    {
+                        return;
+                    }
+                    let delta = event.delta.pixel_delta(px(line_px));
+                    let offset = scroll.offset();
+                    let max = scroll.max_offset();
+                    let next = gpui::point(
+                        (offset.x + delta.x).clamp(-max.x, px(0.0)),
+                        (offset.y + delta.y).clamp(-max.y, px(0.0)),
+                    );
+                    if next != offset {
+                        scroll.set_offset(next);
+                        cx.notify(view);
+                        // Consume before the transcript's wheel overlay.
+                        // At an edge, let the conversation keep scrolling.
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0(),
+    );
+    div()
+        .w_full()
+        .min_w_0()
+        .child(viewport)
+        .children((count > 24).then(|| {
+            div()
+                .pt(px(8.0))
+                .text_size(px(12.0))
+                .text_color(theme.colors.text_muted.to_paint())
+                .child(format!("{count} lines · Scroll to read more"))
+        }))
+        .into_any_element()
 }
 
 /// A rich block: code on the fence's glass card with its copy action,
@@ -1281,7 +1393,7 @@ fn valid_code_range(token: &CodeToken, source: &str) -> Option<(Range<usize>, Co
 pub struct InlineLink {
     /// Byte range of the visible label in the flattened source.
     pub range: Range<usize>,
-    /// Verbatim absolute destination (`http(s)`/`mailto:` only).
+    /// Verbatim absolute web, email, or file destination.
     pub destination: String,
 }
 
@@ -1404,18 +1516,60 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
     Some(result)
 }
 
-/// Only absolute `http(s)` and `mailto` destinations open through the
-/// platform browser. Relative paths need a project base the renderer does
-/// not own, so they keep their plain label instead of opening an arbitrary
-/// local path; any other scheme stays inert. The engine still preserves
-/// every destination verbatim in the model.
+/// Web/email links open in the browser; file links open in the thread preview.
 fn is_openable_link_destination(destination: &str) -> bool {
-    let trimmed = destination.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+    let lower = destination.to_ascii_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || file_link_path(destination).is_some()
+}
+
+/// Resolves absolute native paths and local file URIs, including code references
+/// with a trailing line/column or fragment. Never accepts a remote file authority.
+fn file_link_path(destination: &str) -> Option<std::path::PathBuf> {
+    let path = if destination.to_ascii_lowercase().starts_with("file:") {
+        let url = url::Url::parse(destination).ok()?;
+        if url.host_str().is_some_and(|host| host != "localhost") {
+            return None;
+        }
+        url.to_file_path().ok()?
+    } else {
+        let path = destination.split('#').next()?;
+        let mut path = path;
+        for _ in 0..2 {
+            if let Some((base, line)) = path.rsplit_once(':')
+                && !line.is_empty()
+                && line.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                path = base;
+            }
+        }
+        std::path::PathBuf::from(path)
+    };
+    let raw = destination.split('#').next().unwrap_or_default();
+    let has_scheme = raw.split_once(':').is_some_and(|(prefix, _)| {
+        !prefix.contains(['/', '\\'])
+            && !prefix.is_empty()
+            && prefix
+                .bytes()
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic())
+            && prefix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+    });
+    (!path.as_os_str().is_empty()
+        && !destination.starts_with("//")
+        && (!has_scheme
+            || destination.to_ascii_lowercase().starts_with("file:")
+            || raw.split_once(':').is_some_and(|(_, suffix)| {
+                !suffix.is_empty()
+                    && suffix
+                        .split(':')
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            })))
+    .then_some(path)
 }
 
 fn command_style(theme: &ArtisanTheme) -> HighlightStyle {
@@ -1467,6 +1621,21 @@ fn emphasis_style() -> HighlightStyle {
         font_style: Some(FontStyle::Italic),
         ..Default::default()
     }
+}
+
+/// Extracts a line number from common file-link suffixes.
+fn file_link_line(destination: &str) -> Option<u32> {
+    if let Some((_, fragment)) = destination.split_once('#') {
+        return fragment.strip_prefix('L').unwrap_or(fragment).parse().ok();
+    }
+    let mut parts = destination.rsplit(':');
+    let last = parts.next()?.parse::<u32>().ok()?;
+    Some(
+        parts
+            .next()
+            .and_then(|part| part.parse().ok())
+            .unwrap_or(last),
+    )
 }
 
 fn link_style(theme: &ArtisanTheme) -> HighlightStyle {

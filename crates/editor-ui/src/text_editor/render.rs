@@ -718,7 +718,7 @@ impl Element for GlyphText {
         let glyph = px(GLYPH_SIZE_PX);
         let mut glyphs = Vec::new();
         for (range, _, asset, color) in &self.glyphs {
-            let Some(origin) = layout.position_for_index(range.start) else {
+            let Some(origin) = super::visual_position(&layout, range.start) else {
                 continue;
             };
             let mut element = asset_glyph(*asset)

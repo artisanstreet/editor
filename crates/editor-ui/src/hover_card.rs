@@ -54,8 +54,7 @@ pub enum HoverTone {
     /// The text colour.
     #[default]
     Neutral,
-    /// The text colour's lightness in the destructive red: rows that
-    /// archive, delete or stop.
+    /// Varde's muted red glass tint: rows that archive, delete or stop.
     Destructive,
 }
 
@@ -71,15 +70,33 @@ pub struct HoverColors {
 impl HoverColors {
     #[must_use]
     pub const fn new(theme: &ArtisanTheme, tone: HoverTone) -> Self {
-        let ink = match tone {
-            HoverTone::Neutral => theme.colors.text,
-            HoverTone::Destructive => theme.colors.text.in_hue_of(theme.colors.destructive_text),
-        };
-        let (top, bottom) = hover_fill_stops(theme, ink);
-        Self {
-            top,
-            bottom,
-            ring: ink.at(Opacity::HoverRing),
+        match tone {
+            HoverTone::Neutral => {
+                let ink = theme.colors.text;
+                let (top, bottom) = hover_fill_stops(theme, ink);
+                Self {
+                    top,
+                    bottom,
+                    ring: ink.at(Opacity::HoverRing),
+                }
+            }
+            HoverTone::Destructive => {
+                // Match Varde's glass-destructive material: the actual red
+                // at 28% / 14%, rather than red at the text's lightness.
+                let ink = theme.colors.destructive_hover;
+                let strong = ink.at(Opacity::DestructiveHoverStrong);
+                let soft = ink.at(Opacity::DestructiveHoverSoft);
+                let (top, bottom) = if theme.colors.mode.is_dark() {
+                    (strong, soft)
+                } else {
+                    (soft, strong)
+                };
+                Self {
+                    top,
+                    bottom,
+                    ring: strong,
+                }
+            }
         }
     }
 
@@ -350,7 +367,7 @@ impl TooltipAnchor {
     }
 }
 
-/// The glass tooltip frame: strong glass, 12 px text, padded; `fixed`
+/// The glass tooltip frame: strong glass, muted 12 px text, padded; `fixed`
 /// takes exactly `width`, otherwise at most.
 #[must_use]
 pub fn glass_tooltip(
@@ -368,7 +385,7 @@ pub fn glass_tooltip(
         .text_size(TypographyTokens::size(TextStep::Xs))
         .line_height(px(16.0))
         .whitespace_normal()
-        .text_color(theme.colors.text.to_paint())
+        .text_color(theme.colors.text_muted.to_paint())
 }
 
 enum GlassShape {
@@ -394,7 +411,7 @@ impl RenderOnce for GlassCard {
             GlassShape::Pill => (px(11.0), true),
             GlassShape::Handle => (RadiusTokens::value(RadiusStep::XlMid), true),
         };
-        let strength = if matches!(self.shape, GlassShape::Navigator) {
+        let strength = if matches!(self.shape, GlassShape::Card | GlassShape::Navigator) {
             GlassStrength::Strong
         } else {
             GlassStrength::Quiet
@@ -469,12 +486,16 @@ fn glass_surface(
             div()
                 .relative()
                 .when(fill, gpui::Styled::size_full)
-                .text_color(theme.colors.text.to_paint())
+                .text_color(if fill {
+                    theme.colors.text.to_paint()
+                } else {
+                    theme.colors.text_muted.to_paint()
+                })
                 .child(content),
         )
 }
 
-/// The card title: semibold, control-sized, in the popover foreground.
+/// The card title: semibold, control-sized, inheriting the card text colour.
 #[must_use]
 pub fn hover_card_title(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()

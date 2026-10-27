@@ -93,6 +93,10 @@ pub enum Opacity {
     HoverBottom,
     /// The hairline ring around the hover pill and chart hover bands.
     HoverRing,
+    /// Varde's destructive hover: strong gradient stop and inset rim.
+    DestructiveHoverStrong,
+    /// Varde's destructive hover: soft gradient stop.
+    DestructiveHoverSoft,
     /// The border of a glass surface: a text-coloured edge over any backdrop.
     GlassBorder,
     /// The tinted fill behind a status chip or toned badge, in the tone's colour.
@@ -113,6 +117,8 @@ pub enum Opacity {
     Unavailable,
     /// The page-coloured backdrop a dialog lays over the app behind it.
     Backdrop,
+    /// A light tint behind the settings dialog.
+    SettingsBackdrop,
     /// The black shade behind a bare dialog (image viewer), over any content.
     Shade,
     /// The near-opaque page backdrop behind the full-window image preview.
@@ -239,6 +245,8 @@ impl Opacity {
             Self::HoverTop => 0.16,
             Self::HoverBottom => 0.07,
             Self::HoverRing => 0.13,
+            Self::DestructiveHoverStrong => 0.28,
+            Self::DestructiveHoverSoft => 0.14,
             Self::GlassBorder => 0.10,
             Self::ToneTint => 0.10,
             Self::ToneIcon => 0.8,
@@ -249,6 +257,7 @@ impl Opacity {
             Self::ProgressTrack => 0.18,
             Self::Unavailable => 0.35,
             Self::Backdrop => 0.9,
+            Self::SettingsBackdrop => 0.24,
             Self::Shade => 0.45,
             Self::BackdropDense => 0.97,
             Self::MediaEdge => 0.12,
@@ -598,6 +607,8 @@ pub struct ColorTokens {
     pub action_text: Oklch,
     /// `--destructive`: red 9, solid fills.
     pub destructive: Oklch,
+    /// Varde's muted hover tint: red 600 in light mode, red 500 in dark.
+    pub destructive_hover: Oklch,
     /// `--destructive-text`: red 11, error text and icons.
     pub destructive_text: Oklch,
     /// `--destructive-contrast`: text on a destructive fill.
@@ -614,6 +625,8 @@ pub struct ColorTokens {
     pub favourite: Oklch,
     /// `--unread`: a thread with news.
     pub unread: Oklch,
+    /// Pink: a pending question or approval needs the user's answer.
+    pub needs_answer: Oklch,
     /// `--question-tint`: a question waiting on the user.
     pub question_tint: Oklch,
     /// `--thread-title-active`: the open thread's title.
@@ -679,6 +692,10 @@ mod polar {
     pub const RED_600: Lch = (0.577, 0.245, 27.325);
     pub const RED_700: Lch = (0.505, 0.213, 27.518);
     pub const RED_950: Lch = (0.258, 0.092, 26.042);
+
+    // Pink: waiting for the user's answer.
+    pub const PINK_400: Lch = (0.718, 0.202, 349.761);
+    pub const PINK_600: Lch = (0.592, 0.249, 0.584);
 
     // Amber: warning.
     pub const AMBER_50: Lch = (0.987, 0.022, 95.277);
@@ -792,10 +809,10 @@ impl ColorTokens {
             EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700, EMERALD_950, GRAY_50, GRAY_100,
             GRAY_200, GRAY_300, GRAY_400, GRAY_500, GRAY_600, GRAY_900, INDIGO_50, INDIGO_100,
             INDIGO_200, INDIGO_300, INDIGO_400, INDIGO_500, INDIGO_600, INDIGO_700, INDIGO_800,
-            INDIGO_900, INDIGO_950, POLAR_50, POLAR_100, POLAR_300, POLAR_400, POLAR_500,
-            POLAR_600, POLAR_700, POLAR_800, POLAR_900, POLAR_950, PURPLE_300, PURPLE_400,
-            PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400, RED_500, RED_600, RED_700, RED_950,
-            WHITE,
+            INDIGO_900, INDIGO_950, PINK_400, PINK_600, POLAR_50, POLAR_100, POLAR_300, POLAR_400,
+            POLAR_500, POLAR_600, POLAR_700, POLAR_800, POLAR_900, POLAR_950, PURPLE_300,
+            PURPLE_400, PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400, RED_500, RED_600,
+            RED_700, RED_950, WHITE,
         };
         let dark = mode.is_dark();
         let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
@@ -957,6 +974,7 @@ impl ColorTokens {
             action_hover_bottom: token(BLUE_600),
             action_text: token(WHITE),
             destructive: red.solid,
+            destructive_hover: pick(RED_600, RED_500),
             destructive_text: red.text,
             destructive_contrast: red.contrast,
             banner_info: BannerColors {
@@ -969,6 +987,7 @@ impl ColorTokens {
             banner_error: banner(red),
             favourite: amber.text,
             unread: link,
+            needs_answer: pick(PINK_600, PINK_400),
             question_tint: pick(INDIGO_50, INDIGO_950),
             thread_title_active: link,
             mention_skill: link,

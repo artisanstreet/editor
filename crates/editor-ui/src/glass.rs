@@ -144,9 +144,11 @@ pub fn card_shadows(theme: &ArtisanTheme) -> Vec<BoxShadow> {
     theme.elevation.shadows(Elevation::Raised)
 }
 
-/// [`card_shadows`] in a tone instead of a border: a soft half-pixel ring
-/// and a faint glow of the tone under the raised drops, for small tinted
-/// cards and pills (a blocked goal's state) whose solid border reads harsh.
+/// [`card_shadows`] in a tone instead of a border.
+///
+/// A soft half-pixel ring and a faint glow of the tone under the raised
+/// drops, for small tinted cards and pills (a blocked goal's state) whose
+/// solid border reads harsh.
 #[must_use]
 pub fn tinted_card_shadows(theme: &ArtisanTheme, tone: Oklch) -> Vec<BoxShadow> {
     let mut shadows = vec![

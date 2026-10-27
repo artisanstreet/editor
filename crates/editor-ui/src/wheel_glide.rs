@@ -20,6 +20,11 @@ impl WheelGlide {
         if !self.active() {
             self.last_frame = Some(Instant::now());
         }
+        // Reversing the wheel should respond immediately, without first
+        // spending the distance queued in the previous direction.
+        if self.remaining.signum() != delta.signum() {
+            self.remaining = 0.0;
+        }
         let target = (current + self.remaining + delta).clamp(-max.max(0.0), 0.0);
         self.remaining = target - current;
     }
@@ -50,8 +55,9 @@ impl WheelGlide {
             self.cancel();
             return (distance != 0.0).then_some(target);
         }
-        // Master's 60 Hz response: 28% of the way each frame.
-        let fraction = 1.0 - 0.72_f32.powf(elapsed.as_secs_f32() * 60.0);
+        // A 90 ms response settles gently in either direction. Elapsed time
+        // keeps the speed independent of the display's refresh rate.
+        let fraction = 1.0 - (-elapsed.as_secs_f32() / 0.09).exp();
         let moved = distance * fraction;
         self.remaining = distance - moved;
         Some(current + moved)
@@ -69,6 +75,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reversing_direction_drops_the_previous_ticks_backlog() {
+        let mut glide = WheelGlide::default();
+        glide.push(-250.0, -100.0, 500.0);
+        glide.push(-250.0, 30.0, 500.0);
+        let next = glide
+            .step_elapsed(-250.0, 500.0, Duration::from_millis(16))
+            .unwrap();
+        assert!(next > -250.0, "the next frame follows the new direction");
+        assert!(next < -220.0, "the new direction still eases in");
+    }
+
+    #[test]
+    fn equal_elapsed_time_travels_the_same_distance_at_different_refresh_rates() {
+        let travel = |frame_ms, frames| {
+            let mut glide = WheelGlide::default();
+            glide.push(-250.0, -100.0, 500.0);
+            let mut current = -250.0;
+            for _ in 0..frames {
+                current = glide
+                    .step_elapsed(current, 500.0, Duration::from_millis(frame_ms))
+                    .unwrap();
+            }
+            current
+        };
+        assert!((travel(8, 12) - travel(16, 6)).abs() < 0.001);
+    }
+
+    #[test]
     fn a_wheel_tick_glides_to_its_distance_and_stops_at_the_edge() {
         let mut glide = WheelGlide::default();
         glide.push(-100.0, 60.0, 500.0);
@@ -79,7 +113,10 @@ mod tests {
             offset = next;
             frames += 1;
         }
-        assert!((offset - -40.0).abs() < f32::EPSILON);
+        assert!(
+            (offset - -40.0).abs() < 0.001,
+            "settles within a thousandth of a pixel"
+        );
         assert!(frames > 5, "it eases over several frames, not one jump");
         glide.push(-10.0, 60.0, 500.0);
         assert!(glide.step_elapsed(-10.0, 500.0, Duration::from_secs(1)) <= Some(0.0));

@@ -2,8 +2,9 @@
 //!
 //! A closed `mermaid` fence lays out through `mermaid-rs-renderer` into an
 //! SVG painted in the transcript's own tokens, once per theme mode, and GPUI
-//! rasterizes the SVG of the active mode as an ordinary image. Layout runs on the owning Markdown worker before
-//! the prepared block is published. No font scan or layout runs during paint.
+//! rasterizes the active mode at its displayed device size. Layout runs on
+//! the owning Markdown worker before the prepared block is published.
+//! No font scan or layout runs during paint.
 //!
 //! Source the renderer rejects — or panics on — yields no diagram, and the
 //! caller keeps drawing the fence as code.
@@ -13,7 +14,7 @@ use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use gpui::{RenderImage, SvgRenderer};
+use gpui::{ParsedSvg, SvgRenderer};
 use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict, render_svg,
 };
@@ -32,27 +33,37 @@ const MAX_SOURCE_BYTES: usize = 32 * 1024;
 /// rasterized image grows past what a transcript should hold.
 const MAX_EDGE_PX: f32 = 8192.0;
 
-/// Fonts the labels name. Layout measures against the system font database
-/// and GPUI paints with the same one, so the families must be system ones;
-/// the app's bundled faces are invisible to the measurer.
-const FONT_FAMILY: &str =
-    "\"Segoe UI\", \"Helvetica Neue\", Helvetica, Arial, \"DejaVu Sans\", sans-serif";
+/// GPUI's SVG resolver loads this face from the bundled asset catalog.
+/// Use deterministic layout metrics below: the dependency's private font
+/// database cannot see bundled faces and would otherwise measure a fallback.
+const FONT_FAMILY: &str = "Spline Sans";
 
 const FONT_SIZE_PX: f32 = 14.0;
 
-/// One diagram ready to paint: the SVG of each mode as an image, and the
-/// size it claims.
-#[derive(Debug)]
+/// Parsed SVGs for both themes, with shared layout dimensions.
 pub(super) struct MermaidDiagram {
-    pub(super) dark: Arc<RenderImage>,
-    pub(super) light: Arc<RenderImage>,
+    pub(super) dark: Arc<ParsedSvg>,
+    pub(super) light: Arc<ParsedSvg>,
     pub(super) width: f32,
     pub(super) height: f32,
+    pub(super) resident_bytes: usize,
 }
 
+impl std::fmt::Debug for MermaidDiagram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MermaidDiagram")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
+mod view;
+pub(super) use view::DiagramView;
+
 impl MermaidDiagram {
-    /// The image painted in `mode`'s tokens.
-    pub(super) const fn image(&self, mode: ThemeMode) -> &Arc<RenderImage> {
+    /// The parsed SVG painted in `mode`'s tokens.
+    pub(super) const fn image(&self, mode: ThemeMode) -> &Arc<ParsedSvg> {
         match mode {
             ThemeMode::Dark => &self.dark,
             ThemeMode::Light => &self.light,
@@ -115,14 +126,16 @@ impl DiagramCache {
         diagram
     }
 }
-pub(super) fn image(svg: &DiagramSvg, renderer: SvgRenderer) -> Option<MermaidDiagram> {
-    let dark = super::rich::decode_image_bytes(svg.source.as_bytes(), renderer.clone()).ok()?;
-    let light = super::rich::decode_image_bytes(svg.light_source.as_bytes(), renderer).ok()?;
+pub(super) fn image(svg: &DiagramSvg, renderer: &SvgRenderer) -> Option<MermaidDiagram> {
+    let dark = Arc::new(renderer.parse_svg(svg.source.as_bytes()).ok()?);
+    let light = Arc::new(renderer.parse_svg(svg.light_source.as_bytes()).ok()?);
     Some(MermaidDiagram {
         dark,
         light,
         width: f32::from_bits(svg.width_bits),
         height: f32::from_bits(svg.height_bits),
+        // Parsed paths and shaped glyphs retain more than the XML input.
+        resident_bytes: (svg.source.len() + svg.light_source.len()) * 8,
     })
 }
 
@@ -174,7 +187,10 @@ fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f3
         {
             return None;
         }
-        let config = LayoutConfig::default();
+        let config = LayoutConfig {
+            fast_text_metrics: true,
+            ..LayoutConfig::default()
+        };
         // Both themes share fonts and sizes, so one layout serves both.
         let layout = compute_layout(&parsed.graph, &themes[0], &config);
         let size = measure_svg_dimensions(&layout, &config, None);

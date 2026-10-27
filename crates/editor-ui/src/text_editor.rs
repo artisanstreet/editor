@@ -31,7 +31,7 @@ mod text;
 /// the row above, which would paint the caret there and stop Up from leaving
 /// a wrapped row's first column. Must only be called after the layout was
 /// painted.
-fn visual_position(layout: &TextLayout, index: usize) -> Option<gpui::Point<Pixels>> {
+pub(crate) fn visual_position(layout: &TextLayout, index: usize) -> Option<gpui::Point<Pixels>> {
     let position = layout.position_for_index(index)?;
     let line_height = layout.line_height();
     let bounds = layout.bounds();

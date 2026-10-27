@@ -36,6 +36,7 @@ pub struct MediaFetcher {
     pub(super) owner: Arc<[u64]>,
     revision: u64,
     reference_scope: Option<super::super::actions::ResourceScope>,
+    local_files: bool,
     fetch: Arc<dyn Fn(MediaRequest) -> MediaFetch + Send + Sync>,
     pub(super) resources: Arc<super::resource_cache::ResourceCache>,
 }
@@ -71,9 +72,17 @@ impl MediaFetcher {
             owner: Arc::from([]),
             revision: 0,
             reference_scope: None,
+            local_files: false,
             fetch: Arc::new(fetch),
             resources: Arc::new(super::resource_cache::ResourceCache::default()),
         }
+    }
+
+    /// Whether the owning Forge uses this computer's native filesystem.
+    #[must_use]
+    pub const fn local_files(mut self, local: bool) -> Self {
+        self.local_files = local;
+        self
     }
 
     pub(in crate::markdown_renderer) fn owned_by(mut self, owner: &[u64], revision: u64) -> Self {

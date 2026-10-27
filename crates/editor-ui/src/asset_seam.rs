@@ -346,10 +346,12 @@ impl AssetGlyph {
     #[must_use]
     pub fn with_transformation(self, transformation: Transformation) -> Self {
         match self.0 {
-            GlyphRoute::Tinted(TintedSvg { svg, asset_id }) => Self(GlyphRoute::Tinted(TintedSvg {
-                svg: svg.with_transformation(transformation),
-                asset_id,
-            })),
+            GlyphRoute::Tinted(TintedSvg { svg, asset_id }) => {
+                Self(GlyphRoute::Tinted(TintedSvg {
+                    svg: svg.with_transformation(transformation),
+                    asset_id,
+                }))
+            }
             route @ GlyphRoute::FullColor(_) => Self(route),
         }
     }

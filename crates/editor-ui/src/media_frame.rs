@@ -2,9 +2,9 @@
 
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, canvas, div, px,
+    AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, Pixels, RenderImage, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Window, canvas, div, img, px,
 };
 
 type Activation = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -13,7 +13,7 @@ enum Size {
     Aspect(f32),
     Attachment,
     SentAttachment,
-    Transcript,
+    Transcript(f32),
 }
 
 /// Callers place the frame and supply its content. Radius, clipping, border,
@@ -37,12 +37,33 @@ impl MediaFrame {
             ..Self::new(theme, 1.0, content)
         }
     }
-    /// A generated image keeps its intrinsic aspect within the transcript measure.
-    pub fn transcript_image(theme: ArtisanTheme, content: impl IntoElement) -> Self {
+    /// A generated image fills the transcript measure in a wide, height-capped frame.
+    pub fn transcript_image(theme: ArtisanTheme, aspect: f32, content: impl IntoElement) -> Self {
         Self {
-            size: Size::Transcript,
+            size: Size::Transcript(aspect.max(16.0 / 9.0)),
             ..Self::new(theme, 1.0, content)
         }
+    }
+    /// Centers the complete image over a softened, cropped copy of the same pixels.
+    /// Overscan keeps the blur's faded edges outside the frame's clip.
+    pub fn image_content(image: &std::sync::Arc<RenderImage>) -> impl IntoElement + use<> {
+        div()
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .child(
+                div().absolute().inset(px(-48.0)).blur(px(24.0)).child(
+                    img(std::sync::Arc::clone(image))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                ),
+            )
+            .child(
+                img(std::sync::Arc::clone(image))
+                    .relative()
+                    .size_full()
+                    .object_fit(ObjectFit::Contain),
+            )
     }
     pub fn new(theme: ArtisanTheme, aspect: f32, content: impl IntoElement) -> Self {
         let aspect = if aspect.is_finite() && aspect > 0.0 {
@@ -137,7 +158,9 @@ impl RenderOnce for MediaFrame {
             Size::Aspect(aspect) => frame
                 .w_full()
                 .aspect_ratio(aspect)
-                .rounded(RadiusTokens::value(RadiusStep::Xl)),
+                .rounded(RadiusTokens::value(RadiusStep::Xl))
+                .border_0()
+                .shadow(crate::glass::card_shadows(&theme)),
             Size::Attachment => frame
                 .size(px(72.0))
                 .flex_none()
@@ -150,11 +173,14 @@ impl RenderOnce for MediaFrame {
                 .rounded(RadiusTokens::value(Self::SENT_ATTACHMENT_RADIUS))
                 .border_color(theme.colors.line.to_paint())
                 .bg(theme.colors.surface.to_paint()),
-            Size::Transcript => frame
+            Size::Transcript(aspect) => frame
+                .w_full()
+                .aspect_ratio(aspect)
                 .max_w(px(576.0))
                 .max_h(px(480.0))
                 .rounded(RadiusTokens::value(RadiusStep::Lg))
-                .border_0(),
+                .border_0()
+                .shadow(crate::glass::card_shadows(&theme)),
         };
         if let Some(selector) = self.selector {
             frame = frame.debug_selector(move || selector.to_string());

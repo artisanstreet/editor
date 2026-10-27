@@ -42,6 +42,7 @@ pub mod selectable_text;
 pub mod shimmer_text;
 pub mod slider;
 pub mod status_chip;
+pub mod streaming;
 pub mod switch;
 pub mod tab_card;
 pub mod terminal_text;

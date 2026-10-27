@@ -172,6 +172,31 @@ impl Button {
         )
     }
 
+    /// Where [`Self::corner_close`] sits inside the corner it closes.
+    pub const CORNER_INSET: f32 = crate::attachment_tile::ACTION_INSET;
+
+    /// The frosted close card an overlay seats in its top-right corner (the
+    /// image preview's, a dialog's), concentric with `surface_radius`, the
+    /// inner radius of the corner it sits in, at [`Self::CORNER_INSET`].
+    #[must_use]
+    pub fn corner_close(
+        id: impl Into<ElementId>,
+        theme: ArtisanTheme,
+        label: impl Into<SharedString>,
+        surface_radius: gpui::Pixels,
+    ) -> Self {
+        Self::icon(id, theme, AssetId::TABLER_X, label)
+            .variant(ButtonVariant::Ghost)
+            .hover_fill()
+            .muted()
+            .glass()
+            .compact(px(crate::attachment_tile::REMOVE_SIZE))
+            .nested_radius(crate::theme::RadiusTokens::nested(
+                surface_radius,
+                px(Self::CORNER_INSET),
+            ))
+    }
+
     #[must_use]
     pub const fn variant(mut self, variant: ButtonVariant) -> Self {
         self.variant = variant;

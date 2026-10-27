@@ -73,6 +73,8 @@ pub(super) struct FlatInline {
     pub(super) chains: Vec<Vec<InlineLayer>>,
     pub(super) links: Vec<InlineLink>,
     pub(super) code_ranges: Vec<Range<usize>>,
+    pub(super) file_icons: Vec<(usize, (editor_assets::AssetId, editor_assets::AssetId))>,
+    pub(super) file_slots: Vec<Range<usize>>,
     /// Whether color values become swatches (reply bodies) or stay text
     /// (the frozen [`super::InlinePresentation`] contract).
     pub(super) swatches: bool,
@@ -324,6 +326,18 @@ fn flatten_link(
 ) {
     let start = flat.source.len();
     chain.push(InlineLayer::Link);
+    if let Some(path) = super::file_link_path(destination)
+        && flat.swatches
+    {
+        let slot_start = flat.source.len();
+        flat.source.push_str(SWATCH_SLOT);
+        flat.source.push('\u{00a0}');
+        flat.file_slots.push(slot_start..flat.source.len());
+        flat.file_icons.push((
+            slot_start + '\u{2060}'.len_utf8(),
+            crate::icon::file_icon(&path),
+        ));
+    }
     flatten(label, chain, flat, true);
     chain.pop();
     let end = flat.source.len();

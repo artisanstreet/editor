@@ -46,7 +46,7 @@ use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Element, ElementId,
     EntityId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Hsla,
     InspectorElementId, IntoElement, KeyDownEvent, LayoutId, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Styled, StyledText,
     TextLayout, TextRun, TextStyle, Window,
 };
 
@@ -475,7 +475,10 @@ pub struct SelectableText {
     source_slice: Option<Range<usize>>,
     base_highlights: RangeSlice<(Range<usize>, HighlightStyle)>,
     text_run_overrides: RangeSlice<TextRunOverride>,
+    tokens: Vec<crate::text_editor::Token>,
     inline_images: Vec<(usize, std::sync::Arc<gpui::RenderImage>)>,
+    inline_file_icons: Rc<[(usize, editor_assets::AssetId)]>,
+    prepared_file_icons: Vec<gpui::AnyElement>,
     selection_color: Hsla,
     link_ranges: Rc<[Range<usize>]>,
     on_link: Option<SelectableLinkHandler>,
@@ -519,7 +522,10 @@ impl SelectableText {
             source_slice: None,
             base_highlights: RangeSlice::Owned(base_highlights),
             text_run_overrides: RangeSlice::default(),
+            tokens: Vec::new(),
             inline_images: Vec::new(),
+            inline_file_icons: Rc::from([]),
+            prepared_file_icons: Vec::new(),
             selection_color: theme.colors.text_selection.to_paint(),
             link_ranges: Rc::from([]),
             on_link: None,
@@ -720,6 +726,139 @@ impl SelectableText {
         self
     }
 
+    /// Styles mentions while keeping their sigils in the selection source.
+    #[must_use]
+    pub fn with_tokens(mut self, tokens: Vec<crate::text_editor::Token>) -> Self {
+        self.tokens = tokens
+            .into_iter()
+            .filter(|token| {
+                token.range.start < token.range.end
+                    && token.range.end <= self.text.len()
+                    && self.text.is_char_boundary(token.range.start)
+                    && self.text.is_char_boundary(token.range.end)
+            })
+            .collect();
+        self
+    }
+
+    fn prepare_tokens(&mut self, window: &Window) {
+        if self.tokens.is_empty() {
+            return;
+        }
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let font_id = window.text_system().resolve_font(&style.font());
+        let mut highlights = self.base_highlights.as_slice().to_vec();
+        let mut overrides = self.text_run_overrides.as_slice().to_vec();
+        for token in &self.tokens {
+            highlights = gpui::combine_highlights(highlights, [(token.range.clone(), token.style)])
+                .collect();
+            if token.glyph.is_some() {
+                let sigil = self.text[token.range.clone()].chars().next().unwrap_or('$');
+                let range = token.range.start..token.range.start + sigil.len_utf8();
+                highlights = gpui::combine_highlights(
+                    highlights,
+                    [(
+                        range.clone(),
+                        HighlightStyle {
+                            color: Some(gpui::transparent_black()),
+                            ..Default::default()
+                        },
+                    )],
+                )
+                .collect();
+                let advance = window
+                    .text_system()
+                    .advance(font_id, font_size, sigil)
+                    .map_or(gpui::px(0.0), |advance| advance.width);
+                overrides.push(TextRunOverride {
+                    range,
+                    font_family: None,
+                    letter_spacing: Some((gpui::px(20.0) - advance).max(gpui::px(0.0))),
+                });
+            }
+        }
+        self.base_highlights = RangeSlice::Owned(highlights);
+        self.text_run_overrides = RangeSlice::Owned(overrides);
+    }
+
+    /// Places catalog file glyphs in reserved em-space slots.
+    #[must_use]
+    pub fn with_inline_file_icons(mut self, icons: Rc<[(usize, editor_assets::AssetId)]>) -> Self {
+        self.inline_file_icons = icons;
+        self
+    }
+
+    fn prepaint_file_icons(&mut self, window: &mut Window, cx: &mut App) {
+        self.prepared_file_icons.clear();
+        if let Some(layout) = &self.geometry {
+            for (offset, asset) in self.inline_file_icons.iter() {
+                if self
+                    .reveal_frontier
+                    .as_ref()
+                    .is_some_and(|(end, _)| offset >= end)
+                {
+                    continue;
+                }
+                if let (Some(origin), Some(end)) = (
+                    layout.position_for_index(*offset),
+                    layout.position_for_index(*offset + '\u{2003}'.len_utf8()),
+                ) {
+                    let side = end.x - origin.x;
+                    if side <= gpui::px(0.0) {
+                        continue;
+                    }
+                    let mut glyph = crate::asset_seam::asset_glyph(*asset)
+                        .size(side)
+                        .text_color(window.text_style().color)
+                        .into_any_element();
+                    glyph.prepaint_as_root(
+                        origin + gpui::point(gpui::px(0.0), (layout.line_height() - side) / 2.0),
+                        gpui::size(
+                            gpui::AvailableSpace::Definite(side),
+                            gpui::AvailableSpace::Definite(side),
+                        ),
+                        window,
+                        cx,
+                    );
+                    self.prepared_file_icons.push(glyph);
+                }
+            }
+        }
+    }
+
+    fn prepaint_tokens(&mut self, window: &mut Window, cx: &mut App) {
+        if let Some(layout) = &self.geometry {
+            for token in &self.tokens {
+                let (Some(asset), Some(origin)) =
+                    (token.glyph, layout.glyph_position(token.range.start))
+                else {
+                    continue;
+                };
+                let side = gpui::px(15.0);
+                let mut glyph = crate::asset_seam::asset_glyph(asset)
+                    .size(side)
+                    .text_color(
+                        token
+                            .style
+                            .color
+                            .unwrap_or_else(|| window.text_style().color),
+                    )
+                    .into_any_element();
+                glyph.prepaint_as_root(
+                    origin + gpui::point(gpui::px(0.0), (layout.line_height() - side) / 2.0),
+                    gpui::size(
+                        gpui::AvailableSpace::Definite(side),
+                        gpui::AvailableSpace::Definite(side),
+                    ),
+                    window,
+                    cx,
+                );
+                self.prepared_file_icons.push(glyph);
+            }
+        }
+    }
+
     /// Returns the rendered text.
     #[must_use]
     pub fn text(&self) -> &str {
@@ -797,6 +936,7 @@ impl Element for SelectableText {
             style.size.height = (*height).into();
             return (window.request_layout(style, [], cx), ());
         }
+        self.prepare_tokens(window);
         let default_style = window.text_style();
         let mut inputs = RunInputs {
             text: &self.text,
@@ -966,6 +1106,8 @@ impl Element for SelectableText {
             });
             Some(LeafLayout::Native(layout, cells))
         };
+        self.prepaint_file_icons(window, cx);
+        self.prepaint_tokens(window, cx);
         if let Some((end, report)) = &self.reveal_frontier {
             let end = (*end).min(self.text.len());
             let index = self.text[..end]
@@ -1217,6 +1359,9 @@ impl Element for SelectableText {
                         .ok();
                 }
             }
+        }
+        for glyph in &mut self.prepared_file_icons {
+            glyph.paint(window, cx);
         }
         for swatch in self.inline_swatches.iter() {
             paint_swatch(&layout, swatch, self.swatch_edge, window);

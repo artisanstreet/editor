@@ -38,8 +38,8 @@ mod kit;
 mod media;
 mod narrative;
 
-pub(super) use actions::show_copy_menu;
 pub use actions::{CopyEntry, CopyKind, OpenReference, ResourceScope, ShowCopyMenu};
+pub(super) use actions::{open_reference, show_copy_menu};
 pub use media::{MediaFetch, MediaFetcher, MediaRequest, decode_image_bytes, image_resident_bytes};
 pub(super) use media::{color_copy_entries, color_paint, color_ranges};
 

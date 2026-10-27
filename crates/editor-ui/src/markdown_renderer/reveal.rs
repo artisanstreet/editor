@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::motion::MotionCurve;
+use crate::streaming::StreamingMode;
 use gpui::{
     AnyElement, HighlightStyle, IntoElement as _, ParentElement as _, Pixels, SharedString,
     Styled as _, div, px,
@@ -47,6 +48,8 @@ pub struct PreparedReveal {
     /// word may still be growing.
     tail: Cell<Option<usize>>,
     reduced: Cell<bool>,
+    /// Words arrive uncapped, each fading in whole (`StreamingMode::Swift`).
+    swift: Cell<bool>,
     animating: Cell<bool>,
     now: Cell<Instant>,
     paused: Cell<bool>,
@@ -68,6 +71,7 @@ impl Default for PreparedReveal {
             streaming: Cell::new(false),
             tail: Cell::new(None),
             reduced: Cell::new(false),
+            swift: Cell::new(false),
             animating: Cell::new(false),
             now: Cell::new(Instant::now()),
             paused: Cell::new(false),
@@ -93,7 +97,11 @@ impl PreparedReveal {
         let began = self.began_fresh.get().unwrap_or(fresh);
         self.began_fresh.set(Some(began));
         self.fresh.set(began);
-        self.reduced.set(reduced);
+        // Instant draws text as it arrives: no pacing, no fade, no mask and
+        // no block entrance, exactly as reduced motion does.
+        let mode = StreamingMode::current();
+        self.reduced.set(reduced || mode == StreamingMode::Instant);
+        self.swift.set(mode == StreamingMode::Swift);
         self.animating.set(false);
         self.settling.set(false);
         self.now.set(Instant::now());
@@ -301,9 +309,12 @@ impl PreparedReveal {
             leaf.visible = text.len();
             leaf.remaining_words = 0;
         }
-        if !self.paused.get() && now >= leaf.next_tick && leaf.budget >= 1.0 {
+        // Swift admits every complete word at once, each fading in whole;
+        // Smooth paces them by the budget and sweeps them in letter runs.
+        let swift = self.swift.get();
+        if !self.paused.get() && (swift || (now >= leaf.next_tick && leaf.budget >= 1.0)) {
             let start = leaf.visible;
-            while leaf.visible < text.len() && leaf.budget >= 1.0 {
+            while leaf.visible < text.len() && (swift || leaf.budget >= 1.0) {
                 let rest = &text[leaf.visible..];
                 let mut end = leaf.visible;
                 let mut word = false;
@@ -325,11 +336,15 @@ impl PreparedReveal {
                 if end <= leaf.visible {
                     break;
                 }
+                if swift {
+                    leaf.marks.push_back((leaf.visible..end, now));
+                } else {
+                    leaf.budget -= 1.0;
+                }
                 leaf.visible = end;
                 leaf.remaining_words = leaf.remaining_words.saturating_sub(1);
-                leaf.budget -= 1.0;
             }
-            if leaf.visible > start {
+            if leaf.visible > start && !swift {
                 // The original reveal swept each admitted segment from left to
                 // right in three-byte runs spread over one150ms interval.
                 let chunk_bytes = (leaf.visible - start).div_ceil(512).max(3);
@@ -466,6 +481,45 @@ mod tests {
                 .is_empty(),
             "the rest is fully shown after one fade"
         );
+    }
+    #[test]
+    fn swift_shows_every_complete_word_at_once_and_holds_the_growing_one() {
+        let set = |mode| crate::streaming::CURRENT.with(|current| current.set(mode));
+        set(StreamingMode::Swift);
+        let reveal = PreparedReveal::default();
+        reveal.begin_frame(true, true, false);
+        reveal.set_tail(Some(1));
+        let text: SharedString = "one two three four five six seven eight nine ten elev".into();
+        let now = Instant::now();
+        let fades = reveal.highlights_at(1, &text, Rc::from([]), now);
+        set(StreamingMode::Smooth);
+        let visible = reveal.leaves.borrow()[&1].visible;
+        assert_eq!(
+            visible,
+            text.len() - "elev".len(),
+            "no rate cap, growing word waits"
+        );
+        let word_marks = fades
+            .iter()
+            .filter(|(range, style)| style.fade_out.is_some() && range.end <= visible)
+            .count();
+        assert_eq!(
+            word_marks, 10,
+            "one whole-word fade per word, no letter runs"
+        );
+    }
+    #[test]
+    fn instant_draws_the_text_as_it_arrives() {
+        crate::streaming::CURRENT.with(|current| current.set(StreamingMode::Instant));
+        let reveal = PreparedReveal::default();
+        reveal.begin_frame(true, true, false);
+        reveal.set_tail(Some(1));
+        let text: SharedString = "Every word, even the grow".into();
+        let fades = reveal.highlights(1, &text, Rc::from([]));
+        crate::streaming::CURRENT.with(|current| current.set(StreamingMode::Smooth));
+        assert!(fades.is_empty());
+        assert!(!reveal.is_animating());
+        assert_eq!(reveal.block_entrance(3), None);
     }
     #[test]
     fn history_resumes_whole_and_reduced_motion_drops_reveal_ownership() {

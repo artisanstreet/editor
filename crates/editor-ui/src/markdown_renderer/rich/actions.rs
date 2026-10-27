@@ -26,7 +26,7 @@ pub struct OpenReference {
 }
 
 /// Opens `path` at `line` through its owning Forge preview.
-pub(super) fn open_reference(
+pub(in crate::markdown_renderer) fn open_reference(
     path: &str,
     line: Option<u32>,
     scope: Option<ResourceScope>,
