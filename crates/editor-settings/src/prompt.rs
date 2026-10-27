@@ -1,20 +1,16 @@
-//! Global prompt drafts and optimistic save/resolve forms. Canonical metadata belongs to HostData.
+//! Global prompt drafts and optimistic saves. Canonical metadata belongs to HostData.
 
 use crate::Settings;
 use crate::page;
-use crate::ui::{PageBlock, card, header, section_shell};
-use artisan_api::{
-    EngineId, GlobalPrompt, PromptCandidate, PromptEngineState, PromptEngineStatus, ResolvePrompt,
-    SavePrompt,
-};
+use crate::ui::header;
+use artisan_api::{GlobalPrompt, SavePrompt};
 use editor_core::{HostData, HostId, SettingsPage};
-use editor_ui::button::ButtonVariant;
-use editor_ui::status_chip::{ChipTone, chips_row, tone_color};
+use editor_ui::button::{Button, ButtonShape, ButtonVariant};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, Subscription, div, px,
+    AppContext as _, Context, Div, Entity, InteractiveElement as _, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Subscription, div, px,
 };
 
 #[cfg(test)]
@@ -33,7 +29,7 @@ pub struct PromptForm {
     base_version: u64,
     /// A newer version was saved elsewhere while the user was editing.
     newer: bool,
-    /// A save or resolution is in flight.
+    /// A save is in flight.
     pending: bool,
     error: Option<String>,
     generation: u64,
@@ -43,7 +39,8 @@ pub struct PromptForm {
 
 impl PromptForm {
     pub(crate) fn new(cx: &mut Context<Settings>) -> Self {
-        let editor = cx.new(|cx| TextEditor::new("", "", cx));
+        let editor =
+            cx.new(|cx| TextEditor::new("", "Write your global instructions…", cx).inset());
         // Typing changes whether the prompt has unsaved changes.
         let changes = cx.subscribe(&editor, |settings, _, event: &TextEditorEvent, cx| {
             if *event == TextEditorEvent::Changed {
@@ -185,15 +182,6 @@ impl Settings {
         .detach();
     }
 
-    fn revert_prompt(&mut self, cx: &mut Context<Self>) {
-        let saved = self.prompt.saved.clone();
-        self.prompt
-            .editor
-            .update(cx, |editor, cx| editor.set_text(&saved, cx));
-        self.prompt.error = None;
-        cx.notify();
-    }
-
     fn load_latest_prompt(&mut self, cx: &mut Context<Self>) {
         if let Some(prompt) = self
             .selected_host(cx)
@@ -203,177 +191,60 @@ impl Settings {
             cx.notify();
         }
     }
-
-    fn resolve_prompt(&mut self, resolution: ResolvePrompt, cx: &mut Context<Self>) {
-        let Some(host) = self.selected_host(cx) else {
-            return;
-        };
-        if self.prompt.pending {
-            return;
-        }
-        let client = host.read(cx).client.clone();
-        let host_id = host.read(cx).id.clone();
-        self.prompt.generation = self.prompt.generation.wrapping_add(1);
-        let generation = self.prompt.generation;
-        self.prompt.pending = true;
-        self.prompt.error = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = client.resolve_global_prompt(&resolution).await;
-            this.update(cx, |this, cx| {
-                let form = &mut this.prompt;
-                if form.host.as_ref() != Some(&host_id) || form.generation != generation {
-                    return;
-                }
-                form.pending = false;
-                match result {
-                    Ok(prompt) => {
-                        host.update(cx, |host, cx| host.remember_prompt(prompt, cx));
-                        if let Some(prompt) = host.read(cx).global_prompt.clone() {
-                            let replace = !form.dirty(cx);
-                            form.load(&prompt, replace, cx);
-                        }
-                    }
-                    Err(error) => form.error = Some(format!("{error:#}")),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn prompt_button(
-        &self,
-        id: String,
-        label: &'static str,
-        variant: ButtonVariant,
-        disabled: bool,
-        resolution: Option<ResolvePrompt>,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let selector = id.clone();
-        div()
-            .debug_selector(move || selector)
-            .child(self.button(
-                SharedString::from(id),
-                label,
-                variant,
-                disabled,
-                cx.listener(move |this, _, _, cx| {
-                    if let Some(resolution) = resolution.clone() {
-                        this.resolve_prompt(resolution, cx);
-                    }
-                }),
-            ))
-            .into_any_element()
-    }
 }
 
 pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> Div {
     let form = &settings.prompt;
-    let mut page = div().flex().flex_col().child(header(
-        theme,
-        page::label(SettingsPage::GlobalPrompt),
-        page::description(SettingsPage::GlobalPrompt),
-    ));
     let host = settings.selected_host(cx);
     let load_error = host
         .as_ref()
         .and_then(|host| host.read(cx).prompt_load().error.clone());
-    let fetching = host
-        .as_ref()
-        .is_some_and(|host| host.read(cx).prompt_load().loading);
+    let mut page = div()
+        .size_full()
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .gap(px(20.0))
+        .child(header(
+            theme,
+            page::label(SettingsPage::GlobalPrompt),
+            "Instructions shared by every engine, in every thread.",
+        ))
+        .child(
+            div()
+                .id("global-prompt-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .debug_selector(|| "settings-global-prompt-editor".to_owned())
+                .child(form.editor.clone()),
+        );
     if let Some(error) = form.error.as_deref().or(load_error.as_deref()) {
-        page = page.child(notice(theme, error)).child(settings.button(
-            "prompt-retry",
-            "Retry",
+        page = page.child(editor_ui::page::notice(theme, error.to_owned()));
+    }
+    let mut actions = div().flex().flex_shrink_0().justify_end().gap(px(8.0));
+    if form.newer {
+        actions = actions.child(settings.button(
+            "settings-global-prompt-load-latest",
+            "Load latest",
             ButtonVariant::Outline,
-            form.pending || fetching,
-            cx.listener(|this, _, _, cx| {
-                if let Some(host) = this.selected_host(cx) {
-                    this.prompt.error = None;
-                    host.update(cx, |host, cx| host.load_prompt(true, cx));
-                }
-            }),
+            form.pending,
+            cx.listener(|this, _, _, cx| this.load_latest_prompt(cx)),
         ));
     }
-    let projected = settings
-        .selected_host(cx)
-        .and_then(|host| host.read(cx).global_prompt.clone());
-    if let Some(prompt) = &projected
-        && !prompt.candidates.is_empty()
-    {
-        page = page.child(choice_section(settings, theme, &prompt.candidates, cx));
-    }
-    page = page.child(editor_section(settings, theme, cx));
-    if let Some(prompt) = &projected {
-        page = page.child(engines_section(settings, theme, &prompt.engines, cx));
-    }
-    page
-}
-
-fn choice_section(
-    settings: &Settings,
-    theme: &ArtisanTheme,
-    candidates: &[PromptCandidate],
-    cx: &Context<Settings>,
-) -> PageBlock {
-    let rows = candidates
-        .iter()
-        .map(|candidate| {
-            let engines: Vec<&str> = candidate
-                .engines
-                .iter()
-                .map(|engine| page::engine_label(*engine))
-                .collect();
-            let short = candidate.id.get(..12).unwrap_or(&candidate.id);
-            let action = settings.prompt_button(
-                format!("settings-global-prompt-choose-{short}"),
-                "Use this prompt",
-                ButtonVariant::Default,
-                settings.prompt.pending,
-                Some(ResolvePrompt::Choose {
-                    candidate_id: candidate.id.clone(),
-                }),
-                cx,
-            );
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .py(px(14.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(16.0))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.colors.text.to_paint())
-                                .child(format!("From {}", engines.join(", "))),
-                        )
-                        .child(action),
-                )
-                .child(editor_ui::page::text_preview(theme, &candidate.text))
-                .into_any_element()
-        })
-        .collect();
-    section_shell(
-        theme,
-        "Choose your global prompt",
-        Some(
-            "Your engines had different prompts when Artisan took them over. Choose the one to keep in every engine, or write your own below. The others are backed up, never deleted.",
+    page.child(
+        actions.child(
+            Button::text("settings-global-prompt-save", *theme, "Save")
+                .debug_selector("settings-global-prompt-save")
+                .variant(ButtonVariant::Accent)
+                .shape(ButtonShape::Rounded)
+                .disabled(!form.loaded || !form.dirty(cx) || form.pending || form.newer)
+                .on_activate(cx.listener(|this, _, _, cx| this.save_prompt(cx))),
         ),
-        None,
-        card(theme, rows),
     )
-.debug_selector("settings-section-setup")
 }
 
+#[cfg(test)]
 impl Settings {
     /// The line under the prompt editor.
     pub(crate) fn prompt_status(&self, cx: &gpui::App) -> String {
@@ -393,193 +264,6 @@ impl Settings {
             format!("Saved \u{b7} version {}", form.base_version)
         }
     }
-}
-
-fn editor_section(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> PageBlock {
-    let form = &settings.prompt;
-    let loaded = form.loaded;
-    let dirty = form.dirty(cx);
-    let status = settings.prompt_status(cx);
-    let mut actions = div().flex().flex_row().gap(px(8.0)).flex_shrink_0();
-    if form.newer {
-        actions = actions.child(settings.button(
-            "settings-global-prompt-load-latest",
-            "Load latest",
-            ButtonVariant::Outline,
-            form.pending,
-            cx.listener(|this, _, _, cx| this.load_latest_prompt(cx)),
-        ));
-    }
-    actions = actions
-        .child(settings.button(
-            "settings-global-prompt-revert",
-            "Revert",
-            ButtonVariant::Ghost,
-            !dirty || form.pending,
-            cx.listener(|this, _, _, cx| this.revert_prompt(cx)),
-        ))
-        .child(settings.button(
-            "settings-global-prompt-save",
-            "Save",
-            ButtonVariant::Default,
-            !loaded || !dirty || form.pending || form.newer,
-            cx.listener(|this, _, _, cx| this.save_prompt(cx)),
-        ));
-    let footer = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(16.0))
-        .py(px(12.0))
-        .child(
-            div()
-                .debug_selector(|| "settings-global-prompt-status".to_owned())
-                .text_xs()
-                .text_color(theme.colors.text_muted.to_paint())
-                .child(status),
-        )
-        .child(actions);
-    let editor = div()
-        .pt(px(16.0))
-        .min_h(px(160.0))
-        .debug_selector(|| "settings-global-prompt-editor".to_owned())
-        .child(form.editor.clone());
-    section_shell(
-        theme,
-        "Prompt",
-        Some(
-            "Engines read this before every conversation, after their own system prompt and before your project's AGENTS.md or CLAUDE.md.",
-        ),
-        None,
-        card(theme, vec![editor.into_any_element(), footer.into_any_element()]),
-    )
-.debug_selector("settings-section-prompt")
-}
-
-fn engines_section(
-    settings: &Settings,
-    theme: &ArtisanTheme,
-    engines: &[PromptEngineState],
-    cx: &Context<Settings>,
-) -> PageBlock {
-    let rows = engines
-        .iter()
-        .map(|engine| engine_row(settings, theme, engine, cx).into_any_element())
-        .collect();
-    section_shell(
-        theme,
-        "Engines",
-        Some(
-            "Where each engine keeps the prompt. A file edited outside Artisan is left alone until you decide.",
-        ),
-        None,
-        card(theme, rows),
-    )
-.debug_selector("settings-section-engines")
-}
-
-fn engine_row(
-    settings: &Settings,
-    theme: &ArtisanTheme,
-    engine: &PromptEngineState,
-    cx: &Context<Settings>,
-) -> Div {
-    let name = page::engine_label(engine.engine);
-    let mut row = div()
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .py(px(14.0))
-        .debug_selector({
-            let selector = format!("settings-global-prompt-engine-{}", engine.engine);
-            move || selector
-        })
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.colors.text.to_paint())
-                                .child(name),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .truncate()
-                                .text_color(theme.colors.text_muted.to_paint())
-                                .child(
-                                    engine
-                                        .reason
-                                        .clone()
-                                        .or_else(|| engine.file.clone())
-                                        .unwrap_or_default(),
-                                ),
-                        ),
-                )
-                .child(chips_row(
-                    theme,
-                    std::slice::from_ref(&editor_ui::status_chip::prompt_status(engine)),
-                    "global-prompt-engine",
-                )),
-        );
-    if engine.status == PromptEngineStatus::Drifted
-        && let Some(external) = &engine.external_text
-    {
-        row = row
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(tone_color(theme, ChipTone::Warning).to_paint())
-                    .debug_selector({
-                        let selector = format!("settings-global-prompt-drift-{}", engine.engine);
-                        move || selector
-                    })
-                    .child(format!("{name} was edited outside Artisan. It now says:")),
-            )
-            .child(editor_ui::page::text_preview(theme, external))
-            .child(drift_actions(settings, engine.engine, cx));
-    }
-    row
-}
-
-fn drift_actions(settings: &Settings, engine: EngineId, cx: &Context<Settings>) -> Div {
-    let pending = settings.prompt.pending;
-    div()
-        .flex()
-        .flex_row()
-        .gap(px(8.0))
-        .child(settings.prompt_button(
-            format!("settings-global-prompt-import-{engine}"),
-            "Use this version everywhere",
-            ButtonVariant::Outline,
-            pending,
-            Some(ResolvePrompt::UseEngine { engine }),
-            cx,
-        ))
-        .child(settings.prompt_button(
-            format!("settings-global-prompt-overwrite-{engine}"),
-            "Restore Artisan's prompt",
-            ButtonVariant::Ghost,
-            pending,
-            Some(ResolvePrompt::RestoreEngine { engine }),
-            cx,
-        ))
-}
-
-fn notice(theme: &ArtisanTheme, text: &str) -> editor_ui::page::Notice {
-    editor_ui::page::notice(theme, text.to_owned()).debug_selector("settings-global-prompt-notice")
 }
 
 #[cfg(test)]
