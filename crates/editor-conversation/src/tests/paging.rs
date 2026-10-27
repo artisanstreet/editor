@@ -163,7 +163,7 @@ fn a_long_thread_opens_in_place_without_reading_all_of_it(cx: &mut TestAppContex
 /// Jumping to a message from the menu doesn't teleport: the view lands a
 /// little short of it and glides the rest quickly.
 #[gpui::test]
-fn a_jump_to_a_message_glides_its_last_stretch(cx: &mut TestAppContext) {
+fn a_jump_to_a_message_eases_the_scroll_offset(cx: &mut TestAppContext) {
     let forge = Forge::start();
     let thread = forge.thread();
     let mut asks = Vec::new();
@@ -201,18 +201,46 @@ fn a_jump_to_a_message_glides_its_last_stretch(cx: &mut TestAppContext) {
         shown(cx, format!("user:{}:0", target.id))
             .map(|bounds| f32::from(bounds.top() - viewport.top()))
     };
+    let before = cx.read(|cx| {
+        f32::from(
+            conversation
+                .read(cx)
+                .list
+                .scroll_px_offset_for_scrollbar()
+                .y,
+        )
+    });
     conversation.update(cx, |conversation, cx| conversation.jump_to(&target, cx));
-    draw(cx);
-    let shift = conversation.update(cx, |conversation, _| conversation.arrival_offset());
+    let first = cx.read(|cx| {
+        f32::from(
+            conversation
+                .read(cx)
+                .list
+                .scroll_px_offset_for_scrollbar()
+                .y,
+        )
+    });
     assert!(
-        shift < -1.0,
-        "jumping up, the transcript starts a little above its place and moves down into it, not cut ({shift})"
+        (first - before).abs() < 10.0,
+        "navigation starts from the current scroll position"
     );
+    let mut moved = false;
     wait(cx, "the jump to arrive on the message", |cx| {
         draw(cx);
-        let offset = conversation.update(cx, |conversation, _| conversation.arrival_offset());
-        offset == 0.0 && top(cx).is_some_and(|top| top.abs() < 0.5)
+        let (offset, done) = cx.read(|cx| {
+            let conversation = conversation.read(cx);
+            (
+                f32::from(conversation.list.scroll_px_offset_for_scrollbar().y),
+                conversation.scroll_destination.is_none(),
+            )
+        });
+        moved |= offset > before + 1.0;
+        done && top(cx).is_some_and(|top| top.abs() < 0.5)
     });
+    assert!(
+        moved,
+        "jumping up eases the actual scroll position toward the message"
+    );
 }
 
 /// Background work keeps updating items while the reader sits still: the
@@ -977,4 +1005,95 @@ fn a_turn_of_thousands_of_calls_opens_as_its_rows(cx: &mut TestAppContext) {
             .any(|(row, _)| matches!(row, crate::fold::Row::EarlierWork { .. }))
     });
     assert!(earlier, "the work not read yet waits as a row above it");
+}
+
+/// Long fences keep their own wheel input instead of sending it to the transcript.
+#[gpui::test]
+fn long_code_blocks_scroll_to_the_last_line_and_across_long_lines(cx: &mut TestAppContext) {
+    let forge = Forge::start();
+    let thread = forge.thread();
+    let text = (0..80)
+        .map(|index| {
+            if index == 79 {
+                format!("last line {}", "wide text ".repeat(100))
+            } else {
+                format!("line {index}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let item = forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        reply(&format!("```text\n{text}\n```")),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
+    open(&core, &host, &thread, cx);
+    landed(cx, &conversation);
+    settle(cx, &conversation);
+    let transcript_offset = cx.read(|cx| conversation.read(cx).list.logical_scroll_top());
+    let prefix = format!("prose-{}-3-line-", item.id);
+    let first = painted(cx, format!("{prefix}0")).expect("the first line is visible");
+    assert!(
+        painted(cx, format!("{prefix}79")).is_none(),
+        "the last line starts outside the viewport"
+    );
+    let position = gpui::point(first.left() + gpui::px(40.0), first.top() + gpui::px(100.0));
+    // A discrete mouse wheel was intercepted by the transcript glide overlay.
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -200.0)),
+        ..Default::default()
+    });
+    draw(cx);
+    cx.run_until_parked();
+    draw(cx);
+    let last = painted(cx, format!("{prefix}79")).expect("scrolling reveals the last line");
+    assert!(
+        painted(cx, format!("{prefix}0")).is_none(),
+        "the viewport advanced through the text"
+    );
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-1000.0), gpui::px(0.0))),
+        ..Default::default()
+    });
+    draw(cx);
+    cx.run_until_parked();
+    draw(cx);
+    let across = painted(cx, format!("{prefix}79")).expect("the last line remains visible");
+    assert!(
+        across.left() < last.left() - gpui::px(100.0),
+        "long lines scroll horizontally"
+    );
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(10_000.0))),
+        ..Default::default()
+    });
+    draw(cx);
+    cx.run_until_parked();
+    draw(cx);
+    assert!(
+        painted(cx, format!("{prefix}0")).is_some(),
+        "a trackpad can return to the first line"
+    );
+    let after = cx.read(|cx| conversation.read(cx).list.logical_scroll_top());
+    assert_eq!(after.item_ix, transcript_offset.item_ix);
+    assert_eq!(
+        after.offset_in_item, transcript_offset.offset_in_item,
+        "scrolling inside the block leaves the transcript in place"
+    );
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position,
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(50.0))),
+        ..Default::default()
+    });
+    assert_eq!(
+        cx.read(|cx| conversation.read(cx).reader_toward_end),
+        Some(false),
+        "scrolling past the block's top edge reaches the transcript"
+    );
 }

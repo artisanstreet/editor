@@ -6,7 +6,7 @@ use editor_ui::{
     button::{Button, ButtonVariant},
     chat_bubble::ChatBubbleSegment,
     media_frame::MediaFrame,
-    theme::{ArtisanTheme, RadiusStep, RadiusTokens},
+    theme::ArtisanTheme,
 };
 use gpui::{
     AnyElement, Div, IntoElement, ObjectFit, ParentElement as _, SharedString, Styled as _,
@@ -96,11 +96,7 @@ impl MediaPresenter<'_> {
         let retry = self.actions.handler(Action::RetryImage(retry_hash));
         let (content, image): (AnyElement, _) = match self.images.get(hash) {
             Some(Blob::Ready(image)) => (
-                img(std::sync::Arc::clone(image))
-                    .max_h(px(480.0))
-                    .max_w(px(ChatBubbleSegment::MAX_WIDTH))
-                    .rounded(RadiusTokens::value(RadiusStep::Lg))
-                    .into_any_element(),
+                MediaFrame::image_content(image).into_any_element(),
                 Some(std::sync::Arc::clone(image)),
             ),
             Some(Blob::Failed(error)) => (
@@ -123,13 +119,23 @@ impl MediaPresenter<'_> {
             ),
             _ => (
                 div()
-                    .size(px(480.0))
+                    .size_full()
                     .bg(theme.colors.raised.to_paint())
                     .into_any_element(),
                 None,
             ),
         };
-        let mut frame = MediaFrame::transcript_image(theme, content)
+        let aspect = image.as_ref().map_or(16.0 / 9.0, |image| {
+            let size = image.size(0);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "decoded image edges are bounded"
+            )]
+            {
+                size.width.0 as f32 / size.height.0.max(1) as f32
+            }
+        });
+        let mut frame = MediaFrame::transcript_image(theme, aspect, content)
             .on_visible(self.actions.handler(Action::LoadImage(hash.clone())));
         if let Some(image) = image {
             frame = frame.on_activate(

@@ -245,20 +245,10 @@ impl Inspector {
             return row.into_any_element();
         };
         // Section rules run edge to edge across the panel; rows keep the
-        // panel's inset inside them. The project facts always close with one.
-        let fact = |entry: Option<&Entry>| matches!(entry, Some(Entry::Fact(_)));
-        let after_facts = index > 0 && fact(self.entries.get(index - 1));
-        let rule = match entry {
-            Entry::Fact(_) if !fact(self.entries.get(index + 1)) => Some(false),
-            Entry::Heading(_) if !after_facts => Some(true),
-            Entry::Fact(_)
-            | Entry::Heading(_)
-            | Entry::Agent(_)
-            | Entry::Plan(_)
-            | Entry::PlanCollection
-            | Entry::Terminal(_)
-            | Entry::Workflow(_) => None,
-        };
+        // panel's inset inside them. Every section, the project facts and
+        // each headed one alike, closes with a rule under its last row, so
+        // the one rule between two sections is the first one's closing rule.
+        let closes_section = matches!(self.entries.get(index + 1), None | Some(Entry::Heading(_)));
         let line = theme.colors.line.to_paint();
         let content = (|| match entry {
             Entry::Heading(label) => row
@@ -609,13 +599,7 @@ impl Inspector {
         div()
             .w_full()
             .px(px(10.0))
-            .map(|entry| match rule {
-                // Above a section heading.
-                Some(true) => entry.mt(px(10.0)).border_t_1().border_color(line),
-                // Below the project facts.
-                Some(false) => entry.pb(px(10.0)).border_b_1().border_color(line),
-                None => entry,
-            })
+            .when(closes_section, |entry| closing_rule(entry, line))
             .child(content)
             .into_any_element()
     }
@@ -761,6 +745,12 @@ impl AgentCard {
             ))
     }
 }
+/// The rule that closes every section and pane in the inspector: 10 px of
+/// air under its last row, then a line edge to edge. One helper, so the
+/// facts, each headed section and the panels below the list all end alike.
+fn closing_rule(entry: gpui::Div, line: gpui::Hsla) -> gpui::Div {
+    entry.pb(px(10.0)).border_b_1().border_color(line)
+}
 fn inspector_glyph(theme: &ArtisanTheme, id: AssetId) -> impl IntoElement {
     editor_ui::icon::icon(editor_ui::icon::IconStyle::resolve(
         *theme,
@@ -798,16 +788,14 @@ impl Render for Inspector {
         )
         .flex_1()
         .min_h_0();
+        let line = theme.colors.line.to_paint();
+        // The panels opened under the list close like every section above.
         root.child(list)
-            .children(
-                self.source
-                    .iter()
-                    .map(|source| div().px(px(10.0)).child(source.clone())),
-            )
+            .children(self.source.iter().map(|source| {
+                closing_rule(div().px(px(10.0)).pt(px(10.0)), line).child(source.clone())
+            }))
             .children(self.plan.iter().map(|plan| {
-                div()
-                    .flex_none()
-                    .px(px(10.0))
+                closing_rule(div().flex_none().px(px(10.0)).pt(px(10.0)), line)
                     .debug_selector(|| "inspector-plan-panel".to_owned())
                     .child(plan.clone())
             }))

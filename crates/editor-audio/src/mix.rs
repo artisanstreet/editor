@@ -54,7 +54,8 @@ pub fn render_mapped<T: Copy>(
             f64::from(audio.samples[frame * channels + channel.min(channels - 1)])
         };
         let sample = |channel: usize| {
-            let mixed = at(*cursor, channel).mul_add(1.0 - *phase, at(next, channel) * *phase) as f32;
+            let mixed =
+                at(*cursor, channel).mul_add(1.0 - *phase, at(next, channel) * *phase) as f32;
             if mixed.is_finite() { mixed } else { 0.0 }
         };
         let (left, right) = (sample(0), sample(1));

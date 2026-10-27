@@ -47,9 +47,6 @@ pub(in crate::row) struct TextPresenter<'a> {
     pub agent_scope: bool,
 }
 impl TextPresenter<'_> {
-    pub(super) fn output(&self, item: &Item, text: &str) -> AnyElement {
-        self.plain_text(item, Slot::Output, text)
-    }
     pub(super) fn answer(&self, item: &Item) -> AnyElement {
         let Some(text) = SourceField::AnswerText.text(item) else {
             return div().into_any_element();
@@ -61,13 +58,6 @@ impl TextPresenter<'_> {
             }
             TextContent::Inline(text) => self.plain_text(item, Slot::Answer, text),
             TextContent::Stored(_) => self.content_text(item, SourceField::AnswerText),
-        }
-    }
-
-    pub(super) fn inherited_content(&self, item: &Item, field: SourceField) -> AnyElement {
-        match field.text(item) {
-            Some(TextContent::Inline(text)) => text.clone().into_any_element(),
-            _ => self.content_text(item, field),
         }
     }
 

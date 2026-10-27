@@ -885,10 +885,22 @@ fn head_every_run(
         .iter()
         .filter_map(|row| match row {
             Row::Work { run: Some(run), .. } => Some(run.clone()),
-            _ => None,
+            Row::Projected { .. }
+            | Row::Work { .. }
+            | Row::EarlierWork { .. }
+            | Row::WorkEntry { .. }
+            | Row::Chain { .. }
+            | Row::Text { .. }
+            | Row::Prompt(_)
+            | Row::Compaction(_)
+            | Row::Image(_)
+            | Row::Gap
+            | Row::Status(_)
+            | Row::AgentResult(_)
+            | Row::AgentStatus(..) => None,
         })
         .collect();
-    let header = |run: RunId| Row::Work {
+    let work_header = |run: RunId| Row::Work {
         run: Some(run),
         segment: 0,
         entries: Vec::new(),
@@ -909,10 +921,10 @@ fn head_every_run(
         })
         .collect();
     // Later rows first, so earlier indices stay put.
-    inserts.sort_by(|a, b| b.0.cmp(&a.0));
+    inserts.sort_by_key(|&(at, _)| std::cmp::Reverse(at));
     let inserted: HashSet<RunId> = inserts.iter().map(|(_, run)| run.clone()).collect();
     for (at, run) in inserts {
-        rows.insert(at, header(run));
+        rows.insert(at, work_header(run));
     }
     if let Some(run) = latest.filter(|run| run.status.is_live()) {
         let id = turn(&Some(run.id.clone())).unwrap_or_else(|| run.id.clone());
@@ -921,7 +933,7 @@ fn head_every_run(
                 .iter()
                 .rposition(|row| matches!(row, Row::Status(_)))
                 .unwrap_or(rows.len());
-            rows.insert(status, header(id));
+            rows.insert(status, work_header(id));
         }
     }
 }

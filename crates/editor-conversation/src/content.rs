@@ -1,7 +1,7 @@
 //! Mounted authored source fields. Core owns bounded raw paging, requests and export;
 //! this module owns field identity and reuse across transcript Item revisions.
 use crate::fold::{PlainSection, TextSection};
-use artisan_api::{ApprovalRequest, Item, ItemId, ItemKind, TextContent, ToolKind};
+use artisan_api::{ApprovalRequest, Item, ItemId, ItemKind, TextContent};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
     App, AppContext as _, IntoElement, ParentElement as _, RenderOnce, WeakEntity, Window, div,
@@ -22,10 +22,7 @@ pub enum SourceField {
     Text(TextSection),
     Prose,
     Notice,
-    Command,
     Output,
-    Input,
-    Diff(usize),
     Question(usize),
     AnswerText,
     ApprovalCommand,
@@ -74,59 +71,11 @@ impl SourceField {
                 | ItemKind::Compaction { .. }
                 | ItemKind::Error { .. } => None,
             },
-            Self::Command => match &item.kind {
-                ItemKind::Tool {
-                    tool: ToolKind::Shell { command, .. },
-                    ..
-                } => Some(command),
-                ItemKind::UserMessage { .. }
-                | ItemKind::AssistantMessage { .. }
-                | ItemKind::Tool { .. }
-                | ItemKind::Agent { .. }
-                | ItemKind::Question { .. }
-                | ItemKind::Plan { .. }
-                | ItemKind::Image { .. }
-                | ItemKind::Compaction { .. }
-                | ItemKind::Notice { .. }
-                | ItemKind::Error { .. } => None,
-            },
             Self::Output => match &item.kind {
                 ItemKind::Tool {
                     output: Some(output),
                     ..
                 } => Some(&output.text),
-                ItemKind::UserMessage { .. }
-                | ItemKind::AssistantMessage { .. }
-                | ItemKind::Tool { .. }
-                | ItemKind::Agent { .. }
-                | ItemKind::Question { .. }
-                | ItemKind::Plan { .. }
-                | ItemKind::Image { .. }
-                | ItemKind::Compaction { .. }
-                | ItemKind::Notice { .. }
-                | ItemKind::Error { .. } => None,
-            },
-            Self::Input => match &item.kind {
-                ItemKind::Tool {
-                    tool: ToolKind::Mcp { input, .. } | ToolKind::Other { input, .. },
-                    ..
-                } => input.as_ref(),
-                ItemKind::UserMessage { .. }
-                | ItemKind::AssistantMessage { .. }
-                | ItemKind::Tool { .. }
-                | ItemKind::Agent { .. }
-                | ItemKind::Question { .. }
-                | ItemKind::Plan { .. }
-                | ItemKind::Image { .. }
-                | ItemKind::Compaction { .. }
-                | ItemKind::Notice { .. }
-                | ItemKind::Error { .. } => None,
-            },
-            Self::Diff(index) => match &item.kind {
-                ItemKind::Tool {
-                    tool: ToolKind::Edit { changes },
-                    ..
-                } => changes.inline()?.get(*index)?.diff.as_ref(),
                 ItemKind::UserMessage { .. }
                 | ItemKind::AssistantMessage { .. }
                 | ItemKind::Tool { .. }

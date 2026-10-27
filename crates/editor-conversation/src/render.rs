@@ -73,6 +73,7 @@ impl Render for Conversation {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.frame_started.set(Some(std::time::Instant::now()));
         self.sync_reveal(cx);
+        self.smooth_scroll(window, cx);
         if self.advance_disclosures(cx) {
             window.request_animation_frame();
         }
@@ -80,13 +81,14 @@ impl Render for Conversation {
         self.theme = *cx.theme();
         // Judged on last frame's layout; the wordmark stays until it holds.
         let theme = self.theme;
-        let screen = self.core.read(cx).screen().clone();
+        let screen = self.core.read(cx).workspace_screen().clone();
         let wide = f32::from(window.viewport_size().width) >= WIDE_FROM;
         let bottom = if wide {
             COMPOSER_BOTTOM_WIDE
         } else {
             COMPOSER_BOTTOM
         };
+        let frame_bounds = Rc::clone(&self.frame_bounds);
         let mut root = div()
             .relative()
             .size_full()
@@ -122,10 +124,6 @@ impl Render for Conversation {
             (Screen::Thread { .. }, Some(view)) => {
                 following = view.viewport.state().is_following();
                 let landing = self.landing();
-                let arrival = self.arrival_offset();
-                if arrival != 0.0 {
-                    window.request_animation_frame();
-                }
                 let transcript =
                     list(self.list.clone(), cx.processor(Self::row_element)).size_full();
                 div()
@@ -136,7 +134,6 @@ impl Render for Conversation {
                         div()
                             .size_full()
                             .relative()
-                            .top(px(arrival))
                             .when(landing, |list| list.opacity(0.0))
                             .child(transcript),
                     )
@@ -175,14 +172,23 @@ impl Render for Conversation {
             }
             _ => div().flex_1().into_any_element(),
         };
-        root = root.child(div().size_full().child(body));
+        root = root.child(div().size_full().child(body)).child(
+            canvas(
+                move |bounds, _, _| frame_bounds.set(Some(bounds)),
+                |_, (), _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
         // A subagent's view is read-only: the composer talks to the thread.
         if let Some(composer) = self.composer.as_ref().filter(|_| self.agent.is_none())
             && matches!(screen, Screen::Thread { .. } | Screen::NewThread { .. })
         {
             let this = cx.entity().downgrade();
+            let composer_bounds = Rc::clone(&self.composer_bounds);
             let measure = canvas(
                 move |bounds, _, cx| {
+                    composer_bounds.set(Some(bounds));
                     let height = f32::from(bounds.size.height);
                     let this = this;
                     cx.defer(move |cx| {
@@ -275,12 +281,24 @@ impl Render for Conversation {
                         .child(card),
                 );
             } else {
+                let offset = self.composer_drop.map_or(0.0, |(started, shift)| {
+                    let progress = (started.elapsed().as_secs_f32() / 0.4).min(1.0);
+                    if cx.reduce_motion() || progress >= 1.0 {
+                        0.0
+                    } else {
+                        window.request_animation_frame();
+                        shift * (1.0 - smooth_out(progress))
+                    }
+                });
+                if offset == 0.0 {
+                    self.composer_drop = None;
+                }
                 root = root.child(
                     div()
                         .absolute()
                         .left_0()
                         .right_0()
-                        .bottom_0()
+                        .bottom(px(-offset))
                         .flex()
                         .justify_center()
                         .px(px(GUTTER))
@@ -581,7 +599,14 @@ impl Conversation {
         let rows = self.rows.len();
         canvas(
             |_, _, _| {},
-            move |_, (), _window, cx| {
+            move |_, (), window, cx| {
+                if following && !landing && !cx.reduce_motion() {
+                    let max = f32::from(list.max_offset_for_scrollbar().y).max(0.0);
+                    let current = -f32::from(list.scroll_px_offset_for_scrollbar().y);
+                    if max - current > 0.25 {
+                        window.request_animation_frame();
+                    }
+                }
                 // Render to here is the transcript's build and layout.
                 if let Some(started) = frame_started.take() {
                     let ms = started.elapsed().as_millis();
@@ -596,7 +621,11 @@ impl Conversation {
                             && bounds.top() < viewport.bottom() + px(reach)
                     })
                 };
-                let older = more && wants_older(&list);
+                // While easing to the tail, the first visible row can still
+                // be near the old top. It is not a request for older history.
+                let max = f32::from(list.max_offset_for_scrollbar().y).max(0.0);
+                let at_tail = -f32::from(list.scroll_px_offset_for_scrollbar().y) >= max - 0.25;
+                let older = more && wants_older(&list) && (!following || at_tail);
                 // The nearest earlier work under the view loads first: it
                 // is what the reader meets scrolling up. The list places
                 // only rows from its top one down, so work just above the
@@ -1296,17 +1325,20 @@ impl Conversation {
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = self.theme;
-        let pitch = NAVIGATOR_MENU_ROW_PX + 4.0;
+        // Each row sits centred in its slot, half the 4 px gap above and half
+        // below, so the list is exactly its rows tall: nothing to overscroll.
+        // A list 4 px shorter than its slots let "scroll to the turn in view"
+        // lift every row by the trailing gap, starving the top padding and
+        // doubling the bottom.
+        let gap = 4.0;
+        let pitch = NAVIGATOR_MENU_ROW_PX + gap;
+        let pad_y = NAVIGATOR_PAD_PX - gap / 2.0;
         #[expect(
             clippy::cast_precision_loss,
             reason = "a thread's turn count is far inside f32's exact integer range"
         )]
-        let content_height = (markers.len() as f32).mul_add(pitch, -4.0);
-        let height = content_height.min(
-            NAVIGATOR_PAD_PX
-                .mul_add(-2.0, max_height)
-                .max(NAVIGATOR_MENU_ROW_PX),
-        );
+        let content_height = (markers.len() as f32) * pitch;
+        let height = content_height.min(pad_y.mul_add(-2.0, max_height).max(pitch));
         let this = cx.entity().downgrade();
         let hover = Rc::clone(&self.navigator_hover);
         let surface = self.navigator_hover_surface.clone();
@@ -1321,7 +1353,7 @@ impl Conversation {
                     let probe_hover = Rc::clone(&hover);
                     let probe_surface = surface.clone();
                     let probe_id = move_id.clone();
-                    div().h(px(pitch)).w_full().child(
+                    div().h(px(pitch)).w_full().py(px(gap / 2.0)).child(
                         div()
                             .id(SharedString::from(format!("navigator-row-{}", marker.id)))
                             .relative()
@@ -1378,7 +1410,8 @@ impl Conversation {
         .w_full();
         let content = div()
             .relative()
-            .p(px(NAVIGATOR_PAD_PX))
+            .px(px(NAVIGATOR_PAD_PX))
+            .py(px(pad_y))
             .child(sliding_hover_pill(
                 "turn-navigator-hover",
                 &theme,

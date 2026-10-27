@@ -229,13 +229,21 @@ Every `src` is a path relative to the project, an absolute path, a
 ### image
 
 Show an image the reply is about: a screenshot you took, a plot you
-rendered, a generated asset. Images keep their own size, capped in height.
-`src` (required unless `images`), `alt`; or `images: [{ src, alt?, caption? }]`
-for a few side by side; `width?`, `height?`: the size hint used until a
-single image loads.
+rendered, a generated asset. A single image is centered over a blurred copy.
+Use `src`, `alt`; or `images: ["path", ...]` (`paths` is an alias) for a
+Discord-style gallery with balanced rows of two or three square tiles.
+Entries can also be `{ src, alt?, caption? }`, mixed with plain paths.
+Galleries support up to 16 images. Tiles keep the complete image over a
+blurred background; click any tile for the full preview. Navigate the gallery
+with the outside arrow buttons, Left/Right keys, or a horizontal drag.
+`width?`, `height?`: the size hint used until a single image loads.
 
 ```artisan-image
 { "src": "docs/assets/after.png", "alt": "The settings page after the fix" }
+```
+
+```artisan-image
+{ "images": ["docs/assets/front.png", "docs/assets/side.png", "docs/assets/back.png"] }
 ```
 
 ### image-compare

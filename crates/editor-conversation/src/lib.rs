@@ -86,11 +86,6 @@ impl WindowState {
     }
 }
 
-/// A jump's transcript starts this far short of its target…
-const ARRIVAL_PX: f32 = 160.0;
-/// …and eases into place over this long.
-const ARRIVAL: Duration = Duration::from_millis(180);
-
 #[derive(Clone, Debug)]
 pub enum ConversationEvent {
     /// The open thread's items changed (the inspector re-reads them).
@@ -166,6 +161,9 @@ pub struct Conversation {
     /// Height of the composer card floating over the transcript; the end
     /// space under the last row clears it.
     composer_height: f32,
+    composer_bounds: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    frame_bounds: Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    composer_drop: Option<(std::time::Instant, f32)>,
     /// The pointer is over the turn navigator (rail or menu).
     navigator_hovered: bool,
     navigator_hover: Rc<RefCell<editor_ui::picker_motion::SlidingHoverState>>,
@@ -204,8 +202,10 @@ pub struct Conversation {
     /// Wheel ticks glide; precise trackpad deltas use native scrolling.
     glide: WheelGlide,
     glide_scheduled: bool,
-    /// A jump's arrival: when it began and how far short it started.
-    arrival: Option<(std::time::Instant, f32)>,
+    /// A measured navigation destination; tail following uses the current end instead.
+    scroll_destination: Option<ListOffset>,
+    scroll_frame: Option<std::time::Instant>,
+
     /// Ticks the elapsed time while the open thread's run is live.
     clock: Option<Task<()>>,
     host_events: Option<Subscription>,
@@ -282,6 +282,9 @@ impl Conversation {
             theme,
             load_error: None,
             composer_height: 0.0,
+            composer_bounds: Rc::default(),
+            frame_bounds: Rc::default(),
+            composer_drop: None,
             navigator_hovered: false,
             navigator_hover: Rc::default(),
             navigator_hover_surface: editor_ui::measure::Measured::default(),
@@ -300,7 +303,8 @@ impl Conversation {
             frame_started: Rc::default(),
             glide: WheelGlide::default(),
             glide_scheduled: false,
-            arrival: None,
+            scroll_destination: None,
+            scroll_frame: None,
             clock: None,
             host_events: None,
             new_thread_host: None,
@@ -337,6 +341,8 @@ impl Conversation {
     /// Another transcript: its prepared bodies, motion and measurements go.
     fn forget_transcript(&mut self, cx: &mut App) {
         self.release_selection(cx);
+        self.scroll_destination = None;
+        self.scroll_frame = None;
         self.bodies.clear(cx);
         self.disclosures.clear();
         self.reveal_frontier = None;
@@ -385,20 +391,6 @@ impl Conversation {
         let effects = view.jump(Jump::To(position));
         self.clear_page_frontiers();
         self.perform(effects, cx);
-    }
-
-    /// How far the transcript is drawn from its place while a jump arrives;
-    /// zero once it has.
-    pub(crate) fn arrival_offset(&mut self) -> f32 {
-        let Some((since, shift)) = self.arrival else {
-            return 0.0;
-        };
-        let progress = since.elapsed().as_secs_f32() / ARRIVAL.as_secs_f32();
-        if progress >= 1.0 {
-            self.arrival = None;
-            return 0.0;
-        }
-        shift * (1.0 - motion::eased(editor_ui::motion::MotionCurve::SmoothOut, progress))
     }
 
     /// The opened thread is still preparing its first screen: its first
@@ -602,7 +594,28 @@ impl Conversation {
     }
 
     fn sync_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let screen = self.core.read(cx).screen().clone();
+        let screen = self.core.read(cx).workspace_screen().clone();
+        let creating = self.composer.as_ref().is_some_and(|composer| {
+            matches!(composer.read(cx).target(), ComposerTarget::NewThread { .. })
+        });
+        if creating
+            && matches!(screen, Screen::Thread { .. })
+            && !cx.reduce_motion()
+            && let (Some(card), Some(frame)) = (self.composer_bounds.get(), self.frame_bounds.get())
+        {
+            let bottom = if f32::from(window.viewport_size().width) >= 640.0 {
+                24.0
+            } else {
+                16.0
+            };
+            let target_top = f32::from(frame.bottom() - card.size.height) - bottom;
+            self.composer_drop = Some((
+                std::time::Instant::now(),
+                f32::from(card.top()) - target_top,
+            ));
+        } else if !matches!(screen, Screen::Thread { .. }) {
+            self.composer_drop = None;
+        }
         let target = match screen {
             Screen::Thread { host, thread } => {
                 if self.open.as_ref() != Some(&(host.clone(), thread.clone())) {
@@ -675,6 +688,9 @@ impl Conversation {
             tracing::warn!(host = %host_id, thread = %thread, "can't open a thread on an unknown host");
             return;
         };
+        let local_files = self.core.read(cx).hosts().any(|(config, _)| {
+            &config.id == host_id && config.kind == editor_core::HostKind::Local
+        });
         let client = host.read(cx).client.clone();
         let resource_thread = thread.clone();
         self.bodies.markdown.set_media_fetcher(Some(
@@ -692,6 +708,7 @@ impl Conversation {
                     })
                 },
             )
+            .local_files(local_files)
             .reference_scope(editor_ui::markdown_renderer::ResourceScope {
                 host: host_id.0.clone(),
                 thread: thread.clone(),
@@ -813,7 +830,13 @@ impl Conversation {
             HostEvent::EngineInstall { .. }
             | HostEvent::WslDistro { .. }
             | HostEvent::EditorCall { .. } => {}
-            HostEvent::Changed => cx.notify(),
+            HostEvent::Changed => {
+                // A catalog may arrive after the message bodies were cached.
+                for row in self.row_views.iter().flatten() {
+                    row.update(cx, |row, cx| row.refresh_mentions(cx));
+                }
+                cx.notify();
+            }
             HostEvent::Reset => {
                 self.page_task = None;
                 self.work_reading = None;
@@ -834,8 +857,14 @@ impl Conversation {
                 Effect::Fetch(fetch) => self.fetch(fetch, cx),
                 Effect::ScrollToEnd => {
                     self.glide.cancel();
-                    self.list.set_follow_mode(FollowMode::Tail);
-                    self.list.scroll_to_end();
+                    self.scroll_destination = None;
+                    if cx.reduce_motion() || self.landing() {
+                        self.list.set_follow_mode(FollowMode::Tail);
+                        self.list.scroll_to_end();
+                    } else {
+                        self.list.set_follow_mode(FollowMode::Normal);
+                        self.scroll_frame = Some(std::time::Instant::now());
+                    }
                 }
                 Effect::ScrollTo(position) => {
                     let index = self.view.as_ref().and_then(|view| {
@@ -848,21 +877,16 @@ impl Conversation {
                     if let Some(item_ix) = index {
                         self.glide.cancel();
                         self.list.set_follow_mode(FollowMode::Normal);
-                        let from = self.list.logical_scroll_top().item_ix;
+                        let from = self.list.logical_scroll_top();
                         self.list.scroll_to(ListOffset {
                             item_ix,
                             offset_in_item: px(0.0),
                         });
-                        // The transcript is drawn a little short, on the side
-                        // it came from, and eases in: a jump reads as a quick
-                        // scroll rather than a cut.
-                        if !cx.reduce_motion() && item_ix != from {
-                            let shift = if item_ix < from {
-                                -ARRIVAL_PX
-                            } else {
-                                ARRIVAL_PX
-                            };
-                            self.arrival = Some((std::time::Instant::now(), shift));
+                        if !cx.reduce_motion() && !self.landing() {
+                            let target = self.list.logical_scroll_top();
+                            self.list.scroll_to(from);
+                            self.scroll_destination = Some(target);
+                            self.scroll_frame = Some(std::time::Instant::now());
                         }
                     }
                 }
@@ -974,7 +998,11 @@ impl Conversation {
     /// a page can replace the work row at the loaded edge, and the native
     /// splice cannot keep an anchor whose key disappears.
     fn reading_anchors(&self) -> Vec<(RowKey, Option<ItemId>, gpui::Pixels)> {
-        if self.list.is_following_tail() {
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.viewport.state().is_following())
+        {
             return Vec::new();
         }
         let viewport = self.list.viewport_bounds();
@@ -1009,6 +1037,60 @@ impl Conversation {
         }
     }
 
+    /// Follow measured content on display frames. Automatic movement never
+    /// reports a reader scroll, so streamed growth cannot change their anchor.
+    fn smooth_scroll(&mut self, window: &Window, cx: &Context<Self>) {
+        let following = self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.viewport.state().is_following());
+        if cx.reduce_motion() || self.landing() || !self.disclosures.is_empty() {
+            self.scroll_destination = None;
+            self.scroll_frame = None;
+            if following && !self.list.is_following_tail() {
+                self.list.set_follow_mode(FollowMode::Tail);
+            }
+            return;
+        }
+        if !following && self.scroll_destination.is_none() {
+            self.scroll_frame = None;
+            return;
+        }
+        // Freeze native tail snapping before easing toward the changing end.
+        self.list.set_follow_mode(FollowMode::Normal);
+        let max = f32::from(self.list.max_offset_for_scrollbar().y).max(0.0);
+        let current = self.list_offset(max);
+        let target = self
+            .scroll_destination
+            .map_or(-max, |destination| {
+                let from = self.list.logical_scroll_top();
+                self.list.scroll_to(destination);
+                let target = f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+                self.list.scroll_to(from);
+                target
+            })
+            .clamp(-max, 0.0);
+        let now = std::time::Instant::now();
+        let elapsed = self
+            .scroll_frame
+            .replace(now)
+            .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
+        let distance = target - current;
+        if distance.abs() <= 0.25 {
+            self.scroll_frame = None;
+            self.list.scroll_by(px(current - target));
+            if let Some(destination) = self.scroll_destination.take() {
+                self.list.scroll_to(destination);
+            }
+            return;
+        }
+        // Time-based easing keeps the response identical at 60 and 144 Hz,
+        // and follows new streaming targets without restarting an animation.
+        let fraction = 1.0 - (-elapsed.as_secs_f32() / 0.09).exp();
+        self.list.scroll_by(px(-distance * fraction));
+        window.request_animation_frame();
+    }
+
     /// Glides a wheel tick over the transcript. Trackpad
     /// deltas and reduced motion go to the list, which moves directly.
     pub(crate) fn transcript_wheel(
@@ -1017,6 +1099,8 @@ impl Conversation {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.scroll_destination = None;
+        self.scroll_frame = None;
         let towards = f32::from(event.delta.pixel_delta(window.line_height()).y);
         if towards.abs() > f32::EPSILON {
             self.reader_toward_end = Some(towards < 0.0);
@@ -1041,6 +1125,23 @@ impl Conversation {
                 );
             }
             return;
+        }
+        // Stop automatic following as soon as the reader asks to go up.
+        // Native scroll callbacks run after layout; waiting for one lets an
+        // intervening streaming frame pull against the reader's input.
+        if towards > 0.0 {
+            let top = self.list.logical_scroll_top().item_ix;
+            let anchor = self.view.as_ref().and_then(|view| {
+                self.rows
+                    .get(top)
+                    .and_then(|(row, _)| row.anchor())
+                    .and_then(|id| view.position_of(id))
+                    .or_else(|| view.window().oldest)
+            });
+            if let Some(anchor) = anchor {
+                let through = self.shown_through(top).unwrap_or(anchor);
+                self.viewport(vec![Input::ScrolledAway { anchor, through }], cx);
+            }
         }
         if event.delta.precise() || cx.reduce_motion() {
             self.glide.cancel();
@@ -1683,7 +1784,10 @@ impl Conversation {
         // The row the reader is on going away (a body splitting into its
         // blocks) keeps the reader on what replaced it.
         let top = self.list.logical_scroll_top();
-        let replaced = !self.list.is_following_tail()
+        let replaced = !self
+            .view
+            .as_ref()
+            .is_some_and(|view| view.viewport.state().is_following())
             && range.contains(&top.item_ix)
             && !new_keys.contains(&old_keys[top.item_ix - range.start])
             && !new_keys.is_empty();

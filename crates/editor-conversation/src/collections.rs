@@ -1,8 +1,6 @@
 //! Typed mounted collection owners. All screens use Core's same bounded native
 //! viewport; this module chooses only canonical record labels and source fields.
-use artisan_api::{
-    Collection, CollectionRef, FileChange, Item, ItemId, ItemKind, Question, TextContent, ToolKind,
-};
+use artisan_api::{Collection, CollectionRef, Item, ItemId, ItemKind, Question, TextContent};
 use editor_core::HostData;
 use editor_sources::{CollectionBrowser, CollectionPresenter, CollectionPreview};
 use editor_ui::theme::ArtisanTheme;
@@ -15,7 +13,6 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 type Owner<T> = Rc<RefCell<Option<(EntityId, ItemId, Entity<CollectionBrowser<T>>)>>>;
 #[derive(Default)]
 pub struct CollectionOwners {
-    edits: Owner<FileChange>,
     questions: Owner<Question>,
 }
 impl CollectionOwners {
@@ -37,30 +34,6 @@ impl CollectionOwners {
             view.update(cx, |view, cx| view.set_source(source.clone(), cx));
         }
         sync(
-            &self.edits,
-            items,
-            |item| match &item.kind {
-                ItemKind::Tool {
-                    tool:
-                        ToolKind::Edit {
-                            changes: Collection::Stored(source),
-                        },
-                    ..
-                } => Some(source),
-                ItemKind::UserMessage { .. }
-                | ItemKind::AssistantMessage { .. }
-                | ItemKind::Tool { .. }
-                | ItemKind::Agent { .. }
-                | ItemKind::Question { .. }
-                | ItemKind::Plan { .. }
-                | ItemKind::Image { .. }
-                | ItemKind::Compaction { .. }
-                | ItemKind::Notice { .. }
-                | ItemKind::Error { .. } => None,
-            },
-            cx,
-        );
-        sync(
             &self.questions,
             items,
             |item| match &item.kind {
@@ -81,29 +54,6 @@ impl CollectionOwners {
             },
             cx,
         );
-    }
-    pub(crate) fn edit(
-        &self,
-        id: ItemId,
-        source: CollectionRef,
-        host: Option<WeakEntity<HostData>>,
-        theme: &ArtisanTheme,
-    ) -> gpui::AnyElement {
-        Mounted {
-            owner: Rc::clone(&self.edits),
-            id,
-            source,
-            host,
-            theme: *theme,
-            title: "File changes".into(),
-            present: Rc::new(|change: &FileChange, _, _| CollectionPreview {
-                label: change.path.clone().into(),
-                detail: change.diff.clone(),
-                selected: false,
-                disabled: false,
-            }),
-        }
-        .into_any_element()
     }
     pub(crate) fn question(
         &self,

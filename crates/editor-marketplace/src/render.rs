@@ -786,7 +786,6 @@ fn engine_marks(theme: &ArtisanTheme, selector: &str, marks: &[EngineMark]) -> D
                     tooltip(
                         move |_, _| {
                             glass_tooltip("marketplace-mark-tip", &theme, px(260.0), false)
-                                .text_color(theme.colors.text.to_paint())
                                 .child(label.clone())
                                 .into_any_element()
                         },

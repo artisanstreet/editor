@@ -180,7 +180,9 @@ fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
             c.jump_to(&message, cx);
             // This fixture checks stationary native clipping; navigation motion
             // has separate tests and must not move its measured tile boundary.
-            c.arrival = None;
+            if let Some(destination) = c.scroll_destination.take() {
+                c.list.scroll_to(destination);
+            }
             let index = c.list.logical_scroll_top().item_ix;
             c.list.scroll_to(gpui::ListOffset {
                 item_ix: index,

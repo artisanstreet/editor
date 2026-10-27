@@ -108,6 +108,11 @@ pub struct RowView {
     prose_reveal: Rc<PreparedReveal>,
     queue_held: bool,
     prose_fresh: bool,
+    #[allow(
+        clippy::option_option,
+        reason = "None means unmeasured, Some(None) means no entrance, Some(Some) means animating"
+    )]
+    message_entrance: Option<Option<std::time::Instant>>,
     reported_height: Rc<Cell<Option<gpui::Pixels>>>,
     /// What it shows changed since `reported_height` was measured.
     remeasure: Rc<Cell<bool>>,
@@ -191,7 +196,6 @@ impl RowView {
     fn tools(&self) -> presenters::tool::ToolPresenter<'_> {
         presenters::tool::ToolPresenter {
             text: self.text(),
-            collections: &self.collections,
             actions: self.actions(),
         }
     }
@@ -226,6 +230,7 @@ impl RowView {
             prose_reveal: Rc::new(PreparedReveal::default()),
             queue_held: false,
             prose_fresh,
+            message_entrance: None,
             reported_height: Rc::default(),
             remeasure: Rc::default(),
             reported_body: Rc::default(),
@@ -258,6 +263,18 @@ impl RowView {
         // The last height stays, so a new one reaches the conversation.
         self.remeasure.set(true);
         cx.notify();
+    }
+
+    pub(crate) fn refresh_mentions(&self, cx: &mut Context<Self>) {
+        if matches!(
+            &self.model.row,
+            Row::Text {
+                slot: Slot::Text(TextSection::User),
+                ..
+            }
+        ) {
+            self.refresh(cx);
+        }
     }
 
     /// The height to draw this row from cache at: known, and no motion
@@ -439,12 +456,18 @@ impl RowView {
                     )
                     .into_any_element()
             }
-            Body::Markdown(markdown) => self.markdown(markdown, reveal, window),
+            Body::Markdown(markdown) => self.markdown(markdown, reveal, window, cx),
             Body::Plain(plain) => self.plain(plain, window, cx),
         }
     }
 
-    fn markdown(&mut self, body: &Markdown, reveal: bool, window: &Window) -> AnyElement {
+    fn markdown(
+        &mut self,
+        body: &Markdown,
+        reveal: bool,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = self.theme();
         let renderer = &self.env.markdown;
         renderer.set_selection_prefix(body.order.clone());
@@ -462,6 +485,52 @@ impl RowView {
                 window.request_animation_frame();
             }
             content
+        } else if matches!(
+            &self.model.row,
+            Row::Text {
+                slot: Slot::Text(TextSection::User),
+                ..
+            }
+        ) {
+            let names = self
+                .env
+                .host
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
+                .and_then(|host| host.read(cx).skill_catalog.clone());
+            let names = names
+                .as_ref()
+                .map(|skills| {
+                    skills
+                        .iter()
+                        .map(|skill| skill.name.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let names = artisan_mentions::MentionNames::new(&names);
+            let mentions: editor_ui::text_editor::Tokenizer = Rc::new(move |text| {
+                names
+                    .mentions(text, '$')
+                    .into_iter()
+                    .map(|mention| editor_ui::text_editor::Token {
+                        range: mention.range,
+                        glyph: Some(editor_ui::AssetId::TABLER_FILE_SPARK),
+                        style: gpui::HighlightStyle {
+                            color: Some(theme.colors.mention_skill.to_paint()),
+                            font_weight: Some(FontWeight::MEDIUM),
+                            ..Default::default()
+                        },
+                    })
+                    .collect()
+            });
+            renderer.render_message_range(
+                &body.prepared,
+                body.range.clone(),
+                theme,
+                body.selector.clone(),
+                body.tone,
+                &mentions,
+            )
         } else if body.code_copy {
             renderer.render_prepared_range(
                 &body.prepared,
@@ -781,38 +850,19 @@ impl RowView {
     }
 
     /// A non-activity row inside the work: plan, notice, nested messages.
-    fn entry(&mut self, item: &Item, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn entry(&self, item: &Item) -> AnyElement {
         match &item.kind {
             ItemKind::Tool { .. }
             | ItemKind::UserMessage {
                 from_agent: Some(_),
                 ..
             } => {
-                let live = self.live_text(&LiveTarget::Shell {
-                    item_id: item.id.clone(),
-                });
                 let expanded = self
                     .ui(&item.id)
                     .and_then(|ui| ui.expanded)
                     .unwrap_or(false);
-                // An opened activity shows its preview once it has run.
-                let preview = self
-                    .model
-                    .text
-                    .clone()
-                    .filter(|_| {
-                        expanded
-                            && activity::agent_message(item).is_none()
-                            && (live.is_none() || item.status.is_terminal())
-                    })
-                    .map(|text| self.body(&text.body, false, window, cx));
-                self.tools().activity_row(
-                    item,
-                    expanded,
-                    live.as_deref(),
-                    &self.model.agents,
-                    preview,
-                )
+                self.tools()
+                    .activity_row(item, expanded, &self.model.agents)
             }
             ItemKind::Agent { .. } => self.agent().agent_row(item),
             ItemKind::Plan { .. } => self.tools().plan_entry(item),
@@ -1259,7 +1309,13 @@ impl Render for RowView {
         self.queue_held = self.env.reveal.borrow_mut().begin(
             key.clone(),
             (position, part, ordinal),
-            !bypass && !rushed && policy == MotionPolicy::Full,
+            !bypass
+                && !rushed
+                && policy == MotionPolicy::Full
+                // Instant draws each row as it arrives, without waiting
+                // on the rows above to settle.
+                && editor_ui::streaming::StreamingMode::current()
+                    != editor_ui::streaming::StreamingMode::Instant,
         );
         self.prose_reveal.set_paused(self.queue_held);
         self.prose_reveal.set_rushed(rushed);
@@ -1315,10 +1371,12 @@ impl Render for RowView {
                     | Row::AgentStatus(..) => None,
                 },
                 Row::WorkEntry { id, .. } => {
-                    let content = self.model.items.get(id).cloned().map_or_else(
-                        || div().into_any_element(),
-                        |item| self.entry(&item, window, cx),
-                    );
+                    let content = self
+                        .model
+                        .items
+                        .get(id)
+                        .cloned()
+                        .map_or_else(|| div().into_any_element(), |item| self.entry(&item));
                     Some(self.entering(id, content))
                 }
                 Row::Chain { ids, .. } => {
@@ -1338,7 +1396,7 @@ impl Render for RowView {
                             let card = self
                                 .requests()
                                 .approval_card(&item, self.answer_state(&item.id));
-                            card.unwrap_or_else(|| self.entry(&item, window, cx))
+                            card.unwrap_or_else(|| self.entry(&item))
                         }
                         None => div().into_any_element(),
                     };
@@ -1373,6 +1431,37 @@ impl Render for RowView {
                 Row::AgentStatus(_, working) => self.agent().agent_status_row(*working),
             }
         };
+        let content = content.map(|content| {
+            if matches!(
+                row.semantic(),
+                Row::Text {
+                    slot: Slot::Plain(PlainSection::User) | Slot::Text(TextSection::User),
+                    ..
+                }
+            ) {
+                let fresh = row
+                    .anchor()
+                    .is_some_and(|id| self.ui(id).is_some_and(ItemUi::fresh));
+                let started = *self.message_entrance.get_or_insert_with(|| {
+                    (fresh && policy == MotionPolicy::Full).then(std::time::Instant::now)
+                });
+                if let Some(started) = started {
+                    let progress = (started.elapsed().as_secs_f32() / 0.4).min(1.0);
+                    if progress < 1.0 && policy == MotionPolicy::Full {
+                        self.animating = true;
+                        let reveal = editor_ui::motion::smooth_out(progress);
+                        return div()
+                            .relative()
+                            .w_full()
+                            .opacity(reveal)
+                            .top(px(8.0 * (1.0 - reveal)))
+                            .child(content)
+                            .into_any_element();
+                    }
+                }
+            }
+            content
+        });
         let theme = self.theme();
         // The status line keeps its own 8 px below (`mb(steps(2))`).
         let below = if matches!(row, Row::Status(_)) {
