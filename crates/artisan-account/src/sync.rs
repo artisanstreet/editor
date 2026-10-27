@@ -29,6 +29,10 @@ pub enum RoutingDecision {
 
 /// Inputs to [`decide_route`]: one struct instead of four bools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "routing needs four independent reachability flags together"
+)]
 pub struct RouteConditions {
     pub has_paired_direct: bool,
     pub direct_reachable: bool,
@@ -97,6 +101,10 @@ impl VaultItem {
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "test helper mirrors the four routing flags"
+    )]
     const fn route(
         has_paired_direct: bool,
         direct_reachable: bool,

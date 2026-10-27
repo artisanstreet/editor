@@ -184,11 +184,19 @@ pub enum FrameError {
 }
 
 /// Strict decode of a client -> server frame.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "frame errors are coarse Invalid to avoid leaking peer bytes"
+)]
 pub fn decode_client_frame(value: &serde_json::Value) -> Result<ClientFrame, FrameError> {
     serde_json::from_value(value.clone()).map_err(|_| FrameError::Invalid)
 }
 
 /// Forward-compatible read of a server -> client frame.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "frame errors are coarse Invalid to avoid leaking peer bytes"
+)]
 pub fn read_server_frame(value: serde_json::Value) -> Result<ServerFrame, FrameError> {
     serde_json::from_value(value).map_err(|_| FrameError::Invalid)
 }
@@ -203,7 +211,12 @@ pub const fn seq_advances(last: Option<u64>, next: u64) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test fixtures; failures fail the test"
+)]
 mod tests {
     use super::*;
     use serde_json::json;

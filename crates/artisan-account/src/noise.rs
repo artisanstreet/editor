@@ -119,6 +119,10 @@ pub fn prologue_bytes(ctx: &ChannelCtx) -> Vec<u8> {
 
 /// Frame: `AR1 ver ch_len ch kind body` (matches `channel.ts`; no sequence —
 /// ordering comes from the sequential Noise nonces).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "frame errors are coarse to avoid leaking transcript bytes"
+)]
 pub fn frame(kind: u8, channel: &str, body: &[u8]) -> Result<Vec<u8>, NoiseError> {
     if kind != KIND_CONFIRM && kind != KIND_DATA {
         return Err(NoiseError::Frame);
@@ -188,6 +192,10 @@ pub struct StaticKeypair {
 }
 
 impl StaticKeypair {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "key failures are coarse KeyError so messages never carry key material"
+    )]
     pub fn generate() -> Result<Self, crate::enrollment::KeyError> {
         let mut secret = [0_u8; 32];
         getrandom::fill(&mut secret).map_err(|_| crate::enrollment::KeyError)?;
@@ -249,9 +257,8 @@ pub fn bind_verify(
     handshake_hash: &[u8],
     signature: &[u8],
 ) -> bool {
-    let message = match bind_message(role, handshake_hash) {
-        Ok(message) => message,
-        Err(_) => return false,
+    let Ok(message) = bind_message(role, handshake_hash) else {
+        return false;
     };
     let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(ed_public) else {
         return false;
@@ -351,8 +358,12 @@ struct Open {
     recv_count: u64,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "handshake holds the snow state once; open is the steady state and stays small"
+)]
 enum State {
-    Hand(Handshake),
+    Hand(Box<Handshake>),
     Open(Open),
     Closed,
 }
@@ -379,8 +390,7 @@ fn now_ms() -> u64 {
     u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |elapsed| elapsed.as_millis()),
     )
     .unwrap_or(0)
 }
@@ -395,6 +405,10 @@ impl NoiseChannel {
         Self::build_inner(initiator, static_secret, peer_static, ctx, None)
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     fn build_inner(
         initiator: bool,
         static_secret: &[u8; 32],
@@ -419,11 +433,11 @@ impl NoiseChannel {
             builder.build_responder().map_err(|_| NoiseError::Key)?
         };
         Ok(Self {
-            state: State::Hand(Handshake {
+            state: State::Hand(Box::new(Handshake {
                 state,
                 sent: 0,
                 received: 0,
-            }),
+            })),
             ctx,
             initiator,
             own_static: x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(
@@ -493,6 +507,10 @@ impl NoiseChannel {
     }
 
     /// Produce the next handshake message (XX turn order enforced).
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     pub fn next_handshake_message(&mut self, out: &mut Vec<u8>) -> Result<(), NoiseError> {
         let State::Hand(hand) = &mut self.state else {
             return Err(NoiseError::Handshake);
@@ -518,6 +536,10 @@ impl NoiseChannel {
 
     /// Consume a peer handshake message. Fails fast when the peer's static
     /// key is already known and mismatched.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     pub fn receive_handshake_message(&mut self, msg: &[u8]) -> Result<(), NoiseError> {
         if msg.is_empty() || msg.len() > 65535 {
             return Err(NoiseError::Handshake);
@@ -544,6 +566,10 @@ impl NoiseChannel {
         Ok(())
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     fn complete_handshake(&mut self) -> Result<(), NoiseError> {
         let State::Hand(hand) = &self.state else {
             return Err(NoiseError::Handshake);
@@ -586,6 +612,10 @@ impl NoiseChannel {
     /// Emit the initiator key confirmation carrying the Core grant JWT:
     /// `hash(64) || jwt_len(u16be) || jwt || sig(64)`. Returns the
     /// ciphertext to send as the Relay data body.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     pub fn emit_initiator_confirm(
         &mut self,
         own_cnf_secret: &[u8; 32],
@@ -643,6 +673,10 @@ impl NoiseChannel {
         outcome
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     fn receive_initiator_confirm_inner(
         &mut self,
         ct: &[u8],
@@ -712,6 +746,10 @@ impl NoiseChannel {
 
     /// Emit the responder key confirmation:
     /// `hash(64) || sig(64)` with the enrolled machine key (role 0x02).
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     pub fn emit_responder_confirm(
         &mut self,
         own_cnf_secret: &[u8; 32],
@@ -760,6 +798,10 @@ impl NoiseChannel {
         outcome
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     fn receive_responder_confirm_inner(
         &mut self,
         ct: &[u8],
@@ -801,6 +843,10 @@ impl NoiseChannel {
     }
 
     /// Seal app data. Requires an open session; rotation bound enforced.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>, NoiseError> {
         if plaintext.len() > MAX_APP_PLAINTEXT {
             return Err(NoiseError::TooLarge);
@@ -843,6 +889,10 @@ impl NoiseChannel {
         outcome
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "handshake errors are coarse to avoid leaking key material or transcript"
+    )]
     fn receive_data_inner(&mut self, ct: &[u8]) -> Result<Vec<u8>, NoiseError> {
         let channel = self.ctx.channel.clone();
         let State::Open(open) = &mut self.state else {
@@ -976,7 +1026,7 @@ mod tests {
         resp.receive_handshake_message(&m1).unwrap();
         let mut m2 = Vec::new();
         resp.next_handshake_message(&mut m2).unwrap();
-        init.receive_handshake_message(&mut m2).unwrap();
+        init.receive_handshake_message(&m2).unwrap();
         let mut m3 = Vec::new();
         init.next_handshake_message(&mut m3).unwrap();
         resp.receive_handshake_message(&m3).unwrap();
@@ -1032,7 +1082,7 @@ mod tests {
         let mut resp = NoiseChannel::responder(&resp_sec, None, ctx()).unwrap();
         let mut m1 = Vec::new();
         init.next_handshake_message(&mut m1).unwrap();
-        resp.receive_handshake_message(&mut m1).unwrap();
+        resp.receive_handshake_message(&m1).unwrap();
         let mut m2 = Vec::new();
         resp.next_handshake_message(&mut m2).unwrap();
         init.receive_handshake_message(&m2).unwrap();
@@ -1141,19 +1191,20 @@ mod relay_fixture_tests {
     use super::*;
 
     fn fixture_path() -> std::path::PathBuf {
-        std::env::var("NOISE_FIXTURE_PATH")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
+        std::env::var("NOISE_FIXTURE_PATH").map_or_else(
+            |_| {
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("..")
                     .join("..")
                     .join("..")
                     .join("relay/contracts/fixtures/noise-xx.json")
-            })
+            },
+            std::path::PathBuf::from,
+        )
     }
 
     fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        hex::encode(bytes)
     }
 
     fn unhex(text: &str) -> Vec<u8> {
@@ -1194,7 +1245,7 @@ mod relay_fixture_tests {
         let mut resp = NoiseChannel::responder_with_ephemeral(
             &resp_static,
             Some(init_pub),
-            ctx.clone(),
+            ctx,
             [0x44_u8; 32],
         )
         .unwrap();

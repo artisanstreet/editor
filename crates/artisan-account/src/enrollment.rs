@@ -22,6 +22,10 @@ pub struct MachineKeypair {
 }
 
 impl MachineKeypair {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "key failures are coarse KeyError so messages never carry key material"
+    )]
     pub fn generate() -> Result<Self, KeyError> {
         let mut secret = [0_u8; 32];
         getrandom::fill(&mut secret).map_err(|_| KeyError)?;
@@ -146,7 +150,7 @@ mod tests {
     #[test]
     fn proof_bodies_match_core_shape() {
         assert_eq!(
-            enrollment_request_body("eA", "server-forge", 1700000000),
+            enrollment_request_body("eA", "server-forge", 1_700_000_000),
             "enrollment-request\neA\nserver-forge\n1700000000"
         );
         assert_eq!(

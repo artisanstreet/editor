@@ -42,6 +42,10 @@ pub fn pop_verify(public: &[u8; 32], nonce: &[u8; 32], jti: &str, signature: &[u
 
 /// A fresh ephemeral Ed25519 keypair (Editor PoP keys are ephemeral and
 /// automatic; Forge `cnf` matches its enrolled key).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "key failures are coarse KeyError so messages never carry key material"
+)]
 pub fn generate_ephemeral() -> Result<[u8; 32], crate::enrollment::KeyError> {
     let mut secret = [0_u8; 32];
     getrandom::fill(&mut secret).map_err(|_| crate::enrollment::KeyError)?;
@@ -49,7 +53,12 @@ pub fn generate_ephemeral() -> Result<[u8; 32], crate::enrollment::KeyError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test fixtures; failures fail the test"
+)]
 mod tests {
     use super::*;
 

@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn canonical_string_matches_core_shape() {
         assert_eq!(
-            canonical_request(1700000000, "bm9uY2U", "post", "/v1/x?a=1", "abc"),
+            canonical_request(1_700_000_000, "bm9uY2U", "post", "/v1/x?a=1", "abc"),
             "1700000000\nbm9uY2U\nPOST\n/v1/x?a=1\nabc"
         );
         assert_eq!(body_hash_hex(b""), EMPTY_BODY_HASH);
@@ -151,18 +151,18 @@ mod tests {
         let (secret, public) = keys();
         let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 16]);
         let body = br#"{"a":1}"#;
-        let canonical = canonical_request(1700000100, &nonce, "POST", "/v1/m", &body_hash_hex(body));
+        let canonical = canonical_request(1_700_000_100, &nonce, "POST", "/v1/m", &body_hash_hex(body));
         let signature = sign_proof(&secret, &canonical);
         let signature_b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
         let proof = MachineProof {
             public: &public,
             body,
-            timestamp_sec: 1700000100,
+            timestamp_sec: 1_700_000_100,
             nonce_b64u: &nonce,
             method: "post",
             path_and_query: "/v1/m",
             signature_b64u: &signature_b64u,
-            now_sec: 1700000100,
+            now_sec: 1_700_000_100,
         };
         verify_machine_proof(&proof).unwrap();
         // Tampered body fails.
@@ -172,7 +172,7 @@ mod tests {
             MachineProofError::Signature
         );
         // Expired timestamp fails.
-        let expired = MachineProof { now_sec: 1700000100 + PROOF_TIMESTAMP_WINDOW_S + 1, ..proof };
+        let expired = MachineProof { now_sec: 1_700_000_100 + PROOF_TIMESTAMP_WINDOW_S + 1, ..proof };
         assert_eq!(
             verify_machine_proof(&expired).unwrap_err(),
             MachineProofError::Time

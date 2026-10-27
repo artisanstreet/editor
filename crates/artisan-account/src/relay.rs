@@ -46,7 +46,12 @@ pub fn route_path(account: &str, machine: &str) -> Result<RoutePath, RouteError>
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test fixtures; failures fail the test"
+)]
 mod tests {
     use super::*;
 

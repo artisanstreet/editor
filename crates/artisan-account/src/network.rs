@@ -23,6 +23,10 @@ pub struct SessionToken(Vec<u8>);
 
 impl SessionToken {
     #[must_use]
+    #[expect(
+        clippy::missing_const_for_fn,
+        reason = "String::into_bytes is not const; token owns its bytes"
+    )]
     pub fn new(token: String) -> Self {
         Self(token.into_bytes())
     }
@@ -42,9 +46,7 @@ impl std::fmt::Debug for SessionToken {
 
 impl Drop for SessionToken {
     fn drop(&mut self) {
-        for byte in &mut self.0 {
-            *byte = 0;
-        }
+        self.0.fill(0);
     }
 }
 
@@ -57,7 +59,7 @@ pub enum NetworkError {
     #[error("Core refused the call: {code}")]
     Core {
         code: String,
-        #[allow(dead_code)]
+        #[allow(dead_code, reason = "Core message kept for exact shape; user text uses code only")]
         message: String,
         request_id: String,
     },
@@ -72,7 +74,7 @@ struct CoreErrorBody {
 #[derive(Clone, Debug, Deserialize)]
 struct CoreErrorDetail {
     code: String,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "Core message kept for exact shape; user text uses code only")]
     message: String,
     #[serde(rename = "requestId")]
     request_id: String,
@@ -210,6 +212,10 @@ pub struct CoreSessionClient {
 }
 
 impl CoreSessionClient {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
+    )]
     pub fn new(base_url: &str) -> Result<Self, NetworkError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -244,7 +250,11 @@ impl CoreSessionClient {
         Err(NetworkError::Transport)
     }
 
-    async fn post<B: Serialize, R: for<'de> Deserialize<'de>>(
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
+    )]
+    async fn post<B: Serialize + Sync, R: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
         body: &B,
@@ -260,6 +270,10 @@ impl CoreSessionClient {
         response.json().await.map_err(|_| NetworkError::Transport)
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
+    )]
     async fn get<R: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -327,6 +341,10 @@ impl CoreSessionClient {
 
     /// Finalize and capture the raw session token from `Set-Cookie`
     /// (`ast_session=`). The token never appears in a JSON body.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
+    )]
     pub async fn magic_finalize(
         &self,
         request_id: &str,
@@ -608,7 +626,7 @@ mod tests {
             "future": [1],
         });
         let status: MagicStatusResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(status.totp_required, false);
+        assert!(!status.totp_required);
     }
 
     #[test]

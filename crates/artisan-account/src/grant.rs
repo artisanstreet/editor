@@ -241,6 +241,10 @@ impl VerifyParams {
 }
 
 /// Decode the 32-byte `cnf` public key.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "grant errors are coarse so messages never carry key material"
+)]
 pub fn cnf_public_key(claims: &GrantClaims) -> Result<[u8; 32], GrantError> {
     if claims.cnf.jwk.kty != "OKP" || claims.cnf.jwk.crv != "Ed25519" {
         return Err(GrantError {
@@ -338,9 +342,14 @@ pub fn verify_claims(claims: &GrantClaims, params: &VerifyParams) -> Result<(), 
     Ok(())
 }
 
-/// Parse a compact JWT and verify its EdDSA signature with `issuer_pubkey`,
-/// then check reconciled claims. `kid` handling (key selection/rotation) is
+/// Parse a compact JWT and verify its EdDSA signature with `issuer_pubkey`.
+///
+/// Then check reconciled claims. `kid` handling (key selection/rotation) is
 /// the caller's job; this only verifies bytes with the given key.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "grant errors are coarse so messages never carry key material"
+)]
 pub fn parse_and_verify_jwt(
     compact: &str,
     issuer_pubkey: &[u8; 32],
@@ -365,6 +374,10 @@ pub fn parse_and_verify_jwt(
     Ok(claims)
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "grant errors are coarse so messages never carry key material"
+)]
 fn split_compact(compact: &str) -> Result<(String, Vec<u8>), GrantError> {
     let mut parts = compact.split('.');
     let (Some(header), Some(payload), Some(signature), None) = (
@@ -396,6 +409,10 @@ fn split_compact(compact: &str) -> Result<(String, Vec<u8>), GrantError> {
     Ok((format!("{header}.{payload}"), signature))
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "grant errors are coarse so messages never carry key material"
+)]
 fn check_header(header_b64: &str) -> Result<(), GrantError> {
     let header = URL_SAFE_NO_PAD
         .decode(header_b64.as_bytes())
@@ -427,6 +444,10 @@ fn check_header(header_b64: &str) -> Result<(), GrantError> {
 ///
 /// Used to echo the grant id back in Relay `authenticate` frames. Never
 /// trusts the payload.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "grant errors are coarse so messages never carry key material"
+)]
 pub fn unverified_jti(compact: &str) -> Result<String, GrantError> {
     let payload_b64 = compact.split('.').nth(1).ok_or(GrantError {
         kind: GrantErrorKind::Encoding,
@@ -453,6 +474,10 @@ pub fn unverified_jti(compact: &str) -> Result<String, GrantError> {
 ///
 /// Used for JWKS key selection/rotation (fetch JWKS, select by `kid`,
 /// check `alg == EdDSA`, then verify). Never trusts the payload.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "grant errors are coarse so messages never carry key material"
+)]
 pub fn unverified_kid(compact: &str) -> Result<String, GrantError> {
     let header_b64 = compact.split('.').next().ok_or(GrantError {
         kind: GrantErrorKind::Encoding,
@@ -481,6 +506,10 @@ pub fn unverified_kid(compact: &str) -> Result<String, GrantError> {
         })
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "grant errors are coarse so messages never carry key material"
+)]
 fn claims_from_compact(compact: &str) -> Result<GrantClaims, GrantError> {
     let payload_b64 = compact.split('.').nth(1).ok_or(GrantError {
         kind: GrantErrorKind::Encoding,
@@ -501,7 +530,8 @@ fn claims_from_compact(compact: &str) -> Result<GrantClaims, GrantError> {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    reason = "test fixtures; failures fail the test"
 )]
 mod tests {
     use super::*;
@@ -729,7 +759,7 @@ mod core_fixture_tests {
             expected_sub: expected["sub"].as_str().unwrap().into(),
             expected_mid: expected["mid"].as_str().unwrap().into(),
             // nowSec inside the grant window (iat == nbf here).
-            now_sec: 1793056834,
+            now_sec: 1_793_056_834,
         };
         let claims = parse_and_verify_jwt(token, &issuer, &params).unwrap();
         assert_eq!(claims.v, 1);
@@ -740,8 +770,8 @@ mod core_fixture_tests {
             claims.scope,
             vec![Scope::RelayConnect, Scope::ForgeExecute]
         );
-        assert_eq!(claims.iat, 1793056834);
-        assert_eq!(claims.nbf, Some(1793056834));
+        assert_eq!(claims.iat, 1_793_056_834);
+        assert_eq!(claims.nbf, Some(1_793_056_834));
         assert_eq!(claims.exp - claims.iat, 300);
         assert_eq!(claims.jti, "tkn_01M5X881B3RJZR6K6Q63EASF2M");
         // v1 has NO rev claim: present-in-fixture would fail strict reads,
@@ -798,7 +828,7 @@ mod core_fixture_tests {
                 .unwrap()
                 .strip_prefix("AST-Machine ")
                 .unwrap(),
-            now_sec: 1793056834,
+            now_sec: 1_793_056_834,
         };
         crate::machine_proof::verify_machine_proof(&request).unwrap();
         let _ = canonical;
