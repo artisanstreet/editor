@@ -204,7 +204,7 @@ impl Engines {
     }
 
     /// Checks a claude.ai session a browser captured, and keeps it for
-    /// Native Claude Mode.
+    /// claude.ai mode.
     ///
     /// # Errors
     ///

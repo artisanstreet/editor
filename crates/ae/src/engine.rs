@@ -71,7 +71,7 @@ pub fn run(command: EngineCommand) -> Result<()> {
             } => {
                 only_claude(engine)?;
                 engines.claude_ai_sign_out()?;
-                ui::success("Signed out of claude.ai. Native Claude Mode runs on Claude Code until you sign in again.");
+                ui::success("Signed out of claude.ai. claude.ai mode runs on Claude Code until you sign in again.");
                 Ok(())
             }
             EngineCommand::Logout { engine, .. } => {
@@ -127,11 +127,11 @@ async fn keep_claude_ai(engines: &Engines, session: artisan_api::ClaudeAiSession
     } = state?
     {
         ui::outro(format!(
-            "Signed in to claude.ai as {account}. Turn on Native Claude Mode in the Editor's settings to use it."
+            "Signed in to claude.ai as {account}. Turn on claude.ai mode in the Editor's settings to use it."
         ));
     } else {
         ui::outro(
-            "Signed in to claude.ai. Turn on Native Claude Mode in the Editor's settings to use it.",
+            "Signed in to claude.ai. Turn on claude.ai mode in the Editor's settings to use it.",
         );
     }
     Ok(())
@@ -275,7 +275,7 @@ async fn list(engines: &Engines, json: bool) -> Result<()> {
         .collect();
     println!("{}", ui::table(&["ENGINE", "VERSION", "ACCOUNT"], &rows));
     if let Some(state) = statuses.iter().find_map(|status| status.claude_ai.as_ref()) {
-        ui::note("claude.ai (Native Claude Mode)", claude_ai_line(state));
+        ui::note("claude.ai mode", claude_ai_line(state));
     }
     Ok(())
 }

@@ -176,9 +176,21 @@ impl Rules {
         if permissions["defaultMode"].as_str() == Some("acceptEdits") {
             self.accept_edits = true;
         }
-        push(&mut self.allow, &permissions["allow"], List::Allow, anchors, path);
+        push(
+            &mut self.allow,
+            &permissions["allow"],
+            List::Allow,
+            anchors,
+            path,
+        );
         push(&mut self.ask, &permissions["ask"], List::Ask, anchors, path);
-        push(&mut self.deny, &permissions["deny"], List::Deny, anchors, path);
+        push(
+            &mut self.deny,
+            &permissions["deny"],
+            List::Deny,
+            anchors,
+            path,
+        );
     }
 
     /// Whether file changes inside the project run without asking
@@ -236,11 +248,8 @@ impl Rules {
     #[must_use]
     pub fn protects(&self, call: &Call) -> bool {
         changes_files(&call.name)
-            && call_path(call).is_some_and(|raw| {
-                self.candidates(raw)
-                    .iter()
-                    .any(|path| self.protected(path))
-            })
+            && call_path(call)
+                .is_some_and(|raw| self.candidates(raw).iter().any(|path| self.protected(path)))
     }
 
     fn protected(&self, path: &Path) -> bool {
@@ -565,7 +574,10 @@ fn bash_spec(spec: &str) -> Option<Spec> {
     if let Some(prefix) = spec.strip_suffix(":*") {
         return one_command(prefix).map(Spec::Prefix);
     }
-    if let Some(prefix) = spec.strip_suffix(" *").filter(|prefix| !prefix.contains('*')) {
+    if let Some(prefix) = spec
+        .strip_suffix(" *")
+        .filter(|prefix| !prefix.contains('*'))
+    {
         return one_command(prefix).map(Spec::Prefix);
     }
     if spec.contains('*') {
@@ -666,13 +678,15 @@ const WRAPPERS: &[&str] = &[
 ];
 /// Wrapper options that take the next word as their value.
 const VALUE_OPTIONS: &[&str] = &[
-    "-u", "-g", "-n", "-c", "-p", "-C", "-I", "-P", "-L", "-d", "-E", "-s", "-k", "-a", "-i",
-    "-o", "-e",
+    "-u", "-g", "-n", "-c", "-p", "-C", "-I", "-P", "-L", "-d", "-E", "-s", "-k", "-a", "-i", "-o",
+    "-e",
 ];
 /// Shells whose `-c` script is read as commands.
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash", "fish"];
 /// Words that start a command without being its program.
-const KEYWORDS: &[&str] = &["!", "{", "if", "then", "else", "elif", "do", "while", "until"];
+const KEYWORDS: &[&str] = &[
+    "!", "{", "if", "then", "else", "elif", "do", "while", "until",
+];
 /// Words that end a compound command and run nothing.
 const CLOSERS: &[&str] = &["}", "fi", "done", "esac"];
 
@@ -1631,12 +1645,21 @@ mod tests {
             )
         };
         assert!(denied("Read", format!("{root}/.env")));
-        assert!(denied("Read", format!("{root}/sub/.env")), "no slash: any depth");
+        assert!(
+            denied("Read", format!("{root}/sub/.env")),
+            "no slash: any depth"
+        );
         assert!(denied("Read", format!("{root}/sub/../.env")));
         assert!(denied("Read", format!("{root}/secrets/key.pem")));
         assert!(denied("Read", "./secrets/key.pem".to_owned()));
-        assert!(!denied("Read", format!("{root}/sub/secrets/key.pem")), "anchored");
-        assert!(denied("Write", format!("{root}/locked/a.txt")), "Edit rules govern Write");
+        assert!(
+            !denied("Read", format!("{root}/sub/secrets/key.pem")),
+            "anchored"
+        );
+        assert!(
+            denied("Write", format!("{root}/locked/a.txt")),
+            "Edit rules govern Write"
+        );
         assert!(!denied("Read", format!("{root}/main.rs")));
     }
 
@@ -1648,7 +1671,13 @@ mod tests {
         std::fs::write(project.path().join(".env"), "KEY=1").unwrap();
         std::os::unix::fs::symlink(project.path().join(".env"), project.path().join("innocent"))
             .unwrap();
-        let rules = rules(home.path(), project.path(), r#"["Read"]"#, "[]", r#"["Read(.env)"]"#);
+        let rules = rules(
+            home.path(),
+            project.path(),
+            r#"["Read"]"#,
+            "[]",
+            r#"["Read(.env)"]"#,
+        );
         assert!(matches!(
             rules.verdict(&call("Read", json!({ "file_path": "innocent" }))),
             Some(Verdict::Deny(_))
@@ -1659,13 +1688,25 @@ mod tests {
     fn read_rules_govern_grep_and_glob() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let rules = rules(home.path(), project.path(), "[]", "[]", r#"["Read(secrets/**)"]"#);
+        let rules = rules(
+            home.path(),
+            project.path(),
+            "[]",
+            "[]",
+            r#"["Read(secrets/**)"]"#,
+        );
         assert!(matches!(
-            rules.verdict(&call("Grep", json!({ "pattern": "key", "path": "secrets/key.pem" }))),
+            rules.verdict(&call(
+                "Grep",
+                json!({ "pattern": "key", "path": "secrets/key.pem" })
+            )),
             Some(Verdict::Deny(_))
         ));
         assert!(matches!(
-            rules.verdict(&call("Glob", json!({ "pattern": "*", "path": "secrets/deep" }))),
+            rules.verdict(&call(
+                "Glob",
+                json!({ "pattern": "*", "path": "secrets/deep" })
+            )),
             Some(Verdict::Deny(_))
         ));
         assert!(rules.hides("Grep", &project.path().join("secrets/key.pem")));
@@ -1718,6 +1759,9 @@ mod tests {
         assert_eq!(fetch("https://docs.example.com/a"), Some(Verdict::Allow));
         assert_eq!(fetch("https://example.com/a"), None, "subdomains only");
         assert_eq!(fetch("https://example.com.evil/a"), None);
-        assert!(matches!(fetch("https://EVIL.example./x"), Some(Verdict::Deny(_))));
+        assert!(matches!(
+            fetch("https://EVIL.example./x"),
+            Some(Verdict::Deny(_))
+        ));
     }
 }

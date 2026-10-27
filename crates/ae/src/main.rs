@@ -147,7 +147,7 @@ pub enum EngineCommand {
     /// Sign an engine in to its account (asks which).
     Login {
         engine: Option<EngineId>,
-        /// Claude only: sign in to claude.ai for Native Claude Mode, in a
+        /// Claude only: sign in to claude.ai for claude.ai mode, in a
         /// browser window on this device.
         #[arg(long)]
         claude_ai: bool,

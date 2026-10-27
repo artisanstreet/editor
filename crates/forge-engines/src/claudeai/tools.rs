@@ -1101,7 +1101,9 @@ async fn web_fetch(
             input: json!({ "url": next.as_str() }),
         };
         if let Some(Verdict::Deny(reason)) = rules.verdict(&hop) {
-            return Answer::error(format!("{url} redirects to {next}, which is refused. {reason}"));
+            return Answer::error(format!(
+                "{url} redirects to {next}, which is refused. {reason}"
+            ));
         }
         if !same_site(&current, &next) {
             return Answer::ok(format!(
@@ -1134,9 +1136,10 @@ async fn web_fetch(
     );
     let declared = body_kind(&media);
     if declared == Some(Body::Binary) {
-        let size = response
-            .content_length()
-            .map_or_else(|| "size unknown".to_owned(), |length| format!("{length} bytes"));
+        let size = response.content_length().map_or_else(
+            || "size unknown".to_owned(),
+            |length| format!("{length} bytes"),
+        );
         return binary(&current, &media, &size);
     }
     let (bytes, cut) = match read_body(&mut response, MAX_WEB_BYTES).await {
@@ -1160,7 +1163,11 @@ async fn web_fetch(
             } else {
                 format!("{} bytes", bytes.len())
             };
-            let media = if media.is_empty() { "no type given" } else { &media };
+            let media = if media.is_empty() {
+                "no type given"
+            } else {
+                &media
+            };
             return binary(&current, media, &size);
         }
         Body::Html => html_to_text(&decode(&bytes, charset.as_deref(), true)),
@@ -1172,7 +1179,11 @@ async fn web_fetch(
         format!("Fetched {url} (redirected to {current})\n")
     };
     if let Some(prompt) = prompt {
-        writeln!(answer, "Requested: {prompt}\nAnswer that from the page below.").ok();
+        writeln!(
+            answer,
+            "Requested: {prompt}\nAnswer that from the page below."
+        )
+        .ok();
     }
     if cut {
         writeln!(
@@ -1205,11 +1216,7 @@ fn binary(url: &reqwest::Url, media: &str, size: &str) -> Answer {
 /// A Content-Type's media type, lowercased, and its charset.
 fn media_type(content_type: &str) -> (String, Option<String>) {
     let mut parts = content_type.split(';');
-    let media = parts
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
+    let media = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
     let charset = parts.find_map(|part| {
         let (key, value) = part.split_once('=')?;
         key.trim()
@@ -2172,7 +2179,11 @@ mod tests {
     fn a_denied_command_is_refused_even_under_full_access_however_it_is_dressed() {
         let home = tempfile::tempdir().expect("a home");
         let project = tempfile::tempdir().expect("a project");
-        let rules = project_rules(home.path(), project.path(), json!({ "deny": ["Bash(rm:*)"] }));
+        let rules = project_rules(
+            home.path(),
+            project.path(),
+            json!({ "deny": ["Bash(rm:*)"] }),
+        );
         for command in [
             " rm -rf /",
             "FOO=1 rm -rf /",
@@ -2262,8 +2273,14 @@ mod tests {
             json!({ "defaultMode": "acceptEdits" }),
         );
         let allowed = Allowed::default();
-        let inside = call("Edit", json!({ "file_path": "src/../a.txt", "old_string": "a", "new_string": "b" }));
-        assert_eq!(plan(&inside, Permissions::Auto, &allowed, &rules), Plan::Run);
+        let inside = call(
+            "Edit",
+            json!({ "file_path": "src/../a.txt", "old_string": "a", "new_string": "b" }),
+        );
+        assert_eq!(
+            plan(&inside, Permissions::Auto, &allowed, &rules),
+            Plan::Run
+        );
         for path in [
             elsewhere.path().join("a.txt").display().to_string(),
             "../escape.txt".to_owned(),
@@ -2296,7 +2313,10 @@ mod tests {
             ".claude/settings.local.json".to_owned(),
             "sub/.Claude/settings.json".to_owned(),
             ".mcp.json".to_owned(),
-            home.path().join(".claude/settings.json").display().to_string(),
+            home.path()
+                .join(".claude/settings.json")
+                .display()
+                .to_string(),
             home.path().join("session.json").display().to_string(),
         ] {
             let write = call(
@@ -2311,7 +2331,10 @@ mod tests {
             assert_eq!(plan(&write, Permissions::Full, &allowed, &rules), Plan::Run);
         }
         let ordinary = call("Write", json!({ "file_path": "a.txt", "content": "" }));
-        assert_eq!(plan(&ordinary, Permissions::Auto, &allowed, &rules), Plan::Run);
+        assert_eq!(
+            plan(&ordinary, Permissions::Auto, &allowed, &rules),
+            Plan::Run
+        );
     }
 
     #[test]
@@ -2460,7 +2483,10 @@ mod tests {
             "::ffff:10.0.0.1",
             "64:ff9b::a9fe:a9fe",
         ] {
-            assert!(!is_public(address.parse().expect("an address")), "{address}");
+            assert!(
+                !is_public(address.parse().expect("an address")),
+                "{address}"
+            );
         }
         for address in ["93.184.216.34", "1.1.1.1", "2606:4700::1111"] {
             assert!(is_public(address.parse().expect("an address")), "{address}");
@@ -2521,9 +2547,16 @@ mod tests {
         let answer = web_fetch(&call("WebFetch", json!({ "url": url })), &rules, true).await;
         assert!(answer.is_error, "{}", answer.text);
         assert!(answer.text.contains("refused"), "{}", answer.text);
-        let answer = web_fetch(&call("WebFetch", json!({ "url": url })), &Rules::default(), true).await;
+        let answer = web_fetch(
+            &call("WebFetch", json!({ "url": url })),
+            &Rules::default(),
+            true,
+        )
+        .await;
         assert!(
-            answer.text.contains("redirects to another host: http://denied.example/secret"),
+            answer
+                .text
+                .contains("redirects to another host: http://denied.example/secret"),
             "a redirect off the site is handed back, not followed: {}",
             answer.text
         );
@@ -2539,7 +2572,9 @@ mod tests {
         let answer = web_fetch(&call("WebFetch", json!({ "url": pdf })), &rules, true).await;
         assert!(answer.is_error);
         assert!(
-            answer.text.contains("binary content (application/pdf, 9 bytes)"),
+            answer
+                .text
+                .contains("binary content (application/pdf, 9 bytes)"),
             "{}",
             answer.text
         );
@@ -2547,7 +2582,12 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n\x89PNG\r\n\x1a\n\0\0\0\0",
         )
         .await;
-        let answer = web_fetch(&call("WebFetch", json!({ "url": unlabelled })), &rules, true).await;
+        let answer = web_fetch(
+            &call("WebFetch", json!({ "url": unlabelled })),
+            &rules,
+            true,
+        )
+        .await;
         assert!(answer.text.contains("binary content"), "{}", answer.text);
         let broken = serve(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nthe start of",
@@ -2565,13 +2605,20 @@ mod tests {
         )
         .await;
         let answer = web_fetch(
-            &call("WebFetch", json!({ "url": page, "prompt": "What is sold?" })),
+            &call(
+                "WebFetch",
+                json!({ "url": page, "prompt": "What is sold?" }),
+            ),
             &Rules::default(),
             true,
         )
         .await;
         assert!(!answer.is_error, "{}", answer.text);
-        assert!(answer.text.contains("Requested: What is sold?"), "{}", answer.text);
+        assert!(
+            answer.text.contains("Requested: What is sold?"),
+            "{}",
+            answer.text
+        );
         assert!(answer.text.ends_with("Café"), "{}", answer.text);
     }
 }

@@ -95,7 +95,7 @@ impl std::fmt::Debug for ClaudeAiSession {
     }
 }
 
-/// Where the claude.ai session Native Claude Mode runs on stands.
+/// Where the claude.ai session claude.ai mode runs on stands.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ClaudeAiState {

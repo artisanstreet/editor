@@ -164,7 +164,8 @@ async fn block(store: &Store, item: &Item, options: &Options) -> Result<String> 
             }
         ),
         ItemKind::Compaction { summary, .. } => format!(
-            "{}{}\n", head("Compacted"),
+            "{}{}\n",
+            head("Compacted"),
             match summary {
                 Some(summary) => text(store, summary, options).await?,
                 None => String::new(),

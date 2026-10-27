@@ -1,5 +1,5 @@
 //! Signs in to claude.ai in the user's own browser, and reads the session
-//! Native Claude Mode runs on.
+//! claude.ai mode runs on.
 //!
 //! claude.ai's chat API is cookie-authenticated, and Cloudflare in front of
 //! it hands out its clearance only to a real browser. So the session comes

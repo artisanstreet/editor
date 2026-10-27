@@ -451,9 +451,8 @@ impl ClaudeAiDecoder {
         // What the message read is what the context holds, as Claude Code
         // reports it: the fresh input plus what came from the cache.
         if usage["input_tokens"].is_u64() {
-            self.usage.context_used = Some(
-                count("input_tokens") + count("cache_read_input_tokens") + written,
-            );
+            self.usage.context_used =
+                Some(count("input_tokens") + count("cache_read_input_tokens") + written);
         }
         if self.usage != before {
             out.push(EngineEvent::Usage(self.usage.clone()));

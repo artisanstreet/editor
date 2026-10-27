@@ -153,7 +153,9 @@ pub fn searchable(conn: &Connection, item: &Item) -> Result<Searchable> {
         ItemKind::Notice { text: body, .. } => push(text, &text_of(conn, body)?),
         ItemKind::Error { message, .. } => push(text, &text_of(conn, message)?),
         ItemKind::Compaction { summary, .. } => {
-            if let Some(summary) = summary { push(text, &text_of(conn, summary)?); }
+            if let Some(summary) = summary {
+                push(text, &text_of(conn, summary)?);
+            }
         }
     }
     Ok(found)
