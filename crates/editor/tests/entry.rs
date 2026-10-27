@@ -8,7 +8,7 @@ use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::time::Duration;
 
 use super::EntryRoot;
-use editor_core::{Core, EditorFiles, EntryGate};
+use editor_core::{AeOutcome, AeRunner, Core, EditorFiles, EntryGate};
 use editor_settings::account::controller;
 use gpui::AppContext as _;
 
@@ -184,6 +184,17 @@ impl EntryFixture {
                 cx,
             )
             .unwrap()
+        });
+        // The mock ae runner must be installed before the executor runs the
+        // async resume: otherwise tests would shell out to a real `ae`.
+        let runner: editor_core::AeRunner = std::sync::Arc::new(|_| editor_core::AeOutcome {
+            success: true,
+            stdout: r#"{"enrolled":false,"enrollment_id":null,"status":"none","account_id":null,"email":null,"display_name":null}"#.to_owned(),
+            stderr: String::new(),
+        });
+        core.update(cx, |core, cx| {
+            core.account()
+                .update(cx, |account, _| account.set_ae_runner(runner));
         });
         Self {
             _dir: dir,

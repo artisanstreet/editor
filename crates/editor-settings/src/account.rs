@@ -297,40 +297,37 @@ fn render_pair_this_machine(
     theme: &ArtisanTheme,
     cx: &Context<Settings>,
 ) -> AnyElement {
-    let output: Option<String> = settings
-        .core
-        .read(cx)
-        .account()
-        .read_with(cx, |account, _| {
-            account.forge_status_output().map(str::to_owned)
-        });
-    let claimed_here = output
-        .as_deref()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                line.strip_prefix("Claimed by account: ")
-                    .map(str::trim)
-                    .filter(|account| !account.is_empty())
-                    .map(str::to_owned)
-            })
-        })
-        .or_else(|| {
-            output.as_deref().and_then(|text| {
-                text.lines().find_map(|line| {
-                    line.strip_prefix("Enrolled: ").map(|rest| {
-                        rest.split_whitespace()
-                            .next()
-                            .unwrap_or_default()
-                            .to_owned()
-                    })
-                })
-            })
-        });
+    let (email, binding) = settings.core.read(cx).account().read_with(cx, |account, _| {
+        (
+            account
+                .profile()
+                .map(|profile| profile.email.clone())
+                .unwrap_or_default(),
+            account.local_binding(),
+        )
+    });
+    let account_id = settings.core.read(cx).account().read_with(cx, |account, _| {
+        account
+            .profile()
+            .map(|profile| profile.account_id.clone())
+    });
+    let bound_here = binding.as_ref().is_some_and(|binding| {
+        binding.enrolled
+            && binding.account_id.as_deref()
+                == account_id.as_deref().filter(|id| !id.is_empty())
+            && account_id.is_some()
+    });
+    let claimed_here = binding.as_ref().and_then(|binding| binding.claimed_by.clone())
+        .is_some_and(|id| Some(id) == account_id);
+    let claimed_elsewhere = binding
+        .as_ref()
+        .and_then(|binding| binding.claimed_by.clone())
+        .is_some_and(|id| Some(id) != account_id);
     let mut blocks: Vec<AnyElement> = vec![
         row(
             theme,
             "Pair this machine",
-            "Runs `ae account enroll` on this Forge, then claims the printed code into this account. You still confirm the exact account on the Forge itself.",
+            "Pairs this Forge into your account, then confirm the exact account shown here.",
             Some(
                 settings
                     .button(
@@ -374,7 +371,7 @@ fn render_pair_this_machine(
         row(
             theme,
             "Check this Forge",
-            "Shows what this Forge thinks: pending, claimed by which account, or already enrolled.",
+            "Re-reads this Forge's enrollment state.",
             Some(
                 settings
                     .button(
@@ -389,18 +386,15 @@ fn render_pair_this_machine(
         )
         .into_any_element(),
     ];
-    if let Some(output) = output {
+    if bound_here {
         blocks.push(
-            div()
-                .text_size(editor_ui::theme::TypographyTokens::size(
-                    editor_ui::theme::TextStep::Terminal,
-                ))
-                .text_color(theme.colors.text_muted.to_paint())
-                .child(SharedString::from(output))
-                .into_any_element(),
+            note(
+                theme,
+                format!("Paired to {email}."),
+            )
+            .into_any_element(),
         );
-    }
-    if let Some(account) = claimed_here {
+    } else if claimed_here {
         blocks.push(
             div()
                 .flex()
@@ -408,12 +402,20 @@ fn render_pair_this_machine(
                 .justify_end()
                 .child(settings.button(
                     SharedString::from("account-forge-confirm"),
-                    SharedString::from(format!("Confirm enrollment into {account}")),
+                    SharedString::from(format!("Confirm this Forge into {email}")),
                     ButtonVariant::Outline,
                     false,
                     cx.listener(|this, _, _, cx| this.account.forge_confirm(cx)),
                 ))
                 .into_any_element(),
+        );
+    } else if claimed_elsewhere {
+        blocks.push(
+            error_text(
+                theme,
+                "This Forge is claimed by a different account. Switch accounts, or pair it anew.",
+            )
+            .into_any_element(),
         );
     }
     section_shell(theme, "Pair a Forge", None, None, card(theme, blocks)).into_any_element()
