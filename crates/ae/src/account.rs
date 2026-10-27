@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct AccountArgs {
-    /// Core base URL (else `AST_CORE_BASE_URL`, else Core dev default).
+    /// Core base URL (else `AST_CORE_BASE_URL`, else production default).
     #[arg(long)]
     pub core: Option<String>,
     #[command(subcommand)]
@@ -28,14 +28,26 @@ pub enum AccountCommand {
         /// Human label for this machine (default: hostname).
         #[arg(long)]
         label: Option<String>,
+        /// Print machine-readable enrollment (code, ids, expiry) instead of
+        /// human text, for the Editor's binding check.
+        #[arg(long)]
+        json: bool,
     },
     /// Poll the enrollment: shows pending/claimed + account when claimed.
-    Status,
+    Status {
+        /// Print machine-readable JSON (stable keys; never secrets) instead
+        /// of human text, for the Editor's binding check.
+        #[arg(long)]
+        json: bool,
+    },
     /// Confirm after explicit local approval of the shown account.
     Confirm {
         /// Approve without asking (the account was already shown + approved).
         #[arg(long, short)]
         yes: bool,
+        /// Only confirm into this account id; refuse on mismatch before the RPC.
+        #[arg(long)]
+        account_id: Option<String>,
     },
     /// Fetch and apply the latest account config bundle now.
     Sync,
@@ -109,9 +121,13 @@ fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient> {
 
 pub fn run(args: &AccountArgs) -> Result<()> {
     match &args.command {
-        AccountCommand::Enroll { label } => enroll(args.core.as_deref(), label.as_deref()),
-        AccountCommand::Status => status(args.core.as_deref()),
-        AccountCommand::Confirm { yes } => confirm(args.core.as_deref(), *yes),
+        AccountCommand::Enroll { label, json } => {
+            enroll(args.core.as_deref(), label.as_deref(), *json)
+        }
+        AccountCommand::Status { json } => status(args.core.as_deref(), *json),
+        AccountCommand::Confirm { yes, account_id } => {
+            confirm(args.core.as_deref(), *yes, account_id.as_deref())
+        }
         AccountCommand::Sync => sync_config_now(args.core.as_deref()),
     }
 }
@@ -165,7 +181,7 @@ fn label_default(label: Option<&str>) -> String {
     .to_owned()
 }
 
-fn enroll(core: Option<&str>, label: Option<&str>) -> Result<()> {
+fn enroll(core: Option<&str>, label: Option<&str>, json: bool) -> Result<()> {
     let mut account = load_account()?;
     if account.machine_id.is_some() {
         bail!("this Forge is already enrolled; see `ae account status`");
@@ -180,8 +196,12 @@ fn enroll(core: Option<&str>, label: Option<&str>) -> Result<()> {
             .enroll_start(keypair.public(), &label, keypair.secret())
             .await
     })?;
-    account.enrollment_id = Some(created.enrollment_id);
+    account.enrollment_id = Some(created.enrollment_id.clone());
     save_account(&account)?;
+    if json {
+        println!("{}", enroll_report(&created));
+        return Ok(());
+    }
     println!(
         "Claim this code in a signed-in session: {} (expires {})",
         created.code, created.expires_at
@@ -190,25 +210,52 @@ fn enroll(core: Option<&str>, label: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn status(core: Option<&str>) -> Result<()> {
+/// Machine-readable enrollment for the Editor: the exact Core-created
+/// fields it needs to track the request. Never key material.
+fn enroll_report(created: &forge_http::core::EnrollmentCreated) -> serde_json::Value {
+    serde_json::json!({
+        "code": created.code.clone(),
+        "enrollment_id": created.enrollment_id.clone(),
+        "expires_at": created.expires_at.clone(),
+        "key_fingerprint": created.key_fingerprint.clone(),
+    })
+}
+
+fn status(core: Option<&str>, json: bool) -> Result<()> {
     let account = load_account()?;
-    let enrollment_id = account
-        .enrollment_id
-        .as_deref()
-        .context("no enrollment started; run `ae account enroll`")?;
+    // Enrolled machines report their binding even though confirming clears
+    // the pending enrollment id.
     if let Some(machine_id) = account.machine_id.as_deref() {
+        if json {
+            println!(
+                "{}",
+                enrolled_report(machine_id, account.account_id.as_deref())
+            );
+            return Ok(());
+        }
         println!(
             "Enrolled: machine {machine_id} in account {}.",
             account.account_id.as_deref().unwrap_or("?")
         );
         return Ok(());
     }
+    let Some(enrollment_id) = account.enrollment_id.as_deref() else {
+        if json {
+            println!("{}", no_enrollment_report());
+            return Ok(());
+        }
+        bail!("no enrollment started; run `ae account enroll`");
+    };
     let keypair = keypair(&mut load_account()?)?;
     let status = runtime()?.block_on(async {
         client(core)?
             .enrollment_status(enrollment_id, keypair.secret())
             .await
     })?;
+    if json {
+        println!("{}", pending_report(enrollment_id, &status));
+        return Ok(());
+    }
     println!("Enrollment status: {}", status.status);
     match (status.account_id, status.email) {
         (Some(account_id), email) => {
@@ -226,9 +273,10 @@ fn status(core: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn confirm(core: Option<&str>, yes: bool) -> Result<()> {
+fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Result<()> {
     let mut account = load_account()?;
     if let Some(machine_id) = account.machine_id.clone() {
+        check_expected_account(expected_account, account.account_id.as_deref())?;
         println!("Already enrolled as {machine_id}.");
         return Ok(());
     }
@@ -245,6 +293,7 @@ fn confirm(core: Option<&str>, yes: bool) -> Result<()> {
     let account_id = status.account_id.clone().context(
         "the enrollment is not claimed yet; claim the code in a signed-in session first",
     )?;
+    check_expected_account(expected_account, Some(&account_id))?;
     println!("Enrollment claimed by account: {account_id}");
     if let Some(email) = status.email.as_deref() {
         println!("Verified email: {email}");
@@ -283,6 +332,67 @@ fn confirm(core: Option<&str>, yes: bool) -> Result<()> {
         confirmed.machine_id
     ));
     Ok(())
+}
+
+/// Refuses to confirm into an unexpected account. `None` expected means no
+/// constraint (standalone CLI); a blank flag never silently disables the
+/// check, and a missing stored/claimed id never satisfies a constraint.
+fn check_expected_account(expected: Option<&str>, actual: Option<&str>) -> Result<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let expected = expected.trim();
+    if expected.is_empty() {
+        bail!("--account-id must not be blank");
+    }
+    match actual {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => bail!(
+            "account mismatch: expected {expected}, found {actual}; refusing to confirm"
+        ),
+        None => bail!("account mismatch: expected {expected}, found none; refusing to confirm"),
+    }
+}
+
+/// No-enrollment report: the pending keys with nulls and `status "none"`,
+/// exit 0, so the Editor distinguishes "nothing started" from failure.
+/// Human output keeps the nonzero error.
+fn no_enrollment_report() -> serde_json::Value {
+    serde_json::json!({
+        "enrolled": false,
+        "enrollment_id": null,
+        "status": "none",
+        "account_id": null,
+        "email": null,
+        "display_name": null,
+    })
+}
+
+/// Machine-readable enrollment state for the Editor's binding check.
+/// Only identifiers Core already shows the operator: never secrets, keys,
+/// codes, or tokens. Compact single line so WSL forwarding stays parseable.
+fn enrolled_report(machine_id: &str, account_id: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "enrolled": true,
+        "machine_id": machine_id,
+        "account_id": account_id,
+    })
+}
+
+/// Pending-enrollment report: the server's verbatim `status` plus the
+/// claimed identity when present (`None` reads as JSON null).
+fn pending_report(
+    enrollment_id: &str,
+    status: &artisan_account::PairStatus,
+) -> serde_json::Value {
+    serde_json::json!({
+        "enrolled": false,
+        "enrollment_id": enrollment_id,
+        "status": status.status.clone(),
+        "account_id": status.account_id.clone(),
+        "email": status.email.clone(),
+        "display_name": status.display_name.clone(),
+    })
 }
 
 fn ask(account_id: &str) -> Result<bool> {
@@ -358,5 +468,135 @@ mod tests {
         let read: AccountFile =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(read, account);
+    }
+
+    #[test]
+    fn expected_account_gate_rejects_mismatch_before_rpc() {
+        assert!(check_expected_account(None, None).is_ok());
+        assert!(check_expected_account(None, Some("acct_a")).is_ok());
+        assert!(check_expected_account(Some("acct_a"), Some("acct_a")).is_ok());
+        assert!(check_expected_account(Some(" acct_a "), Some("acct_a")).is_ok());
+        assert!(check_expected_account(Some("acct_a"), Some("acct_b")).is_err());
+        assert!(check_expected_account(Some("acct_a"), None).is_err());
+        assert!(check_expected_account(Some(""), Some("acct_a")).is_err());
+        assert!(check_expected_account(Some("   "), Some("acct_a")).is_err());
+    }
+
+    fn sorted_keys(value: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn status_json_reports_ids_with_exact_keys() {
+        let enrolled = enrolled_report("mch_1", Some("acct_1"));
+        assert_eq!(enrolled["enrolled"], true);
+        assert_eq!(enrolled["machine_id"], "mch_1");
+        assert_eq!(enrolled["account_id"], "acct_1");
+        assert_eq!(sorted_keys(&enrolled), ["account_id", "enrolled", "machine_id"]);
+        let pending = pending_report(
+            "enr_1",
+            &artisan_account::PairStatus {
+                enrollment_id: None,
+                status: "claimed".to_owned(),
+                account_id: Some("acct_9".to_owned()),
+                email: Some("op@example.invalid".to_owned()),
+                display_name: None,
+                expires_at: None,
+            },
+        );
+        assert_eq!(pending["enrolled"], false);
+        assert_eq!(pending["enrollment_id"], "enr_1");
+        assert_eq!(pending["status"], "claimed");
+        assert_eq!(pending["account_id"], "acct_9");
+        assert_eq!(pending["email"], "op@example.invalid");
+        assert!(pending["display_name"].is_null());
+        assert_eq!(
+            sorted_keys(&pending),
+            [
+                "account_id",
+                "display_name",
+                "email",
+                "enrolled",
+                "enrollment_id",
+                "status"
+            ]
+        );
+    }
+
+    #[test]
+    fn status_json_never_carries_secrets() {
+        // Even with every secret field populated on disk, the reports only
+        // see identifiers: the builders take ids, never the file.
+        let secret = "SECRET-B64U-abcdefghijklmnopqrstuvwxyz012345";
+        let public = "PUBLIC-B64U-abcdefghijklmnopqrstuvwxyz012345";
+        let enrolled = enrolled_report("mch_1", Some("acct_1"));
+        let pending = pending_report(
+            "enr_1",
+            &artisan_account::PairStatus {
+                enrollment_id: None,
+                status: "pending".to_owned(),
+                account_id: None,
+                email: None,
+                display_name: None,
+                expires_at: None,
+            },
+        );
+        for report in [
+            serde_json::to_string(&enrolled).unwrap(),
+            serde_json::to_string(&pending).unwrap(),
+        ] {
+            assert!(!report.contains(secret));
+            assert!(!report.contains(public));
+            assert!(!report.contains("secret"));
+            assert!(!report.contains("token"));
+            assert!(!report.contains("code"));
+        }
+    }
+
+    #[test]
+    fn enroll_report_carries_the_created_dto_fields() {
+        let report = enroll_report(&forge_http::core::EnrollmentCreated {
+            enrollment_id: "enr_1".to_owned(),
+            code: "ABCDEFGH".to_owned(),
+            expires_at: "2030-01-01T00:00:00.000Z".to_owned(),
+            key_fingerprint: "fp".to_owned(),
+        });
+        assert_eq!(report["code"], "ABCDEFGH");
+        assert_eq!(report["enrollment_id"], "enr_1");
+        assert_eq!(report["expires_at"], "2030-01-01T00:00:00.000Z");
+        assert_eq!(report["key_fingerprint"], "fp");
+        assert_eq!(
+            sorted_keys(&report),
+            ["code", "enrollment_id", "expires_at", "key_fingerprint"]
+        );
+    }
+
+    #[test]
+    fn no_enrollment_json_uses_pending_keys_with_nulls() {
+        let report = no_enrollment_report();
+        assert_eq!(report["enrolled"], false);
+        assert!(report["enrollment_id"].is_null());
+        assert_eq!(report["status"], "none");
+        assert!(report["account_id"].is_null());
+        assert!(report["email"].is_null());
+        assert!(report["display_name"].is_null());
+        assert_eq!(
+            sorted_keys(&report),
+            [
+                "account_id",
+                "display_name",
+                "email",
+                "enrolled",
+                "enrollment_id",
+                "status"
+            ]
+        );
     }
 }

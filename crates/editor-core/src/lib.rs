@@ -5,6 +5,7 @@
 //! stream. Sections read from these and call Forge through
 //! [`ForgeClient`]; nothing else is shared between sections.
 
+mod access;
 mod agent_calls;
 mod account;
 mod client;
@@ -18,12 +19,15 @@ mod range_window;
 mod resident;
 pub mod runtime;
 mod screen;
+#[cfg(any(test, feature = "test-support"))]
+mod testing;
 pub use pairing_targets::PairingTargets;
 pub use resident::{CollectionBytes, ResidentBytes};
 
+pub use access::{EntryGate, LocalForgeBinding, OnboardingRecord};
 pub use account::{
-    Account, AccountEvent, AccountPhase, RelayDialRequest, RelayDialer, RelayDialerFactory,
-    CORE_BASE_URL_DEFAULT,
+    Account, AccountEvent, AccountPhase, AeOutcome, AeRunner, RelayDialRequest, RelayDialer,
+    RelayDialerFactory, CORE_BASE_URL_DEFAULT, RELAY_BASE_URL_DEFAULT,
 };
 pub use artisan_account::network::SessionToken;
 
@@ -41,7 +45,7 @@ pub use range_window::{
 pub use ropey::Rope;
 pub use screen::{DraggedThread, Screen, SettingsPage, SettingsSection};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use artisan_api::tls::Identity;
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter};
 use hosts::HostsFile;
@@ -56,6 +60,26 @@ pub struct Core {
     pairing_targets: PairingTargets,
     screen: Screen,
     back: Vec<Screen>,
+    /// Deferred workspace intent while locked. Set by gated `navigate`
+    /// when a workspace screen arrives before `Ready`; applied once on
+    /// `Ready` if the host still exists, dropped on account switch.
+    pending_screen: Option<Screen>,
+    /// Relay auto-connect attempted for the current Ready machine. Guards
+    /// the restart path (Ready + empty hosts) against duplicate dials from
+    /// repeated account events; cleared on lock/switch. Manual Connect
+    /// remains available after a failed attempt.
+    relay_autoconnected: Option<String>,
+    /// Cached Ready identity `(base_url, account_id)` maintained
+    /// synchronously by `reconcile_access`. `hosts()`/`host()`/
+    /// `active_host()` gate on this with no `cx`, no disk IO, and no
+    /// account read; `entry_gate(cx)` stays the UI-facing API.
+    gate_ready: Option<(String, String)>,
+    /// Cached onboarding for the current origin+account. Loaded once per
+    /// account/base transition (never per-frame disk IO); cleared on
+    /// sign-out/switch. `entry_gate` reads this, not the file.
+    onboarding_cache: Option<crate::access::OnboardingRecord>,
+    /// The origin+account the cache was loaded for.
+    onboarding_scope: Option<(String, String)>,
     /// The device name sent when pairing.
     pub device_name: String,
     /// MCP sign-ins this Editor catches the redirect for.
@@ -67,6 +91,11 @@ pub struct Core {
     /// whatever no longer belongs to the session on sign-out or account
     /// switch, so cached account views and streams can't outlive it.
     account_hosts: HashMap<HostId, String>,
+    /// Ephemeral Relay host configs, keyed by id. `connect_with_client`
+    /// registers here; public `hosts()`/`active_host()` include these so a
+    /// connected account Forge is usable (sidebar, composer) once `Ready`.
+    /// Never written to `hosts.json`; dropped with the route on lock.
+    account_configs: HashMap<HostId, HostConfig>,
     /// Session token those entries were opened under. A replaced token
     /// closes every account channel too, even when the account id is
     /// unchanged: old grants and the old dialer are dead.
@@ -78,14 +107,24 @@ pub enum CoreEvent {
     ScreenChanged,
     HostsChanged,
     SettingsChanged,
+    /// Account-only gate moved: mount/drop the workspace.
+    AccessChanged,
     /// An MCP sign-in started, moved on, failed or finished.
     McpSignInChanged,
 }
 
 impl EventEmitter<CoreEvent> for Core {}
 
+/// Guidance shared by the production pairing rejection and the Forge
+/// agent-call rejection: legacy direct pairing has no exact binding proof,
+/// so enrollment is account-side until proven adoption exists.
+pub(crate) const DIRECT_PAIRING_DISABLED: &str =
+    "direct pairing is disabled: enroll this Forge into your account from the Account page, then connect it there";
+
 impl Core {
-    /// Loads this device's files and connects to every paired host.
+    /// Loads this device's files. Hosts stay disconnected until the
+    /// account-only gate reaches `Ready`: no legacy auto-connect prior to
+    /// account readiness, no workspace flash while `Restoring`.
     pub fn new(files: EditorFiles, cx: &mut Context<Self>) -> Result<Self> {
         let identity = files.identity()?;
         let hosts_file = files.hosts()?;
@@ -96,17 +135,23 @@ impl Core {
         let files_dir = files.dir.clone();
         let mut core = Self {
             files,
-            identity: Some(identity.clone()),
+            identity: Some(identity),
             settings,
             hosts: HashMap::new(),
             hosts_file,
             pairing_targets: PairingTargets::default(),
             screen: Screen::Home,
             back: Vec::new(),
+            pending_screen: None,
+            relay_autoconnected: None,
+            gate_ready: None,
+            onboarding_cache: None,
+            onboarding_scope: None,
             device_name: device_name(),
             mcp_sign_ins: mcp_sign_in::McpSignIns::default(),
             account: cx.new(|cx| Account::new(EditorFiles { dir: files_dir }, cx)),
             account_hosts: HashMap::new(),
+            account_configs: HashMap::new(),
             account_session: None,
         };
         // Exact startup install Vilde requests: build his transport factory
@@ -120,21 +165,16 @@ impl Core {
             cx.background_executor().clone(),
         );
         core.set_relay_dialer_factory(factory, cx);
-        // SignedOut (or a replaced session identity) must immediately drop
-        // account Relay inventory: cached threads and streams must not
-        // outlive the session, and grant expiry is not the cleanup path.
+        // Account transitions drive the gate: lock hosts on sign-out,
+        // refresh the onboarding cache on auth, connect deferred hosts on
+        // `Ready`. The subscription is installed before any async resume
+        // completes, so startup has no flash or missed event.
         cx.subscribe(&core.account, |core, account, event, cx| {
             if matches!(event, AccountEvent::Changed) {
-                core.reconcile_account_hosts(&account, cx);
+                core.reconcile_access(&account, cx);
             }
         })
         .detach();
-        for config in core.hosts_file.hosts.clone() {
-            let client = ForgeClient::new(&config.address, &config.fingerprint, &identity);
-            if let Err(error) = client.map(|client| core.connect(&config, client, cx)) {
-                tracing::error!(host = %config.id, "can't connect to {}: {error:#}", config.name);
-            }
-        }
         if let Some(reduced) = core
             .settings
             .get("reduced_motion")
@@ -199,15 +239,27 @@ impl Core {
         }
     }
 
+    /// Visible paired hosts. Empty unless the gate is `Ready`: setup uses
+    /// private internals, public UI never sees content while locked.
+    /// Gated on the synchronously maintained Ready identity: no `cx`,
+    /// no disk IO, no account read on this hot path.
     pub fn hosts(&self) -> impl Iterator<Item = (&HostConfig, &Entity<HostData>)> {
+        let ready = self.gate_ready.is_some();
         self.hosts_file
             .hosts
             .iter()
             .filter_map(|config| self.hosts.get(&config.id).map(|host| (config, host)))
+            .chain(
+                self.account_configs
+                    .values()
+                    .filter_map(|config| self.hosts.get(&config.id).map(|host| (config, host))),
+            )
+            .filter(move |_| ready)
     }
 
     #[must_use]
     pub fn host(&self, id: &HostId) -> Option<&Entity<HostData>> {
+        self.gate_ready.as_ref()?;
         self.hosts.get(id)
     }
 
@@ -217,35 +269,50 @@ impl Core {
     }
 
     /// The current screen's host, then the saved last host, then the first paired host.
+    /// `None` unless `Ready`; locked states never leak a host. Gated on the
+    /// synchronously maintained Ready identity: no `cx` on this hot path.
     #[must_use]
     pub fn active_host(&self) -> Option<&Entity<HostData>> {
+        self.gate_ready.as_ref()?;
         self.screen
             .host()
-            .and_then(|id| self.host(id))
-            .or_else(|| self.hosts_file.last.as_ref().and_then(|id| self.host(id)))
-            .or_else(|| self.hosts().next().map(|(_, host)| host))
+            .and_then(|id| self.hosts.get(id))
+            .or_else(|| {
+                self.hosts_file
+                    .last
+                    .as_ref()
+                    .and_then(|id| self.hosts.get(id))
+            })
+            .or_else(|| {
+                self.hosts_file
+                    .hosts
+                    .iter()
+                    .filter_map(|config| self.hosts.get(&config.id))
+                    .chain(
+                        self.account_configs
+                            .values()
+                            .filter_map(|config| self.hosts.get(&config.id)),
+                    )
+                    .next()
+            })
     }
 
     /// Saves a newly paired host and connects to it.
+    ///
+    /// Forbidden legacy access: unverified direct configs (`Local`/`Wsl`/
+    /// `Remote`) are rejected in every gate state until exact direct binding
+    /// proof exists. Relay routes enter via `connect_with_client` with a
+    /// live client; new Forges enroll through the account (claim/confirm)
+    /// then connect from the Account page.
     #[expect(
         clippy::needless_pass_by_value,
-        reason = "callers hand over a freshly paired host; the saved copy is cloned from it"
+        reason = "callers hand over a freshly paired host; the saved copy is kept on success"
     )]
-    pub fn add_host(&mut self, config: HostConfig, cx: &mut Context<Self>) -> Result<()> {
-        let identity = self.identity.as_ref().context(
-            "this device's identity could not be loaded; repair its configuration before pairing",
-        )?;
-        let client = ForgeClient::new(&config.address, &config.fingerprint, identity)?;
-        let mut file = self.hosts_file.clone();
-        file.hosts.retain(|known| known.id != config.id);
-        file.hosts.push(config.clone());
-        file.last = Some(config.id.clone());
-        self.files.save_hosts(&file)?;
-        self.hosts_file = file;
-        self.connect(&config, client, cx);
-        cx.emit(CoreEvent::HostsChanged);
-        cx.notify();
-        Ok(())
+    pub fn add_host(&mut self, config: HostConfig, _cx: &mut Context<Self>) -> Result<()> {
+        if !matches!(config.kind, HostKind::Account { .. }) {
+            anyhow::bail!(crate::DIRECT_PAIRING_DISABLED);
+        }
+        anyhow::bail!("account Forges connect from the Account page, not by pairing")
     }
 
     /// The AST account controller: sign-in state, sessions, machines.
@@ -254,104 +321,10 @@ impl Core {
         &self.account
     }
 
-    /// Registers the Relay dialer factory (Vilde's transport, once at
-    /// startup via the account controller; the controller installs
-    /// a session-bound dialer on every login and resumed session).
-    /// (Kept on Core so the app bootstrap has one stable call site even
-    /// before any session exists; the live dialer itself lives on Account.)
     pub fn set_relay_dialer_factory(&mut self, factory: RelayDialerFactory, cx: &mut Context<Self>) {
         self.account.update(cx, |account, _| {
             account.set_relay_dialer_factory(factory);
         });
-    }
-
-    /// Adds an in-memory host entry for a connected Relay Forge and connects
-    /// to it. This is the shared inventory path the account controller uses
-    /// with Vilde's relay-backed client: entries are deliberately NOT
-    /// persisted to hosts.json and are NOT ordinary direct hosts. On restart
-    /// the machine inventory is re-discovered on login and the route
-    /// re-establishes on Connect, so no stale relay address is ever
-    /// direct-dialed. Direct pairing still uses `add_host`.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "callers hand over an owned host entry; the saved inventory keeps its own clone"
-    )]
-    pub fn connect_with_client(
-        &mut self,
-        config: HostConfig,
-        client: ForgeClient,
-        cx: &mut Context<Self>,
-    ) {
-        if let HostKind::Account { account, .. } = &config.kind {
-            self.account_hosts.insert(config.id.clone(), account.clone());
-        }
-        self.hosts.remove(&config.id);
-        self.connect(&config, client, cx);
-        cx.emit(CoreEvent::HostsChanged);
-        cx.notify();
-    }
-
-    /// Drops account Relay inventory that no longer belongs to the current
-    /// session: entries whose recorded owner differs from the signed-in
-    /// account, every entry once signed out, and — even under the same
-    /// account id — every entry when the session token was replaced (old
-    /// grants and the old dialer are dead). Direct hosts are untouched.
-    /// Each removed host's Relay route is closed explicitly first
-    /// (`ForgeClient::close_relay`: unary plus every event stream stop at
-    /// once, even for views briefly holding client clones); dropping the
-    /// entity then aborts its connection task and GPUI follow task. Screens
-    /// pointing at removed hosts navigate away and the pruned back stack
-    /// keeps `close_settings`/`go_back` from landing on them; `hosts.json`
-    /// never held these entries, but a saved `last` pointing at one is
-    /// cleared. No grant-expiry wait: this runs on the sign-out transition.
-    fn reconcile_account_hosts(&mut self, account: &Entity<Account>, cx: &mut Context<Self>) {
-        let (current, token) = account.read_with(cx, |account, _| {
-            (
-                account.profile().map(|profile| profile.account_id.clone()),
-                account.session_token().map(|token| token.as_str().to_owned()),
-            )
-        });
-        // A replaced token retires every channel opened under the old one.
-        let rotated = self.account_session.as_deref() != token.as_deref();
-        self.account_session = token;
-        let stale: Vec<HostId> = self
-            .account_hosts
-            .iter()
-            .filter(|&(_, owner)| rotated || Some(owner) != current.as_ref())
-            .map(|(id, _)| id.clone())
-            .collect();
-        if stale.is_empty() {
-            return;
-        }
-        for id in &stale {
-            // Close the route first so clones held by briefly open views
-            // stop at once; entity drop then aborts `_connection`
-            // (AbortOnDropHandle) and the GPUI follow task, and the Relay
-            // channel (no background tasks of its own) closes its sockets
-            // on drop with it.
-            if let Some(host) = self.hosts.get(id) {
-                host.read_with(cx, |host, _| host.client.close_relay());
-            }
-            self.hosts.remove(id);
-            self.account_hosts.remove(id);
-        }
-        if self.screen.host().is_some_and(|host| stale.contains(host)) {
-            self.navigate(Screen::Home, cx);
-        }
-        // Prune after navigating: `navigate` pushes the retired current
-        // screen onto `back`, so pruning only beforehand would leave the
-        // stale route in history (and in the settings workspace behind).
-        self.back
-            .retain(|screen| screen.host().is_none_or(|host| !stale.contains(host)));
-        if self.hosts_file.last.as_ref().is_some_and(|last| stale.contains(last)) {
-            let mut file = self.hosts_file.clone();
-            file.last = None;
-            if self.files.save_hosts(&file).is_ok() {
-                self.hosts_file = file;
-            }
-        }
-        cx.emit(CoreEvent::HostsChanged);
-        cx.notify();
     }
 
     pub fn remove_host(&mut self, id: &HostId, cx: &mut Context<Self>) -> Result<()> {
@@ -363,6 +336,7 @@ impl Core {
         self.files.save_hosts(&file)?;
         self.hosts_file = file;
         self.account_hosts.remove(id);
+        self.account_configs.remove(id);
         self.hosts.remove(id);
         if self.screen.host() == Some(id) {
             self.navigate(Screen::Home, cx);
@@ -378,7 +352,18 @@ impl Core {
     }
 
     /// Home is only the pairing entry: with a host it is a new thread there.
+    /// Locked states stay on `Home`; only `Ready` auto-advances.
     fn landing(&self, screen: Screen, cx: &App) -> Screen {
+        if !matches!(self.entry_gate(cx), EntryGate::Ready { .. }) {
+            return match screen {
+                Screen::Settings(SettingsPage::Account) | Screen::Home => screen,
+                Screen::Thread { .. }
+                | Screen::NewThread { .. }
+                | Screen::Settings(_)
+                | Screen::Marketplace
+                | Screen::Usage => Screen::Home,
+            };
+        }
         match (screen, self.active_host()) {
             (Screen::Home, Some(host)) => Screen::NewThread {
                 host: host.read(cx).id.clone(),
@@ -389,9 +374,16 @@ impl Core {
     }
 
     pub fn navigate(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        // Locked: stash workspace intent, never load guarded content.
+        if !matches!(self.entry_gate(cx), EntryGate::Ready { .. })
+            && !Self::screen_allowed_while_locked(&screen)
+        {
+            self.pending_screen = Some(screen);
+            return;
+        }
         let screen = self.landing(screen, cx);
         if let Screen::Thread { host, thread } = &screen
-            && let Some(host) = self.host(host).cloned()
+            && let Some(host) = self.hosts.get(host).cloned()
         {
             host.update(cx, |host, cx| host.ensure_thread(thread, cx));
         }
@@ -459,7 +451,7 @@ impl Core {
         if let Some(screen) = self.back.pop() {
             let screen = self.landing(screen, cx);
             if let Screen::Thread { host, thread } = &screen
-                && let Some(host) = self.host(host).cloned()
+                && let Some(host) = self.hosts.get(host).cloned()
             {
                 host.update(cx, |host, cx| host.ensure_thread(thread, cx));
             }
@@ -611,6 +603,11 @@ pub fn init(cx: &mut App) -> (Entity<Core>, Option<anyhow::Error>) {
                 pairing_targets: PairingTargets::default(),
                 screen: Screen::Home,
                 back: Vec::new(),
+                pending_screen: None,
+                relay_autoconnected: None,
+                gate_ready: None,
+                onboarding_cache: None,
+                onboarding_scope: None,
                 device_name: device_name(),
                 mcp_sign_ins: mcp_sign_in::McpSignIns::default(),
                 account: cx.new(|cx| Account::new(
@@ -620,6 +617,7 @@ pub fn init(cx: &mut App) -> (Entity<Core>, Option<anyhow::Error>) {
                     cx,
                 )),
                 account_hosts: HashMap::new(),
+                account_configs: HashMap::new(),
                 account_session: None,
                 }
         }

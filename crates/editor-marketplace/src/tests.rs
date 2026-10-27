@@ -125,7 +125,7 @@ fn the_marketplace_lists_skills_turns_one_off_and_opens_the_prompt(cx: &mut Test
             last: Some(host.id),
         })
         .unwrap();
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
+    let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
     core.update(cx, |core, cx| core.navigate(Screen::Marketplace, cx));
     let (marketplace, cx) = cx.add_window_view(|_, cx| Marketplace::new(core.clone(), cx));
     cx.simulate_resize(size(gpui::px(1000.0), gpui::px(1600.0)));

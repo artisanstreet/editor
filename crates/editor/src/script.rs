@@ -28,7 +28,7 @@ use gpui::{
     ScrollWheelEvent, TouchPhase, WindowBounds, WindowHandle, WindowOptions, point, px,
 };
 
-use crate::workspace::Workspace;
+use crate::entry::EntryRoot;
 
 #[derive(Debug)]
 enum Step {
@@ -67,7 +67,7 @@ pub fn window_options(options: &mut WindowOptions) {
     }
 }
 
-pub fn run(path: PathBuf, handle: WindowHandle<Workspace>, cx: &mut App) {
+pub fn run(path: PathBuf, handle: WindowHandle<EntryRoot>, cx: &mut App) {
     let steps = match std::fs::read_to_string(&path)
         .with_context(|| format!("read {}", path.display()))
         .and_then(|text| parse(&text))
@@ -288,14 +288,8 @@ mod tests {
             )
             .unwrap()
         });
-        core.update(cx, |core, cx| {
-            core.navigate(
-                editor_core::Screen::Settings(editor_core::SettingsPage::General),
-                cx,
-            )
-        });
         let (_, cx) = cx.add_window_view(|window, cx| {
-            crate::workspace::Workspace::new(core.clone(), None, window, cx)
+            crate::entry::EntryRoot::new(core.clone(), None, window, cx)
         });
         println!("executing real capture step in isolated test window");
         cx.update(|window, cx| {
@@ -303,7 +297,7 @@ mod tests {
                 path,
                 window
                     .window_handle()
-                    .downcast::<crate::workspace::Workspace>()
+                    .downcast::<crate::entry::EntryRoot>()
                     .unwrap(),
                 cx,
             )
@@ -354,7 +348,7 @@ mod tests {
     /// bounds below are the render proof; where a renderer exists the PNG
     /// lands at `$ARTISAN_EDITOR_CAPTURE`.
     #[gpui::test]
-    fn account_settings_signed_out_renders_and_captures(cx: &mut gpui::TestAppContext) {
+    fn entry_signed_out_renders_sign_in_and_captures(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
         let dir = tempfile::tempdir().unwrap();
         let core = cx.new(|cx| {
@@ -366,27 +360,20 @@ mod tests {
             )
             .unwrap()
         });
-        core.update(cx, |core, cx| {
-            core.navigate(
-                editor_core::Screen::Settings(editor_core::SettingsPage::Account),
-                cx,
-            )
+        let (_entry, cx) = cx.add_window_view(|window, cx| {
+            crate::entry::EntryRoot::new(core.clone(), None, window, cx)
         });
-        let (_workspace, cx) = cx.add_window_view(|window, cx| {
-            crate::workspace::Workspace::new(core.clone(), None, window, cx)
-        });
-        println!("rendering signed-out Account settings in isolated test window");
+        println!("rendering signed-out entry gate in isolated test window");
         cx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(800.0)));
         cx.run_until_parked();
-        let bounds = cx.debug_bounds("settings-account");
-        assert!(
-            bounds.is_some(),
-            "the Account settings page renders its root"
-        );
+        let bounds = cx.debug_bounds("entry-root");
+        assert!(bounds.is_some(), "the entry gate renders its root");
+        let form = cx.debug_bounds("sign-in-submit");
+        assert!(form.is_some(), "the entry gate shows the sign-in form");
         let out = std::env::var_os("ARTISAN_EDITOR_CAPTURE")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                std::path::PathBuf::from("/tmp/opencode/account-settings-signed-out.png")
+                std::path::PathBuf::from("/tmp/opencode/entry-signed-out.png")
             });
         match cx.update(|window, _| window.render_to_image()) {
             Ok(image) => {

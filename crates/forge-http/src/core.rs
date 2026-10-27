@@ -4,7 +4,7 @@
 //! (`contracts.md` §3–§5): enrollment start/poll/confirm, machine grant
 //! issue, JWKS fetch. Every authenticated call signs the Core canonical
 //! request with the machine/enrollment private key. Base URL comes from
-//! `AST_CORE_BASE_URL` (default Core dev `http://127.0.0.1:8787`).
+//! `AST_CORE_BASE_URL` (default production `https://api.artisan.st`).
 
 use anyhow::{Context, Result};
 use artisan_account::{
@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Where Core lives when nothing else is configured.
-pub const DEFAULT_CORE_BASE_URL: &str = "http://127.0.0.1:8787";
+pub const DEFAULT_CORE_BASE_URL: &str = "https://api.artisan.st";
 
-/// Base URL resolution: explicit argument, else `AST_CORE_BASE_URL`, else dev.
+/// Base URL resolution: explicit argument, else `AST_CORE_BASE_URL`, else production.
 #[must_use]
 pub fn core_base_url(explicit: Option<&str>) -> String {
     explicit
@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn core_base_url_defaults_to_dev() {
+    fn core_base_url_defaults_to_production() {
         assert_eq!(
             core_base_url(None).trim(),
             core_base_url(Some(DEFAULT_CORE_BASE_URL)).trim()

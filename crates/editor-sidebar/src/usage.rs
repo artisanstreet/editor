@@ -422,34 +422,46 @@ impl Render for Account {
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
+        let ast = crate::Sidebar::ast_identity(&self.core, cx);
         let (seed, user, name, status) = self.host.as_ref().map_or_else(
             || {
                 (
-                    "no-host".into(),
-                    "Artisan".into(),
+                    ast.as_ref().map_or_else(
+                        || "no-host".into(),
+                        |(account_id, _)| account_id.clone(),
+                    ),
+                    ast.as_ref().map_or_else(
+                        || "Artisan".into(),
+                        |(_, display)| display.clone(),
+                    ),
                     "No host".into(),
                     "No host".into(),
                 )
             },
             |host| {
                 let host = host.read(cx);
-                let seed = self
-                    .core
-                    .read(cx)
-                    .hosts()
-                    .find(|(config, _)| config.id == host.id)
-                    .map_or_else(
-                        || host.id.0.clone(),
-                        |(config, _)| config.fingerprint.clone(),
-                    );
+                let seed = ast.as_ref().map_or_else(
+                    || {
+                        self.core
+                            .read(cx)
+                            .hosts()
+                            .find(|(config, _)| config.id == host.id)
+                            .map_or_else(
+                                || host.id.0.clone(),
+                                |(config, _)| config.fingerprint.clone(),
+                            )
+                    },
+                    |(account_id, _)| account_id.clone(),
+                );
                 let status = host
                     .status_line()
                     .map_or_else(|| host.name.clone(), str::to_owned);
                 (
                     seed,
-                    host.account
-                        .as_ref()
-                        .map_or_else(|| host.name.clone(), |account| account.user.clone()),
+                    ast.as_ref().map_or_else(
+                        || host.name.clone(),
+                        |(_, display)| display.clone(),
+                    ),
                     host.name.clone(),
                     status,
                 )

@@ -1173,36 +1173,66 @@ impl Sidebar {
     /// The rail's avatar, in the window frame's bottom-left corner: it
     /// opens the account and usage menu. Who and where are in the menu and
     /// the tooltip-free label; a status dot says the host needs attention.
+    /// The signed-in AST account's avatar seed and display name, if any.
+    /// Machine provenance stays separate: hosts keep their own names and
+    /// fingerprints.
+    pub(crate) fn ast_identity(core: &Entity<Core>, cx: &App) -> Option<(String, String)> {
+        core.read(cx).account().read(cx).profile().map(|profile| {
+            (
+                profile.account_id.clone(),
+                if profile.display_name.is_empty() {
+                    profile.email.clone()
+                } else {
+                    profile.display_name.clone()
+                },
+            )
+        })
+    }
+
     fn render_profile_trigger(&mut self, cx: &Context<Self>) -> AnyElement {
-        let (seed, name, machine, status) = match &self.host {
-            Some(host) => {
+        let ast = Self::ast_identity(&self.core, cx);
+        let (seed, name, machine, status) = self.host.as_ref().map_or_else(
+            || {
+                (
+                    ast.as_ref().map_or_else(
+                        || "no-host".to_owned(),
+                        |(account_id, _)| account_id.clone(),
+                    ),
+                    ast.as_ref().map_or_else(
+                        || "Artisan".to_owned(),
+                        |(_, display)| display.clone(),
+                    ),
+                    "No host".to_owned(),
+                    None,
+                )
+            },
+            |host| {
                 let host = host.read(cx);
-                let seed = self
-                    .core
-                    .read(cx)
-                    .hosts()
-                    .find(|(config, _)| config.id == host.id)
-                    .map_or_else(
-                        || host.id.0.clone(),
-                        |(config, _)| config.fingerprint.clone(),
-                    );
+                let seed = ast.as_ref().map_or_else(
+                    || {
+                        self.core
+                            .read(cx)
+                            .hosts()
+                            .find(|(config, _)| config.id == host.id)
+                            .map_or_else(
+                                || host.id.0.clone(),
+                                |(config, _)| config.fingerprint.clone(),
+                            )
+                    },
+                    |(account_id, _)| account_id.clone(),
+                );
                 let status = host.status_line().map(str::to_owned);
                 (
                     seed,
-                    host.account
-                        .as_ref()
-                        .map_or_else(|| host.name.clone(), |account| account.user.clone()),
+                    ast.as_ref().map_or_else(
+                        || host.name.clone(),
+                        |(_, display)| display.clone(),
+                    ),
                     host.name.clone(),
                     status,
                 )
-            }
-            None => (
-                "no-host".to_owned(),
-                "Artisan".to_owned(),
-                "No host".to_owned(),
-                None,
-            ),
-        };
+            },
+        );
         let theme = *cx.theme();
         let image = Arc::clone(
             self.avatars

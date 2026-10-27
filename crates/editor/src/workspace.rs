@@ -1392,7 +1392,15 @@ mod rich_action_tests {
                 last: None,
             })
             .unwrap();
-        let core = cx.new(|cx| Core::new(files, cx).unwrap());
+        let core = cx.new(|cx| {
+            Core::for_tests(
+                editor_core::EditorFiles {
+                    dir: dir.path().to_owned(),
+                },
+                cx,
+            )
+            .unwrap()
+        });
         // Appearance leaves only HostData's normal state fetch in flight.
         core.update(cx, |core, cx| {
             core.navigate(Screen::Settings(editor_core::SettingsPage::General), cx)

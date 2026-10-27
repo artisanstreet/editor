@@ -2,7 +2,7 @@
 //! It retains form drafts and pending-action state only.
 
 mod about;
-mod account;
+pub mod account;
 mod engines;
 mod extensions;
 pub mod frame_rate;
@@ -86,7 +86,7 @@ impl Settings {
             account: account::AccountForm::new(core, cx),
             extensions: extensions::ExtensionsForm::new(cx),
             prompt: prompt::PromptForm::new(cx),
-            hosts: hosts::HostsForm::new(cx),
+            hosts: hosts::HostsForm::new(),
             archive: threads::ArchiveForm::default(),
             scroll: ScrollHandle::new(),
             scroll_page: None,
@@ -132,9 +132,6 @@ impl Settings {
 
     /// Loads what the forms show from the active host.
     fn sync_host(&mut self, cx: &mut Context<Self>) {
-        if self.page(cx) == SettingsPage::Hosts {
-            self.discover_hosts(cx);
-        }
         let host = self.selected_host(cx);
         self.engines
             .sync(host.as_ref().map(|host| host.read(cx).id.clone()));
