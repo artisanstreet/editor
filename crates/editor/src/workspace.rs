@@ -882,7 +882,7 @@ impl Render for Workspace {
                 .cloned()
                 .unwrap_or(Screen::Home)
         } else {
-            current_screen.clone()
+            current_screen
         };
         let window_width = f32::from(window.viewport_size().width);
         // Settings lists its pages in the sidebar, so the sidebar stays.
@@ -1058,8 +1058,8 @@ impl Render for Workspace {
                 // The window's own proportions, scaled down uniformly until
                 // it clears the margin and the size cap on both axes.
                 let window_height = f32::from(window.viewport_size().height);
-                let scale = ((window_width - 2.0 * SETTINGS_DIALOG_MARGIN) / window_width)
-                    .min((window_height - 2.0 * SETTINGS_DIALOG_MARGIN) / window_height)
+                let scale = (2.0f32.mul_add(-SETTINGS_DIALOG_MARGIN, window_width) / window_width)
+                    .min(2.0f32.mul_add(-SETTINGS_DIALOG_MARGIN, window_height) / window_height)
                     .min(SETTINGS_DIALOG_MAX_WIDTH / window_width)
                     .min(SETTINGS_DIALOG_MAX_HEIGHT / window_height)
                     .max(0.0);

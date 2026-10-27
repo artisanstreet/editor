@@ -148,6 +148,10 @@ impl Palette {
         palette
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "palette sections list every destination in search order"
+    )]
     fn entries(&self, cx: &App) -> Vec<Entry> {
         let core = self.core.read(cx);
         let query = self.query.read(cx).text().trim().to_lowercase();
