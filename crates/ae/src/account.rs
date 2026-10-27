@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 #[derive(Args)]
 pub struct AccountArgs {
-    /// Core base URL (else `AST_CORE_BASE_URL`, else Core dev default).
+    /// Core base URL (else `AST_CORE_BASE_URL`, else production default).
     #[arg(long)]
     pub core: Option<String>,
     #[command(subcommand)]

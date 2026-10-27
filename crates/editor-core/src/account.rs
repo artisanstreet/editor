@@ -27,10 +27,10 @@ use crate::Core;
 use crate::hosts::EditorFiles;
 
 /// Where Core lives when neither the account file nor the environment says
-/// otherwise (mirrors the Core dev default; production sets its own URL).
-pub const CORE_BASE_URL_DEFAULT: &str = "http://127.0.0.1:8787";
+/// otherwise (production; `AST_CORE_BASE_URL` overrides for a dev Core).
+pub const CORE_BASE_URL_DEFAULT: &str = "https://api.artisan.st";
 
-/// Base URL resolution: account file, else `AST_CORE_BASE_URL`, else dev.
+/// Base URL resolution: account file, else `AST_CORE_BASE_URL`, else production.
 fn core_base_url(saved: Option<&str>) -> String {
     saved
         .map(str::to_owned)
