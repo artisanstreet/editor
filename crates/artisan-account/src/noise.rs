@@ -1179,7 +1179,9 @@ mod tests {
     }
 }
 
-/// Byte-exact cross-language vectors (`relay/contracts/fixtures/noise-xx.json`).
+/// Byte-exact cross-language vectors (`relay/contracts/fixtures/noise-xx.json`,
+/// vendored in-tree at `fixtures/noise-xx.json` so hermetic builds and
+/// sandboxes without the sibling checkout can still run them).
 /// Fixed statics + fixed ephemerals reproduce every handshake byte, the
 /// handshake hash, both confirms, and both data directions exactly.
 #[cfg(test)]
@@ -1192,13 +1194,7 @@ mod relay_fixture_tests {
 
     fn fixture_path() -> std::path::PathBuf {
         std::env::var("NOISE_FIXTURE_PATH").map_or_else(
-            |_| {
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("..")
-                    .join("..")
-                    .join("..")
-                    .join("relay/contracts/fixtures/noise-xx.json")
-            },
+            |_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/noise-xx.json"),
             std::path::PathBuf::from,
         )
     }
