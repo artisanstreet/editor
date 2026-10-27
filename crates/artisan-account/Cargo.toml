@@ -1,0 +1,27 @@
+[package]
+name = "artisan-account"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "AST account grants, enrollment, Noise XX E2E, and Relay transports for Forge/Editor."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+anyhow.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-tungstenite.workspace = true
+futures.workspace = true
+artisan-api = { path = "../artisan-api" }
+ed25519-dalek.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hex.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+snow = "=0.10.0"
+x25519-dalek = { version = "=3.0.0", features = ["static_secrets"] }
+
+[lints]
+workspace = true

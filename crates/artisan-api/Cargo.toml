@@ -8,16 +8,17 @@ description = "Types shared by Forge and the Editor: threads, items, runs, event
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 uuid.workspace = true
-anyhow = { workspace = true, optional = true }
-base64 = { workspace = true, optional = true, features = ["std"] }
+anyhow.workspace = true
+base64 = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 sha2.workspace = true
 hex.workspace = true
 
 [features]
-tls = ["dep:anyhow", "dep:base64", "dep:rcgen", "dep:rustls"]
+tls = ["dep:rcgen", "dep:rustls"]
 
 [lints]
 workspace = true

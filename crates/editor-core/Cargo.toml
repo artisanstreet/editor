@@ -16,8 +16,11 @@ futures.workspace = true
 gpui.workspace = true
 editor-ui = { path = "../editor-ui" }
 reqwest = { workspace = true, features = ["json", "stream", "zstd"] }
+artisan-account = { path = "../artisan-account" }
+tokio-tungstenite = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
+base64.workspace = true
 sse-core.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }

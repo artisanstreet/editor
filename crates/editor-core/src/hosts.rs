@@ -40,6 +40,12 @@ pub enum HostKind {
         distro: String,
     },
     Remote,
+    /// Paired through the AST account Relay, not direct mTLS. Rebuilt
+    /// from the account session on resume (never dialed as `host:port`):
+    /// `address` and `fingerprint` stay empty for these entries. The
+    /// Forge's enrolled Ed25519 key is Noise-pinning identity material
+    /// presented in-band, never a TLS fingerprint — never store it as one.
+    Account { account: String, machine: String },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

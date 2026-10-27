@@ -39,7 +39,7 @@ impl HostData {
             HostKind::Local | HostKind::Remote if cfg!(windows) && is_loopback(address) => {
                 WslTarget::Default
             }
-            HostKind::Local | HostKind::Remote => WslTarget::None,
+            HostKind::Local | HostKind::Remote | HostKind::Account { .. } => WslTarget::None,
         };
     }
 

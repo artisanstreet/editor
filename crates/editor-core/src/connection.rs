@@ -137,6 +137,9 @@ async fn session(
         *since = Some(head);
         head
     };
+    if client.is_relay() {
+        return relay_session(client, &head, since, updates, retry, observed, attempt, budget).await;
+    }
     let observation = observed.borrow_and_update().clone();
     let mut query = vec![("summary", "true".to_owned())];
     if let Some(thread) = observation {
@@ -204,6 +207,77 @@ async fn session(
             // Frames are capped at FRAME_LIMIT, so the size always fits.
             .acquire_many_owned(u32::try_from(message.data.len().max(1)).unwrap_or(u32::MAX))
 
+            .await
+            .context("event queue closed")?;
+        updates
+            .send(Update::Event(Box::new(envelope), permit))
+            .await
+            .ok()
+            .context("store closed")?;
+        if let Some(seq) = seq {
+            *since = Some(seq);
+        }
+    }
+}
+
+/// Tunneled event stream: one `SUBSCRIBE` channel per session, same
+/// `since` cursor semantics as direct SSE. Re-subscribing from the last
+/// `seq` is the only bookkeeping; oversized envelopes arrive chunked and
+/// reassembled by the transport.
+async fn relay_session(
+    client: &ForgeClient,
+    head: &Seq,
+    since: &mut Option<Seq>,
+    updates: &mut Sender<Update>,
+    retry: &Notify,
+    observed: &mut watch::Receiver<Option<ThreadId>>,
+    attempt: &mut u32,
+    budget: &Arc<tokio::sync::Semaphore>,
+) -> Result<End> {
+    let relay = client.relay().context("Relay transport missing")?.clone();
+    let observation = observed.borrow_and_update().clone();
+    let mut path = format!("/events?since={head}&summary=true");
+    if let Some(thread) = observation {
+        path.push_str(&format!("&thread={thread}"));
+    }
+    let mut stream = relay.subscribe(&path).await?;
+    updates
+        .send(Update::Status(ConnectionStatus::Live))
+        .await
+        .ok()
+        .context("store closed")?;
+    *attempt = 0;
+    loop {
+        let next = tokio::select! {
+            next = stream.next_event() => next,
+            () = retry.notified() => {
+                stream.unsubscribe().await.ok();
+                return Ok(End::Observation);
+            },
+            _ = observed.changed() => {
+                stream.unsubscribe().await.ok();
+                return Ok(End::Observation);
+            },
+        };
+        let Some(envelope) = next? else {
+            return Ok(End::Closed);
+        };
+        if matches!(envelope.event, Event::Reset) {
+            return Ok(End::Reset);
+        }
+        if let Event::Hello { protocol, .. } = &envelope.event
+            && *protocol != artisan_api::PROTOCOL_VERSION
+        {
+            *since = None;
+            bail!(artisan_api::ApiError {
+                code: artisan_api::ErrorCode::VersionMismatch,
+                message: "Forge's event protocol changed; update Forge or the Editor".into()
+            });
+        }
+        let seq = envelope.seq;
+        let raw = serde_json::to_vec(&envelope).context("encode the Forge event")?;
+        let permit = Arc::clone(budget)
+            .acquire_many_owned(u32::try_from(raw.len().max(1)).unwrap_or(u32::MAX))
             .await
             .context("event queue closed")?;
         updates

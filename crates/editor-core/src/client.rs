@@ -11,12 +11,14 @@ use artisan_api::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio_util::task::AbortOnDropHandle;
 
 #[derive(Clone)]
 pub struct ForgeClient {
     http: reqwest::Client,
     base: String,
+    relay: Option<Arc<artisan_account::relay_client::RelayClient>>,
 }
 
 impl ForgeClient {
@@ -34,7 +36,20 @@ impl ForgeClient {
         Ok(Self {
             http,
             base: format!("https://{address}"),
+            relay: None,
         })
+    }
+
+    /// Whether this client tunnels through the Relay instead of direct mTLS.
+    #[must_use]
+    pub const fn is_relay(&self) -> bool {
+        self.relay.is_some()
+    }
+
+    /// The Relay transport behind a `via_relay` client, if any.
+    #[must_use]
+    pub fn relay(&self) -> Option<&Arc<artisan_account::relay_client::RelayClient>> {
+        self.relay.as_ref()
     }
 
     fn url(&self, path: &str) -> String {
@@ -53,6 +68,13 @@ impl ForgeClient {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T> {
+        if self.relay.is_some() {
+            return self
+                .call_relay(request, 32 * 1024 * 1024, None, |bytes| {
+                    serde_json::from_slice(&bytes).context("read Forge's answer")
+                })
+                .await;
+        }
         self.call_decoded(request, |bytes| {
             serde_json::from_slice(&bytes).context("read Forge's answer")
         })
@@ -64,6 +86,11 @@ impl ForgeClient {
         request: reqwest::RequestBuilder,
         decode: impl FnOnce(Vec<u8>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        if self.relay.is_some() {
+            return self
+                .call_relay(request, 32 * 1024 * 1024, None, decode)
+                .await;
+        }
         self.call_decoded_limited(request, 32 * 1024 * 1024, None, decode)
             .await
     }
@@ -75,6 +102,9 @@ impl ForgeClient {
         admission: Option<std::sync::Arc<tokio::sync::Semaphore>>,
         decode: impl FnOnce(Vec<u8>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
+        if self.relay.is_some() {
+            return self.call_relay(request, limit, admission, decode).await;
+        }
         AbortOnDropHandle::new(runtime().spawn(async move {
             // GPUI can stop polling a cancelled view. Keep queued semaphore
             // reservations under the same abort owner as the actual request.
@@ -100,7 +130,44 @@ impl ForgeClient {
         .context("network task")?
     }
 
+    /// One tunneled call through the shared helpers: converts the built
+    /// HTTP request (method, origin-form path+query, JSON or `$bytes` body)
+    /// into a `TunnelRequest`, preserving status/error behavior, the byte
+    /// limit, semaphore admission, and abort-on-drop cancellation.
+    /// Runs on the network runtime (never the GPUI executor).
+    async fn call_relay<T: Send + 'static>(
+        &self,
+        request: reqwest::RequestBuilder,
+        limit: usize,
+        admission: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+        decode: impl FnOnce(Vec<u8>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let relay = self.relay.clone().context("Relay transport missing")?;
+        AbortOnDropHandle::new(runtime().spawn(async move {
+            let permit = match admission {
+                Some(admission) => Some(admission.acquire_owned().await?),
+                None => None,
+            };
+            let (method, path, body) = relay_parts(request)?;
+            let bytes = relay.raw_bytes(&method, &path, body, limit).await?;
+            runtime()
+                .spawn_blocking(move || {
+                    let _permit = permit;
+                    decode(bytes)
+                })
+                .await
+                .context("decode Forge response task")?
+        }))
+        .await
+        .context("network task")?
+    }
+
     async fn call_empty(&self, request: reqwest::RequestBuilder) -> Result<()> {
+        if self.relay.is_some() {
+            return self
+                .call_relay(request, 32 * 1024 * 1024, None, |_bytes| Ok(()))
+                .await;
+        }
         AbortOnDropHandle::new(runtime().spawn(async move {
             let response = request
                 .timeout(std::time::Duration::from_secs(30))
@@ -108,6 +175,45 @@ impl ForgeClient {
                 .await
                 .context("reach Forge")?;
             check(response).await.map(drop)
+        }))
+        .await
+        .context("network task")?
+    }
+
+    /// Raw-byte download for both transports (images, exported sources):
+    /// direct streams the body, Relay decodes the `$bytes` envelope.
+    /// Enforces the 32 MiB ceiling either way, never truncates.
+    async fn call_bytes(&self, request: reqwest::RequestBuilder) -> Result<Vec<u8>> {        const LIMIT: usize = 32 * 1024 * 1024;
+        if let Some(relay) = self.relay.clone() {
+            return AbortOnDropHandle::new(runtime().spawn(async move {
+                let (method, path, body) = relay_parts(request)?;
+                relay.raw_bytes(&method, &path, body, LIMIT).await
+            }))
+            .await
+            .context("network task")?;
+        }
+        AbortOnDropHandle::new(runtime().spawn(async move {
+            use futures::StreamExt as _;
+            let response = check(
+                request
+                    .timeout(std::time::Duration::from_secs(30))
+                    .send()
+                    .await
+                    .context("reach Forge")?,
+            )
+            .await?;
+
+            let mut stream = response.bytes_stream();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                anyhow::ensure!(
+                    bytes.len().saturating_add(chunk.len()) <= LIMIT,
+                    "image exceeds 32 MiB"
+                );
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
         }))
         .await
         .context("network task")?
@@ -179,37 +285,15 @@ impl ForgeClient {
         path: &str,
         from_home: bool,
     ) -> Result<Vec<u8>> {
-        let request = self
-            .http
-            .get(self.url(&format!("/threads/{thread}/resource")))
-            .query(&[
-                ("path", path),
-                ("from_home", if from_home { "true" } else { "false" }),
-            ]);
-        let task =
-            tokio_util::task::AbortOnDropHandle::new(crate::runtime::runtime().spawn(async move {
-                use futures::StreamExt as _;
-                let response = check(
-                    request
-                        .timeout(std::time::Duration::from_secs(30))
-                        .send()
-                        .await
-                        .context("reach Forge")?,
-                )
-                .await?;
-                let mut stream = response.bytes_stream();
-                let mut bytes = Vec::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    anyhow::ensure!(
-                        bytes.len() + chunk.len() <= 32 * 1024 * 1024,
-                        "resource exceeds 32 MiB"
-                    );
-                    bytes.extend_from_slice(&chunk);
-                }
-                Ok(bytes)
-            }));
-        task.await.context("resource task")?
+        self.call_bytes(
+            self.http
+                .get(self.url(&format!("/threads/{thread}/resource")))
+                .query(&[
+                    ("path", path),
+                    ("from_home", if from_home { "true" } else { "false" }),
+                ]),
+        )
+        .await
     }
 
     pub async fn mutate_mcp(
@@ -231,7 +315,10 @@ impl ForgeClient {
 
     /// Hands Forge the code a sign-in's redirect brought back; answers the
     /// server's name.
-    pub async fn mcp_sign_in_finish(&self, finish: &artisan_api::McpSignInFinish) -> Result<String> {
+    pub async fn mcp_sign_in_finish(
+        &self,
+        finish: &artisan_api::McpSignInFinish,
+    ) -> Result<String> {
         self.call(self.json(reqwest::Method::POST, "/mcp/sign-in/finish", finish))
             .await
     }
@@ -656,32 +743,8 @@ impl ForgeClient {
     }
 
     pub async fn blob(&self, hash: &BlobHash) -> Result<Vec<u8>> {
-        let request = self.http.get(self.url(&format!("/blobs/{hash}")));
-        AbortOnDropHandle::new(runtime().spawn(async move {
-            use futures::StreamExt as _;
-            let response = check(
-                request
-                    .timeout(std::time::Duration::from_secs(30))
-                    .send()
-                    .await
-                    .context("reach Forge")?,
-            )
-            .await?;
-
-            let mut stream = response.bytes_stream();
-            let mut bytes = Vec::new();
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.context("read blob")?;
-                anyhow::ensure!(
-                    bytes.len().saturating_add(chunk.len()) <= 32 * 1024 * 1024,
-                    "image exceeds 32 MiB"
-                );
-                bytes.extend_from_slice(&chunk);
-            }
-            Ok(bytes)
-        }))
-        .await
-        .context("network task")?
+        self.call_bytes(self.http.get(self.url(&format!("/blobs/{hash}"))))
+            .await
     }
 
     pub async fn engines(&self) -> Result<Vec<EngineStatus>> {
@@ -794,6 +857,175 @@ impl ForgeClient {
     pub async fn pair(&self, request: &PairRequest) -> Result<PairResponse> {
         self.call(self.json(reqwest::Method::POST, "/pair", request))
             .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relay transport (Vilde): tunneled `ForgeClient` for account Forges.
+// The Forge holds one WebSocket to its Relay room and serves Noise
+// channels as responder; the Editor opens channels as initiator, presents
+// its Core grant JWT inside the encrypted confirm, and verifies the Forge
+// responder confirm against the enrolled key from the authenticated Core
+// machine record. Outer WSS is transport-only; E2E is Noise XX_25519.
+// Grant JWTs are short TTL (<=300 s): the transport refreshes via the
+// session-authed `CoreSessionClient` and re-handshakes (new channel)
+// before expiry, so a 5-minute connection never dies permanently.
+// ---------------------------------------------------------------------------
+
+pub fn relay_dialer(
+    ctx: artisan_account::relay_client::RelayDialContext,
+    executor: gpui::BackgroundExecutor,
+) -> crate::account::RelayDialer {
+    std::sync::Arc::new(move |request: crate::account::RelayDialRequest| {
+        let ctx = ctx.clone();
+        executor.spawn(async move { ForgeClient::via_relay(request, &ctx).await })
+    })
+}
+
+/// Build the account dialer factory Emily registers once via
+/// `set_relay_dialer_factory`: the controller calls it on every login and
+/// resumed session with the live session token + Relay URL, and it returns
+/// the session-bound dialer (or `None` when the URL is empty).
+pub fn relay_dialer_factory(
+    core: artisan_account::CoreSessionClient,
+    executor: gpui::BackgroundExecutor,
+) -> crate::account::RelayDialerFactory {
+    std::sync::Arc::new(
+        move |session: artisan_account::SessionToken, relay_url: String| {
+            if relay_url.trim().is_empty() {
+                return None;
+            }
+            let ctx = artisan_account::relay_client::RelayDialContext {
+                relay_base_url: relay_url,
+                core: core.clone(),
+                session,
+            };
+            Some(relay_dialer(ctx, executor.clone()))
+        },
+    )
+}
+
+/// Split a built HTTP request into its tunneled parts: uppercased method,
+/// origin-form path plus the exact query string `reqwest` encoded, and a
+/// JSON or `$bytes`-enveloped body. JSON content travels as JSON; anything
+/// else (e.g. a `PUT /blobs` WebP upload) travels as a `$bytes` envelope
+/// carrying its content type, which the Forge decodes back to bytes.
+fn relay_parts(
+    request: reqwest::RequestBuilder,
+) -> Result<(String, String, Option<serde_json::Value>)> {
+    let built = request.build().context("build the Forge request")?;
+    let method = built.method().as_str().to_owned();
+    let url = built.url();
+    let mut path = url.path().to_owned();
+    if let Some(query) = url.query()
+        && !query.is_empty()
+    {
+        path.push('?');
+        path.push_str(query);
+    }
+    let content_type = built
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let raw = built
+        .body()
+        .map(|body| {
+            body.as_bytes().context(
+                "streaming request bodies cannot travel the Relay; buffer them first",
+            )
+        })
+        .transpose()?
+        .map(<[u8]>::to_vec);
+    let body = match raw {
+        None => None,
+        Some(bytes) if bytes.is_empty() => None,
+        Some(bytes) => {
+            if content_type.starts_with("application/json") {
+                Some(serde_json::from_slice(&bytes).context("encode the tunneled call")?)
+            } else {
+                use base64::Engine as _;
+                Some(serde_json::json!({"$bytes": {
+                    "content_type": if content_type.is_empty() {
+                        "application/octet-stream".to_owned()
+                    } else {
+                        content_type
+                    },
+                    "b64u": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes),
+                }}))
+            }
+        }
+    };
+    Ok((method, path, body))
+}
+
+impl ForgeClient {
+    /// Open a Relay channel to one Forge and return the host inventory
+    /// entry plus a connected, grant-refreshing client. Consumed by the
+    /// account controller, which puts the client into the existing host
+    /// inventory via `connect_with_client` (no relay-only persistence).
+    ///
+    /// Runtime-safe from any executor: the dial hops onto the network
+    /// runtime (WS connect, timers, and tungstenite need its reactor);
+    /// dropping the returned future aborts the dial.
+    pub async fn via_relay(
+        request: crate::account::RelayDialRequest,
+        ctx: &artisan_account::relay_client::RelayDialContext,
+    ) -> Result<(crate::hosts::HostConfig, Self)> {
+        let ctx = ctx.clone();
+        AbortOnDropHandle::new(runtime().spawn(async move {
+            Self::via_relay_inner(request, &ctx).await
+        }))
+        .await
+        .context("dial the Relay")
+        .and_then(std::convert::identity)
+    }
+
+    async fn via_relay_inner(
+        request: crate::account::RelayDialRequest,
+        ctx: &artisan_account::relay_client::RelayDialContext,
+    ) -> Result<(crate::hosts::HostConfig, Self)> {
+        let relay = artisan_account::relay_client::RelayClient::connect(
+            &ctx.relay_base_url,
+            &request.account_id,
+            &request.machine_id,
+            &request.grant_jwt,
+            &request.cnf_secret,
+            &request.forge_ed25519_b64u,
+            ctx.core.clone(),
+            ctx.session.clone(),
+        )
+        .await?;
+        // Explicit account route: never a dialable `host:port`, never a
+        // TLS fingerprint. Startup must rebuild these from the session
+        // (Emily: `connect_with_client` persistence + `Core::new` resume),
+        // never `ForgeClient::new` mTLS against `address`.
+        let config = crate::hosts::HostConfig {
+            id: crate::hosts::HostId(request.machine_id.clone()),
+            name: request.machine_label.clone(),
+            address: String::new(),
+            fingerprint: String::new(),
+            kind: crate::hosts::HostKind::Account {
+                account: request.account_id.clone(),
+                machine: request.machine_id.clone(),
+            },
+        };
+        // Verify the route is live before handing the client to inventory,
+        // including the Forge protocol version.
+        let live: serde_json::Value = relay.request_json("GET", "/state", None).await?;
+        let protocol = live.get("protocol").and_then(serde_json::Value::as_u64);
+        if protocol != Some(u64::from(artisan_api::PROTOCOL_VERSION)) {
+            anyhow::bail!("Forge speaks an incompatible protocol; update Forge or the Editor");
+        }
+        Ok((
+            config,
+            Self {
+                http: reqwest::Client::new(),
+                base: String::new(),
+                relay: Some(Arc::new(relay)),
+            },
+        ))
     }
 }
 
@@ -922,6 +1154,7 @@ mod tests {
         let client = ForgeClient {
             http: http.clone(),
             base: format!("http://{address}"),
+            relay: None,
         };
         let request = http.get(client.url("/owned-admission"));
         let task = cx.spawn(async move |_| {
