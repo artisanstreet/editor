@@ -29,6 +29,7 @@ use base64::Engine as _;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
+use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +49,34 @@ const SIDE_QUERY_LIMIT: Duration = Duration::from_secs(120);
 pub struct ClaudeHarness;
 
 impl Harness for ClaudeHarness {
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            let session = turn
+                .session_id
+                .as_deref()
+                .context("naming Claude needs a session")?;
+            if let Some(native) = session.strip_prefix(artisan_api::CLAUDE_AI_SESSION_PREFIX) {
+                let conversation = native.split('/').next().context("no native conversation")?;
+                return crate::claudeai::Transport::open(&turn.home)?
+                    .rename_conversation(conversation, &title)
+                    .await;
+            }
+            // The CLI's native generated-title record. Appending preserves
+            // the active transcript and makes the name survive resume.
+            let path = config_dir(&turn)
+                .join("projects")
+                .join(side::project_dir(&turn))
+                .join(format!("{session}.jsonl"));
+            let mut record = serde_json::to_vec(&json!({
+                "type": "ai-title", "aiTitle": title, "sessionId": session,
+            }))?;
+            record.push(b'\n');
+            let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+            file.write_all(&record)?;
+            Ok(())
+        })
+    }
+
     fn compact(
         &self,
         turn: Turn,
@@ -83,11 +112,13 @@ impl Harness for ClaudeHarness {
     ) -> BoxFuture<'static, Result<SideReply>> {
         // A session made on claude.ai is asked there: Claude Code cannot
         // resume it.
-        if turn
-            .session_id
-            .as_deref()
-            .is_some_and(|id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX))
-        {
+        if turn.session_id.as_deref().map_or_else(
+            || {
+                turn.config.options.get("transport").and_then(Value::as_str)
+                    == Some(CLAUDE_AI_TRANSPORT)
+            },
+            |id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX),
+        ) {
             Box::pin(crate::claudeai::side_query(turn, cancel))
         } else {
             Box::pin(side::side_query(turn, cancel))
@@ -105,7 +136,7 @@ fn apply_env(turn: &mut Turn) {
 
 /// Runs the turn, on whichever transport Forge chose for it.
 ///
-/// The claude.ai transport (Native Claude Mode) is the same engine
+/// The claude.ai transport (claude.ai mode) is the same engine
 /// pointed at Anthropic's chat backend, which is the only one that returns
 /// the provider's one-line recap of the model's thinking. Forge picks it
 /// when the mode is on and a session is kept; when the mode is on but
@@ -120,7 +151,7 @@ async fn run(turn: Turn, io: RunIo) -> Outcome {
                 status: artisan_api::Status::Done,
                 kind: artisan_api::ItemKind::Notice {
                     kind: artisan_api::NoticeKind::Info,
-                    text: "Native Claude Mode is on, but claude.ai isn't signed in, so this turn runs on Claude Code. Sign in under Settings → Claude Code → Account.".to_owned().into(),
+                    text: "claude.ai mode is on, but claude.ai isn't signed in, so this turn runs on Claude Code. Sign in under Settings → Claude Code → claude.ai mode.".to_owned().into(),
                 },
             })
             .await;
@@ -562,6 +593,41 @@ fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
 mod tests {
     use super::ClaudeDecoder;
     use artisan_api::ItemId;
+
+    #[tokio::test]
+    async fn generated_title_is_persisted_without_replacing_the_claude_transcript() {
+        use crate::{Harness as _, Launch, Turn, UserInput};
+        use artisan_api::{EngineConfig, EngineId, ThreadId};
+        let dir = tempfile::tempdir().unwrap();
+        let turn = Turn {
+            thread_id: ThreadId::new(),
+            engine: EngineId::Claude,
+            binary: dir.path().join("unused-claude"),
+            home: dir.path().join("home"),
+            cwd: dir.path().to_owned(),
+            config: EngineConfig::new(EngineId::Claude),
+            session_id: Some("working-session".to_owned()),
+            input: UserInput::default(),
+            launch: Launch::default(),
+            trace_dir: None,
+        };
+        let path = super::config_dir(&turn)
+            .join("projects")
+            .join(super::side::project_dir(&turn))
+            .join("working-session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let history = "{\"type\":\"user\",\"message\":{\"content\":\"repair the sidebar\"}}\n";
+        std::fs::write(&path, history).unwrap();
+        super::ClaudeHarness
+            .set_title(turn, "Fix sidebar titles".to_owned())
+            .await
+            .unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with(history));
+        assert_eq!(
+            super::title_from_transcript(&path).as_deref(),
+            Some("Fix sidebar titles")
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

@@ -48,6 +48,30 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 pub struct CodexHarness;
 
 impl Harness for CodexHarness {
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            let session = turn
+                .session_id
+                .as_ref()
+                .context("naming a Codex thread needs a session")?;
+            let mut conn = server::attach(&turn).await?;
+            // Name by id directly: resuming here would steal the live run's
+            // notification subscription from the shared server.
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                goal::call(
+                    &mut conn,
+                    1,
+                    "thread/name/set",
+                    json!({ "threadId": session, "name": title }),
+                ),
+            )
+            .await
+            .context("naming the Codex thread timed out")??;
+            Ok(())
+        })
+    }
+
     fn compact(
         &self,
         turn: Turn,

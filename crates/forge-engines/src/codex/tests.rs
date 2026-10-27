@@ -579,3 +579,57 @@ fn a_reply_codex_drops_for_a_steer_ends_empty_when_the_next_starts() {
     assert!(decoder.finish().iter().all(|event| !matches!(event,
         EngineEvent::Item { key, .. } | EngineEvent::Status { key, .. } if key == "dropped")));
 }
+
+/// Naming must not resume the source: a resume would move the shared
+/// app-server's event ownership away from its still-running turn.
+#[cfg(unix)]
+#[tokio::test]
+async fn generated_title_is_written_to_codex_without_resuming_or_prompting() {
+    use crate::{Harness as _, Launch, Turn, UserInput};
+    use artisan_api::{EngineConfig, EngineId, ThreadId};
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("codex");
+    std::fs::write(
+        &binary,
+        r"#!/usr/bin/env python3
+import json,pathlib,sys
+for line in sys.stdin:
+    request=json.loads(line)
+    method=request.get('method')
+    if method=='initialize':
+        print(json.dumps({'id':request['id'],'result':{}}),flush=True)
+    elif method=='initialized': pass
+    elif method=='thread/name/set':
+        assert request['params']=={'threadId':'working-session','name':'Fix sidebar titles'},request
+        pathlib.Path('named').write_text(json.dumps(request['params']))
+        print(json.dumps({'id':request['id'],'result':{}}),flush=True)
+    else: raise AssertionError(method)
+",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let turn = Turn {
+        thread_id: ThreadId::new(),
+        engine: EngineId::Codex,
+        binary,
+        home: dir.path().join("home"),
+        cwd: dir.path().to_owned(),
+        config: EngineConfig::new(EngineId::Codex),
+        session_id: Some("working-session".to_owned()),
+        input: UserInput::default(),
+        launch: Launch::default(),
+        trace_dir: None,
+    };
+    super::CodexHarness
+        .set_title(turn, "Fix sidebar titles".to_owned())
+        .await
+        .unwrap();
+    let named: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("home/named")).unwrap())
+            .unwrap();
+    assert_eq!(
+        named,
+        json!({ "threadId": "working-session", "name": "Fix sidebar titles" })
+    );
+}

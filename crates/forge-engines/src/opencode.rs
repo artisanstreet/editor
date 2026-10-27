@@ -37,8 +37,47 @@ const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(process::MAX_LINE_BYTES)
 pub struct OpenCodeHarness;
 
 impl Harness for OpenCodeHarness {
-    fn compact(&self, turn: Turn, cancel: tokio_util::sync::CancellationToken)
-        -> BoxFuture<'static, Result<crate::SideReply>> {
+    fn side_query(
+        &self,
+        turn: Turn,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'static, Result<crate::SideReply>> {
+        Box::pin(side::side_query(turn, cancel))
+    }
+
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<()>> {
+        Box::pin(async move {
+            let session = turn
+                .session_id
+                .as_deref()
+                .context("naming OpenCode needs a session")?;
+            let password = password()?;
+            let config_dir = write_agents(&turn.home)?;
+            let mut server = spawn(&turn, &password, &config_dir)?;
+            let result = async {
+                let base = tokio::time::timeout(READY_TIMEOUT, ready(&mut server)).await??;
+                let api = Api::new(base, password)?;
+                let path = format!("/api/session/{session}");
+                let request = api
+                    .client
+                    .patch(format!("{}{path}", api.base))
+                    .timeout(REQUEST_TIMEOUT)
+                    .header("content-type", "application/json")
+                    .body(serde_json::to_vec(&json!({ "title": title }))?);
+                api.send(request, &path).await.map(drop)
+            }
+            .await;
+            server.kill().await;
+            server.wait().await;
+            result
+        })
+    }
+
+    fn compact(
+        &self,
+        turn: Turn,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'static, Result<crate::SideReply>> {
         Box::pin(side::compact(turn, cancel))
     }
 
@@ -334,11 +373,14 @@ fn write_agents(home: &Path) -> Result<PathBuf> {
         })
         .collect();
     let mut agents = agents;
-    agents.insert("artisan-summary".to_owned(), json!({
-        "mode": "primary", "hidden": true,
-        "description": "Summarize historical conversation without taking actions.",
-        "permission": { "*": "deny" },
-    }));
+    agents.insert(
+        "artisan-summary".to_owned(),
+        json!({
+            "mode": "primary", "hidden": true,
+            "description": "Summarize historical conversation without taking actions.",
+            "permission": { "*": "deny" },
+        }),
+    );
     let config = json!({ "$schema": "https://opencode.ai/config.json", "agent": agents });
     let bytes = serde_json::to_vec_pretty(&config)?;
     let path = dir.join("opencode.json");

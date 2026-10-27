@@ -260,7 +260,10 @@ fn each_permission_level_is_an_agent_opencode_knows() {
     assert_eq!(full["external_directory"], "allow");
     assert!(full.get("bash").is_none(), "nothing asks: {full}");
     assert_eq!(config["agent"].as_object().unwrap().len(), 3);
-    assert_eq!(config["agent"]["artisan-summary"]["permission"]["*"], "deny");
+    assert_eq!(
+        config["agent"]["artisan-summary"]["permission"]["*"],
+        "deny"
+    );
 }
 
 /// A background shell's call returns at once (`status: "running"` and its
@@ -310,4 +313,160 @@ fn a_background_shell_runs_until_it_exits() {
             (Done, true, Some(0)),
         ],
     );
+}
+
+#[test]
+fn background_shell_keeps_server_alive_through_notification_and_followup() {
+    use serde_json::json;
+    for (exit, expected, exited_event) in [
+        (0, artisan_api::Status::Done, true),
+        (1, artisan_api::Status::Failed, true),
+        // A fast shell can exit before its tool result registers the shell ID.
+        (0, artisan_api::Status::Done, false),
+        (1, artisan_api::Status::Failed, false),
+    ] {
+        let mut decoder = Decoder::new(Some("root".to_owned()));
+        let feed = |decoder: &mut Decoder, kind: &str, data: Value| {
+            decoder
+                .feed(&json!({"id":"evt", "type":kind, "data":data}).to_string())
+                .unwrap()
+        };
+        decoder.prompt_sent("prompt", None);
+        feed(
+            &mut decoder,
+            "session.execution.started",
+            json!({"sessionID":"root"}),
+        );
+        feed(
+            &mut decoder,
+            "session.inbox.delivered",
+            json!({"sessionID":"root", "inboxID":"prompt"}),
+        );
+        feed(
+            &mut decoder,
+            "session.tool.input.started",
+            json!({"sessionID":"root", "id":"call", "name":"shell"}),
+        );
+        feed(
+            &mut decoder,
+            "session.tool.called",
+            json!({"sessionID":"root", "id":"call", "input":{"command":"build", "background":true}}),
+        );
+        feed(
+            &mut decoder,
+            "session.tool.success",
+            json!({"sessionID":"root", "id":"call", "metadata":{"status":"running", "shellID":"sh_build"}, "content":[]}),
+        );
+        feed(
+            &mut decoder,
+            "session.execution.succeeded",
+            json!({"sessionID":"root"}),
+        );
+        assert!(
+            !decoder.idle(),
+            "the assistant ended, but the build is running"
+        );
+
+        if exited_event {
+            feed(
+                &mut decoder,
+                "shell.exited",
+                json!({"id":"sh_build", "status":"exited", "exit":exit}),
+            );
+        }
+        assert!(
+            !decoder.idle(),
+            "shell exit still needs a notification and wake"
+        );
+        // Other sessions must not release the shell or replace its output.
+        feed(
+            &mut decoder,
+            "session.inbox.enqueued",
+            json!({"sessionID":"unrelated", "inboxID":"other", "item":{"type":"synthetic", "payload":{"text":"unrelated", "metadata":{"source":"shell", "shellID":"sh_build"}}}}),
+        );
+        assert!(!decoder.idle());
+
+        let events = feed(
+            &mut decoder,
+            "session.inbox.enqueued",
+            json!({"sessionID":"root", "inboxID":"notification", "item":{"type":"synthetic", "payload":{"text":"build output", "metadata":{"source":"shell", "shellID":"sh_build", "state":"completed", "exit":exit}}}}),
+        );
+        assert!(events.iter().any(|event| matches!(event,
+            EngineEvent::Item {status, kind: artisan_api::ItemKind::Tool {output: Some(output), exit_code: Some(code), ..}, ..}
+            if *status == expected && *code == exit && *output == artisan_api::Output::from_text("build output")
+        )));
+        assert!(
+            !decoder.idle(),
+            "notification is admitted but not yet delivered"
+        );
+        feed(
+            &mut decoder,
+            "session.execution.started",
+            json!({"sessionID":"root"}),
+        );
+        feed(
+            &mut decoder,
+            "session.inbox.delivered",
+            json!({"sessionID":"root", "inboxID":"notification"}),
+        );
+        assert!(!decoder.idle(), "follow-up is still running");
+        feed(
+            &mut decoder,
+            "session.execution.succeeded",
+            json!({"sessionID":"root"}),
+        );
+        assert!(
+            decoder.idle(),
+            "only the completed follow-up releases the server"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn generated_title_is_written_to_opencode_without_prompting() {
+    use crate::{Harness as _, Launch, Turn, UserInput};
+    use artisan_api::{EngineConfig, EngineId, ThreadId};
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("opencode");
+    std::fs::write(
+        &binary,
+        r"#!/usr/bin/env python3
+import http.server,json,pathlib
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self,*args): pass
+    def do_PATCH(self):
+        assert self.path=='/api/session/working-session',self.path
+        body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        assert body=={'title':'Fix sidebar titles'},body
+        pathlib.Path('named').write_text(json.dumps(body))
+        self.send_response(204)
+        self.end_headers()
+server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+print('opencode server listening on http://127.0.0.1:'+str(server.server_port),flush=True)
+server.serve_forever()
+",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let turn = Turn {
+        thread_id: ThreadId::new(),
+        engine: EngineId::OpenCode,
+        binary,
+        home: dir.path().join("home"),
+        cwd: dir.path().to_owned(),
+        config: EngineConfig::new(EngineId::OpenCode),
+        session_id: Some("working-session".to_owned()),
+        input: UserInput::default(),
+        launch: Launch::default(),
+        trace_dir: None,
+    };
+    super::OpenCodeHarness
+        .set_title(turn, "Fix sidebar titles".to_owned())
+        .await
+        .unwrap();
+    let named: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("named")).unwrap()).unwrap();
+    assert_eq!(named["title"], "Fix sidebar titles");
 }

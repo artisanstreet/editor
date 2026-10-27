@@ -8,6 +8,14 @@ use tokio_util::sync::CancellationToken;
 const LIMIT: Duration = Duration::from_secs(180);
 
 pub(super) async fn compact(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
+    query(turn, cancel, true).await
+}
+
+pub(super) async fn side_query(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
+    query(turn, cancel, false).await
+}
+
+async fn query(turn: Turn, cancel: CancellationToken, compact: bool) -> Result<SideReply> {
     let password = password()?;
     let config_dir = write_agents(&turn.home)?;
     let mut server = spawn(&turn, &password, &config_dir)?;
@@ -23,7 +31,7 @@ pub(super) async fn compact(turn: Turn, cancel: CancellationToken) -> Result<Sid
             api = Some(Api::new(base, password)?);
             let api = api.as_ref().context("no OpenCode API")?;
             let mut events = subscribe(api).await?;
-            let native = turn.session_id.is_some();
+            let native = compact && turn.session_id.is_some();
             let created = if let Some(session) = &turn.session_id {
                 api.post(&format!("/api/session/{session}/fork"), Some(&json!({}))).await?
             } else {
@@ -34,6 +42,9 @@ pub(super) async fn compact(turn: Turn, cancel: CancellationToken) -> Result<Sid
             };
             let session = created["data"]["id"].as_str().context("OpenCode fork has no id")?.to_owned();
             fork = Some(session.clone());
+            if !native && turn.session_id.is_some() {
+                api.post(&format!("/api/session/{session}/agent"), Some(&json!({ "agent": "artisan-summary" }))).await?;
+            }
             if let Some(model) = model_ref(turn.config.model.as_deref(), turn.config.variant.as_deref()) {
                 api.post(&format!("/api/session/{session}/model"), Some(&json!({ "model": model }))).await?;
             }

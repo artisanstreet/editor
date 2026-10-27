@@ -18,7 +18,9 @@
 //! A server serves one launch: binary, home, arguments, environment and the
 //! managed `config.toml`. When any of them changes, the next run starts a new
 //! server and the old one retires. So does a thread whose context window
-//! changed, since Codex reads that only when it loads a thread.
+//! changed, since Codex reads that only when it loads a thread. Before a
+//! replacement resumes a thread, its previous server must acknowledge that
+//! the thread is closed and its persistence writer has been released.
 
 use crate::Turn;
 use crate::process::{self, EngineProcess};
@@ -31,7 +33,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 /// How long a thread stays loaded after its last run.
@@ -63,6 +65,27 @@ pub(super) async fn attach(turn: &Turn) -> Result<Attachment> {
         });
         if server.home == turn.home && (server.key != key || reload) {
             server.retire();
+        }
+    }
+    // A retired process may still serve other runs and retain this thread's
+    // writer lock. Wait for its explicit close before loading it elsewhere.
+    if let Some(thread) = &turn.session_id {
+        for server in servers
+            .iter()
+            .filter(|server| server.home == turn.home && server.retired())
+        {
+            let (reply, released) = oneshot::channel();
+            server
+                .commands
+                .send(Command::Release {
+                    thread: thread.clone(),
+                    reply,
+                })
+                .map_err(|_unsent| anyhow!("the old Codex server ended during thread handoff"))?;
+            tokio::time::timeout(INITIALIZE_TIMEOUT, released)
+                .await
+                .context("waiting for the old Codex server to release the thread timed out")?
+                .context("the old Codex server ended before releasing the thread")??;
         }
     }
     let current = servers
@@ -122,8 +145,19 @@ impl Server {
     async fn start(turn: &Turn, key: u64) -> Result<Arc<Self>> {
         std::fs::create_dir_all(super::codex_home(turn))
             .context("creating CODEX_HOME for the Codex app-server")?;
-        let mut process =
-            process::spawn_in(turn, &["app-server".to_owned()], &turn.home, "codex-server")?;
+        // Artisan already retains idle threads for IDLE_UNLOAD. An explicit
+        // unsubscribe must release persistence immediately for server handoffs,
+        // rather than starting Codex's separate idle retention timer.
+        let mut process = process::spawn_in(
+            turn,
+            &[
+                "app-server".to_owned(),
+                "-c".to_owned(),
+                "thread_unload_delay_secs=0".to_owned(),
+            ],
+            &turn.home,
+            "codex-server",
+        )?;
         tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&mut process))
             .await
             .context("Codex app-server did not answer initialize")?
@@ -148,6 +182,7 @@ impl Server {
             runs: HashMap::new(),
             owners: HashMap::new(),
             pending: HashMap::new(),
+            releasing: HashMap::new(),
             next_id: 1,
             idle: HashMap::new(),
             unclaimed: HashMap::new(),
@@ -270,8 +305,17 @@ enum Command {
     Detach {
         run: u64,
     },
+    Release {
+        thread: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
     /// Look again at whether the server should end.
     Check,
+}
+
+struct Release {
+    thread: String,
+    reply: oneshot::Sender<Result<()>>,
 }
 
 struct AttachedRun {
@@ -291,6 +335,7 @@ struct Actor {
     owners: HashMap<String, u64>,
     /// Requests in flight: the id Codex sees → the run and the id it used.
     pending: HashMap<u64, (u64, Value)>,
+    releasing: HashMap<u64, Release>,
     next_id: u64,
     /// Loaded root threads no run is using, since when.
     idle: HashMap<String, Instant>,
@@ -369,17 +414,24 @@ impl Actor {
             }
             if self.runs.is_empty() && (self.server.retired() || self.idle.is_empty()) {
                 // Under the pool lock, so no run attaches meanwhile.
-                let mut servers = SERVERS.lock().await;
+                // An attaching run may hold the pool while waiting for us to
+                // release a thread. Keep servicing commands in that case.
+                let Ok(mut servers) = SERVERS.try_lock() else {
+                    continue;
+                };
                 if !self.commands.is_empty() {
                     continue;
                 }
-                servers.retain(|server| !Arc::ptr_eq(server, &self.server));
-                drop(servers);
-                break if self.server.retired() {
-                    "retired with no runs left".to_owned()
+                let why = if self.server.retired() {
+                    "retired with no runs left"
                 } else {
-                    "no runs and no loaded threads".to_owned()
+                    "no runs and no loaded threads"
                 };
+                // Keep the pool locked until the process is reaped: removing
+                // it first lets a replacement race its remaining writer locks.
+                self.end(why).await;
+                servers.retain(|server| !Arc::ptr_eq(server, &self.server));
+                return;
             }
         };
         self.end(&ended).await;
@@ -436,6 +488,25 @@ impl Actor {
                     false
                 });
             }
+            Command::Release { thread, reply } => {
+                if self.owners.contains_key(&thread) {
+                    reply
+                        .send(Err(anyhow!("the Codex thread still has an attached run")))
+                        .ok();
+                } else if !self.server.loaded().contains_key(&thread) {
+                    reply.send(Ok(())).ok();
+                } else {
+                    let id = self.next_id;
+                    self.releasing.insert(
+                        id,
+                        Release {
+                            thread: thread.clone(),
+                            reply,
+                        },
+                    );
+                    self.unsubscribe(&thread).await?;
+                }
+            }
             Command::Check => {}
         }
         Ok(())
@@ -452,16 +523,35 @@ impl Actor {
             .collect();
         for thread in stale {
             self.idle.remove(&thread);
-            self.server.loaded().remove(&thread);
-            let id = self.next_id;
-            self.next_id += 1;
-            self.pending.insert(id, (SERVER_RUN, json!(id)));
-            tracing::debug!(thread, "unsubscribing an idle Codex thread");
-            self.process
-                .send(&json!({ "id": id, "method": "thread/unsubscribe", "params": { "threadId": thread } }))
-                .await?;
+            self.unsubscribe(&thread).await?;
         }
         Ok(())
+    }
+
+    async fn unsubscribe(&mut self, thread: &str) -> Result<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.pending.insert(id, (SERVER_RUN, json!(id)));
+        self.process
+            .send(&json!({ "id": id, "method": "thread/unsubscribe",
+            "params": { "threadId": thread } }))
+            .await
+    }
+
+    fn closed(&mut self, thread: &str) {
+        self.server.loaded().remove(thread);
+        self.idle.remove(thread);
+        let ids: Vec<_> = self
+            .releasing
+            .iter()
+            .filter(|(_, release)| release.thread == thread)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(release) = self.releasing.remove(&id) {
+                release.reply.send(Ok(())).ok();
+            }
+        }
     }
 
     fn route(&mut self, line: String) {
@@ -500,6 +590,22 @@ impl Actor {
             return;
         };
         if run == SERVER_RUN {
+            if let Some(id) = id.and_then(Value::as_u64) {
+                let frame: Value = serde_json::from_str(line).unwrap_or_default();
+                if frame["result"]["status"] == "notLoaded" {
+                    if let Some(release) = self.releasing.get(&id) {
+                        let thread = release.thread.clone();
+                        self.closed(&thread);
+                    }
+                } else if frame.get("error").is_some()
+                    && let Some(release) = self.releasing.remove(&id)
+                {
+                    release
+                        .reply
+                        .send(Err(anyhow!("Codex could not release the thread: {line}")))
+                        .ok();
+                }
+            }
             return;
         }
         // `thread/start` and `thread/resume` answer with the run's root thread.
@@ -533,6 +639,9 @@ impl Actor {
             self.unthreaded(method, id, line);
             return;
         };
+        if method == "thread/closed" {
+            self.closed(&thread);
+        }
         // A child thread belongs to the run of the thread that spawned it.
         if let Some(parent) = params
             .thread

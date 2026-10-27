@@ -401,6 +401,21 @@ impl Transport {
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
+    /// Saves the sidebar title on the native conversation too.
+    pub async fn rename_conversation(&self, conversation: &str, title: &str) -> anyhow::Result<()> {
+        let path = format!(
+            "/api/organizations/{}/chat_conversations/{conversation}",
+            self.org()
+        );
+        self.send(
+            self.builder(reqwest::Method::PUT, &path)
+                .header("content-type", "application/json")
+                .body(serde_json::to_string(&json!({ "name": title }))?),
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn post_json(
         &self,
         path: &str,

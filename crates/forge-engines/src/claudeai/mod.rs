@@ -18,9 +18,9 @@ mod capabilities;
 mod decoder;
 mod mcp;
 mod rules;
-mod side;
 mod session;
 mod shells;
+mod side;
 mod skills;
 mod tools;
 mod transport;
@@ -82,8 +82,27 @@ const FRAMING_TAGS: &[&str] = &[
 pub struct ClaudeAiHarness;
 
 impl Harness for ClaudeAiHarness {
-    fn compact(&self, turn: Turn, cancel: tokio_util::sync::CancellationToken)
-        -> BoxFuture<'static, anyhow::Result<crate::SideReply>> {
+    fn side_query(
+        &self,
+        turn: Turn,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<crate::SideReply>> {
+        Box::pin(side::compact(turn, cancel))
+    }
+
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, anyhow::Result<()>> {
+        <crate::claude::ClaudeHarness as Harness>::set_title(
+            &crate::claude::ClaudeHarness,
+            turn,
+            title,
+        )
+    }
+
+    fn compact(
+        &self,
+        turn: Turn,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<crate::SideReply>> {
         Box::pin(side::compact(turn, cancel))
     }
 
@@ -98,7 +117,7 @@ pub async fn run(turn: Turn, io: RunIo) -> Outcome {
         Ok(Some(session)) => session,
         Ok(None) => {
             return Outcome::failed(
-                "Native Claude Mode is not signed in to claude.ai. Sign in under Settings → Claude Code → Account, or run `ae engine login claude --claude-ai`.",
+                "claude.ai mode is not signed in to claude.ai. Sign in under Settings → Claude Code → claude.ai mode, or run `ae engine login claude --claude-ai`.",
             );
         }
         Err(error) => return Outcome::failed(format!("The claude.ai session: {error:#}")),
@@ -107,7 +126,7 @@ pub async fn run(turn: Turn, io: RunIo) -> Outcome {
     // a turn does not knock on Cloudflare's door for nothing.
     if let Some(reason) = &session.expired {
         return Outcome::failed(format!(
-            "The claude.ai session no longer works ({reason}). Sign in again under Settings → Claude Code → Account."
+            "The claude.ai session no longer works ({reason}). Sign in again under Settings → Claude Code → claude.ai mode."
         ));
     }
     if session.needs_renewal {
@@ -547,7 +566,7 @@ fn refused(error: &anyhow::Error) -> Outcome {
             Retry::Overloaded,
         ),
         Some(Refusal::SignedOut(message)) => Outcome::failed(format!(
-            "claude.ai signed the session out ({message}). Sign in again under Settings → Claude Code → Account."
+            "claude.ai signed the session out ({message}). Sign in again under Settings → Claude Code → claude.ai mode."
         )),
         Some(refusal @ Refusal::UsageLimit { resets_at, .. }) => Outcome::retryable(
             refusal.to_string(),
@@ -767,7 +786,7 @@ async fn run_task(
     }
     if call.input["run_in_background"].as_bool() == Some(true) {
         let answer = Answer {
-            text: "Background subagents are not available in Native Claude Mode. Run the task in the foreground instead.".to_owned(),
+            text: "Background subagents are not available in claude.ai mode. Run the task in the foreground instead.".to_owned(),
             is_error: true,
         };
         return Some(finish_agent(call, &answer, io).await);
@@ -1336,13 +1355,19 @@ pub fn tool(name: &str, description: &str, schema: &Value) -> Value {
 mod tests;
 
 /// A compaction of canonical history on the native transport.
-pub(crate) async fn compact(turn: Turn, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<crate::SideReply> {
+pub(crate) async fn compact(
+    turn: Turn,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<crate::SideReply> {
     side::compact(turn, cancel).await
 }
 
 /// A side question (title, suggestion, note) to a sibling branch of a
 /// native session: asked the way a compaction is, from the session's saved
 /// message, so the thread's own continuation never moves.
-pub(crate) async fn side_query(turn: Turn, cancel: tokio_util::sync::CancellationToken) -> anyhow::Result<crate::SideReply> {
+pub(crate) async fn side_query(
+    turn: Turn,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<crate::SideReply> {
     side::compact(turn, cancel).await
 }

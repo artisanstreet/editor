@@ -80,7 +80,9 @@ pub struct Decoder {
     tool_names: HashMap<String, String>,
     /// By OpenCode call id.
     tools: HashMap<String, Tool>,
-    /// Shells still running in the background → the call that started them.
+    /// Background shells awaiting their completion notification → starting call.
+    /// `shell.exited` precedes notification admission and must not release this
+    /// guard: the server still needs to wake the assistant with the result.
     shells: HashMap<String, String>,
     /// Texts ended in the current step, per session, for the phase decision.
     step_texts: HashMap<String, Vec<(String, String)>>,
@@ -173,9 +175,11 @@ impl Decoder {
     }
 
     /// The engine has nothing left to do for this run: the last execution
-    /// ended and every prompt we sent has been delivered.
+    /// ended, every prompt has been delivered, and background shells have
+    /// handed their results back to the assistant.
     pub fn idle(&self) -> bool {
         !self.turn_open
+            && (self.shells.is_empty() || self.error.is_some() || self.cancelled)
             && self
                 .admitted
                 .iter()
@@ -276,9 +280,13 @@ impl Decoder {
                     });
                 }
             }
-            "session.inbox.enqueued" if root => {
-                if let Some(message) = data["inboxID"].as_str()
-                    && data["item"]["type"] == "user"
+            "session.inbox.enqueued" => {
+                if data["item"]["type"] == "synthetic" {
+                    self.shell_notification(&data["item"]["payload"], &mut out);
+                }
+                if root
+                    && let Some(message) = data["inboxID"].as_str()
+                    && matches!(data["item"]["type"].as_str(), Some("user" | "synthetic"))
                 {
                     self.admitted.insert(message.to_owned());
                 }
@@ -779,7 +787,7 @@ impl Decoder {
     fn shell_exited(&mut self, data: &Value, out: &mut Vec<EngineEvent>) {
         let Some(call) = data["id"]
             .as_str()
-            .and_then(|shell| self.shells.remove(shell))
+            .and_then(|shell| self.shells.get(shell).cloned())
         else {
             return;
         };
@@ -798,6 +806,48 @@ impl Decoder {
             && exit.is_some()
         {
             *exit_code = exit;
+        }
+        out.push(self.tool_event(&call));
+    }
+
+    fn shell_notification(&mut self, payload: &Value, out: &mut Vec<EngineEvent>) {
+        let metadata = &payload["metadata"];
+        if metadata["source"] != "shell" {
+            return;
+        }
+        let Some(call) = metadata["shellID"]
+            .as_str()
+            .and_then(|shell| self.shells.remove(shell))
+        else {
+            return;
+        };
+        let Some(tool) = self.tools.get_mut(&call) else {
+            return;
+        };
+        let exit = metadata["exit"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok());
+        tool.status = match metadata["state"].as_str() {
+            Some("cancelled") => Status::Cancelled,
+            Some("error") => Status::Failed,
+            Some("completed")
+                if metadata["timeout"] == true || exit.is_some_and(|code| code != 0) =>
+            {
+                Status::Failed
+            }
+            Some("completed") => Status::Done,
+            _ => tool.status,
+        };
+        if let ItemKind::Tool {
+            output, exit_code, ..
+        } = &mut tool.kind
+        {
+            if let Some(text) = payload["text"].as_str() {
+                *output = Some(Output::from_text(text));
+            }
+            if exit.is_some() {
+                *exit_code = exit;
+            }
         }
         out.push(self.tool_event(&call));
     }

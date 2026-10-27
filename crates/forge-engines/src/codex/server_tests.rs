@@ -14,9 +14,25 @@ use tokio_util::sync::CancellationToken;
 /// One whose text is "ask" asks to run a command and ends saying whether the
 /// first answer it got approved it.
 const FAKE: &str = r#"#!/usr/bin/env bash
+# Without this override, unsubscribe retains persistence until Codex's idle timeout.
+if [ "$2" != -c ] || [ "$3" != thread_unload_delay_secs=0 ]; then exit 1; fi
 echo $$ >> "$ARTISAN_TEST_SPAWNS"
 threads=0
 turns=0
+declare -A locks
+load_thread() {
+  if [ -z "${locks[$thread]}" ]; then
+    exec {fd}> "$ARTISAN_TEST_SPAWNS-$thread.lock"
+    if ! flock -n "$fd"; then
+      printf '{"id":%s,"error":{"code":-32000,"message":"already has an active writer"}}\n' "$id"
+      exec {fd}>&-
+      return 1
+    fi
+    locks[$thread]=$fd
+  fi
+  printf '{"id":%s,"result":{"thread":{"id":"%s"},"model":"fake-model"}}\n' "$id" "$thread"
+}
+
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$ARTISAN_TEST_INPUT"
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
@@ -32,8 +48,15 @@ while IFS= read -r line; do
     initialize) printf '{"id":%s,"result":{"userAgent":"fake"}}\n' "$id" ;;
     thread/start)
       threads=$((threads + 1))
-      printf '{"id":%s,"result":{"thread":{"id":"thread-%s"},"model":"fake-model"}}\n' "$id" "$threads" ;;
-    thread/resume) printf '{"id":%s,"result":{"thread":{"id":"%s"},"model":"fake-model"}}\n' "$id" "$thread" ;;
+      thread="thread-$$-$threads"
+      load_thread ;;
+    thread/resume) load_thread ;;
+    thread/unsubscribe)
+      printf '{"id":%s,"result":{"status":"unsubscribed"}}\n' "$id"
+      sleep 0.1
+      fd=${locks[$thread]}
+      if [ -n "$fd" ]; then exec {fd}>&-; unset 'locks[$thread]'; fi
+      printf '{"method":"thread/closed","params":{"threadId":"%s"}}\n' "$thread" ;;
     turn/start)
       turns=$((turns + 1))
       turn="turn-$turns"
@@ -43,12 +66,15 @@ while IFS= read -r line; do
         ask_thread=$thread
         ask_turn=$turn
         (
+          # Background reply emitters must not inherit the server's writer locks.
+          for fd in "${locks[@]}"; do exec {fd}>&-; done
           sleep 0.5
           printf '{"id":900,"method":"item/commandExecution/requestApproval","params":{"threadId":"%s","turnId":"%s","itemId":"cmd-1","command":"ls"}}\n' "$thread" "$turn"
         ) &
         continue
       fi
       (
+        for fd in "${locks[@]}"; do exec {fd}>&-; done
         sleep 0.3
         if [ "$text" = slow ]; then sleep 1.5; fi
         if [ "$text" = spawn ]; then
@@ -291,4 +317,60 @@ async fn an_approval_reaches_only_the_thread_that_asked() {
         .filter(|line| line.contains("\"id\":900") && !line.contains("\"method\""))
         .count();
     assert_eq!(answers, 1, "{}", fixture.input());
+}
+
+/// An idle thread must move to the replacement without killing other runs
+/// on the retired server, even when unsubscribe answers before releasing its lock.
+#[tokio::test]
+async fn retired_server_releases_a_thread_while_another_run_continues() {
+    let fixture = Fixture::new();
+    let (_, events) = run(fixture.turn("hello", None)).await;
+    let thread = session(&events);
+    let other = tokio::spawn(run(fixture.turn("slow", None)));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !fixture
+            .input()
+            .lines()
+            .any(|line| line.contains("\"text\":\"slow\""))
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the other turn starts before retiring its server");
+    let config = fixture.root.join("home/.codex/config.toml");
+    std::fs::write(&config, "# changed launch\n").unwrap();
+    let (outcome, events) = run(fixture.turn("again", Some(&thread))).await;
+    assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
+    assert!(format!("{events:?}").contains(&format!("reply on {thread} to again")));
+    assert_eq!(fixture.spawns(), 2);
+    assert!(
+        !other.is_finished(),
+        "the other turn is still running after handoff"
+    );
+    let (outcome, _) = other.await.unwrap();
+    assert_eq!(
+        outcome.status,
+        artisan_api::RunStatus::Done,
+        "the other turn completes normally"
+    );
+}
+
+#[tokio::test]
+async fn changing_context_window_releases_the_previous_writer() {
+    let fixture = Fixture::new();
+    let (_, events) = run(fixture.turn("hello", None)).await;
+    let thread = session(&events);
+    let other = super::server::attach(&fixture.turn("other", None))
+        .await
+        .unwrap();
+    let mut again = fixture.turn("again", Some(&thread));
+    again
+        .config
+        .options
+        .insert("context_window".into(), serde_json::json!(100_000));
+    let (outcome, _) = run(again).await;
+    assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
+    assert_eq!(fixture.spawns(), 2);
+    drop(other);
 }

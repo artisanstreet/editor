@@ -237,6 +237,13 @@ impl RunIo {
 pub trait Harness: Send + Sync {
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome>;
 
+    /// Persists Forge's generated title in the native session,
+    /// without prompting it or changing its continuation.
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, anyhow::Result<()>> {
+        let _ = (turn, title);
+        Box::pin(async { Ok(()) })
+    }
+
     /// Forks `turn.session_id` and asks it `turn.input.text` once, with no
     /// tool allowed to change anything. The thread's own session is left as
     /// it was, and the fork is discarded afterwards. The fork keeps the

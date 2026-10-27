@@ -41,7 +41,7 @@ pub(super) async fn clear_goal(turn: Turn) -> Result<()> {
 
 /// Sends a request and waits for its result, skipping what Codex sends
 /// meanwhile.
-async fn call(
+pub(super) async fn call(
     conn: &mut server::Attachment,
     id: u64,
     method: &str,
@@ -52,7 +52,7 @@ async fn call(
         let line = conn
             .next_line()
             .await
-            .ok_or_else(|| anyhow!("Codex exited while clearing a goal: {}", conn.ended()))?;
+            .ok_or_else(|| anyhow!("Codex exited while waiting for {method}: {}", conn.ended()))?;
         let Ok(frame) = serde_json::from_str::<Frame>(&line) else {
             continue;
         };
@@ -60,7 +60,7 @@ async fn call(
             // Resuming asks nothing; anything that does is refused.
             conn.send(json!({
                 "id": request,
-                "error": { "code": crate::rpc::METHOD_NOT_FOUND, "message": "clearing a goal takes no requests" },
+                "error": { "code": crate::rpc::METHOD_NOT_FOUND, "message": "this operation takes no server requests" },
             }))?;
             continue;
         }
