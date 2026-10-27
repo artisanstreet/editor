@@ -5,6 +5,7 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     crane.url = "github:ipetkov/crane";
+    blaze.url = "github:indexable-inc/blaze";
   };
   outputs =
     {
@@ -12,6 +13,7 @@
       nixpkgs,
       rust-overlay,
       crane,
+      blaze,
       ...
     }:
     let
@@ -26,7 +28,12 @@
           pkgs = import nixpkgs { inherit system overlays; };
         in
         import ./nix/workspace.nix {
-          inherit self pkgs crane;
+          inherit
+            self
+            pkgs
+            crane
+            blaze
+            ;
           # Windows binaries are cross-built with the MinGW-w64 toolchain
           # (Rust target x86_64-pc-windows-gnu), which nixpkgs builds and caches.
           windowsPkgs = import nixpkgs {
