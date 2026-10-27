@@ -85,7 +85,8 @@ impl Reassembly {
         if entry.parts.iter().any(Option::is_none) {
             return Ok(None);
         }
-        let mut out = Vec::with_capacity(entry.total_bytes as usize);
+        let mut out =
+            Vec::with_capacity(usize::try_from(entry.total_bytes).unwrap_or(0));
         for part in entry.parts.drain(..).flatten() {
             out.extend_from_slice(&part);
         }
@@ -200,7 +201,7 @@ mod tests {
                 bytes_b64u: String::new(),
             };
             // total_bytes 2 as one empty part: stays in flight, no completion.
-            let _ = reassembly.feed("unary", &chunk);
+            assert!(reassembly.feed("unary", &chunk).is_ok());
         }
         let chunk = crate::TunnelChunk {
             transfer: "one-too-many".to_owned(),

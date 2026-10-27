@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One application call inside an open Noise data channel.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelRequest {
     /// Caller-made id, echoed back for pairing.
@@ -26,11 +26,13 @@ pub struct TunnelRequest {
     pub body: Option<serde_json::Value>,
 }
 
+/// Binary body envelope.
+///
 /// A binary body inside [`TunnelRequest::body`] or [`TunnelResponse::body`]:
 /// `{"$bytes": {"content_type": "<mime>", "b64u": "<base64url>"}}`.
 /// Used for corpus that is not JSON (`PUT /blobs` WebP, `GET /blobs/*`,
 /// exported sources). Keeps every tunnel frame JSON while carrying bytes.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelBytes {
     pub content_type: String,
@@ -40,8 +42,10 @@ pub struct TunnelBytes {
 /// The envelope key naming a [`TunnelBytes`] value.
 pub const BYTES_ENVELOPE_KEY: &str = "$bytes";
 
-/// Split a request body into raw bytes: the `$bytes` envelope form carries
-/// binary with its content type, anything else is re-encoded as JSON.
+/// Split a request body into raw bytes.
+///
+/// The `$bytes` envelope form carries binary with its content type,
+/// anything else is re-encoded as JSON.
 /// Corrupt base64 is an explicit error, never silently empty bytes.
 pub fn request_body_bytes(
     body: Option<&serde_json::Value>,
@@ -55,7 +59,7 @@ pub fn request_body_bytes(
                     use base64::Engine as _;
                     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
                         .decode(envelope.b64u.as_bytes())
-                        .map_err(|_| BodyDecodeError::InvalidBase64)?;
+                        .map_err(|_decode| BodyDecodeError::InvalidBase64)?;
                     Ok((envelope.content_type, raw))
                 }
                 Err(_) => Ok(("application/json".into(), body_json_bytes(body))),
@@ -80,7 +84,7 @@ fn body_json_bytes(body: Option<&serde_json::Value>) -> Vec<u8> {
 }
 
 /// The answer to a [`TunnelRequest`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunnelResponse {
     /// Echo of the request id.
     pub id: String,
@@ -116,9 +120,11 @@ impl TunnelResponse {
     }
 }
 
-/// One chunk of a large transfer (see the wire doc for the protocol).
-/// Every chunk frame stays JSON and under the 60 KiB Noise plaintext cap.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// One chunk of a large transfer.
+///
+/// Every chunk frame stays JSON and under the 60 KiB Noise plaintext cap
+/// (see the wire doc for the protocol).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelChunk {
     /// Transfer this chunk belongs to (caller-made, e.g. the request id).
@@ -133,13 +139,17 @@ pub struct TunnelChunk {
     pub bytes_b64u: String,
 }
 
-/// Chunking limits: 40 KiB of raw bytes per chunk. Base64url expands
-/// 40 KiB to ~54.6 KiB of text, so even the largest chunk frame stays
-/// under the 60 KiB Noise plaintext cap after JSON framing (asserted in
-/// tests against [`TUNNEL_PLAINTEXT_BUDGET`]).
+/// Chunking limits.
+///
+/// 40 KiB of raw bytes per chunk. Base64url expands 40 KiB to ~54.6 KiB
+/// of text, so even the largest chunk frame stays under the 60 KiB Noise
+/// plaintext cap after JSON framing (asserted in tests against
+/// [`TUNNEL_PLAINTEXT_BUDGET`]).
 pub const CHUNK_RAW_BYTES: usize = 40 * 1024;
 /// Noise data-plaintext ceiling every chunk frame must fit.
 pub const TUNNEL_PLAINTEXT_BUDGET: usize = 60_000;
+/// Transfer size cap.
+///
 /// 32 MiB of raw bytes per transfer max (matches the Forge blob/source
 /// ceilings so no transcript becomes unreadable: oversize is an explicit
 /// error, never truncation). Encoded inflight runs ~4/3 of this; the
@@ -148,10 +158,16 @@ pub const TRANSFER_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// Per-connection aggregate cap across all in-progress chunk transfers
 /// (bounds base64 expansion + JSON overhead, not only each transfer).
 pub const REASSEMBLY_MAX_BYTES_PER_CONN: u64 = 64 * 1024 * 1024;
-/// Maximum chunk parts per transfer: `TRANSFER_MAX_BYTES` split into
-/// `CHUNK_RAW_BYTES` pieces, rounded up. Validated BEFORE allocating the
-/// parts vector, so a corrupt `total` can never trigger a huge allocation.
-pub const TRANSFER_MAX_PARTS: u32 = (TRANSFER_MAX_BYTES / CHUNK_RAW_BYTES as u64 + 1) as u32;
+/// Maximum chunk parts per transfer.
+///
+/// `TRANSFER_MAX_BYTES` split into `CHUNK_RAW_BYTES` pieces, rounded up.
+/// Validated BEFORE allocating the parts vector, so a corrupt `total`
+/// can never trigger a huge allocation.
+pub const TRANSFER_MAX_PARTS: u32 = 820;
+const _: () = assert!(
+    TRANSFER_MAX_PARTS as u64 == TRANSFER_MAX_BYTES.div_ceil(CHUNK_RAW_BYTES as u64),
+    "TRANSFER_MAX_PARTS must be the div_ceil part count"
+);
 /// Maximum concurrent in-progress chunk transfers per reassembly scope.
 /// Bounds memory when many partial transfers arrive without completing.
 pub const REASSEMBLY_MAX_IN_FLIGHT: usize = 64;
@@ -174,8 +190,8 @@ pub fn chunk_bytes(transfer: &str, bytes: &[u8]) -> Vec<TunnelChunk> {    use ba
         .enumerate()
         .map(|(index, part)| TunnelChunk {
             transfer: transfer.to_owned(),
-            index: index as u32,
-            total: total as u32,
+            index: u32::try_from(index).unwrap_or(u32::MAX),
+            total: u32::try_from(total).unwrap_or(u32::MAX),
             total_bytes: bytes.len() as u64,
             bytes_b64u: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(part),
         })
@@ -188,7 +204,7 @@ pub fn decode_chunk_bytes(chunk: &TunnelChunk) -> Result<Vec<u8>, BodyDecodeErro
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(chunk.bytes_b64u.as_bytes())
-        .map_err(|_| BodyDecodeError::InvalidBase64)
+        .map_err(|_decode| BodyDecodeError::InvalidBase64)
 }
 
 #[cfg(test)]
@@ -215,7 +231,7 @@ mod tests {
                 index,
                 framed.len()
             );
-            assert_eq!(decode_chunk_bytes(chunk).unwrap().len() <= CHUNK_RAW_BYTES, true);
+            assert!(decode_chunk_bytes(chunk).unwrap().len() <= CHUNK_RAW_BYTES);
         }
         let mut reassembled = Vec::new();
         for chunk in &chunks {
@@ -256,9 +272,11 @@ mod tests {
     }
 }
 
-/// Stream start answer to a `SUBSCRIBE` request:
-/// `{"$stream": {"stream": "<id>"}}` as the response `body`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Stream start answer.
+///
+/// A `SUBSCRIBE` request answers `{"$stream": {"stream": "<id>"}}`
+/// as the response `body`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamStart {
     pub stream: String,
@@ -267,6 +285,8 @@ pub struct StreamStart {
 /// Stream envelope key in a subscribe response body.
 pub const STREAM_START_KEY: &str = "$stream";
 
+/// Tunneled stream frame.
+///
 /// One tunneled stream frame (server → client DATA plaintext):
 /// `{"$event": {"stream": "<id>", ...}}` with exactly one of
 /// `envelope` (one stored/live [`super::Envelope`]), `end`
