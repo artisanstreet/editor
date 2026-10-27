@@ -72,7 +72,7 @@ pub struct Since {
 }
 
 impl Since {
-    pub(crate) fn tunnel(since: Seq, summary: bool, thread: Option<artisan_api::ThreadId>) -> Self {
+    pub(crate) const fn tunnel(since: Seq, summary: bool, thread: Option<artisan_api::ThreadId>) -> Self {
         Self {
             since,
             summary,
@@ -106,13 +106,14 @@ impl Since {
 /// is gone (channel closed/cancelled) or a terminal Reset is sent. The
 /// caller frames each [`Envelope`] as a `$event` DATA frame; envelopes that
 /// would exceed the Noise plaintext cap are chunked by the caller.
+#[expect(clippy::too_many_lines, reason = "backlog/live/cursor in one tunnel turn")]
 pub async fn forward_tunnel(
     app: &App,
     scope: &Since,
     sender: &tokio::sync::mpsc::Sender<Envelope>,
 ) -> anyhow::Result<()> {
     let send = async |envelope: Envelope| -> anyhow::Result<()> {
-        sender.send(envelope).await.map_err(|_| anyhow::anyhow!("stream gone"))?;
+        sender.send(envelope).await.map_err(|_send| anyhow::anyhow!("stream gone"))?;
         Ok(())
     };
     let since = scope.since;
@@ -253,7 +254,7 @@ async fn send_live_tunnel_snapshot(
             sender
                 .send(envelope)
                 .await
-                .map_err(|_| anyhow::anyhow!("stream gone"))?;
+                .map_err(|_send| anyhow::anyhow!("stream gone"))?;
         }
     }
     Ok(live_revision)
@@ -273,7 +274,7 @@ async fn send_engine_tunnel_statuses(
                 },
             })
             .await
-            .map_err(|_| anyhow::anyhow!("stream gone"))?;
+            .map_err(|_send| anyhow::anyhow!("stream gone"))?;
     }
     Ok(())
 }

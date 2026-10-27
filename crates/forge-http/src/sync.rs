@@ -45,8 +45,7 @@ fn now_sec() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |elapsed| elapsed.as_secs()),
     )
     .unwrap_or(0)
 }
@@ -191,6 +190,8 @@ pub struct SkillBundleFile {
     pub sha256: String,
 }
 
+/// Embedded skill bundle.
+///
 /// An embedded skill bundle (Core `SkillRef.bundle` shape): 1–64 files,
 /// total decoded ≤ 1 MiB, every file hash-verified, SKILL.md required at
 /// the root. Installs verbatim under the skill root on machines that lack
@@ -207,11 +208,14 @@ pub const SKILL_BUNDLE_MAX_BYTES: usize = 1024 * 1024;
 pub const MANIFEST_MAX_MCP_SERVERS: usize = 64;
 pub const MANIFEST_MAX_SKILLS: usize = 256;
 
+/// Fetch latest bundle.
+///
 /// Fetch the latest bundle conditionally; verify the canonical manifest
 /// bytes; apply through the Hub; report. `304` (or same version+hash
 /// already applied) means current — no reapply. On failure the last-good
 /// state file is untouched and `failed` is reported with detail; settings
 /// converge idempotently on the next good sync.
+#[expect(clippy::too_many_lines, reason = "fetch/verify/apply/report in one sync turn")]
 pub async fn sync_config(
     http: &reqwest::Client,
     core_base_url: &str,
@@ -330,7 +334,7 @@ fn archive_manifest(data_dir: &Path, bundle: &BundleInfo, bytes: &[u8]) -> Resul
     let dir = config_dir(data_dir);
     std::fs::create_dir_all(&dir)?;
     let staged = dir.join(format!(".bundle-{}.tmp", bundle.version));
-    let _ = std::fs::remove_dir_all(&staged);
+    drop(std::fs::remove_dir_all(&staged));
     std::fs::create_dir_all(&staged)?;
     std::fs::write(staged.join("manifest.json"), bytes)?;
     let live = dir.join(format!("bundle-{}.json", bundle.version));
@@ -420,6 +424,7 @@ fn validate_manifest(manifest: &EditorManifest) -> Result<()> {
 /// leading slash, no `..` segments, ≤ 256 chars), 1–64 files, SKILL.md at
 /// the root, per-file sha256 over decoded bytes, total ≤ 1 MiB.
 fn validate_skill_bundle(skill_name: &str, bundle: &SkillBundle) -> Result<()> {
+    use base64::Engine as _;
     if bundle.files.is_empty() || bundle.files.len() > 64 {
         anyhow::bail!("skill {skill_name} bundle must hold 1-64 files");
     }
@@ -433,7 +438,6 @@ fn validate_skill_bundle(skill_name: &str, bundle: &SkillBundle) -> Result<()> {
         {
             anyhow::bail!("skill {skill_name} bundles an unsafe path");
         }
-        use base64::Engine as _;
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(file.content_base64.as_bytes())
             .with_context(|| {
@@ -529,16 +533,16 @@ async fn restore_settings(
         .setting("global_prompt")
         .await?
         .and_then(|value| value.as_str().map(str::to_owned));
-    if current != snapshot.prompt_text {
-        if let Some(text) = snapshot.prompt_text.as_deref() {
-            let base = store.prompt_version().await?;
-            store
-                .save_prompt_version(base, text.to_owned())
-                .await?
-                .map_err(|latest| {
-                    anyhow::anyhow!("prompt changed during rollback (now version {latest})")
-                })?;
-        }
+    if current != snapshot.prompt_text
+        && let Some(text) = snapshot.prompt_text.as_deref()
+    {
+        let base = store.prompt_version().await?;
+        store
+            .save_prompt_version(base, text.to_owned())
+            .await?
+            .map_err(|latest| {
+                anyhow::anyhow!("prompt changed during rollback (now version {latest})")
+            })?;
     }
     if let Some(mcp) = snapshot.mcp.clone() {
         store.set_setting("mcp_servers".into(), mcp).await?;
@@ -549,6 +553,7 @@ async fn restore_settings(
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "install/enable/prompt/MCP/verify in one apply")]
 async fn apply_inner(
     hub: &forge_runs::Hub,
     store: &forge_store::Store,
@@ -570,6 +575,10 @@ async fn apply_inner(
     if !manifest.skills.is_empty() {
         let catalog = hub.skill_catalog().await?;
         for skill in &manifest.skills {
+            #[allow(
+                clippy::suspicious_operation_groupings,
+                reason = "ManifestSkill has only name; match id, name, or suffix"
+            )]
             let hit = catalog.iter().find(|entry| {
                 entry.id == skill.name || entry.name == skill.name || entry.id.ends_with(&format!(".{}", skill.name))
             });
@@ -702,6 +711,10 @@ async fn verify_applied(
     if !manifest.skills.is_empty() {
         let catalog = hub.skill_catalog().await?;
         for skill in &manifest.skills {
+            #[allow(
+                clippy::suspicious_operation_groupings,
+                reason = "ManifestSkill has only name; match id, name, or local suffix"
+            )]
             let enabled = catalog.iter().any(|entry| {
                 (entry.id == skill.name
                     || entry.name == skill.name
@@ -757,6 +770,7 @@ pub struct MachineIdentity {
 /// Read the machine identity. `None` when the Forge is not enrolled
 /// (accountless Forges stay untouched).
 pub fn load_machine_identity(data_dir: &Path) -> Result<Option<MachineIdentity>> {
+    use base64::Engine as _;
     #[derive(serde::Deserialize)]
     struct AccountFile {
         #[serde(default)]
@@ -777,12 +791,11 @@ pub fn load_machine_identity(data_dir: &Path) -> Result<Option<MachineIdentity>>
     let (Some(secret_b64u), Some(machine_id)) = (file.secret_b64u, file.machine_id) else {
         return Ok(None);
     };
-    use base64::Engine as _;
     let secret: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(secret_b64u.as_bytes())
         .context("read the machine secret")?
         .try_into()
-        .map_err(|_| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
+        .map_err(|_secret| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
     Ok(Some(MachineIdentity {
         machine_id,
         account_id: file.account_id,
@@ -970,6 +983,8 @@ pub fn verify_envelope(envelope: &EngineArtifactEnvelope) -> Result<()> {
     Ok(())
 }
 
+/// Apply a verified envelope.
+///
 /// Apply a verified envelope with freshness: never blindly overwrite newer
 /// local engine auth. Returns the per-engine outcome; the caller probes the
 /// engine afterwards and maps a failed probe to `NeedsReauth`.
@@ -1412,7 +1427,7 @@ mod tests {
             probe_signed_in: false,
         };
         assert!(verify_envelope(&bad).is_err());
-        let reports = vec![
+        let reports = [
             EngineAuthReport {
                 engine: "claude".into(),
                 status: AuthStatus::Updated,
@@ -1435,7 +1450,7 @@ mod tests {
         );
     }
 
-fn skill_manifest(skill: serde_json::Value) -> Vec<u8> {
+fn skill_manifest(skill: &serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "format": "ast-editor-config/1",
         "mcpServers": [{"name": "s", "command": "srv"}],
@@ -1464,7 +1479,7 @@ fn bundled_skill(name: &str, extra: Vec<(&str, &[u8])>) -> serde_json::Value {
 /// enabled in the catalog; prompt + MCP converge in the same apply.
 #[tokio::test]
 async fn bundled_skill_installs_and_reads_back_enabled() {
-    let manifest = skill_manifest(bundled_skill("syncprobed", vec![("refs/notes.md", b"notes")]));
+    let manifest = skill_manifest(&bundled_skill("syncprobed", vec![("refs/notes.md", b"notes")]));
     let (base, stub, _server) = stub_server(false, Some(manifest)).await;
     let dir = tempfile::tempdir().unwrap();
     let hub = test_hub(dir.path());
@@ -1502,7 +1517,7 @@ async fn invalid_bundle_rolls_back_without_partial_apply() {
         "source": "builtin",
         "bundle": {"files": [skill_file("refs/notes.md", b"notes")]},
     });
-    let manifest = skill_manifest(bad_skill);
+    let manifest = skill_manifest(&bad_skill);
     let (base, stub, _server) = stub_server(false, Some(manifest)).await;
     let dir = tempfile::tempdir().unwrap();
     let hub = test_hub(dir.path());
@@ -1525,13 +1540,14 @@ async fn invalid_bundle_rolls_back_without_partial_apply() {
         "detail names the cause: {}",
         reports[0]["detail"]
     );
+    drop(reports);
 }
 
 /// An unknown skill with no bundle fails with a named error instead of
 /// a silent no-op.
 #[tokio::test]
 async fn unknown_skill_without_bundle_fails_named() {
-    let manifest = skill_manifest(serde_json::json!({
+    let manifest = skill_manifest(&serde_json::json!({
         "name": "not-installed-anywhere",
         "source": "builtin",
     }));
@@ -1550,6 +1566,7 @@ async fn unknown_skill_without_bundle_fails_named() {
         "detail names the skill: {}",
         reports[0]["detail"]
     );
+    drop(reports);
 }
 
 /// A per-file hash mismatch is caught before anything mutates.
@@ -1557,7 +1574,7 @@ async fn unknown_skill_without_bundle_fails_named() {
 async fn tampered_bundle_file_hash_rejects_before_mutation() {
     let mut files = vec![skill_file("SKILL.md", skill_md("tampered").as_bytes())];
     files[0]["sha256"] = serde_json::json!("00");
-    let manifest = skill_manifest(serde_json::json!({
+    let manifest = skill_manifest(&serde_json::json!({
         "name": "tampered",
         "source": "builtin",
         "bundle": {"files": files},

@@ -32,15 +32,14 @@ fn now_sec() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |elapsed| elapsed.as_secs()),
     )
     .unwrap_or(0)
 }
 
 fn nonce_b64u() -> Result<String> {
     let mut raw = [0_u8; 16];
-    getrandom::fill(&mut raw).map_err(|_| anyhow::anyhow!("random nonce failed"))?;
+    getrandom::fill(&mut raw).map_err(|_rand| anyhow::anyhow!("random nonce failed"))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw))
 }
 
@@ -142,11 +141,11 @@ impl CoreClient {
             .send()
             .await
             .context("reach Core")?;
-        Ok(Self::check(response)
+        Self::check(response)
             .await?
             .json()
             .await
-            .context("read Core enrollment answer")?)
+            .context("read Core enrollment answer")
     }
 
     /// Poll an enrollment: `GET …/enrollments/{id}/status` with the
@@ -166,11 +165,11 @@ impl CoreClient {
             .send()
             .await
             .context("reach Core")?;
-        Ok(Self::check(response)
+        Self::check(response)
             .await?
             .json()
             .await
-            .context("read Core status answer")?)
+            .context("read Core status answer")
     }
 
     /// Confirm an enrollment: `POST /v1/machines/enrollments/confirm` with
@@ -199,11 +198,11 @@ impl CoreClient {
             .send()
             .await
             .context("reach Core")?;
-        Ok(Self::check(response)
+        Self::check(response)
             .await?
             .json()
             .await
-            .context("read Core confirm answer")?)
+            .context("read Core confirm answer")
     }
 
     /// Issue a machine grant: `POST /v1/grants/issue` (unified endpoint;
@@ -238,11 +237,11 @@ impl CoreClient {
             .send()
             .await
             .context("reach Core")?;
-        Ok(Self::check(response)
+        Self::check(response)
             .await?
             .json()
             .await
-            .context("read Core grant answer")?)
+            .context("read Core grant answer")
     }
 
     /// Fetch the JWKS Core publishes for grant verification.
@@ -253,11 +252,11 @@ impl CoreClient {
             .send()
             .await
             .context("reach Core")?;
-        Ok(Self::check(response)
+        Self::check(response)
             .await?
             .json()
             .await
-            .context("read Core JWKS")?)
+            .context("read Core JWKS")
     }
 
     /// List this account's machines: `GET /v1/machines` (machine proof auth;
@@ -277,11 +276,11 @@ impl CoreClient {
             .send()
             .await
             .context("reach Core")?;
-        Ok(Self::check(response)
+        Self::check(response)
             .await?
             .json()
             .await
-            .context("read Core machines answer")?)
+            .context("read Core machines answer")
     }
 }
 

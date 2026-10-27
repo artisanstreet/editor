@@ -108,7 +108,7 @@ impl GrantVerifier {
             anyhow::bail!("grant is not bound to a Core account/machine route");
         }
         let kid = artisan_account::unverified_kid(token)
-            .map_err(|_| anyhow::anyhow!("grant rejected: bad header"))?;
+            .map_err(|_header| anyhow::anyhow!("grant rejected: bad header"))?;
         let mut keys = self.jwks(false).await?;
         if !keys.contains_key(&kid) {
             keys = self.jwks(true).await?;
@@ -116,7 +116,7 @@ impl GrantVerifier {
         let issuer = keys
             .get(&kid)
             .copied()
-            .with_context(|| format!("unknown grant key id"))?;
+            .with_context(|| "unknown grant key id".to_owned())?;
         let params = VerifyParams {
             expected_iss: self.expected_iss.clone(),
             expected_aud: artisan_account::AUD_RELAY.to_owned(),
@@ -158,7 +158,7 @@ pub(crate) mod tests {
         axum::Json(keys)
     }
 
-    pub(crate) async fn verifier_with_stub(jwks: serde_json::Value) -> (GrantVerifier, String) {
+    pub async fn verifier_with_stub(jwks: serde_json::Value) -> (GrantVerifier, String) {
         let router = axum::Router::new()
             .route("/.well-known/jwks.json", get(jwks_stub))
             .with_state(jwks);
@@ -184,7 +184,7 @@ pub(crate) mod tests {
         (key, x)
     }
 
-    pub(crate) fn grant_token(
+    pub fn grant_token(
         key: &ed25519_dalek::SigningKey,
         sub: &str,
         mid: &str,

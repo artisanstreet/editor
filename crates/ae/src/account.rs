@@ -127,21 +127,21 @@ fn keypair(account: &mut AccountFile) -> Result<artisan_account::MachineKeypair>
             .decode(secret)
             .context("read the machine secret")?
             .try_into()
-            .map_err(|_| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
+            .map_err(|_secret| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
         let public: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(public)
             .context("read the machine key")?
             .try_into()
-            .map_err(|_| anyhow::anyhow!("the machine key is not 32 bytes"))?;
+            .map_err(|_key| anyhow::anyhow!("the machine key is not 32 bytes"))?;
         let keypair = artisan_account::MachineKeypair::from_secret(secret)
-            .map_err(|_| anyhow::anyhow!("the machine secret is invalid"))?;
+            .map_err(|_secret| anyhow::anyhow!("the machine secret is invalid"))?;
         if keypair.public() != &public {
             bail!("the stored machine key does not match its secret");
         }
         return Ok(keypair);
     }
     let keypair =
-        artisan_account::MachineKeypair::generate().map_err(|_| anyhow::anyhow!("random key failed"))?;
+        artisan_account::MachineKeypair::generate().map_err(|_rand| anyhow::anyhow!("random key failed"))?;
     account.secret_b64u = Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(keypair.secret()));
     account.public_b64u = Some(keypair.public_b64u());
     save_account(account)?;
@@ -149,12 +149,15 @@ fn keypair(account: &mut AccountFile) -> Result<artisan_account::MachineKeypair>
 }
 
 fn label_default(label: Option<&str>) -> String {
-    label.map(str::to_owned).unwrap_or_else(|| {
-        gethostname::gethostname()
-            .to_string_lossy()
-            .trim()
-            .to_owned()
-    })
+    label.map_or_else(
+        || {
+            gethostname::gethostname()
+                .to_string_lossy()
+                .trim()
+                .to_owned()
+        },
+        str::to_owned,
+    )
     .chars()
     .take(64)
     .collect::<String>()
@@ -283,39 +286,12 @@ fn confirm(core: Option<&str>, yes: bool) -> Result<()> {
 }
 
 fn ask(account_id: &str) -> Result<bool> {
-    Ok(cliclack::confirm(format!(
+    cliclack::confirm(format!(
         "Enroll this Forge into account {account_id}? The code alone is not enough: this binds the local key."
     ))
     .initial_value(true)
     .interact()
-    .map_err(crate::ui::prompt_error)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn labels_fall_back_to_a_bounded_hostname() {
-        assert_eq!(label_default(Some("  srv-1  ")), "srv-1");
-        assert!(label_default(Some("")).is_empty());
-        assert!(label_default(None).len() <= 64);
-    }
-
-    #[test]
-    fn account_file_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ast_account.json");
-        let account = AccountFile {
-            machine_id: Some("mch_1".into()),
-            account_id: Some("acct_1".into()),
-            ..AccountFile::default()
-        };
-        std::fs::write(&path, serde_json::to_string(&account).unwrap()).unwrap();
-        let read: AccountFile =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(read, account);
-    }
+    .map_err(crate::ui::prompt_error)
 }
 
 /// Fetch and apply the latest account config bundle now (same path the
@@ -356,4 +332,31 @@ fn sync_config_now(core: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_fall_back_to_a_bounded_hostname() {
+        assert_eq!(label_default(Some("  srv-1  ")), "srv-1");
+        assert!(label_default(Some("")).is_empty());
+        assert!(label_default(None).len() <= 64);
+    }
+
+    #[test]
+    fn account_file_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ast_account.json");
+        let account = AccountFile {
+            machine_id: Some("mch_1".into()),
+            account_id: Some("acct_1".into()),
+            ..AccountFile::default()
+        };
+        std::fs::write(&path, serde_json::to_string(&account).unwrap()).unwrap();
+        let read: AccountFile =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(read, account);
+    }
 }

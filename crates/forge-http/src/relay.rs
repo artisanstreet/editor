@@ -67,7 +67,7 @@ const SEND_WINDOW_BYTES: u64 = 1024 * 1024;
 const SEND_PARKED_MAX: usize = 256;
 
 impl SendWindow {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             sent_high: None,
             acked_high: None,
@@ -153,8 +153,7 @@ fn now_sec() -> i64 {
     i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or(0),
+            .map_or(0, |elapsed| elapsed.as_secs()),
     )
     .unwrap_or(0)
 }
@@ -221,7 +220,7 @@ pub async fn serve_channel(
                         sink.send(Ws::Pong(data)).await?;
                         continue;
                     }
-                    _ => continue,
+                    Ws::Binary(_) | Ws::Pong(_) | Ws::Frame(_) => continue,
                 };
                 if handle_server_text(
                     &text,
@@ -260,6 +259,7 @@ pub async fn serve_channel(
     clippy::too_many_arguments,
     reason = "one Relay turn needs all of these; see serve_channel"
 )]
+#[expect(clippy::too_many_lines, reason = "one Relay frame dispatch with all cases")]
 async fn handle_server_text(
     text: &str,
     sink: &mut WsSink,
@@ -281,7 +281,7 @@ async fn handle_server_text(
     let value: serde_json::Value =
         serde_json::from_str(text).context("read a Relay frame")?;
     let frame: ServerFrame = artisan_account::read_server_frame(value)
-        .map_err(|_| anyhow::anyhow!("bad server frame"))?;
+        .map_err(|_frame| anyhow::anyhow!("bad server frame"))?;
     match frame {
         ServerFrame::Challenge(challenge) => {
             use base64::Engine as _;
@@ -290,7 +290,7 @@ async fn handle_server_text(
                 .context("read the Relay challenge")?;
             let nonce: [u8; 32] = nonce
                 .try_into()
-                .map_err(|_| anyhow::anyhow!("bad challenge nonce"))?;
+                .map_err(|_nonce| anyhow::anyhow!("bad challenge nonce"))?;
             let signature = artisan_account::pop_sign(cnf_secret, &nonce, grant_jti);
             let authenticate = serde_json::to_string(&ClientFrame::Authenticate(
                 artisan_account::AuthenticateFrame {
@@ -312,7 +312,7 @@ async fn handle_server_text(
             );
         }
         ServerFrame::ChannelOpened(opened) => {
-            let name = opened.channel.clone();
+            let name = opened.channel;
             let ctx = ChannelCtx {
                 account: account.to_owned(),
                 machine: machine.to_owned(),
@@ -348,15 +348,12 @@ async fn handle_server_text(
                 return Ok(());
             }
             relay_recv_seq.insert(name.clone(), expected.saturating_add(1));
-            let raw = match b64u_decode(&data.body) {
-                Ok(raw) => raw,
-                Err(_) => {
-                    channels.remove(&name);
-                    streams.remove(&name);
-                    reassembly.drop_channel(&name);
-                    windows.remove(&name);
-                    return Ok(());
-                }
+            let Ok(raw) = b64u_decode(&data.body) else {
+                channels.remove(&name);
+                streams.remove(&name);
+                reassembly.drop_channel(&name);
+                windows.remove(&name);
+                return Ok(());
             };
             let outcome = handle_channel_bytes(
                 &name,
@@ -408,7 +405,7 @@ async fn handle_server_text(
 
 fn fresh_static() -> Result<[u8; 32]> {
     let mut secret = [0_u8; 32];
-    getrandom::fill(&mut secret).map_err(|_| anyhow::anyhow!("random static failed"))?;
+    getrandom::fill(&mut secret).map_err(|_rand| anyhow::anyhow!("random static failed"))?;
     Ok(secret)
 }
 
@@ -450,7 +447,7 @@ async fn handle_channel_bytes(
             .verify_channel_grant(jwt, &channel.account, &channel.machine, now_sec(), false)
             .await?;
         let cnf = artisan_account::cnf_public_key(&claims)
-            .map_err(|_| anyhow::anyhow!("bad grant cnf"))?;
+            .map_err(|_cnf| anyhow::anyhow!("bad grant cnf"))?;
         channel.noise.accept_initiator_confirm(&cnf, &confirm)?;
         channel.claims = Some(claims);
         let reply = channel.noise.emit_responder_confirm(forge_cnf_secret)?;
@@ -744,7 +741,7 @@ async fn drain_parked(
     sink: &mut WsSink,
 ) -> Result<()> {
     loop {
-        let ready = windows.get(name).map_or(false, |window| {
+        let ready = windows.get(name).is_some_and(|window| {
             window
                 .parked
                 .front()
@@ -811,11 +808,8 @@ async fn dispatch_request(
             "subscriptions use SUBSCRIBE on an open channel",
         );
     }
-    let (content_type, bytes) = match artisan_api::request_body_bytes(request.body.as_ref()) {
-        Ok(decoded) => decoded,
-        Err(_) => {
-            return artisan_api::TunnelResponse::error(&request.id, 400, "bad tunneled body");
-        }
+    let Ok((content_type, bytes)) = artisan_api::request_body_bytes(request.body.as_ref()) else {
+        return artisan_api::TunnelResponse::error(&request.id, 400, "bad tunneled body");
     };
     let http_request = axum::http::Request::builder()
         .method(method)
@@ -830,6 +824,7 @@ async fn dispatch_request(
     http_request.extensions_mut().insert(crate::routes::TunnelAuth {
         claims: claims.clone(),
     });
+    #[allow(clippy::manual_let_else, reason = "Err is Infallible; match keeps the 502 shape")]
     let response = match app.clone().oneshot(http_request).await {
         Ok(response) => response,
         Err(_) => {
@@ -874,7 +869,7 @@ async fn dispatch_request(
 )]
 mod tests {
     use super::*;
-    use artisan_account::{InitiatorConfirm, NoiseChannel};
+    use artisan_account::NoiseChannel;
     use futures::SinkExt as _;
     use futures::StreamExt as _;
     use tokio_tungstenite::tungstenite::Message as Ws;
@@ -947,8 +942,7 @@ mod tests {
         // with TTL ≤ 300 s.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs() as i64)
-            .unwrap_or(1_700_000_100);
+            .map_or(1_700_000_100, |elapsed| elapsed.as_secs().cast_signed());
         let cnf_public = ed25519_dalek::SigningKey::from_bytes(cnf_secret)
             .verifying_key()
             .to_bytes();
@@ -982,8 +976,43 @@ mod tests {
     /// Full journey against a stub Relay: admission, Noise handshake,
     /// JWT-in-confirm verification, unary dispatch, acks, and an event
     /// stream — with concurrency between stream and unary calls.
+    #[expect(clippy::too_many_lines, reason = "one stub-relay journey step by step")]
     #[tokio::test]
     async fn tunneled_state_unary_and_stream_against_stub_relay() {
+        // Bounded reads everywhere: a stalled peer fails fast instead of
+        // hanging the suite (regression guard for the ~3min idle hang).
+        async fn recv_text(
+            source: &mut futures::stream::SplitStream<
+                tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+            >,
+        ) -> String {
+            tokio::time::timeout(std::time::Duration::from_secs(15), source.next())
+                .await
+                .expect("relay stub read timed out")
+                .expect("relay closed the stream")
+                .expect("relay read failed")
+                .into_text()
+                .expect("relay sent non-text")
+                .to_string()
+        }
+
+        async fn send(
+            sink: &mut futures::stream::SplitSink<
+                tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+                Ws,
+            >,
+            text: String,
+        ) {
+            use futures::SinkExt as _;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                sink.send(Ws::Text(text.into())),
+            )
+            .await
+            .expect("relay stub send timed out")
+            .unwrap();
+        }
+
         let (issuer_key, issuer_x) = test_issuer();
         let (verifier, _jwks_base) = crate::account_auth::tests::verifier_with_stub(
             serde_json::json!({
@@ -1006,52 +1035,24 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let ws_url = format!("ws://{address}/v1/route/x/y");
 
-        // Bounded reads everywhere: a stalled peer fails fast instead of
-        // hanging the suite (regression guard for the ~3min idle hang).
-        async fn recv_text(
-            source: &mut futures::stream::SplitStream<
-                tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-            >,
-        ) -> String {
-            tokio::time::timeout(std::time::Duration::from_secs(15), source.next())
-                .await
-                .expect("relay stub read timed out")
-                .expect("relay closed the stream")
-                .expect("relay read failed")
-                .into_text()
-                .expect("relay sent non-text")
-                .to_string()
-        }
-
         // Stub Relay: verify admission, then drive one channel as the room.
         let stub = tokio::spawn(async move {
             let stream = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
                 .await
                 .unwrap();
             let (mut sink, mut source) = stream.split();
-            async fn send(
-                sink: &mut futures::stream::SplitSink<
-                    tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-                    Ws,
-                >,
-                text: String,
-            ) {
-                use futures::SinkExt as _;
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
-                    sink.send(Ws::Text(text.into())),
-                )
-                .await
-                .expect("relay stub send timed out")
-                .unwrap();
-            }
             // Admission.
             let hello = recv_text(&mut source).await;
             let hello: artisan_account::ClientFrame =
                 serde_json::from_str(&hello).unwrap();
             let grant = match hello {
                 artisan_account::ClientFrame::Hello(h) => h.grant,
-                _ => panic!("expected hello"),
+                artisan_account::ClientFrame::Authenticate(_)
+                | artisan_account::ClientFrame::Open(_)
+                | artisan_account::ClientFrame::Data(_)
+                | artisan_account::ClientFrame::Ack(_)
+                | artisan_account::ClientFrame::Close(_)
+                | artisan_account::ClientFrame::Pong(_) => panic!("expected hello"),
             };
             assert!(!grant.is_empty());
             let nonce = [0x66_u8; 32];
@@ -1073,7 +1074,12 @@ mod tests {
                 artisan_account::ClientFrame::Authenticate(a) => {
                     assert!(!a.sig.is_empty());
                 }
-                _ => panic!("expected authenticate"),
+                artisan_account::ClientFrame::Hello(_)
+                | artisan_account::ClientFrame::Open(_)
+                | artisan_account::ClientFrame::Data(_)
+                | artisan_account::ClientFrame::Ack(_)
+                | artisan_account::ClientFrame::Close(_)
+                | artisan_account::ClientFrame::Pong(_) => panic!("expected authenticate"),
             }
             send(
                 &mut sink,
@@ -1129,7 +1135,12 @@ mod tests {
                             serde_json::from_value(value).unwrap();
                         match ack {
                             artisan_account::ClientFrame::Ack(a) => assert_eq!(a.channel, "ch1"),
-                            _ => panic!("expected ack shape"),
+                            artisan_account::ClientFrame::Hello(_)
+                            | artisan_account::ClientFrame::Authenticate(_)
+                            | artisan_account::ClientFrame::Open(_)
+                            | artisan_account::ClientFrame::Data(_)
+                            | artisan_account::ClientFrame::Close(_)
+                            | artisan_account::ClientFrame::Pong(_) => panic!("expected ack shape"),
                         }
                         continue;
                     }
@@ -1143,7 +1154,14 @@ mod tests {
             send_data(&mut sink, m1).await;
             let m2 = match next_server_frame().await {
                 ServerFrame::Data(data) => b64u_decode(&data.body).unwrap(),
-                other => panic!("expected data, got {other:?}"),
+                other @ (ServerFrame::Challenge(_)
+                | ServerFrame::Ready(_)
+                | ServerFrame::ChannelOpened(_)
+                | ServerFrame::ChannelClosed(_)
+                | ServerFrame::Ack(_)
+                | ServerFrame::Presence(_)
+                | ServerFrame::Error(_)
+                | ServerFrame::Ping(_)) => panic!("expected data, got {other:?}"),
             };
             init.receive_handshake_message(&m2).unwrap();
             let mut m3 = Vec::new();
@@ -1158,7 +1176,14 @@ mod tests {
             // Responder confirm; verify against the Forge enrolled key.
             let c2 = match next_server_frame().await {
                 ServerFrame::Data(data) => b64u_decode(&data.body).unwrap(),
-                other => panic!("expected data, got {other:?}"),
+                other @ (ServerFrame::Challenge(_)
+                | ServerFrame::Ready(_)
+                | ServerFrame::ChannelOpened(_)
+                | ServerFrame::ChannelClosed(_)
+                | ServerFrame::Ack(_)
+                | ServerFrame::Presence(_)
+                | ServerFrame::Error(_)
+                | ServerFrame::Ping(_)) => panic!("expected data, got {other:?}"),
             };
             init.receive_responder_confirm(&c2, &forge_enrolled_pub).unwrap();
             assert_eq!(init.phase(), artisan_account::Phase::Open);
@@ -1174,7 +1199,14 @@ mod tests {
             send_data(&mut sink, ct).await;
             let answer = match next_server_frame().await {
                 ServerFrame::Data(data) => b64u_decode(&data.body).unwrap(),
-                other => panic!("expected data, got {other:?}"),
+                other @ (ServerFrame::Challenge(_)
+                | ServerFrame::Ready(_)
+                | ServerFrame::ChannelOpened(_)
+                | ServerFrame::ChannelClosed(_)
+                | ServerFrame::Ack(_)
+                | ServerFrame::Presence(_)
+                | ServerFrame::Error(_)
+                | ServerFrame::Ping(_)) => panic!("expected data, got {other:?}"),
             };
             let plaintext = init.receive_data(&answer).unwrap();
             let response: artisan_api::TunnelResponse = serde_json::from_slice(&plaintext).unwrap();
@@ -1217,7 +1249,7 @@ mod tests {
             repositories: std::sync::Arc::new(
                 crate::repository::Repositories::new().unwrap(),
             ),
-            icons: Default::default(),
+            icons: std::sync::Arc::default(),
         }
     }
 

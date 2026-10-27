@@ -44,6 +44,7 @@ pub fn core_issuer() -> String {
 
 /// Run account services until `shutdown`. Returns immediately for
 /// accountless Forges.
+#[allow(clippy::unused_async, reason = "spawned as a task; callers await the join")]
 pub async fn run(
     data_dir: PathBuf,
     hub: forge_runs::Hub,
@@ -165,10 +166,12 @@ fn account_app(
         shutdown,
         tasks: tokio_util::task::TaskTracker::new(),
         repositories: std::sync::Arc::new(crate::repository::Repositories::new()?),
-        icons: Default::default(),
+        icons: std::sync::Arc::default(),
     })
 }
 
+/// Relay connection config.
+///
 /// Configuration for one tunneled Relay connection, explicit so external
 /// harnesses (integration tests, alternate binaries) never duplicate
 /// Forge's private route/repository types: the Hub and shutdown are the
@@ -190,6 +193,8 @@ pub struct AccountRelayConfig {
     pub expected_iss: String,
 }
 
+/// Serve Relay channels.
+///
 /// Serve Relay channels until `shutdown`: fresh short-lived machine grant
 /// per connection (Core-issued, single-use `jti`), PoP admission, Noise
 /// channels, reconnect with backoff. This is the production entry point
@@ -282,7 +287,7 @@ async fn relay_turn(
         .await
         .context("issue a Relay grant")?;
     let jti = artisan_account::unverified_jti(&issued.token)
-        .map_err(|_| anyhow::anyhow!("Core grant has no id"))?;
+        .map_err(|_jti| anyhow::anyhow!("Core grant has no id"))?;
     // Machine grants bind cnf to the enrolled key: PoP + confirm signatures
     // use the same local secret.
     let serve = crate::relay::serve_channel(
