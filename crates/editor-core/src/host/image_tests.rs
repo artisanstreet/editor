@@ -140,9 +140,12 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
             editor_ui::markdown_renderer::decode_image_bytes,
         )));
     });
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
-    let a = cx.read(|cx| core.read(cx).host(&configs[0].id).unwrap().clone());
-    let b = cx.read(|cx| core.read(cx).host(&configs[1].id).unwrap().clone());
+    // Image coalescing needs live hosts; the explicit test-only
+    // constructor connects the saved fixtures with the test gate marked
+    // ready (production `Core::new` stays disconnected without an account).
+    let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
+    let a = cx.read(|cx| core.read(cx).hosts.get(&configs[0].id).unwrap().clone());
+    let b = cx.read(|cx| core.read(cx).hosts.get(&configs[1].id).unwrap().clone());
     let mut blobs: Vec<BlobRef> = Vec::new();
     for index in 0..36 {
         blobs.push(

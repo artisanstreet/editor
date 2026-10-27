@@ -173,13 +173,22 @@ pub type RelayDialer =
 pub type RelayDialerFactory =
     Arc<dyn Fn(SessionToken, String) -> Option<RelayDialer> + Send + Sync>;
 
-/// Relay URL source of truth lives with Vilde's protocol docs; the Editor
-/// reads it from the environment and never invents one.
+/// First-party production Relay; `AST_RELAY_URL` overrides for dev.
+/// Explicit empty `AST_RELAY_URL` disables the Relay path.
+pub const RELAY_BASE_URL_DEFAULT: &str = "wss://relay.editor.artisan.st";
+
+/// Relay URL: explicit `AST_RELAY_URL` wins, else the production default.
+/// An explicitly empty `AST_RELAY_URL` disables Relay (returns `None`);
+/// an unset variable returns the production default so stock installs can
+/// connect account Forges without extra configuration.
 pub fn relay_url_from_env() -> Option<String> {
-    std::env::var("AST_RELAY_URL")
-        .ok()
-        .map(|url| url.trim().to_owned())
-        .filter(|url| !url.is_empty())
+    match std::env::var("AST_RELAY_URL") {
+        Ok(url) => {
+            let trimmed = url.trim().to_owned();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        }
+        Err(_) => Some(RELAY_BASE_URL_DEFAULT.to_owned()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +202,10 @@ pub fn relay_url_from_env() -> Option<String> {
 pub enum AccountPhase {
     /// No session. The email form is the whole story.
     SignedOut,
+    /// Saved session is validating against `/v1/me`; unverified.
+    /// Distinct from `Requesting` so startup never flashes signed-out and
+    /// pending refresh never drops a valid session on transport failure.
+    Restoring,
     /// `POST /v1/auth/magic/request` in flight.
     Requesting,
     /// Link sent; polling `/v1/auth/magic/status` until the email is
@@ -223,6 +236,7 @@ impl std::fmt::Debug for AccountPhase {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SignedOut => formatter.write_str("SignedOut"),
+            Self::Restoring => formatter.write_str("Restoring"),
             Self::Requesting => formatter.write_str("Requesting"),
             Self::Pending {
                 request_id,
@@ -278,6 +292,10 @@ pub fn valid_code_shape(code: &str) -> bool {
     !normalised.is_empty() && normalised.len() <= 16
 }
 
+/// One enrolled Forge as `/v1/me` reports it. Reuses the existing network
+/// DTO directly; no new shape.
+pub type AccountMachine = artisan_account::network::MachineEntry;
+
 pub struct Account {
     files: EditorFiles,
     http: CoreSessionClient,
@@ -299,6 +317,17 @@ pub struct Account {
     /// Relay URL from `AST_RELAY_URL` (Vilde's protocol docs own the value;
     /// never invented here). Needed alongside the session to build the dialer.
     relay_url: Option<String>,
+    /// Bumped on every session set/clear; stale async callbacks compare it.
+    generation: u64,
+    /// Sign-in request epoch. Bumped on every new magic-link request and on
+    /// cancel/sign-out, so a detached request HTTP callback can never set
+    /// `Pending` (or `Error`) over a newer flow or a locked gate. Session
+    /// refresh never bumps this: ordinary refresh must not rotate anything.
+    auth_epoch: u64,
+    /// Cached local Forge binding. Refreshed only via explicit
+    /// `refresh_local_binding` (user action / onboarding step), never per
+    /// render, so the hot path does no disk IO.
+    cached_binding: Option<crate::access::LocalForgeBinding>,
 }
 
 impl Account {
@@ -340,6 +369,9 @@ impl Account {
             dialer: None,
             dialer_factory,
             relay_url: relay_url_from_env(),
+            generation: 0,
+            auth_epoch: 0,
+            cached_binding: None,
         };
         if this.session.is_some() {
             this.resume(cx);
@@ -368,6 +400,21 @@ impl Account {
     #[must_use]
     pub fn session_token(&self) -> Option<SessionToken> {
         self.session.clone()
+    }
+
+    /// Core API origin this controller talks to. Onboarding records are
+    /// scoped by it so dev/prod account ids never collide.
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Monotonic session generation: bumped on every session set/clear so
+    /// stale in-flight callbacks cannot repopulate after sign-out/switch.
+    /// Types land first; the bump wiring follows with the lifecycle work.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Builds the session-bound dialer when a session, factory, and relay
@@ -423,18 +470,139 @@ impl Account {
         );
     }
 
+    /// Invalidates all in-flight callbacks from the previous session.
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Operational failure while signed in: preserves the valid session and
+    /// profile, surfacing friendly text as a notice. Only an explicitly
+    /// dead session (`unauthorized`/`gone`) locks. Login request/finalize
+    /// errors keep using entry `Error`.
+    fn fail_operational(&mut self, error: &NetworkError, cx: &mut Context<Self>) {
+        if crate::access::is_session_dead(error) {
+            tracing::warn!(code = ?error, "session is dead; locking");
+            self.clear_session_locked(cx);
+            return;
+        }
+        tracing::warn!(code = ?error, "account operation failed; session kept");
+        self.notice = Some(plain_failure(error));
+        cx.emit(AccountEvent::Changed);
+        cx.notify();
+    }
+
+    /// Clears the session after Core rejects it. Bumps the generation and
+    /// the auth epoch so stale `finalize`/`refresh`/`connect_machine` and
+    /// detached request callbacks cannot repopulate inventory or unlock
+    /// after sign-out/switch.
+    fn clear_session_locked(&mut self, cx: &mut Context<Self>) {
+        self.session = None;
+        self.dialer = None;
+        self.relay_error = None;
+        self.clear_session_file();
+        self.bump_generation();
+        self.auth_epoch = self.auth_epoch.wrapping_add(1);
+        self.set_phase(AccountPhase::SignedOut, cx);
+    }
+
     /// The signed-in profile, if any.
     #[must_use]
     pub const fn profile(&self) -> Option<&AccountProfile> {
         match &self.phase {
             AccountPhase::Authenticated { profile } => Some(profile),
             AccountPhase::SignedOut
+            | AccountPhase::Restoring
             | AccountPhase::Requesting
             | AccountPhase::Pending { .. }
             | AccountPhase::EmailApproved { .. }
             | AccountPhase::Finalizing
             | AccountPhase::Error { .. } => None,
         }
+    }
+
+    /// Non-revoked Forges from the live profile. Empty unless signed in.
+    #[must_use]
+    pub fn onboardable_machines(&self) -> Vec<AccountMachine> {
+        self.profile()
+            .map(|profile| {
+                profile
+                    .machines
+                    .iter()
+                    .filter(|machine| machine.revoked_at.is_none())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether `machine_id` is in the live profile and non-revoked.
+    #[must_use]
+    pub fn can_complete_setup(&self, machine_id: &str) -> bool {
+        self.profile().is_some_and(|profile| {
+            profile
+                .machines
+                .iter()
+                .any(|machine| machine.id == machine_id && machine.revoked_at.is_none())
+        })
+    }
+
+    /// Explicit mock sign-in for unrelated component tests only. Installs a
+    /// session plus an authenticated fixture profile with no network, so the
+    /// entry gate reads a genuine `Ready` once the fixture onboarding record
+    /// is present. Never compiled into production; native entry/gate tests
+    /// use the real HTTP fixture.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn test_authenticate(
+        &mut self,
+        profile: AccountProfile,
+        session: SessionToken,
+        cx: &mut Context<Self>,
+    ) {
+        self.session = Some(session);
+        self.bump_generation();
+        self.install_relay_dialer();
+        self.set_phase(AccountPhase::Authenticated { profile }, cx);
+    }
+
+    /// Cached local Forge binding. Refreshed only by explicit
+    /// `refresh_local_binding`, never per render.
+    #[must_use]
+    pub fn local_binding(&self) -> Option<crate::access::LocalForgeBinding> {
+        self.cached_binding.clone()
+    }
+
+    /// Reads the binding file once for the cached value.
+    fn read_local_binding_file() -> Option<crate::access::LocalForgeBinding> {
+        let path = artisan_paths::App::Forge.data().ok()?.join("ast_account.json");
+        let bytes = std::fs::read(path).ok()?;
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let machine_id = parsed
+            .get("machine_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let account_id = parsed
+            .get("account_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let public_key = parsed
+            .get("public_b64u")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        Some(crate::access::LocalForgeBinding {
+            enrolled: machine_id.is_some(),
+            claimed_by: None,
+            machine_id,
+            account_id,
+            public_key,
+        })
+    }
+
+    /// Re-reads the local Forge binding once (explicit user/onboarding
+    /// action) and caches it. The hot path (`local_binding`) never hits disk.
+    pub fn refresh_local_binding(&mut self, cx: &mut Context<Self>) {
+        self.cached_binding = Self::read_local_binding_file();
+        cx.emit(AccountEvent::Changed);
+        cx.notify();
     }
 
     // -- sign-in ------------------------------------------------------
@@ -459,12 +627,20 @@ impl Account {
         let http = self.http.clone();
         let device_name = device_name();
         let email_owned = email.clone();
+        // A new request retires any detached earlier request: only this
+        // epoch may move the gate to `Pending`.
+        self.auth_epoch = self.auth_epoch.wrapping_add(1);
+        let auth_epoch = self.auth_epoch;
         self.set_phase(AccountPhase::Requesting, cx);
         cx.spawn(async move |this, cx| {
             let result =
                 run_http(async move { http.magic_request(&email, &device_name).await }).await;
             let email = email_owned;
-            this.update(cx, |this, cx| match result {
+            this.update(cx, |this, cx| {
+                if this.auth_epoch != auth_epoch {
+                    return;
+                }
+                match result {
                 Ok(requested) => {
                     let phase = AccountPhase::Pending {
                         request_id: requested.request_id,
@@ -476,6 +652,7 @@ impl Account {
                     this.poll_status(cx);
                 }
                 Err(error) => this.fail(&error, cx),
+                }
             })
             .ok();
         })
@@ -492,6 +669,7 @@ impl Account {
                 ..
             } => (request_id.clone(), request_secret.clone()),
             AccountPhase::SignedOut
+            | AccountPhase::Restoring
             | AccountPhase::Requesting
             | AccountPhase::EmailApproved { .. }
             | AccountPhase::Finalizing
@@ -566,6 +744,7 @@ impl Account {
                 ..
             } => (request_id.clone(), request_secret.clone()),
             AccountPhase::SignedOut
+            | AccountPhase::Restoring
             | AccountPhase::Requesting
             | AccountPhase::Pending { .. }
             | AccountPhase::Finalizing
@@ -573,6 +752,7 @@ impl Account {
             | AccountPhase::Error { .. } => return,
         };
         let http = self.http.clone();
+        let generation = self.generation;
         self.set_phase(AccountPhase::Finalizing, cx);
         cx.spawn(async move |this, cx| {
             let result = run_http(async move {
@@ -587,10 +767,16 @@ impl Account {
                 .await
             })
             .await;
-            this.update(cx, |this, cx| match result {
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                match result {
                 Err(error) => this.fail(&error, cx),
                 Ok((finalized, token)) => {
                     this.session = Some(token);
+                    this.bump_generation();
+                    let generation = this.generation;
                     if let Err(error) = this.persist_session() {
                         tracing::warn!("could not persist the session: {error:#}");
                     }
@@ -601,18 +787,24 @@ impl Account {
                             Some(session) => run_http(async move { http.me(&session).await }).await,
                             None => Err(NetworkError::Transport),
                         };
-                        this.update(cx, |this, cx| match profile {
+                        this.update(cx, |this, cx| {
+                            if this.generation != generation {
+                                return;
+                            }
+                            match profile {
                             Ok(profile) => {
                                 this.install_relay_dialer();
                                 this.set_phase(AccountPhase::Authenticated { profile }, cx);
                             }
                             Err(error) => this.fail(&error, cx),
+                        }
                         })
                         .ok();
                     })
                     .detach();
                     let _ = finalized;
                 }
+            }
             })
             .ok();
         })
@@ -633,7 +825,9 @@ impl Account {
         if let Err(error) = save_account_file(
             &account_path(&self.files),
             &AccountFile {
-                base_url: None,
+                // Keep the explicit Core origin across sign-out; only the
+                // opaque token clears so a saved custom Core survives.
+                base_url: Some(self.base_url.clone()),
                 session_token: None,
             },
         ) {
@@ -643,23 +837,38 @@ impl Account {
 
     /// Validates a saved session on startup and loads the inventory.
     /// A dead session falls back to signed-out without blocking the UI.
+    /// Transport failures keep the saved session and stay `Restoring`.
     fn resume(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
         };
         let http = self.http.clone();
-        self.set_phase(AccountPhase::Requesting, cx);
+        let generation = self.generation;
+        self.set_phase(AccountPhase::Restoring, cx);
         cx.spawn(async move |this, cx| {
             let profile = run_http(async move { http.me(&session).await }).await;
             this.update(cx, |this, cx| {
-                if let Ok(profile) = profile {
-                    this.install_relay_dialer();
-                    this.set_phase(AccountPhase::Authenticated { profile }, cx);
-                } else {
-                    this.session = None;
-                    this.dialer = None;
-                    this.clear_session_file();
-                    this.set_phase(AccountPhase::SignedOut, cx);
+                if this.generation != generation {
+                    return;
+                }
+                match profile {
+                    Ok(profile) => {
+                        this.install_relay_dialer();
+                        this.set_phase(AccountPhase::Authenticated { profile }, cx);
+                    }
+                    Err(error) if crate::access::is_session_invalid(&error) => {
+                        this.clear_session_locked(cx);
+                    }
+                    Err(_) => {
+                        // Offline or transient Core failure: keep the saved
+                        // session and stay Restoring, never flash signed-out.
+                        if !matches!(this.phase(), AccountPhase::Restoring) {
+                            this.set_phase(AccountPhase::Restoring, cx);
+                        } else {
+                            cx.emit(AccountEvent::Changed);
+                            cx.notify();
+                        }
+                    }
                 }
             })
             .ok();
@@ -667,20 +876,36 @@ impl Account {
         .detach();
     }
 
-    /// Re-reads `/v1/me`: profile plus machine inventory.
+    /// Re-reads `/v1/me`: profile plus machine inventory. Transport or
+    /// non-auth failures keep the existing `Authenticated` profile; only a
+    /// session-invalidating Core code signs out.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             self.set_phase(AccountPhase::SignedOut, cx);
             return;
         };
         let http = self.http.clone();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let profile = run_http(async move { http.me(&session).await }).await;
-            this.update(cx, |this, cx| match profile {
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                match profile {
                 Ok(profile) => {
+                    this.install_relay_dialer();
                     this.set_phase(AccountPhase::Authenticated { profile }, cx);
                 }
-                Err(error) => this.fail(&error, cx),
+                Err(error) if crate::access::is_session_invalid(&error) => {
+                    this.clear_session_locked(cx);
+                }
+                Err(_) => {
+                    // Keep the valid session; a failed refresh must not drop
+                    // it. Surface nothing as an auth error.
+                    cx.notify();
+                }
+            }
             })
             .ok();
         })
@@ -697,31 +922,27 @@ impl Account {
                 }
             });
         }
-        self.session = None;
-        self.dialer = None;
-        self.relay_error = None;
-        self.clear_session_file();
-        self.set_phase(AccountPhase::SignedOut, cx);
+        self.clear_session_locked(cx);
     }
 
     /// Signs out every session on the account, then this device.
     pub fn sign_out_everywhere(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
-            self.set_phase(AccountPhase::SignedOut, cx);
+            self.clear_session_locked(cx);
             return;
         };
         let http = self.http.clone();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let result = run_http(async move { http.revoke_all_sessions(&session).await }).await;
             this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
                 if let Err(error) = result {
-                    this.fail(&error, cx);
+                    this.fail_operational(&error, cx);
                 } else {
-                    this.session = None;
-                    this.dialer = None;
-                    this.relay_error = None;
-                    this.clear_session_file();
-                    this.set_phase(AccountPhase::SignedOut, cx);
+                    this.clear_session_locked(cx);
                 }
             })
             .ok();
@@ -750,10 +971,14 @@ impl Account {
             return;
         }
         let http = self.http.clone();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let result =
                 run_http(async move { http.claim_enrollment(&session, &code).await }).await;
             this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
                 match result {
                     Ok(_) => {
                         let email = this
@@ -782,7 +1007,8 @@ impl Account {
 
     /// Starts a Forge enrollment on this machine via `ae account enroll`,
     /// then claims the printed code into this signed-in account. Local
-    /// confirmation still happens on the Forge (`ae account confirm`).
+    /// confirmation still happens on the Forge (`ae account confirm` with
+    /// the expected account id; `--yes` never implies approval).
     pub fn enroll_this_forge(&mut self, cx: &mut Context<Self>) {
         if self.profile().is_none() {
             return;
@@ -792,14 +1018,22 @@ impl Account {
         cx.notify();
         let session = self.session.clone();
         let http = self.http.clone();
+        let base_url = self.base_url.clone();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let enrollment = run_ae_enroll().await;
+            let enrollment = run_ae_enroll(&base_url).await;
             this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
                 match (enrollment, session) {
                     (Ok(code), Some(session)) => {
                         cx.spawn(async move |this, cx| {
                             let claimed = http.claim_enrollment(&session, &code).await;
                             this.update(cx, |this, cx| {
+                                if this.generation != generation {
+                                    return;
+                                }
                                 match claimed {
                                     Ok(_) => {
                                         let email = this
@@ -846,8 +1080,8 @@ impl Account {
     /// Connects an account Forge through the Relay backend: issues a fresh
     /// session-authed grant with an ephemeral `cnf`, hands it to the
     /// registered dialer, and puts the connected host into the existing
-    /// inventory. Until the dialer is registered the button explains the
-    /// Relay path is still arriving; direct pairing is unaffected.
+    /// inventory. Without a configured Relay route the button says so
+    /// plainly with retry guidance; there is no accountless fallback.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "callers hand over an owned machine id; the public controller API keeps String"
@@ -878,7 +1112,7 @@ impl Account {
         };
         let Some(dialer) = self.dialer.clone() else {
             self.notice = Some(
-                "The Relay connection opens with the Forge relay update. Your paired hosts on the Hosts page keep working.".to_owned(),
+                "The Relay route is not configured (missing Relay URL). Check the connection and try again.".to_owned(),
             );
             cx.emit(AccountEvent::Changed);
             cx.notify();
@@ -890,6 +1124,9 @@ impl Account {
         cx.notify();
         let http = self.http.clone();
         let core = core.clone();
+        let generation = self.generation;
+        let session_str = session.as_str().to_owned();
+        let account_id = profile.account_id.clone();
         cx.spawn(async move |this, cx| {
             let Ok(keypair) = artisan_account::MachineKeypair::generate() else {
                 this.update(cx, |this, cx| {
@@ -904,6 +1141,7 @@ impl Account {
             };
             let public_b64u = keypair.public_b64u();
             let secret = *keypair.secret();
+            let target_machine = machine.id.clone();
             let machine_id = machine.id.clone();
             let machine_label = machine.label.clone();
             let machine_key = machine.public_key.x.clone();
@@ -926,6 +1164,9 @@ impl Account {
                 },
                 Err(error) => {
                     this.update(cx, |this, cx| {
+                        if this.generation != generation {
+                            return;
+                        }
                         this.relay_error = Some(plain_failure(&error));
                         this.notice = None;
                         cx.emit(AccountEvent::Changed);
@@ -937,37 +1178,73 @@ impl Account {
             };
             let task = dialer(request);
             let completed = task.await;
-            this.update(cx, |this, cx| {
-                match completed {
-                    Ok((config, client)) => {
-                        core.update(cx, |core, cx| {
-                            core.connect_with_client(config, client, cx);
-                        });
-                        this.notice = Some(format!("Relay route to {machine_label} is open."));
-                        this.relay_error = None;
+            // Insertion runs after the Account borrow releases: validating
+            // here, inserting into Core afterwards, so the guard never reads
+            // `core.account` while this Account update holds it.
+            let to_insert = this
+                .update(cx, |this, cx| {
+                    if this.generation != generation {
+                        return None;
                     }
-                    Err(error) => {
-                        this.relay_error = Some(format!(
-                            "The Relay route to {machine_label} did not open: {error:#}"
-                        ));
+                    // Stale account, replaced session, or revoked target must
+                    // not repopulate inventory after sign-out/switch.
+                    let valid = this.profile().is_some_and(|profile| {
+                        profile.account_id == account_id
+                            && this
+                                .session_token()
+                                .as_ref()
+                                .is_some_and(|token| token.as_str() == session_str)
+                            && profile.machines.iter().any(|machine| {
+                                machine.id == target_machine && machine.revoked_at.is_none()
+                            })
+                    });
+                    if !valid {
+                        return None;
                     }
-                }
-                cx.emit(AccountEvent::Changed);
-                cx.notify();
-            })
-            .ok();
+                    match completed {
+                        Ok((config, client)) => {
+                            this.notice =
+                                Some(format!("Relay route to {machine_label} is open."));
+                            this.relay_error = None;
+                            cx.emit(AccountEvent::Changed);
+                            cx.notify();
+                            Some((config, client))
+                        }
+                        Err(error) => {
+                            this.relay_error = Some(format!(
+                                "The Relay route to {machine_label} did not open: {error:#}"
+                            ));
+                            cx.emit(AccountEvent::Changed);
+                            cx.notify();
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten();
+            if let Some((config, client)) = to_insert {
+                let _ = core.update(cx, |core, cx| {
+                    core.connect_with_client(config, client, cx);
+                });
+            }
         })
         .detach();
     }
 
     /// Shows this Forge's enrollment state (`ae account status`, read-only).
     /// The operator still approves and confirms on the Forge itself.
+    /// Passes the explicit Core origin so a saved custom Core is used.
     pub fn forge_status(&mut self, cx: &mut Context<Self>) {
         self.forge_status_output = Some("Checking the Forge…".to_owned());
         cx.notify();
+        let base_url = self.base_url.clone();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let output = run_ae(&["account", "status"]).await;
+            let output = run_ae(&["account", "--core", &base_url, "status"]).await;
             this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
                 this.forge_status_output = Some(output);
                 cx.emit(AccountEvent::Changed);
                 cx.notify();
@@ -977,15 +1254,41 @@ impl Account {
         .detach();
     }
 
-    /// Confirms the pending enrollment on this Forge after the operator
-    /// approved the exact claimed identity. Only enabled after a fresh
-    /// status showing a claimed enrollment.
+    /// Confirms the pending enrollment on this Forge for the exact signed-in
+    /// account (`--account-id` expected; `--yes` never implies approval).
+    /// Only enabled after a fresh status showing a claimed enrollment, with
+    /// the account email shown in native UI before explicit confirm.
     pub fn forge_confirm(&mut self, cx: &mut Context<Self>) {
+        let Some(expected) = self.profile().map(|profile| profile.account_id.clone()) else {
+            return;
+        };
         self.forge_status_output = Some("Confirming on the Forge…".to_owned());
         cx.notify();
+        let base_url = self.base_url.clone();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let output = run_ae(&["account", "confirm", "--yes"]).await;
+            let output = run_ae(&[
+                "account",
+                "--core",
+                &base_url,
+                "confirm",
+                "--yes",
+                "--account-id",
+                &expected,
+            ])
+            .await;
             this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
+                // Drop stale output on account switch: only apply when the
+                // signed-in account still expects this binding.
+                let still_expected = this
+                    .profile()
+                    .is_some_and(|profile| profile.account_id == expected);
+                if !still_expected {
+                    return;
+                }
                 this.forge_status_output = Some(output);
                 cx.emit(AccountEvent::Changed);
                 cx.notify();
@@ -996,32 +1299,42 @@ impl Account {
         .detach();
     }
 
-    /// Removes a Forge from the account (revokes its enrollment).
+    /// Removes a Forge from the account (revokes its enrollment). Guarded by
+    /// the session generation: a delayed failure from an old session (even
+    /// a dead-session 401) can never clear a newer signed-in session.
     pub fn remove_machine(&mut self, machine_id: String, cx: &mut Context<Self>) {
         let Some(session) = self.session.clone() else {
             return;
         };
         let http = self.http.clone();
+        let generation = self.generation;
         cx.spawn(async move |this, cx| {
             let result = run_http({
                 let http = http.clone();
                 async move { http.revoke_machine(&session, &machine_id).await }
             })
             .await;
-            this.update(cx, |this, cx| match result {
-                Ok(()) => {
-                    this.notice = Some("Forge removed from the account.".to_owned());
-                    this.refresh(cx);
+            this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
                 }
-                Err(error) => this.fail(&error, cx),
+                match result {
+                    Ok(()) => {
+                        this.notice = Some("Forge removed from the account.".to_owned());
+                        this.refresh(cx);
+                    }
+                    Err(error) => this.fail_operational(&error, cx),
+                }
             })
             .ok();
         })
         .detach();
     }
 
-    /// Dismisses the current error back to signed-out.
+    /// Dismisses the current error back to signed-out. Bumps the auth epoch
+    /// so a detached earlier request can never set `Pending` afterwards.
     pub fn dismiss_error(&mut self, cx: &mut Context<Self>) {
+        self.auth_epoch = self.auth_epoch.wrapping_add(1);
         self.set_phase(AccountPhase::SignedOut, cx);
     }
 }
@@ -1079,19 +1392,22 @@ where
     }
 }
 
-/// Runs `ae account enroll` on this machine and returns the printed code.
+/// Runs `ae account --core <base> enroll` on this machine and returns the
+/// printed code. The explicit origin keeps a saved custom Core from
+/// diverging via environment inheritance.
 ///
 /// The human output is parsed defensively; unparseable output surfaces
 /// verbatim so nothing is silently misread.
 ///
 /// (Vilde: an `ae account enroll --json` flag would remove this parsing;
 /// requested via root.)
-async fn run_ae_enroll() -> Result<String> {
+async fn run_ae_enroll(base_url: &str) -> Result<String> {
     use crate::runtime::runtime;
+    let base_url = base_url.to_owned();
     let output = runtime()
         .spawn(async move {
             tokio::process::Command::new("ae")
-                .args(["account", "enroll"])
+                .args(["account", "--core", &base_url, "enroll"])
                 .output()
                 .await
         })

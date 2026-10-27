@@ -21,6 +21,14 @@ struct StubCore {
     _thread: std::thread::JoinHandle<()>,
     pub base_url: String,
     pub requests: Arc<Mutex<Vec<(String, String, String)>>>,
+    /// When set, `GET /v1/me` answers with this status/body instead of the
+    /// wrapped handler. Lets tests flip the profile between healthy,
+    /// transient-failure, and session-invalid without rebuilding the stub.
+    pub me_override: Arc<Mutex<Option<(u16, String)>>>,
+    /// When set, `POST /v1/machines/*/revoke` answers with this status
+    /// (Core unauthorized envelope) instead of success. Proves a delayed
+    /// dead session from an old call cannot clear a newer session.
+    pub revoke_override: Arc<Mutex<Option<u16>>>,
 }
 
 impl StubCore {
@@ -29,6 +37,10 @@ impl StubCore {
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
+        let me_override: Arc<Mutex<Option<(u16, String)>>> = Arc::new(Mutex::new(None));
+        let overridden = Arc::clone(&me_override);
+        let revoke_override: Arc<Mutex<Option<u16>>> = Arc::new(Mutex::new(None));
+        let revoked = Arc::clone(&revoke_override);
         let thread = std::thread::spawn(move || {
             for stream in listener.incoming().take(50) {
                 let Ok(stream) = stream else { break };
@@ -64,6 +76,42 @@ impl StubCore {
                     .lock()
                     .unwrap()
                     .push((method.clone(), path.clone(), body.clone()));
+                if method == "GET" && path == "/v1/me" {
+                    if let Some((status, response_body)) =
+                        overridden.lock().unwrap().clone()
+                    {
+                        let mut response = format!(
+                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            response_body.len()
+                        );
+                        response.push_str(&response_body);
+                        let mut stream = reader.into_inner();
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            break;
+                        }
+                        drop(stream.flush());
+                        continue;
+                    }
+                }
+                if method == "POST"
+                    && path.starts_with("/v1/machines/")
+                    && path.ends_with("/revoke")
+                    && let Some(status) = *revoked.lock().unwrap()
+                {
+                    let response_body = serde_json::json!({"error": {"code": "unauthorized", "message": "stub", "request_id": "req-test"}})
+                        .to_string();
+                    let mut response = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response_body.len()
+                    );
+                    response.push_str(&response_body);
+                    let mut stream = reader.into_inner();
+                    if stream.write_all(response.as_bytes()).is_err() {
+                        break;
+                    }
+                    drop(stream.flush());
+                    continue;
+                }
                 let (status, headers, response_body) = handler(&method, &path, &body);
                 let mut response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -88,6 +136,8 @@ impl StubCore {
             _thread: thread,
             base_url: format!("http://{address}"),
             requests,
+            me_override: Arc::clone(&me_override),
+            revoke_override: Arc::clone(&revoke_override),
         }
     }
 }
@@ -386,16 +436,16 @@ fn snake_case_requests_are_rejected(_cx: &TestAppContext) {
     assert!(body["error"]["request_id"].is_string());
 }
 
-/// Sign-out immediately drops account Relay inventory while a direct host
-/// stays put: cached account hosts and their screens must not outlive the
-/// session, and grant expiry is never the cleanup path, so this asserts
-/// right after the sign-out transition.
+/// Sign-out immediately drops every host route, direct included: cached
+/// account hosts, direct connections, and their screens must not outlive
+/// the session, and grant expiry is never the cleanup path, so this asserts
+/// right after the sign-out transition. Disk pairings stay.
 #[gpui::test]
 #[allow(
     clippy::too_many_lines,
-    reason = "one sign-out scenario: Relay inventory cleared, direct host kept"
+    reason = "one sign-out scenario: every route locked, disk preserved"
 )]
-fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
+fn sign_out_locks_every_host_route(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let stub = StubCore::new(strict_core());
     let dir = tempfile::tempdir().unwrap();
@@ -438,7 +488,9 @@ fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
     });
     assert_eq!(owner, "acct_00000000000000000000000000");
 
-    // A direct host through the public pairing path (persists to hosts.json).
+    // A legacy direct pairing on disk, seeded directly: production
+    // `add_host` rejects unverified direct configs, so tests use the file
+    // plus a test-only private inventory insert, never the bypass.
     let identity = core.read_with(cx, |core, _| core.identity.clone().unwrap());
     let direct = HostConfig {
         id: HostId("direct-1".to_owned()),
@@ -447,8 +499,17 @@ fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
         fingerprint: "00".repeat(32),
         kind: HostKind::Local,
     };
+    core.read_with(cx, |core, _| {
+        core.files
+            .save_hosts(&crate::hosts::HostsFile {
+                hosts: vec![],
+                last: None,
+            })
+            .unwrap();
+    });
+    let direct_client = ForgeClient::new(&direct.address, &direct.fingerprint, &identity).unwrap();
     core.update(cx, |core, cx| {
-        core.add_host(direct.clone(), cx).unwrap();
+        core.add_test_host(direct.clone(), direct_client, cx);
     });
 
     // An account Relay entry with a harmless unconnected client: building
@@ -475,27 +536,50 @@ fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
             cx,
         );
     });
-    assert!(core.read_with(cx, |core, _| core.host(&machine.id).is_some()));
+    // Setup internals hold the Relay route while public inventory stays
+    // hidden until `Ready`: proves private-connect vs public-gate split.
+    core.read_with(cx, |core, _| {
+        assert!(
+            core.hosts.contains_key(&machine.id),
+            "setup internals hold the route"
+        );
+        assert!(
+            core.host(&machine.id).is_none(),
+            "public inventory hidden until Ready"
+        );
+    });
 
-    // Sign out: the account entry, its screens, and its bookkeeping go
-    // immediately; the direct host and its persisted pairing stay.
+    // Sign out (account-only): every host route locks, direct included.
+    // Disk pairings stay; backend Forge jobs keep running.
     account.update(cx, super::Account::sign_out);
     wait_for(cx, "the account inventory to clear", |cx| {
-        core.read_with(cx, |core, _| core.host(&machine.id).is_none().then_some(()))
+        core.read_with(cx, |core, _| {
+            (core.hosts.is_empty() && core.account_hosts.is_empty()).then_some(())
+        })
     });
-    core.read_with(cx, |core, _| {
-        assert!(core.host(&direct.id).is_some(), "direct host stays");
-        assert!(core.host(&machine.id).is_none(), "account host is gone");
-        assert_eq!(
-            core.screen().host(),
-            Some(&direct.id),
-            "navigated away to the surviving host"
+    core.read_with(cx, |core, cx| {
+        assert!(
+            core.host(&direct.id).is_none(),
+            "direct route locks on sign-out"
         );
+        assert!(
+            core.host(&machine.id).is_none(),
+            "account host is gone"
+        );
+        assert!(
+            core.hosts.is_empty(),
+            "no live host entities survive sign-out"
+        );
+        assert!(
+            matches!(core.entry_gate(cx), crate::EntryGate::SignedOut),
+            "gate locks after sign-out"
+        );
+        assert_eq!(*core.screen(), Screen::Home, "locked home");
         assert!(
             core.back
                 .iter()
-                .all(|screen| screen.host() != Some(&machine.id)),
-            "no back-stack route points at the removed account host"
+                .all(|screen| screen.host().is_none()),
+            "no back-stack route points at a removed host"
         );
         assert!(
             core.account_hosts.is_empty(),
@@ -525,5 +609,327 @@ fn sign_out_removes_account_hosts_but_keeps_direct(cx: &mut TestAppContext) {
         file.get("last").and_then(serde_json::Value::as_str),
         Some("mch_11111111111111111111111111"),
         "no saved last pointing at the removed account host"
+    );
+}
+
+/// A transient profile failure while signed in must not relock the
+/// workspace: the valid session and profile stay, surfaced as a notice.
+#[gpui::test]
+fn refresh_transient_failure_preserves_authenticated(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let stub = StubCore::new(strict_core());
+    let dir = tempfile::tempdir().unwrap();
+    let base_url = stub.base_url.clone();
+    let core = cx.new(|cx| {
+        let core = Core::new(
+            EditorFiles {
+                dir: dir.path().join("editor"),
+            },
+            cx,
+        )
+        .unwrap();
+        core.account.update(cx, |account, cx| {
+            *account = super::Account::with_base_url(
+                EditorFiles {
+                    dir: dir.path().join("editor"),
+                },
+                Some(base_url),
+                cx,
+            );
+        });
+        core
+    });
+    let account = core.read_with(cx, |core, _| core.account().clone());
+    account.update(cx, |account, cx| {
+        account.request_link("op@example.invalid".to_owned(), cx);
+    });
+    wait_for(cx, "the email approval", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| {
+                matches!(account.phase(), AccountPhase::EmailApproved { .. }).then_some(())
+            })
+    });
+    account.update(cx, |account, cx| {
+        account.finish_sign_in(None, None, cx);
+    });
+    wait_for(cx, "the sign-in to complete", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| {
+                account.profile().map(|profile| profile.email.clone())
+            })
+    });
+    // A transient Core failure on refresh: workspace stays unlocked.
+    *stub.me_override.lock().unwrap() = Some({
+        let (status, _, body) = envelope("bad_request");
+        (status, body)
+    });
+    account.update(cx, super::Account::refresh);
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(50));
+    cx.run_until_parked();
+    let phase = account.read_with(cx, |account, _| account.phase().clone());
+    assert!(
+        matches!(phase, AccountPhase::Authenticated { .. }),
+        "transient refresh keeps the session: {phase:?}"
+    );
+}
+
+/// A session-invalid profile answer signs out and locks: the dead token is
+/// cleared so the next launch does not flash it.
+#[gpui::test]
+fn refresh_session_invalid_clears_and_locks(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let stub = StubCore::new(strict_core());
+    let dir = tempfile::tempdir().unwrap();
+    let base_url = stub.base_url.clone();
+    let core = cx.new(|cx| {
+        let core = Core::new(
+            EditorFiles {
+                dir: dir.path().join("editor"),
+            },
+            cx,
+        )
+        .unwrap();
+        core.account.update(cx, |account, cx| {
+            *account = super::Account::with_base_url(
+                EditorFiles {
+                    dir: dir.path().join("editor"),
+                },
+                Some(base_url),
+                cx,
+            );
+        });
+        core
+    });
+    let account = core.read_with(cx, |core, _| core.account().clone());
+    account.update(cx, |account, cx| {
+        account.request_link("op@example.invalid".to_owned(), cx);
+    });
+    wait_for(cx, "the email approval", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| {
+                matches!(account.phase(), AccountPhase::EmailApproved { .. }).then_some(())
+            })
+    });
+    account.update(cx, |account, cx| {
+        account.finish_sign_in(None, None, cx);
+    });
+    wait_for(cx, "the sign-in to complete", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| {
+                account.profile().map(|profile| profile.email.clone())
+            })
+    });
+    *stub.me_override.lock().unwrap() = Some((
+        401,
+        serde_json::json!({"error": {"code": "unauthorized", "message": "stub", "request_id": "req-test"}})
+            .to_string(),
+    ));
+    account.update(cx, super::Account::refresh);
+    wait_for(cx, "the revocation to lock", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| {
+                matches!(account.phase(), AccountPhase::SignedOut).then_some(())
+            })
+    });
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("editor").join("account.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        stored.get("session_token").is_none(),
+        "dead token cleared: {stored:?}"
+    );
+}
+
+/// A business-operation failure (Forge removal refused) keeps the session:
+/// profile stays, workspace stays unlocked, text is a notice.
+#[gpui::test]
+fn remove_machine_failure_preserves_authenticated(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let stub = StubCore::new(strict_core());
+    let dir = tempfile::tempdir().unwrap();
+    let base_url = stub.base_url.clone();
+    let core = cx.new(|cx| {
+        let core = Core::new(
+            EditorFiles {
+                dir: dir.path().join("editor"),
+            },
+            cx,
+        )
+        .unwrap();
+        core.account.update(cx, |account, cx| {
+            *account = super::Account::with_base_url(
+                EditorFiles {
+                    dir: dir.path().join("editor"),
+                },
+                Some(base_url),
+                cx,
+            );
+        });
+        core
+    });
+    let account = core.read_with(cx, |core, _| core.account().clone());
+    account.update(cx, |account, cx| {
+        account.request_link("op@example.invalid".to_owned(), cx);
+    });
+    wait_for(cx, "the email approval", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| {
+                matches!(account.phase(), AccountPhase::EmailApproved { .. }).then_some(())
+            })
+    });
+    account.update(cx, |account, cx| {
+        account.finish_sign_in(None, None, cx);
+    });
+    wait_for(cx, "the sign-in to complete", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| {
+                account.profile().map(|profile| profile.email.clone())
+            })
+    });
+    // The stub has no machine-revoke route: a 404 business failure.
+    account.update(cx, |account, cx| {
+        account.remove_machine("mch_11111111111111111111111111".to_owned(), cx);
+    });
+    wait_for(cx, "the failure notice", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| account.notice().map(str::to_owned))
+    });
+    let phase = account.read_with(cx, |account, _| account.phase().clone());
+    assert!(
+        matches!(phase, AccountPhase::Authenticated { .. }),
+        "business failure keeps the session: {phase:?}"
+    );
+}
+
+/// A superseded magic-link request can never move the gate: the second
+/// request wins outright, and canceling drops a detached in-flight reply.
+#[gpui::test]
+fn superseded_request_result_ignored_after_new_flow_or_cancel(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let stub = StubCore::new(strict_core());
+    let dir = tempfile::tempdir().unwrap();
+    let base_url = stub.base_url.clone();
+    let core = cx.new(|cx| {
+        let core = Core::new(
+            EditorFiles {
+                dir: dir.path().join("editor"),
+            },
+            cx,
+        )
+        .unwrap();
+        core.account.update(cx, |account, cx| {
+            *account = super::Account::with_base_url(
+                EditorFiles {
+                    dir: dir.path().join("editor"),
+                },
+                Some(base_url),
+                cx,
+            );
+        });
+        core
+    });
+    let account = core.read_with(cx, |core, _| core.account().clone());
+    // Two requests, no parking between: only the newest epoch may settle.
+    account.update(cx, |account, cx| {
+        account.request_link("first@example.invalid".to_owned(), cx);
+    });
+    account.update(cx, |account, cx| {
+        account.request_link("second@example.invalid".to_owned(), cx);
+    });
+    wait_for(cx, "the pending request", |cx| {
+        core.read_with(cx, |core, _| core.account().clone())
+            .read_with(cx, |account, _| match account.phase() {
+                AccountPhase::Pending { email, .. } if email == "second@example.invalid" => {
+                    Some(())
+                }
+                _ => None,
+            })
+    });
+    // Cancel drops the in-flight reply instead of landing on Pending/Error.
+    account.update(cx, |account, cx| account.dismiss_error(cx));
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(50));
+    cx.run_until_parked();
+    let phase = account.read_with(cx, |account, _| account.phase().clone());
+    assert!(
+        matches!(phase, AccountPhase::SignedOut),
+        "cancel wins over detached replies: {phase:?}"
+    );
+}
+
+/// A delayed dead-session answer from an old call can never clear a newer
+/// signed-in session: the generation guard drops it.
+#[gpui::test]
+fn stale_remove_401_cannot_clear_new_session(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let stub = StubCore::new(strict_core());
+    let dir = tempfile::tempdir().unwrap();
+    let base_url = stub.base_url.clone();
+    let core = cx.new(|cx| {
+        let core = Core::new(
+            EditorFiles {
+                dir: dir.path().join("editor"),
+            },
+            cx,
+        )
+        .unwrap();
+        core.account.update(cx, |account, cx| {
+            *account = super::Account::with_base_url(
+                EditorFiles {
+                    dir: dir.path().join("editor"),
+                },
+                Some(base_url),
+                cx,
+            );
+        });
+        core
+    });
+    let account = core.read_with(cx, |core, _| core.account().clone());
+    let sign_in = |cx: &mut TestAppContext| {
+        account.update(cx, |account, cx| {
+            account.request_link("op@example.invalid".to_owned(), cx);
+        });
+        wait_for(cx, "the email approval", |cx| {
+            core.read_with(cx, |core, _| core.account().clone())
+                .read_with(cx, |account, _| {
+                    matches!(account.phase(), AccountPhase::EmailApproved { .. }).then_some(())
+                })
+        });
+        account.update(cx, |account, cx| {
+            account.finish_sign_in(None, None, cx);
+        });
+        wait_for(cx, "the sign-in to complete", |cx| {
+            core.read_with(cx, |core, _| core.account().clone())
+                .read_with(cx, |account, _| {
+                    account.profile().map(|profile| profile.email.clone())
+                })
+        });
+    };
+    sign_in(cx);
+    // The old call's answer will be a dead session; switch first, no parks.
+    *stub.revoke_override.lock().unwrap() = Some(401);
+    account.update(cx, |account, cx| {
+        account.remove_machine("mch_11111111111111111111111111".to_owned(), cx);
+    });
+    account.update(cx, super::Account::sign_out);
+    sign_in(cx);
+    // Let every detached callback settle: the old 401 must not clear this.
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(100));
+    cx.run_until_parked();
+    let phase = account.read_with(cx, |account, _| account.phase().clone());
+    assert!(
+        matches!(phase, AccountPhase::Authenticated { .. }),
+        "stale 401 dropped, new session stands: {phase:?}"
+    );
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("editor").join("account.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        stored.get("session_token").is_some(),
+        "new session token retained: {stored:?}"
     );
 }
