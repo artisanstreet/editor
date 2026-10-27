@@ -4,6 +4,8 @@ edition.workspace = true
 license-file.workspace = true
 version.workspace = true
 description = "Forge's HTTPS API: mutual-TLS auth, JSON routes and the event stream."
+# tests/ holds path-included unit tests (see src `#[path]`), not integration targets.
+autotests = false
 
 [dependencies]
 dirs.workspace = true

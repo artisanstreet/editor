@@ -21,6 +21,12 @@ pub const CONFIG_SYNC_INTERVAL: Duration = Duration::from_mins(5);
 /// Relay reconnect backoff bounds.
 pub const RELAY_BACKOFF_MIN: Duration = Duration::from_secs(1);
 pub const RELAY_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// How often an accountless Forge re-checks for enrollment while waiting.
+///
+/// One check is a single cheap file stat; a short cadence lets a Forge
+/// enrolled while running publish promptly. Config sync keeps its own
+/// five-minute cadence.
+pub const ENROLLMENT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Production Relay used when deployment config does not name one.
 pub const DEFAULT_RELAY_URL: &str = "wss://relay.editor.artisan.st";
@@ -56,8 +62,9 @@ pub fn core_issuer() -> String {
         .unwrap_or_else(|| crate::core::core_base_url(None).trim().to_owned())
 }
 
-/// Run account services until `shutdown`. Returns immediately for
-/// accountless Forges.
+/// Run account services until `shutdown`. A Forge that starts accountless
+/// waits for enrollment (late `ae account confirm` needs no restart);
+/// returns unspawned when `shutdown` fires first.
 #[allow(clippy::unused_async, reason = "spawned as a task; callers await the join")]
 pub async fn run(
     data_dir: PathBuf,
@@ -65,14 +72,10 @@ pub async fn run(
     shutdown: tokio_util::sync::CancellationToken,
     tasks: tokio_util::task::TaskTracker,
 ) {
-    let identity = match crate::sync::load_machine_identity(&data_dir) {
-        Ok(identity) => identity,
-        Err(error) => {
-            tracing::warn!("account services disabled: {error:#}");
-            return;
-        }
-    };
-    let Some(identity) = identity else {
+    // Already-enrolled Forges proceed on the first check. Daemon
+    // environment is fixed at startup, so `relay_url()` is read once below.
+    let Some(identity) = await_enrollment(&data_dir, &shutdown, ENROLLMENT_POLL_INTERVAL).await
+    else {
         return;
     };
     tracing::info!(machine = %identity.machine_id, "account services starting");
@@ -98,6 +101,41 @@ pub async fn run(
         hub,
         shutdown,
     ));
+}
+
+/// Waits for enrollment plus a confirmed account binding. Returns `None`
+/// when `shutdown` fires first. Unreadable files warn once (loader errors
+/// name the path, never key bytes); unconfirmed machines keep waiting.
+async fn await_enrollment(
+    data_dir: &std::path::Path,
+    shutdown: &tokio_util::sync::CancellationToken,
+    interval: Duration,
+) -> Option<crate::sync::MachineIdentity> {
+    let mut warned = false;
+    loop {
+        match crate::sync::load_machine_identity(data_dir) {
+            Ok(Some(identity)) if identity.account_id.is_some() => {
+                // Shutdown wins over a simultaneous enrollment: no new spawn.
+                if shutdown.is_cancelled() {
+                    return None;
+                }
+                return Some(identity);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if warned {
+                    tracing::debug!("account enrollment unreadable: {error:#}");
+                } else {
+                    tracing::warn!("account enrollment unreadable: {error:#}");
+                    warned = true;
+                }
+            }
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return None,
+            () = tokio::time::sleep(interval) => {}
+        }
+    }
 }
 
 async fn relay_loop(
@@ -320,3 +358,7 @@ async fn relay_turn(
         () = shutdown.cancelled() => Ok(()),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/account_service.rs"]
+mod tests;
