@@ -61,7 +61,9 @@ impl Composer {
                 {
                     body = body.child(token().text_color(muted).child(context_label(context)));
                 }
-                if let Some(effort) = &config.effort {
+                if config.engine != EngineId::OpenCode
+                    && let Some(effort) = &config.effort
+                {
                     body = body.child(token().text_color(muted).child(humanize(effort)));
                 }
                 body = body.children(variant_and_speed_tokens(

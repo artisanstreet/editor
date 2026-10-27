@@ -143,11 +143,7 @@ impl Composer {
                         tab.child(self.picker.tooltip_anchor.track())
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.reset_model_scroll();
-                        this.browsing = Some(engine);
-                        this.refresh_picker_catalog(cx);
-                        this.close_axis(cx);
-                        cx.notify();
+                        this.browse_engine(engine, cx);
                     }))
                     .when_some(gate, |tab, gate| {
                         let reason = gate.reason(engine);
@@ -488,14 +484,25 @@ impl Composer {
             || config.model.clone().unwrap_or_default(),
             |model| model.name.clone(),
         );
-        let mut summary = div().flex().flex_col().gap(px(4.0)).child(
-            div()
-                .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(TypographyTokens::size(TextStep::Sm))
-                .line_height(px(20.0))
-                .child(name),
-        );
+        // Reserve the bottom of the preview for the controls, even when a
+        // model's description needs more room than the remaining space.
+        let mut summary = div()
+            .id("composer-model-summary")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(TypographyTokens::size(TextStep::Sm))
+                    .line_height(px(20.0))
+                    .child(name),
+            );
         let line = model
             .and_then(|model| model.description.clone())
             .unwrap_or_else(|| {
@@ -520,13 +527,14 @@ impl Composer {
             });
         summary = summary.child(
             div()
+                .flex_shrink_0()
                 .text_size(TypographyTokens::size(TextStep::Xs))
                 .line_height(px(16.0))
                 .text_color(theme.colors.text_muted.to_paint())
                 .child(line),
         );
         preview = preview.child(summary);
-        let mut controls = div().flex().flex_col().gap(px(6.0));
+        let mut controls = div().flex().flex_col().flex_shrink_0().gap(px(6.0));
         for axis in Axis::ALL {
             let options = axis_options(axis, config, model);
             if axis.shown(options.len()) {

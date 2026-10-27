@@ -658,6 +658,105 @@ fn each_model_comes_back_as_it_was_last_chosen(cx: &mut TestAppContext) {
     assert_eq!(config(vcx, &fresh), sonnet, "Sonnet comes back as chosen");
 }
 
+#[gpui::test]
+fn returning_to_a_harness_restores_its_last_model_and_preferences(cx: &mut TestAppContext) {
+    let forge = Fixture::new(cx);
+    let (composer, vcx) = forge.open(
+        cx,
+        ComposerTarget::NewThread {
+            host: forge.host.clone(),
+            project: Some(forge.project.clone()),
+        },
+    );
+    wait(vcx, "the model catalog", |vcx| {
+        composer.read_with(vcx, |composer, cx| {
+            composer.host(cx).is_some_and(|host| {
+                host.read(cx)
+                    .engines
+                    .get(&EngineId::Claude)
+                    .is_some_and(|engine| !engine.models.is_empty())
+            })
+        })
+    });
+    // Publish a second harness with a catalog in a non-first gateway group.
+    composer.update(vcx, |composer, cx| {
+        composer.host(cx).unwrap().update(cx, |host, _| {
+            let mut status = host.engines[&EngineId::Claude].clone();
+            status.engine = EngineId::OpenCode;
+            status.models = vec![
+                artisan_api::Model {
+                    id: "other".into(),
+                    group: Some("first".into()),
+                    ..Default::default()
+                },
+                artisan_api::Model {
+                    id: "gateway/muse-spark-1.3".into(),
+                    group: Some("gateway".into()),
+                    ..Default::default()
+                },
+            ]
+            .into();
+            host.engines.insert(EngineId::OpenCode, status);
+        });
+    });
+    let mut muse = EngineConfig::new(EngineId::OpenCode);
+    muse.model = Some("gateway/muse-spark-1.3".into());
+    muse.permissions = artisan_api::Permissions::Full;
+    let mut opus = EngineConfig::new(EngineId::Claude);
+    opus.model = Some("opus".into());
+    opus.effort = Some("high".into());
+    // The fixture only runs Claude; seed OpenCode's durable choice directly.
+    forge
+        .forge
+        .block_on(forge.store.set_model_config(
+            muse.clone(),
+            &artisan_api::Model {
+                id: muse.model.clone().unwrap(),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    composer.update(vcx, |composer, cx| composer.choose_config(opus.clone(), cx));
+    wait(vcx, "both harness choices to persist", |vcx| {
+        composer.read_with(vcx, |composer, cx| {
+            let host = composer.host(cx).unwrap().read(cx);
+            host.setting(artisan_api::HARNESS_CONFIGS_KEY)
+                .is_some_and(|saved| {
+                    saved.get("opencode") == Some(&serde_json::to_value(&muse).unwrap())
+                        && saved.get("claude") == Some(&serde_json::to_value(&opus).unwrap())
+                })
+        })
+    });
+    composer.update(vcx, |composer, cx| {
+        composer.choose_config(muse.clone(), cx);
+        composer.choose_config(opus.clone(), cx);
+        // Return before the network writer gets to save either choice.
+        composer.browse_engine(EngineId::OpenCode, cx);
+        assert_eq!(composer.effective_config(cx), Some(muse.clone()));
+        composer.browse_engine(EngineId::Claude, cx);
+        assert_eq!(composer.effective_config(cx), Some(opus.clone()));
+    });
+    composer.update(vcx, |composer, cx| {
+        composer.open_menu(crate::Menu::Model, cx);
+        composer.browse_engine(EngineId::OpenCode, cx);
+    });
+    assert_eq!(
+        composer.read_with(vcx, super::Composer::effective_config),
+        Some(muse)
+    );
+    assert_eq!(
+        composer.read_with(vcx, |composer, _| composer.model_rows()),
+        vec!["-first", "+gateway", "gateway/muse-spark-1.3"]
+    );
+    composer.update(vcx, |composer, cx| {
+        composer.browse_engine(EngineId::Claude, cx);
+    });
+    assert_eq!(
+        composer.read_with(vcx, super::Composer::effective_config),
+        Some(opus)
+    );
+}
+
 /// A new thread opened without a project starts in the one the last
 /// thread was started in.
 #[gpui::test]

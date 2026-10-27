@@ -2,6 +2,7 @@
 
 use super::*;
 use editor_ui::project_mark::project_mark;
+use editor_ui::scroll_edge::{Edge, scroll_edge};
 
 impl Composer {
     /// The project menu (`home_project_picker`): one row per project, with
@@ -109,6 +110,7 @@ impl Composer {
                     .collect()
             }),
         )
+        .track_scroll(&self.picker.project_scroll)
         .h(px(f32::from(u8::try_from(count.min(8)).unwrap_or(8)) * 36.0));
         let scratch = ProjectId::scratch();
         let offers_scratch = self.host(cx).is_some_and(|host| {
@@ -119,8 +121,33 @@ impl Composer {
         });
         let mut list = div().flex().flex_col().p(px(8.0));
         if count > 0 {
+            let above = self.picker.project_scroll.0.borrow().base_handle.clone();
+            let below = above.clone();
             list = list
-                .child(project_rows)
+                .child(
+                    div()
+                        .relative()
+                        .overflow_hidden()
+                        .child(project_rows)
+                        .child(
+                            scroll_edge(
+                                Edge::Top,
+                                theme.colors.gray.step(7),
+                                &self.picker.project_edges[0],
+                                move || -f32::from(above.offset().y),
+                            )
+                            .top_0(),
+                        )
+                        .child(
+                            scroll_edge(
+                                Edge::Bottom,
+                                theme.colors.gray.step(4),
+                                &self.picker.project_edges[1],
+                                move || f32::from(below.max_offset().y + below.offset().y),
+                            )
+                            .bottom_0(),
+                        ),
+                )
                 .child(editor_ui::glass::glass_menu_separator(&theme));
         }
         // The distinct intake rows after a hairline: a thread without a

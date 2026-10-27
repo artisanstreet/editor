@@ -265,6 +265,8 @@ pub struct PickerState {
     pub(super) model_hover: HoverSurface,
     axis_hover: HoverSurface,
     project_hover: HoverSurface,
+    project_scroll: gpui::UniformListScrollHandle,
+    project_edges: [editor_ui::scroll_edge::EdgeFade; 2],
     light: Rc<RefCell<EngineLight>>,
     tabs_surface: Measured,
     light_tab: Measured,
@@ -353,6 +355,10 @@ impl Composer {
         self.clear_tooltip();
         self.menu = Some(menu);
         self.picker.shown = Some(menu);
+        if menu == Menu::Project {
+            self.picker.project_scroll = gpui::UniformListScrollHandle::new();
+            self.picker.project_edges = Default::default();
+        }
         if menu == Menu::Model {
             self.reset_model_scroll();
             self.browsing = self.effective_config(cx).map(|config| config.engine);
@@ -509,6 +515,26 @@ impl Composer {
         }));
     }
 
+    /// Returning to a harness restores its last model and preferences.
+    pub(crate) fn browse_engine(&mut self, engine: EngineId, cx: &mut Context<Self>) {
+        self.reset_model_scroll();
+        self.browsing = Some(engine);
+        if self
+            .effective_config(cx)
+            .is_none_or(|config| config.engine != engine)
+        {
+            let saved = self
+                .host(cx)
+                .and_then(|host| crate::remembered_harness_config(host.read(cx), engine));
+            if let Some(config) = saved {
+                self.choose_config(config, cx);
+            }
+        }
+        self.refresh_picker_catalog(cx);
+        self.close_axis(cx);
+        cx.notify();
+    }
+
     /// Only changed host data, an opened picker or an explicit choice rebuilds its ordering.
     pub(crate) fn refresh_picker_catalog(&mut self, cx: &Context<Self>) {
         if self.menu.is_none() {
@@ -522,7 +548,10 @@ impl Composer {
         let engine = self
             .browsing
             .or_else(|| current.as_ref().map(|config| config.engine));
-        let chosen = current.as_ref().and_then(|config| config.model.as_deref());
+        let chosen = current
+            .as_ref()
+            .filter(|config| Some(config.engine) == engine)
+            .and_then(|config| config.model.as_deref());
         self.picker.models = engine
             .and_then(|engine| Some((engine, host.engines.get(&engine)?)))
             .map(|(engine, status)| {
@@ -582,7 +611,28 @@ impl Composer {
             .values()
             .filter(|project| !project.removed && !project.id.is_scratch())
             .collect();
-        projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        // Reading or editing thread metadata must not make a project recent.
+        let mut activity = HashMap::new();
+        for thread in host.threads.values() {
+            let at = thread.activity_at.max(thread.created_at);
+            activity
+                .entry(&thread.project_id)
+                .and_modify(|latest: &mut i64| *latest = (*latest).max(at))
+                .or_insert(at);
+        }
+        projects.sort_by(|a, b| {
+            let recent = |project: &artisan_api::Project| {
+                activity
+                    .get(&project.id)
+                    .copied()
+                    .unwrap_or_default()
+                    .max(project.created_at)
+            };
+            recent(b)
+                .cmp(&recent(a))
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         self.picker.projects = projects
             .into_iter()
             .map(|project| project.id.clone())

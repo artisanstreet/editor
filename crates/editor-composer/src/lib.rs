@@ -1469,6 +1469,26 @@ fn remembered_config(host: &HostData) -> Option<EngineConfig> {
     {
         config = saved;
     }
+    fitted_remembered_config(host, config)
+}
+
+/// The last choice within one harness, including before per-harness memory existed.
+fn remembered_harness_config(host: &HostData, engine: EngineId) -> Option<EngineConfig> {
+    if let Some(config) = host.pending_harness_config(engine) {
+        return fitted_remembered_config(host, config.clone());
+    }
+    let value = host
+        .setting(artisan_api::HARNESS_CONFIGS_KEY)
+        .and_then(|configs| configs.get(engine.as_str()))
+        .or_else(|| host.setting(DEFAULT_CONFIG_KEY))?;
+    let config: EngineConfig = serde_json::from_value(value.clone()).ok()?;
+    if config.engine != engine {
+        return None;
+    }
+    fitted_remembered_config(host, config)
+}
+
+fn fitted_remembered_config(host: &HostData, mut config: EngineConfig) -> Option<EngineConfig> {
     let status = host.engines.get(&config.engine)?;
     if !matches!(status.install, artisan_api::InstallState::Installed { .. })
         || matches!(
