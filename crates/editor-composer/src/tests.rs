@@ -1517,6 +1517,7 @@ fn submitted_draft_rejects_attachment_and_configuration_changes_until_settled(
 ) {
     let fixture = Fixture::new(cx);
     let thread = fixture.thread();
+    let target_thread = thread.clone();
     let (composer, cx) = fixture.open(
         cx,
         ComposerTarget::Thread {
@@ -1524,7 +1525,16 @@ fn submitted_draft_rejects_attachment_and_configuration_changes_until_settled(
             thread,
         },
     );
+    let (core, host) = (fixture.core.clone(), fixture.host.clone());
+    wait(cx, "the thread", |cx| {
+        knows_thread(cx, &core, &host, &target_thread)
+    });
     cx.simulate_input("submit one immutable draft");
+    wait(cx, "the draft to be sendable", |cx| {
+        composer.read_with(cx, |composer, cx| {
+            composer.session.is_some() && composer.blocked(cx).is_none()
+        })
+    });
     composer.update(cx, |composer, cx| {
         let original_config = composer.config.clone();
         composer.send(cx);
