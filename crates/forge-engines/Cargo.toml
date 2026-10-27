@@ -1,7 +1,7 @@
 [package]
 name = "forge-engines"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Engine adapters: run Claude, Codex, OpenCode, Grok and Cursor and map their wiring onto artisan-api items."
 

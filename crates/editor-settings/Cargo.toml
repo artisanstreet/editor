@@ -1,7 +1,7 @@
 [package]
 name = "editor-settings"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Preferences, engines, skills and MCP servers, hosts and devices."
 

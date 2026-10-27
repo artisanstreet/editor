@@ -1,7 +1,7 @@
 [package]
 name = "artisan-paths"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Where Artisan's apps (ae, Forge, the Editor) are installed and keep their data."
 
