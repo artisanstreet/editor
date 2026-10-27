@@ -1,7 +1,7 @@
 [package]
 name = "forge-store"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Forge's durable state: one SQLite file with a global change seq, plus content-addressed blobs."
 

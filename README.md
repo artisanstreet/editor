@@ -57,14 +57,11 @@ request a feature, please <a href="https://github.com/artisanstreet/editor/issue
 License
 -------
 
-Artisan Editor is released under the <a href="LICENSE.md">AST License</a>. In short:
+Artisan Editor is released under the <a href="LICENSE.md">BSD 3-Clause License</a>.
+You may use, modify, and redistribute it, including commercially, provided
+the copyright notice, license conditions, and disclaimer are retained.
+The copyright holders and contributors may not be used to endorse derived
+products without prior written permission.
 
-- You may use, modify, and redistribute it, provided the copyright notice
-  and license are kept intact.
-- You may not sell or otherwise monetize it, or products derived from it,
-  without a separate commercial license from Artisan Street.
-- Derived products must use a different name and must not use the Artisan
-  names or logos, or imply endorsement by Artisan Street.
-
-This summary is not the license. <a href="LICENSE.md">LICENSE.md</a> governs.
+Third-party components retain their respective licenses and notices.
 </pre>

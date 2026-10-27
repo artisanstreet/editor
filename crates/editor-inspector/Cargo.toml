@@ -1,7 +1,7 @@
 [package]
 name = "editor-inspector"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Shells, agents, changed files, context and usage of the open thread."
 

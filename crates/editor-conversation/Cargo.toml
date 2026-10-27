@@ -1,7 +1,7 @@
 [package]
 name = "editor-conversation"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "The open thread: the item window, the transcript and the live run."
 
