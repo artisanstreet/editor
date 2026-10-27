@@ -36,6 +36,9 @@ pub struct SpawnAgent {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub speed: Option<String>,
+    pub variant: Option<String>,
+    pub context_window: Option<u64>,
+    pub options: Option<serde_json::Map<String, serde_json::Value>>,
     pub permissions: Option<Permissions>,
     /// Deliver the result to the parent as a message when it finishes,
     /// instead of waiting for `agent_wait`.
@@ -80,6 +83,8 @@ pub struct AgentInfo {
     pub harness: EngineId,
     pub model: Option<String>,
     pub effort: Option<String>,
+    #[serde(default)]
+    pub variant: Option<String>,
     pub permissions: Permissions,
     pub state: AgentState,
     /// Its last reply, once it settled.
@@ -149,7 +154,18 @@ fn resolve(
     config.model = model;
     // Effort and speed: asked for, else the parent's, kept only when the
     // model offers it.
-    let effort = request.effort.clone().or_else(|| parent.effort.clone());
+    // OpenCode sends reasoning through variant, never through effort.
+    let effort = if engine == EngineId::OpenCode {
+        if request.effort.is_some() {
+            warnings.push(
+                "OpenCode uses variant for reasoning; effort was ignored. Set variant instead."
+                    .to_owned(),
+            );
+        }
+        None
+    } else {
+        request.effort.clone().or_else(|| parent.effort.clone())
+    };
     config.effort = match (effort, catalog) {
         (Some(effort), Some(model))
             if !model.efforts.is_empty() && !model.efforts.contains(&effort) =>
@@ -181,6 +197,44 @@ fn resolve(
     if same && config.model == parent.model {
         config.variant.clone_from(&parent.variant);
         config.options.clone_from(&parent.options);
+    }
+    if let Some(options) = &request.options {
+        config.options.extend(options.clone());
+    }
+    if let Some(tokens) = request.context_window {
+        config
+            .options
+            .insert("context_window".into(), tokens.into());
+    }
+    if config
+        .options
+        .get("context_window")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        config.options.remove("context_window");
+    }
+    if let Some(variant) = &request.variant {
+        config.variant = Some(variant.clone());
+    }
+    if let Some(model) = catalog {
+        let variant = model.variant_for(config.variant.as_deref());
+        if config.variant.is_some() && config.variant != variant {
+            warnings.push(format!(
+                "{} has no variant {}; using {}.",
+                model.id,
+                config.variant.as_deref().unwrap_or_default(),
+                variant.as_deref().unwrap_or("its default")
+            ));
+        }
+        config.variant = variant;
+        let context = config.options.get("context_window").cloned();
+        model.normalize_context_window(&mut config);
+        if let Some(context) = context.filter(|_| !config.options.contains_key("context_window")) {
+            warnings.push(format!(
+                "{} has no context window override {context}; using its standard window.",
+                model.id
+            ));
+        }
     }
     config.permissions = match request.permissions {
         Some(Permissions::Full) if parent.permissions == Permissions::Auto => {
@@ -263,7 +317,7 @@ impl Hub {
                     model: config.model.clone(),
                     background: request.background,
                     result: None,
-                    label: Some(task.clone()),
+                    label: None,
                     engine: Some(engine),
                     thread: Some(child.clone()),
                 },
@@ -294,6 +348,7 @@ impl Hub {
             harness: engine,
             model: config.model,
             effort: config.effort,
+            variant: config.variant,
             permissions: config.permissions,
             state: AgentState::Working,
             result: None,
@@ -567,7 +622,12 @@ impl Hub {
                 .as_ref()
                 .and_then(|config| config.model.clone())
                 .or(model),
-            effort: config.as_ref().and_then(|config| config.effort.clone()),
+            effort: config.as_ref().and_then(|config| {
+                (config.engine != EngineId::OpenCode)
+                    .then(|| config.effort.clone())
+                    .flatten()
+            }),
+            variant: config.as_ref().and_then(|config| config.variant.clone()),
             permissions: config.map(|config| config.permissions).unwrap_or_default(),
             state,
             result,
@@ -700,6 +760,9 @@ impl Hub {
     }
 
     async fn settle_agent(&self, thread: &ThreadId) -> Result<()> {
+        // Serialize reports with Stop and with reconciliation, so a report
+        // is either included in Stop's cutoff or observes its cancellation.
+        let _admission = self.inner.admission.lock().await;
         let store = self.store();
         let Some(child) = store.thread(thread).await? else {
             return Ok(());
@@ -724,7 +787,12 @@ impl Hub {
             .waiters_lock()
             .get(agent)
             .is_some_and(|count| *count > 0);
-        if background && !waited && !was.is_terminal() && info.state.is_settled() {
+        if background
+            && !waited
+            && !was.is_terminal()
+            && info.state.is_settled()
+            && info.state != AgentState::Cancelled
+        {
             self.deliver_result(&parent, &info).await?;
         }
         Ok(())
@@ -732,6 +800,19 @@ impl Hub {
 
     /// Tells the parent a background agent finished, as a message.
     async fn deliver_result(&self, parent: &ThreadId, info: &AgentInfo) -> Result<()> {
+        // A child can finish successfully while Stop is winding the tree
+        // down. Its late result must not start another turn either.
+        let cancelling = self.lock().get(parent).map(|run| run.cancel.is_cancelled());
+        if cancelling == Some(true)
+            || (cancelling.is_none()
+                && self
+                    .store()
+                    .latest_run(parent)
+                    .await?
+                    .is_some_and(|run| run.status == RunStatus::Cancelled))
+        {
+            return Ok(());
+        }
         let outcome = match info.state {
             AgentState::Done => "finished",
             AgentState::Failed => "failed",
@@ -942,6 +1023,147 @@ mod tests {
                 "Permissions capped at auto (the parent's).",
             ]
         );
+    }
+
+    fn configurable_model() -> Model {
+        Model {
+            variants: vec![
+                artisan_api::Variant {
+                    id: "medium".into(),
+                    label: "Medium".into(),
+                },
+                artisan_api::Variant {
+                    id: "xhigh".into(),
+                    label: "Extra high".into(),
+                },
+            ],
+            default_variant: Some("medium".into()),
+            context_windows: vec![artisan_api::ContextWindow {
+                tokens: 1_000_000,
+                override_tokens: Some(1_000_000),
+            }],
+            ..model("muse", &[])
+        }
+    }
+
+    #[test]
+    fn opencode_variant_context_and_options_can_be_requested_across_harnesses() {
+        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
+        let request = SpawnAgent {
+            model: Some("muse".into()),
+            variant: Some("xhigh".into()),
+            context_window: Some(1_000_000),
+            options: Some(
+                serde_json::from_value(serde_json::json!({
+                    "context_window": 200_000, "custom": true,
+                }))
+                .unwrap(),
+            ),
+            ..SpawnAgent::default()
+        };
+        let (config, warnings) = resolve(&parent(), &request, &status).unwrap();
+        assert_eq!(config.variant.as_deref(), Some("xhigh"));
+        assert_eq!(config.effort, None);
+        assert_eq!(config.context_window_override(), Some(1_000_000));
+        assert_eq!(config.options["custom"], true);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn opencode_inherits_variant_without_stale_effort() {
+        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
+        let mut parent = EngineConfig::new(EngineId::OpenCode);
+        parent.model = Some("muse".into());
+        parent.effort = Some("medium".into());
+        parent.variant = Some("xhigh".into());
+        let (config, warnings) = resolve(&parent, &SpawnAgent::default(), &status).unwrap();
+        assert_eq!(config.variant.as_deref(), Some("xhigh"));
+        assert_eq!(config.effort, None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn opencode_warns_when_effort_is_requested_instead_of_variant() {
+        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
+        let request = SpawnAgent {
+            effort: Some("xhigh".into()),
+            ..SpawnAgent::default()
+        };
+        let (config, warnings) = resolve(&parent(), &request, &status).unwrap();
+        assert_eq!(config.effort, None);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("Set variant instead"))
+        );
+    }
+
+    #[test]
+    fn unsupported_variant_and_context_fall_back_with_warnings() {
+        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
+        let request = SpawnAgent {
+            model: Some("muse".into()),
+            variant: Some("unknown".into()),
+            context_window: Some(123),
+            ..SpawnAgent::default()
+        };
+        let (config, warnings) = resolve(&parent(), &request, &status).unwrap();
+        assert_eq!(config.variant.as_deref(), Some("medium"));
+        assert_eq!(config.context_window_override(), None);
+        assert_eq!(
+            warnings,
+            [
+                "muse has no variant unknown; using medium.",
+                "muse has no context window override 123; using its standard window.",
+            ]
+        );
+    }
+
+    #[test]
+    fn model_options_inherit_merge_and_reset_context() {
+        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
+        let mut parent = EngineConfig::new(EngineId::OpenCode);
+        parent.model = Some("muse".into());
+        parent.variant = Some("xhigh".into());
+        parent.options = serde_json::from_value(serde_json::json!({
+            "context_window": 1_000_000, "keep": true, "replace": "old",
+        }))
+        .unwrap();
+        let (inherited, warnings) = resolve(&parent, &SpawnAgent::default(), &status).unwrap();
+        assert_eq!(inherited, parent);
+        assert!(warnings.is_empty());
+        let request = SpawnAgent {
+            options: Some(
+                serde_json::from_value(serde_json::json!({
+                    "context_window": null, "replace": "new",
+                }))
+                .unwrap(),
+            ),
+            ..SpawnAgent::default()
+        };
+        let (config, warnings) = resolve(&parent, &request, &status).unwrap();
+        assert_eq!(config.variant, parent.variant);
+        assert_eq!(config.context_window_override(), None);
+        assert!(!config.options.contains_key("context_window"));
+        assert_eq!(config.options["keep"], true);
+        assert_eq!(config.options["replace"], "new");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn changing_models_drops_inherited_options_and_uses_variant_default() {
+        let status = status(EngineId::Claude, vec![configurable_model()], "muse");
+        let mut parent = parent();
+        parent.variant = Some("xhigh".into());
+        parent.options.insert("custom".into(), true.into());
+        let request = SpawnAgent {
+            model: Some("muse".into()),
+            ..SpawnAgent::default()
+        };
+        let (config, warnings) = resolve(&parent, &request, &status).unwrap();
+        assert_eq!(config.variant.as_deref(), Some("medium"));
+        assert!(config.options.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]

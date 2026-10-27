@@ -2883,9 +2883,15 @@ for line in sys.stdin:
     if method=='initialize':
         send({'id':message['id'],'result':{}})
     elif method in ('thread/start','thread/resume'):
-        send({'id':message['id'],'result':{'thread':{'id':thread}}})
+        send({'id':message['id'],'result':{'thread':{'id':'title-session' if message['params'].get('ephemeral') else thread}}})
+    elif method=='thread/name/set':
+        send({'id':message['id'],'result':{}})
     elif method=='turn/start':
         send({'id':message['id'],'result':{'turn':{'id':turn}}})
+        if message['params']['threadId']=='title-session':
+            send({'method':'item/completed','params':{'threadId':'title-session','turnId':turn,'item':{'id':'title','type':'agentMessage','text':json.dumps({'title':'Native approval requests'})}}})
+            send({'method':'turn/completed','params':{'threadId':'title-session','turn':{'id':turn,'status':'completed'}}})
+            continue
         send({'method':'item/started','params':{'threadId':thread,'turnId':turn,'item':{'id':item,'type':'commandExecution','command':'echo once','status':'inProgress'}}})
         send({'id':0,'method':'item/commandExecution/requestApproval','params':{'threadId':thread,'turnId':turn,'itemId':item,'command':'echo once'}})
     elif method is None and message.get('id')==0:
@@ -3483,7 +3489,7 @@ async fn a_turn_that_changed_things_gets_a_you_should_know_note() {
     );
 }
 
-/// With both turned off in settings, nothing is asked on the side.
+/// With titles, suggestions and notes off, nothing is asked on the side.
 #[tokio::test(flavor = "multi_thread")]
 async fn turned_off_side_queries_ask_nothing() {
     let (fixture, asked) = asking(
@@ -3496,7 +3502,7 @@ async fn turned_off_side_queries_ask_nothing() {
         |_| r#"{"suggestion": "Next"}"#.to_owned(),
     )
     .await;
-    for key in [SUGGESTIONS_KEY, YOU_SHOULD_KNOW_KEY] {
+    for key in [SUGGESTIONS_KEY, YOU_SHOULD_KNOW_KEY, SUMMARY_TITLES_KEY] {
         fixture
             .hub
             .store()
@@ -4174,6 +4180,159 @@ async fn an_agent_a_restart_interrupted_keeps_working_while_it_carries_on() {
     let item = fixture.hub.store().item(&agent).await.unwrap().unwrap();
     assert!(!item.status.is_terminal());
     assert_eq!(user_messages(&fixture.items().await), 0);
+    fixture.hub.shutdown();
+}
+
+/// Cancellation reports, and results racing with Stop, must not become
+/// fresh inputs that restart the parent the user just stopped.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_thread_with_background_agents_does_not_restart_it() {
+    let fixture = fixture(Arc::new(|turn, io| {
+        Box::pin(async move {
+            if turn.input.text.contains("resume") {
+                return Outcome::done();
+            }
+            io.cancel.cancelled().await;
+            Outcome::cancelled()
+        })
+    }))
+    .await;
+    let (agent, child) = interrupted_agent(&fixture).await;
+    for (thread, text) in [(&fixture.thread_id, "parent"), (&child, "child")] {
+        fixture
+            .hub
+            .send_message(thread, message(text))
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut running = true;
+            for thread in [&fixture.thread_id, &child] {
+                running &= fixture
+                    .hub
+                    .store()
+                    .latest_run(thread)
+                    .await
+                    .unwrap()
+                    .is_some_and(|run| run.status == RunStatus::Running);
+            }
+            if running {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("parent and child start");
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.hub.is_live(&fixture.thread_id) || fixture.hub.is_live(&child) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Stop settles both threads without restarting the parent");
+    // Also exercise reconciliation after the live cancellation path.
+    fixture.hub.reconcile_agents().await;
+    let items = fixture.items().await;
+    assert!(
+        !items.iter().any(|item| matches!(
+            &item.kind, ItemKind::UserMessage { from_agent: Some(from), .. } if from == &agent
+        )),
+        "an agent report restarted the stopped parent: {items:?}"
+    );
+    assert_eq!(
+        fixture
+            .hub
+            .store()
+            .latest_run(&fixture.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Cancelled
+    );
+    assert!(
+        fixture
+            .hub
+            .store()
+            .pending_inputs(&fixture.thread_id)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("resume"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    assert_eq!(
+        fixture
+            .hub
+            .store()
+            .latest_run(&fixture.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Done
+    );
+    fixture.hub.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successful_agent_result_arriving_after_stop_does_not_restart_its_parent() {
+    let fixture = fixture(Arc::new(|_, io| {
+        Box::pin(async move {
+            io.cancel.cancelled().await;
+            Outcome::cancelled()
+        })
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("parent"))
+        .await
+        .unwrap();
+    fixture
+        .wait_for(|items| {
+            items.iter().any(|item| {
+                matches!(item.kind, ItemKind::UserMessage { .. }) && item.status == Status::Done
+            })
+        })
+        .await;
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    fixture.settled().await;
+
+    // The child's successful outcome was persisted, but its report has
+    // not reached the parent yet when Stop finishes.
+    let (_, child) = interrupted_agent(&fixture).await;
+    let mut run = fixture
+        .hub
+        .store()
+        .latest_run(&child)
+        .await
+        .unwrap()
+        .unwrap();
+    run.status = RunStatus::Done;
+    fixture.hub.store().upsert_run(run).await.unwrap();
+    fixture.hub.reconcile_agents().await;
+    assert_eq!(user_messages(&fixture.items().await), 1);
+    assert!(!fixture.hub.is_live(&fixture.thread_id));
+    assert!(
+        fixture
+            .hub
+            .store()
+            .pending_inputs(&fixture.thread_id)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
     fixture.hub.shutdown();
 }
 
@@ -5098,4 +5257,265 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
     let runs = fixture.settled().await;
     assert!(cleaned.load(std::sync::atomic::Ordering::SeqCst));
     assert!(runs.iter().any(|run| run.status == RunStatus::Cancelled));
+}
+
+/// A long first turn and an independently delayed title response.
+struct BackgroundTitle {
+    session: String,
+    release_title: Arc<Notify>,
+    title_started: Arc<Notify>,
+    named: Arc<Notify>,
+    names: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl Harness for BackgroundTitle {
+    fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
+        let session = self.session.clone();
+        Box::pin(async move {
+            io.emit(EngineEvent::InputAccepted { id: turn.input.id })
+                .await;
+            io.emit(EngineEvent::Session { id: session }).await;
+            io.cancel.cancelled().await;
+            Outcome::cancelled()
+        })
+    }
+
+    fn side_query(
+        &self,
+        turn: Turn,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<forge_engines::SideReply>> {
+        let release = Arc::clone(&self.release_title);
+        let started = Arc::clone(&self.title_started);
+        Box::pin(async move {
+            assert!(
+                turn.session_id.is_none(),
+                "early titles must not fork or prompt the active session"
+            );
+            assert!(turn.input.text.contains("repair the sidebar"));
+            started.notify_one();
+            tokio::select! {
+                () = release.notified() => Ok(forge_engines::SideReply {
+                    text: r#"{"title":"Sidebar title generation"}"#.to_owned(),
+                    ..Default::default()
+                }),
+                () = cancel.cancelled() => anyhow::bail!("title cancelled with working turn"),
+            }
+        })
+    }
+
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, anyhow::Result<()>> {
+        self.names
+            .lock()
+            .unwrap()
+            .push((turn.session_id.unwrap(), title));
+        self.named.notify_one();
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_titles_replace_the_prompt_and_reach_the_adapter_before_the_turn_ends() {
+    for engine in [EngineId::Codex, EngineId::Claude] {
+        for stopped in [false, true] {
+            let harness = Arc::new(BackgroundTitle {
+                session: if engine == EngineId::Claude {
+                    format!("{}conversation/leaf", artisan_api::CLAUDE_AI_SESSION_PREFIX)
+                } else {
+                    "codex-session".to_owned()
+                },
+                release_title: Arc::new(Notify::new()),
+                title_started: Arc::new(Notify::new()),
+                named: Arc::new(Notify::new()),
+                names: Arc::new(Mutex::new(Vec::new())),
+            });
+            let adapter = Arc::clone(&harness) as Arc<dyn Harness>;
+            let fixture =
+                fixture_with_engine_harness(engine, Arc::new(move |_| Arc::clone(&adapter))).await;
+            if engine == EngineId::Claude {
+                sign_in_to_claude_ai(&fixture);
+                turn_on_enhanced_claude(&fixture).await;
+            }
+            fixture
+                .hub
+                .send_message(&fixture.thread_id, message("repair the sidebar"))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), harness.title_started.notified())
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .hub
+                    .store()
+                    .thread(&fixture.thread_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .title
+                    .as_deref(),
+                Some("repair the sidebar")
+            );
+            if stopped {
+                fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+                fixture.settled().await;
+                fixture
+                    .hub
+                    .send_message(&fixture.thread_id, message("keep working"))
+                    .await
+                    .unwrap();
+                fixture.wait_for(|items| items.iter().any(|item| {
+                    item.status == Status::Done && matches!(&item.kind,
+                        ItemKind::UserMessage { text, .. } if text.inline().is_some_and(|text| text == "keep working"))
+                })).await;
+            }
+            harness.release_title.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), harness.named.notified())
+                .await
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .hub
+                    .store()
+                    .thread(&fixture.thread_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .title
+                    .as_deref(),
+                Some("Sidebar title generation")
+            );
+            assert_eq!(
+                *harness.names.lock().unwrap(),
+                [(
+                    harness.session.clone(),
+                    "Sidebar title generation".to_owned()
+                )]
+            );
+            assert!(
+                fixture.hub.is_live(&fixture.thread_id),
+                "title must be applied while work continues"
+            );
+            fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+            fixture.settled().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_background_title_preserves_a_manual_rename() {
+    let harness = Arc::new(BackgroundTitle {
+        session: "codex-session".to_owned(),
+        release_title: Arc::new(Notify::new()),
+        title_started: Arc::new(Notify::new()),
+        named: Arc::new(Notify::new()),
+        names: Arc::new(Mutex::new(Vec::new())),
+    });
+    let adapter = Arc::clone(&harness) as Arc<dyn Harness>;
+    let fixture =
+        fixture_with_engine_harness(EngineId::Codex, Arc::new(move |_| Arc::clone(&adapter))).await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("repair the sidebar"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), harness.title_started.notified())
+        .await
+        .unwrap();
+    // Bypass Hub's memory-only eligibility too: the durable comparison must
+    // protect changes from another writer while the query is in flight.
+    fixture
+        .hub
+        .store()
+        .update_thread(
+            &fixture.thread_id,
+            artisan_api::UpdateThread {
+                title: Some("My chosen name".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    harness.release_title.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let querying = fixture
+                .hub
+                .inner
+                .title_queries
+                .lock()
+                .unwrap()
+                .contains(&fixture.thread_id);
+            if !querying {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        fixture
+            .hub
+            .store()
+            .thread(&fixture.thread_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .title
+            .as_deref(),
+        Some("My chosen name")
+    );
+    assert!(
+        harness.names.lock().unwrap().is_empty(),
+        "a discarded title must not rename the native session"
+    );
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    fixture.settled().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_titles_replace_the_prompt_while_every_adapter_is_working() {
+    for engine in [EngineId::Codex, EngineId::Claude, EngineId::OpenCode] {
+        let adapter: Arc<dyn Harness> = Arc::new(Scripted(Arc::new(|_, io| {
+            Box::pin(async move {
+                io.emit(EngineEvent::Title {
+                    title: "Native background title".to_owned(),
+                })
+                .await;
+                io.emit(reply("waiting", "Still working")).await;
+                io.cancel.cancelled().await;
+                Outcome::cancelled()
+            })
+        })));
+        let fixture =
+            fixture_with_engine_harness(engine, Arc::new(move |_| Arc::clone(&adapter))).await;
+        fixture
+            .hub
+            .send_message(&fixture.thread_id, message("repair the sidebar"))
+            .await
+            .unwrap();
+        fixture
+            .wait_for(|items| {
+                items
+                    .iter()
+                    .any(|item| matches!(&item.kind, ItemKind::AssistantMessage { .. }))
+            })
+            .await;
+        assert_eq!(
+            fixture
+                .hub
+                .store()
+                .thread(&fixture.thread_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Native background title")
+        );
+        assert!(fixture.hub.is_live(&fixture.thread_id));
+        fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+        fixture.settled().await;
+    }
 }

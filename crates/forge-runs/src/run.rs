@@ -77,7 +77,7 @@ pub async fn drive(
     let claude_ai_before = claude_ai_home
         .as_deref()
         .map(forge_engines::claudeai::Session::state);
-    let mut items = Work::default();
+    let mut items = Work::new(hub, &thread, first_run, &pending);
     hub.open_suggestion(thread_id, &run_id);
     let adapter_cancel = cancel.child_token();
     items.binary = hub.engines().lease(engine);
@@ -125,11 +125,6 @@ pub async fn drive(
         .entry(thread_id.clone())
         .or_default()
         .add(&items.weighed);
-    // An engine that named nothing (claude.ai never does; Claude Code can
-    // miss) leaves the thread to the side query after its next done turn.
-    if first_run && !items.titled {
-        hub.untitled_lock().insert(thread_id.clone());
-    }
     finish(hub, &mut run, &items, outcome).await?;
     if let Some(home) = &claude_ai_home
         && claude_ai_before.as_ref() != Some(&forge_engines::claudeai::Session::state(home))
@@ -662,9 +657,9 @@ fn carried_session(
 enum ClaudeTransport {
     /// Claude Code, the official way.
     Code,
-    /// claude.ai's chat backend: Native Claude Mode.
+    /// claude.ai's chat backend: claude.ai mode.
     Chat,
-    /// Native Claude Mode is on with no session: Claude Code, and the
+    /// claude.ai mode is on with no session: Claude Code, and the
     /// turn says why.
     ChatSignedOut,
 }
@@ -722,8 +717,26 @@ struct Work {
     hidden: HashSet<String>,
     /// The engine reported an error of its own.
     errored: bool,
-    /// The engine named the thread during this run.
-    titled: bool,
+    /// The original request, to name adapters without native background titles.
+    early_title: Option<Box<(artisan_api::Thread, Vec<artisan_api::Item>)>>,
+}
+
+impl Work {
+    fn new(
+        hub: &Hub,
+        thread: &artisan_api::Thread,
+        first: bool,
+        messages: &[artisan_api::Item],
+    ) -> Self {
+        let early_title = first.then(|| {
+            hub.untitled_lock().insert(thread.id.clone());
+            Box::new((thread.clone(), messages.to_vec()))
+        });
+        Self {
+            early_title,
+            ..Self::default()
+        }
+    }
 }
 
 /// An Artisan MCP `agent_spawn` call: the `Agent` item Forge stores stands
@@ -917,6 +930,16 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
                 run.session_id = Some(id);
                 *run = store.upsert_run(run.clone()).await?;
             }
+            if let Some(title) = items.early_title.take()
+                && (run.engine == EngineId::Codex
+                    || run
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX)))
+            {
+                let (thread, messages) = *title;
+                hub.start_title(thread, messages);
+            }
         }
         EngineEvent::Model { id } => {
             if run.model.as_deref() != Some(&id) {
@@ -927,7 +950,7 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
         EngineEvent::Title { title } => {
             let title = title.trim().to_owned();
             if !title.is_empty() {
-                items.titled = true;
+                hub.untitled_lock().remove(&thread_id);
             }
             if !title.is_empty() && hub.enabled(crate::SUMMARY_TITLES_KEY).await {
                 store

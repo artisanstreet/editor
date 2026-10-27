@@ -60,9 +60,10 @@ struct Inner {
     suggestions: Mutex<HashMap<ThreadId, Suggested>>,
     /// How much each thread has done since its last "You should know" check.
     attention: Mutex<HashMap<ThreadId, side::Attention>>,
-    /// Threads whose first run brought no title from the engine; the side
-    /// query after their next finished turn names them.
+    /// Threads still waiting for a generated title.
     untitled: Mutex<std::collections::HashSet<ThreadId>>,
+    /// Titles being generated independently of the working turn.
+    title_queries: Mutex<std::collections::HashSet<ThreadId>>,
     /// Held while skills or the prompt are written into engine homes.
     homes: Mutex<()>,
     shutdown: CancellationToken,
@@ -147,6 +148,7 @@ impl Hub {
                 suggestions: Mutex::new(HashMap::new()),
                 attention: Mutex::new(HashMap::new()),
                 untitled: Mutex::new(std::collections::HashSet::new()),
+                title_queries: Mutex::new(std::collections::HashSet::new()),
                 homes: Mutex::new(()),
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
@@ -523,12 +525,15 @@ impl Hub {
 
     /// Cancels the thread's live run, if any, and the agents it started.
     pub async fn cancel(&self, thread_id: &ThreadId) -> Result<()> {
+        // Stop the whole tree before dispatching inputs or delivering agent
+        // results. Otherwise a child's cancellation can restart its parent.
+        let _admission = self.inner.admission.lock().await;
         self.cancel_one(thread_id).await?;
         self.cancel_agents_of(thread_id).await
     }
 
+    /// The caller holds admission across the entire cancellation tree.
     async fn cancel_one(&self, thread_id: &ThreadId) -> Result<()> {
-        let _admission = self.inner.admission.lock().await;
         let cutoff = self.store().head();
         if let Some(run) = self.lock().get(thread_id) {
             run.cancel_through.store(cutoff, Ordering::Release);
