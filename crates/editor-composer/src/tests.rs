@@ -206,7 +206,7 @@ impl Fixture {
             .unwrap()
             .id;
         cx.update(editor_sources::init);
-        let core = cx.new(|cx| Core::new(files, cx).unwrap());
+        let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
         Self {
             core,
             host: host.id,
@@ -569,7 +569,7 @@ fn a_new_thread_starts_with_the_model_last_used(cx: &mut TestAppContext) {
     // The Editor restarts: a new Core reads the same files.
     let files = forge.core.read_with(vcx, |core, _| core.files.clone());
     vcx.update(|_, app| editor_sources::init(app));
-    let core = vcx.update(|_, app| app.new(|cx| Core::new(files, cx).unwrap()));
+    let core = vcx.update(|_, app| app.new(|cx| Core::for_tests(files, cx).unwrap()));
     let (fresh, vcx) =
         cx.add_window_view(move |window, cx| Composer::new(core, target, window, cx));
     vcx.simulate_resize(size(px(800.0), px(600.0)));
@@ -661,7 +661,7 @@ fn each_model_comes_back_as_it_was_last_chosen(cx: &mut TestAppContext) {
     // The Editor restarts: a fresh picker still knows Sonnet's settings.
     let files = forge.core.read_with(vcx, |core, _| core.files.clone());
     vcx.update(|_, app| editor_sources::init(app));
-    let core = vcx.update(|_, app| app.new(|cx| Core::new(files, cx).unwrap()));
+    let core = vcx.update(|_, app| app.new(|cx| Core::for_tests(files, cx).unwrap()));
     let (fresh, vcx) =
         cx.add_window_view(move |window, cx| Composer::new(core, target, window, cx));
     wait(vcx, "the new Core to follow Forge", |vcx| {

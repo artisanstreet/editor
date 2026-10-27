@@ -21,6 +21,7 @@ tracing.workspace = true
 webp.workspace = true
 
 [dev-dependencies]
+editor-core = { path = "../editor-core", features = ["test-support"] }
 forge-engines = { path = "../forge-engines" }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }

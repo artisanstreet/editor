@@ -14,6 +14,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 artisan-api = { path = "../artisan-api", features = ["tls"] }
+editor-core = { path = "../editor-core", features = ["test-support"] }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
 gpui = { workspace = true, features = ["test-support"] }
