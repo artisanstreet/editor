@@ -35,7 +35,7 @@ impl Setup {
 
         let (files, _) = forge_fixture::pair(&store, &forge, &address, &dir.path().join("editor"));
         cx.update(editor_ui::text_editor::TextEditor::bind_actions);
-        let core = cx.new(|cx| Core::new(files, cx).unwrap());
+        let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
         let window = cx.add_window(|window, cx| Sidebar::new(core.clone(), window, cx));
 
         let path = dir.path().join("project");
@@ -783,7 +783,11 @@ fn host_switch_preserves_new_rename_dialog_after_old_rename_failure(cx: &mut Tes
         Some("accepted old host title")
     );
     setup.core.update(cx, |core, cx| {
-        core.add_host(other_host.clone(), cx).unwrap();
+        let identity = core.identity.clone().unwrap();
+        let client =
+            editor_core::ForgeClient::new(&other_host.address, &other_host.fingerprint, &identity)
+                .unwrap();
+        core.add_test_host(&other_host, client, cx);
         core.navigate(
             Screen::Thread {
                 host: other_host.id.clone(),
