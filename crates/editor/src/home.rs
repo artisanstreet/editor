@@ -1,31 +1,21 @@
-//! Home: the account's Forges. Choosing and connecting happens here;
-//! enrollment itself lives in Account settings and the entry gate.
+//! Home: the account's Forges, when none is open yet.
 
-use crate::entry::setup::SetupView;
-use editor_core::{Core, Screen, SettingsPage};
-use editor_ui::button::{Button, ButtonVariant};
+use editor_core::Core;
+use editor_settings::account::forges::ForgesView;
 use editor_ui::theme::ActiveTheme as _;
 use gpui::{
     AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Styled as _, Subscription, Window, div, px,
+    Render, Styled as _, Window, div, px,
 };
 
 pub struct Home {
-    core: Entity<Core>,
-    setup: Entity<SetupView>,
-    _events: Subscription,
+    forges: Entity<ForgesView>,
 }
 
 impl Home {
     pub fn new(core: Entity<Core>, cx: &mut Context<Self>) -> Self {
-        let setup = cx.new(|cx| SetupView::new(core.clone(), false, cx));
-        let events = cx.subscribe(&core, |_, _, _: &editor_core::CoreEvent, cx| {
-            cx.notify();
-        });
         Self {
-            core,
-            setup,
-            _events: events,
+            forges: cx.new(|cx| ForgesView::new(core, cx)),
         }
     }
 }
@@ -33,7 +23,6 @@ impl Home {
 impl Render for Home {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
-        let core = self.core.clone();
         div()
             .size_full()
             .flex()
@@ -58,26 +47,8 @@ impl Render for Home {
                             .mt(px(8.0))
                             .max_w(px(560.0))
                             .w_full()
-                            .child(self.setup.clone()),
-                    )
-                    .child(
-                        div().mt(px(16.0)).child(
-                            Button::text(
-                                "home-manage-forges",
-                                theme,
-                                "Manage Forges in Account settings",
-                            )
-                            .variant(ButtonVariant::Ghost)
-                            .debug_selector("home-manage-forges")
-                            .on_activate(cx.listener(move |_, _, _, cx| {
-                                core.update(cx, |core, cx| {
-                                    core.navigate(Screen::Settings(SettingsPage::Account), cx);
-                                });
-                            }))
-                            .into_any_element(),
-                        ),
+                            .child(self.forges.clone()),
                     ),
             )
-            .into_any_element()
     }
 }

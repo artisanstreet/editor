@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use super::EntryRoot;
 use editor_core::{Core, EditorFiles, EntryGate, Services};
-use editor_settings::account::controller;
 use gpui::AppContext as _;
 
 pub(crate) const ACCOUNT_ID: &str = "acct_test000000000000000000000001";
@@ -270,7 +269,12 @@ fn sign_out_drops_mounted_workspace_back_to_entry(cx: &mut gpui::TestAppContext)
         cx.debug_bounds("artisan-desktop-workspace").is_some()
     });
     let core = fixture.core.clone();
-    cx.update(|_, cx| controller::sign_out(&core, false, cx));
+    cx.update(|_, cx| {
+        core.read(cx)
+            .account()
+            .clone()
+            .update(cx, editor_core::Account::sign_out)
+    });
     cx.run_until_parked();
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
     assert!(cx.debug_bounds("entry-root").is_some());
@@ -291,19 +295,24 @@ fn needs_setup_offers_sign_out_and_retry_without_unlocking(cx: &mut gpui::TestAp
     let core = fixture.core.clone();
     let (_entry, cx) = cx.add_window_view(move |window, cx| EntryRoot::new(core, None, window, cx));
     wait_for(cx, "the setup surface to render", |cx| {
-        cx.debug_bounds("entry-setup").is_some()
+        cx.debug_bounds("forges").is_some()
     });
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
     let core = fixture.core.clone();
-    cx.update(|_, cx| controller::refresh(&core, cx));
+    cx.update(|_, cx| {
+        core.read(cx)
+            .account()
+            .clone()
+            .update(cx, editor_core::Account::refresh)
+    });
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("entry-setup").is_some(),
+        cx.debug_bounds("forges").is_some(),
         "retry must keep the setup surface, not unlock"
     );
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
     let switcher = cx
-        .debug_bounds("entry-setup-use-another")
+        .debug_bounds("forges-use-another")
         .expect("the setup surface offers switching accounts");
     cx.simulate_click(switcher.center(), gpui::Modifiers::none());
     cx.run_until_parked();

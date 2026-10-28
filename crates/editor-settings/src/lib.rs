@@ -21,9 +21,10 @@ use editor_ui::switch::{Switch, SwitchSize};
 use editor_ui::theme::{ActiveTheme as _, ArtisanTheme};
 use editor_ui::wheel_glide::WheelGlide;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point, px,
+    AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, point, px,
 };
 
 pub use about::BuildInfo;
@@ -40,7 +41,8 @@ pub struct Settings {
     theme: ArtisanTheme,
     build: BuildInfo,
     engines: engines::EnginesForm,
-    account: account::AccountForm,
+    sign_in: Entity<account::sign_in::SignInView>,
+    forges: Entity<account::forges::ForgesView>,
     extensions: extensions::ExtensionsForm,
     prompt: prompt::PromptForm,
     hosts: hosts::HostsForm,
@@ -51,6 +53,7 @@ pub struct Settings {
     glide_scheduled: bool,
     host_subscription: Option<Subscription>,
     _core_subscription: Subscription,
+    _account_subscription: Subscription,
 }
 
 impl Settings {
@@ -76,14 +79,20 @@ impl Settings {
             }
             cx.notify();
         });
+        let account = core.read(cx).account().clone();
+        let account_subscription =
+            cx.subscribe(&account, |_, _, _: &editor_core::AccountEvent, cx| {
+                cx.notify();
+            });
         let mut settings = Self {
             #[cfg(test)]
             completion_gate: None,
-            core: core.clone(),
             theme: *cx.theme(),
             build,
             engines: engines::EnginesForm::new(cx),
-            account: account::AccountForm::new(core, cx),
+            sign_in: cx.new(|cx| account::sign_in::SignInView::new(core.clone(), cx)),
+            forges: cx.new(|cx| account::forges::ForgesView::new(core.clone(), cx)),
+            core,
             extensions: extensions::ExtensionsForm::new(cx),
             prompt: prompt::PromptForm::new(cx),
             hosts: hosts::HostsForm::new(),
@@ -94,10 +103,10 @@ impl Settings {
             glide_scheduled: false,
             host_subscription: None,
             _core_subscription: core_subscription,
+            _account_subscription: account_subscription,
         };
         settings.watch_hosts(cx);
         settings.sync_host(cx);
-        settings.account.watch_account(cx);
         settings
     }
 

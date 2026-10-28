@@ -1,6 +1,6 @@
-use editor_core::{Core, CoreEvent, EntryGate};
-use editor_settings::account::{controller, sign_in::SignInView};
-use editor_ui::button::{Button, ButtonVariant};
+use editor_core::{Core, EntryGate};
+use editor_settings::account::forges::ForgesView;
+use editor_settings::account::sign_in::SignInView;
 use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens};
 use editor_ui::window_controls::WindowControls;
 use gpui::prelude::FluentBuilder as _;
@@ -12,9 +12,6 @@ use gpui::{
 
 use crate::workspace::Workspace;
 
-pub mod setup;
-use setup::SetupView;
-
 #[cfg(all(test, feature = "capture"))]
 #[path = "../tests/entry.rs"]
 pub(crate) mod behavior;
@@ -23,14 +20,13 @@ pub const KEY_CONTEXT: &str = "Entry";
 
 pub struct EntryRoot {
     core: Entity<Core>,
-    workspace: Option<Entity<Workspace>>,
-    mounted: Option<String>,
+    /// The workspace and the account it was mounted for.
+    workspace: Option<(String, Entity<Workspace>)>,
     sign_in: Entity<SignInView>,
-    setup: Entity<SetupView>,
+    forges: Entity<ForgesView>,
     failure: Option<String>,
     focus: FocusHandle,
     _core: Subscription,
-    _account: Subscription,
 }
 
 impl EntryRoot {
@@ -41,38 +37,18 @@ impl EntryRoot {
         cx: &mut Context<Self>,
     ) -> Self {
         let sign_in = cx.new(|cx| SignInView::new(core.clone(), cx));
-        let setup = cx.new(|cx| SetupView::new(core.clone(), true, cx));
-        let core_subscription =
-            cx.subscribe_in(&core, window, |this, _, event: &CoreEvent, window, cx| {
-                if matches!(
-                    event,
-                    CoreEvent::ScreenChanged
-                        | CoreEvent::HostsChanged
-                        | CoreEvent::SettingsChanged
-                        | CoreEvent::AccessChanged
-                        | CoreEvent::McpSignInChanged
-                ) {
-                    this.sync(window, cx);
-                }
-            });
-        let account = core.read(cx).account().clone();
-        let account_subscription = cx.subscribe_in(
-            &account,
-            window,
-            |this, _, _: &editor_core::AccountEvent, window, cx| {
-                this.sync(window, cx);
-            },
-        );
+        let forges = cx.new(|cx| ForgesView::new(core.clone(), cx));
+        let subscription = cx.subscribe_in(&core, window, |this, _, _, window, cx| {
+            this.sync(window, cx);
+        });
         let mut this = Self {
             core,
             workspace: None,
-            mounted: None,
             sign_in,
-            setup,
+            forges,
             failure,
             focus: cx.focus_handle(),
-            _core: core_subscription,
-            _account: account_subscription,
+            _core: subscription,
         };
         this.sync(window, cx);
         window.focus(&this.focus, cx);
@@ -80,22 +56,22 @@ impl EntryRoot {
     }
 
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let key = match self.core.read(cx).entry_gate(cx) {
+        let ready = match self.core.read(cx).entry_gate(cx) {
             EntryGate::Ready { account_id } => Some(account_id),
             EntryGate::Restoring | EntryGate::SignedOut | EntryGate::NeedsSetup { .. } => None,
         };
-        if key != self.mounted {
-            self.workspace = None;
-            self.mounted = None;
+        let mounted = self.workspace.as_ref().map(|(account_id, _)| account_id);
+        if mounted == ready.as_ref() {
+            if ready.is_none() {
+                cx.notify();
+            }
+            return;
         }
-        if let Some(account_id) = key
-            && self.workspace.is_none()
-        {
-            let core = self.core.clone();
-            let failure = self.failure.clone();
-            self.workspace = Some(cx.new(|cx| Workspace::new(core, failure, window, cx)));
-            self.mounted = Some(account_id);
-        }
+        self.workspace = ready.map(|account_id| {
+            let (core, failure) = (self.core.clone(), self.failure.clone());
+            let workspace = cx.new(|cx| Workspace::new(core, failure, window, cx));
+            (account_id, workspace)
+        });
         cx.notify();
     }
 
@@ -178,58 +154,18 @@ impl EntryRoot {
 
 impl Render for EntryRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(workspace) = self.workspace.clone() {
-            return workspace.into_any_element();
+        if let Some((_, workspace)) = &self.workspace {
+            return workspace.clone().into_any_element();
         }
-        match self.core.read(cx).entry_gate(cx) {
-            EntryGate::Ready { .. } => div().into_any_element(),
-            EntryGate::Restoring => {
-                let theme = *cx.theme();
-                let body = div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_color(theme.colors.text_muted.to_paint())
-                            .child("Checking the saved sign-in with the account service."),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .gap(px(8.0))
-                            .child(
-                                Button::text("entry-retry", theme, "Retry")
-                                    .variant(ButtonVariant::Default)
-                                    .debug_selector("entry-retry")
-                                    .on_activate(cx.listener(|this, _, _, cx| {
-                                        controller::refresh(&this.core, cx);
-                                    }))
-                                    .into_any_element(),
-                            )
-                            .child(
-                                Button::text("entry-use-another", theme, "Use another account")
-                                    .variant(ButtonVariant::Ghost)
-                                    .debug_selector("entry-use-another")
-                                    .on_activate(cx.listener(|this, _, _, cx| {
-                                        controller::sign_out(&this.core, false, cx);
-                                    }))
-                                    .into_any_element(),
-                            ),
-                    )
-                    .into_any_element();
-                self.shell("Restoring the session", body, window, cx)
-            }
-            EntryGate::SignedOut => {
-                let form = self.sign_in.clone().into_any_element();
-                self.shell("Sign in to Artisan", form, window, cx)
-            }
+        let (title, body) = match self.core.read(cx).entry_gate(cx) {
+            EntryGate::Restoring | EntryGate::SignedOut | EntryGate::Ready { .. } => (
+                "Sign in to Artisan",
+                self.sign_in.clone().into_any_element(),
+            ),
             EntryGate::NeedsSetup { .. } => {
-                let body = self.setup.clone().into_any_element();
-                self.shell("Connect a Forge", body, window, cx)
+                ("Connect a Forge", self.forges.clone().into_any_element())
             }
-        }
+        };
+        self.shell(title, body, window, cx)
     }
 }
