@@ -173,7 +173,8 @@ impl CoreClient {
     }
 
     /// Confirm an enrollment: `POST /v1/machines/enrollments/confirm` with
-    /// the proof over the exact account+key binding. The caller must have
+    /// enrollment-key request authentication and a proof over the exact
+    /// account+key binding. The caller must have
     /// shown `account_id` + verified email to the local operator first.
     pub async fn confirm_enrollment(
         &self,
@@ -191,10 +192,15 @@ impl CoreClient {
             "accountId": account_id,
             "confirmation": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(confirmation),
         });
+        let path = "/v1/machines/enrollments/confirm";
+        let body = serde_json::to_vec(&request)?;
+        let headers = Self::proof_headers(enrollment_id, secret, "POST", path, &body, now_sec())?;
         let response = self
             .http
-            .post(self.url("/v1/machines/enrollments/confirm"))
-            .json(&request)
+            .post(self.url(path))
+            .headers(headers)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await
             .context("reach Core")?;
@@ -407,14 +413,49 @@ mod tests {
 
     async fn confirm(
         State(_stub): State<Stub>,
+        headers: axum::http::HeaderMap,
         body: axum::body::Bytes,
     ) -> impl axum::response::IntoResponse {
+        let enrollment_id = "enr_00000000000000000000000001";
+        assert_eq!(headers["x-ast-machine"], enrollment_id);
+        let timestamp = headers["x-ast-timestamp"].to_str().unwrap().parse().unwrap();
+        let nonce = headers["x-ast-nonce"].to_str().unwrap();
+        let signature = headers["authorization"]
+            .to_str()
+            .unwrap()
+            .strip_prefix("AST-Machine ")
+            .unwrap();
+        let keypair = artisan_account::MachineKeypair::from_secret([0x21_u8; 32]).unwrap();
+        artisan_account::verify_machine_proof(&artisan_account::MachineProof {
+            public: keypair.public(),
+            body: &body,
+            timestamp_sec: timestamp,
+            nonce_b64u: nonce,
+            method: "POST",
+            path_and_query: "/v1/machines/enrollments/confirm",
+            signature_b64u: signature,
+            now_sec: now_sec(),
+        })
+        .unwrap();
         let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(request["enrollmentId"], enrollment_id);
         assert_eq!(
             request["accountId"],
             "acct_00000000000000000000000000"
         );
-        assert!(request["confirmation"].as_str().is_some());
+        let confirmation = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(request["confirmation"].as_str().unwrap())
+            .unwrap();
+        let binding = enrollment_confirm_body(
+            enrollment_id,
+            "acct_00000000000000000000000000",
+            &keypair.public_b64u(),
+        );
+        assert!(artisan_account::verify_enrollment_proof(
+            keypair.public(),
+            &binding,
+            &confirmation,
+        ));
         axum::Json(serde_json::json!({
             "machine_id": "mch_11111111111111111111111111",
             "account_id": "acct_00000000000000000000000000",
