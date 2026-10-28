@@ -8,7 +8,6 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
-use sha2::Digest as _;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("cannot make a key right now")]
@@ -54,16 +53,6 @@ impl MachineKeypair {
         URL_SAFE_NO_PAD.encode(self.public)
     }
 
-    /// Base64url-no-pad SHA-256 of the public key: how operators compare
-    /// machines (`keyFingerprint`, Core §2). Never log private material.
-    #[must_use]
-    pub fn fingerprint(&self) -> Fingerprint {
-        use base64::Engine as _;
-        Fingerprint(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(self.public)),
-        )
-    }
-
     #[must_use]
     pub const fn secret(&self) -> &[u8; 32] {
         &self.secret
@@ -88,11 +77,6 @@ pub struct PairStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
 }
-
-/// Enrollment operator key fingerprint for display.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Fingerprint(pub String);
 
 /// Normalize a user-typed code the same way everywhere: keep ASCII
 /// alphanumerics, uppercase (client sends the raw code; Core hashes).
@@ -189,10 +173,8 @@ mod tests {
     }
 
     #[test]
-    fn keypairs_reject_zero_and_fingerprint_is_b64u() {
+    fn keypairs_reject_zero_and_codes_normalise() {
         assert!(MachineKeypair::from_secret([0_u8; 32]).is_err());
-        let keypair = MachineKeypair::from_secret([0x21_u8; 32]).unwrap();
-        assert_eq!(keypair.fingerprint().0.len(), 43);
         assert_eq!(normalise_code("ab-12 cd"), "AB12CD");
     }
 }

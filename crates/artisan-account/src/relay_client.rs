@@ -396,7 +396,10 @@ fn grant_fresh_enough(jwt: &str) -> bool {
     reason = "relay errors use user-facing messages; transport details stay out of logs"
 )]
 fn ws_url_for(relay_base: &str, account: &str, machine: &str) -> Result<String> {
-    let route = crate::route_path(account, machine).map_err(|_| anyhow!("bad relay route"))?;
+    anyhow::ensure!(
+        crate::grant::is_valid_id(account) && crate::grant::is_valid_id(machine),
+        "bad relay route"
+    );
     let mut base = relay_base.trim_end_matches('/').to_owned();
     if let Some(rest) = base.strip_prefix("https://") {
         base = format!("wss://{rest}");
@@ -406,7 +409,7 @@ fn ws_url_for(relay_base: &str, account: &str, machine: &str) -> Result<String> 
     if !(base.starts_with("ws://") || base.starts_with("wss://")) {
         anyhow::bail!("relay URL must be ws(s):// or http(s)://");
     }
-    Ok(format!("{base}{}", route.path))
+    Ok(format!("{base}/v1/route/{account}/{machine}"))
 }
 
 /// One WS + Noise XX channel with send-window pacing and chunk reassembly.
@@ -1635,7 +1638,6 @@ mod tests {
                     serde_json::from_str(open.to_text().unwrap()).unwrap();
                 assert_eq!(open["type"], "open");
                 let name = open["channel"].as_str().unwrap();
-                assert!(crate::is_valid_channel(name), "invalid channel: {name}");
                 assert!(names.insert(name.to_owned()), "channel reused: {name}");
                 // Stop before Noise: this fixture checks the real socket's
                 // open request, including repeated opens with the same key.

@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const AUD_RELAY: &str = "ast-relay";
-pub const AUD_CORE: &str = "ast-core";
 
 /// Allowed clock skew in seconds (Core §4).
 pub const SKEW_S: i64 = 60;
@@ -18,16 +17,6 @@ pub const SKEW_S: i64 = 60;
 pub const SCOPE_RELAY_CONNECT: &str = "relay:connect";
 pub const SCOPE_FORGE_EXECUTE: &str = "forge:execute";
 pub const SCOPE_MACHINE_SYNC: &str = "machine:sync";
-
-/// An account or machine id: Relay `idCharset`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AccountId(pub String);
-
-/// A machine id: same charset as [`AccountId`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct MachineId(pub String);
 
 /// Whether an id matches Relay's channel charset
 /// (`^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$`, also used for route ids).
@@ -640,7 +629,7 @@ mod tests {
     fn wrong_audience_and_binding_are_rejected() {
         let key = signing_key();
         let mut wrong_aud = claims();
-        wrong_aud.aud = Aud::One(AUD_CORE.into());
+        wrong_aud.aud = Aud::One("ast-core".into());
         let token = compact(&wrong_aud, &key);
         assert_eq!(
             parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params())

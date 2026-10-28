@@ -17,7 +17,7 @@ pub const PROOF_TIMESTAMP_WINDOW_S: i64 = 300;
 /// Minimum raw nonce bytes (Core §3: ≥12 random bytes).
 pub const MIN_NONCE_BYTES: usize = 12;
 
-/// Hex SHA-256 of the empty body.
+#[cfg(test)]
 pub const EMPTY_BODY_HASH: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 

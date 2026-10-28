@@ -172,10 +172,6 @@ pub struct GrantIssueRequest {
     pub cnf: Option<Jwk>,
 }
 
-/// The `cnf` of a grant request: exactly the [`Jwk`]. Kept as a name so
-/// existing imports keep working; there is no extra nesting on the wire.
-pub type GrantCnf = Jwk;
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct GrantToken {
     pub token: String,
