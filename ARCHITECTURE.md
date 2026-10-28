@@ -33,8 +33,8 @@ editor
   editor-composer      draft, WebP attachments, model picker, send/steer            → core, sources, editor-ui
   editor-conversation  the open thread: item window, viewport, pure render         → core, sources, editor-ui, composer
   editor-inspector     shells, agents, changed files, context/usage                 → core, sources, editor-ui, conversation
-  editor-settings      preferences, engines, skills/MCP/prompt, hosts & devices     → core, editor-ui
-  editor (bin)         window, titlebar, layout, palette, notices, first pairing    → all
+  editor-settings      preferences, engines, skills/MCP/prompt, account & Forges    → core, editor-ui
+  editor (bin)         window, titlebar, layout, palette, notices, sign-in gate     → all
 ```
 
 Dependencies point down. The one sideways link is Inspector → Conversation,
@@ -156,6 +156,45 @@ stored hashed) and prints `address code fingerprint`. The Editor calls
 pinned to that fingerprint. For a Forge on the same machine or in WSL the
 Editor runs `ae forge pair --json` itself.
 
+## Accounts
+
+The Editor is account only: nothing past sign-in and setup is reachable
+without a signed-in Artisan account. Core (the account service) issues
+sessions and grants; the Relay forwards end-to-end encrypted traffic.
+
+- **Gate.** `access::entry_gate(phase, onboarding)` is a pure function:
+  `Restoring | SignedOut | NeedsSetup | Ready`. `Core::hosts()` is empty
+  until Ready; a link or notification opened before then waits in
+  `pending_screen` and opens on Ready.
+- **Sign-in.** Email link, then optional TOTP. The session and the last
+  profile are saved in the Editor's `account.json`, so a later launch is
+  Ready from cache, offline included. Only a 401/410 from Core signs out;
+  network errors retry with backoff.
+- **Binding a Forge.** `ae account enroll` creates a machine key and a
+  code; a signed-in Editor claims the code; `ae account confirm` shows the
+  account and email and binds the key (Forge data dir `ast_account.json`),
+  then restarts a running Forge. A revoked machine re-enrolls with
+  `--replace` and a fresh key. The Editor drives all of this through the
+  installed `ae --json`, never by parsing text.
+- **Routes.** The enrolled Forge on this machine is reached directly over
+  mutual TLS, paired once with `ae forge pair --json` and saved in
+  `hosts.json`. Every other machine on the account is reached through the
+  Relay. Saved hosts without a proven binding stay hidden.
+- **Relay.** Forge holds one WebSocket to its Relay room
+  (`forge-http/src/relay.rs`). Each Editor channel runs `Noise_XX`; the
+  Editor's grant travels inside the encrypted confirm and Forge verifies it
+  against Core's JWKS itself, so the Relay only sees opaque bodies. Unary
+  calls are `TunnelRequest`/`TunnelResponse`; `/events` is a `SUBSCRIBE` on
+  its own channel. A failing channel is closed alone, never the socket.
+- **Config sync.** An enrolled Forge fetches the account's config bundle
+  (global prompt, MCP servers, skills) at startup and every 5 minutes,
+  checks the manifest bytes against the bundle hash, applies it through the
+  Hub and reports back. It replaces or removes only MCP servers an earlier
+  bundle placed (`ast_sync.json`); servers added on the machine are never
+  touched.
+- **Sign-out** drops every live host and route. `hosts.json`, the Forge
+  stores and enrollments stay on disk for the next sign-in.
+
 ## Editor
 
 One window. `Core` owns the paired hosts and the current `Screen`
@@ -194,7 +233,7 @@ work is cancelled by dropping its task, not fenced with generation counters.
 | Forge `<data>/engines/` | engine installs and homes |
 | Forge `<data>/extensions/skills/` | skills |
 | Forge `<data>/forge.lock` | one Forge per data dir |
-| Editor `<config>/Artisan/editor/` | `identity.json`, `hosts.json`, `settings.json` |
+| Editor `<config>/Artisan/editor/` | `identity.json`, `hosts.json`, `settings.json`, `account.json` |
 | Install root `~/.local/share/artisan` or `%LOCALAPPDATA%\Artisan` | `versions/`, `current`, `bin/ae`, `forge/` (data) |
 
 `ae forge import` copies a pre-reform Forge (threads, messages, images,
