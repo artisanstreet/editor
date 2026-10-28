@@ -1,988 +1,787 @@
-//! Account-only entry gate behavior: restore vs sign-in vs setup vs ready.
-//!
-//! Public-surface tests for the owned model (`editor-core`): fresh devices
-//! never auto-connect legacy pairings, startup restore never flashes the
-//! workspace, sign-in lands in setup with inventory hidden, only a verified
-//! live Relay route completes setup, restarts rebind the recorded machine
-//! through the account, and sign-out/switch/revocation lock everything with
-//! stale callbacks dropped. No wire snapshots: a lean local Core stub plus
-//! real localhost roundtrips.
+//! The account-only entry, end to end through `Core`: a stub Core over
+//! HTTP, a scripted `ae`, a scripted Relay, and a real Forge for the direct
+//! route.
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::future_not_send,
+    reason = "test fixtures: a failure fails the test; GPUI test futures are !Send"
+)]
 
+use std::collections::VecDeque;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use editor_core::hosts::HostsFile;
 use editor_core::{
-    Account, AccountPhase, AeOutcome, AeRunner, Core, EditorFiles, EntryGate, ForgeClient,
-    HostConfig, HostId, HostKind, RelayDialRequest, Screen,
+    Account, AccountPhase, Core, EditorFiles, EntryGate, ForgeClient, HostConfig, HostId, HostKind,
+    LocalForge, RelayDialRequest, RelayScript, Services,
 };
-use gpui::{AppContext as _, TestAppContext};
+use gpui::{AppContext as _, Entity, TestAppContext};
+use serde_json::{Value, json};
 
-const ACCOUNT_A: &str = "acct_aaaaaaaaaaaaaaaaaaaaaaaaaa";
-const ACCOUNT_B: &str = "acct_bbbbbbbbbbbbbbbbbbbbbbbbbb";
-const MACHINE_A: &str = "mch_11111111111111111111111111";
+const ACCOUNT: &str = "acct_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+const EMAIL: &str = "op@example.invalid";
+const LOCAL: &str = "mch_11111111111111111111111111";
+const REMOTE: &str = "mch_22222222222222222222222222";
+
+// -- stub Core ---------------------------------------------------------
+
+#[derive(Default)]
+struct Stub {
+    me: (u16, String),
+    statuses: VecDeque<(u16, String)>,
+    finalize_delay: Duration,
+    finalized: bool,
+    seen: Vec<String>,
+}
 
 struct StubCore {
-    _thread: std::thread::JoinHandle<()>,
-    pub base_url: String,
-    pub me_override: Arc<Mutex<Option<(u16, String)>>>,
+    base_url: String,
+    state: Arc<Mutex<Stub>>,
 }
 
 impl StubCore {
-    #[expect(
-        clippy::unwrap_used,
-        reason = "behavioral test fixture; a failure fails the test"
-    )]
-    fn new(account_id: &str) -> Self {
-        let account_id = account_id.to_owned();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let me_override: Arc<Mutex<Option<(u16, String)>>> = Arc::new(Mutex::new(None));
-        let overridden = Arc::clone(&me_override);
-        let thread = std::thread::spawn(move || {
-            let me_body = serde_json::json!({
-                "account_id": account_id,
-                "email": "op@example.invalid",
-                "display_name": "Op",
-                "totp_enrolled": false,
-                "machines": [
-                    {"id": MACHINE_A, "label": "server",
-                     "public_key": {"kty": "OKP", "crv": "Ed25519",
-                                  "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
-                     "created_at": "2026-10-26T00:00:00.000Z",
-                     "revoked_at": None::<String>, "last_seen_at": None::<String>}
-                ],
-                "provider_connections": [],
-                "latest_config_version": 3,
-            })
-            .to_string();
-            for stream in listener.incoming().take(200) {
-                let Ok(stream) = stream else { break };
-                drop(stream.set_read_timeout(Some(Duration::from_secs(10))));
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut head = String::new();
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).is_err()
-                        || line == "\r\n"
-                        || line == "\n"
-                        || line.is_empty()
-                    {
-                        break;
-                    }
-                    head.push_str(&line);
-                }
-                let mut parts = head.lines().next().unwrap_or_default().split_whitespace();
-                let method = parts.next().unwrap_or_default().to_owned();
-                let path = parts.next().unwrap_or_default().to_owned();
-                let content_length: usize = head
-                    .lines()
-                    .find_map(|line| {
-                        line.strip_prefix("Content-Length:")
-                            .or_else(|| line.strip_prefix("content-length:"))
-                            .map(|value| value.trim().parse().unwrap_or(0))
-                    })
-                    .unwrap_or(0);
-                let mut raw = vec![0_u8; content_length];
-                reader.read_exact(&mut raw).unwrap_or(());
-                let (status, headers, response_body) =
-                    respond(&method, &path, &me_body, &account_id, &overridden);
-                let mut response = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
-                    response_body.len()
-                );
-                for (name, value) in headers {
-                    response.push_str(&name);
-                    response.push_str(": ");
-                    response.push_str(&value);
-                    response.push_str("\r\n");
-                }
-                response.push_str("\r\n");
-                response.push_str(&response_body);
-                let mut stream = reader.into_inner();
-                if stream.write_all(response.as_bytes()).is_err() {
-                    break;
-                }
-                drop(stream.flush());
+    fn new(me: &Value) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let state = Arc::new(Mutex::new(Stub {
+            me: (200, me.to_string()),
+            ..Stub::default()
+        }));
+        let shared = Arc::clone(&state);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                serve(stream, &shared);
             }
         });
-        Self {
-            _thread: thread,
-            base_url: format!("http://{address}"),
-            me_override,
-        }
+        Self { base_url, state }
+    }
+
+    fn saw(&self, request: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .seen
+            .iter()
+            .any(|seen| seen == request)
     }
 }
 
-/// One stubbed Core answer. The `me` override is read outside the
-/// response match so no lock guard lives across the match.
-#[expect(clippy::unwrap_used, reason = "behavioral test fixture; a failure fails the test")]
-fn respond(
-    method: &str,
-    path: &str,
-    me_body: &str,
-    account_id: &str,
-    me_override: &Arc<Mutex<Option<(u16, String)>>>,
-) -> (u16, Vec<(String, String)>, String) {
-    if method == "GET" && path == "/v1/me" {
-        let overridden = me_override.lock().unwrap().clone();
-        if let Some((status, body)) = overridden {
-            return (status, vec![], body);
-        }
-        return (200, vec![], me_body.to_owned());
+fn serve(stream: TcpStream, state: &Mutex<Stub>) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() {
+        return;
     }
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0; length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let mut parts = request_line.split_whitespace();
+    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let (status, headers, reply) = respond(method, path, state);
+    let response = format!(
+        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{reply}",
+        reply.len()
+    );
+    let mut stream = reader.into_inner();
+    if stream.write_all(response.as_bytes()).is_ok() {
+        stream.flush().ok();
+    }
+}
+
+fn respond(method: &str, path: &str, state: &Mutex<Stub>) -> (u16, &'static str, String) {
+    let mut stub = state.lock().unwrap();
+    stub.seen.push(format!("{method} {path}"));
     match (method, path) {
+        ("GET", "/v1/me") => (stub.me.0, "", stub.me.1.clone()),
         ("POST", "/v1/auth/magic/request") => (
             200,
-            vec![],
-            serde_json::json!({
-                "request_id": "logreq_00000000000000000000000001",
-                "request_secret": "SECRET-ONE",
-                "expires_at": "2026-10-26T00:15:00.000Z",
-            })
-            .to_string(),
-        ),
-        ("POST", "/v1/auth/magic/status") => (
-            200,
-            vec![],
-            serde_json::json!({
-                "request_id": "logreq_00000000000000000000000001",
-                "status": "email_approved",
-                "totp_required": false,
-                "email": "op@example.invalid",
-                "expires_at": "2026-10-26T00:15:00.000Z",
-            })
-            .to_string(),
-        ),
-        ("POST", "/v1/auth/magic/finalize") => (
-            200,
-            vec![(
-                "Set-Cookie".to_owned(),
-                "ast_session=STUB-SESSION; Path=/; HttpOnly".to_owned(),
-            )],
-            serde_json::json!({
-                "session_id": "sess_00000000000000000000000001",
-                "account_id": account_id,
-                "expires_at": "2026-10-26T01:15:00.000Z",
-                "totp_verified": false,
-            })
-            .to_string(),
-        ),
-        ("POST", "/v1/grants/issue") => (
-            200,
-            vec![],
-            serde_json::json!({
-                "token": "grant.jwt.stub",
-                "expires_at": "2026-10-26T00:05:00.000Z",
-            })
-            .to_string(),
-        ),
-        ("POST", path)
-            if path == "/v1/sessions/current/revoke" || path == "/v1/sessions/revoke-all" =>
-        {
-            (
-                200,
-                vec![],
-                serde_json::json!({"revoked": true}).to_string(),
-            )
-        }
-        _ => (
-            404,
-            vec![],
-            serde_json::json!({"error": {"code": "not_found", "message": "stub", "request_id": "req-test"}})
+            "",
+            json!({"request_id": "logreq_1", "request_secret": "SECRET", "expires_at": "2026-10-28T01:00:00.000Z"})
                 .to_string(),
         ),
+        ("POST", "/v1/auth/magic/status") => {
+            let (status, body) = stub.statuses.pop_front().unwrap_or_else(|| {
+                (
+                    200,
+                    json!({"request_id": "logreq_1", "status": "email_approved", "totp_required": false,
+                           "email": EMAIL, "expires_at": "2026-10-28T01:00:00.000Z"})
+                    .to_string(),
+                )
+            });
+            (status, "", body)
+        }
+        ("POST", "/v1/auth/magic/finalize") => {
+            let delay = stub.finalize_delay;
+            drop(stub);
+            std::thread::sleep(delay);
+            state.lock().unwrap().finalized = true;
+            (
+                200,
+                "Set-Cookie: ast_session=SESSION; Path=/; HttpOnly\r\n",
+                json!({"session_id": "sess_1", "account_id": ACCOUNT,
+                       "expires_at": "2026-10-29T00:00:00.000Z", "totp_verified": false})
+                .to_string(),
+            )
+        }
+        ("POST", "/v1/machines/enrollments/claim") => {
+            (200, "", json!({"enrollment_id": "enr_1"}).to_string())
+        }
+        ("POST", "/v1/grants/issue") => (
+            200,
+            "",
+            json!({"token": "grant.jwt", "expires_at": "2026-10-28T00:05:00.000Z"}).to_string(),
+        ),
+        ("POST", "/v1/sessions/current/revoke") => (200, "", json!({"revoked": true}).to_string()),
+        _ => (404, "", core_error("not_found")),
     }
 }
 
-#[expect(clippy::panic, reason = "behavioral test fixture; a failure fails the test")]
-fn wait_for<T>(
-    cx: &TestAppContext,
+fn core_error(code: &str) -> String {
+    json!({"error": {"code": code, "message": "stub", "request_id": "req_1"}}).to_string()
+}
+
+fn machine(id: &str, revoked: bool) -> Value {
+    json!({
+        "id": id,
+        "label": id,
+        "public_key": {"kty": "OKP", "crv": "Ed25519", "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+        "created_at": "2026-10-01T00:00:00.000Z",
+        "revoked_at": revoked.then_some("2026-10-02T00:00:00.000Z"),
+        "last_seen_at": null,
+    })
+}
+
+fn profile(machines: &[Value]) -> Value {
+    json!({
+        "account_id": ACCOUNT,
+        "email": EMAIL,
+        "display_name": "Op",
+        "totp_enrolled": false,
+        "machines": machines,
+        "latest_config_version": null,
+    })
+}
+
+// -- scripted `ae` and a real Forge -------------------------------------
+
+type PairScript = Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync>;
+
+const UNENROLLED: &str = r#"{"enrolled":false,"status":"none"}"#;
+
+fn claimed() -> String {
+    json!({"enrolled": false, "status": "claimed", "account_id": ACCOUNT, "email": EMAIL})
+        .to_string()
+}
+
+fn enrolled(machine_id: &str) -> String {
+    json!({"enrolled": true, "machine_id": machine_id, "account_id": ACCOUNT}).to_string()
+}
+
+#[derive(Clone)]
+struct ScriptedAe {
+    status: Arc<Mutex<String>>,
+    calls: Arc<Mutex<Vec<String>>>,
+    pair: Option<PairScript>,
+}
+
+impl ScriptedAe {
+    fn new(status: &str, pair: Option<PairScript>) -> Self {
+        Self {
+            status: Arc::new(Mutex::new(status.to_owned())),
+            calls: Arc::default(),
+            pair,
+        }
+    }
+
+    fn script(&self) -> editor_core::AeScript {
+        let ae = self.clone();
+        Arc::new(move |args: &[&str]| {
+            ae.calls.lock().unwrap().push(args.join(" "));
+            match args {
+                ["pair", "--json"] => ae
+                    .pair
+                    .as_ref()
+                    .map_or_else(|| Err(anyhow::anyhow!("no Forge here")), |pair| pair()),
+                [.., "status", "--json"] => Ok(ae.status.lock().unwrap().clone()),
+                [.., "enroll", "--json"] | [.., "enroll", "--json", "--replace"] => {
+                    *ae.status.lock().unwrap() = claimed();
+                    Ok(r#"{"code":"ABCD-2345"}"#.to_owned())
+                }
+                [.., "confirm", "--yes", "--account-id", _] => {
+                    *ae.status.lock().unwrap() = enrolled(LOCAL);
+                    Ok("Enrolled.".to_owned())
+                }
+                _ => anyhow::bail!("unexpected `ae {}`", args.join(" ")),
+            }
+        })
+    }
+
+    fn called(&self, command: &str) -> bool {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.contains(command))
+    }
+}
+
+struct Forge {
+    runtime: tokio::runtime::Runtime,
+    store: forge_store::Store,
+    address: String,
+    _data: tempfile::TempDir,
+}
+
+impl Forge {
+    fn start() -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let server = runtime
+            .block_on(forge_http::start(forge_http::ServeConfig {
+                data_dir: data.path().to_owned(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+            }))
+            .unwrap();
+        let address = server.local_addr().unwrap().to_string();
+        let store = server.store().clone();
+        runtime.spawn(async move { server.run().await.ok() });
+        Self {
+            runtime,
+            store,
+            address,
+            _data: data,
+        }
+    }
+
+    /// What `ae pair --json` prints on this machine.
+    fn pair_script(&self) -> PairScript {
+        let (handle, store, address) = (
+            self.runtime.handle().clone(),
+            self.store.clone(),
+            self.address.clone(),
+        );
+        Arc::new(move || {
+            let invite = handle.block_on(forge_http::invite(&store))?;
+            Ok(json!({"code": invite.code, "forge_certificate": invite.forge_certificate, "address": address})
+                .to_string())
+        })
+    }
+
+    /// A pairing saved earlier, as the direct route leaves it in `hosts.json`.
+    fn saved_pairing(&self, files: &EditorFiles, id: &str) -> HostConfig {
+        let identity = files.identity().unwrap();
+        let invite = self
+            .runtime
+            .block_on(forge_http::invite(&self.store))
+            .unwrap();
+        let fingerprint = artisan_api::tls::fingerprint_of(&invite.forge_certificate).unwrap();
+        let config = self
+            .runtime
+            .block_on(editor_core::hosts::pair(
+                &self.address,
+                &invite.code,
+                &fingerprint,
+                &identity,
+                "test",
+                id.to_owned(),
+                HostKind::Local,
+            ))
+            .unwrap();
+        HostConfig {
+            id: HostId(id.to_owned()),
+            ..config
+        }
+    }
+}
+
+// -- this device's files ------------------------------------------------
+
+fn save_session(dir: &Path, base_url: &str, profile: Option<&Value>) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut file = json!({"base_url": base_url, "session_token": "SESSION"});
+    if let Some(profile) = profile {
+        file["profile"] = profile.clone();
+    }
+    std::fs::write(dir.join("account.json"), file.to_string()).unwrap();
+}
+
+fn save_onboarding(dir: &Path, base_url: &str, machine_id: &str) {
+    use base64::Engine as _;
+    let origin = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(base_url);
+    let accounts = dir.join("accounts");
+    std::fs::create_dir_all(&accounts).unwrap();
+    std::fs::write(
+        accounts.join(format!("{origin}-{ACCOUNT}.json")),
+        json!({"account_id": ACCOUNT, "base_url": base_url, "machine_id": machine_id}).to_string(),
+    )
+    .unwrap();
+}
+
+fn save_hosts(dir: &Path, hosts: Vec<HostConfig>) {
+    EditorFiles {
+        dir: dir.to_owned(),
+    }
+    .save_hosts(&HostsFile { hosts, last: None })
+    .unwrap();
+}
+
+fn saved_session(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("account.json"))
+        .unwrap_or_default()
+        .contains("session_token")
+}
+
+// -- driving the Editor -------------------------------------------------
+
+fn open_core(
+    cx: &mut TestAppContext,
+    dir: &Path,
+    core_url: &str,
+    ae: &ScriptedAe,
+    relay: Option<RelayScript>,
+) -> Entity<Core> {
+    cx.executor().allow_parking();
+    let services = Services::scripted(core_url, ae.script(), relay);
+    let files = EditorFiles {
+        dir: dir.to_owned(),
+    };
+    cx.new(|cx| Core::with_services(files, services, cx).unwrap())
+}
+
+/// Lets the Editor's tasks and the real network make progress until
+/// `check` holds.
+async fn wait_for<T>(
+    cx: &mut TestAppContext,
     what: &str,
-    check: impl Fn(&TestAppContext) -> Option<T>,
+    mut check: impl FnMut(&mut TestAppContext) -> Option<T>,
 ) -> T {
-    for _ in 0..400 {
+    for _ in 0..500 {
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         if let Some(value) = check(cx) {
             return value;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        cx.executor().timer(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for {what}");
 }
 
-/// Drives a full magic-link sign-in against the stub; returns the account id.
-fn sign_in(
-    cx: &mut TestAppContext,
-    core: &gpui::Entity<Core>,
-    email: &str,
-) -> (gpui::Entity<Account>, String) {
-    let account = core.read_with(cx, |core, _| core.account().clone());
-    account.update(cx, |account, cx| {
-        account.request_link(email.to_owned(), cx);
-    });
+fn account(cx: &TestAppContext, core: &Entity<Core>) -> Entity<Account> {
+    core.read_with(cx, |core, _| core.account().clone())
+}
+
+fn gate(cx: &TestAppContext, core: &Entity<Core>) -> EntryGate {
+    core.read_with(cx, |core, cx| core.entry_gate(cx))
+}
+
+fn ready() -> EntryGate {
+    EntryGate::Ready {
+        account_id: ACCOUNT.to_owned(),
+    }
+}
+
+fn local_forge(cx: &TestAppContext, core: &Entity<Core>) -> LocalForge {
+    account(cx, core).read_with(cx, |account, _| account.local_forge())
+}
+
+/// `(id, kind, through the Relay)` for each host the workspace may show.
+fn visible_hosts(cx: &TestAppContext, core: &Entity<Core>) -> Vec<(String, HostKind, bool)> {
+    core.read_with(cx, |core, cx| {
+        core.hosts()
+            .map(|(config, host)| {
+                (
+                    config.id.0.clone(),
+                    config.kind.clone(),
+                    host.read(cx).client.is_relay(),
+                )
+            })
+            .collect()
+    })
+}
+
+async fn wait_approved(cx: &mut TestAppContext, core: &Entity<Core>) {
+    let account = account(cx, core);
+    account.update(cx, |account, cx| account.request_link(EMAIL, cx));
     wait_for(cx, "the email approval", |cx| {
-        core.read_with(cx, |core, _| core.account().clone())
+        account
             .read_with(cx, |account, _| {
-                matches!(account.phase(), AccountPhase::EmailApproved { .. }).then_some(())
+                matches!(account.phase(), AccountPhase::EmailApproved { .. })
             })
-    });
-    account.update(cx, |account, cx| {
-        account.finish_sign_in(None, None, cx);
-    });
-    let account_id = wait_for(cx, "the sign-in to complete", |cx| {
-        core.read_with(cx, |core, _| core.account().clone())
-            .read_with(cx, |account, _| {
-                account.profile().map(|profile| profile.account_id.clone())
-            })
-    });
-    (account, account_id)
-}
-
-/// A dialer that returns a plain (non-Relay) client: insertable through the
-/// validated path, but never a live Relay route, so setup stays incomplete.
-fn insertable_dialer(
-    executor: gpui::BackgroundExecutor,
-    identity: artisan_api::tls::Identity,
-    machine: String,
-    account: String,
-) -> editor_core::RelayDialerFactory {
-    use std::sync::Arc as _Arc;
-    _Arc::new(move |_session: editor_core::SessionToken, _url: String| {
-        let executor = executor.clone();
-        let identity = identity.clone();
-        let (machine, account) = (machine.clone(), account.clone());
-        Some(_Arc::new(move |_req: RelayDialRequest| {
-            let identity = identity.clone();
-            let (machine, account) = (machine.clone(), account.clone());
-            executor.spawn(async move {
-                let client =
-                    ForgeClient::new("127.0.0.1:9", &"00".repeat(32), &identity)?;
-                let config = HostConfig {
-                    id: HostId(machine.clone()),
-                    name: "server".to_owned(),
-                    address: String::new(),
-                    fingerprint: String::new(),
-                    kind: HostKind::Account { account, machine },
-                };
-                Ok((config, client))
-            })
-        }) as editor_core::RelayDialer)
+            .then_some(())
     })
+    .await;
 }
 
-/// Writes a Relay onboarding record the way a proven setup persists it:
-/// `accounts/{base64url(base)}-{account}.json` under the Editor data dir.
-#[expect(clippy::unwrap_used, reason = "behavioral test fixture; a failure fails the test")]
-fn write_relay_record(data_dir: &std::path::Path, base_url: &str, account_id: &str) {
-    use base64::Engine as _;
-    let scope = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(base_url.as_bytes());
-    let dir = data_dir.join("accounts");
-    std::fs::create_dir_all(&dir).unwrap();
-    let record = serde_json::json!({
-        "account_id": account_id,
-        "base_url": base_url,
-        "machine_id": MACHINE_A,
-        "completed_at": "1",
-    });
-    std::fs::write(
-        dir.join(format!("{scope}-{account_id}.json")),
-        serde_json::to_vec_pretty(&record).unwrap(),
-    )
-    .unwrap();
-}
-
-fn gate_of(cx: &TestAppContext, core: &gpui::Entity<Core>) -> EntryGate {
-    core.read_with(cx, Core::entry_gate)
-}
-
-/// Canned `ae` runner that fails closed: installed in every fixture before
-/// any async work runs, so no test ever shells out to a real `ae`.
-fn failing_ae_runner() -> AeRunner {
-    std::sync::Arc::new(|_| AeOutcome {
-        success: false,
-        stdout: String::new(),
-        stderr: "test runner: no ae subprocess".to_owned(),
+async fn sign_in(cx: &mut TestAppContext, core: &Entity<Core>) {
+    wait_approved(cx, core).await;
+    let account = account(cx, core);
+    account.update(cx, |account, cx| account.finish_sign_in(None, None, cx));
+    wait_for(cx, "the sign-in", |cx| {
+        account
+            .read_with(cx, |account, _| account.profile().is_some())
+            .then_some(())
     })
+    .await;
+}
+
+// -- scenarios ----------------------------------------------------------
+
+#[gpui::test]
+async fn sign_in_then_setup_connects_this_forge_directly(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = StubCore::new(&profile(&[machine(LOCAL, false)]));
+    let forge = Forge::start();
+    let ae = ScriptedAe::new(UNENROLLED, Some(forge.pair_script()));
+    let core = open_core(cx, dir.path(), &stub.base_url, &ae, None);
+    assert_eq!(
+        gate(cx, &core),
+        EntryGate::SignedOut,
+        "a fresh device starts signed out"
+    );
+
+    sign_in(cx, &core).await;
+    assert!(
+        matches!(gate(cx, &core), EntryGate::NeedsSetup { .. }),
+        "signed in without setup"
+    );
+
+    let account = account(cx, &core);
+    account.update(cx, Account::enroll_this_forge);
+    wait_for(cx, "the claim", |cx| {
+        matches!(local_forge(cx, &core), LocalForge::Claimed { .. }).then_some(())
+    })
+    .await;
+    assert!(
+        stub.saw("POST /v1/machines/enrollments/claim"),
+        "the code went to Core"
+    );
+
+    account.update(cx, Account::confirm_forge);
+    wait_for(cx, "the direct route", |cx| {
+        core.read_with(cx, |core, cx| core.machine_live(LOCAL, cx))
+            .then_some(())
+    })
+    .await;
+    assert!(
+        visible_hosts(cx, &core).is_empty(),
+        "nothing shows before setup finishes"
+    );
+
+    core.update(cx, |core, cx| core.complete_setup(LOCAL.to_owned(), cx))
+        .unwrap();
+    assert_eq!(gate(cx, &core), ready(), "setup opens the gate");
+    assert_eq!(
+        visible_hosts(cx, &core),
+        vec![(LOCAL.to_owned(), HostKind::Local, false)],
+        "this machine's Forge is reached directly, not through the Relay"
+    );
+    assert!(
+        EditorFiles {
+            dir: dir.path().to_owned()
+        }
+        .hosts()
+        .unwrap()
+        .hosts
+        .iter()
+        .any(|config| config.id.0 == LOCAL),
+        "the direct pairing is saved for offline starts"
+    );
 }
 
 #[gpui::test]
-fn fresh_device_signed_out_never_autoconnects_legacy(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
+async fn resume_online_reaches_ready_and_pairs_the_enrolled_forge(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
+    let stub = StubCore::new(&profile(&[machine(LOCAL, false)]));
+    save_session(dir.path(), &stub.base_url, None);
+    save_onboarding(dir.path(), &stub.base_url, LOCAL);
+    let forge = Forge::start();
+    let ae = ScriptedAe::new(&enrolled(LOCAL), Some(forge.pair_script()));
+    let core = open_core(cx, dir.path(), &stub.base_url, &ae, None);
+    assert_eq!(
+        gate(cx, &core),
+        EntryGate::Restoring,
+        "no workspace flash before Core answers"
+    );
+
+    wait_for(cx, "the direct route", |cx| {
+        visible_hosts(cx, &core).first().cloned()
+    })
+    .await;
+    assert_eq!(
+        gate(cx, &core),
+        ready(),
+        "a known session with setup done opens"
+    );
+    assert!(
+        ae.called("pair --json"),
+        "the Editor paired with its Forge through `ae`"
+    );
+}
+
+#[gpui::test]
+async fn resume_offline_opens_the_direct_forge_from_the_saved_profile(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let offline = "http://127.0.0.1:1";
+    let forge = Forge::start();
     let files = EditorFiles {
-        dir: dir.path().join("editor"),
+        dir: dir.path().to_owned(),
+    };
+    save_hosts(dir.path(), vec![forge.saved_pairing(&files, LOCAL)]);
+    save_session(
+        dir.path(),
+        offline,
+        Some(&profile(&[machine(LOCAL, false)])),
+    );
+    save_onboarding(dir.path(), offline, LOCAL);
+    let ae = ScriptedAe::new(&enrolled(LOCAL), None);
+    let core = open_core(cx, dir.path(), offline, &ae, None);
+    assert_eq!(
+        gate(cx, &core),
+        ready(),
+        "the saved profile opens the gate without Core"
+    );
+
+    wait_for(cx, "the direct route", |cx| {
+        core.read_with(cx, |core, cx| core.machine_live(LOCAL, cx))
+            .then_some(())
+    })
+    .await;
+    assert_eq!(
+        gate(cx, &core),
+        ready(),
+        "an unreachable Core never signs out"
+    );
+    assert!(
+        saved_session(dir.path()),
+        "the session stays saved for when Core is back"
+    );
+}
+
+#[gpui::test]
+async fn a_session_core_rejects_signs_out(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = StubCore::new(&profile(&[machine(REMOTE, false)]));
+    stub.state.lock().unwrap().me = (401, core_error("unauthorized"));
+    save_session(
+        dir.path(),
+        &stub.base_url,
+        Some(&profile(&[machine(REMOTE, false)])),
+    );
+    save_onboarding(dir.path(), &stub.base_url, REMOTE);
+    let ae = ScriptedAe::new(UNENROLLED, None);
+    let core = open_core(cx, dir.path(), &stub.base_url, &ae, None);
+
+    wait_for(cx, "the sign-out", |cx| {
+        (gate(cx, &core) == EntryGate::SignedOut).then_some(())
+    })
+    .await;
+    assert!(
+        visible_hosts(cx, &core).is_empty(),
+        "no host outlives the session"
+    );
+    assert!(!saved_session(dir.path()), "the dead session is forgotten");
+}
+
+#[gpui::test]
+async fn sign_out_hides_every_host_and_signing_in_again_reconnects(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = StubCore::new(&profile(&[machine(LOCAL, false)]));
+    let forge = Forge::start();
+    let files = EditorFiles {
+        dir: dir.path().to_owned(),
+    };
+    save_hosts(dir.path(), vec![forge.saved_pairing(&files, LOCAL)]);
+    save_session(dir.path(), &stub.base_url, None);
+    save_onboarding(dir.path(), &stub.base_url, LOCAL);
+    let ae = ScriptedAe::new(&enrolled(LOCAL), None);
+    let core = open_core(cx, dir.path(), &stub.base_url, &ae, None);
+    wait_for(cx, "the direct route", |cx| {
+        visible_hosts(cx, &core).first().cloned()
+    })
+    .await;
+
+    account(cx, &core).update(cx, Account::sign_out);
+    assert_eq!(gate(cx, &core), EntryGate::SignedOut, "signed out");
+    assert!(
+        visible_hosts(cx, &core).is_empty(),
+        "sign-out hides every host"
+    );
+    assert!(
+        !core.read_with(cx, |core, cx| core.machine_live(LOCAL, cx)),
+        "the route is closed, not just hidden"
+    );
+    assert_eq!(files.hosts().unwrap().hosts.len(), 1, "hosts.json is kept");
+
+    sign_in(cx, &core).await;
+    wait_for(cx, "the route to reopen", |cx| {
+        visible_hosts(cx, &core).first().cloned()
+    })
+    .await;
+    assert_eq!(gate(cx, &core), ready(), "setup done once stays done");
+    assert!(!ae.called("pair --json"), "the saved pairing is reused");
+}
+
+#[gpui::test]
+async fn another_machine_of_the_account_is_reached_through_the_relay(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = StubCore::new(&profile(&[machine(REMOTE, false)]));
+    let files = EditorFiles {
+        dir: dir.path().to_owned(),
     };
     let identity = files.identity().unwrap();
-    let pin = artisan_api::tls::fingerprint(identity.certificate_der().unwrap().as_ref());
-    // A legacy OS-user pairing on disk, from before account-only.
-    let legacy = HostConfig {
-        id: HostId("legacy-1".to_owned()),
-        name: "Legacy".to_owned(),
-        address: "127.0.0.1:9".to_owned(),
-        fingerprint: pin,
-        kind: HostKind::Local,
-    };
-    files
-        .save_hosts(&editor_core::hosts::HostsFile {
-            hosts: vec![legacy.clone()],
-            last: Some(legacy.id.clone()),
+    save_hosts(
+        dir.path(),
+        vec![HostConfig {
+            id: HostId("legacy".to_owned()),
+            name: "Legacy".to_owned(),
+            address: "127.0.0.1:9".to_owned(),
+            fingerprint: "00".repeat(32),
+            kind: HostKind::Local,
+        }],
+    );
+    save_session(dir.path(), &stub.base_url, None);
+    save_onboarding(dir.path(), &stub.base_url, REMOTE);
+    let dialed = Arc::new(Mutex::new(Vec::new()));
+    let relay: RelayScript = {
+        let dialed = Arc::clone(&dialed);
+        Arc::new(move |request: &RelayDialRequest| {
+            dialed.lock().unwrap().push(request.machine_id.clone());
+            ForgeClient::new("127.0.0.1:9", &"00".repeat(32), &identity)
         })
-        .unwrap();
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
-    assert!(matches!(gate_of(cx, &core), EntryGate::SignedOut));
-    assert!(core.read_with(cx, |core, _| core.hosts().next().is_none()));
-    assert!(core.read_with(cx, |core, _| core.host(&legacy.id).is_none()));
-    assert!(core.read_with(cx, |core, _| core.active_host().is_none()));
-    // A deeplink while locked defers: Home stays, nothing loads.
-    core.update(cx, |core, cx| {
-        core.navigate(
-            Screen::Thread {
-                host: legacy.id.clone(),
-                thread: artisan_api::ThreadId("t".to_owned()),
-            },
-            cx,
-        );
-    });
-    assert_eq!(core.read_with(cx, |core, _| core.screen().clone()), Screen::Home);
-    // The pairing survives on disk, disconnected, awaiting verified adoption.
-    assert!(dir.path().join("editor").join("hosts.json").exists());
-}
+    };
+    let ae = ScriptedAe::new(UNENROLLED, None);
+    let core = open_core(cx, dir.path(), &stub.base_url, &ae, Some(relay));
 
-#[gpui::test]
-fn restoring_holds_without_flash_on_transport(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let dir = tempfile::tempdir().unwrap();
-    // A saved session whose Core is unreachable (closed port).
-    std::fs::create_dir_all(dir.path().join("editor")).unwrap();
-    std::fs::write(
-        dir.path().join("editor").join("account.json"),
-        serde_json::json!({
-            "base_url": "http://127.0.0.1:1",
-            "session_token": "STALE-TOKEN",
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let files = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
-    let account = core.read_with(cx, |core, _| core.account().clone());
-    account.update(cx, |account, _| {
-        account.set_ae_runner(failing_ae_runner());
-    });
-    // Restoring, not SignedOut: no workspace flash, no host connects.
-    assert!(matches!(gate_of(cx, &core), EntryGate::Restoring));
-    cx.run_until_parked();
-    std::thread::sleep(Duration::from_millis(100));
-    cx.run_until_parked();
-    assert!(matches!(gate_of(cx, &core), EntryGate::Restoring));
-    assert!(core.read_with(cx, |core, _| core.hosts().next().is_none()));
-    // The saved session is retained for retry, not dropped.
-    let stored: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("editor").join("account.json")).unwrap(),
-    )
-    .unwrap();
+    let hosts = wait_for(cx, "the Relay host", |cx| {
+        let hosts = visible_hosts(cx, &core);
+        (!hosts.is_empty()).then_some(hosts)
+    })
+    .await;
     assert_eq!(
-        stored.get("session_token").and_then(|v| v.as_str()),
-        Some("STALE-TOKEN")
-    );
-}
-
-#[gpui::test]
-fn login_reaches_needs_setup_with_hidden_inventory(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let stub = StubCore::new(ACCOUNT_A);
-    let dir = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let base_url = stub.base_url;
-    let core = cx.new(|cx| {
-        let core = Core::new(files, cx).unwrap();
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_url),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-        core
-    });
-    let identity = core.read_with(cx, |core, _| core.identity.clone().unwrap());
-    core.update(cx, |core, cx| {
-        core.set_relay_dialer_factory(
-            insertable_dialer(cx.background_executor().clone(), identity, MACHINE_A.to_owned(), ACCOUNT_A.to_owned()),
-            cx,
-        );
-    });
-    let (_account, account_id) = sign_in(cx, &core, "op@example.invalid");
-    assert_eq!(account_id, ACCOUNT_A);
-    // Authenticated but not onboarded: setup, with public inventory hidden.
-    match gate_of(cx, &core) {
-        EntryGate::NeedsSetup { account_id, .. } => assert_eq!(account_id, ACCOUNT_A),
-        gate @ (EntryGate::Restoring | EntryGate::SignedOut | EntryGate::Ready { .. }) => {
-            panic!("expected NeedsSetup, got {gate:?}")
-        }
-    }
-    // The real stub connect path inserts (grant + dial + guarded insertion,
-    // no borrow panic) while staying publicly hidden until Ready.
-    let account = core.read_with(cx, |core, _| core.account().clone());
-    account.update(cx, |account, cx| {
-        account.connect_machine(MACHINE_A.to_owned(), &core, cx);
-    });
-    wait_for(cx, "the route to open", |cx| {
-        core.read_with(cx, |core, _| core.account().clone())
-            .read_with(cx, |account, _| {
-                account.notice().filter(|notice| notice.contains("is open")).map(str::to_owned)
-            })
-    });
-    assert!(core.read_with(cx, |core, _| core.hosts().next().is_none()));
-    assert!(
-        core.read_with(cx, |core, cx| core
-            .require_host(&HostId(MACHINE_A.to_owned()), cx)
-            .is_none())
-    );
-    assert!(
-        !core.read_with(cx, |core, cx| core.connected_account_host(MACHINE_A, cx)),
-        "a non-Relay placeholder is not a live route"
-    );
-    // Workspace navigation while locked defers instead of loading.
-    core.update(cx, |core, cx| {
-        core.navigate(
-            Screen::NewThread {
-                host: HostId(MACHINE_A.to_owned()),
-                project: None,
+        hosts,
+        vec![(
+            REMOTE.to_owned(),
+            HostKind::Account {
+                account: ACCOUNT.to_owned(),
+                machine: REMOTE.to_owned()
             },
-            cx,
-        );
-    });
-    assert_eq!(core.read_with(cx, |core, _| core.screen().clone()), Screen::Home);
+            false
+        )],
+        "only the account's machine shows; the legacy pairing stays hidden"
+    );
+    assert_eq!(
+        *dialed.lock().unwrap(),
+        vec![REMOTE.to_owned()],
+        "dialed through the Relay"
+    );
+    assert!(
+        stub.saw("POST /v1/grants/issue"),
+        "with a fresh grant from Core"
+    );
 }
 
 #[gpui::test]
-fn setup_rejects_placeholders_without_live_relay(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let stub = StubCore::new(ACCOUNT_A);
+async fn a_removed_local_forge_can_pair_again(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let base_url = stub.base_url;
-    let core = cx.new(|cx| {
-        let core = Core::new(files, cx).unwrap();
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_url),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-        core
-    });
-    let identity = core.read_with(cx, |core, _| core.identity.clone().unwrap());
-    core.update(cx, |core, cx| {
-        core.set_relay_dialer_factory(
-            insertable_dialer(cx.background_executor().clone(), identity, MACHINE_A.to_owned(), ACCOUNT_A.to_owned()),
-            cx,
-        );
-    });
-    sign_in(cx, &core, "op@example.invalid");
-    // No route at all: honest rejection, no persisted binding.
-    let account = core.read_with(cx, |core, _| core.account().clone());
-    let err = core
-        .update(cx, |core, cx| {
-            core.complete_setup(MACHINE_A.to_owned(), cx)
-        })
-        .unwrap_err();
-    assert!(format!("{err:#}").contains("Relay"), "unexpected: {err:#}");
-    // A connected-but-not-Relay placeholder is still insufficient.
-    account.update(cx, |account, cx| {
-        account.connect_machine(MACHINE_A.to_owned(), &core, cx);
-    });
-    wait_for(cx, "the route to open", |cx| {
-        core.read_with(cx, |core, _| core.account().clone())
-            .read_with(cx, |account, _| {
-                account.notice().filter(|notice| notice.contains("is open")).map(str::to_owned)
+    let stub = StubCore::new(&profile(&[machine(LOCAL, true)]));
+    save_session(dir.path(), &stub.base_url, None);
+    let ae = ScriptedAe::new(&enrolled(LOCAL), None);
+    let core = open_core(cx, dir.path(), &stub.base_url, &ae, None);
+
+    wait_for(cx, "the binding", |cx| {
+        (local_forge(cx, &core)
+            == LocalForge::Revoked {
+                machine_id: LOCAL.to_owned(),
             })
-    });
-    let err = core
-        .update(cx, |core, cx| {
-            core.complete_setup(MACHINE_A.to_owned(), cx)
-        })
-        .unwrap_err();
-    assert!(format!("{err:#}").contains("Relay"), "unexpected: {err:#}");
-    assert!(matches!(gate_of(cx, &core), EntryGate::NeedsSetup { .. }));
-}
+        .then_some(())
+    })
+    .await;
+    assert!(
+        !core.read_with(cx, |core, cx| core.machine_live(LOCAL, cx)),
+        "a removed Forge is never dialed"
+    );
 
-/// Unverified direct pairing is rejected in every gate state: production
-/// `add_host` never persists or connects a legacy config, and the reply
-/// guides to account enrollment. No pairing network runs.
-#[gpui::test]
-fn add_host_rejects_unverified_direct_in_needssetup(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let stub = StubCore::new(ACCOUNT_A);
-    let dir = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let base_url = stub.base_url;
-    let core = cx.new(|cx| {
-        let core = Core::new(files, cx).unwrap();
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_url),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-        core
-    });
-    sign_in(cx, &core, "op@example.invalid");
-    assert!(matches!(gate_of(cx, &core), EntryGate::NeedsSetup { .. }));
-    let err = core
-        .update(cx, |core, cx| {
-            core.add_host(
-                HostConfig {
-                    id: HostId("legacy-b".to_owned()),
-                    name: "Legacy B".to_owned(),
-                    address: "127.0.0.1:9".to_owned(),
-                    fingerprint: "00".repeat(32),
-                    kind: HostKind::Local,
-                },
-                cx,
-            )
-        })
-        .unwrap_err();
+    account(cx, &core).update(cx, Account::enroll_this_forge);
+    wait_for(cx, "the new claim", |cx| {
+        matches!(local_forge(cx, &core), LocalForge::Claimed { .. }).then_some(())
+    })
+    .await;
     assert!(
-        format!("{err:#}").contains("enroll this Forge into your account"),
-        "unexpected: {err:#}"
-    );
-    assert!(!dir.path().join("editor").join("hosts.json").exists());
-    assert!(core.read_with(cx, |core, _| core.hosts().next().is_none()));
-}
-
-/// A proven Relay record restores to Ready on restart and auto-reconnects
-/// the recorded machine through the account; legacy pairings stay dark.
-#[gpui::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one restart scenario: record, resume, auto-connect, lock"
-)]
-fn restart_with_bound_record_ready_and_autoconnects(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let stub = StubCore::new(ACCOUNT_A);
-    let dir = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let base_url = stub.base_url;
-    let core = cx.new(|cx| {
-        let core = Core::new(files, cx).unwrap();
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_url.clone()),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-        core
-    });
-    let identity = core.read_with(cx, |core, _| core.identity.clone().unwrap());
-    core.update(cx, |core, cx| {
-        core.set_relay_dialer_factory(
-            insertable_dialer(cx.background_executor().clone(), identity.clone(), MACHINE_A.to_owned(), ACCOUNT_A.to_owned()),
-            cx,
-        );
-    });
-    sign_in(cx, &core, "op@example.invalid");
-    // A legacy pairing on disk must never light up by itself.
-    // (Written directly: production `add_host` rejects unverified direct
-    // configs, so tests seed the file instead of the bypass.)
-    std::fs::write(
-        dir.path().join("editor").join("hosts.json"),
-        serde_json::json!({
-            "hosts": [{
-                "id": "old-legacy",
-                "name": "Old",
-                "address": "127.0.0.1:9",
-                "fingerprint": "00".repeat(32),
-                "kind": {"type": "local"},
-            }],
-            "last": "old-legacy",
-        })
-        .to_string(),
-    )
-    .unwrap();
-    // Simulate the proven setup having persisted its record earlier.
-    write_relay_record(&dir.path().join("editor"), &base_url, ACCOUNT_A);
-    // Restart: same device dir, same session file.
-    let files2 = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let base_url2 = base_url.clone();
-    let core2 = cx.new(|cx| {
-        let core = Core::new(files2, cx).unwrap();
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_url2),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-        core
-    });
-    let identity2 = core2.read_with(cx, |core, _| core.identity.clone().unwrap());
-    core2.update(cx, |core, cx| {
-        core.set_relay_dialer_factory(
-            insertable_dialer(cx.background_executor().clone(), identity2, MACHINE_A.to_owned(), ACCOUNT_A.to_owned()),
-            cx,
-        );
-    });
-    // Resume validates, the bound record yields Ready, and the recorded
-    // machine auto-reconnects through the account after borrow release.
-    wait_for(cx, "the restart to reach Ready", |cx| {
-        matches!(gate_of(cx, &core2), EntryGate::Ready { .. }).then_some(())
-    });
-    wait_for(cx, "the recorded route to reconnect", |cx| {
-        core2
-            .read_with(cx, |core, cx| {
-                core.require_host(&HostId(MACHINE_A.to_owned()), cx)
-            })
-            .map(|_| ())
-    });
-    // Public inventory shows the Relay route and it is navigable; the
-    // legacy pairing stays disconnected and unlisted.
-    assert!(
-        core2.read_with(cx, |core, _| core
-            .hosts()
-            .any(|(config, _)| config.id.0 == MACHINE_A))
-    );
-    assert!(core2.read_with(cx, |core, _| core.active_host().is_some()));
-    core2.update(cx, |core, cx| {
-        core.navigate(
-            Screen::NewThread {
-                host: HostId(MACHINE_A.to_owned()),
-                project: None,
-            },
-            cx,
-        );
-    });
-    assert!(
-        core2
-            .read_with(cx, |core, _| core.screen().clone())
-            .host()
-            .is_some()
-    );
-    let persisted: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("editor").join("hosts.json")).unwrap(),
-    )
-    .unwrap();
-    let ids: Vec<String> = persisted
-        .get("hosts")
-        .and_then(|hosts| hosts.as_array())
-        .map(|hosts| {
-            hosts
-                .iter()
-                .filter_map(|host| host.get("id").and_then(|id| id.as_str()).map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    assert!(!ids.contains(&MACHINE_A.to_owned()), "Relay routes never persist");
-    // Even Ready, an arbitrary legacy pairing is refused, not connected.
-    let err = core2
-        .update(cx, |core, cx| {
-            core.add_host(
-                HostConfig {
-                    id: HostId("sneaky-b".to_owned()),
-                    name: "Sneaky".to_owned(),
-                    address: "127.0.0.1:9".to_owned(),
-                    fingerprint: "ff".repeat(32),
-                    kind: HostKind::Local,
-                },
-                cx,
-            )
-        })
-        .unwrap_err();
-    assert!(
-        format!("{err:#}").contains("enroll this Forge into your account"),
-        "unexpected: {err:#}"
-    );
-    assert!(core2.read_with(cx, |core, _| core.host(&HostId("sneaky-b".to_owned())).is_none()));
-    // Sign-out locks everything again.
-    let account2 = core2.read_with(cx, |core, _| core.account().clone());
-    account2.update(cx, Account::sign_out);
-    wait_for(cx, "the lock to land", |cx| {
-        matches!(gate_of(cx, &core2), EntryGate::SignedOut).then_some(())
-    });
-    assert!(core2.read_with(cx, |core, _| core.hosts().next().is_none()));
-    assert!(
-        core2
-            .read_with(cx, |core, cx| core
-                .require_host(&HostId(MACHINE_A.to_owned()), cx)
-                .is_none())
+        ae.called("enroll --json --replace"),
+        "re-pairing replaces the machine key"
     );
 }
 
 #[gpui::test]
-fn switch_account_drops_previous_inventory(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let stub_a = StubCore::new(ACCOUNT_A);
-    let stub_b = StubCore::new(ACCOUNT_B);
+async fn a_network_blip_while_waiting_for_the_link_keeps_waiting(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    // A legacy pairing on disk (see restart test: file-seeded, never
-    // production-paired).
-    std::fs::create_dir_all(dir.path().join("editor")).unwrap();
-    std::fs::write(
-        dir.path().join("editor").join("hosts.json"),
-        serde_json::json!({
-            "hosts": [{
-                "id": "a-direct",
-                "name": "A",
-                "address": "127.0.0.1:9",
-                "fingerprint": "00".repeat(32),
-                "kind": {"type": "local"},
-            }],
-            "last": null,
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let files = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let base_a = stub_a.base_url;
-    let core = cx.new(|cx| {
-        let core = Core::new(files, cx).unwrap();
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_a),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-        core
-    });
-    let identity = core.read_with(cx, |core, _| core.identity.clone().unwrap());
-    core.update(cx, |core, cx| {
-        core.set_relay_dialer_factory(
-            insertable_dialer(cx.background_executor().clone(), identity, MACHINE_A.to_owned(), ACCOUNT_A.to_owned()),
-            cx,
-        );
-    });
-    sign_in(cx, &core, "op@example.invalid");
-    let account = core.read_with(cx, |core, _| core.account().clone());
-    account.update(cx, Account::sign_out);
-    wait_for(cx, "the sign-out to land", |cx| {
-        matches!(gate_of(cx, &core), EntryGate::SignedOut).then_some(())
-    });
-    // Switch identity: a fresh controller on Core B in the same device dir.
-    let base_b = stub_b.base_url;
-    core.update(cx, |core, cx| {
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_b),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-    });
-    let (_account_b, account_id) = sign_in(cx, &core, "op@example.invalid");
-    assert_eq!(account_id, ACCOUNT_B);
-    match gate_of(cx, &core) {
-        EntryGate::NeedsSetup { account_id, .. } => assert_eq!(account_id, ACCOUNT_B),
-        gate @ (EntryGate::Restoring | EntryGate::SignedOut | EntryGate::Ready { .. }) => {
-            panic!("expected NeedsSetup for B, got {gate:?}")
-        }
-    }
-    assert!(core.read_with(cx, |core, _| core.hosts().next().is_none()));
-    assert!(
-        core.read_with(cx, |core, _| core.host(&HostId("a-direct".to_owned())).is_none())
-    );
-}
-
-#[gpui::test]
-fn stale_connect_after_signout_never_repopulates(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let stub = StubCore::new(ACCOUNT_A);
-    let dir = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let base_url = stub.base_url;
-    let core = cx.new(|cx| {
-        let core = Core::new(files, cx).unwrap();
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_url),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-        core
-    });
-    sign_in(cx, &core, "op@example.invalid");
-    // A dialer that hangs until released: sign out mid-flight. A oneshot
-    // (not `Notify`) carries the release past the grant/dial race.
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-    let parked: Arc<Mutex<Option<tokio::sync::oneshot::Receiver<()>>>> =
-        Arc::new(Mutex::new(Some(rx)));
-    let release = Arc::new(Mutex::new(Some(tx)));
-    let executor = cx.background_executor.clone();
-    let identity = core.read_with(cx, |core, _| core.identity.clone().unwrap());
-    core.update(cx, |core, cx| {
-        core.set_relay_dialer_factory(
-            Arc::new(move |_session: editor_core::SessionToken, _url: String| {
-                let executor = executor.clone();
-                let identity = identity.clone();
-                let parked = Arc::clone(&parked);
-                Some(Arc::new(move |req: RelayDialRequest| {
-                    let identity = identity.clone();
-                    let parked = Arc::clone(&parked);
-                    executor.spawn(async move {
-                        let rx = parked.lock().unwrap().take();
-                        if let Some(rx) = rx {
-                            drop(rx.await);
-                        }
-                        let client =
-                            ForgeClient::new("127.0.0.1:9", &"00".repeat(32), &identity)?;
-                        let config = HostConfig {
-                            id: HostId(req.machine_id.clone()),
-                            name: "server".to_owned(),
-                            address: String::new(),
-                            fingerprint: String::new(),
-                            kind: HostKind::Account {
-                                account: req.account_id.clone(),
-                                machine: req.machine_id.clone(),
-                            },
-                        };
-                        Ok((config, client))
-                    })
-                }) as editor_core::RelayDialer)
-            }),
-            cx,
-        );
-    });
-    let account = core.read_with(cx, |core, _| core.account().clone());
-    account.update(cx, |account, cx| {
-        account.connect_machine(MACHINE_A.to_owned(), &core, cx);
-    });
-    account.update(cx, Account::sign_out);
-    release.lock().unwrap().take().map(|tx| tx.send(()));
-    wait_for(cx, "the stale dial to settle locked", |cx| {
-        cx.run_until_parked();
-        matches!(gate_of(cx, &core), EntryGate::SignedOut).then_some(())
-    });
-    cx.run_until_parked();
-    std::thread::sleep(Duration::from_millis(50));
-    cx.run_until_parked();
-    assert!(core.read_with(cx, |core, _| core.hosts().next().is_none()));
-    assert!(
-        core.read_with(cx, |core, cx| core
-            .require_host(&HostId(MACHINE_A.to_owned()), cx)
-            .is_none())
-    );
-}
-
-#[gpui::test]
-fn revocation_locks_and_clears_dead_session(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let stub = StubCore::new(ACCOUNT_A);
-    let dir = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: dir.path().join("editor"),
-    };
-    let base_url = stub.base_url;
-    let core = cx.new(|cx| {
-        let core = Core::new(files, cx).unwrap();
-        core.account().update(cx, |account, cx| {
-            *account = Account::with_base_url(
-                EditorFiles {
-                    dir: dir.path().join("editor"),
-                },
-                Some(base_url),
-                cx,
-            );
-            account.set_ae_runner(failing_ae_runner());
-        });
-        core
-    });
-    sign_in(cx, &core, "op@example.invalid");
-    *stub.me_override.lock().unwrap() = Some((
-        401,
-        serde_json::json!({"error": {"code": "unauthorized", "message": "stub", "request_id": "req-test"}})
-            .to_string(),
-    ));
-    let account = core.read_with(cx, |core, _| core.account().clone());
-    account.update(cx, Account::refresh);
-    wait_for(cx, "the revocation to lock", |cx| {
-        matches!(gate_of(cx, &core), EntryGate::SignedOut).then_some(())
-    });
-    assert!(core.read_with(cx, |core, _| core.hosts().next().is_none()));
-    let stored: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("editor").join("account.json")).unwrap(),
-    )
-    .unwrap();
-    assert!(stored.get("session_token").is_none(), "dead token cleared");
-}
-
-#[test]
-fn onboarding_records_scope_by_core_origin() {
-    use base64::Engine as _;
-    let dir = tempfile::tempdir().unwrap();
-    let base_a = "https://api.artisan.st";
-    let base_b = "http://127.0.0.1:8787";
-    for base in [base_a, base_b] {
-        let scope = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(base.as_bytes());
-        let accounts = dir.path().join("accounts");
-        std::fs::create_dir_all(&accounts).unwrap();
-        let record = serde_json::json!({
-            "account_id": ACCOUNT_A,
-            "base_url": base,
-            "machine_id": MACHINE_A,
-            "completed_at": "1",
-        });
-        std::fs::write(
-            accounts.join(format!("{scope}-{ACCOUNT_A}.json")),
-            serde_json::to_vec_pretty(&record).unwrap(),
-        )
-        .unwrap();
-    }
-    // Same account id, two origins: two distinct records, each self-scoped.
-    let entries: Vec<_> = std::fs::read_dir(dir.path().join("accounts"))
+    let stub = StubCore::new(&profile(&[]));
+    stub.state
+        .lock()
         .unwrap()
-        .collect();
-    assert_eq!(entries.len(), 2);
-    for entry in entries {
-        let record: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
-        assert_eq!(record.get("account_id").and_then(|v| v.as_str()), Some(ACCOUNT_A));
-        assert!(record.get("base_url").and_then(|v| v.as_str()).is_some());
+        .statuses
+        .push_back((503, "upstream hiccup".to_owned()));
+    let ae = ScriptedAe::new(UNENROLLED, None);
+    let core = open_core(cx, dir.path(), &stub.base_url, &ae, None);
+
+    wait_approved(cx, &core).await;
+    assert!(
+        stub.state.lock().unwrap().statuses.is_empty(),
+        "the failed poll happened before the approval"
+    );
+}
+
+#[gpui::test]
+async fn a_superseded_sign_in_never_completes(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = StubCore::new(&profile(&[]));
+    stub.state.lock().unwrap().finalize_delay = Duration::from_millis(300);
+    let ae = ScriptedAe::new(UNENROLLED, None);
+    let core = open_core(cx, dir.path(), &stub.base_url, &ae, None);
+    wait_approved(cx, &core).await;
+
+    let account = account(cx, &core);
+    account.update(cx, |account, cx| account.finish_sign_in(None, None, cx));
+    wait_for(cx, "the finish to reach Core", |_| {
+        stub.saw("POST /v1/auth/magic/finalize").then_some(())
+    })
+    .await;
+    account.update(cx, Account::dismiss_error);
+    wait_for(cx, "Core to answer the abandoned finish", |_| {
+        stub.state.lock().unwrap().finalized.then_some(())
+    })
+    .await;
+    for _ in 0..10 {
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.executor().timer(Duration::from_millis(20)).await;
     }
+    assert_eq!(
+        gate(cx, &core),
+        EntryGate::SignedOut,
+        "the abandoned sign-in stays abandoned"
+    );
+    assert!(!saved_session(dir.path()), "its session is never saved");
 }

@@ -8,7 +8,7 @@ use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::time::Duration;
 
 use super::EntryRoot;
-use editor_core::{AeOutcome, AeRunner, Core, EditorFiles, EntryGate};
+use editor_core::{Core, EditorFiles, EntryGate, Services};
 use editor_settings::account::controller;
 use gpui::AppContext as _;
 
@@ -176,25 +176,15 @@ impl EntryFixture {
             std::fs::create_dir_all(&accounts).unwrap();
             std::fs::write(accounts.join(name), record.to_string()).unwrap();
         }
+        let services = Services::scripted(
+            &stub.base_url,
+            std::sync::Arc::new(|_| {
+                Ok(r#"{"enrolled":false,"enrollment_id":null,"status":"none"}"#.to_owned())
+            }),
+            None,
+        );
         let core = cx.new(|cx| {
-            Core::new(
-                EditorFiles {
-                    dir: editor_dir,
-                },
-                cx,
-            )
-            .unwrap()
-        });
-        // The mock ae runner must be installed before the executor runs the
-        // async resume: otherwise tests would shell out to a real `ae`.
-        let runner: editor_core::AeRunner = std::sync::Arc::new(|_| editor_core::AeOutcome {
-            success: true,
-            stdout: r#"{"enrolled":false,"enrollment_id":null,"status":"none","account_id":null,"email":null,"display_name":null}"#.to_owned(),
-            stderr: String::new(),
-        });
-        core.update(cx, |core, cx| {
-            core.account()
-                .update(cx, |account, _| account.set_ae_runner(runner));
+            Core::with_services(EditorFiles { dir: editor_dir }, services, cx).unwrap()
         });
         Self {
             _dir: dir,
