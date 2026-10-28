@@ -596,7 +596,7 @@ async fn subscribe(
     sink: &mut WsSink,
     stream_tx: &tokio::sync::mpsc::Sender<(String, StreamMsg)>,
 ) -> Result<()> {
-    let Some(since) = crate::events::Since::parse_events_path(&request.path) else {
+    let Some(since) = crate::events::Since::from_events_path(&request.path) else {
         let response = artisan_api::TunnelResponse::error(&request.id, 400, "bad subscribe path");
         send_response(name, &response, channels, windows, sink).await?;
         return Ok(());
@@ -621,7 +621,7 @@ async fn subscribe(
     );
     send_response(name, &response, channels, windows, sink).await?;
     let pump = tokio::spawn(async move {
-        crate::events::forward_tunnel(&pump_app, &since, &sender)
+        crate::events::forward(&pump_app, &since, &sender)
             .await
             .ok();
     });
