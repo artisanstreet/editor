@@ -440,10 +440,17 @@ fn sync_config_now(core: Option<&str>) -> Result<()> {
     let Some(identity) = forge_http::sync::load_machine_identity(&data_dir)? else {
         bail!("this Forge is not enrolled; run `ae account enroll` first");
     };
-    let Some(account_id) = identity.account_id else {
+    if identity.account_id.is_none() {
         bail!("no account recorded; re-run `ae account confirm`");
-    };
-    let _ = account_id;
+    }
+    // A serving Forge owns the store and syncs on startup; opening the store
+    // here would recover (cancel) its live runs.
+    if crate::service::is_running() {
+        crate::service::restart()?;
+        crate::ui::success("Restarted Forge; it syncs the account config on startup.");
+        return Ok(());
+    }
+    let _lock = forge_http::lock_data_dir(&data_dir)?;
     let store = forge_store::Store::open(&data_dir).context("open the Forge store")?;
     let engines = forge_engines::Engines::new(&data_dir);
     let hub = forge_runs::Hub::new(store, engines, data_dir.clone());
