@@ -9,8 +9,8 @@ pub mod relay_client;
 mod signin;
 
 pub use enrollment::{
-    KeyError, MachineKeypair, PairStatus, enrollment_confirm_body, enrollment_request_body,
-    normalise_code, sign_enrollment_proof, verify_enrollment_proof,
+    MachineKeypair, PairStatus, enrollment_confirm_body, enrollment_request_body, normalise_code,
+    sign_enrollment_proof, verify_enrollment_proof,
 };
 pub use frames::{
     AckFrame, AuthenticateFrame, ChallengeFrame, ChannelClosedFrame, ChannelOpenedFrame,
@@ -23,8 +23,7 @@ pub use grant::{
     unverified_jti, unverified_kid,
 };
 pub use machine_proof::{
-    MachineProof, MachineProofError, body_hash_hex, canonical_request, sign_proof,
-    verify_machine_proof,
+    MachineProof, body_hash_hex, canonical_request, sign_proof, verify_machine_proof,
 };
 pub use network::{AccountProfile, CoreSessionClient, SessionToken};
 pub use noise::{ChannelCtx, NoiseChannel, Phase};

@@ -8,6 +8,7 @@
 //! `|now - timestamp| <= 300`s, durable nonce dedup (unique
 //! `(subject, nonce)` insert), body-hash compare, Ed25519 verify.
 
+use anyhow::Context as _;
 use base64::Engine as _;
 use sha2::Digest as _;
 
@@ -20,18 +21,6 @@ pub const MIN_NONCE_BYTES: usize = 12;
 #[cfg(test)]
 pub const EMPTY_BODY_HASH: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum MachineProofError {
-    #[error("proof timestamp outside the acceptance window")]
-    Time,
-    #[error("nonce too short")]
-    Nonce,
-    #[error("bad signature")]
-    Signature,
-    #[error("bad encoding")]
-    Encoding,
-}
 
 /// Hex lowercase SHA-256 of raw request body bytes.
 #[must_use]
@@ -79,24 +68,15 @@ pub fn sign_proof(secret: &[u8; 32], canonical: &str) -> [u8; 64] {
 ///
 /// Takes a [`MachineProof`] request (8 fields would exceed the argument
 /// limit).
-#[expect(
-    clippy::map_err_ignore,
-    reason = "proof errors are coarse so messages never carry key material"
-)]
-pub fn verify_machine_proof(proof: &MachineProof<'_>) -> Result<(), MachineProofError> {
-    if proof
-        .timestamp_sec
-        .saturating_sub(proof.now_sec)
-        .abs()
-        > PROOF_TIMESTAMP_WINDOW_S
-    {
-        return Err(MachineProofError::Time);
+pub fn verify_machine_proof(proof: &MachineProof<'_>) -> anyhow::Result<()> {
+    if proof.timestamp_sec.saturating_sub(proof.now_sec).abs() > PROOF_TIMESTAMP_WINDOW_S {
+        anyhow::bail!("the proof timestamp is outside the acceptance window");
     }
     let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(proof.nonce_b64u.as_bytes())
-        .map_err(|_| MachineProofError::Encoding)?;
+        .context("decode the proof nonce")?;
     if nonce.len() < MIN_NONCE_BYTES {
-        return Err(MachineProofError::Nonce);
+        anyhow::bail!("the proof nonce is too short");
     }
     // The body hash is recomputed from the received body and covered by the
     // signature: a tampered body fails verification. No separate transmitted
@@ -109,22 +89,19 @@ pub fn verify_machine_proof(proof: &MachineProof<'_>) -> Result<(), MachineProof
         &body_hash_hex(proof.body),
     );
     let key =
-        ed25519_dalek::VerifyingKey::from_bytes(proof.public).map_err(|_| MachineProofError::Signature)?;
+        ed25519_dalek::VerifyingKey::from_bytes(proof.public).context("read the machine key")?;
     let signature = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(proof.signature_b64u.as_bytes())
-        .map_err(|_| MachineProofError::Encoding)?;
-    let signature =
-        ed25519_dalek::Signature::try_from(signature.as_slice()).map_err(|_| MachineProofError::Signature)?;
+        .context("decode the proof signature")?;
+    let signature = ed25519_dalek::Signature::try_from(signature.as_slice())
+        .context("read the proof signature")?;
     key.verify_strict(canonical.as_bytes(), &signature)
-        .map_err(|_| MachineProofError::Signature)?;
+        .context("the machine proof signature does not verify")?;
     Ok(())
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod tests {
     use super::*;
 
@@ -151,7 +128,8 @@ mod tests {
         let (secret, public) = keys();
         let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 16]);
         let body = br#"{"a":1}"#;
-        let canonical = canonical_request(1_700_000_100, &nonce, "POST", "/v1/m", &body_hash_hex(body));
+        let canonical =
+            canonical_request(1_700_000_100, &nonce, "POST", "/v1/m", &body_hash_hex(body));
         let signature = sign_proof(&secret, &canonical);
         let signature_b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
         let proof = MachineProof {
@@ -166,26 +144,28 @@ mod tests {
         };
         verify_machine_proof(&proof).unwrap();
         // Tampered body fails.
-        let tampered = MachineProof { body: br#"{"a":2}"#, ..proof };
-        assert_eq!(
-            verify_machine_proof(&tampered).unwrap_err(),
-            MachineProofError::Signature
-        );
+        let tampered = MachineProof {
+            body: br#"{"a":2}"#,
+            ..proof
+        };
+        let error = format!("{:#}", verify_machine_proof(&tampered).unwrap_err());
+        assert!(error.contains("does not verify"), "tampered: {error}");
         // Expired timestamp fails.
-        let expired = MachineProof { now_sec: 1_700_000_100 + PROOF_TIMESTAMP_WINDOW_S + 1, ..proof };
-        assert_eq!(
-            verify_machine_proof(&expired).unwrap_err(),
-            MachineProofError::Time
+        let expired = MachineProof {
+            now_sec: 1_700_000_100 + PROOF_TIMESTAMP_WINDOW_S + 1,
+            ..proof
+        };
+        let error = format!("{:#}", verify_machine_proof(&expired).unwrap_err());
+        assert!(
+            error.contains("outside the acceptance window"),
+            "expired: {error}"
         );
         // Short nonce fails.
         let short = MachineProof {
             nonce_b64u: &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1_u8; 4]),
             ..proof
         };
-        // Re-sign would be needed for a new nonce; reuse shows nonce checked first.
-        assert_eq!(
-            verify_machine_proof(&short).unwrap_err(),
-            MachineProofError::Nonce
-        );
+        let error = format!("{:#}", verify_machine_proof(&short).unwrap_err());
+        assert!(error.contains("too short"), "short: {error}");
     }
 }

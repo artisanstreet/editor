@@ -9,10 +9,6 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("cannot make a key right now")]
-pub struct KeyError;
-
 /// A local Ed25519 machine keypair.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MachineKeypair {
@@ -21,20 +17,14 @@ pub struct MachineKeypair {
 }
 
 impl MachineKeypair {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "key failures are coarse KeyError so messages never carry key material"
-    )]
-    pub fn generate() -> Result<Self, KeyError> {
+    pub fn generate() -> anyhow::Result<Self> {
         let mut secret = [0_u8; 32];
-        getrandom::fill(&mut secret).map_err(|_| KeyError)?;
+        getrandom::fill(&mut secret)?;
         Self::from_secret(secret)
     }
 
-    pub fn from_secret(secret: [u8; 32]) -> Result<Self, KeyError> {
-        if secret == [0_u8; 32] {
-            return Err(KeyError);
-        }
+    pub fn from_secret(secret: [u8; 32]) -> anyhow::Result<Self> {
+        anyhow::ensure!(secret != [0_u8; 32], "the machine key is all zeros");
         let key = ed25519_dalek::SigningKey::from_bytes(&secret);
         Ok(Self {
             secret,
@@ -113,11 +103,7 @@ pub fn sign_enrollment_proof(secret: &[u8; 32], body: &str) -> [u8; 64] {
 
 /// Verify an enrollment proof body against the enrollment public key.
 #[must_use]
-pub fn verify_enrollment_proof(
-    public: &[u8; 32],
-    body: &str,
-    signature: &[u8],
-) -> bool {
+pub fn verify_enrollment_proof(public: &[u8; 32], body: &str, signature: &[u8]) -> bool {
     let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(public) else {
         return false;
     };
@@ -128,10 +114,7 @@ pub fn verify_enrollment_proof(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod tests {
     use super::*;
 
