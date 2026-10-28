@@ -366,9 +366,9 @@ impl Account {
             .child(
                 self.action(
                     true,
-                    "sidebar-manage-hosts",
+                    "sidebar-manage-forges",
                     AssetId::TABLER_SETTINGS,
-                    "Manage hosts…",
+                    "Manage Forges…",
                     cx,
                 )
                 .on_click(move |_, _, cx| {
@@ -376,7 +376,7 @@ impl Account {
                         close(cx);
                     }
                     core.update(cx, |core, cx| {
-                        core.navigate(Screen::Settings(SettingsPage::Hosts), cx);
+                        core.navigate(Screen::Settings(SettingsPage::Account), cx);
                     });
                 }),
             );
