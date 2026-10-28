@@ -28,7 +28,7 @@ pub fn core_base_url(explicit: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_CORE_BASE_URL.to_owned())
 }
 
-fn now_sec() -> i64 {
+pub(crate) fn now_sec() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

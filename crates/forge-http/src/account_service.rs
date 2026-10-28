@@ -54,6 +54,7 @@ pub async fn run(
     tasks.spawn(crate::sync::run_config_loop(
         data_dir,
         app.hub.clone(),
+        identity.clone(),
         shutdown.clone(),
         CONFIG_SYNC_INTERVAL,
     ));
