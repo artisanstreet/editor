@@ -163,9 +163,12 @@ async fn authorize(
                 .scope
                 .contains(&artisan_account::Scope::ForgeExecute);
         if live {
-            request.extensions_mut().insert(artisan_api::DeviceId(
-                format!("tunnel-{}", tunnel.claims.sub),
-            ));
+            request
+                .extensions_mut()
+                .insert(artisan_api::DeviceId(format!(
+                    "tunnel-{}",
+                    tunnel.claims.sub
+                )));
             return next.run(request).await;
         }
         return error(

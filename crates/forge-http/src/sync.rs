@@ -71,8 +71,7 @@ fn read_state(data_dir: &Path) -> Result<Option<ConfigState>> {
     let path = sync_state_path(data_dir);
     match std::fs::read(&path) {
         Ok(bytes) => Ok(Some(
-            serde_json::from_slice(&bytes)
-                .with_context(|| format!("read {}", path.display()))?,
+            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))?,
         )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("read {}", path.display()))?,
@@ -199,7 +198,10 @@ pub const MANIFEST_MAX_SKILLS: usize = 256;
 /// already applied) means current — no reapply. On failure the last-good
 /// state file is untouched and `failed` is reported with detail; settings
 /// converge idempotently on the next good sync.
-#[expect(clippy::too_many_lines, reason = "fetch/verify/apply/report in one sync turn")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "fetch/verify/apply/report in one sync turn"
+)]
 pub async fn sync_config(
     http: &reqwest::Client,
     core_base_url: &str,
@@ -274,13 +276,33 @@ pub async fn sync_config(
         .to_vec();
     let sha256 = hex::encode(sha2::Sha256::digest(&bytes));
     if sha256 != bundle.content_hash {
-        report_state(http, core_base_url, machine_id, secret, &bundle.id, "failed", "manifest hash mismatch").await.ok();
+        report_state(
+            http,
+            core_base_url,
+            machine_id,
+            secret,
+            &bundle.id,
+            "failed",
+            "manifest hash mismatch",
+        )
+        .await
+        .ok();
         anyhow::bail!("manifest bytes do not match bundle.content_hash: not applying");
     }
     let manifest: EditorManifest =
         serde_json::from_slice(&bytes).context("read the canonical manifest")?;
     if manifest.format != "ast-editor-config/1" {
-        report_state(http, core_base_url, machine_id, secret, &bundle.id, "failed", "unknown manifest format").await.ok();
+        report_state(
+            http,
+            core_base_url,
+            machine_id,
+            secret,
+            &bundle.id,
+            "failed",
+            "unknown manifest format",
+        )
+        .await
+        .ok();
         anyhow::bail!("unknown manifest format: not applying");
     }
     let detail = match apply_manifest(hub, &manifest).await {
@@ -302,7 +324,16 @@ pub async fn sync_config(
     };
     // Archive the verified canonical bytes atomically for audit.
     archive_manifest(data_dir, &bundle, &bytes)?;
-    report_state(http, core_base_url, machine_id, secret, &bundle.id, "applied", &detail).await?;
+    report_state(
+        http,
+        core_base_url,
+        machine_id,
+        secret,
+        &bundle.id,
+        "applied",
+        &detail,
+    )
+    .await?;
     let state = ConfigState {
         bundle_id: bundle.id,
         version: bundle.version,
@@ -325,8 +356,7 @@ fn archive_manifest(data_dir: &Path, bundle: &BundleInfo, bytes: &[u8]) -> Resul
     if live.exists() {
         std::fs::remove_dir_all(&live).ok();
     }
-    std::fs::rename(&staged, &live)
-        .with_context(|| format!("publish {}", live.display()))?;
+    std::fs::rename(&staged, &live).with_context(|| format!("publish {}", live.display()))?;
     std::fs::write(dir.join("current"), bundle.version.to_string())?;
     Ok(())
 }
@@ -339,10 +369,7 @@ fn archive_manifest(data_dir: &Path, bundle: &BundleInfo, bytes: &[u8]) -> Resul
 /// Observable effects only: prompt text, MCP list, and skill enablement
 /// are read back after writing — nothing counts as applied until it reads
 /// back correct.
-async fn apply_manifest(
-    hub: &forge_runs::Hub,
-    manifest: &EditorManifest,
-) -> Result<String> {
+async fn apply_manifest(hub: &forge_runs::Hub, manifest: &EditorManifest) -> Result<String> {
     validate_manifest(manifest)?;
     let staged = stage_skills(manifest)?;
     let store = hub.store();
@@ -424,9 +451,7 @@ fn validate_skill_bundle(skill_name: &str, bundle: &SkillBundle) -> Result<()> {
         }
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(file.content_base64.as_bytes())
-            .with_context(|| {
-                format!("skill {skill_name} has undecodable file {}", file.path)
-            })?;
+            .with_context(|| format!("skill {skill_name} has undecodable file {}", file.path))?;
         total = total.saturating_add(raw.len());
         if total > SKILL_BUNDLE_MAX_BYTES {
             anyhow::bail!("skill {skill_name} bundle exceeds the size bound");
@@ -463,7 +488,9 @@ fn stage_skills(manifest: &EditorManifest) -> Result<Vec<StagedSkill>> {
         for file in &bundle.files {
             let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(file.content_base64.as_bytes())
-                .with_context(|| format!("skill {} has undecodable file {}", skill.name, file.path))?;
+                .with_context(|| {
+                    format!("skill {} has undecodable file {}", skill.name, file.path)
+                })?;
             let path = dir.path().join(&file.path);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -509,10 +536,7 @@ async fn snapshot_settings(store: &forge_store::Store) -> Result<SettingsSnapsho
     })
 }
 
-async fn restore_settings(
-    store: &forge_store::Store,
-    snapshot: &SettingsSnapshot,
-) -> Result<()> {
+async fn restore_settings(store: &forge_store::Store, snapshot: &SettingsSnapshot) -> Result<()> {
     let current: Option<String> = store
         .setting("global_prompt")
         .await?
@@ -532,12 +556,17 @@ async fn restore_settings(
         store.set_setting("mcp_servers".into(), mcp).await?;
     }
     if let Some(disabled) = snapshot.disabled.clone() {
-        store.set_setting("disabled_skills".into(), disabled).await?;
+        store
+            .set_setting("disabled_skills".into(), disabled)
+            .await?;
     }
     Ok(())
 }
 
-#[expect(clippy::too_many_lines, reason = "install/enable/prompt/MCP/verify in one apply")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "install/enable/prompt/MCP/verify in one apply"
+)]
 async fn apply_inner(
     hub: &forge_runs::Hub,
     store: &forge_store::Store,
@@ -564,7 +593,9 @@ async fn apply_inner(
                 reason = "ManifestSkill has only name; match id, name, or suffix"
             )]
             let hit = catalog.iter().find(|entry| {
-                entry.id == skill.name || entry.name == skill.name || entry.id.ends_with(&format!(".{}", skill.name))
+                entry.id == skill.name
+                    || entry.name == skill.name
+                    || entry.id.ends_with(&format!(".{}", skill.name))
             });
             let Some(hit) = hit else {
                 anyhow::bail!(
@@ -681,9 +712,10 @@ async fn verify_applied(
         .transpose()?
         .unwrap_or_default();
     for entry in &manifest.mcp_servers {
-        let found = current.iter().find(|server| server.name == entry.name).with_context(|| {
-            format!("MCP server {} missing after apply", entry.name)
-        })?;
+        let found = current
+            .iter()
+            .find(|server| server.name == entry.name)
+            .with_context(|| format!("MCP server {} missing after apply", entry.name))?;
         anyhow::ensure!(
             found.command == entry.command.clone().unwrap_or_default()
                 && found.args == entry.args.clone().unwrap_or_default()
@@ -727,8 +759,14 @@ pub async fn report_state(
         "detail": detail,
     });
     let body = serde_json::to_vec(&request)?;
-    let headers =
-        crate::core::proof_headers_for(machine_id, secret, "POST", CONFIG_STATE_PATH, &body, now_sec())?;
+    let headers = crate::core::proof_headers_for(
+        machine_id,
+        secret,
+        "POST",
+        CONFIG_STATE_PATH,
+        &body,
+        now_sec(),
+    )?;
     let response = http
         .post(format!("{core_base_url}{CONFIG_STATE_PATH}"))
         .headers(headers)
@@ -830,12 +868,8 @@ pub async fn run_config_loop(
     }
 }
 
-
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod tests {
     use super::*;
     use axum::extract::State;
@@ -851,10 +885,20 @@ mod tests {
     }
 
     fn machine_proof_ok(headers: &HeaderMap) {
-        for name in ["x-ast-machine", "x-ast-timestamp", "x-ast-nonce", "authorization"] {
+        for name in [
+            "x-ast-machine",
+            "x-ast-timestamp",
+            "x-ast-nonce",
+            "authorization",
+        ] {
             assert!(headers.contains_key(name), "missing proof header {name}");
         }
-        assert!(headers["authorization"].to_str().unwrap().starts_with("AST-Machine "));
+        assert!(
+            headers["authorization"]
+                .to_str()
+                .unwrap()
+                .starts_with("AST-Machine ")
+        );
     }
 
     fn manifest_bytes() -> Vec<u8> {
@@ -891,7 +935,9 @@ mod tests {
     }
 
     fn stub_manifest(stub: &Stub) -> Vec<u8> {
-        stub.manifest_override.clone().unwrap_or_else(manifest_bytes)
+        stub.manifest_override
+            .clone()
+            .unwrap_or_else(manifest_bytes)
     }
 
     async fn latest(
@@ -995,14 +1041,25 @@ mod tests {
         assert_eq!(state.content_hash, bundle_hash());
         assert_eq!(stub.reports.lock().unwrap().len(), 1);
         // Observable engine state, not a cached file.
-        let prompt: Option<serde_json::Value> =
-            hub.store().setting("global_prompt").await.unwrap();
-        assert_eq!(prompt.and_then(|v| v.as_str().map(str::to_owned)).as_deref(), Some("synced prompt"));
+        let prompt: Option<serde_json::Value> = hub.store().setting("global_prompt").await.unwrap();
+        assert_eq!(
+            prompt
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .as_deref(),
+            Some("synced prompt")
+        );
         let mcp: Vec<artisan_api::McpServer> = serde_json::from_value(
-            hub.store().setting("mcp_servers").await.unwrap().unwrap_or_default(),
+            hub.store()
+                .setting("mcp_servers")
+                .await
+                .unwrap()
+                .unwrap_or_default(),
         )
         .unwrap();
-        assert!(mcp.iter().any(|server| server.name == "s" && server.command == "srv"));
+        assert!(
+            mcp.iter()
+                .any(|server| server.name == "s" && server.command == "srv")
+        );
 
         let outcome = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
             .await
@@ -1011,7 +1068,11 @@ mod tests {
             matches!(outcome, ConfigOutcome::Current(_)),
             "ETag 304 must not reapply"
         );
-        assert_eq!(stub.reports.lock().unwrap().len(), 1, "no second report on 304");
+        assert_eq!(
+            stub.reports.lock().unwrap().len(),
+            1,
+            "no second report on 304"
+        );
     }
 
     /// Manifest bytes that do not hash to `bundle.content_hash` are rejected
@@ -1031,141 +1092,147 @@ mod tests {
         );
     }
 
-fn skill_manifest(skill: &serde_json::Value) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "format": "ast-editor-config/1",
-        "mcp_servers": [{"name": "s", "command": "srv"}],
-        "skills": [skill],
-        "global_prompt": "synced prompt",
-    }))
-    .unwrap()
-}
-
-fn bundled_skill(name: &str, extra: Vec<(&str, &[u8])>) -> serde_json::Value {
-    let mut files = vec![skill_file(
-        "SKILL.md",
-        skill_md(name).as_bytes(),
-    )];
-    for (path, contents) in extra {
-        files.push(skill_file(path, contents));
-    }
-    serde_json::json!({
-        "name": name,
-        "source": "builtin",
-        "bundle": {"files": files},
-    })
-}
-
-/// A bundled skill installs through the real installer and reads back
-/// enabled in the catalog; prompt + MCP converge in the same apply.
-#[tokio::test]
-async fn bundled_skill_installs_and_reads_back_enabled() {
-    let manifest = skill_manifest(&bundled_skill("syncprobed", vec![("refs/notes.md", b"notes")]));
-    let (base, stub, _server) = stub_server(false, Some(manifest)).await;
-    let dir = tempfile::tempdir().unwrap();
-    let hub = test_hub(dir.path());
-    let outcome = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
-        .await
-        .unwrap();
-    assert!(matches!(outcome, ConfigOutcome::Updated(_)));
-    let catalog = hub.skill_catalog().await.unwrap();
-    let installed = catalog
-        .iter()
-        .find(|entry| entry.id == "local.syncprobed")
-        .expect("installed skill in catalog");
-    assert!(installed.enabled, "installed skill is enabled");
-    let prompt: Option<String> = hub
-        .store()
-        .setting("global_prompt")
-        .await
+    fn skill_manifest(skill: &serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "format": "ast-editor-config/1",
+            "mcp_servers": [{"name": "s", "command": "srv"}],
+            "skills": [skill],
+            "global_prompt": "synced prompt",
+        }))
         .unwrap()
-        .and_then(|value| value.as_str().map(str::to_owned));
-    assert_eq!(prompt.as_deref(), Some("synced prompt"));
-    assert_eq!(stub.reports.lock().unwrap().len(), 1);
-    assert_eq!(
-        stub.reports.lock().unwrap()[0]["status"],
-        serde_json::json!("applied")
-    );
-}
+    }
 
-/// A bundle missing SKILL.md fails the whole apply: prompt and MCP are
-/// unchanged, nothing is installed, last-good stays absent, and the
-/// failure is reported with detail.
-#[tokio::test]
-async fn invalid_bundle_rolls_back_without_partial_apply() {
-    let bad_skill = serde_json::json!({
-        "name": "brokenskill",
-        "source": "builtin",
-        "bundle": {"files": [skill_file("refs/notes.md", b"notes")]},
-    });
-    let manifest = skill_manifest(&bad_skill);
-    let (base, stub, _server) = stub_server(false, Some(manifest)).await;
-    let dir = tempfile::tempdir().unwrap();
-    let hub = test_hub(dir.path());
-    let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
-    assert!(result.is_err(), "missing SKILL.md must fail the apply");
-    // Nothing applied: prompt untouched, no skill installed, no state.
-    let prompt: Option<serde_json::Value> = hub.store().setting("global_prompt").await.unwrap();
-    assert_eq!(prompt, None);
-    let catalog = hub.skill_catalog().await.unwrap();
-    assert!(
-        catalog.iter().all(|entry| entry.id != "local.brokenskill"),
-        "no partial install may remain"
-    );
-    assert!(!super::sync_state_path(dir.path()).exists());
-    let reports = stub.reports.lock().unwrap();
-    assert_eq!(reports.len(), 1);
-    assert_eq!(reports[0]["status"], serde_json::json!("failed"));
-    assert!(
-        reports[0]["detail"].as_str().unwrap().contains("SKILL.md"),
-        "detail names the cause: {}",
-        reports[0]["detail"]
-    );
-    drop(reports);
-}
+    fn bundled_skill(name: &str, extra: Vec<(&str, &[u8])>) -> serde_json::Value {
+        let mut files = vec![skill_file("SKILL.md", skill_md(name).as_bytes())];
+        for (path, contents) in extra {
+            files.push(skill_file(path, contents));
+        }
+        serde_json::json!({
+            "name": name,
+            "source": "builtin",
+            "bundle": {"files": files},
+        })
+    }
 
-/// An unknown skill with no bundle fails with a named error instead of
-/// a silent no-op.
-#[tokio::test]
-async fn unknown_skill_without_bundle_fails_named() {
-    let manifest = skill_manifest(&serde_json::json!({
-        "name": "not-installed-anywhere",
-        "source": "builtin",
-    }));
-    let (base, stub, _server) = stub_server(false, Some(manifest)).await;
-    let dir = tempfile::tempdir().unwrap();
-    let hub = test_hub(dir.path());
-    let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
-    assert!(result.is_err());
-    let reports = stub.reports.lock().unwrap();
-    assert_eq!(reports[0]["status"], serde_json::json!("failed"));
-    assert!(
-        reports[0]["detail"]
-            .as_str()
+    /// A bundled skill installs through the real installer and reads back
+    /// enabled in the catalog; prompt + MCP converge in the same apply.
+    #[tokio::test]
+    async fn bundled_skill_installs_and_reads_back_enabled() {
+        let manifest = skill_manifest(&bundled_skill(
+            "syncprobed",
+            vec![("refs/notes.md", b"notes")],
+        ));
+        let (base, stub, _server) = stub_server(false, Some(manifest)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = test_hub(dir.path());
+        let outcome = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ConfigOutcome::Updated(_)));
+        let catalog = hub.skill_catalog().await.unwrap();
+        let installed = catalog
+            .iter()
+            .find(|entry| entry.id == "local.syncprobed")
+            .expect("installed skill in catalog");
+        assert!(installed.enabled, "installed skill is enabled");
+        let prompt: Option<String> = hub
+            .store()
+            .setting("global_prompt")
+            .await
             .unwrap()
-            .contains("not-installed-anywhere"),
-        "detail names the skill: {}",
-        reports[0]["detail"]
-    );
-    drop(reports);
-}
+            .and_then(|value| value.as_str().map(str::to_owned));
+        assert_eq!(prompt.as_deref(), Some("synced prompt"));
+        assert_eq!(stub.reports.lock().unwrap().len(), 1);
+        assert_eq!(
+            stub.reports.lock().unwrap()[0]["status"],
+            serde_json::json!("applied")
+        );
+    }
 
-/// A per-file hash mismatch is caught before anything mutates.
-#[tokio::test]
-async fn tampered_bundle_file_hash_rejects_before_mutation() {
-    let mut files = vec![skill_file("SKILL.md", skill_md("tampered").as_bytes())];
-    files[0]["sha256"] = serde_json::json!("00");
-    let manifest = skill_manifest(&serde_json::json!({
-        "name": "tampered",
-        "source": "builtin",
-        "bundle": {"files": files},
-    }));
-    let (base, stub, _server) = stub_server(false, Some(manifest)).await;
-    let dir = tempfile::tempdir().unwrap();
-    let hub = test_hub(dir.path());
-    assert!(sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await.is_err());
-    assert!(!super::sync_state_path(dir.path()).exists());
-    assert_eq!(stub.reports.lock().unwrap()[0]["status"], serde_json::json!("failed"));
-}
+    /// A bundle missing SKILL.md fails the whole apply: prompt and MCP are
+    /// unchanged, nothing is installed, last-good stays absent, and the
+    /// failure is reported with detail.
+    #[tokio::test]
+    async fn invalid_bundle_rolls_back_without_partial_apply() {
+        let bad_skill = serde_json::json!({
+            "name": "brokenskill",
+            "source": "builtin",
+            "bundle": {"files": [skill_file("refs/notes.md", b"notes")]},
+        });
+        let manifest = skill_manifest(&bad_skill);
+        let (base, stub, _server) = stub_server(false, Some(manifest)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = test_hub(dir.path());
+        let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
+        assert!(result.is_err(), "missing SKILL.md must fail the apply");
+        // Nothing applied: prompt untouched, no skill installed, no state.
+        let prompt: Option<serde_json::Value> = hub.store().setting("global_prompt").await.unwrap();
+        assert_eq!(prompt, None);
+        let catalog = hub.skill_catalog().await.unwrap();
+        assert!(
+            catalog.iter().all(|entry| entry.id != "local.brokenskill"),
+            "no partial install may remain"
+        );
+        assert!(!super::sync_state_path(dir.path()).exists());
+        let reports = stub.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0]["status"], serde_json::json!("failed"));
+        assert!(
+            reports[0]["detail"].as_str().unwrap().contains("SKILL.md"),
+            "detail names the cause: {}",
+            reports[0]["detail"]
+        );
+        drop(reports);
+    }
 
+    /// An unknown skill with no bundle fails with a named error instead of
+    /// a silent no-op.
+    #[tokio::test]
+    async fn unknown_skill_without_bundle_fails_named() {
+        let manifest = skill_manifest(&serde_json::json!({
+            "name": "not-installed-anywhere",
+            "source": "builtin",
+        }));
+        let (base, stub, _server) = stub_server(false, Some(manifest)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = test_hub(dir.path());
+        let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
+        assert!(result.is_err());
+        let reports = stub.reports.lock().unwrap();
+        assert_eq!(reports[0]["status"], serde_json::json!("failed"));
+        assert!(
+            reports[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("not-installed-anywhere"),
+            "detail names the skill: {}",
+            reports[0]["detail"]
+        );
+        drop(reports);
+    }
+
+    /// A per-file hash mismatch is caught before anything mutates.
+    #[tokio::test]
+    async fn tampered_bundle_file_hash_rejects_before_mutation() {
+        let mut files = vec![skill_file("SKILL.md", skill_md("tampered").as_bytes())];
+        files[0]["sha256"] = serde_json::json!("00");
+        let manifest = skill_manifest(&serde_json::json!({
+            "name": "tampered",
+            "source": "builtin",
+            "bundle": {"files": files},
+        }));
+        let (base, stub, _server) = stub_server(false, Some(manifest)).await;
+        let dir = tempfile::tempdir().unwrap();
+        let hub = test_hub(dir.path());
+        assert!(
+            sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
+                .await
+                .is_err()
+        );
+        assert!(!super::sync_state_path(dir.path()).exists());
+        assert_eq!(
+            stub.reports.lock().unwrap()[0]["status"],
+            serde_json::json!("failed")
+        );
+    }
 }

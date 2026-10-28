@@ -8,8 +8,8 @@
 
 use anyhow::{Context, Result};
 use artisan_account::{
-    body_hash_hex, canonical_request, enrollment_confirm_body,
-    enrollment_request_body, sign_enrollment_proof, sign_proof,
+    body_hash_hex, canonical_request, enrollment_confirm_body, enrollment_request_body,
+    sign_enrollment_proof, sign_proof,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -75,13 +75,8 @@ impl CoreClient {
         now: i64,
     ) -> Result<reqwest::header::HeaderMap> {
         let nonce = nonce_b64u()?;
-        let canonical = canonical_request(
-            now,
-            &nonce,
-            method,
-            path_and_query,
-            &body_hash_hex(body),
-        );
+        let canonical =
+            canonical_request(now, &nonce, method, path_and_query, &body_hash_hex(body));
         let signature = sign_proof(secret, &canonical);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -92,10 +87,7 @@ impl CoreClient {
             "X-AST-Timestamp",
             now.to_string().parse().context("timestamp header")?,
         );
-        headers.insert(
-            "X-AST-Nonce",
-            nonce.parse().context("nonce header")?,
-        );
+        headers.insert("X-AST-Nonce", nonce.parse().context("nonce header")?);
         let authorization = format!(
             "AST-Machine {}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
@@ -393,7 +385,12 @@ mod tests {
     ) -> impl axum::response::IntoResponse {
         assert_eq!(id, "enr_00000000000000000000000001");
         // Machine-proof headers are present and well-formed.
-        for name in ["x-ast-machine", "x-ast-timestamp", "x-ast-nonce", "authorization"] {
+        for name in [
+            "x-ast-machine",
+            "x-ast-timestamp",
+            "x-ast-nonce",
+            "authorization",
+        ] {
             assert!(
                 headers.contains_key(name),
                 "missing machine proof header {name}"
@@ -418,7 +415,11 @@ mod tests {
     ) -> impl axum::response::IntoResponse {
         let enrollment_id = "enr_00000000000000000000000001";
         assert_eq!(headers["x-ast-machine"], enrollment_id);
-        let timestamp = headers["x-ast-timestamp"].to_str().unwrap().parse().unwrap();
+        let timestamp = headers["x-ast-timestamp"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
         let nonce = headers["x-ast-nonce"].to_str().unwrap();
         let signature = headers["authorization"]
             .to_str()
@@ -439,10 +440,7 @@ mod tests {
         .unwrap();
         let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(request["enrollmentId"], enrollment_id);
-        assert_eq!(
-            request["accountId"],
-            "acct_00000000000000000000000000"
-        );
+        assert_eq!(request["accountId"], "acct_00000000000000000000000000");
         let confirmation = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(request["confirmation"].as_str().unwrap())
             .unwrap();
@@ -494,10 +492,7 @@ mod tests {
         };
         Router::new()
             .route("/v1/machines/enrollments", post(enroll))
-            .route(
-                "/v1/machines/enrollments/{id}/status",
-                get(status),
-            )
+            .route("/v1/machines/enrollments/{id}/status", get(status))
             .route("/v1/machines/enrollments/confirm", post(confirm))
             .route("/v1/grants/issue", post(grants_issue))
             .route("/v1/machines", get(machines))
