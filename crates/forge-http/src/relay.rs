@@ -148,14 +148,7 @@ type WsSink = futures::stream::SplitSink<
     tokio_tungstenite::tungstenite::Message,
 >;
 
-fn now_sec() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs()),
-    )
-    .unwrap_or(0)
-}
+use crate::core::now_sec;
 
 fn b64u_encode(bytes: &[u8]) -> String {
     use base64::Engine as _;

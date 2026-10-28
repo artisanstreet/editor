@@ -66,7 +66,7 @@ impl CoreClient {
     }
 
     /// Machine-proof headers for an authenticated machine call.
-    fn proof_headers(
+    pub(crate) fn proof_headers(
         subject: &str,
         secret: &[u8; 32],
         method: &str,
@@ -241,57 +241,6 @@ impl CoreClient {
             .await
             .context("read Core grant answer")
     }
-
-    /// Fetch the JWKS Core publishes for grant verification.
-    pub async fn jwks(&self) -> Result<Jwks> {
-        let response = self
-            .http
-            .get(self.url("/.well-known/jwks.json"))
-            .send()
-            .await
-            .context("reach Core")?;
-        Self::check(response)
-            .await?
-            .json()
-            .await
-            .context("read Core JWKS")
-    }
-
-    /// List this account's machines: `GET /v1/machines` (machine proof auth;
-    /// forward-compatible entries).
-    pub async fn list_machines(
-        &self,
-        machine_id: &str,
-        secret: &[u8; 32],
-    ) -> Result<Vec<MachineEntry>> {
-        let now = now_sec();
-        let path = "/v1/machines";
-        let headers = Self::proof_headers(machine_id, secret, "GET", path, b"", now)?;
-        let response = self
-            .http
-            .get(self.url(path))
-            .headers(headers)
-            .send()
-            .await
-            .context("reach Core")?;
-        Self::check(response)
-            .await?
-            .json()
-            .await
-            .context("read Core machines answer")
-    }
-}
-
-/// Build the exact headers without sending (used by tests and `ae`).
-pub fn proof_headers_for(
-    subject: &str,
-    secret: &[u8; 32],
-    method: &str,
-    path_and_query: &str,
-    body: &[u8],
-    now: i64,
-) -> Result<reqwest::header::HeaderMap> {
-    CoreClient::proof_headers(subject, secret, method, path_and_query, body, now)
 }
 
 /// `POST /v1/machines/enrollments` → created (strict read).
@@ -341,15 +290,6 @@ pub struct Jwks {
     pub keys: Vec<Jwk>,
 }
 
-/// One machine entry (forward-compatible: ignores future fields).
-/// Matches Core `MachineInfo` (`id`, not `machine_id`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MachineEntry {
-    pub id: String,
-    #[serde(default)]
-    pub label: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,9 +298,7 @@ mod tests {
     use axum::routing::{get, post};
 
     #[derive(Clone)]
-    struct Stub {
-        expected_proof: bool,
-    }
+    struct Stub;
 
     async fn enroll(
         State(_stub): State<Stub>,
@@ -474,33 +412,18 @@ mod tests {
         }))
     }
 
-    async fn machines(
-        State(_stub): State<Stub>,
-        headers: axum::http::HeaderMap,
-    ) -> impl axum::response::IntoResponse {
-        assert!(headers.contains_key("authorization"));
-        // Forward-compatible entries may carry future fields.
-        // Matches Core `MachineInfo` (`id`, not `machine_id`).
-        axum::Json(serde_json::json!([
-            {"id": "mch_11111111111111111111111111", "label": "srv", "future": 1},
-        ]))
-    }
-
     fn stub_router() -> Router {
-        let stub = Stub {
-            expected_proof: true,
-        };
+        let stub = Stub;
         Router::new()
             .route("/v1/machines/enrollments", post(enroll))
             .route("/v1/machines/enrollments/{id}/status", get(status))
             .route("/v1/machines/enrollments/confirm", post(confirm))
             .route("/v1/grants/issue", post(grants_issue))
-            .route("/v1/machines", get(machines))
             .with_state(stub)
     }
 
     /// The full machine journey against a stub Core: enroll → poll status →
-    /// confirm → grant issue → machines list. Asserts the exact proof
+    /// confirm → grant issue. Asserts the exact proof
     /// headers and body shapes Core specifies.
     #[tokio::test]
     async fn machine_journey_against_stub_core() {
@@ -548,18 +471,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(grant.token, "grant.jwt.token");
-        let machines = client
-            .list_machines(&confirmed.machine_id, &secret)
-            .await
-            .unwrap();
-        assert_eq!(machines.len(), 1);
-    }
-
-    #[test]
-    fn core_base_url_defaults_to_production() {
-        assert_eq!(
-            core_base_url(None).trim(),
-            core_base_url(Some(DEFAULT_CORE_BASE_URL)).trim()
-        );
     }
 }

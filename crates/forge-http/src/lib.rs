@@ -2,13 +2,13 @@
 //! server-sent event stream. Nothing is tied to a connection; a client's
 //! only sync state is the last seq it saw.
 
-pub mod account_auth;
-pub mod account_service;
+mod account_auth;
+mod account_service;
 pub mod core;
 mod events;
 mod extensions;
 mod gateway;
-pub mod relay;
+mod relay;
 mod repository;
 mod routes;
 pub mod sync;

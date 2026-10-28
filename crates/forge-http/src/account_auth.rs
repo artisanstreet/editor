@@ -140,9 +140,6 @@ impl GrantVerifier {
     }
 }
 
-/// The error kind of a rejected grant (no token bytes in messages).
-pub use artisan_account::GrantErrorKind as RejectionKind;
-
 #[allow(
     clippy::missing_errors_doc,
     reason = "test-only helpers; failures fail the test"
@@ -271,10 +268,5 @@ pub(crate) mod tests {
                 .await
                 .is_err()
         );
-    }
-
-    #[test]
-    fn rejection_kind_is_exported() {
-        let _ = RejectionKind::Signature;
     }
 }

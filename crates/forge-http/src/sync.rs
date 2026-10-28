@@ -128,7 +128,7 @@ struct Core<'a> {
 
 impl Core<'_> {
     fn get(&self, path: &str) -> Result<reqwest::RequestBuilder> {
-        let headers = crate::core::proof_headers_for(
+        let headers = crate::core::CoreClient::proof_headers(
             self.machine_id,
             self.secret,
             "GET",
@@ -148,7 +148,7 @@ impl Core<'_> {
             "status": status,
             "detail": detail,
         }))?;
-        let headers = crate::core::proof_headers_for(
+        let headers = crate::core::CoreClient::proof_headers(
             self.machine_id,
             self.secret,
             "POST",
