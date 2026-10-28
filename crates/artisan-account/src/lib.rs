@@ -27,7 +27,7 @@ pub use machine_proof::{
     verify_machine_proof,
 };
 pub use network::{AccountProfile, CoreSessionClient, SessionToken};
-pub use noise::{ChannelCtx, NoiseChannel, NoiseError, Phase};
+pub use noise::{ChannelCtx, NoiseChannel, Phase};
 pub use pop::pop_sign;
 
 const PROTOCOL_VERSION: u32 = 1;
