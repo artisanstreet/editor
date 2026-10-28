@@ -66,3 +66,21 @@ impl Core {
         cx.notify();
     }
 }
+
+/// Saves the record a finished setup leaves, so a test can resume straight
+/// into `Ready` without knowing where or how it is stored.
+pub fn save_onboarding_for_tests(
+    files: &EditorFiles,
+    base_url: &str,
+    account_id: &str,
+    machine_id: &str,
+) -> Result<()> {
+    crate::access::save_onboarding(
+        &files.dir,
+        &crate::access::OnboardingRecord {
+            account_id: account_id.to_owned(),
+            base_url: base_url.to_owned(),
+            machine_id: machine_id.to_owned(),
+        },
+    )
+}

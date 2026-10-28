@@ -22,6 +22,8 @@ mod screen;
 mod services;
 #[cfg(any(test, feature = "test-support"))]
 mod testing;
+#[cfg(any(test, feature = "test-support"))]
+pub use testing::save_onboarding_for_tests;
 pub use resident::{CollectionBytes, ResidentBytes};
 
 pub use access::EntryGate;
