@@ -1,159 +1,57 @@
-//! Tunneled Relay client for account Forges (native Editor, CLI, harnesses).
-//!
-//! The Forge holds one WebSocket to its Relay room and serves Noise
-//! channels as responder; this client opens channels as initiator, presents
-//! its Core grant JWT inside the encrypted confirm, and verifies the Forge
-//! responder confirm against the enrolled key from the authenticated Core
-//! machine record. Outer WSS is transport-only; E2E is Noise XX_25519.
-//! Grant JWTs are short TTL (<=300 s): the transport refreshes via the
-//! session-authed [`CoreSessionClient`] and re-handshakes (new channel)
-//! before expiry, so a long-lived connection never dies permanently.
-//!
-//! No GPUI here: every entry is runtime-agnostic async; callers run it on
-//! the network runtime (never an ambient reactor).
+//! Tunneled Relay client for account Forges. Each channel is its own
+//! WebSocket carrying one Noise XX session to the Forge; unary calls share
+//! one channel, every event subscription gets its own.
 
-use anyhow::{Context, Result, anyhow};
-use serde::de::DeserializeOwned;
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use crate::{CoreSessionClient, SessionToken};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use artisan_api::{
+    ApiError, Envelope, ErrorCode, Reassembly, StreamEvent, StreamStart, TunnelChunk,
+    TunnelRequest, TunnelResponse,
+};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures::{SinkExt as _, StreamExt as _};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message as Ws;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
-/// Terminal close signal shared by every handle of one channel.
-///
-/// `tokio::sync::watch::Sender::send` drops the value when no receiver
-/// exists yet, so a bare `send(true)` can miss a reader that subscribes
-/// just after [`close`]. [`close`] therefore uses `send_replace`, which
-/// retains the terminal state regardless of receivers, and [`aborted`]
-/// checks the atomic flag too — a close-before-subscribe or
-/// close-while-waiting race always resolves to closed, never to a stream
-/// timeout.
-#[derive(Clone, Debug)]
-struct CloseSignal {
-    closed: Arc<AtomicBool>,
-    shutdown: tokio::sync::watch::Sender<bool>,
-}
+use crate::grant::{is_valid_id, unverified_jti, unverified_part};
+use crate::{
+    AckFrame, AuthenticateFrame, ChannelCtx, ClientFrame, CoreSessionClient, DataFrame,
+    HelloFrame, MachineKeypair, NoiseChannel, OpenFrame, PongFrame, ServerFrame, SessionToken,
+    pop_sign,
+};
 
-impl CloseSignal {
-    fn new() -> Self {
-        Self {
-            closed: Arc::new(AtomicBool::new(false)),
-            shutdown: tokio::sync::watch::Sender::new(false),
-        }
-    }
+const OPEN_DEADLINE: Duration = Duration::from_secs(30);
+const REFRESH_MARGIN_S: i64 = 60;
 
-    /// Record the terminal state. Idempotent; safe from any executor.
-    fn close(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        self.shutdown.send_replace(true);
-    }
-
-    fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
-    }
-
-    /// Completes once [`close`] ran — including a close that happened
-    /// before this waiter subscribed.
-    #[expect(
-        clippy::let_underscore_must_use,
-        reason = "close signal result is irrelevant; waking is what matters"
-    )]
-    async fn aborted(&self) {
-        if self.is_closed() {
-            return;
-        }
-        let mut rx = self.shutdown.subscribe();
-        // Re-check after subscribing: `send_replace` retains the terminal
-        // value, so a close racing the subscribe is still observed here.
-        if *rx.borrow() || self.is_closed() {
-            return;
-        }
-        let _ = rx.changed().await;
-    }
-}
-
-/// Everything the Relay dialer needs beyond one prepared request.
-///
-/// Where the Relay lives plus the session-authed Core client for grant refresh.
-/// Built once after sign-in; Emily wires it into `set_relay_dialer`.
 #[derive(Clone)]
 pub struct RelayDialContext {
-    /// `wss://relay.example` (no trailing slash; `https://` also accepted).
     pub relay_base_url: String,
-    /// Session-authed Core HTTP for grant refresh.
     pub core: CoreSessionClient,
-    /// Persistent session token (grants are short-lived; this is not).
     pub session: SessionToken,
 }
 
-/// Relay base URL from deployment config (`AST_RELAY_URL`). `None` when
-/// unset: the Relay path stays off while direct pairing keeps working.
-#[must_use]
-pub fn relay_base_url_from_env() -> Option<String> {
-    std::env::var("AST_RELAY_URL")
-        .ok()
-        .map(|url| url.trim().to_owned())
-        .filter(|url| !url.is_empty())
-}
-
-impl RelayDialContext {
-    /// Build from deployment config + the signed-in session. `None` when
-    /// `AST_RELAY_URL` is unset: the caller leaves the dialer uninstalled
-    /// and account Forges explain the Relay path is still arriving.
-    #[must_use]
-    pub fn from_env(
-        core: CoreSessionClient,
-        session: SessionToken,
-    ) -> Option<Self> {
-        relay_base_url_from_env().map(|relay_base_url| Self {
-            relay_base_url,
-            core,
-            session,
-        })
-    }
-}
-
-/// Build the account dialer Emily registers via `set_relay_dialer`.
-///
-/// The closure captures Core + session + Relay URL; each dial uses the
-/// prepared `RelayDialRequest` for the first handshake and refreshes
-/// grants from Core from then on.
-///
-/// Network work runs on the network runtime (never the GPUI executor —
-/// WS connect, timers, and tungstenite need its reactor), wrapped so
-/// dropping the GPUI `Task` aborts the dial.
-/// One tunneled Forge: unary calls share one WS/Noise channel (serialized),
-/// each event subscription gets its own WS/Noise channel.
+#[derive(Clone)]
 pub struct RelayClient {
-    unary: RelayChannel,
-    ctx_account: String,
-    ctx_machine: String,
-    /// Weak handles to every event channel opened by
-    /// [`RelayClient::subscribe`], so [`RelayClient::close_all`]
-    /// terminates streams as well as unary. Lock is never held across
-    /// an await; dead entries are pruned on close.
-    streams: Arc<std::sync::Mutex<Vec<std::sync::Weak<RelayChannelInner>>>>,
-}
-
-impl Clone for RelayClient {
-    fn clone(&self) -> Self {
-        Self {
-            unary: self.unary.clone(),
-            ctx_account: self.ctx_account.clone(),
-            ctx_machine: self.ctx_machine.clone(),
-            streams: Arc::clone(&self.streams),
-        }
-    }
+    route: Arc<Route>,
+    unary: Arc<tokio::sync::Mutex<Option<Conn>>>,
+    cancel: CancellationToken,
 }
 
 impl RelayClient {
-    /// Open the unary channel: admission, Noise XX, JWT-in-confirm verified
-    /// against the Forge key. `forge_ed25519_b64u` is the enrolled key from
-    /// the authenticated Core machine record (transcript pinning, never a
-    /// TLS fingerprint).
+    /// `forge_ed25519_b64u` is the Forge's enrolled key from the
+    /// authenticated Core machine record; the responder confirm must be
+    /// signed by it.
     #[expect(
         clippy::too_many_arguments,
-        reason = "relay dial needs endpoint, identity, grant, keys, and session together"
+        reason = "the dial request's fields, kept as the consumers pass them"
     )]
     pub async fn connect(
         relay_base_url: &str,
@@ -165,106 +63,47 @@ impl RelayClient {
         core: CoreSessionClient,
         session: SessionToken,
     ) -> Result<Self> {
-        let forge_pub = decode_32(forge_ed25519_b64u).context("bad Forge key")?;
-        let unary = RelayChannel::connect(
-            relay_base_url,
-            account_id,
-            machine_id,
-            "unary",
-            grant_jwt,
-            cnf_secret,
-            &forge_pub,
+        let forge_pub: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(forge_ed25519_b64u)
+            .context("read the Forge key")?
+            .try_into()
+            .ok()
+            .context("the Forge key is not 32 bytes")?;
+        let route = Arc::new(Route {
+            relay_base: relay_base_url.to_owned(),
+            account: account_id.to_owned(),
+            machine: machine_id.to_owned(),
+            forge_pub,
             core,
             session,
-        )
-        .await?;
+        });
+        let cancel = CancellationToken::new();
+        let conn = route.open_with("unary", grant_jwt, cnf_secret, &cancel).await?;
         Ok(Self {
-            unary,
-            ctx_account: account_id.to_owned(),
-            ctx_machine: machine_id.to_owned(),
-            streams: Arc::new(std::sync::Mutex::new(Vec::new())),
+            route,
+            unary: Arc::new(tokio::sync::Mutex::new(Some(conn))),
+            cancel,
         })
     }
 
-    /// Promptly terminate the unary channel; in-flight and future calls
-    /// fail fast, blocked reads wake at once. See [`RelayChannel::close`]:
-    /// synchronous, idempotent, callable from any executor.
-    pub fn close(&self) {
-        self.unary.close();
-    }
-
-    /// Promptly terminate the unary channel and every stream opened by
-    /// [`RelayClient::subscribe`]. Sign-out calls this when dropping
-    /// account hosts so views briefly holding clones stop at once, and no
-    /// grant refresh, reconnect, or new subscription can start afterwards
-    /// (those paths check the closed signal first). Synchronous,
-    /// idempotent, callable from any executor.
+    /// Ends the unary channel and every event stream at once; later calls
+    /// and subscriptions fail.
     pub fn close_all(&self) {
-        self.close();
-        let channels = self
-            .streams
-            .lock()
-            .map(|mut open| {
-                open.retain(|weak| std::sync::Weak::upgrade(weak).is_some());
-                open.iter()
-                    .filter_map(std::sync::Weak::upgrade)
-                    .map(|inner| RelayChannel { inner })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for channel in channels {
-            channel.close();
-        }
+        self.cancel.cancel();
     }
 
-    /// Whether [`RelayClient::close_all`] (or [`RelayClient::close`]) ran.
-    /// New subscriptions are refused once closed.
-    pub fn is_closed(&self) -> bool {
-        self.unary.is_closed()
-    }
-
-    /// Connect snapshot over the tunnel (same shape as direct `/state`).
-    pub async fn state(&self) -> Result<artisan_api::State> {
-        self.request_json("GET", "/state", None).await
-    }
-
-    /// Unary TunnelRequest with a JSON answer; parses `body` into `T`.
-    /// Responses are forward-compatible (unknown fields ignored); requests
-    /// never carry unknown fields. Non-2xx answers become `ApiError`.
     pub async fn request_json<T: DeserializeOwned>(
         &self,
         method: &str,
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T> {
-        let response = self.raw_request(method, path, body).await?;
+        let response = Box::pin(self.request(method, path, body)).await?;
         serde_json::from_value(response.body).context("read Forge's answer")
     }
 
-    /// Unary call answered with `()`; non-2xx becomes `ApiError`.
-    pub async fn request_empty(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<serde_json::Value>,
-    ) -> Result<()> {
-        self.raw_request(method, path, body).await.map(drop)
-    }
-
-    /// Unary call returning the checked `TunnelResponse` itself.
-    pub async fn raw_request(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<serde_json::Value>,
-    ) -> Result<artisan_api::TunnelResponse> {
-        let response = self.unary.call(method, path, body).await?;
-        check_tunnel(&response)?;
-        Ok(response)
-    }
-
-    /// Binary download with a byte ceiling: `$bytes` envelope decoded, else
-    /// UTF-8/JSON fallback. Enforces `limit`, never truncates.
+    /// Decodes a `$bytes` envelope, else the UTF-8/JSON body; refuses
+    /// answers over `limit`.
     pub async fn raw_bytes(
         &self,
         method: &str,
@@ -272,86 +111,539 @@ impl RelayClient {
         body: Option<serde_json::Value>,
         limit: usize,
     ) -> Result<Vec<u8>> {
-        let response = self.raw_request(method, path, body).await?;
-        let bytes = decode_tunnel_bytes(&response)?;
-        anyhow::ensure!(
-            bytes.len() <= limit,
-            "Forge response exceeds {limit} bytes"
-        );
+        let bytes = decode_tunnel_bytes(&Box::pin(self.request(method, path, body)).await?)?;
+        ensure!(bytes.len() <= limit, "Forge response exceeds {limit} bytes");
         Ok(bytes)
     }
 
-    /// Binary download: `$bytes` envelope decoded, else UTF-8/JSON fallback.
-    pub async fn request_bytes(&self, path: &str) -> Result<Vec<u8>> {
-        self.raw_bytes("GET", path, None, 32 * 1024 * 1024).await
+    pub async fn subscribe(&self, path: &str) -> Result<RelayEventStream> {
+        let cancel = self.cancel.child_token();
+        let open = async {
+            let mut conn = self.route.open("events", &cancel).await?;
+            let response = conn
+                .call(&request(artisan_api::METHOD_SUBSCRIBE, path, None))
+                .await?;
+            check_tunnel(&response)?;
+            let Subscribed { start } =
+                serde_json::from_value(response.body).context("read the event stream id")?;
+            Ok::<_, anyhow::Error>((conn, start.stream))
+        };
+        let (conn, stream_id) = cancel
+            .run_until_cancelled(Box::pin(open))
+            .await
+            .context("relay connection closed")??;
+        Ok(RelayEventStream {
+            conn,
+            stream_id,
+            ended: false,
+            cancel,
+        })
     }
 
-    /// Open a dedicated event stream channel (`SUBSCRIBE`), returning the
-    /// stream id and a live envelope receiver. Oversized envelopes arrive
-    /// chunked and reassembled; a lagged broadcast or full queue ends the
-    /// stream with `Reset` (caller re-subscribes from its `since` cursor).
-    /// Refused once [`RelayClient::close_all`] ran.
-    pub async fn subscribe(&self, path: &str) -> Result<RelayEventStream> {
-        // Signal first: no new subscriptions after close.
-        if self.is_closed() {
-            anyhow::bail!("relay connection closed");
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<TunnelResponse> {
+        let request = request(method, path, body);
+        let response = self
+            .cancel
+            .run_until_cancelled(Box::pin(self.call(&request)))
+            .await
+            .context("relay connection closed")??;
+        check_tunnel(&response)?;
+        Ok(response)
+    }
+
+    /// Reads are repeated once on a fresh channel; a mutation may already
+    /// have run, so its retry is the caller's choice.
+    async fn call(&self, request: &TunnelRequest) -> Result<TunnelResponse> {
+        let mut unary = self.unary.lock().await;
+        let mut result = self.call_once(&mut unary, request).await;
+        if result.is_err() && matches!(request.method.as_str(), "GET" | "HEAD") {
+            result = self.call_once(&mut unary, request).await;
         }
-        let stream = RelayEventStream::open(
-            &self.unary,
-            &self.ctx_account,
-            &self.ctx_machine,
-            path,
-        )
-        .await?;
-        if let Ok(mut open) = self.streams.lock() {
-            open.retain(|weak| weak.upgrade().is_some());
-            open.push(std::sync::Arc::downgrade(&stream.channel.inner));
-        }
-        Ok(stream)
+        drop(unary);
+        result
+    }
+
+    /// The connection is taken out for the call and only put back after a
+    /// complete answer, so a failed or abandoned call never leaves a
+    /// half-used Noise session behind.
+    async fn call_once(
+        &self,
+        unary: &mut Option<Conn>,
+        request: &TunnelRequest,
+    ) -> Result<TunnelResponse> {
+        let mut conn = match unary.take().filter(Conn::usable) {
+            Some(conn) => conn,
+            None => self.route.open("unary", &self.cancel).await?,
+        };
+        let response = conn.call(request).await?;
+        *unary = Some(conn);
+        Ok(response)
     }
 }
 
-fn check_tunnel(response: &artisan_api::TunnelResponse) -> Result<()> {
+#[derive(Deserialize)]
+struct Subscribed {
+    #[serde(rename = "$stream")]
+    start: StreamStart,
+}
+
+pub struct RelayEventStream {
+    conn: Conn,
+    stream_id: String,
+    ended: bool,
+    cancel: CancellationToken,
+}
+
+impl RelayEventStream {
+    /// `None` once the Forge ends the stream; a lagging subscriber gets a
+    /// `Reset` envelope and re-subscribes from its cursor.
+    pub async fn next_event(&mut self) -> Result<Option<Envelope>> {
+        while !self.ended {
+            let plaintext = self
+                .cancel
+                .run_until_cancelled(self.conn.next_plaintext())
+                .await
+                .context("relay connection closed")??;
+            let Message::Event(event) = read_message(&plaintext)? else {
+                continue;
+            };
+            let StreamEvent { envelope, end, error, .. } = *event;
+            if let Some(error) = error {
+                bail!("the Forge ended the event stream: {error}");
+            }
+            if let Some(envelope) = envelope {
+                return Ok(Some(envelope));
+            }
+            self.ended = end.is_some();
+        }
+        Ok(None)
+    }
+
+    pub async fn unsubscribe(&mut self) -> Result<()> {
+        let path = format!("/events/{}", self.stream_id);
+        let request = request(artisan_api::METHOD_UNSUBSCRIBE, &path, None);
+        let response = self
+            .cancel
+            .run_until_cancelled(self.conn.call(&request))
+            .await
+            .context("relay connection closed")??;
+        self.ended = true;
+        check_tunnel(&response)
+    }
+}
+
+struct Route {
+    relay_base: String,
+    account: String,
+    machine: String,
+    forge_pub: [u8; 32],
+    core: CoreSessionClient,
+    session: SessionToken,
+}
+
+impl Route {
+    async fn open(&self, prefix: &str, parent: &CancellationToken) -> Result<Conn> {
+        let keypair = MachineKeypair::generate().context("make a connection key")?;
+        let grant = self
+            .core
+            .issue_editor_grant(&self.session, &self.machine, &keypair.public_b64u())
+            .await
+            .context("refresh the Relay grant")?;
+        self.open_with(prefix, &grant.token, keypair.secret(), parent)
+            .await
+    }
+
+    async fn open_with(
+        &self,
+        prefix: &str,
+        grant_jwt: &str,
+        cnf_secret: &[u8; 32],
+        parent: &CancellationToken,
+    ) -> Result<Conn> {
+        tokio::time::timeout(
+            OPEN_DEADLINE,
+            self.open_channel(prefix, grant_jwt, cnf_secret, parent),
+        )
+        .await
+        .context("the Relay did not open the channel in time")?
+    }
+
+    async fn open_channel(
+        &self,
+        prefix: &str,
+        grant_jwt: &str,
+        cnf_secret: &[u8; 32],
+        parent: &CancellationToken,
+    ) -> Result<Conn> {
+        let channel = format!("{prefix}-{}", hex::encode(random::<16>()?));
+        let url = ws_url(&self.relay_base, &self.account, &self.machine)?;
+        let mut socket = connect_socket(&url, parent.child_token()).await?;
+        admit(&mut socket, grant_jwt, cnf_secret).await?;
+        let expires_at = grant_expires_at(grant_jwt)?;
+        socket.send(&ClientFrame::Open(OpenFrame {
+            v: 1,
+            channel: channel.clone(),
+        }))?;
+        loop {
+            if let ServerFrame::ChannelOpened(opened) = socket.recv().await?
+                && opened.channel == channel
+            {
+                break;
+            }
+        }
+        let ctx = ChannelCtx {
+            account: self.account.clone(),
+            machine: self.machine.clone(),
+            channel: channel.clone(),
+        };
+        let mut conn = Conn {
+            socket,
+            noise: NoiseChannel::initiator(&random()?, None, ctx)?,
+            channel,
+            send_seq: 0,
+            recv_seq: 0,
+            pending: VecDeque::new(),
+            reassembly: Reassembly::new(),
+            expires_at,
+        };
+        conn.handshake(grant_jwt, cnf_secret, &self.forge_pub).await?;
+        Ok(conn)
+    }
+}
+
+async fn admit(socket: &mut Socket, grant_jwt: &str, cnf_secret: &[u8; 32]) -> Result<()> {
+    let jti = unverified_jti(grant_jwt)?;
+    socket.send(&ClientFrame::Hello(HelloFrame {
+        v: 1,
+        grant: grant_jwt.to_owned(),
+    }))?;
+    loop {
+        match socket.recv().await? {
+            ServerFrame::Challenge(challenge) => {
+                let nonce: [u8; 32] = URL_SAFE_NO_PAD
+                    .decode(challenge.nonce)
+                    .context("read the Relay challenge")?
+                    .try_into()
+                    .ok()
+                    .context("the Relay challenge is not 32 bytes")?;
+                socket.send(&ClientFrame::Authenticate(AuthenticateFrame {
+                    v: 1,
+                    jti: jti.clone(),
+                    sig: URL_SAFE_NO_PAD.encode(pop_sign(cnf_secret, &nonce, &jti)),
+                }))?;
+            }
+            ServerFrame::Ready(_) => return Ok(()),
+            ServerFrame::ChannelOpened(_)
+            | ServerFrame::Data(_)
+            | ServerFrame::ChannelClosed(_)
+            | ServerFrame::Ack(_)
+            | ServerFrame::Presence(_)
+            | ServerFrame::Error(_)
+            | ServerFrame::Ping(_) => {}
+        }
+    }
+}
+
+/// One open, confirmed Noise channel over its own Relay socket.
+struct Conn {
+    socket: Socket,
+    channel: String,
+    noise: NoiseChannel,
+    send_seq: u64,
+    recv_seq: u64,
+    /// Data that arrived while a send waited for its ack, in Noise order.
+    pending: VecDeque<Vec<u8>>,
+    reassembly: Reassembly,
+    expires_at: i64,
+}
+
+enum Inbound {
+    Data(Vec<u8>),
+    Ack(u64),
+}
+
+impl Conn {
+    /// Forge checks the grant's `exp` on every request, so a channel is
+    /// replaced before its grant runs out.
+    fn usable(&self) -> bool {
+        !self.socket.token.is_cancelled() && self.expires_at - now_sec() > REFRESH_MARGIN_S
+    }
+
+    async fn handshake(
+        &mut self,
+        grant_jwt: &str,
+        cnf_secret: &[u8; 32],
+        forge_pub: &[u8; 32],
+    ) -> Result<()> {
+        let mut first = Vec::new();
+        self.noise.next_handshake_message(&mut first)?;
+        self.send_raw(&first)?;
+        let second = self.next_data().await?;
+        self.noise
+            .receive_handshake_message(&second)
+            .context("shake hands with the Forge")?;
+        let mut third = Vec::new();
+        self.noise.next_handshake_message(&mut third)?;
+        self.send_raw(&third)?;
+        let confirm = self
+            .noise
+            .emit_initiator_confirm(cnf_secret, grant_jwt.as_bytes())?;
+        self.send_raw(&confirm)?;
+        let reply = self.next_data().await?;
+        self.noise
+            .receive_responder_confirm(&reply, forge_pub)
+            .context("confirm the Forge's identity")
+    }
+
+    async fn call(&mut self, request: &TunnelRequest) -> Result<TunnelResponse> {
+        let bytes = serde_json::to_vec(request).context("encode the tunneled call")?;
+        if bytes.len() > artisan_api::TUNNEL_PLAINTEXT_BUDGET {
+            for chunk in artisan_api::chunk_bytes(&request.id, &bytes) {
+                self.send(&serde_json::to_vec(&chunk).context("encode the tunneled call")?)
+                    .await?;
+            }
+        } else {
+            self.send(&bytes).await?;
+        }
+        loop {
+            if let Message::Response(response) = read_message(&self.next_plaintext().await?)?
+                && response.id == request.id
+            {
+                return Ok(response);
+            }
+        }
+    }
+
+    /// Stop-and-wait: the Relay window can never fill.
+    async fn send(&mut self, plaintext: &[u8]) -> Result<()> {
+        let sealed = self.noise.seal(plaintext)?;
+        let seq = self.send_raw(&sealed)?;
+        loop {
+            match self.inbound().await? {
+                Inbound::Ack(acked) if acked >= seq => return Ok(()),
+                Inbound::Ack(_) => {}
+                Inbound::Data(raw) => {
+                    let plaintext = self.noise.receive_data(&raw)?;
+                    self.pending.push_back(plaintext);
+                }
+            }
+        }
+    }
+
+    fn send_raw(&mut self, bytes: &[u8]) -> Result<u64> {
+        let seq = self.send_seq;
+        self.socket.send(&ClientFrame::Data(DataFrame {
+            v: 1,
+            channel: self.channel.clone(),
+            seq,
+            body: URL_SAFE_NO_PAD.encode(bytes),
+        }))?;
+        self.send_seq += 1;
+        Ok(seq)
+    }
+
+    /// One complete application message, reassembled from chunks.
+    async fn next_plaintext(&mut self) -> Result<Vec<u8>> {
+        loop {
+            let plaintext = if let Some(plaintext) = self.pending.pop_front() {
+                plaintext
+            } else {
+                let raw = self.next_data().await?;
+                self.noise.receive_data(&raw)?
+            };
+            let Ok(chunk) = serde_json::from_slice::<TunnelChunk>(&plaintext) else {
+                return Ok(plaintext);
+            };
+            if let Some(whole) = self.reassembly.feed(&self.channel, &chunk)? {
+                return Ok(whole);
+            }
+        }
+    }
+
+    async fn next_data(&mut self) -> Result<Vec<u8>> {
+        loop {
+            if let Inbound::Data(raw) = self.inbound().await? {
+                return Ok(raw);
+            }
+        }
+    }
+
+    async fn inbound(&mut self) -> Result<Inbound> {
+        loop {
+            match self.socket.recv().await? {
+                ServerFrame::Data(DataFrame { channel, seq, body, .. }) => {
+                    self.socket
+                        .send(&ClientFrame::Ack(AckFrame { v: 1, channel, seq }))?;
+                    ensure!(seq == self.recv_seq, "the Relay delivered data out of order");
+                    self.recv_seq += 1;
+                    return Ok(Inbound::Data(
+                        URL_SAFE_NO_PAD.decode(body).context("read the Relay frame")?,
+                    ));
+                }
+                ServerFrame::Ack(ack) => return Ok(Inbound::Ack(ack.seq)),
+                ServerFrame::Challenge(_)
+                | ServerFrame::Ready(_)
+                | ServerFrame::ChannelOpened(_)
+                | ServerFrame::ChannelClosed(_)
+                | ServerFrame::Presence(_)
+                | ServerFrame::Error(_)
+                | ServerFrame::Ping(_) => {}
+            }
+        }
+    }
+}
+
+type WsConnection =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A Relay WebSocket owned by its pump task, which answers heartbeats on
+/// its own and never waits on the reader.
+struct Socket {
+    out: mpsc::UnboundedSender<String>,
+    frames: mpsc::UnboundedReceiver<Result<ServerFrame>>,
+    /// Cancelled when the client signs out or the socket ends.
+    token: CancellationToken,
+    _pump: AbortOnDropHandle<()>,
+}
+
+impl Socket {
+    fn send(&self, frame: &ClientFrame) -> Result<()> {
+        let text = serde_json::to_string(frame).context("encode a Relay frame")?;
+        self.out.send(text).context("the Relay connection ended")
+    }
+
+    async fn recv(&mut self) -> Result<ServerFrame> {
+        match self.frames.recv().await.context("the Relay connection ended")?? {
+            ServerFrame::ChannelClosed(closed) => {
+                bail!("the Relay closed the channel: {}", closed.reason)
+            }
+            ServerFrame::Error(error) => {
+                bail!("the Relay refused: {} {}", error.code, error.message)
+            }
+            frame @ (ServerFrame::Challenge(_)
+            | ServerFrame::Ready(_)
+            | ServerFrame::ChannelOpened(_)
+            | ServerFrame::Data(_)
+            | ServerFrame::Ack(_)
+            | ServerFrame::Presence(_)
+            | ServerFrame::Ping(_)) => Ok(frame),
+        }
+    }
+}
+
+async fn connect_socket(url: &str, token: CancellationToken) -> Result<Socket> {
+    let (ws, _response) = tokio_tungstenite::connect_async(url)
+        .await
+        .with_context(|| format!("connect to the Relay at {url}"))?;
+    let (out, outgoing) = mpsc::unbounded_channel();
+    let (incoming, frames) = mpsc::unbounded_channel();
+    let pump_token = token.clone();
+    let pump = tokio::spawn(async move {
+        let outcome = pump_token
+            .run_until_cancelled(run_pump(ws, outgoing, &incoming))
+            .await;
+        pump_token.cancel();
+        if let Some(Err(error)) = outcome {
+            let _reader_gone = incoming.send(Err(error));
+        }
+    });
+    Ok(Socket {
+        out,
+        frames,
+        token,
+        _pump: AbortOnDropHandle::new(pump),
+    })
+}
+
+/// Incoming frames go to an unbounded queue: Relay data is already bounded
+/// by its ack window, which only moves when the reader consumes it.
+async fn run_pump(
+    ws: WsConnection,
+    mut outgoing: mpsc::UnboundedReceiver<String>,
+    frames: &mpsc::UnboundedSender<Result<ServerFrame>>,
+) -> Result<()> {
+    let (mut sink, mut source) = ws.split();
+    loop {
+        tokio::select! {
+            text = outgoing.recv() => {
+                let Some(text) = text else { return Ok(()) };
+                sink.send(Ws::Text(text.into())).await.context("send to the Relay")?;
+            }
+            message = source.next() => {
+                match message.context("the Relay closed the connection")?.context("read from the Relay")? {
+                    Ws::Text(text) => match serde_json::from_str::<ServerFrame>(&text) {
+                        Ok(ServerFrame::Ping(ping)) => {
+                            let answer = serde_json::to_string(&ClientFrame::Pong(PongFrame { v: 1, t: ping.t }))?;
+                            sink.send(Ws::Text(answer.into())).await.context("answer the Relay")?;
+                        }
+                        Ok(ServerFrame::Presence(_)) | Err(_) => {}
+                        Ok(frame) => {
+                            let terminal = matches!(frame, ServerFrame::ChannelClosed(_) | ServerFrame::Error(_));
+                            if frames.send(Ok(frame)).is_err() || terminal {
+                                return Ok(());
+                            }
+                        }
+                    },
+                    Ws::Ping(data) => sink.send(Ws::Pong(data)).await.context("answer the Relay")?,
+                    Ws::Close(_) => bail!("the Relay closed the connection"),
+                    Ws::Binary(_) | Ws::Pong(_) | Ws::Frame(_) => {}
+                }
+            }
+        }
+    }
+}
+
+enum Message {
+    Response(TunnelResponse),
+    Event(Box<StreamEvent>),
+}
+
+/// A live `$event` can interleave with a response on an event channel.
+fn read_message(bytes: &[u8]) -> Result<Message> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).context("read Forge's answer")?;
+    match value.get_mut(artisan_api::STREAM_EVENT_KEY).map(serde_json::Value::take) {
+        Some(event) => Ok(Message::Event(Box::new(
+            serde_json::from_value(event).context("read the Forge event")?,
+        ))),
+        None => Ok(Message::Response(
+            serde_json::from_value(value).context("read Forge's answer")?,
+        )),
+    }
+}
+
+fn check_tunnel(response: &TunnelResponse) -> Result<()> {
     if (200..300).contains(&response.status) {
         return Ok(());
     }
-    let (code, message) = tunnel_error(&response.body);
-    let mut error = serde_json::from_value::<artisan_api::ApiError>(serde_json::json!({
-        "code": code,
-        "message": message,
-    }))
-    .unwrap_or_else(|_| artisan_api::ApiError {
-        code: artisan_api::ErrorCode::Internal,
-        message: format!("Forge answered {}", response.status),
-    });
-    if matches!(response.status, 401 | 403) {
-        error.code = artisan_api::ErrorCode::Unauthorized;
-    }
-    Err(anyhow!(error))
+    let detail = |key: &str| {
+        response
+            .body
+            .pointer(&format!("/error/{key}"))
+            .and_then(serde_json::Value::as_str)
+    };
+    let code = if matches!(response.status, 401 | 403) {
+        ErrorCode::Unauthorized
+    } else {
+        detail("code")
+            .and_then(|code| serde_json::from_value(code.into()).ok())
+            .unwrap_or(ErrorCode::Internal)
+    };
+    let message = detail("message")
+        .map_or_else(|| format!("Forge answered {}", response.status), str::to_owned);
+    Err(anyhow!(ApiError { code, message }))
 }
 
-fn tunnel_error(body: &serde_json::Value) -> (String, String) {
-    let code = body
-        .pointer("/error/code")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("tunnel_error")
-        .to_owned();
-    let message = body
-        .pointer("/error/message")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("the Forge did not complete the tunneled call")
-        .to_owned();
-    (code, message)
-}
-
-fn decode_tunnel_bytes(response: &artisan_api::TunnelResponse) -> Result<Vec<u8>> {
-    use base64::Engine as _;
+fn decode_tunnel_bytes(response: &TunnelResponse) -> Result<Vec<u8>> {
     if let Some(envelope) = response.body.get(artisan_api::BYTES_ENVELOPE_KEY) {
         let bytes: artisan_api::TunnelBytes =
             serde_json::from_value(envelope.clone()).context("read Forge bytes")?;
-        return base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(bytes.b64u.as_bytes())
-            .context("read Forge bytes");
+        return URL_SAFE_NO_PAD.decode(bytes.b64u).context("read Forge bytes");
     }
     if let Some(text) = response.body.as_str() {
         return Ok(text.as_bytes().to_vec());
@@ -359,1407 +651,235 @@ fn decode_tunnel_bytes(response: &artisan_api::TunnelResponse) -> Result<Vec<u8>
     serde_json::to_vec(&response.body).context("read Forge bytes")
 }
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "relay errors use user-facing messages; transport details stay out of logs"
-)]
-fn decode_32(b64u: &str) -> Result<[u8; 32]> {
-    use base64::Engine as _;
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(b64u.as_bytes())
-        .map_err(|_| anyhow!("bad key encoding"))?;
-    raw.try_into()
-        .map_err(|_| anyhow!("bad key length"))
+fn request(method: &str, path: &str, body: Option<serde_json::Value>) -> TunnelRequest {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static IDS: AtomicU64 = AtomicU64::new(1);
+    TunnelRequest {
+        id: format!("e{}", IDS.fetch_add(1, Ordering::Relaxed)),
+        method: method.to_owned(),
+        path: path.to_owned(),
+        body,
+    }
 }
 
-/// Short grant TTLs by design: refresh a minute before expiry.
-fn grant_expires_at(jwt: &str) -> Option<i64> {
-    use base64::Engine as _;
-    let payload = jwt.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.as_bytes())
-        .ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    value.get("exp")?.as_i64()
-}
-
-fn grant_fresh_enough(jwt: &str) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs().cast_signed());
-    grant_expires_at(jwt).is_some_and(|exp| exp - now > 60)
-}
-
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "relay errors use user-facing messages; transport details stay out of logs"
-)]
-fn ws_url_for(relay_base: &str, account: &str, machine: &str) -> Result<String> {
-    anyhow::ensure!(
-        crate::grant::is_valid_id(account) && crate::grant::is_valid_id(machine),
-        "bad relay route"
+fn ws_url(relay_base: &str, account: &str, machine: &str) -> Result<String> {
+    ensure!(
+        is_valid_id(account) && is_valid_id(machine),
+        "the Relay route is not valid"
     );
-    let mut base = relay_base.trim_end_matches('/').to_owned();
-    if let Some(rest) = base.strip_prefix("https://") {
-        base = format!("wss://{rest}");
-    } else if let Some(rest) = base.strip_prefix("http://") {
-        base = format!("ws://{rest}");
-    }
-    if !(base.starts_with("ws://") || base.starts_with("wss://")) {
-        anyhow::bail!("relay URL must be ws(s):// or http(s)://");
-    }
+    let base = relay_base.trim_end_matches('/');
+    let base = [("https://", "wss://"), ("http://", "ws://")]
+        .into_iter()
+        .find_map(|(from, to)| base.strip_prefix(from).map(|rest| format!("{to}{rest}")))
+        .unwrap_or_else(|| base.to_owned());
+    ensure!(
+        base.starts_with("ws://") || base.starts_with("wss://"),
+        "the Relay URL must be ws(s):// or http(s)://"
+    );
     Ok(format!("{base}/v1/route/{account}/{machine}"))
 }
 
-/// One WS + Noise XX channel with send-window pacing and chunk reassembly.
-struct RelayChannel {
-    inner: Arc<RelayChannelInner>,
+fn grant_expires_at(grant_jwt: &str) -> Result<i64> {
+    #[derive(Deserialize)]
+    struct Expiry {
+        exp: i64,
+    }
+    let Expiry { exp } = unverified_part(grant_jwt, 1)?;
+    Ok(exp)
 }
 
-struct RelayChannelInner {
-    relay_base: String,
-    account: String,
-    machine: String,
-    channel_prefix: String,
-    forge_pub: [u8; 32],
-    core: CoreSessionClient,
-    session: SessionToken,
-    state: tokio::sync::Mutex<ChannelState>,
-    /// Terminal close signal shared by every handle of this channel.
-    close: CloseSignal,
+fn now_sec() -> i64 {
+    artisan_api::now() / 1000
 }
 
-struct ChannelState {
-    channel: String,
-    sink: WsSink,
-    stream: WsStream,
-    noise: crate::NoiseChannel,
-    send_seq: u64,
-    recv_seq: u64,
-    window: RelaySendWindow,
-    reassembly: artisan_api::Reassembly,
-    /// Complete responses that arrived while pacing a send (stop-and-wait
-    /// acks); the following `read_response` picks them up by id.
-    stashed: Vec<artisan_api::TunnelResponse>,
-    grant_jwt: String,
-    cnf_secret: [u8; 32],
-    usable: Arc<AtomicBool>,
-    _socket: tokio_util::task::AbortOnDropHandle<()>,
+fn random<const N: usize>() -> Result<[u8; N]> {
+    let mut bytes = [0_u8; N];
+    getrandom::fill(&mut bytes).context("read random bytes")?;
+    Ok(bytes)
 }
-
-type WsSink = futures::channel::mpsc::Sender<tokio_tungstenite::tungstenite::Message>;
-type WsStream = futures::channel::mpsc::Receiver<Result<crate::ServerFrame>>;
-
-struct RelaySocket {
-    sink: WsSink,
-    stream: WsStream,
-    usable: Arc<AtomicBool>,
-    task: tokio_util::task::AbortOnDropHandle<()>,
-}
-
-/// Own socket reads even between unary requests, so idle channels answer
-/// Relay heartbeats and notice peer disconnects before the next request.
-async fn relay_socket(url: &str, close: CloseSignal) -> Result<RelaySocket> {
-    use futures::{SinkExt as _, StreamExt as _};
-    use tokio_tungstenite::tungstenite::Message as Ws;
-
-    let (ws, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .with_context(|| format!("connect to the Relay at {url}"))?;
-    let (mut sink, mut source) = ws.split();
-    let (send, mut outgoing) = futures::channel::mpsc::channel::<Ws>(64);
-    let (mut incoming, receive) = futures::channel::mpsc::channel(64);
-    let usable = Arc::new(AtomicBool::new(true));
-    let health = Arc::clone(&usable);
-    let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-        let pump = async {
-            loop {
-                let message = tokio::select! {
-                    next = outgoing.next() => {
-                        let Some(next) = next else { return Ok(()); };
-                        sink.send(next).await.context("send to the Relay")?;
-                        continue;
-                    }
-                    next = source.next() => next.context("the Relay closed the connection")??,
-                };
-                match message {
-                    Ws::Text(text) => {
-                        let value = serde_json::from_str(&text).context("read the Relay frame")?;
-                        let frame = crate::read_server_frame(value).context("read the Relay frame")?;
-                        if let crate::ServerFrame::Ping(ping) = frame {
-                            let pong = crate::ClientFrame::Pong(crate::PongFrame { v: 1, t: ping.t });
-                            sink.send(Ws::Text(serde_json::to_string(&pong)?.into())).await?;
-                        } else {
-                            if matches!(frame, crate::ServerFrame::ChannelClosed(_) | crate::ServerFrame::Error(_)) {
-                                health.store(false, Ordering::Release);
-                            }
-                            incoming.send(Ok(frame)).await.context("Relay reader closed")?;
-                        }
-                    }
-                    Ws::Ping(data) => sink.send(Ws::Pong(data)).await?,
-                    Ws::Close(_) => anyhow::bail!("the Relay closed the connection"),
-                    Ws::Binary(_) | Ws::Pong(_) | Ws::Frame(_) => {}
-                }
-            }
-        };
-        let result: Result<()> = tokio::select! {
-            () = close.aborted() => Ok(()),
-            result = pump => result,
-        };
-        health.store(false, Ordering::Release);
-        if let Err(error) = result {
-            incoming.send(Err(error)).await.ok();
-        }
-    }));
-    Ok(RelaySocket { sink: send, stream: receive, usable, task })
-}
-
-/// Client-side send window mirroring the Relay room: at most 64 unacked
-/// frames AND 1 MiB unacked bytes per direction, sizes counted as the
-/// BASE64 STRING length exactly as the room counts. Overflow parks in a
-/// bounded FIFO; once anything parks, everything after parks behind it
-/// (strict FIFO preserves Noise nonce order).
-struct RelaySendWindow {
-    sent_high: Option<u64>,
-    acked_high: Option<u64>,
-    sizes: std::collections::VecDeque<usize>,
-    unacked_bytes: u64,
-    parked: std::collections::VecDeque<String>,
-}
-
-impl RelaySendWindow {
-    const FRAMES: u64 = 64;
-    const BYTES: u64 = 1024 * 1024;
-    const PARKED_MAX: usize = 256;
-
-    const fn new() -> Self {
-        Self {
-            sent_high: None,
-            acked_high: None,
-            sizes: std::collections::VecDeque::new(),
-            unacked_bytes: 0,
-            parked: std::collections::VecDeque::new(),
-        }
-    }
-
-    fn unacked_frames(&self) -> u64 {
-        match (self.sent_high, self.acked_high) {
-            (Some(sent), Some(acked)) => sent.saturating_sub(acked),
-            (Some(_), None) => self.sizes.len() as u64,
-            _ => 0,
-        }
-    }
-
-    fn has_space(&self, body_len: usize) -> bool {
-        self.unacked_frames() < Self::FRAMES
-            && self.unacked_bytes.saturating_add(body_len as u64) <= Self::BYTES
-    }
-
-    fn noted_sent(&mut self, seq: u64, body_len: usize) {
-        self.sent_high = Some(seq);
-        self.sizes.push_back(body_len);
-        self.unacked_bytes = self.unacked_bytes.saturating_add(body_len as u64);
-    }
-
-    /// Baseline after a handshake/confirm exchange whose frames traveled
-    /// outside this window: seqs `0..=acked` count as sent AND acked, so
-    /// the first tracked app frame (seq `acked + 1`, e.g. 3 after m1/m3/
-    /// confirm) has exact cumulative accounting. Late handshake acks
-    /// (`seq <= acked`) are then ignored rather than misread as credit —
-    /// without this, `on_ack(3)` would release one entry yet leave
-    /// `acked_high` at 0 and the ack wait would never complete.
-    const fn acknowledged_through(acked: u64) -> Self {
-        let mut window = Self::new();
-        window.sent_high = Some(acked);
-        window.acked_high = Some(acked);
-        window
-    }
-
-    /// Release everything up to `ack_seq` (cumulative). Mirrors the room:
-    /// duplicates and ahead-of-sent acks are ignored. Releases exactly the
-    /// frames implied by the previous cursor, bounded by the actual queue —
-    /// never fabricates credit beyond what was sent.
-    fn on_ack(&mut self, ack_seq: u64) {
-        if self.acked_high.is_some_and(|acked| ack_seq <= acked) {
-            return;
-        }
-        if self.sent_high.is_none_or(|sent| ack_seq > sent) {
-            return;
-        }
-        let base = self.acked_high.map_or(0, |acked| acked.saturating_add(1));
-        if ack_seq < base {
-            return;
-        }
-        let mut to_release = ack_seq.saturating_sub(base).saturating_add(1);
-        to_release = to_release.min(self.sizes.len() as u64);
-        for _ in 0..to_release {
-            let Some(size) = self.sizes.pop_front() else {
-                break;
-            };
-            self.unacked_bytes = self.unacked_bytes.saturating_sub(size as u64);
-        }
-        if to_release > 0 {
-            self.acked_high = Some(base.saturating_add(to_release).saturating_sub(1));
-        }
-    }
-
-    fn should_park(&self, body_len: usize) -> bool {
-        !self.parked.is_empty() || !self.has_space(body_len)
-    }
-}
-
-impl Drop for ChannelState {
-    fn drop(&mut self) {
-        self.cnf_secret.fill(0);
-    }
-}
-
-impl Clone for RelayChannel {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
-/// Open one WS + Noise XX channel: admission, channel open, handshake,
-/// then the JWT-in-confirm exchange verified against the Forge key.
-#[expect(clippy::too_many_arguments, reason = "channel identity, proof, and terminal cancellation travel together")]
-async fn open_channel_state(
-    relay_base: &str,
-    account: &str,
-    machine: &str,
-    channel_prefix: &str,
-    grant_jwt: &str,
-    cnf_secret: &[u8; 32],
-    forge_pub: &[u8; 32],
-    close: &CloseSignal,
-) -> Result<ChannelState> {
-    // Relay channel names are shared by every client on this Forge. A new
-    // socket must not reuse a name, even while its previous socket closes.
-    let mut nonce = [0_u8; 16];
-    getrandom::fill(&mut nonce).map_err(|_| anyhow!("make a Relay channel id"))?;
-    let channel = format!("{channel_prefix}-{}", hex::encode(nonce));
-    let url = ws_url_for(relay_base, account, machine)?;
-    let RelaySocket { mut sink, mut stream, usable, task } = relay_socket(&url, close.clone()).await?;
-    admit(&mut sink, &mut stream, grant_jwt, cnf_secret).await?;
-    open_channel(&mut sink, &mut stream, &channel).await?;
-    let (mut noise, send_seq, recv_seq) =
-        handshake_channel(&mut sink, &mut stream, account, machine, &channel).await?;
-    let (send_seq, recv_seq) = confirm_channel(
-        &mut sink,
-        &mut stream,
-        &mut noise,
-        &channel,
-        send_seq,
-        recv_seq,
-        grant_jwt,
-        cnf_secret,
-        forge_pub,
-    )
-    .await?;
-    Ok(ChannelState {
-        channel,
-        sink,
-        stream,
-        noise,
-        send_seq,
-        recv_seq,
-        // m1/m3/confirm used seqs 0..send_seq outside the window; baseline
-        // the cursor so the first tracked app frame acks exactly.
-        window: RelaySendWindow::acknowledged_through(send_seq.saturating_sub(1)),
-        reassembly: artisan_api::Reassembly::new(),
-        stashed: Vec::new(),
-        grant_jwt: grant_jwt.to_owned(),
-        cnf_secret: *cnf_secret,
-        usable,
-        _socket: task,
-    })
-}
-
-fn next_request_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static IDS: AtomicU64 = AtomicU64::new(1);
-    format!("e{}", IDS.fetch_add(1, Ordering::Relaxed))
-}
-
-impl RelayChannel {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "relay dial needs endpoint, identity, grant, keys, and session together"
-    )]
-    async fn connect(
-        relay_base: &str,
-        account: &str,
-        machine: &str,
-        channel: &str,
-        grant_jwt: &str,
-        cnf_secret: &[u8; 32],
-        forge_pub: &[u8; 32],
-        core: CoreSessionClient,
-        session: SessionToken,
-    ) -> Result<Self> {
-        let close = CloseSignal::new();
-        let state = open_channel_state(
-            relay_base,
-            account,
-            machine,
-            channel,
-            grant_jwt,
-            cnf_secret,
-            forge_pub,
-            &close,
-        )
-        .await?;
-        Ok(Self {
-            inner: Arc::new(RelayChannelInner {
-                relay_base: relay_base.to_owned(),
-                account: account.to_owned(),
-                machine: machine.to_owned(),
-                channel_prefix: channel.to_owned(),
-                forge_pub: *forge_pub,
-                core,
-                session,
-                state: tokio::sync::Mutex::new(state),
-                close,
-            }),
-        })
-    }
-
-    /// Promptly terminate the channel: in-flight and future calls fail
-    /// fast, blocked reads wake immediately, no new frames are sealed.
-    /// Synchronous and idempotent — safe to call from sign-out on any
-    /// executor, even while views still hold clones. Dropping the last
-    /// handle then closes the socket; no grant semantics change (remote
-    /// session revoke keeps its ≤300 s tail, but the local client stops
-    /// at once).
-    pub fn close(&self) {
-        self.inner.close.close();
-    }
-
-    fn is_closed(&self) -> bool {
-        self.inner.close.is_closed()
-    }
-
-    /// Completes the moment [`RelayChannel::close`] runs (or immediately
-    /// when already closed).
-    async fn aborted(&self) {
-        self.inner.close.aborted().await;
-    }
-
-    /// Unary call: seal (chunking when large), paced send, reassembled answer.
-    async fn call(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<serde_json::Value>,
-    ) -> Result<artisan_api::TunnelResponse> {
-        let id = next_request_id();
-        let request = artisan_api::TunnelRequest {
-            id: id.clone(),
-            method: method.to_owned(),
-            path: path.to_owned(),
-            body,
-        };
-        let bytes = serde_json::to_vec(&request).context("encode the tunneled call")?;
-        // Signal first: never wait on the mutex of a closed channel.
-        if self.is_closed() {
-            anyhow::bail!("relay connection closed");
-        }
-        let mut guard = self.inner.state.lock().await;
-        let mut retried = false;
-        loop {
-            self.ensure_fresh_locked(&mut guard).await?;
-            let result = self.call_locked(&mut guard, &bytes, &id).await;
-            if result.is_err() {
-                guard.usable.store(false, Ordering::Release);
-                // Reads may be repeated after a lost channel. A mutation
-                // might already have run, so leave its retry to the caller.
-                if !retried && matches!(method, "GET" | "HEAD") && !self.is_closed() {
-                    retried = true;
-                    continue;
-                }
-            }
-            return result;
-        }
-    }
-
-    async fn call_locked(
-        &self,
-        guard: &mut ChannelState,
-        bytes: &[u8],
-        id: &str,
-    ) -> Result<artisan_api::TunnelResponse> {
-        if bytes.len() > artisan_api::TUNNEL_PLAINTEXT_BUDGET {
-            for chunk in artisan_api::chunk_bytes(id, bytes) {
-                let framed = serde_json::to_vec(&chunk).context("encode the tunneled call")?;
-                self.send_plaintext_locked(guard, &framed).await?;
-            }
-        } else {
-            self.send_plaintext_locked(guard, bytes).await?;
-        }
-        self.read_response_locked(guard, id).await
-    }
-
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "relay errors use user-facing messages; transport details stay out of logs"
-    )]
-    async fn ensure_fresh_locked(&self, conn: &mut ChannelState) -> Result<()> {
-        // Never refresh or reconnect a closed channel: close_all wins over
-        // grant rotation, so logout cannot resurrect a channel mid-teardown.
-        if self.is_closed() {
-            anyhow::bail!("relay connection closed");
-        }
-        if conn.usable.load(Ordering::Acquire) && grant_fresh_enough(&conn.grant_jwt) {
-            return Ok(());
-        }
-        let keypair =
-            crate::MachineKeypair::generate().map_err(|_| anyhow!("make a key"))?;
-        let grant = self
-            .inner
-            .core
-            .issue_editor_grant(
-                &self.inner.session,
-                &self.inner.machine,
-                &keypair.public_b64u(),
-            )
-            .await
-            .map_err(|_| anyhow!("refresh the Relay grant"))?;
-        *conn = open_channel_state(
-            &self.inner.relay_base,
-            &self.inner.account,
-            &self.inner.machine,
-            &self.inner.channel_prefix,
-            &grant.token,
-            keypair.secret(),
-            &self.inner.forge_pub,
-            &self.inner.close,
-        )
-        .await?;
-        Ok(())
-    }
-
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "relay errors use user-facing messages; transport details stay out of logs"
-    )]
-    async fn send_plaintext_locked(
-        &self,
-        conn: &mut ChannelState,
-        plaintext: &[u8],
-    ) -> Result<()> {
-        let sealed = conn
-            .noise
-            .seal(plaintext)
-            .map_err(|_| anyhow!("seal the tunneled call"))?;
-        self.send_raw_locked(conn, &sealed).await
-    }
-
-    async fn send_raw_locked(&self, conn: &mut ChannelState, raw: &[u8]) -> Result<()> {
-        use base64::Engine as _;
-        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
-        if conn.window.should_park(body.len()) {
-            if conn.window.parked.len() >= RelaySendWindow::PARKED_MAX {
-                anyhow::bail!("relay window full");
-            }
-            conn.window.parked.push_back(body);
-            self.drain_parked_locked(conn).await?;
-            return Ok(());
-        }
-        let seq = conn.send_seq;
-        send_data_frame(&mut conn.sink, &conn.channel, seq, &body).await?;
-        conn.send_seq = conn.send_seq.saturating_add(1);
-        conn.window.noted_sent(seq, body.len());
-        self.wait_ack_locked(conn, seq).await?;
-        self.drain_parked_locked(conn).await?;
-        Ok(())
-    }
-
-    async fn drain_parked_locked(&self, conn: &mut ChannelState) -> Result<()> {
-        while let Some(body) = conn.window.parked.front().cloned() {
-            if !conn.window.has_space(body.len()) {
-                break;
-            }
-            conn.window.parked.pop_front();
-            let seq = conn.send_seq;
-            send_data_frame(&mut conn.sink, &conn.channel, seq, &body).await?;
-            conn.send_seq = conn.send_seq.saturating_add(1);
-            conn.window.noted_sent(seq, body.len());
-            self.wait_ack_locked(conn, seq).await?;
-        }
-        Ok(())
-    }
-
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "relay errors use user-facing messages; transport details stay out of logs"
-    )]
-    async fn wait_ack_locked(&self, conn: &mut ChannelState, seq: u64) -> Result<()> {
-        let deadline = tokio::time::Duration::from_secs(30);
-        loop {
-            if conn.window.acked_high.is_some_and(|acked| acked >= seq) {
-                return Ok(());
-            }
-            // Abort wins over the 30 s pacing wait: logout never stalls here.
-            let abort = self.aborted();
-            tokio::select! {
-                biased;
-                () = abort => {
-                    anyhow::bail!("relay connection closed");
-                }
-                result = tokio::time::timeout(deadline, read_server_frame(&mut conn.stream)) => {
-                    let frame = result
-                        .map_err(|_| anyhow!("the Relay did not answer"))??;
-                    if let Some(response) = self.handle_frame_locked(conn, frame).await? {
-                        conn.stashed.push(response);
-                    }
-                }
-            }
-        }
-    }
-
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "relay errors use user-facing messages; transport details stay out of logs"
-    )]
-    async fn read_response_locked(
-        &self,
-        conn: &mut ChannelState,
-        id: &str,
-    ) -> Result<artisan_api::TunnelResponse> {
-        if let Some(position) = conn.stashed.iter().position(|response| response.id == id) {
-            return Ok(conn.stashed.remove(position));
-        }
-        let deadline = tokio::time::Duration::from_secs(120);
-        loop {
-            // Abort wins over the 120 s idle wait: logout never stalls here.
-            let abort = self.aborted();
-            tokio::select! {
-                biased;
-                () = abort => {
-                    anyhow::bail!("relay connection closed");
-                }
-                result = tokio::time::timeout(deadline, read_server_frame(&mut conn.stream)) => {
-                    let frame = result
-                        .map_err(|_| anyhow!("the Forge did not answer"))??;
-                    if let Some(response) = self.handle_frame_locked(conn, frame).await? {
-                        if response.id == id {
-                            return Ok(response);
-                        }
-                        conn.stashed.push(response);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Handle one Relay frame. Returns a complete unary `TunnelResponse`
-    /// when one arrives (reassembling chunks); `None` for acks and
-    /// housekeeping. Responses for other in-flight ids are returned too —
-    /// the caller stashes or matches them.
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "relay errors use user-facing messages; transport details stay out of logs"
-    )]
-    async fn handle_frame_locked(
-        &self,
-        conn: &mut ChannelState,
-        frame: crate::ServerFrame,
-    ) -> Result<Option<artisan_api::TunnelResponse>> {
-        use crate::ServerFrame;
-        match frame {
-            ServerFrame::Data(data) => {
-                send_ack_frame(&mut conn.sink, &data.channel, data.seq).await?;
-                if data.seq != conn.recv_seq {
-                    anyhow::bail!("relay data out of order");
-                }
-                conn.recv_seq = conn.recv_seq.saturating_add(1);
-                let raw = decode_32_or_bytes(&data.body)?;
-                let plaintext = conn
-                    .noise
-                    .receive_data(&raw)
-                    .map_err(|_| anyhow!("open the Forge reply"))?;
-                if let Ok(chunk) = serde_json::from_slice::<artisan_api::TunnelChunk>(&plaintext) {
-                    if let Some(done) = conn
-                        .reassembly
-                        .feed(&conn.channel, &chunk)
-                        .map_err(|_| anyhow!("reassemble the Forge reply"))?
-                    {
-                        match classify_frame_body(&done)? {
-                            FrameBody::Response(response) => return Ok(Some(response)),
-                            // Live $event interleaved while a call is in
-                            // flight (e.g. UNSUBSCRIBE racing backlog/live
-                            // mail on an event channel): not the awaited
-                            // answer — skip it and keep waiting.
-                            FrameBody::LiveEvent => return Ok(None),
-                        }
-                    }
-                    return Ok(None);
-                }
-                match classify_frame_body(&plaintext)? {
-                    FrameBody::Response(response) => Ok(Some(response)),
-                    // Same interleave as above on the unchunked path.
-                    FrameBody::LiveEvent => Ok(None),
-                }
-            }
-            ServerFrame::Ack(ack) => {
-                conn.window.on_ack(ack.seq);
-                Ok(None)
-            }
-            ServerFrame::ChannelClosed(closed) => {
-                anyhow::bail!("the Relay closed {}", closed.channel)
-            }
-            ServerFrame::Error(error) => {
-                anyhow::bail!("the Relay refused the tunnel: {} {}", error.code, error.message)
-            }
-            ServerFrame::Challenge(_)
-            | ServerFrame::Ready(_)
-            | ServerFrame::Presence(_)
-            | ServerFrame::Ping(_)
-            | ServerFrame::ChannelOpened(_) => Ok(None),
-        }
-    }
-}
-
-fn decode_32_or_bytes(b64u: &str) -> Result<Vec<u8>> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(b64u.as_bytes())
-        .context("read the Relay frame")
-}
-
-/// What one assembled plaintext holds: a tunneled response, or a live
-/// `$event` envelope that interleaved on an event channel while a call
-/// was in flight.
-enum FrameBody {
-    Response(artisan_api::TunnelResponse),
-    LiveEvent,
-}
-
-/// Split an assembled plaintext without losing error detail. A live
-/// `$event` (object with `$event`, no top-level `id`) is normal traffic
-/// on event channels — e.g. backlog/live mail racing UNSUBSCRIBE — and
-/// must skip the response wait, not fail it. Anything else that is not a
-/// `TunnelResponse` keeps the exact serde error via `{e:#}` upstream.
-fn classify_frame_body(body: &[u8]) -> Result<FrameBody> {
-    match serde_json::from_slice::<artisan_api::TunnelResponse>(body) {
-        Ok(response) => Ok(FrameBody::Response(response)),
-        Err(decode_error) => {
-            let is_event = serde_json::from_slice::<serde_json::Value>(body)
-                .is_ok_and(|value| value.get("$event").is_some());
-            if is_event {
-                Ok(FrameBody::LiveEvent)
-            } else {
-                Err(anyhow!(decode_error).context("read Forge's answer"))
-            }
-        }
-    }
-}
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "relay errors use user-facing messages; transport details stay out of logs"
-)]
-async fn admit(sink: &mut WsSink, stream: &mut WsStream, grant_jwt: &str, cnf_secret: &[u8; 32]) -> Result<()> {
-    use futures::SinkExt as _;
-    use tokio_tungstenite::tungstenite::Message as Ws;
-    let hello = serde_json::to_string(&crate::ClientFrame::Hello(
-        crate::HelloFrame {
-            v: 1,
-            grant: grant_jwt.to_owned(),
-        },
-    ))?;
-    sink.send(Ws::Text(hello.into())).await?;
-    let jti = crate::unverified_jti(grant_jwt).map_err(|_| anyhow!("bad grant"))?;
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), read_server_frame(stream))
-            .await
-            .map_err(|_| anyhow!("the Relay did not answer"))??;
-        match frame {
-            crate::ServerFrame::Challenge(challenge) => {
-                use base64::Engine as _;
-                let nonce: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .decode(challenge.nonce.as_bytes())
-                    .map_err(|_| anyhow!("bad Relay challenge"))?
-                    .try_into()
-                    .map_err(|_| anyhow!("bad Relay challenge"))?;
-                let sig = crate::pop_sign(cnf_secret, &nonce, &jti);
-                let auth = serde_json::to_string(&crate::ClientFrame::Authenticate(
-                    crate::AuthenticateFrame {
-                        v: 1,
-                        jti: jti.clone(),
-                        sig: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig),
-                    },
-                ))?;
-                sink.send(Ws::Text(auth.into())).await?;
-            }
-            crate::ServerFrame::Ready(_) => return Ok(()),
-            crate::ServerFrame::Error(error) => {
-                anyhow::bail!("the Relay refused the tunnel: {} {}", error.code, error.message)
-            }
-            crate::ServerFrame::ChannelOpened(_)
-            | crate::ServerFrame::Data(_)
-            | crate::ServerFrame::ChannelClosed(_)
-            | crate::ServerFrame::Ack(_)
-            | crate::ServerFrame::Presence(_)
-            | crate::ServerFrame::Ping(_) => {}
-        }
-    }
-}
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "relay errors use user-facing messages; transport details stay out of logs"
-)]
-async fn open_channel(sink: &mut WsSink, stream: &mut WsStream, channel: &str) -> Result<()> {
-    use futures::SinkExt as _;
-    use tokio_tungstenite::tungstenite::Message as Ws;
-    let open = serde_json::to_string(&crate::ClientFrame::Open(
-        crate::OpenFrame {
-            v: 1,
-            channel: channel.to_owned(),
-        },
-    ))?;
-    sink.send(Ws::Text(open.into())).await?;
-    loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), read_server_frame(stream))
-            .await
-            .map_err(|_| anyhow!("the Relay did not open the channel"))??;
-        match frame {
-            crate::ServerFrame::ChannelOpened(opened) if opened.channel == channel => {
-                return Ok(());
-            }
-            crate::ServerFrame::Error(error) => {
-                anyhow::bail!("the Relay refused the channel: {} {}", error.code, error.message)
-            }
-            crate::ServerFrame::Challenge(_)
-            | crate::ServerFrame::Ready(_)
-            | crate::ServerFrame::Data(_)
-            | crate::ServerFrame::ChannelClosed(_)
-            | crate::ServerFrame::Ack(_)
-            | crate::ServerFrame::Presence(_)
-            | crate::ServerFrame::Ping(_)
-            | crate::ServerFrame::ChannelOpened(_) => {}
-        }
-    }
-}
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "relay errors use user-facing messages; transport details stay out of logs"
-)]
-async fn handshake_channel(
-    sink: &mut WsSink,
-    stream: &mut WsStream,
-    account: &str,
-    machine: &str,
-    channel: &str,
-) -> Result<(crate::NoiseChannel, u64, u64)> {
-    let static_secret = fresh_noise_secret()?;
-    let ctx = crate::ChannelCtx {
-        account: account.to_owned(),
-        machine: machine.to_owned(),
-        channel: channel.to_owned(),
-    };
-    let mut noise = crate::NoiseChannel::initiator(&static_secret, None, ctx)
-        .map_err(|_| anyhow!("start the Noise handshake"))?;
-    // NOTE: no X25519 peer pinning here — there is intentionally no static
-    // registry. The Forge generates a fresh Noise static per channel, so the
-    // enrolled Ed25519 identity key MUST NOT be passed as the Noise peer
-    // static (different key system AND different value; pinning it fails
-    // every handshake at m2). Forge identity binds one step later: the
-    // initiator confirm carries the Core grant JWT, and the responder
-    // confirm signature is verified against the enrolled key.
-    let mut out = Vec::new();
-    noise
-        .next_handshake_message(&mut out)
-        .map_err(|_| anyhow!("start the Noise handshake"))?;
-    let mut send_seq = 0_u64;
-    let mut recv_seq = 0_u64;
-    send_data_frame(sink, channel, send_seq, &b64u_encode(&out)).await?;
-    send_seq = send_seq.saturating_add(1);
-    // XX: initiator sends m1, receives m2, sends m3.
-    for _ in 0..8 {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), read_server_frame(stream))
-            .await
-            .map_err(|_| anyhow!("the Forge did not shake hands"))??;
-        match frame {
-            crate::ServerFrame::Data(data) => {
-                send_ack_frame(sink, &data.channel, data.seq).await?;
-                if data.seq != recv_seq {
-                    anyhow::bail!("relay data out of order");
-                }
-                recv_seq = recv_seq.saturating_add(1);
-                let raw = decode_32_or_bytes(&data.body)?;
-                noise
-                    .receive_handshake_message(&raw)
-                    .map_err(|error| anyhow!("shake hands with the Forge: {error}"))?;
-                if noise.phase() != crate::Phase::Handshake {
-                    break;
-                }
-                let mut reply = Vec::new();
-                if noise.next_handshake_message(&mut reply).is_ok() && !reply.is_empty() {
-                    send_data_frame(sink, channel, send_seq, &b64u_encode(&reply)).await?;
-                    send_seq = send_seq.saturating_add(1);
-                }
-                if noise.phase() != crate::Phase::Handshake {
-                    break;
-                }
-            }
-            crate::ServerFrame::Ack(_)
-            | crate::ServerFrame::Challenge(_)
-            | crate::ServerFrame::Ready(_)
-            | crate::ServerFrame::ChannelOpened(_)
-            | crate::ServerFrame::Presence(_)
-            | crate::ServerFrame::Ping(_) => {}
-            crate::ServerFrame::Error(error) => {
-                anyhow::bail!("the Relay refused the handshake: {} {}", error.code, error.message)
-            }
-            crate::ServerFrame::ChannelClosed(closed) => {
-                anyhow::bail!("the Relay closed {}", closed.channel)
-            }
-        }
-    }
-    if noise.phase() == crate::Phase::Handshake {
-        anyhow::bail!("the Forge did not shake hands");
-    }
-    Ok((noise, send_seq, recv_seq))
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "confirm needs sink, stream, noise, seqs, grant, keys together"
-)]
-#[expect(
-    clippy::map_err_ignore,
-    reason = "relay errors use user-facing messages; transport details stay out of logs"
-)]
-async fn confirm_channel(
-    sink: &mut WsSink,
-    stream: &mut WsStream,
-    noise: &mut crate::NoiseChannel,
-    channel: &str,
-    mut send_seq: u64,
-    mut recv_seq: u64,
-    grant_jwt: &str,
-    cnf_secret: &[u8; 32],
-    forge_pub: &[u8; 32],
-) -> Result<(u64, u64)> {
-    let confirm = noise
-        .emit_initiator_confirm(cnf_secret, grant_jwt.as_bytes())
-        .map_err(|error| anyhow!("confirm the Relay session: {error}"))?;
-    send_data_frame(sink, channel, send_seq, &b64u_encode(&confirm)).await?;
-    send_seq = send_seq.saturating_add(1);
-    for _ in 0..8 {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), read_server_frame(stream))
-            .await
-            .map_err(|_| anyhow!("the Forge did not confirm the session"))??;
-        match frame {
-            crate::ServerFrame::Data(data) => {
-                send_ack_frame(sink, &data.channel, data.seq).await?;
-                if data.seq != recv_seq {
-                    anyhow::bail!("relay data out of order");
-                }
-                recv_seq = recv_seq.saturating_add(1);
-                let raw = decode_32_or_bytes(&data.body)?;
-                noise
-                    .receive_responder_confirm(&raw, forge_pub)
-                    .map_err(|error| anyhow!("confirm the Relay session: {error}"))?;
-                return Ok((send_seq, recv_seq));
-            }
-            crate::ServerFrame::Ack(_)
-            | crate::ServerFrame::Challenge(_)
-            | crate::ServerFrame::Ready(_)
-            | crate::ServerFrame::ChannelOpened(_)
-            | crate::ServerFrame::Presence(_)
-            | crate::ServerFrame::Ping(_) => {}
-            crate::ServerFrame::Error(error) => {
-                anyhow::bail!("the Relay refused the session: {} {}", error.code, error.message)
-            }
-            crate::ServerFrame::ChannelClosed(closed) => {
-                anyhow::bail!("the Relay closed {}", closed.channel)
-            }
-        }
-    }
-    anyhow::bail!("the Forge did not confirm the session")
-}
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "relay errors use user-facing messages; transport details stay out of logs"
-)]
-fn fresh_noise_secret() -> Result<[u8; 32]> {
-    let mut secret = [0_u8; 32];
-    getrandom::fill(&mut secret).map_err(|_| anyhow!("make a key"))?;
-    if secret == [0_u8; 32] {
-        anyhow::bail!("make a key");
-    }
-    Ok(secret)
-}
-
-fn b64u_encode(bytes: &[u8]) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
-async fn send_data_frame(sink: &mut WsSink, channel: &str, seq: u64, body: &str) -> Result<()> {
-    use futures::SinkExt as _;
-    use tokio_tungstenite::tungstenite::Message as Ws;
-    // Real channel name is filled by the caller; the confirm helper passes
-    // through here only for its frame encoding.
-    let frame = crate::DataFrame {
-        v: 1,
-        channel: channel.to_owned(),
-        seq,
-        body: body.to_owned(),
-    };
-    let text = serde_json::to_string(&crate::ClientFrame::Data(frame))?;
-    sink.send(Ws::Text(text.into()))
-        .await
-        .context("send to the Relay")?;
-    Ok(())
-}
-
-async fn send_ack_frame(sink: &mut WsSink, channel: &str, seq: u64) -> Result<()> {
-    use futures::SinkExt as _;
-    use tokio_tungstenite::tungstenite::Message as Ws;
-    let frame = crate::AckFrame {
-        v: 1,
-        channel: channel.to_owned(),
-        seq,
-    };
-    let text = serde_json::to_string(&crate::ClientFrame::Ack(frame))?;
-    sink.send(Ws::Text(text.into())).await.ok();
-    Ok(())
-}
-
-#[expect(
-    clippy::map_err_ignore,
-    reason = "relay errors use user-facing messages; transport details stay out of logs"
-)]
-async fn read_server_frame(stream: &mut WsStream) -> Result<crate::ServerFrame> {
-    use futures::StreamExt as _;
-    stream.next().await.context("the Relay closed the connection")?
-}
-
-/// One live tunneled event subscription on its own WS/Noise channel.
-pub struct RelayEventStream {
-    channel: RelayChannel,
-    stream_id: String,
-    ended: Option<String>,
-}
-
-impl RelayEventStream {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "relay errors use user-facing messages; transport details stay out of logs"
-    )]
-    async fn open(
-        unary_like: &RelayChannel,
-        account: &str,
-        machine: &str,
-        path: &str,
-    ) -> Result<Self> {
-        // A dedicated channel per subscription: unary calls proceed while
-        // the stream is open (concurrency preserved, one stream per
-        // channel as the Forge requires). Fresh grant + ephemeral `cnf`
-        // per channel; nothing secret persists beyond the session.
-        let inner = std::sync::Arc::clone(&unary_like.inner);
-        let keypair =
-            crate::MachineKeypair::generate().map_err(|_| anyhow!("make a key"))?;
-        let grant = inner
-            .core
-            .issue_editor_grant(&inner.session, machine, &keypair.public_b64u())
-            .await
-            .map_err(|_| anyhow!("prepare the event stream"))?;
-        let channel = RelayChannel::connect(
-            &inner.relay_base,
-            account,
-            machine,
-            "events",
-            &grant.token,
-            keypair.secret(),
-            &inner.forge_pub,
-            inner.core.clone(),
-            inner.session.clone(),
-        )
-        .await?;
-        let id = next_request_id();
-        let request = artisan_api::TunnelRequest {
-            id: id.clone(),
-            method: artisan_api::METHOD_SUBSCRIBE.to_owned(),
-            path: path.to_owned(),
-            body: None,
-        };
-        let bytes = serde_json::to_vec(&request).context("open the event stream")?;
-        let mut guard = channel.inner.state.lock().await;
-        channel.send_plaintext_locked(&mut guard, &bytes).await?;
-        let response = channel.read_response_locked(&mut guard, &id).await?;
-        drop(guard);
-        check_tunnel(&response)?;
-        let stream_id = response
-            .body
-            .pointer("/$stream/stream")
-            .and_then(serde_json::Value::as_str)
-            .context("open the event stream")?
-            .to_owned();
-        Ok(Self {
-            channel,
-            stream_id,
-            ended: None,
-        })
-    }
-
-    /// The stream the Forge assigned at subscribe time.
-    #[must_use]
-    pub const fn stream_id(&self) -> &String {
-        &self.stream_id
-    }
-
-    /// The terminal reason once the Forge ends the stream, if it has.
-    #[must_use]
-    pub const fn ended(&self) -> Option<&String> {
-        self.ended.as_ref()
-    }
-
-    /// Next live envelope. Returns `None` once the Forge ends the stream
-    /// (lagged broadcast or full queue arrive as `Reset`: re-subscribe
-    /// from the last `seq` via a fresh `subscribe`).
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "relay errors use user-facing messages; transport details stay out of logs"
-    )]
-    #[expect(
-        clippy::significant_drop_tightening,
-        reason = "channel state stays locked across the frame read to keep seq and reassembly consistent"
-    )]
-    pub async fn next_event(&mut self) -> Result<Option<artisan_api::Envelope>> {
-        if self.ended.is_some() {
-            return Ok(None);
-        }
-        // Signal first: never wait on the mutex of a closed stream.
-        if self.channel.is_closed() {
-            anyhow::bail!("relay connection closed");
-        }
-        let mut guard = self.channel.inner.state.lock().await;
-        loop {
-            // Abort wins over the 120 s idle wait: logout never stalls here.
-            let abort = self.channel.aborted();
-            let frame = tokio::select! {
-                biased;
-                () = abort => {
-                    anyhow::bail!("relay connection closed");
-                }
-                result = tokio::time::timeout(
-                    std::time::Duration::from_secs(120),
-                    read_server_frame(&mut guard.stream),
-                ) => {
-                    result
-                        .map_err(|_| anyhow!("the Forge event stream stalled"))??
-                }
-            };
-            let channel_name = guard.channel.clone();
-            match frame {
-                crate::ServerFrame::Data(data) => {
-                    send_ack_frame(&mut guard.sink, &data.channel, data.seq).await?;
-                    if data.seq != guard.recv_seq {
-                        anyhow::bail!("relay data out of order");
-                    }
-                    guard.recv_seq = guard.recv_seq.saturating_add(1);
-                    let raw = decode_32_or_bytes(&data.body)?;
-                    let plaintext = guard
-                        .noise
-                        .receive_data(&raw)
-                        .map_err(|_| anyhow!("open the Forge event"))?;
-                    if let Ok(chunk) =
-                        serde_json::from_slice::<artisan_api::TunnelChunk>(&plaintext)
-                    {
-                        if let Some(done) = guard
-                            .reassembly
-                            .feed(&channel_name, &chunk)
-                            .map_err(|_| anyhow!("reassemble the Forge event"))?
-                        {
-                            match decode_event(&done)? {
-                                StreamFrame::Envelope(envelope) => return Ok(Some(*envelope)),
-                                StreamFrame::End(reason) => {
-                                    self.ended = Some(reason);
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                    } else {
-                        match decode_event(&plaintext)? {
-                            StreamFrame::Envelope(envelope) => return Ok(Some(*envelope)),
-                            StreamFrame::End(reason) => {
-                                self.ended = Some(reason);
-                                return Ok(None);
-                            }
-                        }
-                    }
-                }
-                crate::ServerFrame::Ack(ack) => {
-                    guard.window.on_ack(ack.seq);
-                }
-                crate::ServerFrame::ChannelClosed(closed) => {
-                    anyhow::bail!("the Relay closed {}", closed.channel)
-                }
-                crate::ServerFrame::Error(error) => {
-                    anyhow::bail!(
-                        "the Relay refused the event stream: {} {}",
-                        error.code,
-                        error.message
-                    )
-                }
-                crate::ServerFrame::Challenge(_)
-                | crate::ServerFrame::Ready(_)
-                | crate::ServerFrame::Presence(_)
-                | crate::ServerFrame::Ping(_)
-                | crate::ServerFrame::ChannelOpened(_) => {}
-            }
-        }
-    }
-
-    /// End this stream without closing the channel.
-    pub async fn unsubscribe(&mut self) -> Result<()> {
-        let path = format!("/events/{}", self.stream_id);
-        self.channel
-            .call(artisan_api::METHOD_UNSUBSCRIBE, &path, None)
-            .await?;
-        Ok(())
-    }
-
-    /// Promptly terminate the stream's channel; in-flight `next_event`
-    /// fails fast. Synchronous, idempotent; closing the client via
-    /// [`RelayClient::close_all`] covers streams the caller dropped.
-    pub fn close(&self) {
-        self.channel.close();
-    }
-}
-
-/// One decoded `$event` frame: a live envelope, or the terminal `end`
-/// marker carrying the Forge's reason.
-enum StreamFrame {
-    Envelope(Box<artisan_api::Envelope>),
-    End(String),
-}
-
-/// Decode one `$event` frame — never a silent drop: non-event frames fail.
-fn decode_event(plaintext: &[u8]) -> Result<StreamFrame> {
-    let value: serde_json::Value =
-        serde_json::from_slice(plaintext).context("read the Forge event")?;
-    let event = value
-        .get("$event")
-        .context("the Forge event stream sent a non-event frame")?;
-    if let Some(end) = event.get("end") {
-        let reason = end.as_str().unwrap_or("ended").to_owned();
-        return Ok(StreamFrame::End(reason));
-    }
-    let envelope: artisan_api::Envelope = serde_json::from_value(
-        event
-            .get("envelope")
-            .cloned()
-            .context("read the Forge event")?,
-    )
-    .context("read the Forge event")?;
-    Ok(StreamFrame::Envelope(Box::new(envelope)))
-}
-
-
 
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
+    clippy::expect_used,
     reason = "test setup; failures fail the test"
 )]
 mod tests {
     use super::*;
+    use tokio::net::TcpListener;
+
+    const WAIT: Duration = Duration::from_secs(2);
+
+    async fn listen() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        (listener, url)
+    }
 
     #[tokio::test]
-    async fn idle_socket_answers_heartbeats_and_reports_lost_channels() {
-        use futures::{SinkExt as _, StreamExt as _};
-        use tokio_tungstenite::tungstenite::Message as Ws;
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
+    async fn the_socket_answers_pings_skips_noise_and_ends_on_channel_close() {
+        let (listener, url) = listen().await;
         let relay = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            ws.send(Ws::Text(r#"{"v":1,"type":"ping","t":1234}"#.into())).await.unwrap();
-            // No request or read is running on the client. The socket
-            // owner must answer without waiting for its next unary call.
-            let reply = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-                .await.unwrap().unwrap().unwrap();
-            let reply: serde_json::Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
-            assert_eq!(reply, serde_json::json!({"v": 1, "type": "pong", "t": 1234}));
-            ws.send(Ws::Text(r#"{"v":1,"type":"channel-closed","channel":"unary-1","reason":"forge-offline"}"#.into())).await.unwrap();
-            // Terminal close must stop the socket owner too, even when
-            // client handles and the incoming receiver are still alive.
-            let ended = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
-                .await.unwrap();
-            assert!(!matches!(ended, Some(Ok(Ws::Text(_)))), "closed client kept sending");
+            ws.send(Ws::Text(r#"{"v":1,"type":"ping","t":1234}"#.into()))
+                .await
+                .unwrap();
+            let pong = tokio::time::timeout(WAIT, ws.next()).await.unwrap().unwrap().unwrap();
+            let pong: serde_json::Value = serde_json::from_str(pong.to_text().unwrap()).unwrap();
+            assert_eq!(
+                pong,
+                serde_json::json!({"v": 1, "type": "pong", "t": 1234}),
+                "an idle socket must answer the heartbeat"
+            );
+            for frame in [
+                r#"{"v":1,"type":"presence","forge_online":true,"clients":2}"#,
+                r#"{"v":1,"type":"from-a-newer-relay"}"#,
+                "not json",
+                r#"{"v":1,"type":"ack","channel":"c","seq":3}"#,
+                r#"{"v":1,"type":"channel-closed","channel":"c","reason":"forge-offline"}"#,
+            ] {
+                ws.send(Ws::Text(frame.into())).await.unwrap();
+            }
+            let ended = tokio::time::timeout(WAIT, ws.next()).await.unwrap();
+            assert!(
+                !matches!(ended, Some(Ok(Ws::Text(_)))),
+                "the socket kept talking after its channel closed"
+            );
         });
-        let close = CloseSignal::new();
-        let mut socket = relay_socket(&url, close.clone()).await.unwrap();
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), read_server_frame(&mut socket.stream))
-            .await.unwrap().unwrap();
-        assert!(matches!(frame, crate::ServerFrame::ChannelClosed(_)), "heartbeat must stay out of the request queue");
-        assert!(!socket.usable.load(Ordering::Acquire), "the next call must reconnect");
-        close.close();
+        let mut socket = connect_socket(&url, CancellationToken::new()).await.unwrap();
+        let frame = tokio::time::timeout(WAIT, socket.recv()).await.unwrap().unwrap();
+        assert!(
+            matches!(frame, ServerFrame::Ack(AckFrame { seq: 3, .. })),
+            "presence and unknown frames must not reach the reader: {frame:?}"
+        );
+        let error = socket.recv().await.unwrap_err();
+        assert!(format!("{error:#}").contains("forge-offline"), "{error:#}");
+        tokio::time::timeout(WAIT, socket.token.cancelled())
+            .await
+            .expect("a closed channel marks the socket dead");
         relay.await.unwrap();
     }
 
     #[tokio::test]
-    async fn sockets_use_distinct_channel_names_for_reconnects_and_subscriptions() {
-        use base64::Engine as _;
-        use futures::{SinkExt as _, StreamExt as _};
-        use tokio_tungstenite::tungstenite::Message;
+    async fn signing_out_ends_open_sockets() {
+        let (listener, url) = listen().await;
+        let relay = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            let ended = tokio::time::timeout(WAIT, ws.next()).await.unwrap();
+            assert!(!matches!(ended, Some(Ok(Ws::Text(_)))), "socket outlived sign-out");
+        });
+        let client = CancellationToken::new();
+        let mut socket = connect_socket(&url, client.child_token()).await.unwrap();
+        client.cancel();
+        let read = tokio::time::timeout(WAIT, socket.recv()).await.unwrap();
+        assert!(read.is_err(), "a reader must wake when the client signs out");
+        relay.await.unwrap();
+    }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("ws://{}", listener.local_addr().unwrap());
+    #[tokio::test]
+    async fn signing_out_during_subscribe_ends_it() {
+        let core = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let core_url = format!("http://{}", core.local_addr().unwrap());
+        let hung_core = tokio::spawn(async move {
+            let (_tcp, _) = core.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = RelayClient {
+            route: Arc::new(Route {
+                relay_base: "ws://127.0.0.1:1".to_owned(),
+                account: "acct_00000000000000000000000000".to_owned(),
+                machine: "mch_11111111111111111111111111".to_owned(),
+                forge_pub: [0; 32],
+                core: CoreSessionClient::new(&core_url).unwrap(),
+                session: SessionToken::new("session".to_owned()),
+            }),
+            unary: Arc::new(tokio::sync::Mutex::new(None)),
+            cancel: CancellationToken::new(),
+        };
+        let subscribing = tokio::spawn({
+            let client = client.clone();
+            async move { Box::pin(client.subscribe("/events?since=0")).await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        client.close_all();
+        let outcome = tokio::time::timeout(WAIT, subscribing).await.unwrap().unwrap();
+        assert!(outcome.is_err(), "a subscription survived sign-out");
+        hung_core.abort();
+    }
+
+    #[tokio::test]
+    async fn every_socket_opens_a_fresh_channel_name() {
+        let (listener, url) = listen().await;
         let relay = tokio::spawn(async move {
             let mut names = std::collections::HashSet::new();
             for _ in 0..4 {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
                 let hello = ws.next().await.unwrap().unwrap();
-                let hello: serde_json::Value =
-                    serde_json::from_str(hello.to_text().unwrap()).unwrap();
-                assert_eq!(hello["type"], "hello");
-                ws.send(Message::Text(
+                assert!(hello.to_text().unwrap().contains("\"hello\""), "hello first");
+                ws.send(Ws::Text(
                     r#"{"v":1,"type":"ready","role":"client","account":"a","machine":"m","forge_online":true}"#
                         .into(),
                 ))
                 .await
                 .unwrap();
                 let open = ws.next().await.unwrap().unwrap();
-                let open: serde_json::Value =
-                    serde_json::from_str(open.to_text().unwrap()).unwrap();
-                assert_eq!(open["type"], "open");
-                let name = open["channel"].as_str().unwrap();
-                assert!(names.insert(name.to_owned()), "channel reused: {name}");
-                // Stop before Noise: this fixture checks the real socket's
-                // open request, including repeated opens with the same key.
-                ws.send(Message::Text(
-                    r#"{"v":1,"type":"error","code":"probe-complete","message":"open recorded"}"#
-                        .into(),
+                let open: serde_json::Value = serde_json::from_str(open.to_text().unwrap()).unwrap();
+                assert_eq!(open["type"], "open", "open after admission");
+                let name = open["channel"].as_str().unwrap().to_owned();
+                assert!(names.insert(name.clone()), "channel reused: {name}");
+                ws.send(Ws::Text(
+                    r#"{"v":1,"type":"error","code":"probe-complete","message":"open recorded"}"#.into(),
                 ))
                 .await
                 .unwrap();
             }
         });
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(br#"{"jti":"channel-test"}"#);
+        let route = Route {
+            relay_base: url,
+            account: "a".to_owned(),
+            machine: "m".to_owned(),
+            forge_pub: [2; 32],
+            core: CoreSessionClient::new("http://127.0.0.1:1").unwrap(),
+            session: SessionToken::new("session".to_owned()),
+        };
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"jti":"channel-test","exp":4000000000}"#);
         let grant = format!("header.{payload}.signature");
         for prefix in ["unary", "unary", "events", "events"] {
-            let result = open_channel_state(&url, "a", "m", prefix, &grant, &[1; 32], &[2; 32], &CloseSignal::new())
-                .await;
-            let error = result.err().unwrap();
-            assert!(error.to_string().contains("probe-complete"), "{error:#}");
+            let error = route
+                .open_with(prefix, &grant, &[1; 32], &CancellationToken::new())
+                .await
+                .err()
+                .unwrap();
+            assert!(format!("{error:#}").contains("probe-complete"), "{error:#}");
         }
         relay.await.unwrap();
     }
 
-    async fn completes(signal: &CloseSignal) {
-        tokio::time::timeout(std::time::Duration::from_secs(5), signal.aborted())
-            .await
-            .expect("close must resolve, never hang on a stream timeout");
-    }
-
-    #[tokio::test]
-    async fn close_before_subscribe_still_wakes() {
-        // The race: close() runs while no reader exists yet (watch send
-        // would drop the value), then a reader subscribes. send_replace
-        // retains the terminal state, so the late subscriber still wakes.
-        let signal = CloseSignal::new();
-        signal.close();
-        completes(&signal).await;
-        assert!(signal.is_closed());
-    }
-
-    #[tokio::test]
-    async fn repeated_close_stays_closed() {
-        let signal = CloseSignal::new();
-        signal.close();
-        signal.close();
-        completes(&signal).await;
-        assert!(signal.is_closed());
-    }
-
-    #[tokio::test]
-    async fn close_wakes_a_blocked_reader() {
-        let signal = CloseSignal::new();
-        let waiter = tokio::spawn({
-            let signal = signal.clone();
-            async move {
-                signal.aborted().await;
-            }
-        });
-        tokio::task::yield_now().await;
-        signal.close();
-        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
-            .await
-            .expect("close must wake a blocked reader")
-            .unwrap();
-        assert!(signal.is_closed());
-    }
-
     #[test]
-    fn first_tracked_app_frame_after_handshake_baseline_acks() {
-        // Handshake (m1, m3) + confirm used seqs 0..=2 outside the window.
-        // The first tracked app frame has seq 3, not 0: a cumulative
-        // ack(3) must release exactly it and advance the cursor to 3.
-        // (Without the baseline, ack(3) released one entry yet left
-        // acked_high at 0 and the ack wait never completed.)
-        let mut window = RelaySendWindow::acknowledged_through(2);
-        assert_eq!(window.acked_high, Some(2));
-        assert_eq!(window.unacked_frames(), 0);
-        // A late handshake ack is ignored, never credit.
-        window.on_ack(1);
-        assert_eq!(window.acked_high, Some(2));
-        assert_eq!(window.unacked_bytes, 0);
-        // First tracked app frame: seq 3.
-        assert!(window.has_space(100));
-        window.noted_sent(3, 100);
-        assert_eq!(window.unacked_frames(), 1);
-        window.on_ack(3);
-        assert_eq!(window.acked_high, Some(3));
-        assert_eq!(window.unacked_bytes, 0);
-        assert_eq!(window.unacked_frames(), 0);
-    }
-
-    #[test]
-    fn response_frames_classify_as_responses() {
-        let body = br#"{"id":"rs2","status":200,"body":{"unsubscribed":true}}"#;
-        let classified = classify_frame_body(body).unwrap();
+    fn responses_read_as_responses() {
+        let message = read_message(br#"{"id":"rs2","status":200,"body":{"unsubscribed":true}}"#).unwrap();
         assert!(
-            matches!(&classified, FrameBody::Response(response) if response.id == "rs2" && response.status == 200),
-            "response misclassified as event"
+            matches!(&message, Message::Response(response) if response.id == "rs2"),
+            "response misread as an event"
         );
     }
 
     #[test]
-    fn queued_event_frames_skip_the_response_wait() {
-        // The exact interleaving that failed native UNSUBSCRIBE: a live
-        // $event queued ahead of the response has no top-level `id` and
-        // must not fail the wait with "missing field `id`".
-        let body = br#"{"$event":{"stream":"events-1","envelope":{"seq":9,"live_revision":0,"type":"setting","key":"label","value":"x"}}}"#;
-        let classified = classify_frame_body(body).unwrap();
+    fn events_interleaved_with_a_response_are_events() {
+        let message = read_message(br#"{"$event":{"stream":"events-1","end":"closed"}}"#).unwrap();
         assert!(
-            matches!(classified, FrameBody::LiveEvent),
-            "event misclassified as response"
+            matches!(&message, Message::Event(event) if event.end.as_deref() == Some("closed")),
+            "event misread as a response"
         );
     }
 
     #[test]
-    fn malformed_frames_keep_the_exact_decode_error() {
-        // Not a response and not an event: the caller must see the real
-        // serde error via `{e:#}`, not a generic failure.
-        let body = br#"{"id":1,"status":"bogus"}"#;
-        let result = classify_frame_body(body);
-        assert!(result.is_err(), "garbage classified as a frame");
-        let text = format!("{:#}", result.err().unwrap());
-        assert!(text.contains("read Forge's answer"), "lost context: {text}");
+    fn malformed_answers_keep_the_decode_error() {
+        let error = read_message(br#"{"id":1,"status":"bogus"}"#).err().unwrap();
+        let text = format!("{error:#}");
+        assert!(text.contains("read Forge's answer") && text.contains("invalid type"), "{text}");
     }
 }
