@@ -1020,9 +1020,7 @@ impl Account {
                                         this.refresh_local_binding(cx);
                                     }
                                     Err(error) => {
-                                        tracing::warn!(
-                                            "Forge enrollment claim failed for code {code}: {error:#}"
-                                        );
+                                        tracing::warn!("Forge enrollment claim failed: {error:#}");
                                         this.notice = Some(
                                             "Could not claim the enrollment.".to_owned(),
                                         );
