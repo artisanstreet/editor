@@ -19,7 +19,7 @@ mod script;
 mod workspace;
 
 use actions::{GoBack, NewThread, OpenPalette, OpenSettings, Quit, ToggleInspector, ToggleSidebar};
-use editor_core::{Core, EntryGate, Screen};
+use editor_core::{Core, Screen};
 use entry::EntryRoot;
 use gpui::{
     App, AppContext as _, Bounds, Entity, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
@@ -95,27 +95,13 @@ fn init_logging() {
     }
 }
 
-/// Opens a deep link only when the gate is already `Ready`; a locked
-/// window stays on the entry surface instead of navigating behind it.
-fn maybe_open_link(link: Option<Screen>, core: &Entity<editor_core::Core>, cx: &mut App) {
-    if let Some(screen) = link {
-        let ready = matches!(core.read(cx).entry_gate(cx), EntryGate::Ready { .. });
-        if ready {
-            core.update(cx, |core, cx| core.navigate(screen, cx));
-        }
-    }
-}
-
-/// Follows a tapped system notification into its thread, but only through
-/// the entry gate: locked windows ignore notification taps.
+/// Follows a tapped system notification into its thread. While the gate is
+/// locked, Core keeps the screen and opens it once the gate is `Ready`.
 fn follow_notification(
     core: &Entity<Core>,
     response: &gpui::SystemNotificationResponse,
     cx: &mut App,
 ) {
-    if !matches!(core.read(cx).entry_gate(cx), EntryGate::Ready { .. }) {
-        return;
-    }
     let Some((host, thread)) = notifications::parse_tag(&response.tag) else {
         return;
     };
@@ -160,7 +146,9 @@ fn main() {
             let (core, failure) = editor_core::init(cx);
             let failure = failure
                 .map(|error| format!("Couldn't read this device's Artisan files: {error:#}"));
-            maybe_open_link(link, &core, cx);
+            if let Some(screen) = link {
+                core.update(cx, |core, cx| core.navigate(screen, cx));
+            }
             cx.set_app_identity("com.artisanstreet.editor", "Artisan Editor");
             let notified_core = core.downgrade();
             cx.on_system_notification_response(move |response, cx| {
