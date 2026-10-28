@@ -22,6 +22,21 @@ impl Account {
         self.cached_binding.clone()
     }
 
+    /// The authoritative account inventory can revoke a binding that `ae`
+    /// still has on disk. Only an explicit revocation permits replacement.
+    pub fn local_binding_revoked(&self) -> bool {
+        let Some(binding) = self.cached_binding.as_ref().filter(|binding| binding.enrolled) else {
+            return false;
+        };
+        self.profile().is_some_and(|profile| {
+            binding.account_id.as_deref() == Some(profile.account_id.as_str())
+                && profile.machines.iter().any(|machine| {
+                    Some(machine.id.as_str()) == binding.machine_id.as_deref()
+                        && machine.revoked_at.is_some()
+                })
+        })
+    }
+
     /// Re-reads the local Forge binding through `ae` (explicit user or
     /// onboarding refresh) and caches it. The hot path (`local_binding`)
     /// never hits disk or subprocess. Completions from a superseded refresh
@@ -152,8 +167,16 @@ async fn run_ae_subprocess(args: Vec<String>) -> Result<AeOutcome> {
 /// Core from diverging via environment inheritance. Machine output is the
 /// only contract: human text is never parsed (its first alphanumerics are
 /// sentence words, not the code).
-pub(super) async fn run_ae_enroll(runner: Option<AeRunner>, base_url: &str) -> Result<String> {
-    let stdout = run_ae(runner, &["account", "--core", base_url, "enroll", "--json"]).await?;
+pub(super) async fn run_ae_enroll(
+    runner: Option<AeRunner>,
+    base_url: &str,
+    replace: bool,
+) -> Result<String> {
+    let mut args = vec!["account", "--core", base_url, "enroll", "--json"];
+    if replace {
+        args.push("--replace");
+    }
+    let stdout = run_ae(runner, &args).await?;
     let parsed: serde_json::Value = serde_json::from_slice(stdout.as_bytes())
         .context("read the Forge enrollment answer")?;
     let code = normalise_code(

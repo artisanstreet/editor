@@ -32,6 +32,9 @@ pub enum AccountCommand {
         /// human text, for the Editor's binding check.
         #[arg(long)]
         json: bool,
+        /// Replace a removed enrollment with a fresh machine key.
+        #[arg(long)]
+        replace: bool,
     },
     /// Poll the enrollment: shows pending/claimed + account when claimed.
     Status {
@@ -121,8 +124,8 @@ fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient> {
 
 pub fn run(args: &AccountArgs) -> Result<()> {
     match &args.command {
-        AccountCommand::Enroll { label, json } => {
-            enroll(args.core.as_deref(), label.as_deref(), *json)
+        AccountCommand::Enroll { label, json, replace } => {
+            enroll(args.core.as_deref(), label.as_deref(), *json, *replace)
         }
         AccountCommand::Status { json } => status(args.core.as_deref(), *json),
         AccountCommand::Confirm { yes, account_id } => {
@@ -181,12 +184,28 @@ fn label_default(label: Option<&str>) -> String {
     .to_owned()
 }
 
-fn enroll(core: Option<&str>, label: Option<&str>, json: bool) -> Result<()> {
+fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) -> Result<()> {
     let mut account = load_account()?;
-    if account.machine_id.is_some() {
+    if account.machine_id.is_some() && !replace {
         bail!("this Forge is already enrolled; see `ae account status`");
     }
-    let keypair = keypair(&mut account)?;
+    let restart = replace && account.machine_id.is_some() && crate::service::is_running();
+    let keypair = if replace {
+        use base64::Engine as _;
+        // Core keeps revoked account/key pairs unique. Re-enrollment needs
+        // a new key, not just a new code for the revoked key. Keep the old
+        // binding on disk until Core accepts the replacement enrollment.
+        let fresh = artisan_account::MachineKeypair::generate()
+            .map_err(|_rand| anyhow::anyhow!("random key failed"))?;
+        account = AccountFile {
+            secret_b64u: Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fresh.secret())),
+            public_b64u: Some(fresh.public_b64u()),
+            ..AccountFile::default()
+        };
+        fresh
+    } else {
+        keypair(&mut account)?
+    };
     let label = label_default(label);
     if label.is_empty() {
         bail!("give this machine a label with --label");
@@ -198,6 +217,11 @@ fn enroll(core: Option<&str>, label: Option<&str>, json: bool) -> Result<()> {
     })?;
     account.enrollment_id = Some(created.enrollment_id.clone());
     save_account(&account)?;
+    if restart {
+        // The old daemon holds its machine identity in memory. Restart
+        // into the pending state so it observes the new confirmation.
+        crate::service::restart()?;
+    }
     if json {
         println!("{}", enroll_report(&created));
         return Ok(());

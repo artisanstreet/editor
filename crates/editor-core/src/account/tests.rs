@@ -563,6 +563,7 @@ fn sign_out_locks_every_host_route(cx: &mut TestAppContext) {
             core.hosts.contains_key(&machine.id),
             "setup internals hold the route"
         );
+        assert!(core.is_paired(&machine.id), "account routes retain their draft sessions during reconnects");
         assert!(
             core.host(&machine.id).is_none(),
             "public inventory hidden until Ready"
@@ -586,6 +587,7 @@ fn sign_out_locks_every_host_route(cx: &mut TestAppContext) {
             core.host(&machine.id).is_none(),
             "account host is gone"
         );
+        assert!(!core.is_paired(&machine.id), "sign-out retires account draft sessions");
         assert!(
             core.hosts.is_empty(),
             "no live host entities survive sign-out"
@@ -1162,6 +1164,48 @@ fn scripted_ae_runner() -> (
         }
     });
     (runner, calls)
+}
+
+#[gpui::test]
+fn revoked_local_enrollment_can_be_paired_again(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let stub = StubCore::new(strict_core());
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, body) = strict_core()("GET", "/v1/me", "");
+    let mut profile: artisan_account::AccountProfile = serde_json::from_str(&body).unwrap();
+    let machine_id = profile.machines[0].id.clone();
+    profile.machines[0].revoked_at = Some("2026-10-28T00:00:00Z".to_owned());
+    let (runner, calls) = scripted_ae_runner();
+    let account = cx.new(|cx| {
+        let mut account = super::Account::with_base_url(
+            EditorFiles { dir: dir.path().join("editor") },
+            Some(stub.base_url.clone()),
+            cx,
+        );
+        account.set_ae_runner(runner);
+        account.test_authenticate(profile.clone(), artisan_account::SessionToken::new("STUB-SESSION".to_owned()), cx);
+        account.cached_binding = Some(crate::access::LocalForgeBinding {
+            enrolled: true,
+            machine_id: Some(machine_id),
+            account_id: Some(profile.account_id),
+            claimed_by: None,
+            claimed_email: None,
+        });
+        account
+    });
+    account.update(cx, |account, cx| {
+        assert!(account.local_binding_revoked(), "revoked binding needs recovery");
+        assert!(account.onboardable_machines().is_empty(), "revoked Forge cannot connect");
+        account.enroll_this_forge(cx);
+    });
+    wait_for(cx, "the replacement enrollment claim", |cx| {
+        account.read_with(cx, |account, _| {
+            account.notice().filter(|notice| notice.starts_with("Claimed for")).map(|_| ())
+        })
+    });
+    assert!(calls.lock().unwrap().iter().any(|args| {
+        args.iter().any(|arg| arg == "enroll") && args.iter().any(|arg| arg == "--replace")
+    }), "recovery must explicitly replace the revoked machine key");
 }
 
 /// The click path advances the binding cache on its own: enroll (fake `ae`

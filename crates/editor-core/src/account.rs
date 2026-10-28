@@ -979,6 +979,7 @@ impl Account {
         if self.profile().is_none() {
             return;
         }
+        let replace = self.local_binding_revoked();
         self.notice = Some("Starting the Forge enrollment…".to_owned());
         cx.emit(AccountEvent::Changed);
         cx.notify();
@@ -988,7 +989,7 @@ impl Account {
         let generation = self.generation;
         let runner = self.ae_runner.clone();
         cx.spawn(async move |this, cx| {
-            let enrollment = enrollment::run_ae_enroll(runner, &base_url).await;
+            let enrollment = enrollment::run_ae_enroll(runner, &base_url, replace).await;
             this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;

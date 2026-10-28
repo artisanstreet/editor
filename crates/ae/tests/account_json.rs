@@ -313,4 +313,26 @@ fn enroll_status_confirm_json_lifecycle() {
         String::from_utf8_lossy(&human.stdout).contains(MACHINE_ID),
         "human status names the machine"
     );
+
+    // A removed machine still has a local enrollment. Ordinary enrollment
+    // must preserve it; explicit replacement rotates the revoked key and
+    // returns to a pending enrollment that can be claimed and confirmed.
+    let refused = run(&home, &["account", "--core", &core, "enroll", "--json"]).unwrap();
+    assert!(!refused.status.success(), "replacement must be explicit");
+    let replaced = stdout_json(&run(
+        &home,
+        &["account", "--core", &core, "enroll", "--json", "--replace"],
+    ).unwrap()).unwrap();
+    assert_eq!(replaced["code"], CODE);
+    let replacement: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(account_file(&home)).unwrap()).unwrap();
+    assert_ne!(replacement["secret_b64u"], secret, "revoked keys cannot be reused");
+    assert_ne!(replacement["public_b64u"], public, "the machine key must rotate");
+    assert!(replacement.get("machine_id").is_none(), "old binding must clear");
+    assert!(replacement.get("account_id").is_none(), "old account must clear");
+    let confirmed = run(
+        &home,
+        &["account", "--core", &core, "confirm", "--yes", "--account-id", ACCOUNT_ID],
+    ).unwrap();
+    assert!(confirmed.status.success(), "replacement must confirm: {}", String::from_utf8_lossy(&confirmed.stderr));
 }

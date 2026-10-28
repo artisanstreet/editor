@@ -15,6 +15,7 @@ pub struct SetupView {
     setup_flow: bool,
     _claim: Subscription,
     _account: Subscription,
+    _core: Subscription,
 }
 
 impl SetupView {
@@ -42,6 +43,11 @@ impl SetupView {
                 cx.notify();
             },
         );
+        let core_subscription = cx.subscribe(&core, |_, _, event: &editor_core::CoreEvent, cx| {
+            if matches!(event, editor_core::CoreEvent::HostsChanged) {
+                cx.notify();
+            }
+        });
         Self {
             core,
             claim_code,
@@ -50,6 +56,7 @@ impl SetupView {
             setup_flow,
             _claim: claim_subscription,
             _account: account_subscription,
+            _core: core_subscription,
         }
     }
 
@@ -269,6 +276,7 @@ impl Render for SetupView {
                     .as_deref()
                     .is_some_and(|id| id == account_id)
         });
+        let revoked_here = account.read(cx).local_binding_revoked();
         let claimed_here = binding
             .as_ref()
             .and_then(|binding| binding.claimed_by.clone())
@@ -285,7 +293,7 @@ impl Render for SetupView {
                     .is_some_and(|id| id != account_id)
         });
         let pair_core = self.core.clone();
-        if bound_here {
+        if bound_here && !revoked_here {
             rows.push(
                 div()
                     .flex()
@@ -378,7 +386,11 @@ impl Render for SetupView {
                     .child(
                         div()
                             .text_color(theme.colors.text_muted.to_paint())
-                            .child("This Forge isn't paired yet.")
+                            .child(if revoked_here {
+                                "This Forge was removed from this account. Pair it again to reconnect."
+                            } else {
+                                "This Forge isn't paired yet."
+                            })
                     )
                     .child(
                         div()
@@ -386,7 +398,11 @@ impl Render for SetupView {
                             .flex_row()
                             .justify_end()
                             .child(
-                                Button::text("entry-pair", theme, "Pair this machine")
+                                Button::text("entry-pair", theme, if revoked_here {
+                                    "Pair this machine again"
+                                } else {
+                                    "Pair this machine"
+                                })
                                     .variant(ButtonVariant::Default)
                                     .debug_selector("entry-pair")
                                     .on_activate(move |_, _, cx| {
