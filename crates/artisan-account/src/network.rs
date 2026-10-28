@@ -59,7 +59,10 @@ pub enum NetworkError {
     #[error("Core refused the call: {code}")]
     Core {
         code: String,
-        #[allow(dead_code, reason = "Core message kept for exact shape; user text uses code only")]
+        #[allow(
+            dead_code,
+            reason = "Core message kept for exact shape; user text uses code only"
+        )]
         message: String,
         request_id: String,
     },
@@ -74,7 +77,10 @@ struct CoreErrorBody {
 #[derive(Clone, Debug, Deserialize)]
 struct CoreErrorDetail {
     code: String,
-    #[allow(dead_code, reason = "Core message kept for exact shape; user text uses code only")]
+    #[allow(
+        dead_code,
+        reason = "Core message kept for exact shape; user text uses code only"
+    )]
     message: String,
     request_id: String,
 }

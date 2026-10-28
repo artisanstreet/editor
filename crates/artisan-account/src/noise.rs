@@ -42,7 +42,14 @@ fn frame(kind: u8, channel: &str, body: &[u8]) -> Result<Vec<u8>> {
         .ok()
         .filter(|len| (1..=64).contains(len))
         .context("bad Noise channel name")?;
-    Ok([APP_MAGIC, &[APP_VERSION, channel_len], channel.as_bytes(), &[kind], body].concat())
+    Ok([
+        APP_MAGIC,
+        &[APP_VERSION, channel_len],
+        channel.as_bytes(),
+        &[kind],
+        body,
+    ]
+    .concat())
 }
 
 fn parse_frame<'a>(plaintext: &'a [u8], channel: &str) -> Result<(u8, &'a [u8])> {
@@ -54,9 +61,15 @@ fn parse_frame<'a>(plaintext: &'a [u8], channel: &str) -> Result<(u8, &'a [u8])>
     let (name, rest) = rest
         .split_at_checked(usize::from(channel_len))
         .context("short Noise frame")?;
-    ensure!(name == channel.as_bytes(), "Noise frame for another channel");
+    ensure!(
+        name == channel.as_bytes(),
+        "Noise frame for another channel"
+    );
     let (&kind, body) = rest.split_first().context("short Noise frame")?;
-    ensure!(kind == KIND_CONFIRM || kind == KIND_DATA, "unknown Noise frame kind");
+    ensure!(
+        kind == KIND_CONFIRM || kind == KIND_DATA,
+        "unknown Noise frame kind"
+    );
     Ok((kind, body))
 }
 
@@ -169,11 +182,12 @@ impl NoiseChannel {
         fixed_ephemeral: Option<&[u8; 32]>,
     ) -> Result<Self> {
         let prologue = prologue_bytes(&ctx);
-        let mut builder = snow::Builder::new(NOISE_PROTOCOL.parse().context("read the Noise protocol")?)
-            .prologue(&prologue)
-            .context("set the Noise prologue")?
-            .local_private_key(static_secret)
-            .context("set the Noise static key")?;
+        let mut builder =
+            snow::Builder::new(NOISE_PROTOCOL.parse().context("read the Noise protocol")?)
+                .prologue(&prologue)
+                .context("set the Noise prologue")?
+                .local_private_key(static_secret)
+                .context("set the Noise static key")?;
         if let Some(ephemeral) = fixed_ephemeral {
             builder = builder.fixed_ephemeral_key_for_testing_only(ephemeral);
         }
@@ -262,7 +276,10 @@ impl NoiseChannel {
     }
 
     /// Runs one receive step; any failure closes the session for good.
-    fn closing_on_error<T>(&mut self, step: impl FnOnce(&mut Open, &str) -> Result<T>) -> Result<T> {
+    fn closing_on_error<T>(
+        &mut self,
+        step: impl FnOnce(&mut Open, &str) -> Result<T>,
+    ) -> Result<T> {
         let (open, channel) = self.open_mut()?;
         let outcome = step(open, channel);
         if outcome.is_err() {
@@ -303,10 +320,16 @@ impl NoiseChannel {
             let (kind, body) = open.open(channel, ciphertext)?;
             ensure!(kind == KIND_CONFIRM, "expected the initiator confirm");
             let (hash, rest) = body.split_at_checked(HASH_LEN).context("short confirm")?;
-            ensure!(hash == open.handshake_hash.as_slice(), "the confirm is for another handshake");
+            ensure!(
+                hash == open.handshake_hash.as_slice(),
+                "the confirm is for another handshake"
+            );
             let (len, rest) = rest.split_first_chunk::<2>().context("short confirm")?;
             let jwt_len = usize::from(u16::from_be_bytes(*len));
-            ensure!((1..=MAX_GRANT_JWT).contains(&jwt_len), "bad grant length in the confirm");
+            ensure!(
+                (1..=MAX_GRANT_JWT).contains(&jwt_len),
+                "bad grant length in the confirm"
+            );
             let (jwt, signature) = rest.split_at_checked(jwt_len).context("short confirm")?;
             Ok(InitiatorConfirm {
                 jwt: jwt.to_vec(),
@@ -323,7 +346,12 @@ impl NoiseChannel {
         self.closing_on_error(|open, _| {
             ensure!(!open.confirm_received, "the initiator already confirmed");
             ensure!(
-                bind_verify(peer_cnf_public, ROLE_INITIATOR, &open.handshake_hash, &confirm.signature),
+                bind_verify(
+                    peer_cnf_public,
+                    ROLE_INITIATOR,
+                    &open.handshake_hash,
+                    &confirm.signature
+                ),
                 "the initiator confirm is not signed by the grant key"
             );
             open.confirm_received = true;
@@ -352,9 +380,17 @@ impl NoiseChannel {
             let (kind, body) = open.open(channel, ciphertext)?;
             ensure!(kind == KIND_CONFIRM, "expected the responder confirm");
             let (hash, signature) = body.split_at_checked(HASH_LEN).context("short confirm")?;
-            ensure!(hash == open.handshake_hash.as_slice(), "the confirm is for another handshake");
             ensure!(
-                bind_verify(forge_enrolled_public, ROLE_RESPONDER, &open.handshake_hash, signature),
+                hash == open.handshake_hash.as_slice(),
+                "the confirm is for another handshake"
+            );
+            ensure!(
+                bind_verify(
+                    forge_enrolled_public,
+                    ROLE_RESPONDER,
+                    &open.handshake_hash,
+                    signature
+                ),
                 "the Forge confirm is not signed by its enrolled key"
             );
             open.confirm_received = true;
@@ -363,7 +399,10 @@ impl NoiseChannel {
     }
 
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        ensure!(plaintext.len() <= MAX_APP_PLAINTEXT, "message too large for one Noise frame");
+        ensure!(
+            plaintext.len() <= MAX_APP_PLAINTEXT,
+            "message too large for one Noise frame"
+        );
         let (open, channel) = self.open_mut()?;
         ensure!(open.confirmed(), "the Noise session is not confirmed");
         open.seal(channel, KIND_DATA, plaintext)
@@ -380,7 +419,11 @@ impl NoiseChannel {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    reason = "test fixtures; failures fail the test"
+)]
 mod tests {
     use super::*;
 
@@ -424,7 +467,11 @@ mod tests {
         let mut init = NoiseChannel::initiator(&INIT_STATIC, None, ctx()).unwrap();
         let mut resp = NoiseChannel::responder(&RESP_STATIC, None, ctx()).unwrap();
         shake(&mut init, &mut resp).unwrap();
-        assert_eq!((init.phase(), resp.phase()), (Phase::Confirm, Phase::Confirm), "handshake done");
+        assert_eq!(
+            (init.phase(), resp.phase()),
+            (Phase::Confirm, Phase::Confirm),
+            "handshake done"
+        );
         (init, resp)
     }
 
@@ -433,10 +480,16 @@ mod tests {
         let c1 = init.emit_initiator_confirm(&CNF_INIT, GRANT_JWT).unwrap();
         let parsed = resp.receive_initiator_confirm(&c1).unwrap();
         assert_eq!(parsed.jwt, GRANT_JWT, "grant travels in the confirm");
-        resp.accept_initiator_confirm(&cnf_public(&CNF_INIT), &parsed).unwrap();
+        resp.accept_initiator_confirm(&cnf_public(&CNF_INIT), &parsed)
+            .unwrap();
         let c2 = resp.emit_responder_confirm(&CNF_RESP).unwrap();
-        init.receive_responder_confirm(&c2, &cnf_public(&CNF_RESP)).unwrap();
-        assert_eq!((init.phase(), resp.phase()), (Phase::Open, Phase::Open), "both open");
+        init.receive_responder_confirm(&c2, &cnf_public(&CNF_RESP))
+            .unwrap();
+        assert_eq!(
+            (init.phase(), resp.phase()),
+            (Phase::Open, Phase::Open),
+            "both open"
+        );
         (init, resp)
     }
 
@@ -479,7 +532,10 @@ mod tests {
         let mut c1 = init.emit_initiator_confirm(&CNF_INIT, GRANT_JWT).unwrap();
         let last = c1.len() - 1;
         c1[last] ^= 0x01;
-        assert!(resp.receive_initiator_confirm(&c1).is_err(), "tampered confirm accepted");
+        assert!(
+            resp.receive_initiator_confirm(&c1).is_err(),
+            "tampered confirm accepted"
+        );
         assert_eq!(resp.phase(), Phase::Closed, "session survived tampering");
     }
 
@@ -488,15 +544,29 @@ mod tests {
         let (mut init, mut resp) = shaken();
         let c1 = init.emit_initiator_confirm(&CNF_INIT, GRANT_JWT).unwrap();
         let parsed = resp.receive_initiator_confirm(&c1).unwrap();
-        assert!(resp.accept_initiator_confirm(&[0x09; 32], &parsed).is_err(), "wrong key accepted");
-        assert_eq!(resp.phase(), Phase::Closed, "session survived a bad binding");
+        assert!(
+            resp.accept_initiator_confirm(&[0x09; 32], &parsed).is_err(),
+            "wrong key accepted"
+        );
+        assert_eq!(
+            resp.phase(),
+            Phase::Closed,
+            "session survived a bad binding"
+        );
     }
 
     #[test]
     fn a_frame_for_another_channel_is_rejected() {
         let framed = frame(KIND_DATA, "exec-1", b"hi").unwrap();
-        assert_eq!(parse_frame(&framed, "exec-1").unwrap(), (KIND_DATA, b"hi".as_slice()), "own channel");
-        assert!(parse_frame(&framed, "other").is_err(), "foreign channel accepted");
+        assert_eq!(
+            parse_frame(&framed, "exec-1").unwrap(),
+            (KIND_DATA, b"hi".as_slice()),
+            "own channel"
+        );
+        assert!(
+            parse_frame(&framed, "other").is_err(),
+            "foreign channel accepted"
+        );
     }
 
     #[test]
@@ -505,15 +575,26 @@ mod tests {
         let ed = [0x55; 32];
         let public = cnf_public(&ed);
         let signature = bind_sign(&ed, ROLE_INITIATOR, &hash);
-        assert!(bind_verify(&public, ROLE_INITIATOR, &hash, &signature), "own binding");
-        assert!(!bind_verify(&public, ROLE_RESPONDER, &hash, &signature), "role swap");
-        assert!(!bind_verify(&public, ROLE_INITIATOR, &[0; 64], &signature), "other transcript");
+        assert!(
+            bind_verify(&public, ROLE_INITIATOR, &hash, &signature),
+            "own binding"
+        );
+        assert!(
+            !bind_verify(&public, ROLE_RESPONDER, &hash, &signature),
+            "role swap"
+        );
+        assert!(
+            !bind_verify(&public, ROLE_INITIATOR, &[0; 64], &signature),
+            "other transcript"
+        );
     }
 
     #[test]
     fn relay_vectors_reproduce_byte_exact() {
         let path = std::env::var("NOISE_FIXTURE_PATH").map_or_else(
-            |_unset| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/noise-xx.json"),
+            |_unset| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/noise-xx.json")
+            },
             std::path::PathBuf::from,
         );
         let fixture: serde_json::Value =
@@ -525,16 +606,40 @@ mod tests {
             machine: fixture["ctx"]["machine"].as_str().unwrap().into(),
             channel: fixture["ctx"]["channel"].as_str().unwrap().into(),
         };
-        assert_eq!(hex::encode(prologue_bytes(&ctx)), field("prologue_hex"), "prologue");
+        assert_eq!(
+            hex::encode(prologue_bytes(&ctx)),
+            field("prologue_hex"),
+            "prologue"
+        );
         let init_pub = noise_public(INIT_STATIC);
         let resp_pub = noise_public(RESP_STATIC);
-        assert_eq!(hex::encode(init_pub), field("init_static_pub"), "initiator static");
-        assert_eq!(hex::encode(resp_pub), field("resp_static_pub"), "responder static");
+        assert_eq!(
+            hex::encode(init_pub),
+            field("init_static_pub"),
+            "initiator static"
+        );
+        assert_eq!(
+            hex::encode(resp_pub),
+            field("resp_static_pub"),
+            "responder static"
+        );
 
-        let mut init =
-            NoiseChannel::build(true, &INIT_STATIC, Some(resp_pub), ctx.clone(), Some(&[0x33; 32])).unwrap();
-        let mut resp =
-            NoiseChannel::build(false, &RESP_STATIC, Some(init_pub), ctx.clone(), Some(&[0x44; 32])).unwrap();
+        let mut init = NoiseChannel::build(
+            true,
+            &INIT_STATIC,
+            Some(resp_pub),
+            ctx.clone(),
+            Some(&[0x33; 32]),
+        )
+        .unwrap();
+        let mut resp = NoiseChannel::build(
+            false,
+            &RESP_STATIC,
+            Some(init_pub),
+            ctx.clone(),
+            Some(&[0x44; 32]),
+        )
+        .unwrap();
         let mut m1 = Vec::new();
         init.next_handshake_message(&mut m1).unwrap();
         assert_eq!(hex::encode(&m1), field("m1"), "m1");
@@ -549,8 +654,14 @@ mod tests {
         resp.receive_handshake_message(&m3).unwrap();
 
         let grant_jwt = field("grant_jwt");
-        let c1 = init.emit_initiator_confirm(&[0x55; 32], grant_jwt.as_bytes()).unwrap();
-        assert_eq!(hex::encode(&c1), field("confirm_init_ct"), "initiator confirm");
+        let c1 = init
+            .emit_initiator_confirm(&[0x55; 32], grant_jwt.as_bytes())
+            .unwrap();
+        assert_eq!(
+            hex::encode(&c1),
+            field("confirm_init_ct"),
+            "initiator confirm"
+        );
         let parsed = resp.receive_initiator_confirm(&c1).unwrap();
         let issuer: [u8; 32] = {
             use base64::Engine as _;
@@ -579,18 +690,43 @@ mod tests {
         resp.accept_initiator_confirm(&cnf, &parsed).unwrap();
 
         let c2 = resp.emit_responder_confirm(&[0x66; 32]).unwrap();
-        assert_eq!(hex::encode(&c2), field("confirm_resp_ct"), "responder confirm");
+        assert_eq!(
+            hex::encode(&c2),
+            field("confirm_resp_ct"),
+            "responder confirm"
+        );
         let forge_enrolled = cnf_public(&[0x66; 32]);
-        assert_eq!(hex::encode(forge_enrolled), field("resp_cnf_pub"), "enrolled key");
-        init.receive_responder_confirm(&c2, &forge_enrolled).unwrap();
+        assert_eq!(
+            hex::encode(forge_enrolled),
+            field("resp_cnf_pub"),
+            "enrolled key"
+        );
+        init.receive_responder_confirm(&c2, &forge_enrolled)
+            .unwrap();
 
         let a = field("plaintext_a");
         let ct_init = init.seal(a.as_bytes()).unwrap();
-        assert_eq!(hex::encode(&ct_init), field("data_init_ct"), "initiator data");
-        assert_eq!(resp.receive_data(&ct_init).unwrap(), a.as_bytes(), "initiator data opens");
+        assert_eq!(
+            hex::encode(&ct_init),
+            field("data_init_ct"),
+            "initiator data"
+        );
+        assert_eq!(
+            resp.receive_data(&ct_init).unwrap(),
+            a.as_bytes(),
+            "initiator data opens"
+        );
         let b = field("plaintext_b");
         let ct_resp = resp.seal(b.as_bytes()).unwrap();
-        assert_eq!(hex::encode(&ct_resp), field("data_resp_ct"), "responder data");
-        assert_eq!(init.receive_data(&ct_resp).unwrap(), b.as_bytes(), "responder data opens");
+        assert_eq!(
+            hex::encode(&ct_resp),
+            field("data_resp_ct"),
+            "responder data"
+        );
+        assert_eq!(
+            init.receive_data(&ct_resp).unwrap(),
+            b.as_bytes(),
+            "responder data opens"
+        );
     }
 }

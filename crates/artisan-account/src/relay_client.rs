@@ -23,9 +23,8 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::grant::{is_valid_id, unverified_jti, unverified_part};
 use crate::{
-    AckFrame, AuthenticateFrame, ChannelCtx, ClientFrame, CoreSessionClient, DataFrame,
-    HelloFrame, MachineKeypair, NoiseChannel, OpenFrame, PongFrame, ServerFrame, SessionToken,
-    pop_sign,
+    AckFrame, AuthenticateFrame, ChannelCtx, ClientFrame, CoreSessionClient, DataFrame, HelloFrame,
+    MachineKeypair, NoiseChannel, OpenFrame, PongFrame, ServerFrame, SessionToken, pop_sign,
 };
 
 const OPEN_DEADLINE: Duration = Duration::from_secs(30);
@@ -78,7 +77,9 @@ impl RelayClient {
             session,
         });
         let cancel = CancellationToken::new();
-        let conn = route.open_with("unary", grant_jwt, cnf_secret, &cancel).await?;
+        let conn = route
+            .open_with("unary", grant_jwt, cnf_secret, &cancel)
+            .await?;
         Ok(Self {
             route,
             unary: Arc::new(tokio::sync::Mutex::new(Some(conn))),
@@ -212,7 +213,12 @@ impl RelayEventStream {
             let Message::Event(event) = read_message(&plaintext)? else {
                 continue;
             };
-            let StreamEvent { envelope, end, error, .. } = *event;
+            let StreamEvent {
+                envelope,
+                end,
+                error,
+                ..
+            } = *event;
             if let Some(error) = error {
                 bail!("the Forge ended the event stream: {error}");
             }
@@ -311,7 +317,8 @@ impl Route {
             reassembly: Reassembly::new(),
             expires_at,
         };
-        conn.handshake(grant_jwt, cnf_secret, &self.forge_pub).await?;
+        conn.handshake(grant_jwt, cnf_secret, &self.forge_pub)
+            .await?;
         Ok(conn)
     }
 }
@@ -476,13 +483,20 @@ impl Conn {
     async fn inbound(&mut self) -> Result<Inbound> {
         loop {
             match self.socket.recv().await? {
-                ServerFrame::Data(DataFrame { channel, seq, body, .. }) => {
+                ServerFrame::Data(DataFrame {
+                    channel, seq, body, ..
+                }) => {
                     self.socket
                         .send(&ClientFrame::Ack(AckFrame { v: 1, channel, seq }))?;
-                    ensure!(seq == self.recv_seq, "the Relay delivered data out of order");
+                    ensure!(
+                        seq == self.recv_seq,
+                        "the Relay delivered data out of order"
+                    );
                     self.recv_seq += 1;
                     return Ok(Inbound::Data(
-                        URL_SAFE_NO_PAD.decode(body).context("read the Relay frame")?,
+                        URL_SAFE_NO_PAD
+                            .decode(body)
+                            .context("read the Relay frame")?,
                     ));
                 }
                 ServerFrame::Ack(ack) => return Ok(Inbound::Ack(ack.seq)),
@@ -518,7 +532,12 @@ impl Socket {
     }
 
     async fn recv(&mut self) -> Result<ServerFrame> {
-        match self.frames.recv().await.context("the Relay connection ended")?? {
+        match self
+            .frames
+            .recv()
+            .await
+            .context("the Relay connection ended")??
+        {
             ServerFrame::ChannelClosed(closed) => {
                 bail!("the Relay closed the channel: {}", closed.reason)
             }
@@ -607,7 +626,10 @@ enum Message {
 fn read_message(bytes: &[u8]) -> Result<Message> {
     let mut value: serde_json::Value =
         serde_json::from_slice(bytes).context("read Forge's answer")?;
-    match value.get_mut(artisan_api::STREAM_EVENT_KEY).map(serde_json::Value::take) {
+    match value
+        .get_mut(artisan_api::STREAM_EVENT_KEY)
+        .map(serde_json::Value::take)
+    {
         Some(event) => Ok(Message::Event(Box::new(
             serde_json::from_value(event).context("read the Forge event")?,
         ))),
@@ -634,8 +656,10 @@ fn check_tunnel(response: &TunnelResponse) -> Result<()> {
             .and_then(|code| serde_json::from_value(code.into()).ok())
             .unwrap_or(ErrorCode::Internal)
     };
-    let message = detail("message")
-        .map_or_else(|| format!("Forge answered {}", response.status), str::to_owned);
+    let message = detail("message").map_or_else(
+        || format!("Forge answered {}", response.status),
+        str::to_owned,
+    );
     Err(anyhow!(ApiError { code, message }))
 }
 
@@ -643,7 +667,9 @@ fn decode_tunnel_bytes(response: &TunnelResponse) -> Result<Vec<u8>> {
     if let Some(envelope) = response.body.get(artisan_api::BYTES_ENVELOPE_KEY) {
         let bytes: artisan_api::TunnelBytes =
             serde_json::from_value(envelope.clone()).context("read Forge bytes")?;
-        return URL_SAFE_NO_PAD.decode(bytes.b64u).context("read Forge bytes");
+        return URL_SAFE_NO_PAD
+            .decode(bytes.b64u)
+            .context("read Forge bytes");
     }
     if let Some(text) = response.body.as_str() {
         return Ok(text.as_bytes().to_vec());
@@ -725,7 +751,11 @@ mod tests {
             ws.send(Ws::Text(r#"{"v":1,"type":"ping","t":1234}"#.into()))
                 .await
                 .unwrap();
-            let pong = tokio::time::timeout(WAIT, ws.next()).await.unwrap().unwrap().unwrap();
+            let pong = tokio::time::timeout(WAIT, ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
             let pong: serde_json::Value = serde_json::from_str(pong.to_text().unwrap()).unwrap();
             assert_eq!(
                 pong,
@@ -747,8 +777,13 @@ mod tests {
                 "the socket kept talking after its channel closed"
             );
         });
-        let mut socket = connect_socket(&url, CancellationToken::new()).await.unwrap();
-        let frame = tokio::time::timeout(WAIT, socket.recv()).await.unwrap().unwrap();
+        let mut socket = connect_socket(&url, CancellationToken::new())
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(WAIT, socket.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             matches!(frame, ServerFrame::Ack(AckFrame { seq: 3, .. })),
             "presence and unknown frames must not reach the reader: {frame:?}"
@@ -768,13 +803,19 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
             let ended = tokio::time::timeout(WAIT, ws.next()).await.unwrap();
-            assert!(!matches!(ended, Some(Ok(Ws::Text(_)))), "socket outlived sign-out");
+            assert!(
+                !matches!(ended, Some(Ok(Ws::Text(_)))),
+                "socket outlived sign-out"
+            );
         });
         let client = CancellationToken::new();
         let mut socket = connect_socket(&url, client.child_token()).await.unwrap();
         client.cancel();
         let read = tokio::time::timeout(WAIT, socket.recv()).await.unwrap();
-        assert!(read.is_err(), "a reader must wake when the client signs out");
+        assert!(
+            read.is_err(),
+            "a reader must wake when the client signs out"
+        );
         relay.await.unwrap();
     }
 
@@ -800,11 +841,18 @@ mod tests {
         };
         let subscribing = tokio::spawn({
             let client = client.clone();
-            async move { Box::pin(client.subscribe("/events?since=0")).await.map(drop) }
+            async move {
+                Box::pin(client.subscribe("/events?since=0"))
+                    .await
+                    .map(drop)
+            }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         client.close_all();
-        let outcome = tokio::time::timeout(WAIT, subscribing).await.unwrap().unwrap();
+        let outcome = tokio::time::timeout(WAIT, subscribing)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(outcome.is_err(), "a subscription survived sign-out");
         hung_core.abort();
     }
@@ -818,7 +866,10 @@ mod tests {
                 let (tcp, _) = listener.accept().await.unwrap();
                 let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
                 let hello = ws.next().await.unwrap().unwrap();
-                assert!(hello.to_text().unwrap().contains("\"hello\""), "hello first");
+                assert!(
+                    hello.to_text().unwrap().contains("\"hello\""),
+                    "hello first"
+                );
                 ws.send(Ws::Text(
                     r#"{"v":1,"type":"ready","role":"client","account":"a","machine":"m","forge_online":true}"#
                         .into(),
@@ -826,12 +877,14 @@ mod tests {
                 .await
                 .unwrap();
                 let open = ws.next().await.unwrap().unwrap();
-                let open: serde_json::Value = serde_json::from_str(open.to_text().unwrap()).unwrap();
+                let open: serde_json::Value =
+                    serde_json::from_str(open.to_text().unwrap()).unwrap();
                 assert_eq!(open["type"], "open", "open after admission");
                 let name = open["channel"].as_str().unwrap().to_owned();
                 assert!(names.insert(name.clone()), "channel reused: {name}");
                 ws.send(Ws::Text(
-                    r#"{"v":1,"type":"error","code":"probe-complete","message":"open recorded"}"#.into(),
+                    r#"{"v":1,"type":"error","code":"probe-complete","message":"open recorded"}"#
+                        .into(),
                 ))
                 .await
                 .unwrap();
@@ -860,7 +913,8 @@ mod tests {
 
     #[test]
     fn responses_read_as_responses() {
-        let message = read_message(br#"{"id":"rs2","status":200,"body":{"unsubscribed":true}}"#).unwrap();
+        let message =
+            read_message(br#"{"id":"rs2","status":200,"body":{"unsubscribed":true}}"#).unwrap();
         assert!(
             matches!(&message, Message::Response(response) if response.id == "rs2"),
             "response misread as an event"
@@ -880,6 +934,9 @@ mod tests {
     fn malformed_answers_keep_the_decode_error() {
         let error = read_message(br#"{"id":1,"status":"bogus"}"#).err().unwrap();
         let text = format!("{error:#}");
-        assert!(text.contains("read Forge's answer") && text.contains("invalid type"), "{text}");
+        assert!(
+            text.contains("read Forge's answer") && text.contains("invalid type"),
+            "{text}"
+        );
     }
 }

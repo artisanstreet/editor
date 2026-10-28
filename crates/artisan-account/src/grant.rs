@@ -22,9 +22,8 @@ pub fn is_valid_id(value: &str) -> bool {
     if !first.is_ascii_alphanumeric() {
         return false;
     }
-    rest.iter().all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
-    })
+    rest.iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
 }
 
 /// Whether `value` is a Core id with the given prefix
@@ -282,7 +281,8 @@ pub fn parse_and_verify_jwt(
     params: &VerifyParams,
 ) -> Result<GrantClaims, GrantError> {
     let (signing_input, signature) = split_compact(compact)?;
-    let claims: GrantClaims = unverified_part(compact, 1).map_err(|_decode| GrantError::of(GrantErrorKind::Id))?;
+    let claims: GrantClaims =
+        unverified_part(compact, 1).map_err(|_decode| GrantError::of(GrantErrorKind::Id))?;
     // Standard JWT EdDSA verification: Ed25519 over ASCII `header.payload`.
     let key = ed25519_dalek::VerifyingKey::from_bytes(issuer_pubkey)
         .map_err(|_cause| GrantError::of(GrantErrorKind::Signature))?;
@@ -296,12 +296,9 @@ pub fn parse_and_verify_jwt(
 
 fn split_compact(compact: &str) -> Result<(String, Vec<u8>), GrantError> {
     let mut parts = compact.split('.');
-    let (Some(header), Some(payload), Some(signature), None) = (
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-    ) else {
+    let (Some(header), Some(payload), Some(signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
         return Err(GrantError::of(GrantErrorKind::Encoding));
     };
     if header.is_empty() || payload.is_empty() || signature.is_empty() {
@@ -318,7 +315,9 @@ fn split_compact(compact: &str) -> Result<(String, Vec<u8>), GrantError> {
 }
 
 fn check_header(compact: &str) -> Result<(), GrantError> {
-    unverified_kid(compact).map(drop).map_err(|_header| GrantError::of(GrantErrorKind::Signature))
+    unverified_kid(compact)
+        .map(drop)
+        .map_err(|_header| GrantError::of(GrantErrorKind::Signature))
 }
 
 #[derive(Deserialize)]
@@ -339,8 +338,13 @@ pub fn unverified_part<T: serde::de::DeserializeOwned>(
     index: usize,
 ) -> anyhow::Result<T> {
     use anyhow::Context as _;
-    let part = compact.split('.').nth(index).context("the grant is not a compact JWT")?;
-    let raw = URL_SAFE_NO_PAD.decode(part.as_bytes()).context("decode the grant")?;
+    let part = compact
+        .split('.')
+        .nth(index)
+        .context("the grant is not a compact JWT")?;
+    let raw = URL_SAFE_NO_PAD
+        .decode(part.as_bytes())
+        .context("decode the grant")?;
     serde_json::from_slice(&raw).context("read the grant")
 }
 
@@ -555,10 +559,7 @@ mod tests {
 /// verbatim from `core/fixtures/v1/` — TEST-ONLY synthetic credentials).
 /// Catches exact field drift against Core's actual `issueGrant` output.
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod core_fixture_tests {
     use super::*;
 
@@ -610,10 +611,7 @@ mod core_fixture_tests {
         assert_eq!(claims.sub, expected["sub"].as_str().unwrap());
         assert_eq!(claims.mid, expected["mid"].as_str().unwrap());
         assert_eq!(claims.role, Role::Forge);
-        assert_eq!(
-            claims.scope,
-            vec![Scope::RelayConnect, Scope::ForgeExecute]
-        );
+        assert_eq!(claims.scope, vec![Scope::RelayConnect, Scope::ForgeExecute]);
         assert_eq!(claims.iat, fixture_iat);
         assert_eq!(claims.nbf, Some(fixture_iat));
         assert_eq!(claims.exp - claims.iat, 300);
@@ -641,7 +639,11 @@ mod core_fixture_tests {
             crate::machine_proof::EMPTY_BODY_HASH
         );
         let canonical = crate::machine_proof::canonical_request(
-            headers["x-ast-timestamp"].as_str().unwrap().parse().unwrap(),
+            headers["x-ast-timestamp"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
             headers["x-ast-nonce"].as_str().unwrap(),
             "GET",
             proof["pathAndQuery"].as_str().unwrap(),
@@ -663,7 +665,11 @@ mod core_fixture_tests {
         let request = crate::machine_proof::MachineProof {
             public: &public,
             body,
-            timestamp_sec: headers["x-ast-timestamp"].as_str().unwrap().parse().unwrap(),
+            timestamp_sec: headers["x-ast-timestamp"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
             nonce_b64u: headers["x-ast-nonce"].as_str().unwrap(),
             method: proof["method"].as_str().unwrap(),
             path_and_query: proof["pathAndQuery"].as_str().unwrap(),
@@ -672,7 +678,11 @@ mod core_fixture_tests {
                 .unwrap()
                 .strip_prefix("AST-Machine ")
                 .unwrap(),
-            now_sec: headers["x-ast-timestamp"].as_str().unwrap().parse().unwrap(),
+            now_sec: headers["x-ast-timestamp"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
         };
         crate::machine_proof::verify_machine_proof(&request).unwrap();
         let _ = canonical;
