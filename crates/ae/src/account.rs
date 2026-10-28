@@ -78,8 +78,9 @@ fn account_path() -> Result<PathBuf> {
 fn load_account() -> Result<AccountFile> {
     let path = account_path()?;
     match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .with_context(|| format!("read {}", path.display())),
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AccountFile::default()),
         Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
     }
@@ -124,9 +125,11 @@ fn client(core: Option<&str>) -> Result<forge_http::core::CoreClient> {
 
 pub fn run(args: &AccountArgs) -> Result<()> {
     match &args.command {
-        AccountCommand::Enroll { label, json, replace } => {
-            enroll(args.core.as_deref(), label.as_deref(), *json, *replace)
-        }
+        AccountCommand::Enroll {
+            label,
+            json,
+            replace,
+        } => enroll(args.core.as_deref(), label.as_deref(), *json, *replace),
         AccountCommand::Status { json } => status(args.core.as_deref(), *json),
         AccountCommand::Confirm { yes, account_id } => {
             confirm(args.core.as_deref(), *yes, account_id.as_deref())
@@ -159,29 +162,31 @@ fn keypair(account: &mut AccountFile) -> Result<artisan_account::MachineKeypair>
         }
         return Ok(keypair);
     }
-    let keypair =
-        artisan_account::MachineKeypair::generate().map_err(|_rand| anyhow::anyhow!("random key failed"))?;
-    account.secret_b64u = Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(keypair.secret()));
+    let keypair = artisan_account::MachineKeypair::generate()
+        .map_err(|_rand| anyhow::anyhow!("random key failed"))?;
+    account.secret_b64u =
+        Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(keypair.secret()));
     account.public_b64u = Some(keypair.public_b64u());
     save_account(account)?;
     Ok(keypair)
 }
 
 fn label_default(label: Option<&str>) -> String {
-    label.map_or_else(
-        || {
-            gethostname::gethostname()
-                .to_string_lossy()
-                .trim()
-                .to_owned()
-        },
-        str::to_owned,
-    )
-    .chars()
-    .take(64)
-    .collect::<String>()
-    .trim()
-    .to_owned()
+    label
+        .map_or_else(
+            || {
+                gethostname::gethostname()
+                    .to_string_lossy()
+                    .trim()
+                    .to_owned()
+            },
+            str::to_owned,
+        )
+        .chars()
+        .take(64)
+        .collect::<String>()
+        .trim()
+        .to_owned()
 }
 
 fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) -> Result<()> {
@@ -198,7 +203,9 @@ fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) ->
         let fresh = artisan_account::MachineKeypair::generate()
             .map_err(|_rand| anyhow::anyhow!("random key failed"))?;
         account = AccountFile {
-            secret_b64u: Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fresh.secret())),
+            secret_b64u: Some(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fresh.secret()),
+            ),
             public_b64u: Some(fresh.public_b64u()),
             ..AccountFile::default()
         };
@@ -339,22 +346,23 @@ fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Res
         return Ok(());
     }
     let confirmed = runtime()?.block_on(async {
-        client(core)?.confirm_enrollment(
-            &enrollment_id,
-            &account_id,
-            keypair.public(),
-            keypair.secret(),
-        )
-        .await
+        client(core)?
+            .confirm_enrollment(
+                &enrollment_id,
+                &account_id,
+                keypair.public(),
+                keypair.secret(),
+            )
+            .await
     })?;
     account.machine_id = Some(confirmed.machine_id.clone());
     account.account_id = Some(confirmed.account_id);
     account.enrollment_id = None;
     save_account(&account)?;
-    crate::ui::success(format!(
-        "Enrolled this Forge as {}.",
-        confirmed.machine_id
-    ));
+    if crate::service::is_running() {
+        crate::service::restart()?;
+    }
+    crate::ui::success(format!("Enrolled this Forge as {}.", confirmed.machine_id));
     Ok(())
 }
 
@@ -371,9 +379,9 @@ fn check_expected_account(expected: Option<&str>, actual: Option<&str>) -> Resul
     }
     match actual {
         Some(actual) if actual == expected => Ok(()),
-        Some(actual) => bail!(
-            "account mismatch: expected {expected}, found {actual}; refusing to confirm"
-        ),
+        Some(actual) => {
+            bail!("account mismatch: expected {expected}, found {actual}; refusing to confirm")
+        }
         None => bail!("account mismatch: expected {expected}, found none; refusing to confirm"),
     }
 }
@@ -405,10 +413,7 @@ fn enrolled_report(machine_id: &str, account_id: Option<&str>) -> serde_json::Va
 
 /// Pending-enrollment report: the server's verbatim `status` plus the
 /// claimed identity when present (`None` reads as JSON null).
-fn pending_report(
-    enrollment_id: &str,
-    status: &artisan_account::PairStatus,
-) -> serde_json::Value {
+fn pending_report(enrollment_id: &str, status: &artisan_account::PairStatus) -> serde_json::Value {
     serde_json::json!({
         "enrolled": false,
         "enrollment_id": enrollment_id,
@@ -489,8 +494,7 @@ mod tests {
             ..AccountFile::default()
         };
         std::fs::write(&path, serde_json::to_string(&account).unwrap()).unwrap();
-        let read: AccountFile =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let read: AccountFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(read, account);
     }
 
@@ -507,12 +511,7 @@ mod tests {
     }
 
     fn sorted_keys(value: &serde_json::Value) -> Vec<String> {
-        let mut keys: Vec<String> = value
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect();
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
         keys.sort_unstable();
         keys
     }
@@ -523,7 +522,10 @@ mod tests {
         assert_eq!(enrolled["enrolled"], true);
         assert_eq!(enrolled["machine_id"], "mch_1");
         assert_eq!(enrolled["account_id"], "acct_1");
-        assert_eq!(sorted_keys(&enrolled), ["account_id", "enrolled", "machine_id"]);
+        assert_eq!(
+            sorted_keys(&enrolled),
+            ["account_id", "enrolled", "machine_id"]
+        );
         let pending = pending_report(
             "enr_1",
             &artisan_account::PairStatus {
