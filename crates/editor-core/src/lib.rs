@@ -201,7 +201,8 @@ impl Core {
             host.set_pairing(&config.kind, &config.address);
             host
         });
-        cx.subscribe(&host, |core, host, event, cx| match event {
+        let mut was_live = false;
+        cx.subscribe(&host, move |core, host, event, cx| match event {
             HostEvent::WslDistro { distro } => {
                 let id = host.read(cx).id.clone();
                 core.remember_wsl_distro(&id, distro);
@@ -209,11 +210,18 @@ impl Core {
             HostEvent::EditorCall { id, call } => {
                 core.editor_call(&host, id.clone(), call.clone(), cx);
             }
+            HostEvent::Changed => {
+                let live = host.read(cx).is_live();
+                if live != was_live {
+                    was_live = live;
+                    cx.emit(CoreEvent::HostsChanged);
+                    cx.notify();
+                }
+            }
             HostEvent::Reset
             | HostEvent::ImagesChanged
             | HostEvent::EngineInstall { .. }
             | HostEvent::ThreadSummaryChanged { .. }
-            | HostEvent::Changed
             | HostEvent::ThreadChanged { .. }
             | HostEvent::Item(_)
             | HostEvent::Live { .. } => {}
@@ -265,7 +273,8 @@ impl Core {
 
     /// True until the user explicitly removes this pairing, including connection failures.
     pub fn is_paired(&self, id: &HostId) -> bool {
-        self.hosts_file.hosts.iter().any(|host| &host.id == id)
+        self.account_configs.contains_key(id)
+            || self.hosts_file.hosts.iter().any(|host| &host.id == id)
     }
 
     /// The current screen's host, then the saved last host, then the first paired host.

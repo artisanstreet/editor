@@ -64,7 +64,15 @@ impl ForgeClient {
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.base)
+        // Relay clients have no HTTP origin, but reqwest still needs an
+        // absolute URL to build a request. Only its path/query is tunneled;
+        // this reserved origin is never contacted.
+        let base = if self.base.is_empty() {
+            "https://forge.invalid"
+        } else {
+            &self.base
+        };
+        format!("{base}{path}")
     }
 
     pub(crate) const fn raw(&self) -> &reqwest::Client {
@@ -1118,6 +1126,27 @@ fn source_ranges() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_request_builders_preserve_paths_queries_and_bodies() {
+        let client = ForgeClient {
+            http: reqwest::Client::new(),
+            base: String::new(),
+            relay: None,
+        };
+        let (method, path, body) = relay_parts(client.http.get(client.url("/state"))).unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/state");
+        assert!(body.is_none());
+        let (method, path, body) = relay_parts(
+            client.http.post(client.url("/threads?since=7"))
+                .json(&serde_json::json!({"title": "hello"})),
+        ).unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/threads?since=7");
+        assert_eq!(body, Some(serde_json::json!({"title": "hello"})));
+    }
+
     #[gpui::test]
     fn source_admission_and_release_progress_without_polling_the_ui_again(
         cx: &gpui::TestAppContext,
