@@ -29,8 +29,7 @@ fn added_host_goes_live_and_the_prompt_saves_to_forge(cx: &mut TestAppContext) {
     let core = fixture.core.clone();
     let (settings, cx) = fixture.open(cx, SettingsPage::Hosts);
     let host: Entity<HostData> = cx.read(|cx| {
-        core
-            .read(cx)
+        core.read(cx)
             .host(&fixture.hosts[0])
             .cloned()
             .expect("the paired test host is present")

@@ -426,14 +426,10 @@ impl Render for Account {
         let (seed, user, name, status) = self.host.as_ref().map_or_else(
             || {
                 (
-                    ast.as_ref().map_or_else(
-                        || "no-host".into(),
-                        |(account_id, _)| account_id.clone(),
-                    ),
-                    ast.as_ref().map_or_else(
-                        || "Artisan".into(),
-                        |(_, display)| display.clone(),
-                    ),
+                    ast.as_ref()
+                        .map_or_else(|| "no-host".into(), |(account_id, _)| account_id.clone()),
+                    ast.as_ref()
+                        .map_or_else(|| "Artisan".into(), |(_, display)| display.clone()),
                     "No host".into(),
                     "No host".into(),
                 )
@@ -458,10 +454,8 @@ impl Render for Account {
                     .map_or_else(|| host.name.clone(), str::to_owned);
                 (
                     seed,
-                    ast.as_ref().map_or_else(
-                        || host.name.clone(),
-                        |(_, display)| display.clone(),
-                    ),
+                    ast.as_ref()
+                        .map_or_else(|| host.name.clone(), |(_, display)| display.clone()),
                     host.name.clone(),
                     status,
                 )

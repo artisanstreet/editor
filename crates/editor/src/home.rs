@@ -61,26 +61,21 @@ impl Render for Home {
                             .child(self.setup.clone()),
                     )
                     .child(
-                        div()
-                            .mt(px(16.0))
-                            .child(
-                                Button::text(
-                                    "home-manage-forges",
-                                    theme,
-                                    "Manage Forges in Account settings",
-                                )
-                                .variant(ButtonVariant::Ghost)
-                                .debug_selector("home-manage-forges")
-                                .on_activate(cx.listener(move |_, _, _, cx| {
-                                    core.update(cx, |core, cx| {
-                                        core.navigate(
-                                            Screen::Settings(SettingsPage::Account),
-                                            cx,
-                                        );
-                                    });
-                                }))
-                                .into_any_element(),
-                            ),
+                        div().mt(px(16.0)).child(
+                            Button::text(
+                                "home-manage-forges",
+                                theme,
+                                "Manage Forges in Account settings",
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .debug_selector("home-manage-forges")
+                            .on_activate(cx.listener(move |_, _, _, cx| {
+                                core.update(cx, |core, cx| {
+                                    core.navigate(Screen::Settings(SettingsPage::Account), cx);
+                                });
+                            }))
+                            .into_any_element(),
+                        ),
                     ),
             )
             .into_any_element()

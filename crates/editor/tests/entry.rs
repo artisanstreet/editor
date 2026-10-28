@@ -108,8 +108,7 @@ impl StubCore {
 }
 
 fn base64_url_no_pad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
         let mut word = 0_u32;
@@ -183,9 +182,8 @@ impl EntryFixture {
             }),
             None,
         );
-        let core = cx.new(|cx| {
-            Core::with_services(EditorFiles { dir: editor_dir }, services, cx).unwrap()
-        });
+        let core = cx
+            .new(|cx| Core::with_services(EditorFiles { dir: editor_dir }, services, cx).unwrap());
         Self {
             _dir: dir,
             _stub: stub,
@@ -247,17 +245,13 @@ pub(crate) fn wait_ready(cx: &mut gpui::TestAppContext, core: &gpui::Entity<Core
 fn resume_validates_then_ready_mounts_workspace(cx: &mut gpui::TestAppContext) {
     cx.executor().allow_parking();
     let fixture = EntryFixture::new(cx);
-    let gate = fixture
-        .core
-        .read_with(cx, |core, cx| core.entry_gate(cx));
+    let gate = fixture.core.read_with(cx, |core, cx| core.entry_gate(cx));
     assert!(
         !matches!(gate, EntryGate::Ready { .. }),
         "no workspace flash before resume validates, got {gate:?}"
     );
     let core = fixture.core.clone();
-    let (_entry, cx) = cx.add_window_view(move |window, cx| {
-        EntryRoot::new(core, None, window, cx)
-    });
+    let (_entry, cx) = cx.add_window_view(move |window, cx| EntryRoot::new(core, None, window, cx));
     assert!(cx.debug_bounds("entry-root").is_some());
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
     wait_for(cx, "resume to validate and mount the workspace", |cx| {
@@ -271,9 +265,7 @@ fn sign_out_drops_mounted_workspace_back_to_entry(cx: &mut gpui::TestAppContext)
     cx.executor().allow_parking();
     let fixture = EntryFixture::new(cx);
     let core = fixture.core.clone();
-    let (_entry, cx) = cx.add_window_view(move |window, cx| {
-        EntryRoot::new(core, None, window, cx)
-    });
+    let (_entry, cx) = cx.add_window_view(move |window, cx| EntryRoot::new(core, None, window, cx));
     wait_for(cx, "resume to validate and mount the workspace", |cx| {
         cx.debug_bounds("artisan-desktop-workspace").is_some()
     });
@@ -282,9 +274,7 @@ fn sign_out_drops_mounted_workspace_back_to_entry(cx: &mut gpui::TestAppContext)
     cx.run_until_parked();
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
     assert!(cx.debug_bounds("entry-root").is_some());
-    let gate = fixture
-        .core
-        .read_with(cx, |core, cx| core.entry_gate(cx));
+    let gate = fixture.core.read_with(cx, |core, cx| core.entry_gate(cx));
     assert!(
         matches!(gate, EntryGate::SignedOut),
         "sign-out must relock the gate, got {gate:?}"
@@ -299,9 +289,7 @@ fn needs_setup_offers_sign_out_and_retry_without_unlocking(cx: &mut gpui::TestAp
     let fixture = EntryFixture::new_without_record(cx);
     wait_needs_setup(cx, &fixture.core);
     let core = fixture.core.clone();
-    let (_entry, cx) = cx.add_window_view(move |window, cx| {
-        EntryRoot::new(core, None, window, cx)
-    });
+    let (_entry, cx) = cx.add_window_view(move |window, cx| EntryRoot::new(core, None, window, cx));
     wait_for(cx, "the setup surface to render", |cx| {
         cx.debug_bounds("entry-setup").is_some()
     });
@@ -324,9 +312,7 @@ fn needs_setup_offers_sign_out_and_retry_without_unlocking(cx: &mut gpui::TestAp
         cx.debug_bounds("sign-in-submit").is_some(),
         "switching accounts returns to sign-in"
     );
-    let gate = fixture
-        .core
-        .read_with(cx, |core, cx| core.entry_gate(cx));
+    let gate = fixture.core.read_with(cx, |core, cx| core.entry_gate(cx));
     assert!(
         matches!(gate, EntryGate::SignedOut),
         "switching accounts must relock the gate, got {gate:?}"
@@ -352,9 +338,8 @@ fn deep_links_do_not_mount_workspace_while_locked(cx: &mut gpui::TestAppContext)
             cx,
         );
     });
-    let (_entry, cx) = cx.add_window_view(|window, cx| {
-        EntryRoot::new(core.clone(), None, window, cx)
-    });
+    let (_entry, cx) =
+        cx.add_window_view(|window, cx| EntryRoot::new(core.clone(), None, window, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("entry-root").is_some());
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());

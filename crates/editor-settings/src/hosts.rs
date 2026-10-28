@@ -7,8 +7,7 @@ use editor_core::{ConnectionStatus, HostConfig, HostId, SettingsPage};
 use editor_ui::button::ButtonVariant;
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
-    AnyElement, Context, Div, IntoElement, ParentElement as _, SharedString, Styled as _, div,
-    px,
+    AnyElement, Context, Div, IntoElement, ParentElement as _, SharedString, Styled as _, div, px,
 };
 
 pub struct HostsForm {
@@ -31,10 +30,7 @@ impl Settings {
 
     fn open_enrollment(&self, cx: &mut Context<Self>) {
         self.core.update(cx, |core, cx| {
-            core.navigate(
-                editor_core::Screen::Settings(SettingsPage::Account),
-                cx,
-            );
+            core.navigate(editor_core::Screen::Settings(SettingsPage::Account), cx);
         });
     }
 }

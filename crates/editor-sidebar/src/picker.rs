@@ -535,8 +535,7 @@ mod request_tests {
         setup.core.update(cx, |core, cx| {
             let identity = core.identity.clone().unwrap();
             let client =
-                editor_core::ForgeClient::new(&host.address, &host.fingerprint, &identity)
-                    .unwrap();
+                editor_core::ForgeClient::new(&host.address, &host.fingerprint, &identity).unwrap();
             core.add_test_host(&host, client, cx);
             core.navigate(baseline.clone(), cx);
         });

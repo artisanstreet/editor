@@ -1198,10 +1198,8 @@ impl Sidebar {
                         || "no-host".to_owned(),
                         |(account_id, _)| account_id.clone(),
                     ),
-                    ast.as_ref().map_or_else(
-                        || "Artisan".to_owned(),
-                        |(_, display)| display.clone(),
-                    ),
+                    ast.as_ref()
+                        .map_or_else(|| "Artisan".to_owned(), |(_, display)| display.clone()),
                     "No host".to_owned(),
                     None,
                 )
@@ -1224,10 +1222,8 @@ impl Sidebar {
                 let status = host.status_line().map(str::to_owned);
                 (
                     seed,
-                    ast.as_ref().map_or_else(
-                        || host.name.clone(),
-                        |(_, display)| display.clone(),
-                    ),
+                    ast.as_ref()
+                        .map_or_else(|| host.name.clone(), |(_, display)| display.clone()),
                     host.name.clone(),
                     status,
                 )

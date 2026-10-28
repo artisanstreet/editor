@@ -513,8 +513,7 @@ mod tests {
             core.update(cx, |core, cx| {
                 let identity = core.identity.clone().unwrap();
                 let client =
-                    editor_core::ForgeClient::new("127.0.0.1:1", &fingerprint, &identity)
-                        .unwrap();
+                    editor_core::ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
                 let config = editor_core::HostConfig {
                     id: id.clone(),
                     name: host.into(),

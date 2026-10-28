@@ -372,9 +372,7 @@ mod tests {
         assert!(form.is_some(), "the entry gate shows the sign-in form");
         let out = std::env::var_os("ARTISAN_EDITOR_CAPTURE")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                std::path::PathBuf::from("/tmp/opencode/entry-signed-out.png")
-            });
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/opencode/entry-signed-out.png"));
         match cx.update(|window, _| window.render_to_image()) {
             Ok(image) => {
                 if let Some(parent) = out.parent() {

@@ -5,9 +5,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod context_meter;
+mod entry;
 #[cfg(feature = "dhat-heap")]
 mod heap_profile;
-mod entry;
 mod home;
 mod logging;
 mod notifications;
@@ -22,8 +22,8 @@ use actions::{GoBack, NewThread, OpenPalette, OpenSettings, Quit, ToggleInspecto
 use editor_core::{Core, EntryGate, Screen};
 use entry::EntryRoot;
 use gpui::{
-    App, AppContext as _, Bounds, Entity, KeyBinding, Pixels, Size, TitlebarOptions,
-    WindowBounds, WindowOptions, px, size,
+    App, AppContext as _, Bounds, Entity, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
+    WindowOptions, px, size,
 };
 
 /// The app's actions, in their own module so the expectation below covers

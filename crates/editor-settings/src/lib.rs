@@ -168,12 +168,7 @@ impl Settings {
         }
     }
 
-    fn wheel(
-        &mut self,
-        event: &ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event.delta.precise() || cx.reduce_motion() {
             self.glide.cancel();
             return;
@@ -184,7 +179,8 @@ impl Settings {
             return;
         }
         cx.stop_propagation();
-        self.glide.push(f32::from(self.scroll.offset().y), delta, max);
+        self.glide
+            .push(f32::from(self.scroll.offset().y), delta, max);
         self.schedule_glide(window, cx);
     }
 
