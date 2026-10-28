@@ -418,7 +418,7 @@ struct RelayChannelInner {
     relay_base: String,
     account: String,
     machine: String,
-    channel: String,
+    channel_prefix: String,
     forge_pub: [u8; 32],
     core: CoreSessionClient,
     session: SessionToken,
@@ -428,6 +428,7 @@ struct RelayChannelInner {
 }
 
 struct ChannelState {
+    channel: String,
     sink: WsSink,
     stream: WsStream,
     noise: crate::NoiseChannel,
@@ -440,15 +441,76 @@ struct ChannelState {
     stashed: Vec<artisan_api::TunnelResponse>,
     grant_jwt: String,
     cnf_secret: [u8; 32],
+    usable: Arc<AtomicBool>,
+    _socket: tokio_util::task::AbortOnDropHandle<()>,
 }
 
-type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    tokio_tungstenite::tungstenite::Message,
->;
-type WsStream = futures::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
->;
+type WsSink = futures::channel::mpsc::Sender<tokio_tungstenite::tungstenite::Message>;
+type WsStream = futures::channel::mpsc::Receiver<Result<crate::ServerFrame>>;
+
+struct RelaySocket {
+    sink: WsSink,
+    stream: WsStream,
+    usable: Arc<AtomicBool>,
+    task: tokio_util::task::AbortOnDropHandle<()>,
+}
+
+/// Own socket reads even between unary requests, so idle channels answer
+/// Relay heartbeats and notice peer disconnects before the next request.
+async fn relay_socket(url: &str, close: CloseSignal) -> Result<RelaySocket> {
+    use futures::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message as Ws;
+
+    let (ws, _) = tokio_tungstenite::connect_async(url)
+        .await
+        .with_context(|| format!("connect to the Relay at {url}"))?;
+    let (mut sink, mut source) = ws.split();
+    let (send, mut outgoing) = futures::channel::mpsc::channel::<Ws>(64);
+    let (mut incoming, receive) = futures::channel::mpsc::channel(64);
+    let usable = Arc::new(AtomicBool::new(true));
+    let health = Arc::clone(&usable);
+    let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        let pump = async {
+            loop {
+                let message = tokio::select! {
+                    next = outgoing.next() => {
+                        let Some(next) = next else { return Ok(()); };
+                        sink.send(next).await.context("send to the Relay")?;
+                        continue;
+                    }
+                    next = source.next() => next.context("the Relay closed the connection")??,
+                };
+                match message {
+                    Ws::Text(text) => {
+                        let value = serde_json::from_str(&text).context("read the Relay frame")?;
+                        let frame = crate::read_server_frame(value).context("read the Relay frame")?;
+                        if let crate::ServerFrame::Ping(ping) = frame {
+                            let pong = crate::ClientFrame::Pong(crate::PongFrame { v: 1, t: ping.t });
+                            sink.send(Ws::Text(serde_json::to_string(&pong)?.into())).await?;
+                        } else {
+                            if matches!(frame, crate::ServerFrame::ChannelClosed(_) | crate::ServerFrame::Error(_)) {
+                                health.store(false, Ordering::Release);
+                            }
+                            incoming.send(Ok(frame)).await.context("Relay reader closed")?;
+                        }
+                    }
+                    Ws::Ping(data) => sink.send(Ws::Pong(data)).await?,
+                    Ws::Close(_) => anyhow::bail!("the Relay closed the connection"),
+                    Ws::Binary(_) | Ws::Pong(_) | Ws::Frame(_) => {}
+                }
+            }
+        };
+        let result: Result<()> = tokio::select! {
+            () = close.aborted() => Ok(()),
+            result = pump => result,
+        };
+        health.store(false, Ordering::Release);
+        if let Err(error) = result {
+            incoming.send(Err(error)).await.ok();
+        }
+    }));
+    Ok(RelaySocket { sink: send, stream: receive, usable, task })
+}
 
 /// Client-side send window mirroring the Relay room: at most 64 unacked
 /// frames AND 1 MiB unacked bytes per direction, sizes counted as the
@@ -560,29 +622,33 @@ impl Clone for RelayChannel {
 
 /// Open one WS + Noise XX channel: admission, channel open, handshake,
 /// then the JWT-in-confirm exchange verified against the Forge key.
+#[expect(clippy::too_many_arguments, reason = "channel identity, proof, and terminal cancellation travel together")]
 async fn open_channel_state(
     relay_base: &str,
     account: &str,
     machine: &str,
-    channel: &str,
+    channel_prefix: &str,
     grant_jwt: &str,
     cnf_secret: &[u8; 32],
     forge_pub: &[u8; 32],
+    close: &CloseSignal,
 ) -> Result<ChannelState> {
+    // Relay channel names are shared by every client on this Forge. A new
+    // socket must not reuse a name, even while its previous socket closes.
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| anyhow!("make a Relay channel id"))?;
+    let channel = format!("{channel_prefix}-{}", hex::encode(nonce));
     let url = ws_url_for(relay_base, account, machine)?;
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
-        .await
-        .with_context(|| format!("connect to the Relay at {url}"))?;
-    let (mut sink, mut stream) = futures::StreamExt::split(ws);
+    let RelaySocket { mut sink, mut stream, usable, task } = relay_socket(&url, close.clone()).await?;
     admit(&mut sink, &mut stream, grant_jwt, cnf_secret).await?;
-    open_channel(&mut sink, &mut stream, channel).await?;
+    open_channel(&mut sink, &mut stream, &channel).await?;
     let (mut noise, send_seq, recv_seq) =
-        handshake_channel(&mut sink, &mut stream, account, machine, channel).await?;
+        handshake_channel(&mut sink, &mut stream, account, machine, &channel).await?;
     let (send_seq, recv_seq) = confirm_channel(
         &mut sink,
         &mut stream,
         &mut noise,
-        channel,
+        &channel,
         send_seq,
         recv_seq,
         grant_jwt,
@@ -591,6 +657,7 @@ async fn open_channel_state(
     )
     .await?;
     Ok(ChannelState {
+        channel,
         sink,
         stream,
         noise,
@@ -603,6 +670,8 @@ async fn open_channel_state(
         stashed: Vec::new(),
         grant_jwt: grant_jwt.to_owned(),
         cnf_secret: *cnf_secret,
+        usable,
+        _socket: task,
     })
 }
 
@@ -628,6 +697,7 @@ impl RelayChannel {
         core: CoreSessionClient,
         session: SessionToken,
     ) -> Result<Self> {
+        let close = CloseSignal::new();
         let state = open_channel_state(
             relay_base,
             account,
@@ -636,6 +706,7 @@ impl RelayChannel {
             grant_jwt,
             cnf_secret,
             forge_pub,
+            &close,
         )
         .await?;
         Ok(Self {
@@ -643,12 +714,12 @@ impl RelayChannel {
                 relay_base: relay_base.to_owned(),
                 account: account.to_owned(),
                 machine: machine.to_owned(),
-                channel: channel.to_owned(),
+                channel_prefix: channel.to_owned(),
                 forge_pub: *forge_pub,
                 core,
                 session,
                 state: tokio::sync::Mutex::new(state),
-                close: CloseSignal::new(),
+                close,
             }),
         })
     }
@@ -694,16 +765,38 @@ impl RelayChannel {
             anyhow::bail!("relay connection closed");
         }
         let mut guard = self.inner.state.lock().await;
-        self.ensure_fresh_locked(&mut guard).await?;
+        let mut retried = false;
+        loop {
+            self.ensure_fresh_locked(&mut guard).await?;
+            let result = self.call_locked(&mut guard, &bytes, &id).await;
+            if result.is_err() {
+                guard.usable.store(false, Ordering::Release);
+                // Reads may be repeated after a lost channel. A mutation
+                // might already have run, so leave its retry to the caller.
+                if !retried && matches!(method, "GET" | "HEAD") && !self.is_closed() {
+                    retried = true;
+                    continue;
+                }
+            }
+            return result;
+        }
+    }
+
+    async fn call_locked(
+        &self,
+        guard: &mut ChannelState,
+        bytes: &[u8],
+        id: &str,
+    ) -> Result<artisan_api::TunnelResponse> {
         if bytes.len() > artisan_api::TUNNEL_PLAINTEXT_BUDGET {
-            for chunk in artisan_api::chunk_bytes(&id, &bytes) {
+            for chunk in artisan_api::chunk_bytes(id, bytes) {
                 let framed = serde_json::to_vec(&chunk).context("encode the tunneled call")?;
-                self.send_plaintext_locked(&mut guard, &framed).await?;
+                self.send_plaintext_locked(guard, &framed).await?;
             }
         } else {
-            self.send_plaintext_locked(&mut guard, &bytes).await?;
+            self.send_plaintext_locked(guard, bytes).await?;
         }
-        self.read_response_locked(&mut guard, &id).await
+        self.read_response_locked(guard, id).await
     }
 
     #[expect(
@@ -716,7 +809,7 @@ impl RelayChannel {
         if self.is_closed() {
             anyhow::bail!("relay connection closed");
         }
-        if grant_fresh_enough(&conn.grant_jwt) {
+        if conn.usable.load(Ordering::Acquire) && grant_fresh_enough(&conn.grant_jwt) {
             return Ok(());
         }
         let keypair =
@@ -735,10 +828,11 @@ impl RelayChannel {
             &self.inner.relay_base,
             &self.inner.account,
             &self.inner.machine,
-            &self.inner.channel,
+            &self.inner.channel_prefix,
             &grant.token,
             keypair.secret(),
             &self.inner.forge_pub,
+            &self.inner.close,
         )
         .await?;
         Ok(())
@@ -772,7 +866,7 @@ impl RelayChannel {
             return Ok(());
         }
         let seq = conn.send_seq;
-        send_data_frame(&mut conn.sink, &self.inner.channel, seq, &body).await?;
+        send_data_frame(&mut conn.sink, &conn.channel, seq, &body).await?;
         conn.send_seq = conn.send_seq.saturating_add(1);
         conn.window.noted_sent(seq, body.len());
         self.wait_ack_locked(conn, seq).await?;
@@ -787,7 +881,7 @@ impl RelayChannel {
             }
             conn.window.parked.pop_front();
             let seq = conn.send_seq;
-            send_data_frame(&mut conn.sink, &self.inner.channel, seq, &body).await?;
+            send_data_frame(&mut conn.sink, &conn.channel, seq, &body).await?;
             conn.send_seq = conn.send_seq.saturating_add(1);
             conn.window.noted_sent(seq, body.len());
             self.wait_ack_locked(conn, seq).await?;
@@ -887,7 +981,7 @@ impl RelayChannel {
                 if let Ok(chunk) = serde_json::from_slice::<artisan_api::TunnelChunk>(&plaintext) {
                     if let Some(done) = conn
                         .reassembly
-                        .feed(&self.inner.channel, &chunk)
+                        .feed(&conn.channel, &chunk)
                         .map_err(|_| anyhow!("reassemble the Forge reply"))?
                     {
                         match classify_frame_body(&done)? {
@@ -1244,26 +1338,7 @@ async fn send_ack_frame(sink: &mut WsSink, channel: &str, seq: u64) -> Result<()
 )]
 async fn read_server_frame(stream: &mut WsStream) -> Result<crate::ServerFrame> {
     use futures::StreamExt as _;
-    use tokio_tungstenite::tungstenite::Message as Ws;
-    loop {
-        let message = stream
-            .next()
-            .await
-            .context("the Relay closed the connection")??;
-        match message {
-            Ws::Text(text) => {
-                let value: serde_json::Value =
-                    serde_json::from_str(&text).map_err(|_| anyhow!("bad Relay frame"))?;
-                return crate::read_server_frame(value)
-                    .map_err(|_| anyhow!("bad Relay frame"));
-            }
-            Ws::Close(_) => anyhow::bail!("the Relay closed the connection"),
-            Ws::Ping(data) => {
-                let _ = data;
-            }
-            Ws::Binary(_) | Ws::Pong(_) | Ws::Frame(_) => {}
-        }
-    }
+    stream.next().await.context("the Relay closed the connection")?
 }
 
 /// One live tunneled event subscription on its own WS/Noise channel.
@@ -1382,7 +1457,7 @@ impl RelayEventStream {
                         .map_err(|_| anyhow!("the Forge event stream stalled"))??
                 }
             };
-            let channel_name = self.channel.inner.channel.clone();
+            let channel_name = guard.channel.clone();
             match frame {
                 crate::ServerFrame::Data(data) => {
                     send_ack_frame(&mut guard.sink, &data.channel, data.seq).await?;
@@ -1497,6 +1572,92 @@ fn decode_event(plaintext: &[u8]) -> Result<StreamFrame> {
 )]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn idle_socket_answers_heartbeats_and_reports_lost_channels() {
+        use futures::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message as Ws;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let relay = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ws.send(Ws::Text(r#"{"v":1,"type":"ping","t":1234}"#.into())).await.unwrap();
+            // No request or read is running on the client. The socket
+            // owner must answer without waiting for its next unary call.
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+                .await.unwrap().unwrap().unwrap();
+            let reply: serde_json::Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+            assert_eq!(reply, serde_json::json!({"v": 1, "type": "pong", "t": 1234}));
+            ws.send(Ws::Text(r#"{"v":1,"type":"channel-closed","channel":"unary-1","reason":"forge-offline"}"#.into())).await.unwrap();
+            // Terminal close must stop the socket owner too, even when
+            // client handles and the incoming receiver are still alive.
+            let ended = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+                .await.unwrap();
+            assert!(!matches!(ended, Some(Ok(Ws::Text(_)))), "closed client kept sending");
+        });
+        let close = CloseSignal::new();
+        let mut socket = relay_socket(&url, close.clone()).await.unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), read_server_frame(&mut socket.stream))
+            .await.unwrap().unwrap();
+        assert!(matches!(frame, crate::ServerFrame::ChannelClosed(_)), "heartbeat must stay out of the request queue");
+        assert!(!socket.usable.load(Ordering::Acquire), "the next call must reconnect");
+        close.close();
+        relay.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sockets_use_distinct_channel_names_for_reconnects_and_subscriptions() {
+        use base64::Engine as _;
+        use futures::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let relay = tokio::spawn(async move {
+            let mut names = std::collections::HashSet::new();
+            for _ in 0..4 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let hello = ws.next().await.unwrap().unwrap();
+                let hello: serde_json::Value =
+                    serde_json::from_str(hello.to_text().unwrap()).unwrap();
+                assert_eq!(hello["type"], "hello");
+                ws.send(Message::Text(
+                    r#"{"v":1,"type":"ready","role":"client","account":"a","machine":"m","forge_online":true}"#
+                        .into(),
+                ))
+                .await
+                .unwrap();
+                let open = ws.next().await.unwrap().unwrap();
+                let open: serde_json::Value =
+                    serde_json::from_str(open.to_text().unwrap()).unwrap();
+                assert_eq!(open["type"], "open");
+                let name = open["channel"].as_str().unwrap();
+                assert!(crate::is_valid_channel(name), "invalid channel: {name}");
+                assert!(names.insert(name.to_owned()), "channel reused: {name}");
+                // Stop before Noise: this fixture checks the real socket's
+                // open request, including repeated opens with the same key.
+                ws.send(Message::Text(
+                    r#"{"v":1,"type":"error","code":"probe-complete","message":"open recorded"}"#
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            }
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"jti":"channel-test"}"#);
+        let grant = format!("header.{payload}.signature");
+        for prefix in ["unary", "unary", "events", "events"] {
+            let result = open_channel_state(&url, "a", "m", prefix, &grant, &[1; 32], &[2; 32], &CloseSignal::new())
+                .await;
+            let error = result.err().unwrap();
+            assert!(error.to_string().contains("probe-complete"), "{error:#}");
+        }
+        relay.await.unwrap();
+    }
 
     async fn completes(signal: &CloseSignal) {
         tokio::time::timeout(std::time::Duration::from_secs(5), signal.aborted())

@@ -222,7 +222,7 @@ pub async fn serve_channel(
                     }
                     Ws::Binary(_) | Ws::Pong(_) | Ws::Frame(_) => continue,
                 };
-                if handle_server_text(
+                handle_server_text(
                     &text,
                     &mut sink,
                     &grant_jti,
@@ -239,16 +239,10 @@ pub async fn serve_channel(
                     &mut relay_recv_seq,
                     &stream_tx,
                 )
-                .await
-                .is_err()
-                {
-                    break;
-                }
+                .await?;
             }
             Some((name, msg)) = stream_rx.recv() => {
-                if handle_stream_msg(&name, msg, &mut channels, &mut streams, &mut windows, &mut sink).await.is_err() {
-                    break;
-                }
+                handle_stream_msg(&name, msg, &mut channels, &mut streams, &mut windows, &mut sink).await?;
             }
         }
     }
@@ -302,8 +296,11 @@ async fn handle_server_text(
             sink.send(Ws::Text(authenticate.into())).await?;
         }
         ServerFrame::Ready(_)
-        | ServerFrame::Presence(_)
-        | ServerFrame::Ping(_) => {}
+        | ServerFrame::Presence(_) => {}
+        ServerFrame::Ping(ping) => {
+            let pong = ClientFrame::Pong(artisan_account::PongFrame { v: 1, t: ping.t });
+            sink.send(Ws::Text(serde_json::to_string(&pong)?.into())).await?;
+        }
         ServerFrame::Error(error) => {
             anyhow::bail!(
                 "Relay refused the tunnel: {} {}",
@@ -1081,6 +1078,16 @@ mod tests {
                 | artisan_account::ClientFrame::Close(_)
                 | artisan_account::ClientFrame::Pong(_) => panic!("expected authenticate"),
             }
+            send(
+                &mut sink,
+                serde_json::to_string(&artisan_account::ServerFrame::Ping(
+                    artisan_account::PingFrame { v: 1, t: 1234 },
+                ))
+                .unwrap(),
+            )
+            .await;
+            let pong: serde_json::Value = serde_json::from_str(&recv_text(&mut source).await).unwrap();
+            assert_eq!(pong, serde_json::json!({"v": 1, "type": "pong", "t": 1234}));
             send(
                 &mut sink,
                 serde_json::to_string(&artisan_account::ServerFrame::Ready(

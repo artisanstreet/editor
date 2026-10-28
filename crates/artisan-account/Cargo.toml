@@ -12,6 +12,7 @@ reqwest = { workspace = true, features = ["json"] }
 anyhow.workspace = true
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tokio-tungstenite.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 futures.workspace = true
 artisan-api = { path = "../artisan-api" }
 ed25519-dalek.workspace = true
