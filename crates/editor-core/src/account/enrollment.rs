@@ -1,363 +1,258 @@
-//! Local Forge binding and `ae` subprocess calls for account enrollment.
-//!
-//! The binding comes from `ae account status --json` through the ordinary
-//! `ae` binary (which owns Windows→WSL forwarding): never the data file
-//! directly, never human CLI text. Every `ae` invocation pins the explicit
-//! Core origin.
+//! This machine's Forge enrollment, as the installed `ae` reports it, and
+//! the actions that move it along: enroll, claim, confirm.
 
-use super::{Account, AccountEvent, valid_code_shape};
-#[cfg(any(test, feature = "test-support"))]
-use super::AccountPhase;
-#[cfg(any(test, feature = "test-support"))]
-use artisan_account::network::{AccountProfile, SessionToken};
 use anyhow::{Context as _, Result, bail};
-use artisan_account::normalise_code;
+use artisan_account::network::AccountProfile;
 use gpui::Context;
+use serde::Deserialize;
+
+use super::{Account, run_http};
+use crate::ae::Ae;
+
+/// What `ae account status --json` says, before comparing it to an account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AeBinding {
+    Unenrolled,
+    Pending,
+    Claimed {
+        account_id: String,
+        email: Option<String>,
+    },
+    Enrolled {
+        machine_id: String,
+        account_id: String,
+    },
+}
+
+/// This machine's Forge, seen from the signed-in account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LocalForge {
+    /// Not read yet, or not signed in.
+    Unknown,
+    Unenrolled,
+    /// An enrollment is started and waits for its code to be claimed.
+    Pending,
+    /// Claimed into this account; confirm it on this machine next.
+    Claimed {
+        email: Option<String>,
+    },
+    /// Enrolled to this account: the Editor connects to it directly.
+    Enrolled {
+        machine_id: String,
+    },
+    /// Enrolled to this account, then removed from it: pair it again.
+    Revoked {
+        machine_id: String,
+    },
+    /// Claimed or enrolled by a different account.
+    OtherAccount,
+}
+
+fn local_forge(binding: &AeBinding, profile: &AccountProfile) -> LocalForge {
+    let ours = |account_id: &str| account_id == profile.account_id;
+    match binding {
+        AeBinding::Unenrolled => LocalForge::Unenrolled,
+        AeBinding::Pending => LocalForge::Pending,
+        AeBinding::Claimed { account_id, email } if ours(account_id) => LocalForge::Claimed {
+            email: email.clone(),
+        },
+        AeBinding::Enrolled {
+            machine_id,
+            account_id,
+        } if ours(account_id) => {
+            let revoked = profile
+                .machines
+                .iter()
+                .any(|machine| &machine.id == machine_id && machine.revoked_at.is_some());
+            if revoked {
+                LocalForge::Revoked {
+                    machine_id: machine_id.clone(),
+                }
+            } else {
+                LocalForge::Enrolled {
+                    machine_id: machine_id.clone(),
+                }
+            }
+        }
+        AeBinding::Claimed { .. } | AeBinding::Enrolled { .. } => LocalForge::OtherAccount,
+    }
+}
+
+#[derive(Deserialize)]
+struct StatusReport {
+    enrolled: bool,
+    #[serde(default)]
+    machine_id: Option<String>,
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Enrollment {
+    code: String,
+}
+
+fn parse_status(printed: &str) -> Result<AeBinding> {
+    let status: StatusReport =
+        serde_json::from_str(printed).context("read what `ae account status` printed")?;
+    Ok(
+        match (
+            status.enrolled,
+            status.machine_id,
+            status.account_id,
+            status.status.as_deref(),
+        ) {
+            (true, Some(machine_id), Some(account_id), _) => AeBinding::Enrolled {
+                machine_id,
+                account_id,
+            },
+            (false, _, Some(account_id), Some("claimed" | "confirmed")) => AeBinding::Claimed {
+                account_id,
+                email: status.email,
+            },
+            (false, _, _, Some("pending")) => AeBinding::Pending,
+            (false, _, _, Some("none" | "expired" | "voided")) => AeBinding::Unenrolled,
+            _ => bail!("`ae account status` reported a state this Editor doesn't know: {printed}"),
+        },
+    )
+}
+
+async fn read_status(ae: &Ae, core: &str) -> Result<AeBinding> {
+    parse_status(
+        &ae.run(&["account", "--core", core, "status", "--json"])
+            .await?,
+    )
+}
 
 impl Account {
-    /// Cached local Forge binding. Refreshed only by explicit
-    /// `refresh_local_binding`, never per render.
     #[must_use]
-    pub fn local_binding(&self) -> Option<crate::access::LocalForgeBinding> {
-        self.cached_binding.clone()
-    }
-
-    /// The authoritative account inventory can revoke a binding that `ae`
-    /// still has on disk. Only an explicit revocation permits replacement.
-    pub fn local_binding_revoked(&self) -> bool {
-        let Some(binding) = self.cached_binding.as_ref().filter(|binding| binding.enrolled) else {
-            return false;
-        };
-        self.profile().is_some_and(|profile| {
-            binding.account_id.as_deref() == Some(profile.account_id.as_str())
-                && profile.machines.iter().any(|machine| {
-                    Some(machine.id.as_str()) == binding.machine_id.as_deref()
-                        && machine.revoked_at.is_some()
-                })
-        })
-    }
-
-    /// Re-reads the local Forge binding through `ae` (explicit user or
-    /// onboarding refresh) and caches it. The hot path (`local_binding`)
-    /// never hits disk or subprocess. Completions from a superseded refresh
-    /// or a rotated session never overwrite: the binding epoch plus the
-    /// session generation both gate.
-    pub fn refresh_local_binding(&mut self, cx: &mut Context<Self>) {
-        let base_url = self.base_url.clone();
-        let generation = self.generation;
-        self.binding_epoch = self.binding_epoch.wrapping_add(1);
-        let binding_epoch = self.binding_epoch;
-        let runner = self.ae_runner.clone();
-        cx.spawn(async move |this, cx| {
-            let binding = read_ae_status_json(runner, &base_url).await;
-            this.update(cx, |this, cx| {
-                if this.generation != generation || this.binding_epoch != binding_epoch {
-                    return;
-                }
-                match binding {
-                    Ok(binding) => {
-                        this.cached_binding = binding;
-                    }
-                    Err(error) => {
-                        tracing::warn!("local Forge binding unreadable: {error:#}");
-                    }
-                }
-                cx.emit(AccountEvent::Changed);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    /// Explicit mock sign-in for unrelated component tests only. Installs a
-    /// session plus an authenticated fixture profile with no network, so the
-    /// entry gate reads a genuine `Ready` once the fixture onboarding record
-    /// is present. Never compiled into production; native entry/gate tests
-    /// use the real HTTP fixture.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn test_authenticate(
-        &mut self,
-        profile: AccountProfile,
-        session: SessionToken,
-        cx: &mut Context<Self>,
-    ) {
-        self.session = Some(session);
-        self.bump_generation();
-        self.install_relay_dialer();
-        self.set_phase(AccountPhase::Authenticated { profile }, cx);
-    }
-}
-
-/// Canned `ae` result for tests: exit status plus captured streams.
-/// Portable across OSes: no fixture binaries, no real user files.
-#[derive(Clone, Debug)]
-pub struct AeOutcome {
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-/// Test seam replacing the `ae` subprocess: receives argv, returns the
-/// canned outcome. Injected per-Account in tests; production always runs
-/// the ordinary `ae` binary.
-pub type AeRunner = std::sync::Arc<dyn Fn(Vec<String>) -> AeOutcome + Send + Sync>;
-
-/// Runs `ae …`: exit status plus trimmed stdout. Test runners short-circuit
-/// before any subprocess; without one, the ordinary `ae` binary runs in
-/// every build. Every test fixture injects a runner, so tests never shell
-/// out to a real `ae`.
-pub(super) async fn run_ae(runner: Option<AeRunner>, args: &[&str]) -> Result<String> {
-    let args: Vec<String> = args.iter().map(ToString::to_string).collect();
-    let outcome = match runner {
-        Some(run) => {
-            // Injected runners are synchronous; run them off-thread like the
-            // real subprocess so a slow fake can never wedge the caller.
-            crate::runtime::runtime()
-                .spawn_blocking(move || run(args))
-                .await
-                .map_err(|error| anyhow::anyhow!("account task did not run: {error}"))?
+    pub fn local_forge(&self) -> LocalForge {
+        match (&self.binding, self.profile()) {
+            (Some(binding), Some(profile)) => local_forge(binding, profile),
+            _ => LocalForge::Unknown,
         }
-        None => run_ae_subprocess(args).await?,
-    };
-    if !outcome.success {
-        let detail = outcome
-            .stderr
-            .trim()
-            .lines()
-            .next_back()
-            .filter(|line| !line.trim().is_empty())
-            .unwrap_or("the `ae` command failed with no message");
-        bail!("`ae` failed: {detail}");
     }
-    let stdout = outcome.stdout.trim().to_owned();
-    if stdout.is_empty() {
-        bail!("`ae` printed nothing");
-    }
-    Ok(stdout)
-}
 
-/// Real `ae` subprocess.
-async fn run_ae_subprocess(args: Vec<String>) -> Result<AeOutcome> {
-    use crate::runtime::runtime;
-    let output = runtime()
-        .spawn(async move {
-            let mut command = tokio::process::Command::new("ae");
-            // No console window: the Editor is a GUI app, so a console
-            // child would otherwise flash one.
-            #[cfg(windows)]
-            {
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                command.creation_flags(CREATE_NO_WINDOW);
-            }
-            command.args(&args).output().await
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("account task did not run: {error}"))?;
-    let output = output.map_err(|error| anyhow::anyhow!("could not run `ae`: {error:#}"))?;
-    Ok(AeOutcome {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-}
-
-/// Runs `ae account --core <base> enroll --json` on this machine and returns
-/// the actual Core-issued code. The explicit origin keeps a saved custom
-/// Core from diverging via environment inheritance. Machine output is the
-/// only contract: human text is never parsed (its first alphanumerics are
-/// sentence words, not the code).
-pub(super) async fn run_ae_enroll(
-    runner: Option<AeRunner>,
-    base_url: &str,
-    replace: bool,
-) -> Result<String> {
-    let mut args = vec!["account", "--core", base_url, "enroll", "--json"];
-    if replace {
-        args.push("--replace");
-    }
-    let stdout = run_ae(runner, &args).await?;
-    let parsed: serde_json::Value = serde_json::from_slice(stdout.as_bytes())
-        .context("read the Forge enrollment answer")?;
-    let code = normalise_code(
-        parsed
-            .get("code")
-            .and_then(|code| code.as_str())
-            .unwrap_or_default(),
-    );
-    if !valid_code_shape(&code) {
-        bail!("started the enrollment but Core did not return a usable code");
-    }
-    Ok(code)
-}
-
-/// Parses `ae account status --json` into the binding cache shape. `None`
-/// means unbound (nothing started, pending-unclaimed, expired, voided):
-/// pair or retry. `enrolled` must be a real boolean and a false state must
-/// name a recognized status: `{}`, null, a missing flag, or an unknown
-/// status is a read error, never silent unbound success. `enrolled: true`
-/// requires the confirmed machine and account ids; anything less is
-/// incomplete, never assumed.
-pub(super) fn parse_ae_status(stdout: &str) -> Result<Option<crate::access::LocalForgeBinding>> {
-    let parsed: serde_json::Value =
-        serde_json::from_slice(stdout.as_bytes()).context("read the Forge enrollment state")?;
-    let Some(enrolled) = parsed
-        .get("enrolled")
-        .and_then(serde_json::Value::as_bool)
-    else {
-        bail!("the Forge enrollment state is incomplete");
-    };
-    if enrolled {
-        let machine = parsed
-            .get("machine_id")
-            .and_then(|id| id.as_str())
-            .unwrap_or_default();
-        let account = parsed
-            .get("account_id")
-            .and_then(|id| id.as_str())
-            .unwrap_or_default();
-        if machine.is_empty() || account.is_empty() {
-            bail!("the Forge enrollment state is incomplete");
-        }
-        return Ok(Some(crate::access::LocalForgeBinding {
-            machine_id: Some(machine.to_owned()),
-            account_id: Some(account.to_owned()),
-            enrolled: true,
-            claimed_by: None,
-            claimed_email: None,
+    /// Re-reads this machine's enrollment from `ae`.
+    pub fn refresh_local_forge(&mut self, cx: &mut Context<Self>) {
+        let (ae, core) = (self.services.ae.clone(), self.base_url.clone());
+        self.forge = Some(cx.spawn(async move |this, cx| {
+            let read = read_status(&ae, &core).await;
+            // Err: the Account is gone.
+            this.update(cx, |this, cx| this.set_binding(read, cx)).ok();
         }));
     }
-    match parsed.get("status").and_then(|status| status.as_str()) {
-        Some("claimed" | "confirmed") => {
-            let account = parsed
-                .get("account_id")
-                .and_then(|id| id.as_str())
-                .unwrap_or_default();
-            if account.is_empty() {
-                bail!("the Forge enrollment state is incomplete");
+
+    fn set_binding(&mut self, read: Result<AeBinding>, cx: &mut Context<Self>) {
+        self.forge = None;
+        match read {
+            Ok(binding) => {
+                self.binding = Some(binding);
+                Self::changed(cx);
             }
-            let email = parsed
-                .get("email")
-                .and_then(|email| email.as_str())
-                .map(str::to_owned);
-            Ok(Some(crate::access::LocalForgeBinding {
-                machine_id: None,
-                account_id: None,
-                enrolled: false,
-                claimed_by: Some(account.to_owned()),
-                claimed_email: email,
-            }))
+            // The last binding stays: one failed `ae` run doesn't unpair the Forge.
+            Err(error) => self.report(&error, cx),
         }
-        Some("none" | "pending" | "expired" | "voided") => Ok(None),
-        _ => bail!("the Forge enrollment state is incomplete"),
-    }
-}
-
-/// Reads the local Forge binding through the ordinary `ae` binary (which
-/// owns Windows→WSL forwarding): never the data file directly, so the
-/// Editor sees the same identity `ae` acts on.
-pub(super) async fn read_ae_status_json(
-    runner: Option<AeRunner>,
-    base_url: &str,
-) -> Result<Option<crate::access::LocalForgeBinding>> {
-    let stdout = run_ae(
-        runner,
-        &["account", "--core", base_url, "status", "--json"],
-    )
-    .await?;
-    parse_ae_status(&stdout)
-}
-
-/// Renders a parsed binding as friendly operator text: what state the
-/// Forge is in, never raw CLI output and never raw ids (the verified email
-/// is the useful identity; account ids stay out of display).
-pub(super) fn render_binding_status(
-    binding: Option<&crate::access::LocalForgeBinding>,
-) -> String {
-    match binding {
-        Some(crate::access::LocalForgeBinding { enrolled: true, .. }) => {
-            "This Forge is enrolled.".to_owned()
-        }
-        Some(crate::access::LocalForgeBinding {
-            claimed_email: Some(email),
-            ..
-        }) if !email.trim().is_empty() => {
-            format!("Enrollment claimed. Verified email: {email}.")
-        }
-        Some(_) => "Enrollment claimed.".to_owned(),
-        None => "No claimed Forge enrollment on this machine yet.".to_owned(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(json: &str) -> Result<Option<crate::access::LocalForgeBinding>> {
-        parse_ae_status(json)
     }
 
-    #[test]
-    fn status_shapes_map_to_bindings() {
-        let enrolled = parse(r#"{"enrolled":true,"machine_id":"mch_1","account_id":"acct_1"}"#)
-            .unwrap()
-            .unwrap();
-        assert!(enrolled.enrolled);
-        assert_eq!(enrolled.machine_id.as_deref(), Some("mch_1"));
-        assert_eq!(enrolled.account_id.as_deref(), Some("acct_1"));
-        assert_eq!(
-            render_binding_status(Some(&enrolled)),
-            "This Forge is enrolled."
+    /// Starts an enrollment of this machine's Forge with `ae` and claims its
+    /// code into this account; confirming stays an explicit step.
+    pub fn enroll_this_forge(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let replace = matches!(self.local_forge(), LocalForge::Revoked { .. });
+        let (ae, core_url, http) = (
+            self.services.ae.clone(),
+            self.base_url.clone(),
+            self.http.clone(),
         );
-        let claimed = parse(
-            r#"{"enrolled":false,"enrollment_id":"enr_1","status":"claimed","account_id":"acct_9","email":"op@example.invalid"}"#,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(!claimed.enrolled);
-        assert_eq!(claimed.claimed_by.as_deref(), Some("acct_9"));
-        assert_eq!(
-            claimed.claimed_email.as_deref(),
-            Some("op@example.invalid")
-        );
-        assert_eq!(
-            render_binding_status(Some(&claimed)),
-            "Enrollment claimed. Verified email: op@example.invalid."
-        );
-        for pending in [
-            r#"{"enrolled":false,"enrollment_id":"enr_1","status":"pending"}"#,
-            r#"{"enrolled":false,"enrollment_id":"enr_1","status":"none"}"#,
-            r#"{"enrolled":false,"enrollment_id":"enr_1","status":"expired"}"#,
-            r#"{"enrolled":false,"enrollment_id":"enr_1","status":"voided"}"#,
-        ] {
-            assert!(
-                parse(pending).unwrap().is_none(),
-                "unbound state must read as no binding: {pending}"
-            );
-        }
-        assert_eq!(
-            render_binding_status(None),
-            "No claimed Forge enrollment on this machine yet."
-        );
+        self.last_error = None;
+        self.forge = Some(cx.spawn(async move |this, cx| {
+            let enrolled = async {
+                let mut args = vec!["account", "--core", &core_url, "enroll", "--json"];
+                if replace {
+                    args.push("--replace");
+                }
+                let enrollment: Enrollment = serde_json::from_str(&ae.run(&args).await?)
+                    .context("read what `ae account enroll` printed")?;
+                let code = artisan_account::normalise_code(&enrollment.code);
+                run_http(async move { http.claim_enrollment(&session, &code).await }).await?;
+                read_status(&ae, &core_url).await
+            }
+            .await
+            .context("enroll this machine's Forge");
+            // Err: the Account is gone.
+            this.update(cx, |this, cx| this.set_binding(enrolled, cx))
+                .ok();
+        }));
     }
 
-    #[test]
-    fn malformed_status_is_a_read_error_not_silent_unbound() {
-        for malformed in [
-            "{}",
-            "null",
-            "not json at all",
-            r#"{"status":"claimed"}"#,
-            r#"{"enrolled":"yes"}"#,
-            r#"{"enrolled":true}"#,
-            r#"{"enrolled":true,"machine_id":"mch_1"}"#,
-            r#"{"enrolled":false,"enrollment_id":"enr_1","status":"bogus"}"#,
-            r#"{"enrolled":false,"enrollment_id":"enr_1","status":"claimed"}"#,
-        ] {
-            assert!(
-                parse(malformed).is_err(),
-                "malformed output must fail loudly: {malformed}"
-            );
-        }
+    /// Claims a code another machine's `ae account enroll` printed.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the code comes straight from a text field"
+    )]
+    pub fn claim_code(&mut self, code: String, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let code = artisan_account::normalise_code(&code);
+        let (ae, core_url, http) = (
+            self.services.ae.clone(),
+            self.base_url.clone(),
+            self.http.clone(),
+        );
+        self.last_error = None;
+        self.forge = Some(cx.spawn(async move |this, cx| {
+            let claimed = async {
+                run_http(async move { http.claim_enrollment(&session, &code).await }).await?;
+                read_status(&ae, &core_url).await
+            }
+            .await
+            .context("claim the Forge's code");
+            // Err: the Account is gone.
+            this.update(cx, |this, cx| this.set_binding(claimed, cx))
+                .ok();
+        }));
+    }
+
+    /// Confirms on this machine that its Forge joins the signed-in account.
+    pub fn confirm_forge(&mut self, cx: &mut Context<Self>) {
+        let Some(account_id) = self.profile().map(|profile| profile.account_id.clone()) else {
+            return;
+        };
+        let (ae, core) = (self.services.ae.clone(), self.base_url.clone());
+        self.last_error = None;
+        self.forge = Some(cx.spawn(async move |this, cx| {
+            let confirmed = async {
+                ae.run(&[
+                    "account",
+                    "--core",
+                    &core,
+                    "confirm",
+                    "--yes",
+                    "--account-id",
+                    &account_id,
+                ])
+                .await?;
+                read_status(&ae, &core).await
+            }
+            .await
+            .context("confirm this machine's Forge");
+            // Err: the Account is gone.
+            this.update(cx, |this, cx| {
+                let ok = confirmed.is_ok();
+                this.set_binding(confirmed, cx);
+                if ok {
+                    this.sync(cx);
+                }
+            })
+            .ok();
+        }));
     }
 }

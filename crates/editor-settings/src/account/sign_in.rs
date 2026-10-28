@@ -56,12 +56,7 @@ impl SignInView {
     }
 
     fn phase(&self, cx: &Context<Self>) -> AccountPhase {
-        self.core
-            .read(cx)
-            .account()
-            .read(cx)
-            .phase()
-            .clone()
+        self.core.read(cx).account().read(cx).phase().clone()
     }
 
     pub fn request_link(&self, cx: &mut Context<Self>) {
@@ -69,7 +64,7 @@ impl SignInView {
         let core = self.core.clone();
         core.update(cx, |core, cx| {
             core.account()
-                .update(cx, |account, cx| account.request_link(email, cx));
+                .update(cx, |account, cx| account.request_link(&email, cx));
         });
     }
 

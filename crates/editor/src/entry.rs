@@ -3,12 +3,12 @@ use editor_settings::account::{controller, sign_in::SignInView};
 use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens};
 use editor_ui::window_controls::WindowControls;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
     Subscription, Window, WindowControlArea, div, px,
 };
-use gpui::prelude::FluentBuilder as _;
 
 use crate::workspace::Workspace;
 
@@ -24,7 +24,7 @@ pub const KEY_CONTEXT: &str = "Entry";
 pub struct EntryRoot {
     core: Entity<Core>,
     workspace: Option<Entity<Workspace>>,
-    mounted: Option<(String, u64)>,
+    mounted: Option<String>,
     sign_in: Entity<SignInView>,
     setup: Entity<SetupView>,
     failure: Option<String>,
@@ -42,18 +42,19 @@ impl EntryRoot {
     ) -> Self {
         let sign_in = cx.new(|cx| SignInView::new(core.clone(), cx));
         let setup = cx.new(|cx| SetupView::new(core.clone(), true, cx));
-        let core_subscription = cx.subscribe_in(&core, window, |this, _, event: &CoreEvent, window, cx| {
-            if matches!(
-                event,
-                CoreEvent::ScreenChanged
-                    | CoreEvent::HostsChanged
-                    | CoreEvent::SettingsChanged
-                    | CoreEvent::AccessChanged
-                    | CoreEvent::McpSignInChanged
-            ) {
-                this.sync(window, cx);
-            }
-        });
+        let core_subscription =
+            cx.subscribe_in(&core, window, |this, _, event: &CoreEvent, window, cx| {
+                if matches!(
+                    event,
+                    CoreEvent::ScreenChanged
+                        | CoreEvent::HostsChanged
+                        | CoreEvent::SettingsChanged
+                        | CoreEvent::AccessChanged
+                        | CoreEvent::McpSignInChanged
+                ) {
+                    this.sync(window, cx);
+                }
+            });
         let account = core.read(cx).account().clone();
         let account_subscription = cx.subscribe_in(
             &account,
@@ -80,30 +81,20 @@ impl EntryRoot {
 
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let key = match self.core.read(cx).entry_gate(cx) {
-            EntryGate::Ready { account_id } => {
-                let generation = self
-                    .core
-                    .read(cx)
-                    .account()
-                    .read(cx)
-                    .generation();
-                Some((account_id, generation))
-            }
-            EntryGate::Restoring
-            | EntryGate::SignedOut
-            | EntryGate::NeedsSetup { .. } => None,
+            EntryGate::Ready { account_id } => Some(account_id),
+            EntryGate::Restoring | EntryGate::SignedOut | EntryGate::NeedsSetup { .. } => None,
         };
         if key != self.mounted {
             self.workspace = None;
             self.mounted = None;
         }
-        if let Some((account_id, generation)) = key
+        if let Some(account_id) = key
             && self.workspace.is_none()
         {
             let core = self.core.clone();
             let failure = self.failure.clone();
             self.workspace = Some(cx.new(|cx| Workspace::new(core, failure, window, cx)));
-            self.mounted = Some((account_id, generation));
+            self.mounted = Some(account_id);
         }
         cx.notify();
     }
@@ -201,9 +192,7 @@ impl Render for EntryRoot {
                     .child(
                         div()
                             .text_color(theme.colors.text_muted.to_paint())
-                            .child(
-                                "Checking the saved sign-in with the account service.",
-                            ),
+                            .child("Checking the saved sign-in with the account service."),
                     )
                     .child(
                         div()
@@ -221,17 +210,13 @@ impl Render for EntryRoot {
                                     .into_any_element(),
                             )
                             .child(
-                                Button::text(
-                                    "entry-use-another",
-                                    theme,
-                                    "Use another account",
-                                )
-                                .variant(ButtonVariant::Ghost)
-                                .debug_selector("entry-use-another")
-                                .on_activate(cx.listener(|this, _, _, cx| {
-                                    controller::sign_out(&this.core, false, cx);
-                                }))
-                                .into_any_element(),
+                                Button::text("entry-use-another", theme, "Use another account")
+                                    .variant(ButtonVariant::Ghost)
+                                    .debug_selector("entry-use-another")
+                                    .on_activate(cx.listener(|this, _, _, cx| {
+                                        controller::sign_out(&this.core, false, cx);
+                                    }))
+                                    .into_any_element(),
                             ),
                     )
                     .into_any_element();

@@ -35,7 +35,7 @@ impl Core {
         // connect. Enrollment is account-side; the reply guides there.
         if matches!(call, EditorCall::HostAdd { .. }) {
             return answer(
-                EditorReply::Error(crate::DIRECT_PAIRING_DISABLED.to_owned()),
+                EditorReply::Error("Forges join through the account: enroll this Forge from the Editor's Account page.".to_owned()),
                 cx,
             );
         }

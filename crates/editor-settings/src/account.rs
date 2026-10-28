@@ -32,13 +32,16 @@ impl AccountForm {
     pub(crate) fn new(core: Entity<editor_core::Core>, cx: &mut Context<Settings>) -> Self {
         let sign_in = cx.new(|cx| sign_in::SignInView::new(core.clone(), cx));
         let claim_code = cx.new(|cx| TextEditor::new("", "Code from this Forge", cx).single_line());
-        let claim_submit = cx.subscribe(&claim_code, |this, _, event: &editor_ui::text_editor::TextEditorEvent, cx| {
-            if *event == editor_ui::text_editor::TextEditorEvent::Submitted {
-                this.account.claim_code(cx);
-            } else {
-                cx.notify();
-            }
-        });
+        let claim_submit = cx.subscribe(
+            &claim_code,
+            |this, _, event: &editor_ui::text_editor::TextEditorEvent, cx| {
+                if *event == editor_ui::text_editor::TextEditorEvent::Submitted {
+                    this.account.claim_code(cx);
+                } else {
+                    cx.notify();
+                }
+            },
+        );
         Self {
             core,
             sign_in,
@@ -143,11 +146,7 @@ pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>)
             page = page.child(render_profile(settings, theme, cx));
         }
     }
-    if let Some(notice) = account.read_with(cx, |account, _| account.notice().map(str::to_owned)) {
-        page = page.child(note(theme, notice));
-    }
-    if let Some(error) =
-        account.read_with(cx, |account, _| account.relay_error().map(str::to_owned))
+    if let Some(error) = account.read_with(cx, |account, _| account.last_error().map(str::to_owned))
     {
         page = page.child(error_text(theme, error));
     }
@@ -155,24 +154,22 @@ pub fn render(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>)
 }
 
 #[expect(
-        clippy::too_many_lines,
-        reason = "signed-in account, machines and pairing read as one page"
-    )]
+    clippy::too_many_lines,
+    reason = "signed-in account, machines and pairing read as one page"
+)]
 fn render_profile(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settings>) -> Div {
     let account = settings.core.read(cx).account().clone();
-    let (email, display_name, machines, notice_pending) = account
+    let (email, display_name, machines) = account
         .read_with(cx, |account, _| {
             account.profile().map(|profile| {
                 (
                     profile.email.clone(),
                     profile.display_name.clone(),
                     profile.machines.clone(),
-                    account.notice().map(str::to_owned),
                 )
             })
         })
         .unwrap_or_default();
-    let _ = notice_pending;
     let mut page = div().flex().flex_col().gap(px(10.0));
     let who = if display_name.is_empty() {
         email
@@ -289,40 +286,30 @@ fn render_profile(settings: &Settings, theme: &ArtisanTheme, cx: &Context<Settin
 }
 
 #[expect(
-        clippy::too_many_lines,
-        reason = "pairing status, code entry and confirmation read as one flow"
-    )]
+    clippy::too_many_lines,
+    reason = "pairing status, code entry and confirmation read as one flow"
+)]
 fn render_pair_this_machine(
     settings: &Settings,
     theme: &ArtisanTheme,
     cx: &Context<Settings>,
 ) -> AnyElement {
-    let (email, binding) = settings.core.read(cx).account().read_with(cx, |account, _| {
-        (
-            account
-                .profile()
-                .map(|profile| profile.email.clone())
-                .unwrap_or_default(),
-            account.local_binding(),
-        )
-    });
-    let account_id = settings.core.read(cx).account().read_with(cx, |account, _| {
-        account
-            .profile()
-            .map(|profile| profile.account_id.clone())
-    });
-    let bound_here = binding.as_ref().is_some_and(|binding| {
-        binding.enrolled
-            && binding.account_id.as_deref()
-                == account_id.as_deref().filter(|id| !id.is_empty())
-            && account_id.is_some()
-    });
-    let claimed_here = binding.as_ref().and_then(|binding| binding.claimed_by.clone())
-        .is_some_and(|id| Some(id) == account_id);
-    let claimed_elsewhere = binding
-        .as_ref()
-        .and_then(|binding| binding.claimed_by.clone())
-        .is_some_and(|id| Some(id) != account_id);
+    let (email, local) = settings
+        .core
+        .read(cx)
+        .account()
+        .read_with(cx, |account, _| {
+            (
+                account
+                    .profile()
+                    .map(|profile| profile.email.clone())
+                    .unwrap_or_default(),
+                account.local_forge(),
+            )
+        });
+    let bound_here = matches!(local, editor_core::LocalForge::Enrolled { .. });
+    let claimed_here = matches!(local, editor_core::LocalForge::Claimed { .. });
+    let claimed_elsewhere = matches!(local, editor_core::LocalForge::OtherAccount);
     let mut blocks: Vec<AnyElement> = vec![
         row(
             theme,
@@ -387,13 +374,7 @@ fn render_pair_this_machine(
         .into_any_element(),
     ];
     if bound_here {
-        blocks.push(
-            note(
-                theme,
-                format!("Paired to {email}."),
-            )
-            .into_any_element(),
-        );
+        blocks.push(note(theme, format!("Paired to {email}.")).into_any_element());
     } else if claimed_here {
         blocks.push(
             div()

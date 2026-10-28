@@ -886,40 +886,6 @@ impl ForgeClient {
     }
 }
 
-/// Account Forges are reached through the Relay: the Editor opens Noise
-/// channels to the Forge's room, presents its Core grant inside the
-/// encrypted handshake and pins the Forge's enrolled key from `/v1/me`.
-pub fn relay_dialer(
-    ctx: artisan_account::relay_client::RelayDialContext,
-    executor: gpui::BackgroundExecutor,
-) -> crate::account::RelayDialer {
-    std::sync::Arc::new(move |request: crate::account::RelayDialRequest| {
-        let ctx = ctx.clone();
-        executor.spawn(async move { ForgeClient::via_relay(request, &ctx).await })
-    })
-}
-
-/// Builds a dialer bound to one session and Relay URL; `None` when the URL
-/// is empty.
-pub fn relay_dialer_factory(
-    core: artisan_account::CoreSessionClient,
-    executor: gpui::BackgroundExecutor,
-) -> crate::account::RelayDialerFactory {
-    std::sync::Arc::new(
-        move |session: artisan_account::SessionToken, relay_url: String| {
-            if relay_url.trim().is_empty() {
-                return None;
-            }
-            let ctx = artisan_account::relay_client::RelayDialContext {
-                relay_base_url: relay_url,
-                core: core.clone(),
-                session,
-            };
-            Some(relay_dialer(ctx, executor.clone()))
-        },
-    )
-}
-
 /// Split a built HTTP request into its tunneled parts: uppercased method,
 /// origin-form path plus the exact query string `reqwest` encoded, and a
 /// JSON or `$bytes`-enveloped body. JSON content travels as JSON; anything
@@ -984,9 +950,9 @@ impl ForgeClient {
     /// runtime (WS connect, timers, and tungstenite need its reactor);
     /// dropping the returned future aborts the dial.
     pub async fn via_relay(
-        request: crate::account::RelayDialRequest,
+        request: crate::services::RelayDialRequest,
         ctx: &artisan_account::relay_client::RelayDialContext,
-    ) -> Result<(crate::hosts::HostConfig, Self)> {
+    ) -> Result<Self> {
         let ctx = ctx.clone();
         AbortOnDropHandle::new(
             runtime().spawn(async move { Self::via_relay_inner(request, &ctx).await }),
@@ -997,9 +963,9 @@ impl ForgeClient {
     }
 
     async fn via_relay_inner(
-        request: crate::account::RelayDialRequest,
+        request: crate::services::RelayDialRequest,
         ctx: &artisan_account::relay_client::RelayDialContext,
-    ) -> Result<(crate::hosts::HostConfig, Self)> {
+    ) -> Result<Self> {
         let relay = artisan_account::relay_client::RelayClient::connect(
             &ctx.relay_base_url,
             &request.account_id,
@@ -1011,17 +977,6 @@ impl ForgeClient {
             ctx.session.clone(),
         )
         .await?;
-        // Never dialable as `host:port`: rebuilt from the session each time.
-        let config = crate::hosts::HostConfig {
-            id: crate::hosts::HostId(request.machine_id.clone()),
-            name: request.machine_label.clone(),
-            address: String::new(),
-            fingerprint: String::new(),
-            kind: crate::hosts::HostKind::Account {
-                account: request.account_id.clone(),
-                machine: request.machine_id.clone(),
-            },
-        };
         // Verify the route is live before handing the client to inventory,
         // including the Forge protocol version.
         let live: serde_json::Value = relay.request_json("GET", "/state", None).await?;
@@ -1029,13 +984,10 @@ impl ForgeClient {
         if protocol != Some(u64::from(artisan_api::PROTOCOL_VERSION)) {
             anyhow::bail!("Forge speaks an incompatible protocol; update Forge or the Editor");
         }
-        Ok((
-            config,
-            Self {
-                http: reqwest::Client::new(),
-                transport: Transport::Relay(Arc::new(relay)),
-            },
-        ))
+        Ok(Self {
+            http: reqwest::Client::new(),
+            transport: Transport::Relay(Arc::new(relay)),
+        })
     }
 }
 
@@ -1237,76 +1189,41 @@ mod tests {
         assert!(error.downcast_ref::<serde_json::Error>().is_some());
     }
 
-    /// Polling the actual dialer / `via_relay` from a thread with no Tokio
-    /// reactor must surface an ordinary connection failure, never a reactor
-    /// panic. The transport hops onto the network runtime itself; without
-    /// that hop this test would fail with "no reactor running" instead of
-    /// the refused endpoint below. No live Relay needed: the port is closed
-    /// on purpose, so any reactor-shaped error is the regression signal.
-    ///
-    /// NOTE: do NOT `block_on` the GPUI Task here — the test scheduler's
-    /// virtual background executor only pumps while awaited from the test
-    /// executor, so blocking on it from outside hangs forever.
+    /// The Relay dial hops onto the network runtime itself, so a GPUI test
+    /// executor with no Tokio reactor sees a refused connection, not a panic.
     #[gpui::test]
-    #[allow(
+    #[expect(
         clippy::future_not_send,
-        reason = "gpui TestAppContext is !Send by design; the test executor polls this future"
-    )]
-    #[allow(
-        clippy::needless_pass_by_ref_mut,
-        reason = "gpui test harness hands &mut TestAppContext; the test only reads from it"
+        reason = "gpui TestAppContext is !Send; the test executor polls this future"
     )]
     async fn relay_dial_without_tokio_reactor_fails_with_connection_refused(
         cx: &mut gpui::TestAppContext,
     ) {
         use base64::Engine as _;
-        // Real OS network wait below: allow parking like the neighboring
-        // source-admission test (GPUI forbids parking by default).
         cx.executor().allow_parking();
         let closed = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        let forge_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42_u8; 32]);
         let ctx = artisan_account::relay_client::RelayDialContext {
             relay_base_url: format!("ws://127.0.0.1:{closed}"),
             core: artisan_account::CoreSessionClient::new("http://127.0.0.1:1").unwrap(),
             session: artisan_account::SessionToken::new("test-session".to_owned()),
         };
-        let request = || crate::account::RelayDialRequest {
+        let request = crate::services::RelayDialRequest {
             account_id: "acct_00000000000000000000000000".to_owned(),
             machine_id: "mch_11111111111111111111111111".to_owned(),
-            machine_label: "fixture".to_owned(),
-            forge_ed25519_b64u: forge_key.clone(),
+            forge_ed25519_b64u: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode([0x42_u8; 32]),
             grant_jwt: "bogus.grant.jwt".to_owned(),
             cnf_secret: [0x77_u8; 32],
         };
-        // Through the real dialer (GPUI Task, awaited by the test executor
-        // with no Tokio reactor in scope).
-        let dialer = relay_dialer(ctx.clone(), cx.background_executor.clone());
-        let result = dialer(request()).await;
-        assert!(result.is_err(), "dial to a closed port must fail");
-        if let Err(error) = result {
-            let text = format!("{error:#}");
-            assert!(
-                text.contains("connect to the Relay"),
-                "expected a refused endpoint, got: {text}"
-            );
-            assert!(
-                !text.to_lowercase().contains("reactor"),
-                "reactor leaked into the dial path: {text}"
-            );
-        }
-        // And through the constructor directly: same expectation.
-        let result = ForgeClient::via_relay(request(), &ctx).await;
-        assert!(result.is_err(), "dial to a closed port must fail");
-        if let Err(error) = result {
-            let text = format!("{error:#}");
-            assert!(
-                text.contains("connect to the Relay"),
-                "expected a refused endpoint, got: {text}"
-            );
-        }
+        let text = match ForgeClient::via_relay(request, &ctx).await {
+            Ok(_) => panic!("dial to a closed port must fail"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(text.contains("connect to the Relay"), "got: {text}");
+        assert!(!text.to_lowercase().contains("reactor"), "got: {text}");
     }
 }

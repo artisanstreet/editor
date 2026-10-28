@@ -37,12 +37,10 @@ impl SetupView {
             },
         );
         let account = core.read(cx).account().clone();
-        let account_subscription = cx.subscribe(
-            &account,
-            |_, _, _: &editor_core::AccountEvent, cx| {
+        let account_subscription =
+            cx.subscribe(&account, |_, _, _: &editor_core::AccountEvent, cx| {
                 cx.notify();
-            },
-        );
+            });
         let core_subscription = cx.subscribe(&core, |_, _, event: &editor_core::CoreEvent, cx| {
             if matches!(event, editor_core::CoreEvent::HostsChanged) {
                 cx.notify();
@@ -98,9 +96,7 @@ impl SetupView {
     /// message shows inline and nothing flips to ready.
     fn finish_setup(&mut self, machine_id: &str, cx: &mut Context<Self>) {
         let id = machine_id.to_owned();
-        let result = self
-            .core
-            .update(cx, |core, cx| core.complete_setup(id, cx));
+        let result = self.core.update(cx, |core, cx| core.complete_setup(id, cx));
         self.finish_error = result.err().map(|error| format!("{error:#}"));
         cx.notify();
     }
@@ -114,9 +110,8 @@ impl Render for SetupView {
     fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = *cx.theme();
         let account = self.core.read(cx).account().clone();
-        let (email, account_id, machines, notice, relay_error, binding) = account.read_with(
-            cx,
-            |account, _| {
+        let (email, _account_id, machines, notice, relay_error, local) =
+            account.read_with(cx, |account, _| {
                 (
                     account
                         .profile()
@@ -126,13 +121,12 @@ impl Render for SetupView {
                         .profile()
                         .map(|profile| profile.account_id.clone())
                         .unwrap_or_default(),
-                    account.onboardable_machines(),
-                    account.notice().map(str::to_owned),
-                    account.relay_error().map(str::to_owned),
-                    account.local_binding(),
+                    account.machines(),
+                    None::<String>,
+                    account.last_error().map(str::to_owned),
+                    account.local_forge(),
                 )
-            },
-        );
+            });
         let direct: Vec<(String, bool)> = self
             .core
             .read(cx)
@@ -153,11 +147,8 @@ impl Render for SetupView {
                 || "Enrolled · never connected".to_owned(),
                 |seen| format!("Last seen {seen}"),
             );
-            let connected = self
-                .core
-                .read(cx)
-                .connected_account_host(&machine.id, cx);
-            let completable = account.read(cx).can_complete_setup(&machine.id);
+            let connected = self.core.read(cx).machine_live(&machine.id, cx);
+            let completable = true;
             let id = machine.id.clone();
             let connect_id = SharedString::from(format!("entry-connect-{id}"));
             let finish_id = SharedString::from(format!("entry-finish-{id}"));
@@ -258,40 +249,18 @@ impl Render for SetupView {
                     .child("Already on this device"),
             );
             for (name, is_live) in direct {
-                direct_list = direct_list.child(
-                    div()
-                        .text_color(theme.colors.text_muted.to_paint())
-                        .child(format!(
-                            "{name} · {}",
-                            if is_live { "reachable" } else { "offline" }
-                        )),
-                );
+                direct_list =
+                    direct_list.child(div().text_color(theme.colors.text_muted.to_paint()).child(
+                        format!("{name} · {}", if is_live { "reachable" } else { "offline" }),
+                    ));
             }
             rows.push(direct_list.into_any_element());
         }
-        let bound_here = binding.as_ref().is_some_and(|binding| {
-            binding.enrolled
-                && binding
-                    .account_id
-                    .as_deref()
-                    .is_some_and(|id| id == account_id)
-        });
-        let revoked_here = account.read(cx).local_binding_revoked();
-        let claimed_here = binding
-            .as_ref()
-            .and_then(|binding| binding.claimed_by.clone())
-            .is_some_and(|id| id == account_id);
-        let claimed_elsewhere = binding
-            .as_ref()
-            .and_then(|binding| binding.claimed_by.clone())
-            .is_some_and(|id| id != account_id);
-        let bound_elsewhere = binding.as_ref().is_some_and(|binding| {
-            binding.enrolled
-                && binding
-                    .account_id
-                    .as_deref()
-                    .is_some_and(|id| id != account_id)
-        });
+        let bound_here = matches!(local, editor_core::LocalForge::Enrolled { .. });
+        let revoked_here = matches!(local, editor_core::LocalForge::Revoked { .. });
+        let claimed_here = matches!(local, editor_core::LocalForge::Claimed { .. });
+        let claimed_elsewhere = matches!(local, editor_core::LocalForge::OtherAccount);
+        let bound_elsewhere = false;
         let pair_core = self.core.clone();
         if bound_here && !revoked_here {
             rows.push(
@@ -331,23 +300,19 @@ impl Render for SetupView {
                             .into_any_element(),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .child(
-                                Button::text(
-                                    "entry-forge-confirm",
-                                    theme,
-                                    format!("Confirm this Forge into {email}"),
-                                )
-                                .variant(ButtonVariant::Default)
-                                .debug_selector("entry-forge-confirm")
-                                .on_activate(move |_, _, cx| {
-                                    controller::forge_confirm(&confirm_core, cx);
-                                })
-                                .into_any_element(),
-                            ),
+                        div().flex().flex_row().justify_end().child(
+                            Button::text(
+                                "entry-forge-confirm",
+                                theme,
+                                format!("Confirm this Forge into {email}"),
+                            )
+                            .variant(ButtonVariant::Default)
+                            .debug_selector("entry-forge-confirm")
+                            .on_activate(move |_, _, cx| {
+                                controller::forge_confirm(&confirm_core, cx);
+                            })
+                            .into_any_element(),
+                        ),
                     )
                     .into_any_element(),
             );
@@ -383,33 +348,31 @@ impl Render for SetupView {
                             .text_color(theme.colors.text.to_paint())
                             .child("This Forge"),
                     )
+                    .child(div().text_color(theme.colors.text_muted.to_paint()).child(
+                        if revoked_here {
+                            "This Forge was removed from this account. Pair it again to reconnect."
+                        } else {
+                            "This Forge isn't paired yet."
+                        },
+                    ))
                     .child(
-                        div()
-                            .text_color(theme.colors.text_muted.to_paint())
-                            .child(if revoked_here {
-                                "This Forge was removed from this account. Pair it again to reconnect."
-                            } else {
-                                "This Forge isn't paired yet."
-                            })
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .justify_end()
-                            .child(
-                                Button::text("entry-pair", theme, if revoked_here {
+                        div().flex().flex_row().justify_end().child(
+                            Button::text(
+                                "entry-pair",
+                                theme,
+                                if revoked_here {
                                     "Pair this machine again"
                                 } else {
                                     "Pair this machine"
-                                })
-                                    .variant(ButtonVariant::Default)
-                                    .debug_selector("entry-pair")
-                                    .on_activate(move |_, _, cx| {
-                                        controller::enroll_this_forge(&pair_core, cx);
-                                    })
-                                    .into_any_element(),
-                            ),
+                                },
+                            )
+                            .variant(ButtonVariant::Default)
+                            .debug_selector("entry-pair")
+                            .on_activate(move |_, _, cx| {
+                                controller::enroll_this_forge(&pair_core, cx);
+                            })
+                            .into_any_element(),
+                        ),
                     )
                     .into_any_element(),
             );

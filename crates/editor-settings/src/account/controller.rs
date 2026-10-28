@@ -5,7 +5,7 @@ pub fn request_link(core: &Entity<Core>, email: &str, cx: &mut App) {
     let email = email.to_owned();
     core.update(cx, |core, cx| {
         core.account()
-            .update(cx, |account, cx| account.request_link(email, cx));
+            .update(cx, |account, cx| account.request_link(&email, cx));
     });
 }
 
@@ -49,8 +49,7 @@ pub fn sign_out(core: &Entity<Core>, revoke_all: bool, cx: &mut App) {
 
 pub fn refresh(core: &Entity<Core>, cx: &mut App) {
     core.update(cx, |core, cx| {
-        core.account()
-            .update(cx, editor_core::Account::refresh);
+        core.account().update(cx, editor_core::Account::refresh);
     });
 }
 
@@ -72,23 +71,20 @@ pub fn enroll_this_forge(core: &Entity<Core>, cx: &mut App) {
 pub fn forge_status(core: &Entity<Core>, cx: &mut App) {
     core.update(cx, |core, cx| {
         core.account()
-            .update(cx, editor_core::Account::forge_status);
+            .update(cx, editor_core::Account::refresh_local_forge);
     });
 }
 
 pub fn forge_confirm(core: &Entity<Core>, cx: &mut App) {
     core.update(cx, |core, cx| {
         core.account()
-            .update(cx, editor_core::Account::forge_confirm);
+            .update(cx, editor_core::Account::confirm_forge);
     });
 }
 
 pub fn connect_machine(core: &Entity<Core>, machine_id: &str, cx: &mut App) {
     let id = machine_id.to_owned();
-    let account = core.read_with(cx, |core, _| core.account().clone());
-    account.update(cx, |account, cx| {
-        account.connect_machine(id, core, cx);
-    });
+    core.update(cx, |core, cx| core.connect_machine(&id, cx));
 }
 
 pub fn remove_machine(core: &Entity<Core>, machine_id: &str, cx: &mut App) {
