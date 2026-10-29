@@ -258,6 +258,15 @@ impl Render for Settings {
             "route-settings-{}",
             page::label(page).to_lowercase().replace(' ', "-")
         );
+        if page == SettingsPage::GlobalPrompt {
+            return div()
+                .id("settings-global-prompt-screen")
+                .debug_selector(move || selector)
+                .size_full()
+                .p(px(24.0))
+                .text_color(theme.colors.text.to_paint())
+                .child(main);
+        }
         div()
             .id(SharedString::from(format!("settings-screen-{page:?}")))
             .debug_selector(move || selector)

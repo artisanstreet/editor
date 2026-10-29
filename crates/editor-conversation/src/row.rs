@@ -747,16 +747,7 @@ impl RowView {
             .font_features(tabular_figures())
             .pb(theme.spacing.steps(2.0))
             .debug_selector(|| "work-header".to_owned())
-            .child(near)
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w_full()
-                    .h(px(1.0))
-                    .bg(theme.colors.line.to_paint()),
-            );
+            .child(near);
         if let Some(progress) = self.motion.header_entrance() {
             header = header_entering(header, progress);
         }
