@@ -9,7 +9,8 @@ use crate::{EngineEvent, LiveKind};
 use anyhow::Context as _;
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Collection, Decision, ErrorKind, FileChange, FileOp, ItemId,
-    ItemKind, Output, Phase, Question, QuestionOption, SearchMode, Status, ToolKind, Usage,
+    ItemKind, NoticeKind, Output, Phase, Question, QuestionOption, SearchMode, Status, ToolKind,
+    Usage,
 };
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
@@ -104,6 +105,40 @@ pub struct Decoder {
     /// The last error that ended a turn.
     pub error: Option<String>,
     cancelled: bool,
+    goals: HashMap<String, Goal>,
+    awaiting_goal: Option<GoalChange>,
+}
+
+enum GoalChange {
+    Set(Goal),
+    Clear,
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
+pub(super) struct Goal {
+    id: String,
+    objective: String,
+    status: GoalStatus,
+    #[serde(rename = "updatedAt")]
+    updated_at: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GoalStatus {
+    Active,
+    Paused,
+    Complete,
+}
+
+impl GoalStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Complete => "complete",
+        }
+    }
 }
 
 struct Tool {
@@ -174,16 +209,57 @@ impl Decoder {
         }
     }
 
-    /// The engine has nothing left to do for this run: the last execution
-    /// ended, every prompt has been delivered, and background shells have
-    /// handed their results back to the assistant.
     pub fn idle(&self) -> bool {
         !self.turn_open
+            && self.awaiting_goal.is_none()
+            && (self.error.is_some()
+                || self.cancelled
+                || !self
+                    .root
+                    .as_ref()
+                    .and_then(|root| self.goals.get(root))
+                    .is_some_and(|goal| matches!(goal.status, GoalStatus::Active)))
             && (self.shells.is_empty() || self.error.is_some() || self.cancelled)
             && self
                 .admitted
                 .iter()
                 .all(|message| self.delivered.contains(message))
+    }
+
+    pub(super) fn await_goal_change(&mut self, goal: Option<Goal>) {
+        self.awaiting_goal = Some(goal.map_or(GoalChange::Clear, GoalChange::Set));
+    }
+
+    pub(super) fn goal_changed(&mut self, session: &str, goal: Option<Goal>) -> Vec<EngineEvent> {
+        let Some(parent) = self.sessions.get(session).cloned() else {
+            return Vec::new();
+        };
+        let (state, objective) = match goal {
+            Some(goal) if !goal.objective.trim().is_empty() => {
+                let state = goal.status.as_str();
+                let objective = goal.objective.clone();
+                self.goals.insert(session.to_owned(), goal);
+                (state, objective)
+            }
+            None => match self.goals.remove(session) {
+                Some(goal) => ("cleared", goal.objective),
+                None => return Vec::new(),
+            },
+            Some(_) => return Vec::new(),
+        };
+        vec![EngineEvent::Item {
+            key: parent
+                .as_ref()
+                .map_or_else(|| "goal".to_owned(), |parent| format!("goal:{parent}")),
+            parent,
+            status: Status::Done,
+            kind: ItemKind::Notice {
+                kind: NoticeKind::Goal {
+                    state: state.to_owned(),
+                },
+                text: objective.into(),
+            },
+        }]
     }
 
     /// Settles what is still open after the user cancelled.
@@ -261,7 +337,7 @@ impl Decoder {
         let Some(session) = data["sessionID"].as_str() else {
             return out;
         };
-        if kind == "session.step.started" {
+        if matches!(kind, "session.step.started" | "rpc.opencode.goal.changed") {
             self.bind_orphan(session, &mut out);
         }
         let Some(parent) = self.sessions.get(session).cloned() else {
@@ -269,6 +345,19 @@ impl Decoder {
         };
         let root = self.root.as_deref() == Some(session);
         match kind {
+            "rpc.opencode.goal.changed" => {
+                if let Ok(goal) = serde_json::from_value::<Option<Goal>>(data["goal"].clone()) {
+                    let expected = match (&self.awaiting_goal, &goal) {
+                        (Some(GoalChange::Set(expected)), Some(goal)) => expected == goal,
+                        (Some(GoalChange::Clear), None) => true,
+                        _ => false,
+                    };
+                    if root && expected {
+                        self.awaiting_goal = None;
+                    }
+                    out.extend(self.goal_changed(session, goal));
+                }
+            }
             "session.renamed" if root => {
                 if let Some(title) = data["title"].as_str()
                     && !title.is_empty()

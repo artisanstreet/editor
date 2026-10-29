@@ -431,9 +431,6 @@ impl Hub {
         Ok(thread)
     }
 
-    /// Clears the thread's goal, so the engine stops working toward it.
-    /// Codex clears through its app-server, on the live run's connection
-    /// or on its own; Claude takes `/goal clear` as a message.
     pub async fn clear_goal(&self, thread_id: &ThreadId) -> Result<()> {
         let refused = |message: &str| anyhow::Error::new(Refused(message.to_owned()));
         let store = self.store();
@@ -465,16 +462,10 @@ impl Hub {
                     draft: None,
                 };
                 self.send_message(thread_id, message).await?;
-                // Claude's own reply reports the goal cleared.
                 return Ok(());
             }
-            EngineId::Codex => {}
-            EngineId::OpenCode => {
-                return Err(refused("This engine can't clear its goal from Artisan."));
-            }
+            EngineId::Codex | EngineId::OpenCode => {}
         }
-        // A closed inbox means the run is ending; Codex keeps the goal
-        // and the next turn shows it again.
         if let Some((inbox, _)) = live {
             inbox
                 .send(Input::ClearGoal)
@@ -486,7 +477,7 @@ impl Hub {
                 .await?
                 .filter(|run| run.engine == engine)
                 .and_then(|run| run.session_id)
-                .ok_or_else(|| refused("Codex never started this thread's session."))?;
+                .ok_or_else(|| refused("This engine never started this thread's session."))?;
             let lease = self.engines().lease(engine);
             let turn = run::prepare(
                 self,
@@ -502,8 +493,6 @@ impl Hub {
                 .with_context(|| format!("clearing the goal of thread {thread_id}"))?;
             drop(lease);
         }
-        // Codex reports a clear only to a session that showed the goal, so
-        // the strip learns it here.
         store
             .upsert_item(forge_store::NewItem {
                 id: ItemId::new(),
