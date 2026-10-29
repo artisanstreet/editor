@@ -33,11 +33,7 @@ fn isolated(command: &mut Command, home: &std::path::Path) -> std::io::Result<()
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("LOCALAPPDATA", &localappdata);
     let (root, folder, binary) = if cfg!(windows) {
-        (
-            localappdata.join("Artisan Street"),
-            "Forge",
-            "forge.exe",
-        )
+        (localappdata.join("Artisan Street"), "Forge", "forge.exe")
     } else if cfg!(target_os = "macos") {
         (
             home.join("home/Library/Application Support/Artisan Street"),
@@ -264,7 +260,10 @@ fn enroll_status_confirm_json_lifecycle() {
     let secret = file["secret_b64u"].as_str().unwrap().to_owned();
     let public = file["public_b64u"].as_str().unwrap().to_owned();
     let stdout = serde_json::to_string(&enrolled).unwrap();
-    assert!(!stdout.contains(&secret), "stdout must not carry the secret");
+    assert!(
+        !stdout.contains(&secret),
+        "stdout must not carry the secret"
+    );
     assert!(!stdout.contains(&public), "stdout must not carry the key");
 
     // First poll: pending; second: claimed (the stub models approval).
@@ -312,5 +311,56 @@ fn enroll_status_confirm_json_lifecycle() {
     assert!(
         String::from_utf8_lossy(&human.stdout).contains(MACHINE_ID),
         "human status names the machine"
+    );
+
+    // A removed machine still has a local enrollment. Ordinary enrollment
+    // must preserve it; explicit replacement rotates the revoked key and
+    // returns to a pending enrollment that can be claimed and confirmed.
+    let refused = run(&home, &["account", "--core", &core, "enroll", "--json"]).unwrap();
+    assert!(!refused.status.success(), "replacement must be explicit");
+    let replaced = stdout_json(
+        &run(
+            &home,
+            &["account", "--core", &core, "enroll", "--json", "--replace"],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(replaced["code"], CODE);
+    let replacement: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(account_file(&home)).unwrap()).unwrap();
+    assert_ne!(
+        replacement["secret_b64u"], secret,
+        "revoked keys cannot be reused"
+    );
+    assert_ne!(
+        replacement["public_b64u"], public,
+        "the machine key must rotate"
+    );
+    assert!(
+        replacement.get("machine_id").is_none(),
+        "old binding must clear"
+    );
+    assert!(
+        replacement.get("account_id").is_none(),
+        "old account must clear"
+    );
+    let confirmed = run(
+        &home,
+        &[
+            "account",
+            "--core",
+            &core,
+            "confirm",
+            "--yes",
+            "--account-id",
+            ACCOUNT_ID,
+        ],
+    )
+    .unwrap();
+    assert!(
+        confirmed.status.success(),
+        "replacement must confirm: {}",
+        String::from_utf8_lossy(&confirmed.stderr)
     );
 }

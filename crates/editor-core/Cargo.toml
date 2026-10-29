@@ -28,14 +28,14 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+editor-core = { path = ".", features = ["test-support"] }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
 gpui = { workspace = true, features = ["test-support"] }
 
 [features]
-# Test-only inventory helpers (`Core::for_tests`, `Core::add_test_host`)
-# for unrelated component tests. Production builds never enable this;
-# native entry/gate tests use the real `Core::new` plus HTTP fixtures.
+# `Core::for_tests`, `Core::add_test_host` and scripted `Services` (a stub
+# Core URL, a scripted `ae` and Relay) for tests.
 test-support = []
 
 [lints]

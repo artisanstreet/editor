@@ -8,8 +8,8 @@
 
 use anyhow::{Context, Result};
 use artisan_account::{
-    body_hash_hex, canonical_request, enrollment_confirm_body,
-    enrollment_request_body, sign_enrollment_proof, sign_proof,
+    body_hash_hex, canonical_request, enrollment_confirm_body, enrollment_request_body,
+    sign_enrollment_proof, sign_proof,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub fn core_base_url(explicit: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_CORE_BASE_URL.to_owned())
 }
 
-fn now_sec() -> i64 {
+pub(crate) fn now_sec() -> i64 {
     i64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -66,7 +66,7 @@ impl CoreClient {
     }
 
     /// Machine-proof headers for an authenticated machine call.
-    fn proof_headers(
+    pub(crate) fn proof_headers(
         subject: &str,
         secret: &[u8; 32],
         method: &str,
@@ -75,13 +75,8 @@ impl CoreClient {
         now: i64,
     ) -> Result<reqwest::header::HeaderMap> {
         let nonce = nonce_b64u()?;
-        let canonical = canonical_request(
-            now,
-            &nonce,
-            method,
-            path_and_query,
-            &body_hash_hex(body),
-        );
+        let canonical =
+            canonical_request(now, &nonce, method, path_and_query, &body_hash_hex(body));
         let signature = sign_proof(secret, &canonical);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -92,10 +87,7 @@ impl CoreClient {
             "X-AST-Timestamp",
             now.to_string().parse().context("timestamp header")?,
         );
-        headers.insert(
-            "X-AST-Nonce",
-            nonce.parse().context("nonce header")?,
-        );
+        headers.insert("X-AST-Nonce", nonce.parse().context("nonce header")?);
         let authorization = format!(
             "AST-Machine {}",
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature)
@@ -173,7 +165,8 @@ impl CoreClient {
     }
 
     /// Confirm an enrollment: `POST /v1/machines/enrollments/confirm` with
-    /// the proof over the exact account+key binding. The caller must have
+    /// enrollment-key request authentication and a proof over the exact
+    /// account+key binding. The caller must have
     /// shown `account_id` + verified email to the local operator first.
     pub async fn confirm_enrollment(
         &self,
@@ -191,10 +184,15 @@ impl CoreClient {
             "accountId": account_id,
             "confirmation": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(confirmation),
         });
+        let path = "/v1/machines/enrollments/confirm";
+        let body = serde_json::to_vec(&request)?;
+        let headers = Self::proof_headers(enrollment_id, secret, "POST", path, &body, now_sec())?;
         let response = self
             .http
-            .post(self.url("/v1/machines/enrollments/confirm"))
-            .json(&request)
+            .post(self.url(path))
+            .headers(headers)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await
             .context("reach Core")?;
@@ -243,57 +241,6 @@ impl CoreClient {
             .await
             .context("read Core grant answer")
     }
-
-    /// Fetch the JWKS Core publishes for grant verification.
-    pub async fn jwks(&self) -> Result<Jwks> {
-        let response = self
-            .http
-            .get(self.url("/.well-known/jwks.json"))
-            .send()
-            .await
-            .context("reach Core")?;
-        Self::check(response)
-            .await?
-            .json()
-            .await
-            .context("read Core JWKS")
-    }
-
-    /// List this account's machines: `GET /v1/machines` (machine proof auth;
-    /// forward-compatible entries).
-    pub async fn list_machines(
-        &self,
-        machine_id: &str,
-        secret: &[u8; 32],
-    ) -> Result<Vec<MachineEntry>> {
-        let now = now_sec();
-        let path = "/v1/machines";
-        let headers = Self::proof_headers(machine_id, secret, "GET", path, b"", now)?;
-        let response = self
-            .http
-            .get(self.url(path))
-            .headers(headers)
-            .send()
-            .await
-            .context("reach Core")?;
-        Self::check(response)
-            .await?
-            .json()
-            .await
-            .context("read Core machines answer")
-    }
-}
-
-/// Build the exact headers without sending (used by tests and `ae`).
-pub fn proof_headers_for(
-    subject: &str,
-    secret: &[u8; 32],
-    method: &str,
-    path_and_query: &str,
-    body: &[u8],
-    now: i64,
-) -> Result<reqwest::header::HeaderMap> {
-    CoreClient::proof_headers(subject, secret, method, path_and_query, body, now)
 }
 
 /// `POST /v1/machines/enrollments` → created (strict read).
@@ -343,15 +290,6 @@ pub struct Jwks {
     pub keys: Vec<Jwk>,
 }
 
-/// One machine entry (forward-compatible: ignores future fields).
-/// Matches Core `MachineInfo` (`id`, not `machine_id`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MachineEntry {
-    pub id: String,
-    #[serde(default)]
-    pub label: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,9 +298,7 @@ mod tests {
     use axum::routing::{get, post};
 
     #[derive(Clone)]
-    struct Stub {
-        expected_proof: bool,
-    }
+    struct Stub;
 
     async fn enroll(
         State(_stub): State<Stub>,
@@ -387,7 +323,12 @@ mod tests {
     ) -> impl axum::response::IntoResponse {
         assert_eq!(id, "enr_00000000000000000000000001");
         // Machine-proof headers are present and well-formed.
-        for name in ["x-ast-machine", "x-ast-timestamp", "x-ast-nonce", "authorization"] {
+        for name in [
+            "x-ast-machine",
+            "x-ast-timestamp",
+            "x-ast-nonce",
+            "authorization",
+        ] {
             assert!(
                 headers.contains_key(name),
                 "missing machine proof header {name}"
@@ -407,14 +348,50 @@ mod tests {
 
     async fn confirm(
         State(_stub): State<Stub>,
+        headers: axum::http::HeaderMap,
         body: axum::body::Bytes,
     ) -> impl axum::response::IntoResponse {
+        let enrollment_id = "enr_00000000000000000000000001";
+        assert_eq!(headers["x-ast-machine"], enrollment_id);
+        let timestamp = headers["x-ast-timestamp"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let nonce = headers["x-ast-nonce"].to_str().unwrap();
+        let signature = headers["authorization"]
+            .to_str()
+            .unwrap()
+            .strip_prefix("AST-Machine ")
+            .unwrap();
+        let keypair = artisan_account::MachineKeypair::from_secret([0x21_u8; 32]).unwrap();
+        artisan_account::verify_machine_proof(&artisan_account::MachineProof {
+            public: keypair.public(),
+            body: &body,
+            timestamp_sec: timestamp,
+            nonce_b64u: nonce,
+            method: "POST",
+            path_and_query: "/v1/machines/enrollments/confirm",
+            signature_b64u: signature,
+            now_sec: now_sec(),
+        })
+        .unwrap();
         let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            request["accountId"],
-            "acct_00000000000000000000000000"
+        assert_eq!(request["enrollmentId"], enrollment_id);
+        assert_eq!(request["accountId"], "acct_00000000000000000000000000");
+        let confirmation = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(request["confirmation"].as_str().unwrap())
+            .unwrap();
+        let binding = enrollment_confirm_body(
+            enrollment_id,
+            "acct_00000000000000000000000000",
+            &keypair.public_b64u(),
         );
-        assert!(request["confirmation"].as_str().is_some());
+        assert!(artisan_account::verify_enrollment_proof(
+            keypair.public(),
+            &binding,
+            &confirmation,
+        ));
         axum::Json(serde_json::json!({
             "machine_id": "mch_11111111111111111111111111",
             "account_id": "acct_00000000000000000000000000",
@@ -435,36 +412,18 @@ mod tests {
         }))
     }
 
-    async fn machines(
-        State(_stub): State<Stub>,
-        headers: axum::http::HeaderMap,
-    ) -> impl axum::response::IntoResponse {
-        assert!(headers.contains_key("authorization"));
-        // Forward-compatible entries may carry future fields.
-        // Matches Core `MachineInfo` (`id`, not `machine_id`).
-        axum::Json(serde_json::json!([
-            {"id": "mch_11111111111111111111111111", "label": "srv", "future": 1},
-        ]))
-    }
-
     fn stub_router() -> Router {
-        let stub = Stub {
-            expected_proof: true,
-        };
+        let stub = Stub;
         Router::new()
             .route("/v1/machines/enrollments", post(enroll))
-            .route(
-                "/v1/machines/enrollments/{id}/status",
-                get(status),
-            )
+            .route("/v1/machines/enrollments/{id}/status", get(status))
             .route("/v1/machines/enrollments/confirm", post(confirm))
             .route("/v1/grants/issue", post(grants_issue))
-            .route("/v1/machines", get(machines))
             .with_state(stub)
     }
 
     /// The full machine journey against a stub Core: enroll → poll status →
-    /// confirm → grant issue → machines list. Asserts the exact proof
+    /// confirm → grant issue. Asserts the exact proof
     /// headers and body shapes Core specifies.
     #[tokio::test]
     async fn machine_journey_against_stub_core() {
@@ -512,18 +471,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(grant.token, "grant.jwt.token");
-        let machines = client
-            .list_machines(&confirmed.machine_id, &secret)
-            .await
-            .unwrap();
-        assert_eq!(machines.len(), 1);
-    }
-
-    #[test]
-    fn core_base_url_defaults_to_production() {
-        assert_eq!(
-            core_base_url(None).trim(),
-            core_base_url(Some(DEFAULT_CORE_BASE_URL)).trim()
-        );
     }
 }

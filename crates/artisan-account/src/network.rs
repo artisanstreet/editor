@@ -59,7 +59,10 @@ pub enum NetworkError {
     #[error("Core refused the call: {code}")]
     Core {
         code: String,
-        #[allow(dead_code, reason = "Core message kept for exact shape; user text uses code only")]
+        #[allow(
+            dead_code,
+            reason = "Core message kept for exact shape; user text uses code only"
+        )]
         message: String,
         request_id: String,
     },
@@ -74,7 +77,10 @@ struct CoreErrorBody {
 #[derive(Clone, Debug, Deserialize)]
 struct CoreErrorDetail {
     code: String,
-    #[allow(dead_code, reason = "Core message kept for exact shape; user text uses code only")]
+    #[allow(
+        dead_code,
+        reason = "Core message kept for exact shape; user text uses code only"
+    )]
     message: String,
     request_id: String,
 }
@@ -171,10 +177,6 @@ pub struct GrantIssueRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<Jwk>,
 }
-
-/// The `cnf` of a grant request: exactly the [`Jwk`]. Kept as a name so
-/// existing imports keep working; there is no extra nesting on the wire.
-pub type GrantCnf = Jwk;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct GrantToken {

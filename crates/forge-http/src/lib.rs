@@ -2,15 +2,15 @@
 //! server-sent event stream. Nothing is tied to a connection; a client's
 //! only sync state is the last seq it saw.
 
+mod account_auth;
+mod account_service;
+pub mod core;
 mod events;
 mod extensions;
 mod gateway;
+mod relay;
 mod repository;
 mod routes;
-pub mod account_auth;
-pub mod account_service;
-pub mod core;
-pub mod relay;
 pub mod sync;
 pub mod tls;
 
@@ -133,14 +133,15 @@ pub async fn start_with_harness(
         hub.ensure_scratch_project()
             .await
             .context("ensure the scratch project")?;
-        let app = routes::router(routes::App {
+        let routes_app = routes::App {
             hub: hub.clone(),
             forge_version: env!("CARGO_PKG_VERSION").to_owned(),
             shutdown: shutdown.clone(),
             tasks: tasks.clone(),
             repositories: Arc::new(repository::Repositories::new()?),
             icons: Arc::default(),
-        });
+        };
+        let app = routes::router(routes_app.clone());
         // A bound socket is the detached launcher's readiness boundary.
         // Mandatory setup must succeed before another process can observe it.
         let listener = TcpListener::bind(config.listen)
@@ -150,11 +151,9 @@ pub async fn start_with_harness(
         // Failed binds must leave durable inputs untouched, without launching
         // a controller that will never accept its paired clients.
         gateway::start(&hub, shutdown.clone(), &tasks).await?;
-        // Account services (config sync + Relay connector) start only for
-        // enrolled machines; accountless Forges are untouched.
         tasks.spawn(account_service::run(
             config.data_dir.clone(),
-            hub.clone(),
+            routes_app,
             shutdown.clone(),
             tasks.clone(),
         ));

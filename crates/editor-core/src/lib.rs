@@ -6,38 +6,41 @@
 //! [`ForgeClient`]; nothing else is shared between sections.
 
 mod access;
-mod agent_calls;
 mod account;
+mod ae;
+mod agent_calls;
 mod client;
 mod connection;
 mod host;
 pub mod hosts;
 mod mcp_sign_in;
 pub mod media_http;
-mod pairing_targets;
 mod range_window;
 mod resident;
 pub mod runtime;
 mod screen;
+mod services;
 #[cfg(any(test, feature = "test-support"))]
 mod testing;
-pub use pairing_targets::PairingTargets;
+#[cfg(any(test, feature = "test-support"))]
+pub use testing::save_onboarding_for_tests;
 pub use resident::{CollectionBytes, ResidentBytes};
 
-pub use access::{EntryGate, LocalForgeBinding, OnboardingRecord};
-pub use account::{
-    Account, AccountEvent, AccountPhase, AeOutcome, AeRunner, RelayDialRequest, RelayDialer,
-    RelayDialerFactory, CORE_BASE_URL_DEFAULT, RELAY_BASE_URL_DEFAULT,
-};
-pub use artisan_account::network::SessionToken;
+pub use access::EntryGate;
+pub use account::{Account, AccountEvent, AccountMachine, AccountPhase, LocalForge};
+#[cfg(any(test, feature = "test-support"))]
+pub use ae::AeScript;
+#[cfg(any(test, feature = "test-support"))]
+pub use services::RelayScript;
+pub use services::{RelayDialRequest, Services};
 
-pub use client::{ForgeClient, relay_dialer_factory};
+pub use client::ForgeClient;
 pub use connection::ConnectionStatus;
 pub use host::{
     Attention, BlobImage, HostData, HostEvent, ImageDecoder, LiveSnapshot, ProjectionLoad,
     ThreadPage, ThreadPageDirection, ThreadSummary,
 };
-pub use hosts::{EditorFiles, EditorSettings, HostConfig, HostId, HostKind, LocalTarget};
+pub use hosts::{EditorFiles, EditorSettings, HostConfig, HostId, HostKind};
 pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
 pub use range_window::{
     CollectionWindow, ContentWindow, RangePage, RangeState, RangeWindow, RangeWindowEvent,
@@ -57,49 +60,21 @@ pub struct Core {
     pub settings: EditorSettings,
     hosts: HashMap<HostId, Entity<HostData>>,
     hosts_file: HostsFile,
-    pairing_targets: PairingTargets,
     screen: Screen,
     back: Vec<Screen>,
-    /// Deferred workspace intent while locked. Set by gated `navigate`
-    /// when a workspace screen arrives before `Ready`; applied once on
-    /// `Ready` if the host still exists, dropped on account switch.
+    /// A workspace screen asked for before the gate opened; shown once it does.
     pending_screen: Option<Screen>,
-    /// Relay auto-connect attempted for the current Ready machine. Guards
-    /// the restart path (Ready + empty hosts) against duplicate dials from
-    /// repeated account events; cleared on lock/switch. Manual Connect
-    /// remains available after a failed attempt.
-    relay_autoconnected: Option<String>,
-    /// Cached Ready identity `(base_url, account_id)` maintained
-    /// synchronously by `reconcile_access`. `hosts()`/`host()`/
-    /// `active_host()` gate on this with no `cx`, no disk IO, and no
-    /// account read; `entry_gate(cx)` stays the UI-facing API.
-    gate_ready: Option<(String, String)>,
-    /// Cached onboarding for the current origin+account. Loaded once per
-    /// account/base transition (never per-frame disk IO); cleared on
-    /// sign-out/switch. `entry_gate` reads this, not the file.
-    onboarding_cache: Option<crate::access::OnboardingRecord>,
-    /// The origin+account the cache was loaded for.
-    onboarding_scope: Option<(String, String)>,
+    /// The account's gate as of its last change; hot paths read it without `cx`.
+    gate: EntryGate,
     /// The device name sent when pairing.
     pub device_name: String,
     /// MCP sign-ins this Editor catches the redirect for.
     mcp_sign_ins: mcp_sign_in::McpSignIns,
-    /// The AST account controller: sign-in state, sessions, machines.
     account: Entity<Account>,
-    /// Live account Relay entries (`connect_with_client`), host id to the
-    /// owning account id. Never persisted: the reconciliation below drops
-    /// whatever no longer belongs to the session on sign-out or account
-    /// switch, so cached account views and streams can't outlive it.
-    account_hosts: HashMap<HostId, String>,
-    /// Ephemeral Relay host configs, keyed by id. `connect_with_client`
-    /// registers here; public `hosts()`/`active_host()` include these so a
-    /// connected account Forge is usable (sidebar, composer) once `Ready`.
-    /// Never written to `hosts.json`; dropped with the route on lock.
-    account_configs: HashMap<HostId, HostConfig>,
-    /// Session token those entries were opened under. A replaced token
-    /// closes every account channel too, even when the account id is
-    /// unchanged: old grants and the old dialer are dead.
-    account_session: Option<String>,
+    /// Relay hosts; never written to `hosts.json`.
+    relay_configs: HashMap<HostId, HostConfig>,
+    /// Routes being opened, or that failed, per account machine.
+    dials: HashMap<HostId, access::Dial>,
 }
 
 #[derive(Clone, Debug)]
@@ -115,78 +90,78 @@ pub enum CoreEvent {
 
 impl EventEmitter<CoreEvent> for Core {}
 
-/// Guidance shared by the production pairing rejection and the Forge
-/// agent-call rejection: legacy direct pairing has no exact binding proof,
-/// so enrollment is account-side until proven adoption exists.
-pub(crate) const DIRECT_PAIRING_DISABLED: &str =
-    "direct pairing is disabled: enroll this Forge into your account from the Account page, then connect it there";
-
 impl Core {
-    /// Loads this device's files. Hosts stay disconnected until the
-    /// account-only gate reaches `Ready`: no legacy auto-connect prior to
-    /// account readiness, no workspace flash while `Restoring`.
+    /// Loads this device's files. No host connects until the account says
+    /// which of its Forges to open.
     pub fn new(files: EditorFiles, cx: &mut Context<Self>) -> Result<Self> {
+        Self::with_services(files, Services::installed(), cx)
+    }
+
+    pub fn with_services(
+        files: EditorFiles,
+        services: Services,
+        cx: &mut Context<Self>,
+    ) -> Result<Self> {
         let identity = files.identity()?;
         let hosts_file = files.hosts()?;
+        Ok(Self::assemble(
+            files,
+            services,
+            Some(identity),
+            hosts_file,
+            cx,
+        ))
+    }
+
+    fn assemble(
+        files: EditorFiles,
+        services: Services,
+        identity: Option<Identity>,
+        hosts_file: HostsFile,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let settings = files.settings().unwrap_or_else(|error| {
             tracing::warn!("ignored unreadable settings: {error:#}");
             EditorSettings::new()
         });
-        let files_dir = files.dir.clone();
-        let mut core = Self {
-            files,
-            identity: Some(identity),
-            settings,
-            hosts: HashMap::new(),
-            hosts_file,
-            pairing_targets: PairingTargets::default(),
-            screen: Screen::Home,
-            back: Vec::new(),
-            pending_screen: None,
-            relay_autoconnected: None,
-            gate_ready: None,
-            onboarding_cache: None,
-            onboarding_scope: None,
-            device_name: device_name(),
-            mcp_sign_ins: mcp_sign_in::McpSignIns::default(),
-            account: cx.new(|cx| Account::new(EditorFiles { dir: files_dir }, cx)),
-            account_hosts: HashMap::new(),
-            account_configs: HashMap::new(),
-            account_session: None,
+        let account_files = EditorFiles {
+            dir: files.dir.clone(),
         };
-        // Exact startup install Vilde requests: build his transport factory
-        // from the account's session-authed Core client and register it on
-        // Core (which forwards to the account controller). `Account::new`
-        // installs the same factory as a default so standalone controller
-        // tests still exercise login/resume; this call makes the app
-        // bootstrap path explicit and keeps `set_relay_dialer_factory` wired.
-        let factory = crate::client::relay_dialer_factory(
-            core.account.read(cx).session_client(),
-            cx.background_executor().clone(),
-        );
-        core.set_relay_dialer_factory(factory, cx);
-        // Account transitions drive the gate: lock hosts on sign-out,
-        // refresh the onboarding cache on auth, connect deferred hosts on
-        // `Ready`. The subscription is installed before any async resume
-        // completes, so startup has no flash or missed event.
-        cx.subscribe(&core.account, |core, account, event, cx| {
-            if matches!(event, AccountEvent::Changed) {
-                core.reconcile_access(&account, cx);
+        let account = cx.new(|cx| Account::new(account_files, services, cx));
+        cx.subscribe(&account, |core, _, event, cx| {
+            if *event == AccountEvent::Synced {
+                core.dials
+                    .retain(|_, dial| !matches!(dial, access::Dial::Failed));
             }
+            core.reconcile(cx);
         })
         .detach();
-        if let Some(reduced) = core
-            .settings
+        if let Some(reduced) = settings
             .get("reduced_motion")
             .and_then(serde_json::Value::as_bool)
         {
             cx.set_reduce_motion(reduced);
         }
-        editor_ui::theme::set_mode(theme_mode(&core.settings), cx);
-        editor_ui::theme::set_fonts(font_set(&core.settings), cx);
-        set_outline_text(outline_text(&core.settings), cx);
-        editor_ui::streaming::set_mode(streaming_mode(&core.settings), cx);
-        Ok(core)
+        editor_ui::theme::set_mode(theme_mode(&settings), cx);
+        editor_ui::theme::set_fonts(font_set(&settings), cx);
+        set_outline_text(outline_text(&settings), cx);
+        editor_ui::streaming::set_mode(streaming_mode(&settings), cx);
+        Self {
+            files,
+            identity,
+            settings,
+            hosts: HashMap::new(),
+            hosts_file,
+            screen: Screen::Home,
+            back: Vec::new(),
+            pending_screen: None,
+            gate: account.read(cx).entry_gate(),
+            device_name: device_name(),
+            mcp_sign_ins: mcp_sign_in::McpSignIns::default(),
+            account,
+            relay_configs: HashMap::new(),
+            dials: HashMap::new(),
+        }
     }
 
     fn connect(
@@ -201,7 +176,8 @@ impl Core {
             host.set_pairing(&config.kind, &config.address);
             host
         });
-        cx.subscribe(&host, |core, host, event, cx| match event {
+        let mut was_live = false;
+        cx.subscribe(&host, move |core, host, event, cx| match event {
             HostEvent::WslDistro { distro } => {
                 let id = host.read(cx).id.clone();
                 core.remember_wsl_distro(&id, distro);
@@ -209,11 +185,18 @@ impl Core {
             HostEvent::EditorCall { id, call } => {
                 core.editor_call(&host, id.clone(), call.clone(), cx);
             }
+            HostEvent::Changed => {
+                let live = host.read(cx).is_live();
+                if live != was_live {
+                    was_live = live;
+                    cx.emit(CoreEvent::HostsChanged);
+                    cx.notify();
+                }
+            }
             HostEvent::Reset
             | HostEvent::ImagesChanged
             | HostEvent::EngineInstall { .. }
             | HostEvent::ThreadSummaryChanged { .. }
-            | HostEvent::Changed
             | HostEvent::ThreadChanged { .. }
             | HostEvent::Item(_)
             | HostEvent::Live { .. } => {}
@@ -239,92 +222,52 @@ impl Core {
         }
     }
 
-    /// Visible paired hosts. Empty unless the gate is `Ready`: setup uses
-    /// private internals, public UI never sees content while locked.
-    /// Gated on the synchronously maintained Ready identity: no `cx`,
-    /// no disk IO, no account read on this hot path.
+    /// The live hosts the workspace may show: none until the gate is `Ready`.
     pub fn hosts(&self) -> impl Iterator<Item = (&HostConfig, &Entity<HostData>)> {
-        let ready = self.gate_ready.is_some();
+        let ready = matches!(self.gate, EntryGate::Ready { .. });
         self.hosts_file
             .hosts
             .iter()
+            .chain(self.relay_configs.values())
             .filter_map(|config| self.hosts.get(&config.id).map(|host| (config, host)))
-            .chain(
-                self.account_configs
-                    .values()
-                    .filter_map(|config| self.hosts.get(&config.id).map(|host| (config, host))),
-            )
             .filter(move |_| ready)
     }
 
     #[must_use]
     pub fn host(&self, id: &HostId) -> Option<&Entity<HostData>> {
-        self.gate_ready.as_ref()?;
-        self.hosts.get(id)
+        self.hosts()
+            .find(|(config, _)| &config.id == id)
+            .map(|(_, host)| host)
+    }
+
+    /// Whether the route to one of the account's Forges is live, whatever
+    /// the gate says; setup uses it to offer "Finish setup".
+    #[must_use]
+    pub fn machine_live(&self, machine_id: &str, cx: &App) -> bool {
+        self.hosts
+            .get(&HostId(machine_id.to_owned()))
+            .is_some_and(|host| host.read(cx).is_live())
     }
 
     /// True until the user explicitly removes this pairing, including connection failures.
     pub fn is_paired(&self, id: &HostId) -> bool {
-        self.hosts_file.hosts.iter().any(|host| &host.id == id)
+        self.relay_configs.contains_key(id)
+            || self.hosts_file.hosts.iter().any(|host| &host.id == id)
     }
 
-    /// The current screen's host, then the saved last host, then the first paired host.
-    /// `None` unless `Ready`; locked states never leak a host. Gated on the
-    /// synchronously maintained Ready identity: no `cx` on this hot path.
+    /// The current screen's host, then the saved last host, then the first one.
     #[must_use]
     pub fn active_host(&self) -> Option<&Entity<HostData>> {
-        self.gate_ready.as_ref()?;
         self.screen
             .host()
-            .and_then(|id| self.hosts.get(id))
-            .or_else(|| {
-                self.hosts_file
-                    .last
-                    .as_ref()
-                    .and_then(|id| self.hosts.get(id))
-            })
-            .or_else(|| {
-                self.hosts_file
-                    .hosts
-                    .iter()
-                    .filter_map(|config| self.hosts.get(&config.id))
-                    .chain(
-                        self.account_configs
-                            .values()
-                            .filter_map(|config| self.hosts.get(&config.id)),
-                    )
-                    .next()
-            })
+            .and_then(|id| self.host(id))
+            .or_else(|| self.hosts_file.last.as_ref().and_then(|id| self.host(id)))
+            .or_else(|| self.hosts().next().map(|(_, host)| host))
     }
 
-    /// Saves a newly paired host and connects to it.
-    ///
-    /// Forbidden legacy access: unverified direct configs (`Local`/`Wsl`/
-    /// `Remote`) are rejected in every gate state until exact direct binding
-    /// proof exists. Relay routes enter via `connect_with_client` with a
-    /// live client; new Forges enroll through the account (claim/confirm)
-    /// then connect from the Account page.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "callers hand over a freshly paired host; the saved copy is kept on success"
-    )]
-    pub fn add_host(&mut self, config: HostConfig, _cx: &mut Context<Self>) -> Result<()> {
-        if !matches!(config.kind, HostKind::Account { .. }) {
-            anyhow::bail!(crate::DIRECT_PAIRING_DISABLED);
-        }
-        anyhow::bail!("account Forges connect from the Account page, not by pairing")
-    }
-
-    /// The AST account controller: sign-in state, sessions, machines.
     #[must_use]
     pub const fn account(&self) -> &Entity<Account> {
         &self.account
-    }
-
-    pub fn set_relay_dialer_factory(&mut self, factory: RelayDialerFactory, cx: &mut Context<Self>) {
-        self.account.update(cx, |account, _| {
-            account.set_relay_dialer_factory(factory);
-        });
     }
 
     pub fn remove_host(&mut self, id: &HostId, cx: &mut Context<Self>) -> Result<()> {
@@ -335,8 +278,7 @@ impl Core {
         }
         self.files.save_hosts(&file)?;
         self.hosts_file = file;
-        self.account_hosts.remove(id);
-        self.account_configs.remove(id);
+        self.relay_configs.remove(id);
         self.hosts.remove(id);
         if self.screen.host() == Some(id) {
             self.navigate(Screen::Home, cx);
@@ -354,7 +296,7 @@ impl Core {
     /// Home is only the pairing entry: with a host it is a new thread there.
     /// Locked states stay on `Home`; only `Ready` auto-advances.
     fn landing(&self, screen: Screen, cx: &App) -> Screen {
-        if !matches!(self.entry_gate(cx), EntryGate::Ready { .. }) {
+        if !matches!(self.gate, EntryGate::Ready { .. }) {
             return match screen {
                 Screen::Settings(SettingsPage::Account) | Screen::Home => screen,
                 Screen::Thread { .. }
@@ -375,7 +317,7 @@ impl Core {
 
     pub fn navigate(&mut self, screen: Screen, cx: &mut Context<Self>) {
         // Locked: stash workspace intent, never load guarded content.
-        if !matches!(self.entry_gate(cx), EntryGate::Ready { .. })
+        if !matches!(self.gate, EntryGate::Ready { .. })
             && !Self::screen_allowed_while_locked(&screen)
         {
             self.pending_screen = Some(screen);
@@ -594,32 +536,7 @@ pub fn init(cx: &mut App) -> (Entity<Core>, Option<anyhow::Error>) {
         Ok(core) => core,
         Err(error) => {
             failure = Some(error);
-            Core {
-                files: files.clone(),
-                identity: None,
-                settings: EditorSettings::new(),
-                hosts: HashMap::new(),
-                hosts_file: HostsFile::default(),
-                pairing_targets: PairingTargets::default(),
-                screen: Screen::Home,
-                back: Vec::new(),
-                pending_screen: None,
-                relay_autoconnected: None,
-                gate_ready: None,
-                onboarding_cache: None,
-                onboarding_scope: None,
-                device_name: device_name(),
-                mcp_sign_ins: mcp_sign_in::McpSignIns::default(),
-                account: cx.new(|cx| Account::new(
-                    EditorFiles {
-                        dir: files.dir.clone(),
-                    },
-                    cx,
-                )),
-                account_hosts: HashMap::new(),
-                account_configs: HashMap::new(),
-                account_session: None,
-                }
+            Core::assemble(files, Services::installed(), None, HostsFile::default(), cx)
         }
     });
     (core, failure)

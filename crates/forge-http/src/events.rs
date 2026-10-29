@@ -30,7 +30,7 @@ struct Queue {
     sender: mpsc::Sender<Queued>,
     bytes: Arc<Semaphore>,
 }
-impl Queue {
+impl EnvelopeSink for Queue {
     async fn send(&self, envelope: Envelope) -> anyhow::Result<()> {
         let data = serde_json::to_string(&envelope)?;
         let oversized = data.len() > QUEUE_BYTES;
@@ -72,211 +72,28 @@ pub struct Since {
 }
 
 impl Since {
-    pub(crate) const fn tunnel(since: Seq, summary: bool, thread: Option<artisan_api::ThreadId>) -> Self {
-        Self {
-            since,
-            summary,
-            thread,
-        }
-    }
-
-    pub(crate) fn parse_events_path(path: &str) -> Option<Self> {
-        let (_, query) = path.split_once('?')?;
-        let mut since = 0;
-        let mut summary = false;
-        let mut thread = None;
-        for pair in query.split('&') {
-            let (key, value) = pair.split_once('=')?;
-            match key {
-                "since" => since = value.parse().ok()?,
-                "summary" => summary = value == "true",
-                "thread" => thread = Some(artisan_api::ThreadId(value.into())),
-                _ => return None,
-            }
-        }
-        Some(Self::tunnel(since, summary, thread))
+    /// Reads `/events?since=…&summary=…&thread=…` from a tunneled path.
+    pub(crate) fn from_events_path(path: &str) -> Option<Self> {
+        let uri: axum::http::Uri = path.parse().ok()?;
+        (uri.path() == "/events")
+            .then(|| Query::<Self>::try_from_uri(&uri).ok())
+            .flatten()
+            .map(|Query(since)| since)
     }
 }
 
-/// Forward stored + live envelopes into a bounded tunneled stream.
-///
-/// Same backlog/live/cursor semantics as [`stream`] (subscribe first, skip
-/// durable overlap by seq, memory overlap by publication revision, Reset
-/// when the backlog is gone or the broadcast lags). Ends when the receiver
-/// is gone (channel closed/cancelled) or a terminal Reset is sent. The
-/// caller frames each [`Envelope`] as a `$event` DATA frame; envelopes that
-/// would exceed the Noise plaintext cap are chunked by the caller.
-#[expect(clippy::too_many_lines, reason = "backlog/live/cursor in one tunnel turn")]
-pub async fn forward_tunnel(
-    app: &App,
-    scope: &Since,
-    sender: &tokio::sync::mpsc::Sender<Envelope>,
-) -> anyhow::Result<()> {
-    let send = async |envelope: Envelope| -> anyhow::Result<()> {
-        sender.send(envelope).await.map_err(|_send| anyhow::anyhow!("stream gone"))?;
-        Ok(())
-    };
-    let since = scope.since;
-    let store = app.hub.store();
-    let mut changes = store.subscribe();
-    let head = store.head();
-    send(Envelope {
-        seq: None,
-        live_revision: 0,
-        event: Event::Hello {
-            head,
-            protocol: artisan_api::PROTOCOL_VERSION,
-            forge_version: app.forge_version.clone(),
-        },
-    })
-    .await?;
-    let mut last = since;
-    let (mut completed_items, mut completed_runs) = (HashSet::new(), HashSet::new());
-    if let Some(backlog) = store
-        .changes_since_scoped(since, BACKLOG_LIMIT, scope.summary, scope.thread.clone())
-        .await?
-    {
-        for envelope in backlog {
-            match &envelope.event {
-                Event::Item { item } if item.status.is_terminal() => {
-                    completed_items.insert(item.id.clone());
-                }
-                Event::Run { run } if !run.status.is_live() => {
-                    completed_runs.insert(run.id.clone());
-                }
-                Event::Hello { .. }
-                | Event::Project { .. }
-                | Event::Thread { .. }
-                | Event::Item { .. }
-                | Event::Run { .. }
-                | Event::ItemState { .. }
-                | Event::Setting { .. }
-                | Event::Live { .. }
-                | Event::Suggestion { .. }
-                | Event::Engine { .. }
-                | Event::EngineInstall { .. }
-                | Event::EditorCall { .. }
-                | Event::Reset => {}
-            }
-            last = last.max(envelope.seq.unwrap_or(last));
-            if let Some(envelope) = scoped(envelope, scope) {
-                send(envelope).await?;
-            }
-        }
-    } else {
-        send(Envelope {
-            seq: None,
-            live_revision: 0,
-            event: Event::Reset,
-        })
-        .await?;
-        return Ok(());
-    }
-    let live_revision =
-        send_live_tunnel_snapshot(app, scope, sender, &completed_items, &completed_runs).await?;
-    let mut cursor = Cursor {
-        last,
-        live_revision,
-    };
-    send_engine_tunnel_statuses(app, sender).await?;
-    loop {
-        match changes.recv().await {
-            Ok(mut envelope) => {
-                if !cursor.accept(&envelope) {
-                    continue;
-                }
-                match &mut envelope.event {
-                    Event::Engine { status } => *status = app.hub.engines().status(status.engine),
-                    Event::EngineInstall { engine, install } => {
-                        *install = app.hub.engines().install_state(*engine);
-                    }
-                    Event::Hello { .. }
-                    | Event::Project { .. }
-                    | Event::Thread { .. }
-                    | Event::Item { .. }
-                    | Event::Run { .. }
-                    | Event::ItemState { .. }
-                    | Event::Setting { .. }
-                    | Event::Live { .. }
-                    | Event::Suggestion { .. }
-                    | Event::EditorCall { .. }
-                    | Event::Reset => {}
-                }
-                if let Some(envelope) = scoped(envelope, scope) {
-                    send(envelope).await?;
-                }
-            }
-            // Fell behind: the client refetches the state and reconnects.
-            Err(RecvError::Lagged(_)) => {
-                send(Envelope {
-                    seq: None,
-                    live_revision: 0,
-                    event: Event::Reset,
-                })
-                .await?;
-                return Ok(());
-            }
-            Err(RecvError::Closed) => return Ok(()),
-        }
-    }
+/// Where `forward` puts envelopes: the SSE byte-budgeted queue, or a
+/// tunneled stream's channel.
+pub(crate) trait EnvelopeSink {
+    async fn send(&self, envelope: Envelope) -> anyhow::Result<()>;
 }
 
-async fn send_live_tunnel_snapshot(
-    app: &App,
-    scope: &Since,
-    sender: &tokio::sync::mpsc::Sender<Envelope>,
-    completed_items: &HashSet<artisan_api::ItemId>,
-    completed_runs: &HashSet<artisan_api::RunId>,
-) -> anyhow::Result<u64> {
-    let (live_revision, snapshot) = app.hub.live_snapshot();
-    for event in snapshot {
-        if let Event::Live { target, .. } = &event {
-            let completed = match target {
-                LiveTarget::Text { item_id }
-                | LiveTarget::Shell { item_id }
-                | LiveTarget::Progress { item_id } => completed_items.contains(item_id),
-                LiveTarget::Reasoning { run_id } | LiveTarget::Status { run_id } => {
-                    completed_runs.contains(run_id)
-                }
-            };
-            if completed {
-                continue;
-            }
-        }
-        if let Some(envelope) = scoped(
-            Envelope {
-                seq: None,
-                live_revision: 0,
-                event,
-            },
-            scope,
-        ) {
-            sender
-                .send(envelope)
-                .await
-                .map_err(|_send| anyhow::anyhow!("stream gone"))?;
-        }
-    }
-    Ok(live_revision)
-}
-
-async fn send_engine_tunnel_statuses(
-    app: &App,
-    sender: &tokio::sync::mpsc::Sender<Envelope>,
-) -> anyhow::Result<()> {
-    for engine in artisan_api::EngineId::ALL {
-        sender
-            .send(Envelope {
-                seq: None,
-                live_revision: 0,
-                event: Event::Engine {
-                    status: app.hub.engines().status(engine),
-                },
-            })
+impl EnvelopeSink for tokio::sync::mpsc::Sender<Envelope> {
+    async fn send(&self, envelope: Envelope) -> anyhow::Result<()> {
+        Self::send(self, envelope)
             .await
-            .map_err(|_send| anyhow::anyhow!("stream gone"))?;
+            .map_err(|_| anyhow::anyhow!("stream gone"))
     }
-    Ok(())
 }
 
 pub async fn stream(
@@ -336,7 +153,13 @@ pub async fn stream(
     Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
-async fn forward(app: &App, scope: &Since, sender: &Queue) -> anyhow::Result<()> {
+/// Stored changes after `scope.since`, then the live snapshot, engine
+/// statuses and live changes, until the sink goes away or a Reset is sent.
+pub(crate) async fn forward(
+    app: &App,
+    scope: &Since,
+    sender: &impl EnvelopeSink,
+) -> anyhow::Result<()> {
     let since = scope.since;
     let store = app.hub.store();
     let mut changes = store.subscribe();
@@ -440,7 +263,7 @@ async fn forward(app: &App, scope: &Since, sender: &Queue) -> anyhow::Result<()>
 async fn send_live_snapshot(
     app: &App,
     scope: &Since,
-    sender: &Queue,
+    sender: &impl EnvelopeSink,
     completed_items: &HashSet<artisan_api::ItemId>,
     completed_runs: &HashSet<artisan_api::RunId>,
 ) -> anyhow::Result<u64> {
@@ -474,7 +297,7 @@ async fn send_live_snapshot(
 }
 
 /// Sends every engine's current status.
-async fn send_engine_statuses(app: &App, sender: &Queue) -> anyhow::Result<()> {
+async fn send_engine_statuses(app: &App, sender: &impl EnvelopeSink) -> anyhow::Result<()> {
     for engine in artisan_api::EngineId::ALL {
         send(
             sender,
@@ -560,7 +383,7 @@ fn scoped(mut envelope: Envelope, scope: &Since) -> Option<Envelope> {
     Some(envelope)
 }
 
-async fn send(sender: &Queue, seq: Option<Seq>, event: Event) -> anyhow::Result<()> {
+async fn send(sender: &impl EnvelopeSink, seq: Option<Seq>, event: Event) -> anyhow::Result<()> {
     sender
         .send(Envelope {
             seq,

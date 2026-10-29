@@ -193,7 +193,8 @@ impl Palette {
                 "claude.ai mode",
                 SettingsPage::Section(editor_core::SettingsSection::ClaudeAi),
             ),
-            ("Hosts and devices", SettingsPage::Hosts),
+            ("Forges", SettingsPage::Hosts),
+            ("Account", SettingsPage::Account),
             ("About", SettingsPage::About),
             ("Threads and archive", SettingsPage::Threads),
             ("Global prompt", SettingsPage::GlobalPrompt),
@@ -513,8 +514,7 @@ mod tests {
             core.update(cx, |core, cx| {
                 let identity = core.identity.clone().unwrap();
                 let client =
-                    editor_core::ForgeClient::new("127.0.0.1:1", &fingerprint, &identity)
-                        .unwrap();
+                    editor_core::ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
                 let config = editor_core::HostConfig {
                     id: id.clone(),
                     name: host.into(),

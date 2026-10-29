@@ -19,11 +19,10 @@ use editor_core::{Core, CoreEvent, HostData, HostEvent, Screen, SettingsPage};
 use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::switch::{Switch, SwitchSize};
 use editor_ui::theme::{ActiveTheme as _, ArtisanTheme};
-use editor_ui::wheel_glide::WheelGlide;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, point, px,
+    AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 
 pub use about::BuildInfo;
@@ -40,17 +39,16 @@ pub struct Settings {
     theme: ArtisanTheme,
     build: BuildInfo,
     engines: engines::EnginesForm,
-    account: account::AccountForm,
+    sign_in: Entity<account::sign_in::SignInView>,
+    forges: Entity<account::forges::ForgesView>,
     extensions: extensions::ExtensionsForm,
     prompt: prompt::PromptForm,
-    hosts: hosts::HostsForm,
     archive: threads::ArchiveForm,
     scroll: ScrollHandle,
     scroll_page: Option<SettingsPage>,
-    glide: WheelGlide,
-    glide_scheduled: bool,
     host_subscription: Option<Subscription>,
     _core_subscription: Subscription,
+    _account_subscription: Subscription,
 }
 
 impl Settings {
@@ -66,7 +64,6 @@ impl Settings {
                 return;
             }
             if matches!(event, CoreEvent::ScreenChanged) {
-                this.glide.cancel();
                 this.engines.clear_errors();
             }
             if matches!(event, CoreEvent::HostsChanged | CoreEvent::ScreenChanged) {
@@ -76,28 +73,31 @@ impl Settings {
             }
             cx.notify();
         });
+        let account = core.read(cx).account().clone();
+        let account_subscription =
+            cx.subscribe(&account, |_, _, _: &editor_core::AccountEvent, cx| {
+                cx.notify();
+            });
         let mut settings = Self {
             #[cfg(test)]
             completion_gate: None,
-            core: core.clone(),
             theme: *cx.theme(),
             build,
             engines: engines::EnginesForm::new(cx),
-            account: account::AccountForm::new(core, cx),
+            sign_in: cx.new(|cx| account::sign_in::SignInView::new(core.clone(), cx)),
+            forges: cx.new(|cx| account::forges::ForgesView::new(core.clone(), cx)),
+            core,
             extensions: extensions::ExtensionsForm::new(cx),
             prompt: prompt::PromptForm::new(cx),
-            hosts: hosts::HostsForm::new(),
             archive: threads::ArchiveForm::default(),
             scroll: ScrollHandle::new(),
             scroll_page: None,
-            glide: WheelGlide::default(),
-            glide_scheduled: false,
             host_subscription: None,
             _core_subscription: core_subscription,
+            _account_subscription: account_subscription,
         };
         settings.watch_hosts(cx);
         settings.sync_host(cx);
-        settings.account.watch_account(cx);
         settings
     }
 
@@ -166,47 +166,6 @@ impl Settings {
             | Screen::Marketplace
             | Screen::Usage => SettingsPage::General,
         }
-    }
-
-    fn wheel(
-        &mut self,
-        event: &ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if event.delta.precise() || cx.reduce_motion() {
-            self.glide.cancel();
-            return;
-        }
-        let max = f32::from(self.scroll.max_offset().y).max(0.0);
-        let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);
-        if max <= 0.0 || delta.abs() <= f32::EPSILON {
-            return;
-        }
-        cx.stop_propagation();
-        self.glide.push(f32::from(self.scroll.offset().y), delta, max);
-        self.schedule_glide(window, cx);
-    }
-
-    fn schedule_glide(&mut self, window: &mut Window, cx: &Context<Self>) {
-        if !self.glide.active() || self.glide_scheduled {
-            return;
-        }
-        self.glide_scheduled = true;
-        cx.on_next_frame(window, |this, window, cx| {
-            this.glide_scheduled = false;
-            if !matches!(this.core.read(cx).screen(), Screen::Settings(_)) || cx.reduce_motion() {
-                this.glide.cancel();
-                return;
-            }
-            let offset = this.scroll.offset();
-            let max = f32::from(this.scroll.max_offset().y).max(0.0);
-            if let Some(next) = this.glide.step(f32::from(offset.y), max) {
-                this.scroll.set_offset(point(offset.x, px(next)));
-                cx.notify();
-            }
-            this.schedule_glide(window, cx);
-        });
     }
 
     fn render_main(
@@ -291,7 +250,6 @@ impl Render for Settings {
         let theme = self.theme;
         let page = self.page(cx);
         if self.scroll_page != Some(page) {
-            self.glide.cancel();
             self.scroll = ScrollHandle::new();
             self.scroll_page = Some(page);
         }
@@ -308,25 +266,17 @@ impl Render for Settings {
             .track_scroll(&self.scroll)
             .text_color(theme.colors.text.to_paint())
             .child(
-                // Handle ticks inside the content before the outer scroller's
-                // native listener. Nested controls still receive input first.
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .justify_center()
-                    .on_scroll_wheel(cx.listener(Self::wheel))
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(ui::COLUMN_MAX_WIDTH))
-                            .px(px(40.0))
-                            .pt(px(64.0))
-                            .pb(px(120.0))
-                            .flex()
-                            .flex_col()
-                            .child(main),
-                    ),
+                div().w_full().flex().flex_row().justify_center().child(
+                    div()
+                        .w_full()
+                        .max_w(px(ui::COLUMN_MAX_WIDTH))
+                        .px(px(40.0))
+                        .pt(px(64.0))
+                        .pb(px(120.0))
+                        .flex()
+                        .flex_col()
+                        .child(main),
+                ),
             )
     }
 }

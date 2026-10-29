@@ -1170,67 +1170,53 @@ impl Sidebar {
             )
     }
 
-    /// The rail's avatar, in the window frame's bottom-left corner: it
-    /// opens the account and usage menu. Who and where are in the menu and
-    /// the tooltip-free label; a status dot says the host needs attention.
-    /// The signed-in AST account's avatar seed and display name, if any.
-    /// Machine provenance stays separate: hosts keep their own names and
-    /// fingerprints.
-    pub(crate) fn ast_identity(core: &Entity<Core>, cx: &App) -> Option<(String, String)> {
-        core.read(cx).account().read(cx).profile().map(|profile| {
-            (
-                profile.account_id.clone(),
-                if profile.display_name.is_empty() {
-                    profile.email.clone()
-                } else {
-                    profile.display_name.clone()
+    /// The open host's avatar seed and engine user; with no host open, the
+    /// signed-in account's.
+    pub(crate) fn identity(
+        core: &Entity<Core>,
+        host: Option<&Entity<editor_core::HostData>>,
+        cx: &App,
+    ) -> (String, String) {
+        let account = || {
+            core.read(cx).account().read(cx).profile().map_or_else(
+                || ("no-host".to_owned(), "Artisan".to_owned()),
+                |profile| {
+                    let name = if profile.display_name.is_empty() {
+                        profile.email.clone()
+                    } else {
+                        profile.display_name.clone()
+                    };
+                    (profile.account_id.clone(), name)
                 },
             )
+        };
+        host.map_or_else(account, |host| {
+            let host = host.read(cx);
+            let seed = core
+                .read(cx)
+                .hosts()
+                .find(|(config, _)| config.id == host.id)
+                .map(|(config, _)| config.fingerprint.clone())
+                .filter(|fingerprint| !fingerprint.is_empty())
+                .unwrap_or_else(|| host.id.0.clone());
+            let user = host
+                .account
+                .as_ref()
+                .map_or_else(|| host.name.clone(), |account| account.user.clone());
+            (seed, user)
         })
     }
 
+    /// The rail's avatar, in the window frame's bottom-left corner: it
+    /// opens the account and usage menu. Who and where are in the menu and
+    /// the tooltip-free label; a status dot says the host needs attention.
     fn render_profile_trigger(&mut self, cx: &Context<Self>) -> AnyElement {
-        let ast = Self::ast_identity(&self.core, cx);
-        let (seed, name, machine, status) = self.host.as_ref().map_or_else(
-            || {
-                (
-                    ast.as_ref().map_or_else(
-                        || "no-host".to_owned(),
-                        |(account_id, _)| account_id.clone(),
-                    ),
-                    ast.as_ref().map_or_else(
-                        || "Artisan".to_owned(),
-                        |(_, display)| display.clone(),
-                    ),
-                    "No host".to_owned(),
-                    None,
-                )
-            },
+        let (seed, name) = Self::identity(&self.core, self.host.as_ref(), cx);
+        let (machine, status) = self.host.as_ref().map_or_else(
+            || ("No host".to_owned(), None),
             |host| {
                 let host = host.read(cx);
-                let seed = ast.as_ref().map_or_else(
-                    || {
-                        self.core
-                            .read(cx)
-                            .hosts()
-                            .find(|(config, _)| config.id == host.id)
-                            .map_or_else(
-                                || host.id.0.clone(),
-                                |(config, _)| config.fingerprint.clone(),
-                            )
-                    },
-                    |(account_id, _)| account_id.clone(),
-                );
-                let status = host.status_line().map(str::to_owned);
-                (
-                    seed,
-                    ast.as_ref().map_or_else(
-                        || host.name.clone(),
-                        |(_, display)| display.clone(),
-                    ),
-                    host.name.clone(),
-                    status,
-                )
+                (host.name.clone(), host.status_line().map(str::to_owned))
             },
         );
         let theme = *cx.theme();

@@ -209,7 +209,8 @@ impl Sidebar {
         };
         if let Some(to) = caret.to {
             let row_top = |index: usize| {
-                f32::from(u16::try_from(index).unwrap_or(u16::MAX)).mul_add(SECTION_ROW, CARET_INSET)
+                f32::from(u16::try_from(index).unwrap_or(u16::MAX))
+                    .mul_add(SECTION_ROW, CARET_INSET)
             };
             let marker = div()
                 .absolute()

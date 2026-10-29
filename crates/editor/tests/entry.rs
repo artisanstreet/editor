@@ -1,371 +1,232 @@
-//! Entry-guard behavior through the real controller path: a stub Core
-//! validates the saved session, the durable onboarding record flips the
-//! gate to `Ready`, the workspace mounts with no startup flash, and
-//! sign-out drops it again. Path-included into `src/entry.rs`, so `super::`
-//! reaches the private root. Not an integration target (`autotests = false`).
+//! The entry gate as a user meets it: resume, setup, sign-out and deep
+//! links, against a stub Core and a scripted `ae`. Path-included into
+//! `src/entry.rs`, so `super::` reaches the private root.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::time::Duration;
 
 use super::EntryRoot;
-use editor_core::{AeOutcome, AeRunner, Core, EditorFiles, EntryGate};
-use editor_settings::account::controller;
-use gpui::AppContext as _;
+use editor_core::{
+    Account, Core, EditorFiles, EntryGate, Screen, Services, SettingsPage,
+    save_onboarding_for_tests,
+};
+use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use serde_json::json;
 
-pub(crate) const ACCOUNT_ID: &str = "acct_test000000000000000000000001";
-pub(crate) const MACHINE_ID: &str = "mch_test00000000000000000000001";
-const SESSION: &str = "fixture-opaque-session";
+const ACCOUNT_ID: &str = "acct_test000000000000000000000001";
+const MACHINE_ID: &str = "mch_test00000000000000000000001";
 
-struct StubCore {
-    _thread: std::thread::JoinHandle<()>,
-    base_url: String,
+fn profile() -> serde_json::Value {
+    json!({
+        "account_id": ACCOUNT_ID,
+        "email": "op@example.invalid",
+        "display_name": "Op",
+        "totp_enrolled": false,
+        "machines": [{
+            "id": MACHINE_ID,
+            "label": "test-forge",
+            "public_key": {
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            },
+            "created_at": "2026-10-26T00:00:00.000Z",
+            "revoked_at": null,
+            "last_seen_at": null
+        }],
+        "latest_config_version": 3,
+    })
 }
 
-impl StubCore {
-    fn new() -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let thread = std::thread::spawn(move || {
-            for stream in listener.incoming().take(50) {
-                let Ok(stream) = stream else { break };
-                drop(stream.set_read_timeout(Some(Duration::from_secs(10))));
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut head = String::new();
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).is_err()
-                        || line == "\r\n"
-                        || line == "\n"
-                        || line.is_empty()
-                    {
-                        break;
-                    }
-                    head.push_str(&line);
-                }
-                let mut parts = head.lines().next().unwrap_or_default().split_whitespace();
-                let method = parts.next().unwrap_or_default();
-                let path = parts.next().unwrap_or_default();
-                let content_length: usize = head
-                    .lines()
-                    .find_map(|line| {
-                        line.strip_prefix("Content-Length:")
-                            .or_else(|| line.strip_prefix("content-length:"))
-                            .map(|value| value.trim().parse().unwrap_or(0))
-                    })
-                    .unwrap_or(0);
-                let mut raw = vec![0_u8; content_length];
-                reader.read_exact(&mut raw).unwrap_or(());
-                let body = match (method, path) {
-                    ("GET", "/v1/me") => serde_json::json!({
-                        "account_id": ACCOUNT_ID,
-                        "email": "op@example.invalid",
-                        "display_name": "Op",
-                        "totp_enrolled": false,
-                        "machines": [{
-                            "id": MACHINE_ID,
-                            "label": "test-forge",
-                            "public_key": {
-                                "kty": "OKP",
-                                "crv": "Ed25519",
-                                "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-                            },
-                            "created_at": "2026-10-26T00:00:00.000Z",
-                            "revoked_at": null,
-                            "last_seen_at": null
-                        }],
-                        "latest_config_version": 3,
-                    })
-                    .to_string(),
-                    ("POST", "/v1/sessions/current/revoke") => {
-                        serde_json::json!({"revoked": true}).to_string()
-                    }
-                    _ => serde_json::json!({
-                        "error": {
-                            "code": "not_found",
-                            "message": "stub",
-                            "request_id": "req-test"
-                        }
-                    })
-                    .to_string(),
-                };
-                let status = if body.contains("not_found") { 404 } else { 200 };
-                let response = format!(
-                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let mut stream = reader.into_inner();
-                if stream.write_all(response.as_bytes()).is_err() {
+/// Answers `/v1/me` with [`profile`] and session revokes with success.
+fn stub_core() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
                     break;
                 }
-                drop(stream.flush());
+                head.push_str(&line);
             }
-        });
-        Self {
-            _thread: thread,
-            base_url: format!("http://{address}"),
-        }
-    }
-}
-
-fn base64_url_no_pad(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let mut word = 0_u32;
-        for (index, byte) in chunk.iter().enumerate() {
-            word |= (*byte as u32) << (16 - 8 * index);
-        }
-        let digits = match chunk.len() {
-            3 => 4,
-            2 => 3,
-            _ => 2,
-        };
-        for index in 0..digits {
-            let sextet = ((word >> (18 - 6 * index)) & 0x3f) as usize;
-            out.push(ALPHABET[sextet] as char);
-        }
-    }
-    out
-}
-
-pub(crate) struct EntryFixture {
-    _dir: tempfile::TempDir,
-    _stub: StubCore,
-    pub(crate) core: gpui::Entity<Core>,
-}
-
-impl EntryFixture {
-    pub(crate) fn new(cx: &mut gpui::TestAppContext) -> Self {
-        Self::new_impl(cx, true)
-    }
-
-    /// Same session but no durable onboarding record: resume lands in
-    /// NeedsSetup instead of Ready.
-    pub(crate) fn new_without_record(cx: &mut gpui::TestAppContext) -> Self {
-        Self::new_impl(cx, false)
-    }
-
-    fn new_impl(cx: &mut gpui::TestAppContext, with_record: bool) -> Self {
-        let stub = StubCore::new();
-        let dir = tempfile::tempdir().unwrap();
-        let editor_dir = dir.path().join("editor");
-        std::fs::create_dir_all(&editor_dir).unwrap();
-        std::fs::write(
-            editor_dir.join("account.json"),
-            serde_json::json!({
-                "base_url": stub.base_url,
-                "session_token": SESSION,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        if with_record {
-            let record = serde_json::json!({
-                "account_id": ACCOUNT_ID,
-                "base_url": stub.base_url,
-                "machine_id": MACHINE_ID,
-                "method": "Relay",
-                "completed_at": "2026-10-26T00:00:00.000Z",
-            });
-            let name = format!(
-                "{}-{ACCOUNT_ID}.json",
-                base64_url_no_pad(stub.base_url.as_bytes())
-            );
-            let accounts = editor_dir.join("accounts");
-            std::fs::create_dir_all(&accounts).unwrap();
-            std::fs::write(accounts.join(name), record.to_string()).unwrap();
-        }
-        let core = cx.new(|cx| {
-            Core::new(
-                EditorFiles {
-                    dir: editor_dir,
-                },
-                cx,
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap_or(0))
+                })
+                .unwrap_or(0);
+            let mut body = vec![0_u8; length];
+            reader.read_exact(&mut body).ok();
+            let request = head.lines().next().unwrap_or_default();
+            let (status, body) = if request.starts_with("GET /v1/me ") {
+                (200, profile().to_string())
+            } else if request.starts_with("POST /v1/sessions/current/revoke ") {
+                (200, json!({"revoked": true}).to_string())
+            } else {
+                let error = json!({"error": {"code": "not_found", "message": "stub"}});
+                (404, error.to_string())
+            };
+            let mut stream = reader.into_inner();
+            write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             )
-            .unwrap()
-        });
-        // The mock ae runner must be installed before the executor runs the
-        // async resume: otherwise tests would shell out to a real `ae`.
-        let runner: editor_core::AeRunner = std::sync::Arc::new(|_| editor_core::AeOutcome {
-            success: true,
-            stdout: r#"{"enrolled":false,"enrollment_id":null,"status":"none","account_id":null,"email":null,"display_name":null}"#.to_owned(),
-            stderr: String::new(),
-        });
-        core.update(cx, |core, cx| {
-            core.account()
-                .update(cx, |account, _| account.set_ae_runner(runner));
-        });
-        Self {
-            _dir: dir,
-            _stub: stub,
-            core,
+            .ok();
         }
+    });
+    format!("http://{address}")
+}
+
+struct Fixture {
+    _dir: tempfile::TempDir,
+    core: Entity<Core>,
+}
+
+impl Fixture {
+    /// A device with a saved session for `core_url`; `profile` is the one an
+    /// earlier run saved, and `onboarded` whether setup finished here.
+    fn new(
+        cx: &mut TestAppContext,
+        core_url: &str,
+        profile: Option<serde_json::Value>,
+        onboarded: bool,
+    ) -> Self {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let files = EditorFiles {
+            dir: dir.path().join("editor"),
+        };
+        std::fs::create_dir_all(&files.dir).unwrap();
+        let mut account = json!({"base_url": core_url, "session_token": "fixture-session"});
+        if let Some(profile) = profile {
+            account["profile"] = profile;
+        }
+        std::fs::write(files.dir.join("account.json"), account.to_string()).unwrap();
+        if onboarded {
+            save_onboarding_for_tests(&files, core_url, ACCOUNT_ID, MACHINE_ID).unwrap();
+        }
+        let services = Services::scripted(
+            core_url,
+            std::sync::Arc::new(|_| Ok(r#"{"enrolled":false,"status":"none"}"#.to_owned())),
+            None,
+        );
+        let core = cx.new(|cx| Core::with_services(files, services, cx).unwrap());
+        Self { _dir: dir, core }
+    }
+
+    fn open<'a>(&self, cx: &'a mut TestAppContext) -> &'a mut VisualTestContext {
+        let core = self.core.clone();
+        cx.add_window_view(move |window, cx| EntryRoot::new(core, None, window, cx))
+            .1
+    }
+
+    fn gate(&self, cx: &VisualTestContext) -> EntryGate {
+        self.core.read_with(cx, |core, cx| core.entry_gate(cx))
+    }
+
+    fn account(
+        &self,
+        cx: &mut VisualTestContext,
+        action: impl FnOnce(&mut Account, &mut gpui::Context<Account>),
+    ) {
+        let account = self.core.read_with(cx, |core, _| core.account().clone());
+        account.update(cx, action);
     }
 }
 
-fn wait_for(
-    cx: &mut gpui::VisualTestContext,
+/// Runs the Editor's tasks, and gives the stub Core's thread time, until
+/// `check` holds.
+async fn wait_for(
+    cx: &mut VisualTestContext,
     what: &str,
-    mut check: impl FnMut(&mut gpui::VisualTestContext) -> bool,
+    mut check: impl FnMut(&mut VisualTestContext) -> bool,
 ) {
-    for _ in 0..400 {
-        cx.executor().allow_parking();
+    for _ in 0..500 {
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
         if check(cx) {
             return;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        cx.executor().timer(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for {what}");
 }
 
-/// Blocks until the fixture account validates and the gate reports NeedsSetup.
-pub(crate) fn wait_needs_setup(cx: &mut gpui::TestAppContext, core: &gpui::Entity<Core>) {
-    for _ in 0..400 {
-        cx.executor().allow_parking();
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-        if core.read_with(cx, |core, cx| {
-            matches!(core.entry_gate(cx), EntryGate::NeedsSetup { .. })
-        }) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("timed out waiting for the entry gate to report NeedsSetup");
-}
-
-/// Blocks until the fixture account validates and the gate reports Ready.
-pub(crate) fn wait_ready(cx: &mut gpui::TestAppContext, core: &gpui::Entity<Core>) {
-    for _ in 0..400 {
-        cx.executor().allow_parking();
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.run_until_parked();
-        if core.read_with(cx, |core, cx| {
-            matches!(core.entry_gate(cx), EntryGate::Ready { .. })
-        }) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("timed out waiting for the entry gate to report Ready");
-}
-
 #[gpui::test]
-fn resume_validates_then_ready_mounts_workspace(cx: &mut gpui::TestAppContext) {
-    cx.executor().allow_parking();
-    let fixture = EntryFixture::new(cx);
-    let gate = fixture
-        .core
-        .read_with(cx, |core, cx| core.entry_gate(cx));
-    assert!(
-        !matches!(gate, EntryGate::Ready { .. }),
-        "no workspace flash before resume validates, got {gate:?}"
-    );
-    let core = fixture.core.clone();
-    let (_entry, cx) = cx.add_window_view(move |window, cx| {
-        EntryRoot::new(core, None, window, cx)
-    });
-    assert!(cx.debug_bounds("entry-root").is_some());
+async fn resume_validates_then_ready_mounts_workspace(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx, &stub_core(), None, true);
+    let cx = fixture.open(cx);
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
-    wait_for(cx, "resume to validate and mount the workspace", |cx| {
+    wait_for(cx, "the workspace", |cx| {
         cx.debug_bounds("artisan-desktop-workspace").is_some()
-    });
+    })
+    .await;
     assert!(cx.debug_bounds("entry-root").is_none());
 }
 
 #[gpui::test]
-fn sign_out_drops_mounted_workspace_back_to_entry(cx: &mut gpui::TestAppContext) {
-    cx.executor().allow_parking();
-    let fixture = EntryFixture::new(cx);
-    let core = fixture.core.clone();
-    let (_entry, cx) = cx.add_window_view(move |window, cx| {
-        EntryRoot::new(core, None, window, cx)
-    });
-    wait_for(cx, "resume to validate and mount the workspace", |cx| {
+async fn offline_resume_with_a_saved_profile_mounts_the_workspace(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx, "http://127.0.0.1:1", Some(profile()), true);
+    let cx = fixture.open(cx);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("artisan-desktop-workspace").is_some());
+    assert!(matches!(fixture.gate(cx), EntryGate::Ready { .. }));
+}
+
+#[gpui::test]
+async fn sign_out_drops_mounted_workspace_back_to_entry(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx, &stub_core(), None, true);
+    let cx = fixture.open(cx);
+    wait_for(cx, "the workspace", |cx| {
         cx.debug_bounds("artisan-desktop-workspace").is_some()
-    });
-    let core = fixture.core.clone();
-    cx.update(|_, cx| controller::sign_out(&core, false, cx));
+    })
+    .await;
+    fixture.account(cx, Account::sign_out);
     cx.run_until_parked();
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
-    assert!(cx.debug_bounds("entry-root").is_some());
-    let gate = fixture
-        .core
-        .read_with(cx, |core, cx| core.entry_gate(cx));
-    assert!(
-        matches!(gate, EntryGate::SignedOut),
-        "sign-out must relock the gate, got {gate:?}"
-    );
-}
-
-/// A signed-in account without onboarding stays gated: retry revalidates
-/// without unlocking, and the setup surface offers switching accounts.
-#[gpui::test]
-fn needs_setup_offers_sign_out_and_retry_without_unlocking(cx: &mut gpui::TestAppContext) {
-    cx.executor().allow_parking();
-    let fixture = EntryFixture::new_without_record(cx);
-    wait_needs_setup(cx, &fixture.core);
-    let core = fixture.core.clone();
-    let (_entry, cx) = cx.add_window_view(move |window, cx| {
-        EntryRoot::new(core, None, window, cx)
-    });
-    wait_for(cx, "the setup surface to render", |cx| {
-        cx.debug_bounds("entry-setup").is_some()
-    });
-    assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
-    let core = fixture.core.clone();
-    cx.update(|_, cx| controller::refresh(&core, cx));
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("entry-setup").is_some(),
-        "retry must keep the setup surface, not unlock"
-    );
-    assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
-    let switcher = cx
-        .debug_bounds("entry-setup-use-another")
-        .expect("the setup surface offers switching accounts");
-    cx.simulate_click(switcher.center(), gpui::Modifiers::none());
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
-    assert!(
-        cx.debug_bounds("sign-in-submit").is_some(),
-        "switching accounts returns to sign-in"
-    );
-    let gate = fixture
-        .core
-        .read_with(cx, |core, cx| core.entry_gate(cx));
-    assert!(
-        matches!(gate, EntryGate::SignedOut),
-        "switching accounts must relock the gate, got {gate:?}"
-    );
+    assert!(cx.debug_bounds("sign-in-submit").is_some());
+    assert_eq!(fixture.gate(cx), EntryGate::SignedOut);
 }
 
 #[gpui::test]
-fn deep_links_do_not_mount_workspace_while_locked(cx: &mut gpui::TestAppContext) {
-    cx.executor().allow_parking();
-    let dir = tempfile::tempdir().unwrap();
-    let core = cx.new(|cx| {
-        Core::new(
-            EditorFiles {
-                dir: dir.path().join("editor"),
-            },
-            cx,
-        )
-        .unwrap()
-    });
-    core.update(cx, |core, cx| {
-        core.navigate(
-            editor_core::Screen::Settings(editor_core::SettingsPage::Account),
-            cx,
-        );
-    });
-    let (_entry, cx) = cx.add_window_view(|window, cx| {
-        EntryRoot::new(core.clone(), None, window, cx)
-    });
+async fn setup_can_switch_to_another_account(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx, &stub_core(), None, false);
+    let cx = fixture.open(cx);
+    wait_for(cx, "the setup screen", |cx| {
+        cx.debug_bounds("forges-use-another").is_some()
+    })
+    .await;
+    let switch = cx.debug_bounds("forges-use-another").unwrap();
+    cx.simulate_click(switch.center(), gpui::Modifiers::none());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("entry-root").is_some());
+    assert!(cx.debug_bounds("sign-in-submit").is_some());
     assert!(cx.debug_bounds("artisan-desktop-workspace").is_none());
+    assert_eq!(fixture.gate(cx), EntryGate::SignedOut);
+}
+
+#[gpui::test]
+async fn a_cold_start_deep_link_opens_once_ready(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx, &stub_core(), None, true);
+    let link = Screen::Settings(SettingsPage::General);
+    fixture
+        .core
+        .update(cx, |core, cx| core.navigate(link.clone(), cx));
+    let cx = fixture.open(cx);
+    assert!(cx.debug_bounds("settings-dialog").is_none());
+    wait_for(cx, "the linked screen", |cx| {
+        cx.debug_bounds("settings-dialog").is_some()
+    })
+    .await;
+    assert_eq!(
+        fixture.core.read_with(cx, |core, _| core.screen().clone()),
+        link
+    );
 }

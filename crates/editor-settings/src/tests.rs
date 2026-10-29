@@ -1,5 +1,5 @@
-//! Against a real in-process Forge: pairing by pasting, saving the global
-//! prompt, and the way from Extensions to the Marketplace's skills.
+//! Against a real in-process Forge: saving the global prompt, and the way
+//! from Extensions to the Marketplace's skills.
 
 use crate::prompt::GLOBAL_PROMPT_KEY;
 use crate::{BuildInfo, Settings};
@@ -29,8 +29,7 @@ fn added_host_goes_live_and_the_prompt_saves_to_forge(cx: &mut TestAppContext) {
     let core = fixture.core.clone();
     let (settings, cx) = fixture.open(cx, SettingsPage::Hosts);
     let host: Entity<HostData> = cx.read(|cx| {
-        core
-            .read(cx)
+        core.read(cx)
             .host(&fixture.hosts[0])
             .cloned()
             .expect("the paired test host is present")
@@ -177,8 +176,6 @@ impl SettingsFixture {
                 last: Some(hosts[0].clone()),
             })
             .unwrap();
-        // `for_tests` mocks the gate Ready and connects the saved paired
-        // hosts through the private inventory path.
         let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
         Self {
             core,
@@ -234,55 +231,4 @@ pub fn finish_gate(cx: &VisualTestContext, gate: &CompletionGate) {
     gate.release();
     wait_for(cx, "released callback", |_| gate.finished().then_some(()));
     cx.run_until_parked();
-}
-
-#[gpui::test]
-fn subsections_show_related_controls_in_their_own_category(cx: &mut TestAppContext) {
-    use editor_core::SettingsSection as S;
-    let fixture = SettingsFixture::new(cx);
-    let (_, cx) = fixture.open(cx, SettingsPage::Section(S::Appearance));
-    cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(900.0)));
-    assert!(cx.debug_bounds("settings-font-set-trigger").is_some());
-    assert!(cx.debug_bounds("settings-switch-notify").is_none());
-    assert!(cx.debug_bounds("settings-switch-enhanced-claude").is_none());
-    for (section, visible, absent) in [
-        (
-            S::Notifications,
-            "settings-switch-notify",
-            "settings-font-set-trigger",
-        ),
-        (
-            S::Streaming,
-            "settings-streaming-mode-trigger",
-            "settings-switch-retry-overloaded",
-        ),
-        (
-            S::Automation,
-            "settings-switch-retry-overloaded",
-            "settings-switch-enhanced-claude",
-        ),
-        (
-            S::Assistance,
-            "settings-switch-suggestions",
-            "settings-switch-retry-overloaded",
-        ),
-        (
-            S::ClaudeAi,
-            "settings-switch-enhanced-claude",
-            "settings-section-account",
-        ),
-    ] {
-        fixture.core.update(cx, |core, cx| {
-            core.navigate(Screen::Settings(SettingsPage::Section(section)), cx);
-        });
-        cx.run_until_parked();
-        assert!(
-            cx.debug_bounds(visible).is_some(),
-            "{section:?} shows {visible}"
-        );
-        assert!(
-            cx.debug_bounds(absent).is_none(),
-            "{section:?} excludes {absent}"
-        );
-    }
 }

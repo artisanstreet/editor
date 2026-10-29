@@ -98,23 +98,8 @@ pub struct MagicFinalizeResponse {
     pub totp_verified: bool,
 }
 
-/// `GET /v1/sessions` entry (forward-compatible read).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    #[serde(default)]
-    pub device_name: Option<String>,
-    pub created_at: String,
-    pub expires_at: String,
-    #[serde(default)]
-    pub revoked_at: Option<String>,
-}
-
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod tests {
     use super::*;
 

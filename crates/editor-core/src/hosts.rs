@@ -1,6 +1,7 @@
 //! The Editor's own files: its identity and the Forges it is paired with.
 //! Pairing swaps certificates; the one-time code only confirms it.
 
+use crate::ae::Ae;
 use crate::client::ForgeClient;
 use crate::runtime::runtime;
 use anyhow::{Context, Result, bail};
@@ -45,7 +46,10 @@ pub enum HostKind {
     /// `address` and `fingerprint` stay empty for these entries. The
     /// Forge's enrolled Ed25519 key is Noise-pinning identity material
     /// presented in-band, never a TLS fingerprint — never store it as one.
-    Account { account: String, machine: String },
+    Account {
+        account: String,
+        machine: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -112,7 +116,7 @@ impl EditorFiles {
     }
 }
 
-fn read_json<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
+pub(crate) fn read_json<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     match std::fs::read(path) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
@@ -122,14 +126,20 @@ fn read_json<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     }
 }
 
-fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+/// Replaces `path` atomically, readable only by this user: these files hold
+/// the device key and the account session.
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     use std::io::Write as _;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
     let parent = path.parent().context("configuration directory")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let mut temporary =
         tempfile::NamedTempFile::new_in(parent).context("create configuration temporary")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o600))
+            .context("restrict configuration temporary")?;
+    }
     serde_json::to_writer_pretty(temporary.as_file_mut(), value)?;
     temporary.flush()?;
     temporary
@@ -143,68 +153,33 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 struct Invite {
     code: String,
     forge_certificate: String,
-    #[serde(default)]
-    address: Option<String>,
+    address: String,
 }
 
-/// Where a local Forge runs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LocalTarget {
-    ThisMachine,
-    Wsl { distro: String },
-}
-
-/// Pairs with a Forge on this machine or in WSL with no typing: runs
-/// `ae pair --json` there and uses the code it prints.
-pub async fn pair_local(
-    target: LocalTarget,
+/// Pairs with the Forge on this machine (or the WSL one `ae` forwards to)
+/// by running `ae pair --json` and using the code it prints. The host is
+/// keyed by its account machine id.
+pub(crate) async fn pair_this_machine(
+    ae: &Ae,
     identity: &Identity,
     device_name: &str,
+    id: HostId,
+    name: String,
 ) -> Result<HostConfig> {
-    let mut command = match &target {
-        LocalTarget::ThisMachine => tokio::process::Command::new("ae"),
-        LocalTarget::Wsl { distro } => {
-            let mut command = wsl_exe();
-            command.args(["-d", distro, "--exec", "sh", "-c", AE_IN_WSL, "ae"]);
-            command
-        }
-    };
-    command.args(["pair", "--json"]);
-    let output = runtime()
-        .spawn(async move { command.output().await })
-        .await?
-        .context("run `ae pair`")?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // An older `ae` has no `pair` command; its usage text says nothing
-        // about why pairing can't work.
-        if stderr.contains("unrecognized subcommand 'pair'") {
-            bail!(
-                "the `ae` found there is from an older Artisan; install the new Artisan there first (`ae install`)"
-            );
-        }
-        bail!("`ae pair` failed: {}", stderr.trim());
-    }
-    let invite: Invite =
-        serde_json::from_slice(&output.stdout).context("read what `ae pair` printed")?;
-    let address = invite
-        .address
-        .unwrap_or_else(|| format!("127.0.0.1:{}", 47_900));
+    let invite: Invite = serde_json::from_str(&ae.run(&["pair", "--json"]).await?)
+        .context("read what `ae pair` printed")?;
     let fingerprint = artisan_api::tls::fingerprint_of(&invite.forge_certificate)?;
-    let (name, kind) = match target {
-        LocalTarget::ThisMachine => ("This computer".to_owned(), HostKind::Local),
-        LocalTarget::Wsl { distro } => (distro.clone(), HostKind::Wsl { distro }),
-    };
-    pair(
-        &address,
+    let config = pair(
+        &invite.address,
         &invite.code,
         &fingerprint,
         identity,
         device_name,
         name,
-        kind,
+        HostKind::Local,
     )
-    .await
+    .await?;
+    Ok(HostConfig { id, ..config })
 }
 
 /// Runs `ae` inside a WSL distribution, where `ae install` links it.
@@ -249,21 +224,6 @@ async fn wsl_listing(args: &'static [&'static str]) -> Result<String> {
         .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     Ok(String::from_utf16_lossy(&units).replace('\0', ""))
-}
-
-/// The WSL distributions installed on this Windows machine; empty elsewhere
-/// or when `wsl.exe` is missing.
-pub(crate) async fn wsl_distros() -> Result<Vec<String>> {
-    if !cfg!(windows) {
-        return Ok(Vec::new());
-    }
-    Ok(wsl_listing(&["--list", "--quiet"])
-        .await
-        .context("Could not list WSL distributions")?
-        .lines()
-        .map(|line| line.trim().to_owned())
-        .filter(|line| !line.is_empty())
-        .collect())
 }
 
 /// One row of `wsl.exe --list --verbose`.
