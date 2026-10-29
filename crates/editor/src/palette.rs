@@ -193,7 +193,8 @@ impl Palette {
                 "claude.ai mode",
                 SettingsPage::Section(editor_core::SettingsSection::ClaudeAi),
             ),
-            ("Hosts and devices", SettingsPage::Hosts),
+            ("Forges", SettingsPage::Hosts),
+            ("Account", SettingsPage::Account),
             ("About", SettingsPage::About),
             ("Threads and archive", SettingsPage::Threads),
             ("Global prompt", SettingsPage::GlobalPrompt),
@@ -487,7 +488,7 @@ mod tests {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
         let core = cx.new(|cx| {
-            Core::new(
+            Core::for_tests(
                 editor_core::EditorFiles {
                     dir: dir.path().to_owned(),
                 },
@@ -511,17 +512,17 @@ mod tests {
         ] {
             let id = HostId(host.into());
             core.update(cx, |core, cx| {
-                core.add_host(
-                    editor_core::HostConfig {
-                        id: id.clone(),
-                        name: host.into(),
-                        address: "127.0.0.1:1".into(),
-                        fingerprint: fingerprint.clone(),
-                        kind: editor_core::HostKind::Remote,
-                    },
-                    cx,
-                )
-                .unwrap()
+                let identity = core.identity.clone().unwrap();
+                let client =
+                    editor_core::ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
+                let config = editor_core::HostConfig {
+                    id: id.clone(),
+                    name: host.into(),
+                    address: "127.0.0.1:1".into(),
+                    fingerprint: fingerprint.clone(),
+                    kind: editor_core::HostKind::Remote,
+                };
+                core.add_test_host(&config, client, cx);
             });
             let host = core.read_with(cx, |core, _| core.host(&id).unwrap().clone());
             host.update(cx, |host, _| {

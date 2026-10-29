@@ -174,6 +174,7 @@ impl Session {
         let path = Self::path(home);
         let dir = path.parent().context("the session has no folder")?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        #[cfg(unix)]
         restrict(dir, 0o700)?;
         let temporary = dir.join(format!("session.json.{}.tmp", std::process::id()));
         {
@@ -184,6 +185,7 @@ impl Session {
             let mut file = options
                 .open(&temporary)
                 .with_context(|| format!("creating {}", temporary.display()))?;
+            #[cfg(unix)]
             restrict(&temporary, 0o600)?;
             std::io::Write::write_all(&mut file, serde_json::to_string_pretty(self)?.as_bytes())?;
             file.sync_all()?;
@@ -245,16 +247,11 @@ impl Session {
 
 /// Makes a path this user's alone. Windows keeps per-user ACLs on the
 /// profile folder the data lives in.
+#[cfg(unix)]
 fn restrict(path: &Path, mode: u32) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .with_context(|| format!("restricting {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = (path, mode);
-    Ok(())
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("restricting {}", path.display()))
 }
 
 /// What one `Set-Cookie` header does to the session, when it is claude.ai's.

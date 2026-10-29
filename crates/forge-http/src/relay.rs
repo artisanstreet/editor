@@ -40,10 +40,11 @@ struct Channel {
     machine: String,
 }
 
-/// Pump output toward one stream's channel.
+/// Work finished off the socket loop, headed back to one channel.
 enum StreamMsg {
     Frame(Vec<u8>),
     End { reason: &'static str },
+    Response(artisan_api::TunnelResponse),
 }
 
 /// Per-channel send window mirroring the Relay room's accounting
@@ -143,20 +144,11 @@ struct Stream {
 }
 
 type WsSink = futures::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::Message,
 >;
 
-fn now_sec() -> i64 {
-    i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs()),
-    )
-    .unwrap_or(0)
-}
+use crate::core::now_sec;
 
 fn b64u_encode(bytes: &[u8]) -> String {
     use base64::Engine as _;
@@ -222,7 +214,7 @@ pub async fn serve_channel(
                     }
                     Ws::Binary(_) | Ws::Pong(_) | Ws::Frame(_) => continue,
                 };
-                if handle_server_text(
+                handle_server_text(
                     &text,
                     &mut sink,
                     &grant_jti,
@@ -239,15 +231,12 @@ pub async fn serve_channel(
                     &mut relay_recv_seq,
                     &stream_tx,
                 )
-                .await
-                .is_err()
-                {
-                    break;
-                }
+                .await?;
             }
             Some((name, msg)) = stream_rx.recv() => {
-                if handle_stream_msg(&name, msg, &mut channels, &mut streams, &mut windows, &mut sink).await.is_err() {
-                    break;
+                if let Err(error) = handle_stream_msg(&name, msg, &mut channels, &mut streams, &mut windows, &mut sink).await {
+                    tracing::debug!(channel = %name, "Relay channel failed: {error:#}");
+                    close_channel(&name, "channel-failed", &mut channels, &mut streams, &mut reassembly, &mut windows, &mut sink).await?;
                 }
             }
         }
@@ -259,7 +248,10 @@ pub async fn serve_channel(
     clippy::too_many_arguments,
     reason = "one Relay turn needs all of these; see serve_channel"
 )]
-#[expect(clippy::too_many_lines, reason = "one Relay frame dispatch with all cases")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one Relay frame dispatch with all cases"
+)]
 async fn handle_server_text(
     text: &str,
     sink: &mut WsSink,
@@ -278,10 +270,17 @@ async fn handle_server_text(
     stream_tx: &tokio::sync::mpsc::Sender<(String, StreamMsg)>,
 ) -> Result<()> {
     use tokio_tungstenite::tungstenite::Message as Ws;
-    let value: serde_json::Value =
-        serde_json::from_str(text).context("read a Relay frame")?;
-    let frame: ServerFrame = artisan_account::read_server_frame(value)
-        .map_err(|_frame| anyhow::anyhow!("bad server frame"))?;
+    // A frame this build does not know (a newer Relay) is skipped, never fatal.
+    let frame = match serde_json::from_str(text)
+        .map_err(anyhow::Error::from)
+        .and_then(|value| artisan_account::read_server_frame(value).map_err(anyhow::Error::from))
+    {
+        Ok(frame) => frame,
+        Err(error) => {
+            tracing::debug!("skipped a Relay frame: {error:#}");
+            return Ok(());
+        }
+    };
     match frame {
         ServerFrame::Challenge(challenge) => {
             use base64::Engine as _;
@@ -301,15 +300,14 @@ async fn handle_server_text(
             ))?;
             sink.send(Ws::Text(authenticate.into())).await?;
         }
-        ServerFrame::Ready(_)
-        | ServerFrame::Presence(_)
-        | ServerFrame::Ping(_) => {}
+        ServerFrame::Ready(_) | ServerFrame::Presence(_) => {}
+        ServerFrame::Ping(ping) => {
+            let pong = ClientFrame::Pong(artisan_account::PongFrame { v: 1, t: ping.t });
+            sink.send(Ws::Text(serde_json::to_string(&pong)?.into()))
+                .await?;
+        }
         ServerFrame::Error(error) => {
-            anyhow::bail!(
-                "Relay refused the tunnel: {} {}",
-                error.code,
-                error.message
-            );
+            anyhow::bail!("Relay refused the tunnel: {} {}", error.code, error.message);
         }
         ServerFrame::ChannelOpened(opened) => {
             let name = opened.channel;
@@ -341,18 +339,24 @@ async fn handle_server_text(
             send_ack(&name, data.seq, sink).await?;
             let expected = relay_recv_seq.get(&name).copied().unwrap_or(0);
             if data.seq != expected {
-                channels.remove(&name);
-                streams.remove(&name);
-                reassembly.drop_channel(&name);
-                windows.remove(&name);
+                close_channel(
+                    &name,
+                    "out-of-order",
+                    channels,
+                    streams,
+                    reassembly,
+                    windows,
+                    sink,
+                )
+                .await?;
                 return Ok(());
             }
             relay_recv_seq.insert(name.clone(), expected.saturating_add(1));
             let Ok(raw) = b64u_decode(&data.body) else {
-                channels.remove(&name);
-                streams.remove(&name);
-                reassembly.drop_channel(&name);
-                windows.remove(&name);
+                close_channel(
+                    &name, "bad-body", channels, streams, reassembly, windows, sink,
+                )
+                .await?;
                 return Ok(());
             };
             let outcome = handle_channel_bytes(
@@ -369,19 +373,18 @@ async fn handle_server_text(
                 stream_tx,
             )
             .await;
-            if outcome.is_err() {
-                channels.remove(&name);
-                streams.remove(&name);
-                reassembly.drop_channel(&name);
-                windows.remove(&name);
-                let close = serde_json::to_string(&ClientFrame::Close(
-                    artisan_account::CloseFrame {
-                        v: 1,
-                        channel: name.clone(),
-                        reason: Some("channel-failed".into()),
-                    },
-                ))?;
-                sink.send(Ws::Text(close.into())).await.ok();
+            if let Err(error) = outcome {
+                tracing::debug!(channel = %name, "Relay channel failed: {error:#}");
+                close_channel(
+                    &name,
+                    "channel-failed",
+                    channels,
+                    streams,
+                    reassembly,
+                    windows,
+                    sink,
+                )
+                .await?;
             }
         }
         ServerFrame::ChannelClosed(closed) => {
@@ -401,6 +404,32 @@ async fn handle_server_text(
         }
     }
     Ok(())
+}
+
+/// Ends one channel: drops its state and tells the peer. Only a failed
+/// socket write is returned, since that ends the whole connection anyway.
+async fn close_channel(
+    name: &str,
+    reason: &str,
+    channels: &mut HashMap<String, Channel>,
+    streams: &mut HashMap<String, Stream>,
+    reassembly: &mut Reassembly,
+    windows: &mut HashMap<String, SendWindow>,
+    sink: &mut WsSink,
+) -> Result<()> {
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    channels.remove(name);
+    streams.remove(name);
+    reassembly.drop_channel(name);
+    windows.remove(name);
+    let close = serde_json::to_string(&ClientFrame::Close(artisan_account::CloseFrame {
+        v: 1,
+        channel: name.to_owned(),
+        reason: Some(reason.to_owned()),
+    }))?;
+    sink.send(Ws::Text(close.into()))
+        .await
+        .context("send Relay close")
 }
 
 fn fresh_static() -> Result<[u8; 32]> {
@@ -468,11 +497,24 @@ async fn handle_channel_bytes(
     // Chunked transfers reassemble here (bounded per transfer + per conn).
     if let Ok(chunk) = serde_json::from_slice::<artisan_api::TunnelChunk>(&plaintext) {
         if let Some(reassembled) = reassembly.feed(name, &chunk)? {
-            dispatch_app_bytes(name, &reassembled, channels, streams, app, windows, sink, stream_tx).await?;
+            dispatch_app_bytes(
+                name,
+                &reassembled,
+                channels,
+                streams,
+                app,
+                windows,
+                sink,
+                stream_tx,
+            )
+            .await?;
         }
         return Ok(());
     }
-    dispatch_app_bytes(name, &plaintext, channels, streams, app, windows, sink, stream_tx).await?;
+    dispatch_app_bytes(
+        name, &plaintext, channels, streams, app, windows, sink, stream_tx,
+    )
+    .await?;
     Ok(())
 }
 
@@ -499,7 +541,10 @@ async fn dispatch_app_bytes(
     };
     match request.method.as_str() {
         artisan_api::METHOD_SUBSCRIBE => {
-            subscribe(name, &request, channels, streams, app, windows, sink, stream_tx).await?;
+            subscribe(
+                name, &request, channels, streams, app, windows, sink, stream_tx,
+            )
+            .await?;
         }
         artisan_api::METHOD_UNSUBSCRIBE => {
             let existed = streams.remove(name).is_some();
@@ -510,7 +555,10 @@ async fn dispatch_app_bytes(
             send_response(name, &response, channels, windows, sink).await?;
         }
         _ => {
-            let Some(claims) = channels.get(name).and_then(|channel| channel.claims.clone()) else {
+            let Some(claims) = channels
+                .get(name)
+                .and_then(|channel| channel.claims.clone())
+            else {
                 let response = artisan_api::TunnelResponse::error(
                     &request.id,
                     401,
@@ -519,15 +567,18 @@ async fn dispatch_app_bytes(
                 send_response(name, &response, channels, windows, sink).await?;
                 return Ok(());
             };
-            let response = dispatch_request(&request, &app_router(app), &claims).await;
-            send_response(name, &response, channels, windows, sink).await?;
+            // Off the socket loop: a slow route must not stall acks, pings
+            // or any other channel.
+            let router = crate::routes::router(app.clone());
+            let tx = stream_tx.clone();
+            let name = name.to_owned();
+            tokio::spawn(async move {
+                let response = dispatch_request(&request, &router, &claims).await;
+                tx.send((name, StreamMsg::Response(response))).await.ok();
+            });
         }
     }
     Ok(())
-}
-
-fn app_router(app: &crate::routes::App) -> axum::Router {
-    crate::routes::router(app.clone())
 }
 
 /// Start a bounded event stream on this channel.
@@ -545,9 +596,8 @@ async fn subscribe(
     sink: &mut WsSink,
     stream_tx: &tokio::sync::mpsc::Sender<(String, StreamMsg)>,
 ) -> Result<()> {
-    let Some(since) = crate::events::Since::parse_events_path(&request.path) else {
-        let response =
-            artisan_api::TunnelResponse::error(&request.id, 400, "bad subscribe path");
+    let Some(since) = crate::events::Since::from_events_path(&request.path) else {
+        let response = artisan_api::TunnelResponse::error(&request.id, 400, "bad subscribe path");
         send_response(name, &response, channels, windows, sink).await?;
         return Ok(());
     };
@@ -571,7 +621,7 @@ async fn subscribe(
     );
     send_response(name, &response, channels, windows, sink).await?;
     let pump = tokio::spawn(async move {
-        crate::events::forward_tunnel(&pump_app, &since, &sender)
+        crate::events::forward(&pump_app, &since, &sender)
             .await
             .ok();
     });
@@ -620,7 +670,8 @@ fn next_transfer_id() -> u64 {
     IDS.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Pump stream output toward its channel (sealed per frame, chunked when large).
+/// Work that finished off the socket loop, sent back on its channel. A
+/// channel closed meanwhile just drops it.
 async fn handle_stream_msg(
     name: &str,
     msg: StreamMsg,
@@ -629,37 +680,19 @@ async fn handle_stream_msg(
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
 ) -> Result<()> {
-    let Some(channel) = channels.get_mut(name) else {
+    if !channels.contains_key(name) {
         streams.remove(name);
         return Ok(());
-    };
-    if channel.noise.phase() != Phase::Open {
-        return Ok(());
     }
-    match msg {
-        StreamMsg::Frame(bytes) => {
-            if bytes.len() > artisan_api::TUNNEL_PLAINTEXT_BUDGET {
-                let transfer = format!("{name}:stream:{}", next_transfer_id());
-                for chunk in artisan_api::chunk_bytes(&transfer, &bytes) {
-                    let framed = serde_json::to_vec(&chunk)?;
-                    let sealed = channel.noise.seal(&framed)?;
-                    send_data(name, &sealed, windows, sink).await?;
-                }
-                return Ok(());
-            }
-            let sealed = channel.noise.seal(&bytes)?;
-            send_data(name, &sealed, windows, sink).await?;
-        }
+    let bytes = match msg {
+        StreamMsg::Frame(bytes) => bytes,
+        StreamMsg::Response(response) => serde_json::to_vec(&response)?,
         StreamMsg::End { reason } => {
             streams.remove(name);
-            let end = serde_json::json!({"$event": {"stream": name, "end": reason}});
-            let bytes = serde_json::to_vec(&end)?;
-            if let Ok(sealed) = channel.noise.seal(&bytes) {
-                send_data(name, &sealed, windows, sink).await?;
-            }
+            serde_json::to_vec(&serde_json::json!({"$event": {"stream": name, "end": reason}}))?
         }
-    }
-    Ok(())
+    };
+    send_payload(name, &bytes, channels, windows, sink).await
 }
 
 async fn send_response(
@@ -669,21 +702,37 @@ async fn send_response(
     windows: &mut HashMap<String, SendWindow>,
     sink: &mut WsSink,
 ) -> Result<()> {
-    let Some(channel) = channels.get_mut(name) else {
-        anyhow::bail!("unknown channel");
-    };
-    let bytes = serde_json::to_vec(response)?;
-    if bytes.len() > artisan_api::TUNNEL_PLAINTEXT_BUDGET {
-        let transfer = format!("{name}:resp:{}", next_transfer_id());
-        for chunk in artisan_api::chunk_bytes(&transfer, &bytes) {
-            let framed = serde_json::to_vec(&chunk)?;
-            let sealed = channel.noise.seal(&framed)?;
-            send_data(name, &sealed, windows, sink).await?;
-        }
+    send_payload(
+        name,
+        &serde_json::to_vec(response)?,
+        channels,
+        windows,
+        sink,
+    )
+    .await
+}
+
+/// Seals one application payload, chunked when it exceeds the plaintext budget.
+async fn send_payload(
+    name: &str,
+    bytes: &[u8],
+    channels: &mut HashMap<String, Channel>,
+    windows: &mut HashMap<String, SendWindow>,
+    sink: &mut WsSink,
+) -> Result<()> {
+    let channel = channels.get_mut(name).context("unknown channel")?;
+    if channel.noise.phase() != Phase::Open {
         return Ok(());
     }
-    let sealed = channel.noise.seal(&bytes)?;
-    send_data(name, &sealed, windows, sink).await?;
+    if bytes.len() <= artisan_api::TUNNEL_PLAINTEXT_BUDGET {
+        let sealed = channel.noise.seal(bytes)?;
+        return send_data(name, &sealed, windows, sink).await;
+    }
+    let transfer = format!("{name}:{}", next_transfer_id());
+    for chunk in artisan_api::chunk_bytes(&transfer, bytes) {
+        let sealed = channel.noise.seal(&serde_json::to_vec(&chunk)?)?;
+        send_data(name, &sealed, windows, sink).await?;
+    }
     Ok(())
 }
 
@@ -796,16 +845,12 @@ async fn dispatch_request(
         "DELETE" => axum::http::Method::DELETE,
         _ => return artisan_api::TunnelResponse::error(&request.id, 400, "bad tunneled method"),
     };
-    if !request.path.starts_with('/') || request.path.contains("..") {
-        return artisan_api::TunnelResponse::error(&request.id, 400, "bad tunneled path");
-    }
-    if request.method == artisan_api::METHOD_SUBSCRIBE
-        || request.method == artisan_api::METHOD_UNSUBSCRIBE
-    {
+    // The event stream never ends, so a unary call to it would never answer.
+    if request.path == "/events" || request.path.starts_with("/events?") {
         return artisan_api::TunnelResponse::error(
             &request.id,
             400,
-            "subscriptions use SUBSCRIBE on an open channel",
+            "subscribe to /events with SUBSCRIBE on its own channel",
         );
     }
     let Ok((content_type, bytes)) = artisan_api::request_body_bytes(request.body.as_ref()) else {
@@ -821,16 +866,12 @@ async fn dispatch_request(
     };
     // Grant-based authorization: verified at channel confirmation, carried
     // per request (the direct path keeps using device certificates).
-    http_request.extensions_mut().insert(crate::routes::TunnelAuth {
-        claims: claims.clone(),
-    });
-    #[allow(clippy::manual_let_else, reason = "Err is Infallible; match keeps the 502 shape")]
-    let response = match app.clone().oneshot(http_request).await {
-        Ok(response) => response,
-        Err(_) => {
-            return artisan_api::TunnelResponse::error(&request.id, 502, "local dispatch failed");
-        }
-    };
+    http_request
+        .extensions_mut()
+        .insert(crate::routes::TunnelAuth {
+            claims: claims.clone(),
+        });
+    let Ok(response) = app.clone().oneshot(http_request).await;
     let status = response.status().as_u16();
     let mime = response
         .headers()
@@ -838,9 +879,16 @@ async fn dispatch_request(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_owned();
-    let bytes = axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let bytes = match axum::body::to_bytes(response.into_body(), 32 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return artisan_api::TunnelResponse::error(
+                &request.id,
+                502,
+                &format!("read the Forge response: {error}"),
+            );
+        }
+    };
     if let Ok(body) = serde_json::from_slice::<serde_json::Value>(&bytes)
         && (mime.starts_with("application/json") || body.is_object() || body.is_array())
     {
@@ -863,15 +911,10 @@ async fn dispatch_request(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod tests {
     use super::*;
     use artisan_account::NoiseChannel;
-    use futures::SinkExt as _;
-    use futures::StreamExt as _;
     use tokio_tungstenite::tungstenite::Message as Ws;
 
     const ACCOUNT: &str = "acct_00000000000000000000000000";
@@ -888,8 +931,8 @@ mod tests {
     fn test_issuer() -> (ed25519_dalek::SigningKey, String) {
         use base64::Engine as _;
         let key = ed25519_dalek::SigningKey::from_bytes(&[0x77_u8; 32]);
-        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(key.verifying_key().to_bytes());
+        let x =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes());
         (key, x)
     }
 
@@ -932,10 +975,7 @@ mod tests {
         )
     }
 
-    fn editor_grant(
-        issuer: &ed25519_dalek::SigningKey,
-        cnf_secret: &[u8; 32],
-    ) -> String {
+    fn editor_grant(issuer: &ed25519_dalek::SigningKey, cnf_secret: &[u8; 32]) -> String {
         use base64::Engine as _;
         use ed25519_dalek::Signer as _;
         // Valid *now*: the verifier checks iat/exp against the real clock
@@ -1014,13 +1054,12 @@ mod tests {
         }
 
         let (issuer_key, issuer_x) = test_issuer();
-        let (verifier, _jwks_base) = crate::account_auth::tests::verifier_with_stub(
-            serde_json::json!({
+        let (verifier, _jwks_base) =
+            crate::account_auth::tests::verifier_with_stub(serde_json::json!({
                 "keys": [{"kty": "OKP", "crv": "Ed25519", "x": issuer_x, "kid": "k1",
                           "use": "sig", "alg": "EdDSA"}],
-            }),
-        )
-        .await;
+            }))
+            .await;
         // Forge side keys: machine grant cnf + enrolled confirm key.
         let forge_cnf = [0x44_u8; 32];
         let editor_cnf = [0x33_u8; 32];
@@ -1043,8 +1082,7 @@ mod tests {
             let (mut sink, mut source) = stream.split();
             // Admission.
             let hello = recv_text(&mut source).await;
-            let hello: artisan_account::ClientFrame =
-                serde_json::from_str(&hello).unwrap();
+            let hello: artisan_account::ClientFrame = serde_json::from_str(&hello).unwrap();
             let grant = match hello {
                 artisan_account::ClientFrame::Hello(h) => h.grant,
                 artisan_account::ClientFrame::Authenticate(_)
@@ -1083,6 +1121,17 @@ mod tests {
             }
             send(
                 &mut sink,
+                serde_json::to_string(&artisan_account::ServerFrame::Ping(
+                    artisan_account::PingFrame { v: 1, t: 1234 },
+                ))
+                .unwrap(),
+            )
+            .await;
+            let pong: serde_json::Value =
+                serde_json::from_str(&recv_text(&mut source).await).unwrap();
+            assert_eq!(pong, serde_json::json!({"v": 1, "type": "pong", "t": 1234}));
+            send(
+                &mut sink,
                 serde_json::to_string(&artisan_account::ServerFrame::Ready(
                     artisan_account::ReadyFrame {
                         v: 1,
@@ -1109,10 +1158,10 @@ mod tests {
             .await;
 
             // Noise XX as initiator (client side), no static pinning.
-            let mut init =
-                NoiseChannel::initiator(&editor_noise, None, ctx("ch1")).unwrap();
+            let mut init = NoiseChannel::initiator(&editor_noise, None, ctx("ch1")).unwrap();
             let mut relay_seq = 0_u64;
-            let mut send_data = async |sink: &mut futures::stream::SplitSink<_, Ws>, raw: Vec<u8>| {
+            let mut send_data = async |sink: &mut futures::stream::SplitSink<_, Ws>,
+                                       raw: Vec<u8>| {
                 let frame = serde_json::to_string(&artisan_account::ClientFrame::Data(
                     artisan_account::DataFrame {
                         v: 1,
@@ -1171,7 +1220,9 @@ mod tests {
             // completes its handshake with no further reply.
             // Initiator confirm carrying the editor grant JWT.
             let grant = editor_grant(&issuer_key, &editor_cnf);
-            let c1 = init.emit_initiator_confirm(&editor_cnf, grant.as_bytes()).unwrap();
+            let c1 = init
+                .emit_initiator_confirm(&editor_cnf, grant.as_bytes())
+                .unwrap();
             send_data(&mut sink, c1).await;
             // Responder confirm; verify against the Forge enrolled key.
             let c2 = match next_server_frame().await {
@@ -1185,7 +1236,8 @@ mod tests {
                 | ServerFrame::Error(_)
                 | ServerFrame::Ping(_)) => panic!("expected data, got {other:?}"),
             };
-            init.receive_responder_confirm(&c2, &forge_enrolled_pub).unwrap();
+            init.receive_responder_confirm(&c2, &forge_enrolled_pub)
+                .unwrap();
             assert_eq!(init.phase(), artisan_account::Phase::Open);
 
             // Unary call through the tunnel (real route on the test app).
@@ -1246,9 +1298,7 @@ mod tests {
             forge_version: "test".into(),
             shutdown: tokio_util::sync::CancellationToken::new(),
             tasks: tokio_util::task::TaskTracker::new(),
-            repositories: std::sync::Arc::new(
-                crate::repository::Repositories::new().unwrap(),
-            ),
+            repositories: std::sync::Arc::new(crate::repository::Repositories::new().unwrap()),
             icons: std::sync::Arc::default(),
         }
     }

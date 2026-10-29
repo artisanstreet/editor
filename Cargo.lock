@@ -342,6 +342,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
+ "tokio-util",
  "x25519-dalek",
 ]
 
@@ -2075,6 +2076,7 @@ dependencies = [
  "artisan-paths",
  "base64 0.22.1",
  "claude-ai-browser",
+ "editor-core",
  "editor-ui",
  "forge-http",
  "forge-store",

@@ -205,7 +205,7 @@ fn the_terminal_dialog_shows_the_whole_output_and_follows_it(cx: &mut TestAppCon
     forge.shell(&job, Status::Running);
     let dir = tempfile::tempdir().unwrap();
     let (files, host) = forge.pair(dir.path());
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
+    let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
     let shell_core = core.clone();
     let (shell, cx) = cx.add_window_view(|window, cx| {
         let conversation = cx.new(|cx| Conversation::new(shell_core.clone(), window, cx));
@@ -455,7 +455,7 @@ fn shared_thread_details_survive_transcript_eviction_and_release_on_navigation(
     }
     let dir = tempfile::tempdir().unwrap();
     let (files, host_id) = forge.pair(dir.path());
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
+    let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
     let shell_core = core.clone();
     let (shell, cx) = cx.add_window_view(|window, cx| {
         let conversation = cx.new(|cx| Conversation::new(shell_core.clone(), window, cx));
@@ -697,7 +697,7 @@ fn large_inspector_sections_and_dialog_fit_small_viewport(cx: &mut TestAppContex
     }
     let dir = tempfile::tempdir().unwrap();
     let (files, host_id) = forge.pair(dir.path());
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
+    let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
     let shell_core = core.clone();
     let (shell, cx) = cx.add_window_view(|window, cx| {
         let conversation = cx.new(|cx| Conversation::new(shell_core.clone(), window, cx));
@@ -934,7 +934,7 @@ fn background_work_has_its_own_section(cx: &mut TestAppContext) {
     );
     let dir = tempfile::tempdir().unwrap();
     let (files, host) = forge.pair(dir.path());
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
+    let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
     let shell_core = core.clone();
     let (view, cx) = cx.add_window_view(|window, cx| {
         let conversation = cx.new(|cx| Conversation::new(shell_core.clone(), window, cx));

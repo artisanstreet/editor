@@ -8,11 +8,6 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
-use sha2::Digest as _;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("cannot make a key right now")]
-pub struct KeyError;
 
 /// A local Ed25519 machine keypair.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,20 +17,14 @@ pub struct MachineKeypair {
 }
 
 impl MachineKeypair {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "key failures are coarse KeyError so messages never carry key material"
-    )]
-    pub fn generate() -> Result<Self, KeyError> {
+    pub fn generate() -> anyhow::Result<Self> {
         let mut secret = [0_u8; 32];
-        getrandom::fill(&mut secret).map_err(|_| KeyError)?;
+        getrandom::fill(&mut secret)?;
         Self::from_secret(secret)
     }
 
-    pub fn from_secret(secret: [u8; 32]) -> Result<Self, KeyError> {
-        if secret == [0_u8; 32] {
-            return Err(KeyError);
-        }
+    pub fn from_secret(secret: [u8; 32]) -> anyhow::Result<Self> {
+        anyhow::ensure!(secret != [0_u8; 32], "the machine key is all zeros");
         let key = ed25519_dalek::SigningKey::from_bytes(&secret);
         Ok(Self {
             secret,
@@ -54,16 +43,6 @@ impl MachineKeypair {
         URL_SAFE_NO_PAD.encode(self.public)
     }
 
-    /// Base64url-no-pad SHA-256 of the public key: how operators compare
-    /// machines (`keyFingerprint`, Core §2). Never log private material.
-    #[must_use]
-    pub fn fingerprint(&self) -> Fingerprint {
-        use base64::Engine as _;
-        Fingerprint(
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(self.public)),
-        )
-    }
-
     #[must_use]
     pub const fn secret(&self) -> &[u8; 32] {
         &self.secret
@@ -76,6 +55,8 @@ impl MachineKeypair {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PairStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment_id: Option<String>,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
@@ -83,12 +64,9 @@ pub struct PairStatus {
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
-
-/// Enrollment operator key fingerprint for display.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Fingerprint(pub String);
 
 /// Normalize a user-typed code the same way everywhere: keep ASCII
 /// alphanumerics, uppercase (client sends the raw code; Core hashes).
@@ -125,11 +103,7 @@ pub fn sign_enrollment_proof(secret: &[u8; 32], body: &str) -> [u8; 64] {
 
 /// Verify an enrollment proof body against the enrollment public key.
 #[must_use]
-pub fn verify_enrollment_proof(
-    public: &[u8; 32],
-    body: &str,
-    signature: &[u8],
-) -> bool {
+pub fn verify_enrollment_proof(public: &[u8; 32], body: &str, signature: &[u8]) -> bool {
     let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(public) else {
         return false;
     };
@@ -140,10 +114,7 @@ pub fn verify_enrollment_proof(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod tests {
     use super::*;
 
@@ -185,10 +156,8 @@ mod tests {
     }
 
     #[test]
-    fn keypairs_reject_zero_and_fingerprint_is_b64u() {
+    fn keypairs_reject_zero_and_codes_normalise() {
         assert!(MachineKeypair::from_secret([0_u8; 32]).is_err());
-        let keypair = MachineKeypair::from_secret([0x21_u8; 32]).unwrap();
-        assert_eq!(keypair.fingerprint().0.len(), 43);
         assert_eq!(normalise_code("ab-12 cd"), "AB12CD");
     }
 }

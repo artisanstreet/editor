@@ -30,11 +30,8 @@ pub struct MagicRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MagicRequestResponse {
-    #[serde(rename = "requestId")]
     pub request_id: String,
-    #[serde(rename = "requestSecret")]
     pub request_secret: String,
-    #[serde(rename = "expiresAt")]
     pub expires_at: String,
 }
 
@@ -50,16 +47,13 @@ pub struct MagicStatusRequest {
 
 /// `200` status read (forward-compatible: unknown fields ignored).
 /// NOTE (Vilde owns this file): Core also returns required `email` and
-/// `expiresAt` here — added to match the Core OpenAPI exactly.
+/// `expires_at` here — added to match the Core OpenAPI exactly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MagicStatusResponse {
-    #[serde(rename = "requestId")]
     pub request_id: String,
     pub status: String,
-    #[serde(rename = "totpRequired")]
     pub totp_required: bool,
     pub email: String,
-    #[serde(rename = "expiresAt")]
     pub expires_at: String,
 }
 
@@ -75,10 +69,8 @@ pub struct MagicConsumeRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MagicConsumeResponse {
-    #[serde(rename = "requestId")]
     pub request_id: String,
     pub status: String,
-    #[serde(rename = "totpRequired")]
     pub totp_required: bool,
 }
 
@@ -100,35 +92,14 @@ pub struct MagicFinalizeRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MagicFinalizeResponse {
-    #[serde(rename = "sessionId")]
     pub session_id: String,
-    #[serde(rename = "accountId")]
     pub account_id: String,
-    #[serde(rename = "expiresAt")]
     pub expires_at: String,
-    #[serde(rename = "totpVerified")]
     pub totp_verified: bool,
 }
 
-/// `GET /v1/sessions` entry (forward-compatible read).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    #[serde(default, rename = "deviceName")]
-    pub device_name: Option<String>,
-    #[serde(rename = "createdAt")]
-    pub created_at: String,
-    #[serde(rename = "expiresAt")]
-    pub expires_at: String,
-    #[serde(default, rename = "revokedAt")]
-    pub revoked_at: Option<String>,
-}
-
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod tests {
     use super::*;
 
@@ -145,20 +116,20 @@ mod tests {
     #[test]
     fn status_and_finalize_reads_tolerate_future_fields() {
         let raw = serde_json::json!({
-            "requestId": "logreq_1",
+            "request_id": "logreq_1",
             "status": "pending",
-            "totpRequired": false,
+            "totp_required": false,
             "email": "a@example.invalid",
-            "expiresAt": "2030-01-01T00:00:00Z",
+            "expires_at": "2030-01-01T00:00:00Z",
             "future": [1],
         });
         let status: MagicStatusResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(status.status, "pending");
         let raw = serde_json::json!({
-            "sessionId": "sess_1",
-            "accountId": "acct_1",
-            "expiresAt": "t",
-            "totpVerified": false,
+            "session_id": "sess_1",
+            "account_id": "acct_1",
+            "expires_at": "t",
+            "totp_verified": false,
             "future": 1,
         });
         let finalize: MagicFinalizeResponse = serde_json::from_value(raw).unwrap();

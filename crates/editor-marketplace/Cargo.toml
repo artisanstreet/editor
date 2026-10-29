@@ -1,7 +1,7 @@
 [package]
 name = "editor-marketplace"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "The Marketplace: search the active host's skills and MCP servers."
 
@@ -14,6 +14,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 artisan-api = { path = "../artisan-api", features = ["tls"] }
+editor-core = { path = "../editor-core", features = ["test-support"] }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
 gpui = { workspace = true, features = ["test-support"] }

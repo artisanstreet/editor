@@ -5,6 +5,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod context_meter;
+mod entry;
 #[cfg(feature = "dhat-heap")]
 mod heap_profile;
 mod home;
@@ -18,12 +19,12 @@ mod script;
 mod workspace;
 
 use actions::{GoBack, NewThread, OpenPalette, OpenSettings, Quit, ToggleInspector, ToggleSidebar};
-use editor_core::Screen;
+use editor_core::{Core, Screen};
+use entry::EntryRoot;
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
+    App, AppContext as _, Bounds, Entity, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
 };
-use workspace::Workspace;
 
 /// The app's actions, in their own module so the expectation below covers
 /// only the macro's derives.
@@ -94,6 +95,21 @@ fn init_logging() {
     }
 }
 
+/// Follows a tapped system notification into its thread. While the gate is
+/// locked, Core keeps the screen and opens it once the gate is `Ready`.
+fn follow_notification(
+    core: &Entity<Core>,
+    response: &gpui::SystemNotificationResponse,
+    cx: &mut App,
+) {
+    let Some((host, thread)) = notifications::parse_tag(&response.tag) else {
+        return;
+    };
+    core.update(cx, |core, cx| {
+        core.navigate(Screen::Thread { host, thread }, cx);
+    });
+}
+
 fn main() {
     init_logging();
     #[cfg(feature = "dhat-heap")]
@@ -136,15 +152,9 @@ fn main() {
             cx.set_app_identity("com.artisanstreet.editor", "Artisan Editor");
             let notified_core = core.downgrade();
             cx.on_system_notification_response(move |response, cx| {
-                let (Some((host, thread)), Some(core)) = (
-                    notifications::parse_tag(&response.tag),
-                    notified_core.upgrade(),
-                ) else {
-                    return;
-                };
-                core.update(cx, |core, cx| {
-                    core.navigate(Screen::Thread { host, thread }, cx);
-                });
+                if let Some(core) = notified_core.upgrade() {
+                    follow_notification(&core, &response, cx);
+                }
                 if let Some(window) = cx.windows().first() {
                     window
                         .update(cx, |_, window, _| window.activate_window())
@@ -176,7 +186,7 @@ fn main() {
                 script::window_options(&mut options);
             }
             let opened = cx.open_window(options, move |window, cx| {
-                cx.new(|cx| Workspace::new(core, failure, window, cx))
+                cx.new(|cx| EntryRoot::new(core, failure, window, cx))
             });
             match opened {
                 Ok(handle) => {
@@ -225,7 +235,7 @@ fn bind_keys(cx: &mut App) {
 }
 
 #[cfg(feature = "capture")]
-fn capture(handle: gpui::WindowHandle<Workspace>, cx: &mut App) {
+fn capture(handle: gpui::WindowHandle<EntryRoot>, cx: &mut App) {
     let Some(path) = std::env::var_os("ARTISAN_EDITOR_CAPTURE") else {
         return;
     };

@@ -533,7 +533,10 @@ mod request_tests {
             project: None,
         };
         setup.core.update(cx, |core, cx| {
-            core.add_host(host.clone(), cx).unwrap();
+            let identity = core.identity.clone().unwrap();
+            let client =
+                editor_core::ForgeClient::new(&host.address, &host.fingerprint, &identity).unwrap();
+            core.add_test_host(&host, client, cx);
             core.navigate(baseline.clone(), cx);
         });
         setup.wait(cx, "new host selected", |setup, cx| {

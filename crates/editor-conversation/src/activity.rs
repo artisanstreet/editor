@@ -14,6 +14,7 @@ pub enum ActivityCategory {
     FileDelete,
     FileEdit,
     FileRead,
+    ImageView,
     /// Grep and glob searches.
     FileSearch,
     FolderList,
@@ -48,6 +49,7 @@ impl ActivityCategory {
             Self::FileDelete => counted("deleted a file", "deleted {n} files"),
             Self::FileEdit => counted("edited a file", "edited {n} files"),
             Self::FileRead => counted("read a file", "read {n} files"),
+            Self::ImageView => counted("viewed an image", "viewed {n} images"),
             Self::FileSearch => counted("searched files", "ran {n} searches"),
             Self::FolderList => counted("listed a folder", "listed {n} folders"),
             Self::Integration => counted("used an integration", "used {n} integrations"),
@@ -76,7 +78,9 @@ pub fn category(item: &Item) -> Option<ActivityCategory> {
         } => Some(C::Message),
         ItemKind::Tool { tool, .. } => Some(match tool {
             ToolKind::Shell { .. } => C::Command,
-            ToolKind::Read { .. } | ToolKind::ViewImage { .. } => C::FileRead,
+            ToolKind::Read { path, .. } if is_image_path(path) => C::ImageView,
+            ToolKind::ViewImage { .. } => C::ImageView,
+            ToolKind::Read { .. } => C::FileRead,
             ToolKind::Edit { changes } => match edit_op(changes) {
                 Some(FileOp::Add) => C::FileCreate,
                 Some(FileOp::Delete) => C::FileDelete,
@@ -117,6 +121,30 @@ fn edit_op(changes: &artisan_api::Collection<artisan_api::FileChange>) -> Option
         .iter()
         .all(|change| std::mem::discriminant(&change.op) == std::mem::discriminant(first))
         .then_some(first)
+}
+
+fn is_image_path(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "webp"
+                    | "bmp"
+                    | "svg"
+                    | "ico"
+                    | "tif"
+                    | "tiff"
+                    | "avif"
+                    | "heic"
+                    | "heif"
+            )
+        })
 }
 
 /// One activity row's words: what was done, in the foreground, then what it
@@ -171,6 +199,9 @@ pub fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
                         .inline()
                         .map_or_else(|| "a command".to_owned(), first_line),
                 )
+            }
+            ToolKind::Read { path, .. } if is_image_path(path) => {
+                (tense("Viewed", "Viewing"), path.clone())
             }
             ToolKind::Read { path, range } => (
                 tense("Read", "Reading"),
@@ -716,7 +747,7 @@ pub fn chain_icon(categories: impl Iterator<Item = ActivityCategory>) -> editor_
     }
     match first {
         ActivityCategory::Command => AssetId::TABLER_TERMINAL_2,
-        ActivityCategory::FileRead => AssetId::TABLER_FILE_TEXT,
+        ActivityCategory::FileRead | ActivityCategory::ImageView => AssetId::TABLER_FILE_TEXT,
         ActivityCategory::FileEdit => AssetId::TABLER_FILE_PENCIL,
         ActivityCategory::FileCreate => AssetId::TABLER_FILE_SPARK,
         ActivityCategory::FileDelete => AssetId::TABLER_FILE_X,

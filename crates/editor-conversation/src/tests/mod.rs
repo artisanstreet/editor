@@ -230,7 +230,7 @@ fn editor<'a>(
     cx.executor().allow_parking();
     let (files, host) = forge.pair(editor_dir);
     cx.update(editor_sources::init);
-    let core = cx.new(|cx| Core::new(files, cx).unwrap());
+    let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
     let conversation_core = core.clone();
     let (conversation, cx) =
         cx.add_window_view(|window, cx| Conversation::new(conversation_core, window, cx));

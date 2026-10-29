@@ -393,7 +393,7 @@ impl DraftSession {
 #[cfg(test)]
 mod removal_tests {
     use super::*;
-    use editor_core::{EditorFiles, HostConfig, HostKind};
+    use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
     use gpui::TestAppContext;
 
     #[gpui::test]
@@ -402,7 +402,7 @@ mod removal_tests {
         cx.executor().allow_parking();
         let directory = tempfile::tempdir().unwrap();
         let core = cx.new(|cx| {
-            Core::new(
+            Core::for_tests(
                 EditorFiles {
                     dir: directory.path().to_owned(),
                 },
@@ -410,29 +410,27 @@ mod removal_tests {
             )
             .unwrap()
         });
-        let fingerprint = core.read_with(cx, |core, _| {
-            artisan_api::tls::fingerprint(
-                core.identity
-                    .as_ref()
-                    .unwrap()
-                    .certificate_der()
-                    .unwrap()
-                    .as_ref(),
-            )
+        let (fingerprint, identity) = core.read_with(cx, |core, _| {
+            let identity = core.identity.as_ref().unwrap().clone();
+            let fingerprint = artisan_api::tls::fingerprint(
+                identity.certificate_der().unwrap().as_ref(),
+            );
+            (fingerprint, identity)
         });
         let host_id = HostId("removed-host".into());
+        let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
         core.update(cx, |core, cx| {
-            core.add_host(
-                HostConfig {
+            core.add_test_host(
+                &HostConfig {
                     id: host_id.clone(),
                     name: "Test".into(),
                     address: "127.0.0.1:1".into(),
                     fingerprint,
                     kind: HostKind::Remote,
                 },
+                client,
                 cx,
-            )
-            .unwrap();
+            );
         });
         let host = core.read_with(cx, |core, _| core.host(&host_id).unwrap().clone());
         let client = host.read_with(cx, |host, _| host.client.clone());

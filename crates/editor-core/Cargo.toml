@@ -1,7 +1,7 @@
 [package]
 name = "editor-core"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "The Editor's Forge client: hosts, pairing, the connection to each Forge, the store of what Forge sent, and navigation."
 
@@ -28,9 +28,15 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+editor-core = { path = ".", features = ["test-support"] }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
 gpui = { workspace = true, features = ["test-support"] }
+
+[features]
+# `Core::for_tests`, `Core::add_test_host` and scripted `Services` (a stub
+# Core URL, a scripted `ae` and Relay) for tests.
+test-support = []
 
 [lints]
 workspace = true

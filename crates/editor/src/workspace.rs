@@ -92,7 +92,7 @@ pub struct Workspace {
     settings: Option<Entity<Settings>>,
     build: BuildInfo,
     marketplace: Option<Entity<Marketplace>>,
-    home: Option<Entity<Home>>,
+    home: Entity<Home>,
     usage: Option<Entity<UsagePage>>,
     palette: Option<Entity<Palette>>,
     resource_preview: Option<Entity<crate::resource_preview::ResourcePreview>>,
@@ -185,6 +185,7 @@ impl Workspace {
         ];
         let repository =
             cx.new(|cx| crate::repository_context::RepositoryContext::new(core.clone(), cx));
+        let home = cx.new(|cx| Home::new(core.clone(), cx));
         let mut workspace = Self {
             core,
             sidebar,
@@ -194,7 +195,7 @@ impl Workspace {
             settings: None,
             build,
             marketplace: None,
-            home: None,
+            home,
             usage: None,
             palette: None,
             resource_preview: None,
@@ -228,9 +229,6 @@ impl Workspace {
             }
             Screen::Usage if self.usage.is_none() => {
                 self.usage = Some(cx.new(|cx| UsagePage::new(self.core.clone(), cx)));
-            }
-            Screen::Home if self.home.is_none() => {
-                self.home = Some(cx.new(|cx| Home::new(self.core.clone(), cx)));
             }
             Screen::Home
             | Screen::Thread { .. }
@@ -820,6 +818,89 @@ impl Workspace {
         );
         Some(notice(desktop, text, action))
     }
+
+    fn settings_dialog(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *cx.theme();
+        let desktop = theme.colors;
+        let window_width = f32::from(window.viewport_size().width);
+        let window_height = f32::from(window.viewport_size().height);
+        let scale = (2.0f32.mul_add(-SETTINGS_DIALOG_MARGIN, window_width) / window_width)
+            .min(2.0f32.mul_add(-SETTINGS_DIALOG_MARGIN, window_height) / window_height)
+            .min(SETTINGS_DIALOG_MAX_WIDTH / window_width)
+            .min(SETTINGS_DIALOG_MAX_HEIGHT / window_height)
+            .max(0.0);
+        let dialog_width = (window_width * scale).max(1.0);
+        let dialog_height = (window_height * scale).max(1.0);
+        let nav_width = settings_sidebar_width(dialog_width)
+            .min(260.0)
+            .min(dialog_width * 0.4);
+        let strip_inset = px((SETTINGS_DIALOG_STRIP - f32::from(theme.density.control_sm)) / 2.0);
+        let close = Button::icon("settings-close", theme, AssetId::TABLER_X, "Close settings")
+            .debug_selector("settings-close")
+            .variant(ButtonVariant::Ghost)
+            .hover_fill()
+            .muted()
+            .on_activate(cx.listener(|this, _, window, cx| {
+                editor_ui::overlay::dismiss("settings-dialog", window, cx);
+                this.core.update(cx, Core::close_settings);
+            }));
+        let page = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .overflow_hidden()
+            .rounded_tl(px(CARD_RADIUS))
+            .border_t_1()
+            .border_l_1()
+            .border_color(desktop.line.to_paint())
+            .bg(desktop.background.to_paint())
+            .shadow(theme.elevation.shadows(Elevation::Raised))
+            .children(self.settings.clone());
+        let panel = div()
+            .w_full()
+            .h(px(dialog_height))
+            .flex()
+            .flex_row()
+            .overflow_hidden()
+            .rounded(px(SETTINGS_DIALOG_RADIUS))
+            .border_1()
+            .border_color(desktop.line.to_paint())
+            .bg(desktop.frame.to_paint())
+            .child(
+                div()
+                    .w(px(nav_width))
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(self.settings_sidebar.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(SETTINGS_DIALOG_STRIP))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .pr(strip_inset)
+                            .child(close),
+                    )
+                    .child(page),
+            );
+        let core = self.core.clone();
+        editor_ui::dialog::Dialog::new("settings-dialog", theme, "Settings", panel)
+            .bare()
+            .soft_backdrop()
+            .max_width(px(dialog_width))
+            .debug_selector("settings-dialog")
+            .on_dismiss(move |_, _, cx| core.update(cx, Core::close_settings))
+    }
 }
 
 /// The content card's face: mounted in the window's bottom-right, flush
@@ -887,7 +968,7 @@ impl Render for Workspace {
         let window_width = f32::from(window.viewport_size().width);
         // Settings lists its pages in the sidebar, so the sidebar stays.
         let sidebar_width = if matches!(screen, Screen::Home) {
-            // Pairing has no threads to list: only the rail stays.
+            // Home lists Forges, not threads: only the rail stays.
             None
         } else {
             self.show_sidebar
@@ -904,10 +985,7 @@ impl Render for Workspace {
         .then(|| inspector_width(content_width))
         .flatten();
         let center: AnyElement = match &screen {
-            Screen::Home => self.home.as_ref().map_or_else(
-                || self.conversation.clone().into_any_element(),
-                |home| home.clone().into_any_element(),
-            ),
+            Screen::Home => self.home.clone().into_any_element(),
             Screen::Settings(_) => self
                 .settings
                 .as_ref()
@@ -1054,55 +1132,7 @@ impl Render for Workspace {
                     .clone()
                     .cached(StyleRefinement::default().absolute().inset_0()),
             )
-            .children(if settings_open {
-                // The window's own proportions, scaled down uniformly until
-                // it clears the margin and the size cap on both axes.
-                let window_height = f32::from(window.viewport_size().height);
-                let scale = (2.0f32.mul_add(-SETTINGS_DIALOG_MARGIN, window_width) / window_width)
-                    .min(2.0f32.mul_add(-SETTINGS_DIALOG_MARGIN, window_height) / window_height)
-                    .min(SETTINGS_DIALOG_MAX_WIDTH / window_width)
-                    .min(SETTINGS_DIALOG_MAX_HEIGHT / window_height)
-                    .max(0.0);
-                let dialog_width = (window_width * scale).max(1.0);
-                let dialog_height = (window_height * scale).max(1.0);
-                let nav_width = settings_sidebar_width(dialog_width).min(260.0).min(dialog_width * 0.4);
-                let core = self.core.clone();
-                // The window's own build in miniature: the nav stands on the
-                // frame like the rail, a strip of frame runs above the page
-                // like the titlebar, and the page is a card carved in under
-                // both, rounded at its top-left. The close button lives in the
-                // strip, centred with equal top and right insets, and only
-                // shows a fill on hover.
-                let strip_inset = px((SETTINGS_DIALOG_STRIP - f32::from(theme.density.control_sm)) / 2.0);
-                let panel = div()
-                    .w_full().h(px(dialog_height)).flex().flex_row().overflow_hidden()
-                    .rounded(px(SETTINGS_DIALOG_RADIUS)).border_1().border_color(desktop.line.to_paint())
-                    .bg(desktop.frame.to_paint())
-                    .child(div().w(px(nav_width)).h_full().flex_shrink_0()
-                        .child(self.settings_sidebar.clone()))
-                    .child(div().flex_1().min_h_0().min_w_0().h_full().flex().flex_col()
-                        .child(div().h(px(SETTINGS_DIALOG_STRIP)).flex_shrink_0()
-                            .flex().items_center().justify_end().pr(strip_inset)
-                            .child(Button::icon("settings-close", theme, AssetId::TABLER_X, "Close settings")
-                                .debug_selector("settings-close")
-                                .variant(ButtonVariant::Ghost)
-                                .hover_fill()
-                                .muted()
-                                .on_activate(cx.listener(|this, _, window, cx| {
-                                    editor_ui::overlay::dismiss("settings-dialog", window, cx);
-                                    this.core.update(cx, Core::close_settings);
-                                }))))
-                        .child(div().flex_1().min_h_0().min_w_0().overflow_hidden()
-                            .rounded_tl(px(CARD_RADIUS)).border_t_1().border_l_1()
-                            .border_color(desktop.line.to_paint())
-                            .bg(desktop.background.to_paint())
-                            .shadow(theme.elevation.shadows(Elevation::Raised))
-                            .child(self.settings.as_ref().expect("settings mounted").clone())));
-
-                Some(editor_ui::dialog::Dialog::new("settings-dialog", theme, "Settings", panel)
-                    .bare().soft_backdrop().max_width(px(dialog_width)).debug_selector("settings-dialog")
-                    .on_dismiss(move |_, _, cx| core.update(cx, Core::close_settings)))
-            } else { None })
+            .children(settings_open.then(|| self.settings_dialog(window, cx)))
             .children(self.palette.clone())
             .children(self.resource_preview.clone())
             .children(self.render_copy_menu(cx))
@@ -1392,7 +1422,15 @@ mod rich_action_tests {
                 last: None,
             })
             .unwrap();
-        let core = cx.new(|cx| Core::new(files, cx).unwrap());
+        let core = cx.new(|cx| {
+            Core::for_tests(
+                editor_core::EditorFiles {
+                    dir: dir.path().to_owned(),
+                },
+                cx,
+            )
+            .unwrap()
+        });
         // Appearance leaves only HostData's normal state fetch in flight.
         core.update(cx, |core, cx| {
             core.navigate(Screen::Settings(editor_core::SettingsPage::General), cx)

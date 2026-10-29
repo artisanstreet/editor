@@ -17,9 +17,20 @@ use tokio_util::task::AbortOnDropHandle;
 #[derive(Clone)]
 pub struct ForgeClient {
     http: reqwest::Client,
-    base: String,
-    relay: Option<Arc<artisan_account::relay_client::RelayClient>>,
+    transport: Transport,
 }
+
+#[derive(Clone)]
+enum Transport {
+    /// Mutual TLS to `https://host:port`.
+    Direct(String),
+    /// A Noise channel through the account Relay.
+    Relay(Arc<artisan_account::relay_client::RelayClient>),
+}
+
+/// Requests for a Relay client are still built with `reqwest`, which needs an
+/// absolute URL; only the path and query travel the tunnel.
+const RELAY_ORIGIN: &str = "https://relay.tunnel";
 
 impl ForgeClient {
     /// A client for the Forge at `address` (`host:port`) whose certificate
@@ -35,36 +46,39 @@ impl ForgeClient {
             .context("build the HTTP client")?;
         Ok(Self {
             http,
-            base: format!("https://{address}"),
-            relay: None,
+            transport: Transport::Direct(format!("https://{address}")),
         })
     }
 
     /// Whether this client tunnels through the Relay instead of direct mTLS.
     #[must_use]
     pub const fn is_relay(&self) -> bool {
-        self.relay.is_some()
+        matches!(self.transport, Transport::Relay(_))
     }
 
     /// The Relay transport behind a `via_relay` client, if any.
     #[must_use]
     pub const fn relay(&self) -> Option<&Arc<artisan_account::relay_client::RelayClient>> {
-        self.relay.as_ref()
+        match &self.transport {
+            Transport::Relay(relay) => Some(relay),
+            Transport::Direct(_) => None,
+        }
     }
 
-    /// Promptly terminate the Relay route: unary plus every event stream
-    /// stop at once and later calls fail fast, even while views still hold
-    /// clones of this client. Synchronous and idempotent — call it when
-    /// dropping account hosts on sign-out. Direct clients ignore it.
-    /// Remote revocation keeps its grant TTL tail; local logout is immediate.
+    /// Ends a Relay route at once, even while views still hold clones of
+    /// this client. Direct clients ignore it.
     pub fn close_relay(&self) {
-        if let Some(relay) = &self.relay {
+        if let Some(relay) = self.relay() {
             relay.close_all();
         }
     }
 
     fn url(&self, path: &str) -> String {
-        format!("{}{path}", self.base)
+        let origin = match &self.transport {
+            Transport::Direct(base) => base.as_str(),
+            Transport::Relay(_) => RELAY_ORIGIN,
+        };
+        format!("{origin}{path}")
     }
 
     pub(crate) const fn raw(&self) -> &reqwest::Client {
@@ -79,7 +93,7 @@ impl ForgeClient {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T> {
-        if self.relay.is_some() {
+        if self.is_relay() {
             return self
                 .call_relay(request, 32 * 1024 * 1024, None, |bytes| {
                     serde_json::from_slice(&bytes).context("read Forge's answer")
@@ -97,7 +111,7 @@ impl ForgeClient {
         request: reqwest::RequestBuilder,
         decode: impl FnOnce(Vec<u8>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        if self.relay.is_some() {
+        if self.is_relay() {
             return self
                 .call_relay(request, 32 * 1024 * 1024, None, decode)
                 .await;
@@ -113,7 +127,7 @@ impl ForgeClient {
         admission: Option<std::sync::Arc<tokio::sync::Semaphore>>,
         decode: impl FnOnce(Vec<u8>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        if self.relay.is_some() {
+        if self.is_relay() {
             return self.call_relay(request, limit, admission, decode).await;
         }
         AbortOnDropHandle::new(runtime().spawn(async move {
@@ -153,7 +167,7 @@ impl ForgeClient {
         admission: Option<std::sync::Arc<tokio::sync::Semaphore>>,
         decode: impl FnOnce(Vec<u8>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let relay = self.relay.clone().context("Relay transport missing")?;
+        let relay = self.relay().cloned().context("Relay transport missing")?;
         AbortOnDropHandle::new(runtime().spawn(async move {
             let permit = match admission {
                 Some(admission) => Some(admission.acquire_owned().await?),
@@ -174,7 +188,7 @@ impl ForgeClient {
     }
 
     async fn call_empty(&self, request: reqwest::RequestBuilder) -> Result<()> {
-        if self.relay.is_some() {
+        if self.is_relay() {
             return self
                 .call_relay(request, 32 * 1024 * 1024, None, |_bytes| Ok(()))
                 .await;
@@ -194,8 +208,9 @@ impl ForgeClient {
     /// Raw-byte download for both transports (images, exported sources):
     /// direct streams the body, Relay decodes the `$bytes` envelope.
     /// Enforces the 32 MiB ceiling either way, never truncates.
-    async fn call_bytes(&self, request: reqwest::RequestBuilder) -> Result<Vec<u8>> {        const LIMIT: usize = 32 * 1024 * 1024;
-        if let Some(relay) = self.relay.clone() {
+    async fn call_bytes(&self, request: reqwest::RequestBuilder) -> Result<Vec<u8>> {
+        const LIMIT: usize = 32 * 1024 * 1024;
+        if let Some(relay) = self.relay().cloned() {
             return AbortOnDropHandle::new(runtime().spawn(async move {
                 let (method, path, body) = relay_parts(request)?;
                 relay.raw_bytes(&method, &path, body, LIMIT).await
@@ -871,53 +886,6 @@ impl ForgeClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Relay transport (Vilde): tunneled `ForgeClient` for account Forges.
-// The Forge holds one WebSocket to its Relay room and serves Noise
-// channels as responder; the Editor opens channels as initiator, presents
-// its Core grant JWT inside the encrypted confirm, and verifies the Forge
-// responder confirm against the enrolled key from the authenticated Core
-// machine record. Outer WSS is transport-only; E2E is Noise XX_25519.
-// Grant JWTs are short TTL (<=300 s): the transport refreshes via the
-// session-authed `CoreSessionClient` and re-handshakes (new channel)
-// before expiry, so a 5-minute connection never dies permanently.
-// ---------------------------------------------------------------------------
-
-pub fn relay_dialer(
-    ctx: artisan_account::relay_client::RelayDialContext,
-    executor: gpui::BackgroundExecutor,
-) -> crate::account::RelayDialer {
-    std::sync::Arc::new(move |request: crate::account::RelayDialRequest| {
-        let ctx = ctx.clone();
-        executor.spawn(async move { ForgeClient::via_relay(request, &ctx).await })
-    })
-}
-
-/// Build the account dialer factory.
-///
-/// Emily registers it once via `set_relay_dialer_factory`: the controller
-/// calls it on every login and resumed session with the live session token
-/// + Relay URL, and it returns the session-bound dialer (or `None` when the
-///   URL is empty).
-pub fn relay_dialer_factory(
-    core: artisan_account::CoreSessionClient,
-    executor: gpui::BackgroundExecutor,
-) -> crate::account::RelayDialerFactory {
-    std::sync::Arc::new(
-        move |session: artisan_account::SessionToken, relay_url: String| {
-            if relay_url.trim().is_empty() {
-                return None;
-            }
-            let ctx = artisan_account::relay_client::RelayDialContext {
-                relay_base_url: relay_url,
-                core: core.clone(),
-                session,
-            };
-            Some(relay_dialer(ctx, executor.clone()))
-        },
-    )
-}
-
 /// Split a built HTTP request into its tunneled parts: uppercased method,
 /// origin-form path plus the exact query string `reqwest` encoded, and a
 /// JSON or `$bytes`-enveloped body. JSON content travels as JSON; anything
@@ -945,9 +913,8 @@ fn relay_parts(
     let raw = built
         .body()
         .map(|body| {
-            body.as_bytes().context(
-                "streaming request bodies cannot travel the Relay; buffer them first",
-            )
+            body.as_bytes()
+                .context("streaming request bodies cannot travel the Relay; buffer them first")
         })
         .transpose()?
         .map(<[u8]>::to_vec);
@@ -983,22 +950,22 @@ impl ForgeClient {
     /// runtime (WS connect, timers, and tungstenite need its reactor);
     /// dropping the returned future aborts the dial.
     pub async fn via_relay(
-        request: crate::account::RelayDialRequest,
+        request: crate::services::RelayDialRequest,
         ctx: &artisan_account::relay_client::RelayDialContext,
-    ) -> Result<(crate::hosts::HostConfig, Self)> {
+    ) -> Result<Self> {
         let ctx = ctx.clone();
-        AbortOnDropHandle::new(runtime().spawn(async move {
-            Self::via_relay_inner(request, &ctx).await
-        }))
+        AbortOnDropHandle::new(
+            runtime().spawn(async move { Self::via_relay_inner(request, &ctx).await }),
+        )
         .await
         .context("dial the Relay")
         .and_then(std::convert::identity)
     }
 
     async fn via_relay_inner(
-        request: crate::account::RelayDialRequest,
+        request: crate::services::RelayDialRequest,
         ctx: &artisan_account::relay_client::RelayDialContext,
-    ) -> Result<(crate::hosts::HostConfig, Self)> {
+    ) -> Result<Self> {
         let relay = artisan_account::relay_client::RelayClient::connect(
             &ctx.relay_base_url,
             &request.account_id,
@@ -1010,20 +977,6 @@ impl ForgeClient {
             ctx.session.clone(),
         )
         .await?;
-        // Explicit account route: never a dialable `host:port`, never a
-        // TLS fingerprint. Startup must rebuild these from the session
-        // (Emily: `connect_with_client` persistence + `Core::new` resume),
-        // never `ForgeClient::new` mTLS against `address`.
-        let config = crate::hosts::HostConfig {
-            id: crate::hosts::HostId(request.machine_id.clone()),
-            name: request.machine_label.clone(),
-            address: String::new(),
-            fingerprint: String::new(),
-            kind: crate::hosts::HostKind::Account {
-                account: request.account_id.clone(),
-                machine: request.machine_id.clone(),
-            },
-        };
         // Verify the route is live before handing the client to inventory,
         // including the Forge protocol version.
         let live: serde_json::Value = relay.request_json("GET", "/state", None).await?;
@@ -1031,14 +984,10 @@ impl ForgeClient {
         if protocol != Some(u64::from(artisan_api::PROTOCOL_VERSION)) {
             anyhow::bail!("Forge speaks an incompatible protocol; update Forge or the Editor");
         }
-        Ok((
-            config,
-            Self {
-                http: reqwest::Client::new(),
-                base: String::new(),
-                relay: Some(Arc::new(relay)),
-            },
-        ))
+        Ok(Self {
+            http: reqwest::Client::new(),
+            transport: Transport::Relay(Arc::new(relay)),
+        })
     }
 }
 
@@ -1118,6 +1067,29 @@ fn source_ranges() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_request_builders_preserve_paths_queries_and_bodies() {
+        let client = ForgeClient {
+            http: reqwest::Client::new(),
+            transport: Transport::Direct("https://forge.test".to_owned()),
+        };
+        let (method, path, body) = relay_parts(client.http.get(client.url("/state"))).unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/state");
+        assert!(body.is_none());
+        let (method, path, body) = relay_parts(
+            client
+                .http
+                .post(client.url("/threads?since=7"))
+                .json(&serde_json::json!({"title": "hello"})),
+        )
+        .unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/threads?since=7");
+        assert_eq!(body, Some(serde_json::json!({"title": "hello"})));
+    }
+
     #[gpui::test]
     fn source_admission_and_release_progress_without_polling_the_ui_again(
         cx: &gpui::TestAppContext,
@@ -1166,8 +1138,7 @@ mod tests {
         let http = reqwest::Client::new();
         let client = ForgeClient {
             http: http.clone(),
-            base: format!("http://{address}"),
-            relay: None,
+            transport: Transport::Direct(format!("http://{address}")),
         };
         let request = http.get(client.url("/owned-admission"));
         let task = cx.spawn(async move |_| {
@@ -1218,76 +1189,41 @@ mod tests {
         assert!(error.downcast_ref::<serde_json::Error>().is_some());
     }
 
-    /// Polling the actual dialer / `via_relay` from a thread with no Tokio
-    /// reactor must surface an ordinary connection failure, never a reactor
-    /// panic. The transport hops onto the network runtime itself; without
-    /// that hop this test would fail with "no reactor running" instead of
-    /// the refused endpoint below. No live Relay needed: the port is closed
-    /// on purpose, so any reactor-shaped error is the regression signal.
-    ///
-    /// NOTE: do NOT `block_on` the GPUI Task here — the test scheduler's
-    /// virtual background executor only pumps while awaited from the test
-    /// executor, so blocking on it from outside hangs forever.
+    /// The Relay dial hops onto the network runtime itself, so a GPUI test
+    /// executor with no Tokio reactor sees a refused connection, not a panic.
     #[gpui::test]
-    #[allow(
+    #[expect(
         clippy::future_not_send,
-        reason = "gpui TestAppContext is !Send by design; the test executor polls this future"
-    )]
-    #[allow(
-        clippy::needless_pass_by_ref_mut,
-        reason = "gpui test harness hands &mut TestAppContext; the test only reads from it"
+        reason = "gpui TestAppContext is !Send; the test executor polls this future"
     )]
     async fn relay_dial_without_tokio_reactor_fails_with_connection_refused(
         cx: &mut gpui::TestAppContext,
     ) {
         use base64::Engine as _;
-        // Real OS network wait below: allow parking like the neighboring
-        // source-admission test (GPUI forbids parking by default).
         cx.executor().allow_parking();
         let closed = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        let forge_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42_u8; 32]);
         let ctx = artisan_account::relay_client::RelayDialContext {
             relay_base_url: format!("ws://127.0.0.1:{closed}"),
             core: artisan_account::CoreSessionClient::new("http://127.0.0.1:1").unwrap(),
             session: artisan_account::SessionToken::new("test-session".to_owned()),
         };
-        let request = || crate::account::RelayDialRequest {
+        let request = crate::services::RelayDialRequest {
             account_id: "acct_00000000000000000000000000".to_owned(),
             machine_id: "mch_11111111111111111111111111".to_owned(),
-            machine_label: "fixture".to_owned(),
-            forge_ed25519_b64u: forge_key.clone(),
+            forge_ed25519_b64u: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode([0x42_u8; 32]),
             grant_jwt: "bogus.grant.jwt".to_owned(),
             cnf_secret: [0x77_u8; 32],
         };
-        // Through the real dialer (GPUI Task, awaited by the test executor
-        // with no Tokio reactor in scope).
-        let dialer = relay_dialer(ctx.clone(), cx.background_executor.clone());
-        let result = dialer(request()).await;
-        assert!(result.is_err(), "dial to a closed port must fail");
-        if let Err(error) = result {
-            let text = format!("{error:#}");
-            assert!(
-                text.contains("connect to the Relay"),
-                "expected a refused endpoint, got: {text}"
-            );
-            assert!(
-                !text.to_lowercase().contains("reactor"),
-                "reactor leaked into the dial path: {text}"
-            );
-        }
-        // And through the constructor directly: same expectation.
-        let result = ForgeClient::via_relay(request(), &ctx).await;
-        assert!(result.is_err(), "dial to a closed port must fail");
-        if let Err(error) = result {
-            let text = format!("{error:#}");
-            assert!(
-                text.contains("connect to the Relay"),
-                "expected a refused endpoint, got: {text}"
-            );
-        }
+        let text = match ForgeClient::via_relay(request, &ctx).await {
+            Ok(_) => panic!("dial to a closed port must fail"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(text.contains("connect to the Relay"), "got: {text}");
+        assert!(!text.to_lowercase().contains("reactor"), "got: {text}");
     }
 }

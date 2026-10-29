@@ -1,7 +1,7 @@
 [package]
 name = "editor-sidebar"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Projects, the thread inbox and history, the host switcher."
 
@@ -16,6 +16,7 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+editor-core = { path = "../editor-core", features = ["test-support"] }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
 gpui = { workspace = true, features = ["test-support"] }

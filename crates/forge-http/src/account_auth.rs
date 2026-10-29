@@ -140,9 +140,6 @@ impl GrantVerifier {
     }
 }
 
-/// The error kind of a rejected grant (no token bytes in messages).
-pub use artisan_account::GrantErrorKind as RejectionKind;
-
 #[allow(
     clippy::missing_errors_doc,
     reason = "test-only helpers; failures fail the test"
@@ -179,8 +176,8 @@ pub(crate) mod tests {
     fn issuer() -> (ed25519_dalek::SigningKey, String) {
         use base64::Engine as _;
         let key = ed25519_dalek::SigningKey::from_bytes(&[0x77_u8; 32]);
-        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(key.verifying_key().to_bytes());
+        let x =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes());
         (key, x)
     }
 
@@ -239,7 +236,12 @@ pub(crate) mod tests {
         .await;
         let sub = "acct_00000000000000000000000000";
         let mid = "mch_11111111111111111111111111";
-        let token = grant_token(&issuer_key, sub, mid, &[Scope::RelayConnect, Scope::ForgeExecute]);
+        let token = grant_token(
+            &issuer_key,
+            sub,
+            mid,
+            &[Scope::RelayConnect, Scope::ForgeExecute],
+        );
         let claims = verifier
             .verify_channel_grant(&token, sub, mid, 1_700_000_100, true)
             .await
@@ -247,18 +249,24 @@ pub(crate) mod tests {
         assert_eq!(claims.sub, sub);
         // Missing forge:execute is refused.
         let routed = grant_token(&issuer_key, sub, mid, &[Scope::RelayConnect]);
-        assert!(verifier.verify_channel_grant(&routed, sub, mid, 1_700_000_100, true).await.is_err());
-        // Cross-machine binding is refused.
         assert!(
             verifier
-                .verify_channel_grant(&token, sub, "mch_22222222222222222222222222", 1_700_000_100, true)
+                .verify_channel_grant(&routed, sub, mid, 1_700_000_100, true)
                 .await
                 .is_err()
         );
-    }
-
-    #[test]
-    fn rejection_kind_is_exported() {
-        let _ = RejectionKind::Signature;
+        // Cross-machine binding is refused.
+        assert!(
+            verifier
+                .verify_channel_grant(
+                    &token,
+                    sub,
+                    "mch_22222222222222222222222222",
+                    1_700_000_100,
+                    true
+                )
+                .await
+                .is_err()
+        );
     }
 }

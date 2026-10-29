@@ -206,7 +206,7 @@ impl Fixture {
             .unwrap()
             .id;
         cx.update(editor_sources::init);
-        let core = cx.new(|cx| Core::new(files, cx).unwrap());
+        let core = cx.new(|cx| Core::for_tests(files, cx).unwrap());
         Self {
             core,
             host: host.id,
@@ -569,7 +569,7 @@ fn a_new_thread_starts_with_the_model_last_used(cx: &mut TestAppContext) {
     // The Editor restarts: a new Core reads the same files.
     let files = forge.core.read_with(vcx, |core, _| core.files.clone());
     vcx.update(|_, app| editor_sources::init(app));
-    let core = vcx.update(|_, app| app.new(|cx| Core::new(files, cx).unwrap()));
+    let core = vcx.update(|_, app| app.new(|cx| Core::for_tests(files, cx).unwrap()));
     let (fresh, vcx) =
         cx.add_window_view(move |window, cx| Composer::new(core, target, window, cx));
     vcx.simulate_resize(size(px(800.0), px(600.0)));
@@ -661,7 +661,7 @@ fn each_model_comes_back_as_it_was_last_chosen(cx: &mut TestAppContext) {
     // The Editor restarts: a fresh picker still knows Sonnet's settings.
     let files = forge.core.read_with(vcx, |core, _| core.files.clone());
     vcx.update(|_, app| editor_sources::init(app));
-    let core = vcx.update(|_, app| app.new(|cx| Core::new(files, cx).unwrap()));
+    let core = vcx.update(|_, app| app.new(|cx| Core::for_tests(files, cx).unwrap()));
     let (fresh, vcx) =
         cx.add_window_view(move |window, cx| Composer::new(core, target, window, cx));
     wait(vcx, "the new Core to follow Forge", |vcx| {
@@ -1900,17 +1900,17 @@ fn model_picker_wheel_glides_once_and_hides_hover_outside_the_list(cx: &mut Test
         });
         composer.open_menu(crate::Menu::Model, cx);
     });
-    let mut viewport = None;
-    wait(vcx, "the scrollable model list", |vcx| {
-        viewport = vcx.debug_bounds("composer-model-viewport");
-        viewport.is_some()
-    });
-    let viewport = viewport.unwrap();
-    vcx.simulate_mouse_move(viewport.center(), None, gpui::Modifiers::none());
     let handle = composer.read_with(vcx, |composer, _| {
         composer.picker.model_scroll.0.borrow().base_handle.clone()
     });
     let step = vcx.update(|window, _| f32::from(window.line_height()) * 3.0);
+    let mut viewport = None;
+    wait(vcx, "the scrollable model list", |vcx| {
+        viewport = vcx.debug_bounds("composer-model-viewport");
+        viewport.is_some() && f32::from(handle.max_offset().y) >= step * 2.0
+    });
+    let viewport = viewport.unwrap();
+    vcx.simulate_mouse_move(viewport.center(), None, gpui::Modifiers::none());
     vcx.simulate_event(gpui::ScrollWheelEvent {
         position: viewport.center(),
         delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),

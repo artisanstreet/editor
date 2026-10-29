@@ -216,8 +216,9 @@ let
         # The dependencies are cached; what is left ends in one fat-LTO link
         # (the Editor's peaks near 5.5 GB), so one job at a time.
         CARGO_BUILD_JOBS = 1;
-        # Only here: in the dependency cache it would rebuild it per commit.
+        # Only here: in the dependency cache they would rebuild it per commit.
         ARTISAN_COMMIT = commit;
+        EDITOR_COMMIT = commit;
         doNotPostBuildInstallCargoBinaries = true;
         installPhaseCommand = ''
           mkdir -p "$out/bin"
@@ -310,12 +311,14 @@ let
     }
   );
   checks = {
-    # Cargo.toml owns lint policy.
+    # Cargo.toml owns lint policy. The commit rides only the final
+    # derivation: the shared dependency cache below stays commit-free.
     clippy = craneLib.cargoClippy (
       checkBase
       // {
         cargoArtifacts = checkDeps;
         cargoClippyExtraArgs = "";
+        EDITOR_COMMIT = commit;
       }
     );
     tests = craneLib.cargoTest (
@@ -325,6 +328,7 @@ let
         # Snapshot mismatches fail instead of writing `.snap.new` files.
         INSTA_UPDATE = "no";
         CI = "true";
+        EDITOR_COMMIT = commit;
       }
     );
   };

@@ -46,7 +46,7 @@ pub const fn description(page: SettingsPage) -> &'static str {
             editor_core::SettingsSection::Skills => "Manage the skills available to your engines.",
         },
         SettingsPage::General => "How this Editor behaves on this device.",
-        SettingsPage::Hosts => "The Forges this Editor is paired with.",
+        SettingsPage::Hosts => "The account's Forges this Editor has open.",
         SettingsPage::Account => {
             "Your AST account: sign in, sessions, and the Forges on the account."
         }

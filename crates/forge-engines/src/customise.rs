@@ -294,6 +294,10 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
                 permissions.set_mode(permissions.mode() | 0o200);
             }
             #[cfg(not(unix))]
+            #[allow(
+                clippy::permissions_set_readonly_false,
+                reason = "Windows has no Unix mode bits; clearing readonly is the correct API there"
+            )]
             permissions.set_readonly(false);
             fs::set_permissions(destination, permissions)?;
         }

@@ -1,33 +1,12 @@
-//! Core-signed grant claims (reconciled contract, pending Core doc update).
-//!
-//! Wire shape (JSON in JWT payload):
-//! `{v:1, iss, aud, sub, mid, role, scope, cnf:{jwk}, rev, iat, [nbf,] exp, jti}`.
-//! Strict request reads: unknown top-level fields are rejected at v=1.
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const AUD_RELAY: &str = "ast-relay";
-pub const AUD_CORE: &str = "ast-core";
 
 /// Allowed clock skew in seconds (Core §4).
-pub const SKEW_S: i64 = 60;
-
-pub const SCOPE_RELAY_CONNECT: &str = "relay:connect";
-pub const SCOPE_FORGE_EXECUTE: &str = "forge:execute";
-pub const SCOPE_MACHINE_SYNC: &str = "machine:sync";
-
-/// An account or machine id: Relay `idCharset`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct AccountId(pub String);
-
-/// A machine id: same charset as [`AccountId`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct MachineId(pub String);
+const SKEW_S: i64 = 60;
 
 /// Whether an id matches Relay's channel charset
 /// (`^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$`, also used for route ids).
@@ -43,15 +22,14 @@ pub fn is_valid_id(value: &str) -> bool {
     if !first.is_ascii_alphanumeric() {
         return false;
     }
-    rest.iter().all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
-    })
+    rest.iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
 }
 
 /// Whether `value` is a Core id with the given prefix
 /// (`{prefix}_{26 Crockford ULID chars, no I/L/O/U}`).
 #[must_use]
-pub fn is_core_id(prefix: &str, value: &str) -> bool {
+fn is_core_id(prefix: &str, value: &str) -> bool {
     let Some(suffix) = value.strip_prefix(prefix) else {
         return false;
     };
@@ -95,17 +73,6 @@ pub enum Scope {
     /// Machine config/vault sync (replaces `forge:sync`).
     #[serde(rename = "machine:sync")]
     MachineSync,
-}
-
-impl Scope {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RelayConnect => SCOPE_RELAY_CONNECT,
-            Self::ForgeExecute => SCOPE_FORGE_EXECUTE,
-            Self::MachineSync => SCOPE_MACHINE_SYNC,
-        }
-    }
 }
 
 /// `client` (Editor) or `forge` (machine daemon).
@@ -216,6 +183,12 @@ pub struct GrantError {
     pub kind: GrantErrorKind,
 }
 
+impl GrantError {
+    const fn of(kind: GrantErrorKind) -> Self {
+        Self { kind }
+    }
+}
+
 /// Parameters the verifier is configured with (Core agreement pending on
 /// `iss`/JWKS URL; `expected_aud` is `ast-relay` for Relay admission).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,35 +204,16 @@ pub struct VerifyParams {
     pub now_sec: i64,
 }
 
-impl VerifyParams {
-    #[must_use]
-    pub const fn required_scope(role: Role) -> Scope {
-        match role {
-            Role::Forge | Role::Client => Scope::RelayConnect,
-        }
-    }
-}
-
 /// Decode the 32-byte `cnf` public key.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "grant errors are coarse so messages never carry key material"
-)]
 pub fn cnf_public_key(claims: &GrantClaims) -> Result<[u8; 32], GrantError> {
     if claims.cnf.jwk.kty != "OKP" || claims.cnf.jwk.crv != "Ed25519" {
-        return Err(GrantError {
-            kind: GrantErrorKind::Key,
-        });
+        return Err(GrantError::of(GrantErrorKind::Key));
     }
     let raw = URL_SAFE_NO_PAD
         .decode(claims.cnf.jwk.x.as_bytes())
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Key,
-        })?;
+        .map_err(|_cause| GrantError::of(GrantErrorKind::Key))?;
     if raw.len() != 32 {
-        return Err(GrantError {
-            kind: GrantErrorKind::Key,
-        });
+        return Err(GrantError::of(GrantErrorKind::Key));
     }
     let mut key = [0_u8; 32];
     key.copy_from_slice(&raw);
@@ -271,71 +225,46 @@ pub fn cnf_public_key(claims: &GrantClaims) -> Result<[u8; 32], GrantError> {
 /// Clock skew: ±60 s (Core §4). TTL: `0 < exp - iat <= max_ttl_s`.
 pub fn verify_claims(claims: &GrantClaims, params: &VerifyParams) -> Result<(), GrantError> {
     if claims.v != crate::PROTOCOL_VERSION {
-        return Err(GrantError {
-            kind: GrantErrorKind::Version,
-        });
+        return Err(GrantError::of(GrantErrorKind::Version));
     }
     if claims.iss != params.expected_iss {
-        return Err(GrantError {
-            kind: GrantErrorKind::Issuer,
-        });
+        return Err(GrantError::of(GrantErrorKind::Issuer));
     }
     if !claims.aud.contains(params.expected_aud.as_str()) {
-        return Err(GrantError {
-            kind: GrantErrorKind::Audience,
-        });
+        return Err(GrantError::of(GrantErrorKind::Audience));
     }
     if claims.sub != params.expected_sub || claims.mid != params.expected_mid {
-        return Err(GrantError {
-            kind: GrantErrorKind::Binding,
-        });
+        return Err(GrantError::of(GrantErrorKind::Binding));
     }
     if !is_account_id(&claims.sub) || !is_machine_id(&claims.mid) {
-        return Err(GrantError {
-            kind: GrantErrorKind::Id,
-        });
+        return Err(GrantError::of(GrantErrorKind::Id));
     }
     if claims.jti.is_empty() || claims.jti.len() > 256 {
-        return Err(GrantError {
-            kind: GrantErrorKind::Jti,
-        });
+        return Err(GrantError::of(GrantErrorKind::Jti));
     }
     if claims.iat > params.now_sec.saturating_add(SKEW_S)
         || claims.exp <= params.now_sec.saturating_sub(SKEW_S)
     {
-        return Err(GrantError {
-            kind: GrantErrorKind::Time,
-        });
+        return Err(GrantError::of(GrantErrorKind::Time));
     }
     if let Some(nbf) = claims.nbf
         && params.now_sec < nbf
     {
-        return Err(GrantError {
-            kind: GrantErrorKind::Time,
-        });
+        return Err(GrantError::of(GrantErrorKind::Time));
     }
     let ttl = claims.exp.saturating_sub(claims.iat);
     if ttl <= 0 || ttl > params.max_ttl_s {
-        return Err(GrantError {
-            kind: GrantErrorKind::Ttl,
-        });
+        return Err(GrantError::of(GrantErrorKind::Ttl));
     }
     if claims.scope.is_empty() {
-        return Err(GrantError {
-            kind: GrantErrorKind::Scope,
-        });
+        return Err(GrantError::of(GrantErrorKind::Scope));
     }
     let unique: BTreeSet<Scope> = claims.scope.iter().copied().collect();
     if unique.len() != claims.scope.len() {
-        return Err(GrantError {
-            kind: GrantErrorKind::Scope,
-        });
+        return Err(GrantError::of(GrantErrorKind::Scope));
     }
-    let required = VerifyParams::required_scope(claims.role);
-    if !unique.contains(&required) {
-        return Err(GrantError {
-            kind: GrantErrorKind::Scope,
-        });
+    if !unique.contains(&Scope::RelayConnect) {
+        return Err(GrantError::of(GrantErrorKind::Scope));
     }
     // Touch the key shape now so malformed `cnf` fails before admission.
     cnf_public_key(claims)?;
@@ -346,183 +275,90 @@ pub fn verify_claims(claims: &GrantClaims, params: &VerifyParams) -> Result<(), 
 ///
 /// Then check reconciled claims. `kid` handling (key selection/rotation) is
 /// the caller's job; this only verifies bytes with the given key.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "grant errors are coarse so messages never carry key material"
-)]
 pub fn parse_and_verify_jwt(
     compact: &str,
     issuer_pubkey: &[u8; 32],
     params: &VerifyParams,
 ) -> Result<GrantClaims, GrantError> {
     let (signing_input, signature) = split_compact(compact)?;
-    let claims: GrantClaims = claims_from_compact(compact)?;
+    let claims: GrantClaims =
+        unverified_part(compact, 1).map_err(|_decode| GrantError::of(GrantErrorKind::Id))?;
     // Standard JWT EdDSA verification: Ed25519 over ASCII `header.payload`.
     let key = ed25519_dalek::VerifyingKey::from_bytes(issuer_pubkey)
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Signature,
-        })?;
+        .map_err(|_cause| GrantError::of(GrantErrorKind::Signature))?;
     let signature = ed25519_dalek::Signature::from_slice(&signature)
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Signature,
-        })?;
+        .map_err(|_cause| GrantError::of(GrantErrorKind::Signature))?;
     key.verify_strict(signing_input.as_bytes(), &signature)
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Signature,
-        })?;
+        .map_err(|_cause| GrantError::of(GrantErrorKind::Signature))?;
     verify_claims(&claims, params)?;
     Ok(claims)
 }
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "grant errors are coarse so messages never carry key material"
-)]
 fn split_compact(compact: &str) -> Result<(String, Vec<u8>), GrantError> {
     let mut parts = compact.split('.');
-    let (Some(header), Some(payload), Some(signature), None) = (
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-    ) else {
-        return Err(GrantError {
-            kind: GrantErrorKind::Encoding,
-        });
+    let (Some(header), Some(payload), Some(signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(GrantError::of(GrantErrorKind::Encoding));
     };
     if header.is_empty() || payload.is_empty() || signature.is_empty() {
-        return Err(GrantError {
-            kind: GrantErrorKind::Encoding,
-        });
+        return Err(GrantError::of(GrantErrorKind::Encoding));
     }
-    check_header(header)?;
+    check_header(compact)?;
     let signature = URL_SAFE_NO_PAD
         .decode(signature.as_bytes())
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Encoding,
-        })?;
+        .map_err(|_cause| GrantError::of(GrantErrorKind::Encoding))?;
     if signature.len() != 64 {
-        return Err(GrantError {
-            kind: GrantErrorKind::Signature,
-        });
+        return Err(GrantError::of(GrantErrorKind::Signature));
     }
     Ok((format!("{header}.{payload}"), signature))
 }
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "grant errors are coarse so messages never carry key material"
-)]
-fn check_header(header_b64: &str) -> Result<(), GrantError> {
-    let header = URL_SAFE_NO_PAD
-        .decode(header_b64.as_bytes())
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Encoding,
-        })?;
-    let header: serde_json::Value =
-        serde_json::from_slice(&header).map_err(|_| GrantError {
-            kind: GrantErrorKind::Encoding,
-        })?;
-    if header.get("alg").and_then(serde_json::Value::as_str) != Some("EdDSA") {
-        return Err(GrantError {
-            kind: GrantErrorKind::Signature,
-        });
-    }
-    if header
-        .get("kid")
-        .and_then(serde_json::Value::as_str)
-        .is_none_or(str::is_empty)
-    {
-        return Err(GrantError {
-            kind: GrantErrorKind::Signature,
-        });
-    }
-    Ok(())
+fn check_header(compact: &str) -> Result<(), GrantError> {
+    unverified_kid(compact)
+        .map(drop)
+        .map_err(|_header| GrantError::of(GrantErrorKind::Signature))
 }
 
-/// Read the `jti` from a compact JWT header+payload without verifying.
-///
-/// Used to echo the grant id back in Relay `authenticate` frames. Never
-/// trusts the payload.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "grant errors are coarse so messages never carry key material"
-)]
-pub fn unverified_jti(compact: &str) -> Result<String, GrantError> {
-    let payload_b64 = compact.split('.').nth(1).ok_or(GrantError {
-        kind: GrantErrorKind::Encoding,
-    })?;
-    let payload = URL_SAFE_NO_PAD
-        .decode(payload_b64.as_bytes())
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Encoding,
-        })?;
-    let payload: serde_json::Value =
-        serde_json::from_slice(&payload).map_err(|_| GrantError {
-            kind: GrantErrorKind::Encoding,
-        })?;
-    payload
-        .get("jti")
-        .and_then(serde_json::Value::as_str)
-        .filter(|jti| !jti.is_empty())
-        .map(str::to_owned)
-        .ok_or(GrantError {
-            kind: GrantErrorKind::Encoding,
-        })
-}
-/// Read the `kid` from a compact JWT header without verifying.
-///
-/// Used for JWKS key selection/rotation (fetch JWKS, select by `kid`,
-/// check `alg == EdDSA`, then verify). Never trusts the payload.
-#[expect(
-    clippy::map_err_ignore,
-    reason = "grant errors are coarse so messages never carry key material"
-)]
-pub fn unverified_kid(compact: &str) -> Result<String, GrantError> {
-    let header_b64 = compact.split('.').next().ok_or(GrantError {
-        kind: GrantErrorKind::Encoding,
-    })?;
-    let header = URL_SAFE_NO_PAD
-        .decode(header_b64.as_bytes())
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Encoding,
-        })?;
-    let header: serde_json::Value =
-        serde_json::from_slice(&header).map_err(|_| GrantError {
-            kind: GrantErrorKind::Encoding,
-        })?;
-    if header.get("alg").and_then(serde_json::Value::as_str) != Some("EdDSA") {
-        return Err(GrantError {
-            kind: GrantErrorKind::Signature,
-        });
-    }
-    header
-        .get("kid")
-        .and_then(serde_json::Value::as_str)
-        .filter(|kid| !kid.is_empty())
-        .map(str::to_owned)
-        .ok_or(GrantError {
-            kind: GrantErrorKind::Signature,
-        })
+#[derive(Deserialize)]
+struct UnverifiedHeader {
+    alg: String,
+    kid: String,
 }
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "grant errors are coarse so messages never carry key material"
-)]
-fn claims_from_compact(compact: &str) -> Result<GrantClaims, GrantError> {
-    let payload_b64 = compact.split('.').nth(1).ok_or(GrantError {
-        kind: GrantErrorKind::Encoding,
-    })?;
-    let payload = URL_SAFE_NO_PAD
-        .decode(payload_b64.as_bytes())
-        .map_err(|_| GrantError {
-            kind: GrantErrorKind::Encoding,
-        })?;
-    // Strict: unknown top-level claims are rejected at v=1.
-    serde_json::from_slice(&payload).map_err(|_| GrantError {
-        kind: GrantErrorKind::Id,
-    })
+#[derive(Deserialize)]
+struct UnverifiedJti {
+    jti: String,
+}
+
+/// Decodes one part (0 header, 1 payload) of a compact JWT without checking
+/// its signature.
+pub fn unverified_part<T: serde::de::DeserializeOwned>(
+    compact: &str,
+    index: usize,
+) -> anyhow::Result<T> {
+    use anyhow::Context as _;
+    let part = compact
+        .split('.')
+        .nth(index)
+        .context("the grant is not a compact JWT")?;
+    let raw = URL_SAFE_NO_PAD
+        .decode(part.as_bytes())
+        .context("decode the grant")?;
+    serde_json::from_slice(&raw).context("read the grant")
+}
+
+pub fn unverified_jti(compact: &str) -> anyhow::Result<String> {
+    let UnverifiedJti { jti } = unverified_part(compact, 1)?;
+    anyhow::ensure!(!jti.is_empty(), "the grant has no jti");
+    Ok(jti)
+}
+
+pub fn unverified_kid(compact: &str) -> anyhow::Result<String> {
+    let UnverifiedHeader { alg, kid } = unverified_part(compact, 0)?;
+    anyhow::ensure!(alg == "EdDSA", "the grant is not EdDSA-signed");
+    anyhow::ensure!(!kid.is_empty(), "the grant has no kid");
+    Ok(kid)
 }
 
 #[cfg(test)]
@@ -640,7 +476,7 @@ mod tests {
     fn wrong_audience_and_binding_are_rejected() {
         let key = signing_key();
         let mut wrong_aud = claims();
-        wrong_aud.aud = Aud::One(AUD_CORE.into());
+        wrong_aud.aud = Aud::One("ast-core".into());
         let token = compact(&wrong_aud, &key);
         assert_eq!(
             parse_and_verify_jwt(&token, key.verifying_key().as_bytes(), &params())
@@ -723,10 +559,7 @@ mod tests {
 /// verbatim from `core/fixtures/v1/` — TEST-ONLY synthetic credentials).
 /// Catches exact field drift against Core's actual `issueGrant` output.
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test fixtures; failures fail the test"
-)]
+#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
 mod core_fixture_tests {
     use super::*;
 
@@ -740,10 +573,10 @@ mod core_fixture_tests {
     fn core_issued_grant_verifies_byte_exact() {
         let fixture = fixture();
         let token = fixture["grant"].as_str().unwrap();
-        assert_eq!(crate::grant::unverified_kid(token).unwrap(), "core-202610-89at");
         // Issuer key comes from the fixture JWKS (kid-selected, as prod does).
         let jwks_key = fixture["jwks"]["keys"][0].clone();
-        assert_eq!(jwks_key["kid"], "core-202610-89at");
+        let fixture_kid = jwks_key["kid"].as_str().unwrap().to_owned();
+        assert_eq!(crate::grant::unverified_kid(token).unwrap(), fixture_kid);
         let issuer = {
             use base64::Engine as _;
             let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -751,6 +584,18 @@ mod core_fixture_tests {
                 .unwrap();
             <[u8; 32]>::try_from(raw).unwrap()
         };
+        // now_sec comes from the token itself (iat == nbf in the fixture):
+        // keeps the test byte-exact without hardcoding Core's emission time.
+        let payload_bytes = {
+            use base64::Engine as _;
+            let part = token.split('.').nth(1).unwrap();
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(part.as_bytes())
+                .unwrap()
+        };
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        let fixture_iat = payload["iat"].as_i64().unwrap();
+        let fixture_jti = payload["jti"].as_str().unwrap().to_owned();
         let expected = &fixture["expected"];
         let params = VerifyParams {
             expected_iss: expected["iss"].as_str().unwrap().into(),
@@ -759,28 +604,25 @@ mod core_fixture_tests {
             expected_sub: expected["sub"].as_str().unwrap().into(),
             expected_mid: expected["mid"].as_str().unwrap().into(),
             // nowSec inside the grant window (iat == nbf here).
-            now_sec: 1_793_056_834,
+            now_sec: fixture_iat,
         };
         let claims = parse_and_verify_jwt(token, &issuer, &params).unwrap();
         assert_eq!(claims.v, 1);
         assert_eq!(claims.sub, expected["sub"].as_str().unwrap());
         assert_eq!(claims.mid, expected["mid"].as_str().unwrap());
         assert_eq!(claims.role, Role::Forge);
-        assert_eq!(
-            claims.scope,
-            vec![Scope::RelayConnect, Scope::ForgeExecute]
-        );
-        assert_eq!(claims.iat, 1_793_056_834);
-        assert_eq!(claims.nbf, Some(1_793_056_834));
+        assert_eq!(claims.scope, vec![Scope::RelayConnect, Scope::ForgeExecute]);
+        assert_eq!(claims.iat, fixture_iat);
+        assert_eq!(claims.nbf, Some(fixture_iat));
         assert_eq!(claims.exp - claims.iat, 300);
-        assert_eq!(claims.jti, "tkn_01M5X881B3RJZR6K6Q63EASF2M");
+        assert_eq!(claims.jti, fixture_jti);
         // v1 has NO rev claim: present-in-fixture would fail strict reads,
         // and our parser must accept its absence.
         assert_eq!(claims.rev, None);
         let cnf = cnf_public_key(&claims).unwrap();
         assert_eq!(
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cnf),
-            "gmxYVHSD234eTW6JSPZd6FjwZFllI8-Ue7gBKtkALOM"
+            expected["cnf"]["jwk"]["jwk"]["x"].as_str().unwrap()
         );
     }
 
@@ -790,14 +632,18 @@ mod core_fixture_tests {
         let fixture = fixture();
         let proof = &fixture["machineProof"];
         let headers = &proof["headers"];
-        let body = proof["rawBody"].as_str().unwrap().as_bytes();
+        let body = proof["raw_body"].as_str().unwrap().as_bytes();
         // Body hash matches the signed canonical string.
         assert_eq!(
             crate::machine_proof::body_hash_hex(body),
             crate::machine_proof::EMPTY_BODY_HASH
         );
         let canonical = crate::machine_proof::canonical_request(
-            headers["x-ast-timestamp"].as_str().unwrap().parse().unwrap(),
+            headers["x-ast-timestamp"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
             headers["x-ast-nonce"].as_str().unwrap(),
             "GET",
             proof["pathAndQuery"].as_str().unwrap(),
@@ -819,7 +665,11 @@ mod core_fixture_tests {
         let request = crate::machine_proof::MachineProof {
             public: &public,
             body,
-            timestamp_sec: headers["x-ast-timestamp"].as_str().unwrap().parse().unwrap(),
+            timestamp_sec: headers["x-ast-timestamp"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
             nonce_b64u: headers["x-ast-nonce"].as_str().unwrap(),
             method: proof["method"].as_str().unwrap(),
             path_and_query: proof["pathAndQuery"].as_str().unwrap(),
@@ -828,7 +678,11 @@ mod core_fixture_tests {
                 .unwrap()
                 .strip_prefix("AST-Machine ")
                 .unwrap(),
-            now_sec: 1_793_056_834,
+            now_sec: headers["x-ast-timestamp"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
         };
         crate::machine_proof::verify_machine_proof(&request).unwrap();
         let _ = canonical;

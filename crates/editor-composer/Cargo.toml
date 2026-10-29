@@ -1,7 +1,7 @@
 [package]
 name = "editor-composer"
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 version.workspace = true
 description = "Draft, attachments (converted to WebP), model picker, send / steer / cancel."
 
@@ -21,6 +21,7 @@ tracing.workspace = true
 webp.workspace = true
 
 [dev-dependencies]
+editor-core = { path = "../editor-core", features = ["test-support"] }
 forge-engines = { path = "../forge-engines" }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
