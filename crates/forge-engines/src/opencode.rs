@@ -10,6 +10,10 @@
 //! `interrupted`) bound the turn; OpenCode compacts a full context itself.
 
 mod decoder;
+mod goal;
+#[cfg(test)]
+#[path = "../tests/opencode/goal.rs"]
+mod goal_tests;
 mod side;
 #[cfg(test)]
 mod tests;
@@ -37,6 +41,10 @@ const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(process::MAX_LINE_BYTES)
 pub struct OpenCodeHarness;
 
 impl Harness for OpenCodeHarness {
+    fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, Result<()>> {
+        Box::pin(goal::clear_goal(turn))
+    }
+
     fn side_query(
         &self,
         turn: Turn,
@@ -206,12 +214,10 @@ async fn drive(
     }
 
     let mut decoder = Decoder::new(Some(session.clone()));
-    let message = send_prompt(api, &session, &turn.input).await?;
-    emit_all(
-        io,
-        decoder.prompt_sent(&message, Some(turn.input.id.clone())),
-    )
-    .await;
+    if let Err(error) = goal::refresh(api, &session, &mut decoder, io, false).await {
+        tracing::debug!(session, %error, "OpenCode goal unavailable");
+    }
+    send_input(api, &session, &turn.input, &mut decoder, io).await?;
     loop {
         if decoder.idle() {
             // A steer that raced the end of the turn starts the next one.
@@ -258,13 +264,12 @@ async fn handle_input(
 ) -> Result<()> {
     match input {
         Input::Steer(input) => {
-            // `steer` folds the message in at the next step boundary, or
-            // starts a new turn when the session is idle.
-            let message = send_prompt(api, session, &input).await?;
-            emit_all(io, decoder.prompt_sent(&message, Some(input.id))).await;
+            send_input(api, session, &input, decoder, io).await?;
         }
-        // OpenCode has no goals.
-        Input::ClearGoal => {}
+        Input::ClearGoal => {
+            goal::command(api, session, "clear", &[]).await?;
+            emit_all(io, decoder.goal_changed(session, None)).await;
+        }
         // The session's agent carries its rules; its next step asks by them.
         Input::SetPermissions(permissions) => {
             let agent = agent_name(permissions);
@@ -293,7 +298,29 @@ async fn handle_input(
     Ok(())
 }
 
-async fn send_prompt(api: &Api, session: &str, input: &UserInput) -> Result<String> {
+async fn send_input(
+    api: &Api,
+    session: &str,
+    input: &UserInput,
+    decoder: &mut Decoder,
+    io: &RunIo,
+) -> Result<()> {
+    if let Some(text) = goal::argument(&input.text) {
+        let files = input_files(input).await?;
+        goal::command(api, session, text, &files).await?;
+        goal::refresh(api, session, decoder, io, true).await?;
+        io.emit(EngineEvent::InputAccepted {
+            id: input.id.clone(),
+        })
+        .await;
+        return Ok(());
+    }
+    let message = send_prompt(api, session, input).await?;
+    emit_all(io, decoder.prompt_sent(&message, Some(input.id.clone()))).await;
+    Ok(())
+}
+
+async fn input_files(input: &UserInput) -> Result<Vec<Value>> {
     let mut files = Vec::new();
     for path in &input.images {
         let bytes = tokio::fs::read(path)
@@ -309,15 +336,20 @@ async fn send_prompt(api: &Api, session: &str, input: &UserInput) -> Result<Stri
             "name": path.file_name().map(|name| name.to_string_lossy().into_owned()),
         }));
     }
+    Ok(files)
+}
+
+async fn send_prompt(api: &Api, session: &str, input: &UserInput) -> Result<String> {
+    let files = input_files(input).await?;
     let body = json!({ "text": input.text, "files": files, "delivery": "steer" });
     let admitted = api
         .post(&format!("/api/session/{session}/prompt"), Some(&body))
         .await
         .with_context(|| format!("sending message {} to OpenCode session {session}", input.id))?;
-    Ok(admitted["data"]["id"]
+    let message = admitted["data"]["id"]
         .as_str()
-        .context("OpenCode admitted a prompt without a message id")?
-        .to_owned())
+        .context("OpenCode admitted a prompt without a message id")?;
+    Ok(message.to_owned())
 }
 
 async fn emit_all(io: &RunIo, events: Vec<EngineEvent>) {
