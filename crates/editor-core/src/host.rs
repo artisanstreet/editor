@@ -401,6 +401,14 @@ impl HostData {
                 self.remember_thread(thread);
                 cx.emit(HostEvent::ThreadChanged { thread_id });
             }
+            Event::ThreadRemoved { thread_id } => {
+                self.forget_thread(&thread_id);
+                self.waiting.remove(&thread_id);
+                self.live.remove(&thread_id);
+                self.suggestions.remove(&thread_id);
+                cx.emit(HostEvent::ThreadChanged { thread_id });
+                cx.emit(HostEvent::Changed);
+            }
             Event::Run { run } => {
                 if !run.status.is_live() {
                     self.live.remove(&run.thread_id);

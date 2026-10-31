@@ -175,6 +175,7 @@ impl HostData {
             Event::Hello { .. }
             | Event::Project { .. }
             | Event::Thread { .. }
+            | Event::ThreadRemoved { .. }
             | Event::Setting { .. }
             | Event::Live { .. }
             | Event::Suggestion { .. }

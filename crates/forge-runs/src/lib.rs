@@ -16,6 +16,7 @@ mod gateway;
 mod handoff;
 mod mcp_auth;
 mod park;
+mod retention;
 mod run;
 mod scratch;
 mod side;

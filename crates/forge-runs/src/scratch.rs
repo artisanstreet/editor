@@ -12,7 +12,7 @@ const FOLDER_WORDS: usize = 4;
 const FOLDER_KEY: usize = 12;
 
 impl Hub {
-    fn scratch_root(&self) -> PathBuf {
+    pub(crate) fn scratch_root(&self) -> PathBuf {
         self.data_dir().join("scratch")
     }
 
@@ -64,7 +64,7 @@ fn inside_work_tree(path: &Path) -> bool {
     path.ancestors().any(|dir| dir.join(".git").exists())
 }
 
-fn scratch_folder(root: &Path, thread: &Thread) -> Result<PathBuf> {
+fn folder_key(thread: &Thread) -> String {
     let key: String = thread
         .id
         .as_str()
@@ -72,18 +72,37 @@ fn scratch_folder(root: &Path, thread: &Thread) -> Result<PathBuf> {
         .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    let key = &key[key.len().saturating_sub(FOLDER_KEY)..];
+    key[key.len().saturating_sub(FOLDER_KEY)..].to_owned()
+}
+
+fn existing_scratch_folder(root: &Path, key: &str) -> Result<Option<PathBuf>> {
     let suffix = format!("-{key}");
-    std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
-    let existing = std::fs::read_dir(root)
+    Ok(std::fs::read_dir(root)
         .with_context(|| format!("list {}", root.display()))?
         .filter_map(std::result::Result::ok)
         .find(|entry| {
             entry.file_name().to_string_lossy().ends_with(&suffix)
                 && entry.file_type().is_ok_and(|kind| kind.is_dir())
-        });
-    if let Some(entry) = existing {
-        return Ok(entry.path());
+        })
+        .map(|entry| entry.path()))
+}
+
+pub fn remove_scratch_folder(root: &Path, thread: &Thread) -> Result<()> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    let Some(folder) = existing_scratch_folder(root, &folder_key(thread))? else {
+        return Ok(());
+    };
+    std::fs::remove_dir_all(&folder).with_context(|| format!("remove {}", folder.display()))
+}
+
+fn scratch_folder(root: &Path, thread: &Thread) -> Result<PathBuf> {
+    let key = folder_key(thread);
+    let key = key.as_str();
+    std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
+    if let Some(folder) = existing_scratch_folder(root, key)? {
+        return Ok(folder);
     }
     let words = thread
         .title

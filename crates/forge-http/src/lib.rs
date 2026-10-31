@@ -162,6 +162,11 @@ pub async fn start_with_harness(
         tasks.spawn(async move { auth.check_mcp_auth().await });
         let agents = hub.clone();
         tasks.spawn(async move { agents.reconcile_agents().await });
+        tasks.spawn(remove_inactive_threads(
+            hub.clone(),
+            store.clone(),
+            shutdown.clone(),
+        ));
         anyhow::Ok((listener, address, app))
     }
     .await;
@@ -323,6 +328,21 @@ impl Drop for Server {
 }
 
 /// Forge's certificate, made on first use and kept in the store.
+async fn remove_inactive_threads(hub: Hub, store: Store, shutdown: CancellationToken) {
+    loop {
+        if let Err(error) = hub.remove_inactive_threads().await {
+            tracing::warn!("remove inactive threads: {error:#}");
+        }
+        if let Err(error) = store.gc_content().await {
+            tracing::warn!("collect unreferenced text sources: {error:#}");
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep(std::time::Duration::from_hours(1)) => {}
+        }
+    }
+}
+
 pub async fn identity(store: &Store) -> Result<Identity> {
     if let Some(stored) = store.secret(IDENTITY_KEY).await? {
         return serde_json::from_str(&stored).context("read Forge's identity");

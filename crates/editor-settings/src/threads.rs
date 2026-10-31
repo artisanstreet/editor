@@ -8,6 +8,7 @@ use artisan_api::{ThreadId, Timestamp, UpdateThread};
 use editor_core::SettingsPage;
 use editor_core::{HostData, HostId, SettingsSection};
 use editor_ui::button::{Button, ButtonVariant};
+use editor_ui::select::{Select, SelectEntry};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
     AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement,
@@ -130,9 +131,83 @@ pub fn render(
         content = content.child(render_assistance(settings, host, theme, cx));
     }
     if page.shows(SettingsSection::Archive) {
-        content = content.child(render_archived(settings, host, theme, cx));
+        content = content
+            .child(render_cleanup(host, theme, cx))
+            .child(render_archived(settings, host, theme, cx));
     }
     content
+}
+
+fn retention_label(days: Option<u32>) -> String {
+    match days {
+        None => "Never".to_owned(),
+        Some(365) => "After a year".to_owned(),
+        Some(days) => format!("After {days} days"),
+    }
+}
+
+fn render_cleanup(
+    host: &Entity<HostData>,
+    theme: &ArtisanTheme,
+    cx: &mut Context<Settings>,
+) -> PageBlock {
+    let decl = artisan_api::setting_decl(artisan_api::THREAD_RETENTION_DAYS_KEY);
+    let current = host
+        .read(cx)
+        .setting(artisan_api::THREAD_RETENTION_DAYS_KEY)
+        .cloned()
+        .or_else(|| decl.map(artisan_api::SettingDecl::default_value))
+        .map(|value| value.as_u64().and_then(|days| u32::try_from(days).ok()))
+        .unwrap_or_default();
+    let choices = match decl.map(|decl| decl.kind) {
+        Some(artisan_api::SettingKind::Choice { values }) => values,
+        _ => &[],
+    };
+    let host = host.clone();
+    let select = Select::new(
+        "settings-thread-retention",
+        *theme,
+        Some(current),
+        choices
+            .iter()
+            .map(|days| SelectEntry::item(*days, retention_label(*days)))
+            .collect(),
+    )
+    .label("Delete inactive threads")
+    .debug_selector("settings-thread-retention")
+    .on_change(move |days: Option<u32>, _, _, cx| {
+        save_value(
+            &host,
+            artisan_api::THREAD_RETENTION_DAYS_KEY,
+            serde_json::json!(days),
+            cx,
+        );
+    });
+    section_shell(
+        theme,
+        "Cleanup",
+        None,
+        None,
+        card(
+            theme,
+            vec![
+                row(
+                    theme,
+                    "Delete inactive threads",
+                    "Threads nothing has happened in for this long are deleted with their messages and images, archived or not. Working threads, threads waiting on you and threads whose agents are still active are kept.",
+                    Some(
+                        div()
+                            .w(px(144.0))
+                            .flex_shrink_0()
+                            .child(select)
+                            .into_any_element(),
+                    ),
+                )
+                .into_any_element(),
+            ],
+        ),
+    )
+    .debug_selector("settings-section-cleanup")
 }
 
 /// The archive table.

@@ -20,6 +20,7 @@ pub mod legacy;
 mod pairing;
 mod read;
 mod recall;
+mod retention;
 mod schema;
 mod settings;
 mod source_index;

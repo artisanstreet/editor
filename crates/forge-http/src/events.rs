@@ -191,6 +191,7 @@ pub(crate) async fn forward(
                 Event::Hello { .. }
                 | Event::Project { .. }
                 | Event::Thread { .. }
+                | Event::ThreadRemoved { .. }
                 | Event::Item { .. }
                 | Event::Run { .. }
                 | Event::ItemState { .. }
@@ -235,6 +236,7 @@ pub(crate) async fn forward(
                     Event::Hello { .. }
                     | Event::Project { .. }
                     | Event::Thread { .. }
+                    | Event::ThreadRemoved { .. }
                     | Event::Item { .. }
                     | Event::Run { .. }
                     | Event::ItemState { .. }
@@ -369,6 +371,7 @@ fn scoped(mut envelope: Envelope, scope: &Since) -> Option<Envelope> {
         Event::Hello { .. }
         | Event::Project { .. }
         | Event::Thread { .. }
+        | Event::ThreadRemoved { .. }
         | Event::Item { .. }
         | Event::Run { .. }
         | Event::ItemState { .. }

@@ -73,7 +73,7 @@ impl Writer {
 }
 
 pub struct Tx<'c> {
-    sql: Transaction<'c>,
+    pub(crate) sql: Transaction<'c>,
     seq: Seq,
     events: Vec<Envelope>,
     #[cfg(any(feature = "legacy-import", test))]
@@ -222,12 +222,12 @@ impl Tx<'_> {
         now()
     }
 
-    const fn next_seq(&mut self) -> Seq {
+    pub(crate) const fn next_seq(&mut self) -> Seq {
         self.seq += 1;
         self.seq
     }
 
-    fn emit(&mut self, seq: Seq, event: Event) {
+    pub(crate) fn emit(&mut self, seq: Seq, event: Event) {
         self.events.push(Envelope {
             seq: Some(seq),
             live_revision: 0,

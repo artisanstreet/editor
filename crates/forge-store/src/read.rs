@@ -56,6 +56,7 @@ pub fn max_seq(conn: &Connection) -> Result<Seq> {
             SELECT max(seq) FROM threads UNION ALL
             SELECT max(seq) FROM items UNION ALL
             SELECT max(seq) FROM runs UNION ALL
+            SELECT max(seq) FROM removed_threads UNION ALL
             SELECT max(seq) FROM kv)",
         [],
         |row| row.get(0),
@@ -606,6 +607,7 @@ pub fn changes_since(
         "SELECT seq, kind, CASE WHEN length(CAST(body AS BLOB)) <= 16777216 THEN body END, key FROM (
          SELECT seq, 'project' AS kind, body, NULL AS key FROM projects WHERE seq > ?1
          UNION ALL SELECT seq, 'thread', body, NULL FROM threads WHERE seq > ?1
+         UNION ALL SELECT seq, 'thread_removed', json_quote(id), NULL FROM removed_threads WHERE seq > ?1
          UNION ALL SELECT seq,
              CASE WHEN ?3 AND (?4 IS NULL OR thread_id != ?4) THEN 'item_state' ELSE 'item' END,
              CASE WHEN ?3 AND (?4 IS NULL OR thread_id != ?4)
@@ -648,6 +650,9 @@ pub fn changes_since(
             },
             "thread" => Event::Thread {
                 thread: from_body(&body)?,
+            },
+            "thread_removed" => Event::ThreadRemoved {
+                thread_id: from_body(&body)?,
             },
             "item" => Event::Item {
                 item: from_body(&body)?,
