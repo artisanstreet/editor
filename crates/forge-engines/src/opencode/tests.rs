@@ -242,19 +242,22 @@ fn the_chosen_variant_is_the_model_variant() {
     );
 }
 
-/// OpenCode runs a Forge agent per permission level: Auto asks before
-/// shell commands and other folders, Full allows everything.
 #[test]
 fn each_permission_level_is_an_agent_opencode_knows() {
     let home = tempfile::tempdir().unwrap();
-    let dir = super::write_agents(home.path()).unwrap();
+    let blobs = home.path().join("data/blobs");
+    let dir = super::write_agents(home.path(), std::slice::from_ref(&blobs)).unwrap();
     let config: Value =
         serde_json::from_slice(&std::fs::read(dir.join("opencode.json")).unwrap()).unwrap();
     let rules = |permissions| config["agent"][super::agent_name(permissions)]["permission"].clone();
     let auto = rules(artisan_api::Permissions::Auto);
+    assert_eq!(auto["bash"], "ask");
     assert_eq!(
-        (&auto["bash"], &auto["external_directory"]),
-        (&Value::from("ask"), &Value::from("ask"))
+        auto["external_directory"],
+        serde_json::json!({
+            "*": "ask",
+            format!("{}/*", blobs.to_string_lossy().replace('\\', "/")): "allow",
+        })
     );
     let full = rules(artisan_api::Permissions::Full);
     assert_eq!(full["external_directory"], "allow");

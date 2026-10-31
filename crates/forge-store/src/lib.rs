@@ -176,6 +176,7 @@ impl Store {
         let blob_dir = dir.join("blobs");
         std::fs::create_dir_all(&blob_dir)
             .with_context(|| format!("create {}", blob_dir.display()))?;
+        blobs::name_files(&blob_dir)?;
         Self::start(dir.join("forge.sqlite3"), blob_dir)
     }
 

@@ -47,7 +47,7 @@ pub(super) async fn clear_goal(turn: Turn) -> Result<()> {
         .as_deref()
         .context("clearing a goal needs an OpenCode session")?;
     let password = password()?;
-    let config_dir = write_agents(&turn.home)?;
+    let config_dir = write_agents(&turn.home, &turn.launch.readable)?;
     let mut server = spawn(&turn, &password, &config_dir)?;
     let result = async {
         let base = tokio::time::timeout(READY_TIMEOUT, ready(&mut server)).await??;

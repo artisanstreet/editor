@@ -787,8 +787,6 @@ impl Hub {
         self.inner.data_dir.join("extensions").join("skills")
     }
 
-    /// A user message as `engine` receives it: images as files, and skill
-    /// mentions in the engine's own form.
     async fn user_input(&self, item: &Item, engine: EngineId) -> Result<forge_engines::UserInput> {
         let ItemKind::UserMessage {
             text,
@@ -852,10 +850,11 @@ impl Hub {
         } else {
             text
         };
+        let images = self.store().input_image_paths(images.clone()).await?;
         Ok(forge_engines::UserInput {
             id: item.id.clone(),
-            text,
-            images: self.store().input_image_paths(images.clone()).await?,
+            text: with_image_paths(text, &images),
+            images,
         })
     }
 
@@ -1007,6 +1006,19 @@ impl Hub {
 
 #[cfg(test)]
 mod tests;
+
+fn with_image_paths(text: String, images: &[PathBuf]) -> String {
+    let lines: Vec<String> = images
+        .iter()
+        .enumerate()
+        .map(|(index, path)| format!("[Image {} is saved at {}]", index + 1, path.display()))
+        .collect();
+    match (text.is_empty(), lines.is_empty()) {
+        (_, true) => text,
+        (true, false) => lines.join("\n"),
+        (false, false) => format!("{text}\n\n{}", lines.join("\n")),
+    }
+}
 
 /// The line an engine reads above a message another thread's agent wrote.
 fn sender_line(sender: &artisan_api::Sender) -> String {

@@ -60,7 +60,7 @@ impl Harness for OpenCodeHarness {
                 .as_deref()
                 .context("naming OpenCode needs a session")?;
             let password = password()?;
-            let config_dir = write_agents(&turn.home)?;
+            let config_dir = write_agents(&turn.home, &turn.launch.readable)?;
             let mut server = spawn(&turn, &password, &config_dir)?;
             let result = async {
                 let base = tokio::time::timeout(READY_TIMEOUT, ready(&mut server)).await??;
@@ -104,7 +104,7 @@ impl Harness for OpenCodeHarness {
 
 async fn run(turn: &Turn, io: &mut RunIo) -> Result<Outcome> {
     let password = password()?;
-    let config_dir = write_agents(&turn.home)?;
+    let config_dir = write_agents(&turn.home, &turn.launch.readable)?;
     let mut server = spawn(turn, &password, &config_dir)?;
     let cancel = io.cancel.clone();
     let result = tokio::select! {
@@ -376,12 +376,16 @@ const fn agent_name(permissions: Permissions) -> &'static str {
     }
 }
 
-/// OpenCode permission rules (later keys win; `*` sorts first). OpenCode
-/// has no sandbox or automatic mode: Auto edits inside the project and asks
-/// before shell commands and other folders.
-fn permission(permissions: Permissions) -> Value {
+fn permission(permissions: Permissions, readable: &[PathBuf]) -> Value {
     match permissions {
-        Permissions::Auto => json!({ "*": "allow", "bash": "ask", "external_directory": "ask" }),
+        Permissions::Auto => {
+            let mut external = serde_json::Map::from_iter([("*".to_owned(), json!("ask"))]);
+            for dir in readable {
+                let pattern = format!("{}/*", dir.to_string_lossy().replace('\\', "/"));
+                external.insert(pattern, json!("allow"));
+            }
+            json!({ "*": "allow", "bash": "ask", "external_directory": external })
+        }
         Permissions::Full => {
             json!({ "*": "allow", "external_directory": "allow", "doom_loop": "allow" })
         }
@@ -390,7 +394,7 @@ fn permission(permissions: Permissions) -> Value {
 
 /// Writes Forge's agents into a directory of its own in the engine home.
 /// OpenCode installs its plugin package there on first use, so it persists.
-fn write_agents(home: &Path) -> Result<PathBuf> {
+fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<PathBuf> {
     let dir = home.join("artisan/opencode");
     let agents: serde_json::Map<String, Value> = [Permissions::Auto, Permissions::Full]
         .into_iter()
@@ -399,7 +403,7 @@ fn write_agents(home: &Path) -> Result<PathBuf> {
                 "mode": "primary",
                 "hidden": true,
                 "description": "Artisan's execution policy.",
-                "permission": permission(permissions),
+                "permission": permission(permissions, readable),
             });
             (agent_name(permissions).to_owned(), agent)
         })

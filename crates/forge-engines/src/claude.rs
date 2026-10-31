@@ -30,7 +30,7 @@ use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -180,7 +180,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
     let mut outcome = None;
 
     while !next.is_empty() && !io.cancel.is_cancelled() {
-        let args = launch_args(&turn.config, session.as_deref());
+        let args = launch_args(&turn.config, session.as_deref(), &turn.launch.readable);
         let mut engine = match process::spawn(&turn, &args) {
             Ok(engine) => engine,
             Err(error) => {
@@ -500,7 +500,7 @@ async fn user_line(input: &UserInput) -> Result<Value> {
     }))
 }
 
-fn launch_args(config: &EngineConfig, session: Option<&str>) -> Vec<String> {
+fn launch_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf]) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -545,6 +545,9 @@ fn launch_args(config: &EngineConfig, session: Option<&str>) -> Vec<String> {
     }
     if !settings.is_empty() {
         args.extend(["--settings".to_owned(), Value::Object(settings).to_string()]);
+    }
+    for dir in readable {
+        args.extend(["--add-dir".to_owned(), dir.to_string_lossy().into_owned()]);
     }
     if let Some(session) = session {
         args.extend(["--resume".to_owned(), session.to_owned()]);
@@ -987,7 +990,7 @@ cat > /dev/null
         let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
         config.model = Some("claude-opus-5-5".into());
         let settings = |config: &artisan_api::EngineConfig| {
-            let args = super::launch_args(config, None);
+            let args = super::launch_args(config, None, &[]);
             args.iter()
                 .position(|arg| arg == "--settings")
                 .map(|at| args[at + 1].clone())
@@ -1011,7 +1014,7 @@ cat > /dev/null
             super::context_window_env(&config),
             Some(("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "400000".to_owned()))
         );
-        let args = super::launch_args(&config, None);
+        let args = super::launch_args(&config, None, &[]);
         let model = args.iter().position(|arg| arg == "--model").unwrap();
         assert_eq!(args[model + 1], "claude-opus-test");
     }
@@ -1036,7 +1039,7 @@ cat > /dev/null
     #[test]
     fn permissions_pick_auto_mode_or_skip_prompts() {
         let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
-        let args = super::launch_args(&config, None);
+        let args = super::launch_args(&config, None, &[]);
         let mode = args.iter().position(|arg| arg == "--permission-mode");
         assert_eq!(mode.map(|at| args[at + 1].as_str()), Some("auto"));
         assert!(
@@ -1046,7 +1049,7 @@ cat > /dev/null
         );
 
         config.permissions = artisan_api::Permissions::Full;
-        let args = super::launch_args(&config, None);
+        let args = super::launch_args(&config, None, &[]);
         assert!(
             args.iter()
                 .any(|arg| arg == "--dangerously-skip-permissions")

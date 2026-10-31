@@ -594,6 +594,7 @@ pub async fn prepare(
     for (name, url) in hub.gateway_servers(&thread.id).await {
         forge_engines::with_gateway_mcp(engine, &mut launch, &name, &url);
     }
+    launch.readable.push(hub.store().blob_dir().to_path_buf());
     // A config without a variant (or one the model dropped) runs the
     // model's default.
     let mut config = thread.config.clone();

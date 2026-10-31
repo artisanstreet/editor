@@ -1,5 +1,3 @@
-//! Content-addressed WebP files under `blobs/ab/<sha256>`.
-
 use crate::{Inner, Store};
 use anyhow::{Context, Result, anyhow};
 use artisan_api::{BlobHash, BlobRef};
@@ -42,9 +40,37 @@ impl std::error::Error for BlobRejected {}
 
 const WEBP_QUALITY: f32 = 85.0;
 
+const EXTENSION: &str = "webp";
+
 pub fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
-    hash.is_valid()
-        .then(|| dir.join(&hash.as_str()[..2]).join(hash.as_str()))
+    hash.is_valid().then(|| {
+        dir.join(&hash.as_str()[..2])
+            .join(hash.as_str())
+            .with_extension(EXTENSION)
+    })
+}
+
+pub fn name_files(dir: &Path) -> Result<usize> {
+    let mut renamed = 0;
+    for shard in fs::read_dir(dir).with_context(|| format!("list {}", dir.display()))? {
+        let shard = shard?.path();
+        if !shard.is_dir() {
+            continue;
+        }
+        for file in fs::read_dir(&shard).with_context(|| format!("list {}", shard.display()))? {
+            let file = file?.path();
+            let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !BlobHash(name.to_owned()).is_valid() {
+                continue;
+            }
+            fs::rename(&file, file.with_extension(EXTENSION))
+                .with_context(|| format!("name blob {}", file.display()))?;
+            renamed += 1;
+        }
+    }
+    Ok(renamed)
 }
 
 /// Canonical encoded image admission, also used to validate historical pending inputs.
@@ -169,6 +195,11 @@ impl Store {
             .context("read input image metadata task")?
     }
 
+    #[must_use]
+    pub fn blob_dir(&self) -> &Path {
+        &self.inner.blob_dir
+    }
+
     /// Where a stored blob lives; `None` if the hash is malformed or unknown.
     #[must_use]
     pub fn blob_path(&self, hash: &BlobHash) -> Option<PathBuf> {
@@ -217,7 +248,6 @@ impl Inner {
     }
 }
 
-/// Deletes blob files (and stale temp files) that nothing references.
 pub fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
     let cutoff = SystemTime::now() - GC_MIN_AGE;
     let mut removed = 0;
@@ -230,7 +260,8 @@ pub fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
             let file = file?;
             let name = file.file_name();
             let name = name.to_string_lossy();
-            let keep = referenced.contains(name.as_ref()) || file.metadata()?.modified()? > cutoff;
+            let name = name.strip_suffix(".webp").unwrap_or(&name);
+            let keep = referenced.contains(name) || file.metadata()?.modified()? > cutoff;
             if keep {
                 continue;
             }
