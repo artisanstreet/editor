@@ -86,11 +86,11 @@ fn activity_reuses_a_worker_already_discovered_from_thread_started() {
 }
 
 #[test]
-fn native_paths_are_metadata_and_plaintext_tasks_supply_the_description() {
+fn native_paths_remain_descriptions_while_tasks_keep_the_actual_prompt() {
     let mut decoder = root();
     let started = activity(&mut decoder, "started", "spawn");
     assert!(
-        matches!(&started[..], [EngineEvent::Item { kind: ItemKind::Agent { description, prompt: None, .. }, .. }] if description.byte_len() == 0)
+        matches!(&started[..], [EngineEvent::Item { kind: ItemKind::Agent { description, prompt: None, .. }, .. }] if description.inline() == Some("/root/worker"))
     );
     let prompt = "Check the vegetation transitions.\nKeep the triangle budget unchanged.";
     let events = feed(
@@ -98,7 +98,7 @@ fn native_paths_are_metadata_and_plaintext_tasks_supply_the_description() {
         &json!({"method": "item/completed", "params": {"threadId": "child", "item": {"type": "userMessage", "id": "task", "content": [{"type": "text", "text": prompt}]}}}),
     );
     assert!(
-        matches!(&events[..], [EngineEvent::Item { kind: ItemKind::Agent { description, prompt: Some(task), .. }, .. }] if description.inline() == Some("Check the vegetation transitions.") && task.inline() == Some(prompt))
+        matches!(&events[..], [EngineEvent::Item { kind: ItemKind::Agent { description, prompt: Some(task), .. }, .. }] if description.inline() == Some("/root/worker") && task.inline() == Some(prompt))
     );
 }
 

@@ -1,10 +1,5 @@
 SELECT json_object('id',id,'label',COALESCE(json_extract(body,'$.kind.label'),''),
-            'description',CASE
-                WHEN COALESCE(json_extract(body,'$.kind.engine'),
-                    (SELECT json_extract(t.body,'$.config.engine') FROM threads t WHERE t.id=?1))='codex'
-                    AND json_extract(body,'$.kind.name')=json_extract(body,'$.kind.description')
-                    AND (json_extract(body,'$.kind.name')='/root' OR json_extract(body,'$.kind.name') LIKE '/root/%')
-                THEN '' ELSE json_extract(body,'$.kind.description') END,'status',status,
+            'description',json_extract(body,'$.kind.description'),'status',status,
             'engine',COALESCE(json_extract(body,'$.kind.engine'),
                 (SELECT json_extract(t.body,'$.config.engine') FROM threads t WHERE t.id=?1)),
             'model',json_extract(body,'$.kind.model'),'thread',json_extract(body,'$.kind.thread'),

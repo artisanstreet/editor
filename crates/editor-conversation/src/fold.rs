@@ -197,12 +197,15 @@ impl PlainSection {
                 ..
             } = &item.kind
             && let Some(description) = description.inline()
-            && (description.is_empty()
-                || name
-                    .as_deref()
-                    .is_some_and(|name| name.starts_with("/root") && name == description))
         {
-            return Some("Task message not provided by the harness.");
+            if name.as_deref().is_some_and(|name| {
+                (name == "/root" || name.starts_with("/root/")) && name == description
+            }) {
+                return Some("[This message is encrypted.]");
+            }
+            if description.is_empty() {
+                return Some("Task message not provided by the harness.");
+            }
         }
         if self == Self::AgentMessage
             && let ItemKind::Tool {

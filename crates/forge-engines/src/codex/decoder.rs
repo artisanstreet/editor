@@ -675,20 +675,7 @@ impl Decoder {
                     && let ItemKind::Agent { prompt: None, .. } = &tracked.kind
                     && let Some(text) = user_text(content)
                 {
-                    if let ItemKind::Agent {
-                        prompt,
-                        description,
-                        name,
-                        ..
-                    } = &mut tracked.kind
-                    {
-                        if description.byte_len() == 0
-                            && name
-                                .as_deref()
-                                .is_some_and(|name| name.starts_with("/root/"))
-                        {
-                            *description = text.lines().next().unwrap_or_default().into();
-                        }
+                    if let ItemKind::Agent { prompt, .. } = &mut tracked.kind {
                         *prompt = Some(text.into());
                     }
                     out.push(self.event(agent));
@@ -1003,7 +990,7 @@ impl Decoder {
         let tool = ToolKind::AgentMessage {
             recipient: activity.agent_thread_id.clone(),
             target: None,
-            summary: Some("Message text not provided by Codex".into()),
+            summary: Some("[This message is encrypted.]".into()),
             text: TextContent::default(),
             direction: MessageDirection::Sent,
         };
@@ -1055,7 +1042,7 @@ impl Decoder {
                     engine: None,
                     thread: None,
                     name: None,
-                    description: TextContent::default(),
+                    description: path.clone().into(),
                     prompt: None,
                     agent_id: Some(thread.to_owned()),
                     context_used: None,

@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn native_metadata_does_not_become_a_description_or_a_parent_worker() {
+async fn native_paths_remain_descriptions_without_listing_the_parent_as_a_worker() {
     let dir = TempDir::new();
     let (store, thread) = test_store(&dir.0).await;
     let mut turn = run(&thread, RunStatus::Running);
@@ -46,7 +46,7 @@ async fn native_metadata_does_not_become_a_description_or_a_parent_worker() {
         .iter()
         .find(|agent| agent.id.as_str() == "legacy-worker")
         .unwrap();
-    assert_eq!(legacy.description.byte_len(), 0);
+    assert_eq!(legacy.description.inline(), Some("/root/vegetation"));
     let real = summary
         .agents
         .iter()
