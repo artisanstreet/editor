@@ -717,7 +717,16 @@ async fn execute(
         EngineEvent::Item {
             key: tools::item_key(call),
             parent: None,
-            status: if answer.is_error && matches!(kind, ItemKind::Error { .. }) {
+            // A command that ran and exited non-zero did its work; any other
+            // error is the call failing.
+            status: if answer.is_error
+                && !matches!(
+                    kind,
+                    ItemKind::Tool {
+                        exit_code: Some(_),
+                        ..
+                    }
+                ) {
                 Status::Failed
             } else {
                 Status::Done

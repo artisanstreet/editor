@@ -80,6 +80,8 @@ impl SettingDecl {
     }
 }
 
+pub const THREAD_RETENTION_DAYS_KEY: &str = "thread_retention_days";
+
 pub const SETTINGS: &[SettingDecl] = &[
     SettingDecl {
         key: "suggestions",
@@ -134,6 +136,17 @@ pub const SETTINGS: &[SettingDecl] = &[
         label: "Continue when the usage limit resets",
         description: "When a turn stops because the account ran out of usage, park the thread and carry its turn on once the limit resets.",
         needs_approval: false,
+    },
+    SettingDecl {
+        key: THREAD_RETENTION_DAYS_KEY,
+        owner: SettingOwner::Forge,
+        kind: SettingKind::Choice {
+            values: &[None, Some(7), Some(14), Some(30), Some(90), Some(365)],
+        },
+        default: "30",
+        label: "Delete inactive threads",
+        description: "Delete a thread, its messages and its images once nothing has happened in it for this many days; null keeps every thread. Working, waiting and parked threads, and threads whose agents or handoffs are still active, are kept.",
+        needs_approval: true,
     },
     SettingDecl {
         key: "computer_use",

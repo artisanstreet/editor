@@ -163,7 +163,8 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
             .path()
             .join("blobs")
             .join(&hash.as_str()[..2])
-            .join(hash.as_str());
+            .join(hash.as_str())
+            .with_extension("webp");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::File::create(path)
             .unwrap()
@@ -199,7 +200,8 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
             .path()
             .join("blobs")
             .join(&hash.as_str()[..2])
-            .join(hash.as_str());
+            .join(hash.as_str())
+            .with_extension("webp");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::File::create(path)
             .unwrap()
@@ -230,7 +232,11 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
         .unwrap();
     assert_eq!(store.pending_inputs(&thread).await.unwrap().items.len(), 1);
     let hash = BlobHash("f".repeat(64));
-    let path = dir.path().join("blobs/ff").join(hash.as_str());
+    let path = dir
+        .path()
+        .join("blobs/ff")
+        .join(hash.as_str())
+        .with_extension("webp");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::File::create(path)
         .unwrap()

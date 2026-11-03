@@ -20,6 +20,7 @@ use crate::{SideReply, SideUsage, Turn};
 use anyhow::{Context, Result, bail};
 use artisan_api::EngineConfig;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 pub(super) async fn side_query(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
@@ -47,8 +48,11 @@ async fn query(
         "a claude.ai session cannot be resumed by Claude Code"
     );
     apply_env(&mut turn);
-    let mut engine = process::spawn(&turn, &side_args(&turn.config, session.as_deref()))
-        .context("starting the Claude fork")?;
+    let mut engine = process::spawn(
+        &turn,
+        &side_args(&turn.config, session.as_deref(), &turn.launch.readable),
+    )
+    .context("starting the Claude fork")?;
     engine
         .send(&json!({
             "type": "control_request",
@@ -148,9 +152,8 @@ const REFUSE_TOOLS: &str = "artisan-side-refuse-tools";
 /// What the fork is told when it reaches for a tool.
 const NO_TOOLS: &str = "A side question cannot use tools; answer from the conversation.";
 
-/// The thread's launch, unchanged, forked for one reply.
-fn side_args(config: &EngineConfig, session: Option<&str>) -> Vec<String> {
-    let mut args = launch_args(config, session);
+fn side_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf]) -> Vec<String> {
+    let mut args = launch_args(config, session, readable);
     if session.is_some() {
         args.push("--fork-session".to_owned());
     }
@@ -234,8 +237,9 @@ mod tests {
             let mut config = EngineConfig::new(artisan_api::EngineId::Claude);
             config.permissions = permissions;
             config.model = Some("claude-opus-5-5".to_owned());
-            let thread = launch_args(&config, Some("s1"));
-            let fork = side_args(&config, Some("s1"));
+            let readable = [PathBuf::from("/data/blobs")];
+            let thread = launch_args(&config, Some("s1"), &readable);
+            let fork = side_args(&config, Some("s1"), &readable);
             assert_eq!(fork[..thread.len()], thread[..]);
             assert_eq!(
                 fork[thread.len()..],

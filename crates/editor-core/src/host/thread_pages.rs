@@ -34,6 +34,7 @@ pub(super) struct ThreadPages {
     queued: VecDeque<ThreadId>,
     recent: VecDeque<ThreadId>,
     errors: HashMap<ThreadId, String>,
+    removed: HashSet<ThreadId>,
 }
 impl HostData {
     pub fn thread_page(&self, archived: bool) -> &ThreadPage {
@@ -167,6 +168,9 @@ impl HostData {
         }
         for thread in result.threads {
             let id = thread.id.clone();
+            if self.thread_pages.removed.contains(&id) {
+                continue;
+            }
             if self
                 .threads
                 .get(&id)
@@ -209,6 +213,9 @@ impl HostData {
         trim_page(page, &self.threads, older);
     }
     pub fn ensure_thread(&mut self, id: &ThreadId, cx: &mut Context<Self>) {
+        if self.thread_pages.removed.contains(id) {
+            return;
+        }
         self.thread_pages.recent.retain(|known| known != id);
         self.thread_pages.recent.push_back(id.clone());
         while self.thread_pages.recent.len() > 32 {
@@ -244,6 +251,7 @@ impl HostData {
             this.update(cx, |this, cx| {
                 this.thread_pages.direct.remove(&id);
                 match result {
+                    Ok(thread) if this.thread_pages.removed.contains(&id) => drop(thread),
                     Ok(thread) => {
                         if this
                             .threads
@@ -311,6 +319,23 @@ impl HostData {
             trim_page(page, &self.threads, false);
         }
         self.prune_threads();
+    }
+    pub(super) fn forget_thread(&mut self, id: &ThreadId) {
+        let pages = &mut self.thread_pages;
+        for page in &mut pages.pages {
+            page.ids.retain(|known| known != id);
+            page.changed.remove(id);
+        }
+        pages.direct.remove(id);
+        pages.queued.retain(|known| known != id);
+        pages.errors.insert(
+            id.clone(),
+            "This thread was deleted after a long time without activity.".into(),
+        );
+        pages.removed.insert(id.clone());
+        self.threads.remove(id);
+        self.runs.remove(id);
+        self.read_acks.pending.remove(id);
     }
     pub(super) fn prune_threads(&mut self) {
         let mut keep: HashSet<ThreadId> = self

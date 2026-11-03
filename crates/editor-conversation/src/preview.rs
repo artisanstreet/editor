@@ -1,7 +1,7 @@
 //! What an activity shows when opened, as markdown: the markdown renderer
 //! highlights fenced code off the main thread, so a preview is only text.
 
-use artisan_api::{FileOp, Item, ItemKind, SearchMode, TextContent, ToolKind};
+use artisan_api::{FileOp, Item, ItemKind, SearchMode, Status, TextContent, ToolKind};
 use std::fmt::Write as _;
 
 /// Lines one code block shows before it says how many more there are.
@@ -15,6 +15,10 @@ pub fn markdown(item: &Item) -> Option<String> {
     let ItemKind::Tool { tool, output, .. } = &item.kind else {
         return None;
     };
+    // A failed call's output is its reason, drawn red under its row.
+    if item.status == Status::Failed {
+        return None;
+    }
     let output = output
         .as_ref()
         .and_then(|output| output.text.inline())

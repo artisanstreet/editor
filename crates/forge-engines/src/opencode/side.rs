@@ -17,7 +17,7 @@ pub(super) async fn side_query(turn: Turn, cancel: CancellationToken) -> Result<
 
 async fn query(turn: Turn, cancel: CancellationToken, compact: bool) -> Result<SideReply> {
     let password = password()?;
-    let config_dir = write_agents(&turn.home)?;
+    let config_dir = write_agents(&turn.home, &turn.launch.readable)?;
     let mut server = spawn(&turn, &password, &config_dir)?;
     let mut api = None;
     let mut fork = None;

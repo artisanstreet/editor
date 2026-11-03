@@ -50,7 +50,7 @@ pub fn now() -> Timestamp {
 }
 
 /// The wire-schema version both endpoints must support. Build hashes may differ.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 mod collection;
 pub use collection::*;

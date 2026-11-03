@@ -328,6 +328,10 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
     // Editor's entries still say access and approvals, which became one
     // choice (see the default config's step above).
     &[Step::Rust(migrate_model_permissions)],
+    &[Step::Sql(
+        "CREATE TABLE IF NOT EXISTS removed_threads(id TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+         CREATE INDEX IF NOT EXISTS removed_threads_seq ON removed_threads(seq);",
+    )],
 ];
 
 /// Gives every remembered model config the permissions its old access and
@@ -835,7 +839,7 @@ mod canonical_migration_tests {
     #[test]
     fn remembered_model_configs_keep_full_access() {
         let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, MIGRATIONS.len() - 1).unwrap();
+        migrate_to(&mut conn, MIGRATIONS.len() - 2).unwrap();
         let configs = json!({
             "claude-opus-5-5": {"engine":"claude","model":"claude-opus-5-5","effort":"medium",
                 "access":"full","approvals":"never","options":{"permission_mode":"bypassPermissions"}},

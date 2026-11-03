@@ -4,7 +4,7 @@ use super::request::decision_note;
 use super::text::TextPresenter;
 use super::{Action, Actions};
 use crate::activity;
-use artisan_api::{Item, ItemKind};
+use artisan_api::{Item, ItemKind, Status};
 use editor_ui::theme::ProseTypography;
 use gpui::{
     AnyElement, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
@@ -42,9 +42,11 @@ impl ToolPresenter<'_> {
                     .text_size(theme.typography.control_text)
             })
             .child(words.object.clone());
-        let has_details = message
-            .as_ref()
-            .is_some_and(|message| message.text.byte_len() > 0);
+        let error = failure(item);
+        let has_details = error.is_some()
+            || message
+                .as_ref()
+                .is_some_and(|message| message.text.byte_len() > 0);
         let expanded = has_details && expanded;
         let mut sentence = div()
             .id(SharedString::from(format!("activity-{}", item.id)))
@@ -84,7 +86,26 @@ impl ToolPresenter<'_> {
             });
             sentence = sentence.cursor_pointer().on_click(move |_, _, cx| flip(cx));
         }
-        sentence.into_any_element()
+        match error.filter(|_| expanded) {
+            Some(error) => div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(sentence)
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .pb(theme.spacing.steps(1.0))
+                        .text_size(theme.typography.control_text)
+                        .whitespace_normal()
+                        .text_color(theme.colors.destructive_text.to_paint())
+                        .child(error),
+                )
+                .into_any_element(),
+            None => sentence.into_any_element(),
+        }
     }
 
     pub(in crate::row) fn plan_entry(&self, item: &Item) -> AnyElement {
@@ -98,4 +119,22 @@ impl ToolPresenter<'_> {
         }
         body.into_any_element()
     }
+}
+
+/// What a failed call answered: the reason it failed, shown under its row
+/// when opened.
+fn failure(item: &Item) -> Option<String> {
+    let ItemKind::Tool {
+        output: Some(output),
+        ..
+    } = &item.kind
+    else {
+        return None;
+    };
+    (item.status == Status::Failed)
+        .then(|| output.text.inline())
+        .flatten()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }

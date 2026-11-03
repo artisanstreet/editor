@@ -23,6 +23,12 @@ pub enum DialogDismissReason {
 }
 type Dismiss = Rc<dyn Fn(DialogDismissReason, &mut Window, &mut App)>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DialogSurface {
+    Raised,
+    Glass,
+}
+
 #[derive(IntoElement)]
 pub struct Dialog {
     id: SharedString,
@@ -36,6 +42,7 @@ pub struct Dialog {
     dismissible: bool,
     bare: bool,
     soft_backdrop: bool,
+    surface: DialogSurface,
 }
 
 impl Dialog {
@@ -57,6 +64,7 @@ impl Dialog {
             dismissible: true,
             bare: false,
             soft_backdrop: false,
+            surface: DialogSurface::Raised,
         }
     }
     #[must_use]
@@ -75,6 +83,11 @@ impl Dialog {
     #[must_use]
     pub const fn soft_backdrop(mut self) -> Self {
         self.soft_backdrop = true;
+        self
+    }
+    #[must_use]
+    pub const fn glass(mut self) -> Self {
+        self.surface = DialogSurface::Glass;
         self
     }
     #[must_use]
@@ -141,9 +154,20 @@ impl RenderOnce for Dialog {
                 panel
                     .p(px(20.0))
                     .rounded(RadiusTokens::value(RadiusStep::XlMid))
-                    .bg(theme.colors.raised.to_paint())
-                    .border_1()
-                    .border_color(theme.colors.line.to_paint())
+                    .when(self.surface == DialogSurface::Raised, |panel| {
+                        panel
+                            .bg(theme.colors.raised.to_paint())
+                            .border_1()
+                            .border_color(theme.colors.line.to_paint())
+                    })
+                    .when(self.surface == DialogSurface::Glass, |panel| {
+                        crate::popover::glass_frame(
+                            panel,
+                            &theme,
+                            crate::glass::GlassStrength::Strong,
+                            RadiusTokens::value(RadiusStep::XlMid),
+                        )
+                    })
             })
             .flex()
             .flex_col()
@@ -159,7 +183,13 @@ impl RenderOnce for Dialog {
                         .child(
                             div()
                                 .min_w_0()
-                                .text_size(TypographyTokens::size(TextStep::Lg))
+                                .text_size(TypographyTokens::size(
+                                    if self.surface == DialogSurface::Glass {
+                                        TextStep::Base
+                                    } else {
+                                        TextStep::Lg
+                                    },
+                                ))
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(self.title),
                         )

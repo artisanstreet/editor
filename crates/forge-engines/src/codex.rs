@@ -18,6 +18,9 @@
 //! that config, so it is not sent); a
 //! steer after the turn ended is rejected with "no active turn to steer".
 
+#[cfg(test)]
+#[path = "../tests/codex/activity.rs"]
+mod activity_tests;
 mod citations;
 mod decoder;
 mod goal;

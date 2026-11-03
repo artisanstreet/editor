@@ -121,11 +121,11 @@ impl SettingsPage {
     pub const fn parent(self) -> Self {
         match self {
             Self::Section(section) => section.parent(),
+            Self::GlobalPrompt => Self::Threads,
             page @ (Self::General
             | Self::Hosts
             | Self::About
             | Self::Threads
-            | Self::GlobalPrompt
             | Self::Extensions
             | Self::Account
             | Self::Engine(_)) => page,

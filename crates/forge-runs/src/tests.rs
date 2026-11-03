@@ -2,6 +2,9 @@
 //! never lost, answers reach the right run, cancel settles everything.
 
 use super::*;
+
+#[path = "../tests/run/activity.rs"]
+mod activity;
 use artisan_api::{
     ApprovalRequest, CreateProject, CreateThread, Decision, EngineConfig, ItemsQuery, Permissions,
     Phase, ProjectId, RunStatus, ToolKind,

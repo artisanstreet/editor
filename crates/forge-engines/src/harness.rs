@@ -53,6 +53,7 @@ pub struct Launch {
     /// own. Adapters that run without a process of their own (the claude.ai
     /// transport) connect to these directly.
     pub mcp_servers: Vec<McpServer>,
+    pub readable: Vec<PathBuf>,
 }
 
 /// What `forge-runs` sends a live run.

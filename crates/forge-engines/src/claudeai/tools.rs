@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use artisan_api::{
-    ApprovalRequest, Decision, ErrorKind, ItemKind, McpServer, Output, Permissions, TextContent,
-    ToolKind,
+    ApprovalRequest, Decision, ItemKind, McpServer, Output, Permissions, TextContent, ToolKind,
 };
 use regex::Regex;
 use serde_json::{Value, json};
@@ -548,11 +547,12 @@ pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
                 proposal: None,
                 approval: None,
             },
-            Err(message) => failed(&message),
+            Err(_) => unreadable(call),
         },
         "Task" => agent_kind(call),
-        _ => match crate::claude::tools::tool_kind(&call.name, &call.input) {
-            Ok(mut tool) => {
+        _ => crate::claude::tools::tool_kind(&call.name, &call.input).map_or_else(
+            |_| unreadable(call),
+            |mut tool| {
                 match &mut tool {
                     ToolKind::Shell { cwd: slot, .. } => *slot = Some(cwd.display().to_string()),
                     ToolKind::Mcp { server, tool, .. } => {
@@ -578,9 +578,8 @@ pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
                     exit_code: None,
                     approval: None,
                 }
-            }
-            Err(message) => failed(&message),
-        },
+            },
+        ),
     }
 }
 
@@ -694,9 +693,6 @@ fn finished(item: ItemKind, answer: &Answer, exit_code: Option<i32>) -> ItemKind
     let ItemKind::Tool { tool, title, .. } = item else {
         return item;
     };
-    if answer.is_error && exit_code.is_none() {
-        return failed(&answer.text);
-    }
     ItemKind::Tool {
         tool,
         title,
@@ -1052,7 +1048,10 @@ fn search(
 /// like any other. Behind the user's HTTP proxy the proxy connects
 /// instead (see [`client_for`]). `local_ok` lets tests reach a server on
 /// loopback; `vars` reads the environment's proxy settings.
-#[expect(clippy::too_many_lines, reason = "fetch/redirect/proxy in one vetted hop")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "fetch/redirect/proxy in one vetted hop"
+)]
 async fn web_fetch(
     call: &Call,
     rules: &Rules,
@@ -1724,7 +1723,7 @@ async fn bash(
     let command = command_of(call);
     if command.trim().is_empty() {
         let answer = Answer::error("Bash needs a command.");
-        return (answer.clone(), failed(&answer.text));
+        return (answer.clone(), finished(item, &answer, None));
     }
     let timeout = call.input["timeout"]
         .as_u64()
@@ -1748,7 +1747,7 @@ async fn bash(
         Ok(child) => child,
         Err(error) => {
             let answer = Answer::error(format!("The command could not start: {error:#}"));
-            return (answer.clone(), failed(&answer.text));
+            return (answer.clone(), finished(item, &answer, None));
         }
     };
     let stdout = child.stdout().take();
@@ -1831,12 +1830,18 @@ async fn capped(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> String {
     text
 }
 
-/// An error item for a tool that could not do its work.
-fn failed(message: &str) -> ItemKind {
-    ItemKind::Error {
-        kind: ErrorKind::Execution,
-        message: message.to_owned().into(),
-        retryable: false,
+/// A call whose input could not be read, shown as itself: running it
+/// answers with what was wrong.
+fn unreadable(call: &Call) -> ItemKind {
+    ItemKind::Tool {
+        tool: ToolKind::Other {
+            name: call.name.clone(),
+            input: Some(call.input.to_string().into()),
+        },
+        title: None,
+        output: None,
+        exit_code: None,
+        approval: None,
     }
 }
 
@@ -1973,12 +1978,15 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_todo_preview_is_an_error_not_a_panic() {
+    fn a_malformed_todo_preview_stays_a_tool_call() {
         let item = preview(
             &call("TodoWrite", json!({ "todos": [{ "status": "pending" }] })),
             Path::new("/"),
         );
-        assert!(matches!(item, ItemKind::Error { .. }), "{item:?}");
+        assert!(
+            matches!(&item, ItemKind::Tool { tool: ToolKind::Other { name, .. }, .. } if name == "TodoWrite"),
+            "{item:?}"
+        );
     }
 
     #[test]
@@ -2151,7 +2159,10 @@ mod tests {
     }
 
     /// Rules from a project settings file holding `permissions`.
-    #[allow(clippy::needless_pass_by_value, reason = "test helper takes owned JSON literals")]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "test helper takes owned JSON literals"
+    )]
     fn project_rules(home: &Path, project: &Path, permissions: Value) -> Rules {
         let dir = project.join(".claude");
         std::fs::create_dir_all(&dir).expect("the settings dir");

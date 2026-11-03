@@ -31,6 +31,9 @@ pub enum Event {
     Thread {
         thread: Thread,
     },
+    ThreadRemoved {
+        thread_id: ThreadId,
+    },
     Item {
         item: Item,
     },
@@ -117,6 +120,7 @@ impl Event {
             Self::Item { item } => Some(&item.thread_id),
             Self::Run { run } => Some(&run.thread_id),
             Self::Live { thread_id, .. }
+            | Self::ThreadRemoved { thread_id }
             | Self::ItemState { thread_id, .. }
             | Self::Suggestion { thread_id, .. } => Some(thread_id),
             Self::Hello { .. }

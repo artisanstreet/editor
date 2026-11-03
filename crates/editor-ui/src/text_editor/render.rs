@@ -134,6 +134,10 @@ impl TextEditor {
                 .border(border_width)
                 .border_color(style.border)
                 .bg(style.background)
+                .when(self.inset, |root| {
+                    root.bg(crate::glass::glass_control_fill(cx.theme()))
+                        .shadow(crate::glass::card_shadows(cx.theme()))
+                })
                 .focus(move |focused| focused.border_color(focus_border))
         }
     }
@@ -257,7 +261,12 @@ impl Render for TextEditor {
         self.layout = Some(text.layout());
         self.painted_bounds = None;
 
-        let metrics = EditorMetrics::of(self.mode, &style);
+        let mut metrics = EditorMetrics::of(self.mode, &style);
+        if self.inset {
+            metrics.padding_x = px(12.0);
+            metrics.padding_y = px(10.0);
+            metrics.radius = crate::theme::RadiusTokens::value(crate::theme::RadiusStep::Lg);
+        }
         let line_height = metrics.line_height;
         let mut content = div()
             .relative()

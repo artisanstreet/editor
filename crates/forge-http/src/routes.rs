@@ -832,6 +832,20 @@ async fn set_setting(
             .await?;
         return Ok(StatusCode::NO_CONTENT);
     }
+    if key == artisan_api::THREAD_RETENTION_DAYS_KEY {
+        artisan_api::setting_decl(&key)
+            .context("thread retention is declared")?
+            .check(&value)
+            .map_err(|reason| bad_request(anyhow::anyhow!(reason)))?;
+        app.hub.store().set_setting(key, value).await?;
+        let hub = app.hub.clone();
+        app.tasks.spawn(async move {
+            if let Err(error) = hub.remove_inactive_threads().await {
+                tracing::warn!("remove inactive threads: {error:#}");
+            }
+        });
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let switches = [
         forge_runs::SUGGESTIONS_KEY,
         forge_runs::YOU_SHOULD_KNOW_KEY,

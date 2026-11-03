@@ -594,6 +594,7 @@ pub async fn prepare(
     for (name, url) in hub.gateway_servers(&thread.id).await {
         forge_engines::with_gateway_mcp(engine, &mut launch, &name, &url);
     }
+    launch.readable.push(hub.store().blob_dir().to_path_buf());
     // A config without a variant (or one the model dropped) runs the
     // model's default.
     let mut config = thread.config.clone();
@@ -1031,6 +1032,17 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             } else {
                 items.id(&key)
             };
+            if matches!(kind, ItemKind::Agent { .. })
+                && status == Status::Running
+                && items
+                    .by_key
+                    .get(&key)
+                    .is_some_and(|tracked| tracked.status.is_terminal())
+                && let Some(item) = store.reopen_agent(&id, &run.id).await?
+                && let Some(tracked) = items.by_key.get_mut(&key)
+            {
+                tracked.status = item.status;
+            }
             let tracked = items
                 .by_key
                 .get_mut(&key)

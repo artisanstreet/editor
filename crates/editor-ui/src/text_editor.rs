@@ -210,6 +210,7 @@ pub struct TextEditor {
     list_open: bool,
     /// The owner draws the field's box; see [`TextEditor::bare`].
     bare: bool,
+    inset: bool,
 }
 
 impl EventEmitter<TextEditorEvent> for TextEditor {}
@@ -261,6 +262,7 @@ impl TextEditor {
             tokens: None,
             list_open: false,
             bare: false,
+            inset: false,
         }
     }
 
@@ -278,6 +280,12 @@ impl TextEditor {
     #[must_use]
     pub const fn bare(mut self) -> Self {
         self.bare = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn inset(mut self) -> Self {
+        self.inset = true;
         self
     }
 

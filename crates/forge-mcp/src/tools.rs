@@ -583,7 +583,7 @@ async fn navigate_if_asked(hub: &Hub, navigate_user: bool, page: &str) -> String
 /// The settings page a setting is changed on.
 fn setting_page(key: &str) -> &'static str {
     match key {
-        "suggestions" | "you_should_know" | "summary_titles" => "threads",
+        "suggestions" | "you_should_know" | "summary_titles" | "thread_retention_days" => "threads",
         _ => "general",
     }
 }
