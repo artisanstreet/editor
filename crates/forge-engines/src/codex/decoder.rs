@@ -16,8 +16,8 @@ mod requests;
 
 use super::protocol::{
     CallStatus, CodexError, CollabCall, CollabStatus, CollabTool, CompletedTurn, ExecutionStatus,
-    Frame, Item, MessagePhase, Notification, PatchKind, PlanEntry, PlanStatus, ThreadInfo,
-    ThreadStarted, TokenUsage, TurnStatus, UserInput,
+    Frame, Item, MessagePhase, Notification, PatchKind, PlanEntry, PlanStatus,
+    SubAgentActivityKind, ThreadInfo, ThreadStarted, TokenUsage, TurnStatus, UserInput,
 };
 use crate::{EngineEvent, LiveKind, Outcome};
 use anyhow::Context as _;
@@ -900,6 +900,21 @@ impl Decoder {
                 (id, settled, kind)
             }
             Item::CollabAgentToolCall(call) => return self.collab(scope, call, completed, out),
+            Item::SubAgentActivity {
+                agent_thread_id,
+                agent_path,
+                kind,
+                model,
+            } => {
+                return self.subagent_activity(
+                    scope,
+                    &agent_thread_id,
+                    agent_path,
+                    kind,
+                    model,
+                    out,
+                );
+            }
             Item::Sleep { id, duration_ms } => {
                 let seconds = duration_ms.unwrap_or_default().div_ceil(1000);
                 let mut kind = self.tool_kind(
@@ -957,6 +972,79 @@ impl Decoder {
             exit_code,
             approval,
         }
+    }
+
+    fn subagent_activity(
+        &mut self,
+        scope: Scope,
+        thread: &str,
+        path: String,
+        activity: SubAgentActivityKind,
+        model: Option<String>,
+        out: &mut Vec<EngineEvent>,
+    ) {
+        if thread.trim().is_empty() || matches!(activity, SubAgentActivityKind::Unknown) {
+            return;
+        }
+        let key = self
+            .children
+            .get(thread)
+            .cloned()
+            .unwrap_or_else(|| thread.to_owned());
+        if !self.items.contains_key(&key) {
+            self.track(
+                key.clone(),
+                scope,
+                Status::Running,
+                ItemKind::Agent {
+                    engine: None,
+                    thread: None,
+                    name: None,
+                    description: path.clone().into(),
+                    prompt: None,
+                    agent_id: Some(thread.to_owned()),
+                    context_used: None,
+                    model: None,
+                    background: false,
+                    result: None,
+                    label: None,
+                },
+            );
+        }
+        if let Some(tracked) = self.items.get_mut(&key) {
+            tracked.status = match activity {
+                SubAgentActivityKind::Started | SubAgentActivityKind::Interacted => Status::Running,
+                SubAgentActivityKind::Interrupted => Status::Cancelled,
+                SubAgentActivityKind::Completed => tracked.status.advance(Status::Done),
+                SubAgentActivityKind::Unknown => return,
+            };
+            if let ItemKind::Agent {
+                name,
+                model: current_model,
+                agent_id,
+                result,
+                ..
+            } = &mut tracked.kind
+            {
+                *agent_id = Some(thread.to_owned());
+                if !path.trim().is_empty() {
+                    *name = Some(path);
+                }
+                if model.is_some() {
+                    *current_model = model;
+                }
+                if matches!(
+                    activity,
+                    SubAgentActivityKind::Started | SubAgentActivityKind::Interacted
+                ) {
+                    *result = None;
+                } else if let Some(reply) = self.child_replies.remove(thread) {
+                    *result = Some(reply);
+                }
+            }
+        }
+        out.push(self.event(&key));
+        self.bind_child(thread, &key, out);
     }
 
     fn collab(

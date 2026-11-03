@@ -377,6 +377,7 @@ struct ThreadHead {
 struct ItemHead {
     #[serde(default)]
     receiver_thread_ids: Vec<String>,
+    agent_thread_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -661,16 +662,21 @@ impl Actor {
             }
             return;
         };
+        self.deliver(run, line);
         for child in params
             .item
-            .map(|item| item.receiver_thread_ids)
+            .map(|item| {
+                item.receiver_thread_ids
+                    .into_iter()
+                    .chain(item.agent_thread_id)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
         {
             if !child.trim().is_empty() && !self.owners.contains_key(&child) {
                 self.claim(&child, run);
             }
         }
-        self.deliver(run, line);
     }
 
     /// A frame about no thread: notifications go to every run; a request

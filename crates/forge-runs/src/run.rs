@@ -1032,6 +1032,17 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             } else {
                 items.id(&key)
             };
+            if matches!(kind, ItemKind::Agent { .. })
+                && status == Status::Running
+                && items
+                    .by_key
+                    .get(&key)
+                    .is_some_and(|tracked| tracked.status.is_terminal())
+                && let Some(item) = store.reopen_agent(&id, &run.id).await?
+                && let Some(tracked) = items.by_key.get_mut(&key)
+            {
+                tracked.status = item.status;
+            }
             let tracked = items
                 .by_key
                 .get_mut(&key)

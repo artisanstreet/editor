@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[path = "../../tests/codex/routing.rs"]
+mod activity_routing;
+
 /// Answers each turn with "reply on <thread> to <text>" after a short delay,
 /// so turns of different threads overlap ("slow" waits longer). A turn whose
 /// text is "spawn" also starts a child thread that says "child of <thread>".
@@ -80,6 +83,11 @@ while IFS= read -r line; do
         if [ "$text" = spawn ]; then
           printf '{"method":"thread/started","params":{"thread":{"id":"child-%s","parentThreadId":"%s","agentNickname":"Helper"}}}\n' "$thread" "$thread"
           printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"child-msg-%s","text":"child of %s","phase":"final_answer"},"threadId":"child-%s","turnId":"child-turn"}}\n' "$thread" "$thread" "$thread"
+        fi
+        if [ "$text" = activity ]; then
+          printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"child-msg-%s","text":"child of %s","phase":"final_answer"},"threadId":"child-%s","turnId":"child-turn"}}\n' "$thread" "$thread" "$thread"
+          printf '{"method":"item/completed","params":{"item":{"type":"subAgentActivity","id":"spawn-%s","kind":"started","agentThreadId":"child-%s","agentPath":"/root/worker","model":"worker-model"},"threadId":"%s","turnId":"%s"}}\n' "$thread" "$thread" "$thread" "$turn"
+          printf '{"method":"item/completed","params":{"item":{"type":"subAgentActivity","id":"done-%s","kind":"completed","agentThreadId":"child-%s","agentPath":"/root/worker"},"threadId":"%s","turnId":"%s"}}\n' "$thread" "$thread" "$thread" "$turn"
         fi
         printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-%s","text":"reply on %s to %s","phase":"final_answer"},"threadId":"%s","turnId":"%s"}}\n' "$turn" "$thread" "$text" "$thread" "$turn"
         printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"%s","items":[],"status":"completed","error":null}}}\n' "$thread" "$turn"
