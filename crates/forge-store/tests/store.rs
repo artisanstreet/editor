@@ -1828,3 +1828,6 @@ async fn an_agent_forge_started_keeps_working_through_a_restart() {
     assert!(store.continue_pending(&parent).await.unwrap());
     assert!(store.continue_pending(&child).await.unwrap());
 }
+
+#[path = "store/native-agents.rs"]
+mod native_agents;
