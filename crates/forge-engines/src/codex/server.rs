@@ -181,6 +181,7 @@ impl Server {
             commands: receiver,
             runs: HashMap::new(),
             owners: HashMap::new(),
+            agent_paths: HashMap::new(),
             pending: HashMap::new(),
             releasing: HashMap::new(),
             next_id: 1,
@@ -333,6 +334,7 @@ struct Actor {
     runs: HashMap<u64, AttachedRun>,
     /// Thread → the run its frames go to.
     owners: HashMap<String, u64>,
+    agent_paths: HashMap<String, String>,
     /// Requests in flight: the id Codex sees → the run and the id it used.
     pending: HashMap<u64, (u64, Value)>,
     releasing: HashMap<u64, Release>,
@@ -378,6 +380,8 @@ struct ItemHead {
     #[serde(default)]
     receiver_thread_ids: Vec<String>,
     agent_thread_id: Option<String>,
+    agent_path: Option<String>,
+    kind: Option<super::protocol::SubAgentActivityKind>,
 }
 
 #[derive(Deserialize)]
@@ -663,20 +667,49 @@ impl Actor {
             return;
         };
         self.deliver(run, line);
-        for child in params
-            .item
-            .map(|item| {
-                item.receiver_thread_ids
-                    .into_iter()
-                    .chain(item.agent_thread_id)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-        {
-            if !child.trim().is_empty() && !self.owners.contains_key(&child) {
+        if let Some(item) = params.item {
+            if let Some(child) = self.native_child(&thread, &item)
+                && !self.owners.contains_key(&child)
+            {
                 self.claim(&child, run);
             }
+            for child in item.receiver_thread_ids {
+                if !child.trim().is_empty() && !self.owners.contains_key(&child) {
+                    self.claim(&child, run);
+                }
+            }
         }
+    }
+
+    fn native_child(&mut self, sender: &str, item: &ItemHead) -> Option<String> {
+        use super::protocol::SubAgentActivityKind;
+        let (child, path) = (item.agent_thread_id.as_ref()?, item.agent_path.as_ref()?);
+        if child.trim().is_empty() || child == sender {
+            return None;
+        }
+        let parent_path = self
+            .agent_paths
+            .get(sender)
+            .map(String::as_str)
+            .or_else(|| self.server.loaded().contains_key(sender).then_some("/root"));
+        let owns = match item.kind {
+            Some(SubAgentActivityKind::Started) => true,
+            Some(SubAgentActivityKind::Interacted) => parent_path.is_some_and(|parent| {
+                path.strip_prefix(parent)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            }),
+            Some(
+                SubAgentActivityKind::Interrupted
+                | SubAgentActivityKind::Completed
+                | SubAgentActivityKind::Unknown,
+            )
+            | None => false,
+        };
+        if !owns {
+            return None;
+        }
+        self.agent_paths.insert(child.clone(), path.clone());
+        Some(child.clone())
     }
 
     /// A frame about no thread: notifications go to every run; a request

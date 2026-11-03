@@ -16,7 +16,7 @@ mod requests;
 
 use super::protocol::{
     CallStatus, CodexError, CollabCall, CollabStatus, CollabTool, CompletedTurn, ExecutionStatus,
-    Frame, Item, MessagePhase, Notification, PatchKind, PlanEntry, PlanStatus,
+    Frame, Item, MessagePhase, Notification, PatchKind, PlanEntry, PlanStatus, SubAgentActivity,
     SubAgentActivityKind, ThreadInfo, ThreadStarted, TokenUsage, TurnStatus, UserInput,
 };
 use crate::{EngineEvent, LiveKind, Outcome};
@@ -299,6 +299,14 @@ impl Decoder {
                 if scope.is_none() {
                     self.turn = Some(started.turn.id);
                     self.unanswered = false;
+                } else if let Some(agent) = scope
+                    && let Some(tracked) = self.items.get_mut(&agent)
+                    && tracked.status.is_terminal()
+                    && let ItemKind::Agent { result, .. } = &mut tracked.kind
+                {
+                    tracked.status = Status::Running;
+                    *result = None;
+                    out.push(self.event(&agent));
                 }
             }
             Notification::TurnCompleted(completed) => {
@@ -662,14 +670,25 @@ impl Decoder {
                 (id, settled, kind)
             }
             Item::UserMessage { content, .. } => {
-                // Ours are stored by Forge. A child's first message is its
-                // task; keep it when the spawn call didn't carry one.
                 if let Some(agent) = &scope
                     && let Some(tracked) = self.items.get_mut(agent)
                     && let ItemKind::Agent { prompt: None, .. } = &tracked.kind
                     && let Some(text) = user_text(content)
                 {
-                    if let ItemKind::Agent { prompt, .. } = &mut tracked.kind {
+                    if let ItemKind::Agent {
+                        prompt,
+                        description,
+                        name,
+                        ..
+                    } = &mut tracked.kind
+                    {
+                        if description.byte_len() == 0
+                            && name
+                                .as_deref()
+                                .is_some_and(|name| name.starts_with("/root/"))
+                        {
+                            *description = text.lines().next().unwrap_or_default().into();
+                        }
                         *prompt = Some(text.into());
                     }
                     out.push(self.event(agent));
@@ -900,20 +919,8 @@ impl Decoder {
                 (id, settled, kind)
             }
             Item::CollabAgentToolCall(call) => return self.collab(scope, call, completed, out),
-            Item::SubAgentActivity {
-                agent_thread_id,
-                agent_path,
-                kind,
-                model,
-            } => {
-                return self.subagent_activity(
-                    scope,
-                    &agent_thread_id,
-                    agent_path,
-                    kind,
-                    model,
-                    out,
-                );
+            Item::SubAgentActivity(activity) => {
+                return self.subagent_activity(scope, activity, out);
             }
             Item::Sleep { id, duration_ms } => {
                 let seconds = duration_ms.unwrap_or_default().div_ceil(1000);
@@ -974,16 +981,64 @@ impl Decoder {
         }
     }
 
+    fn subagent_message(
+        &mut self,
+        scope: &Scope,
+        activity: &SubAgentActivity,
+        out: &mut Vec<EngineEvent>,
+    ) -> bool {
+        let parent_path = scope.as_ref().map_or(Some("/root"), |parent| {
+            let ItemKind::Agent { name, .. } = &self.items.get(parent)?.kind else {
+                return None;
+            };
+            name.as_deref()
+        });
+        let recover = !self.children.contains_key(&activity.agent_thread_id)
+            && parent_path.is_some_and(|parent| {
+                activity
+                    .agent_path
+                    .strip_prefix(parent)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+            });
+        let tool = ToolKind::AgentMessage {
+            recipient: activity.agent_thread_id.clone(),
+            target: None,
+            summary: Some("Message text not provided by Codex".into()),
+            text: TextContent::default(),
+            direction: MessageDirection::Sent,
+        };
+        let kind = self.tool_kind(&activity.id, tool, None, None);
+        self.track(activity.id.clone(), scope.clone(), Status::Done, kind);
+        out.push(self.event(&activity.id));
+        recover
+    }
+
     fn subagent_activity(
         &mut self,
         scope: Scope,
-        thread: &str,
-        path: String,
-        activity: SubAgentActivityKind,
-        model: Option<String>,
+        activity: SubAgentActivity,
         out: &mut Vec<EngineEvent>,
     ) {
+        if activity.agent_thread_id.trim().is_empty() {
+            return;
+        }
+        if matches!(activity.kind, SubAgentActivityKind::Interacted)
+            && !self.subagent_message(&scope, &activity, out)
+        {
+            return;
+        }
+        let SubAgentActivity {
+            agent_thread_id,
+            agent_path: path,
+            kind: activity,
+            model,
+            ..
+        } = activity;
+        let thread = agent_thread_id.as_str();
         if thread.trim().is_empty() || matches!(activity, SubAgentActivityKind::Unknown) {
+            return;
+        }
+        if self.root.as_deref() == Some(thread) {
             return;
         }
         let key = self
@@ -1000,7 +1055,7 @@ impl Decoder {
                     engine: None,
                     thread: None,
                     name: None,
-                    description: path.clone().into(),
+                    description: TextContent::default(),
                     prompt: None,
                     agent_id: Some(thread.to_owned()),
                     context_used: None,
@@ -1033,10 +1088,7 @@ impl Decoder {
                 if model.is_some() {
                     *current_model = model;
                 }
-                if matches!(
-                    activity,
-                    SubAgentActivityKind::Started | SubAgentActivityKind::Interacted
-                ) {
+                if matches!(activity, SubAgentActivityKind::Started) {
                     *result = None;
                 } else if let Some(reply) = self.child_replies.remove(thread) {
                     *result = Some(reply);
@@ -1079,13 +1131,15 @@ impl Decoder {
                     addresses,
                     targets: Vec::new(),
                 }),
-                CollabTool::SendInput => addresses.first().map(|to| ToolKind::AgentMessage {
-                    recipient: to.clone(),
-                    target: None,
-                    summary: None,
-                    text: call.prompt.clone().unwrap_or_default().into(),
-                    direction: MessageDirection::Sent,
-                }),
+                CollabTool::SendInput | CollabTool::SendMessage | CollabTool::FollowupTask => {
+                    addresses.first().map(|to| ToolKind::AgentMessage {
+                        recipient: to.clone(),
+                        target: None,
+                        summary: None,
+                        text: call.prompt.clone().unwrap_or_default().into(),
+                        direction: MessageDirection::Sent,
+                    })
+                }
                 CollabTool::SpawnAgent | CollabTool::Other => None,
             };
             if let Some(tool) = tool {

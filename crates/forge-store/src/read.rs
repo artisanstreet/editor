@@ -767,25 +767,10 @@ pub fn inspector(conn: &Connection, thread: &ThreadId) -> Result<artisan_api::In
     })
 }
 
-/// The thread's agents still at work, for the inspector.
 fn live_agents(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::InspectorAgent>> {
-    // Only agents still at work: one that settled leaves the list at once,
-    // not when the next turn starts.
     let mut agents: Vec<artisan_api::InspectorAgent> = many(
         conn,
-        "SELECT json_object('id',id,'label',COALESCE(json_extract(body,'$.kind.label'),''),
-            'description',json_extract(body,'$.kind.description'),'status',status,
-            'engine',COALESCE(json_extract(body,'$.kind.engine'),
-                (SELECT json_extract(t.body,'$.config.engine') FROM threads t WHERE t.id=?1)),
-            'model',json_extract(body,'$.kind.model'),'thread',json_extract(body,'$.kind.thread'),
-            'config',json(COALESCE(
-                (SELECT json_extract(t.body,'$.config') FROM threads t WHERE t.id=json_extract(items.body,'$.kind.thread')),
-                (SELECT json_extract(t.body,'$.config') FROM threads t WHERE t.id=?1))),
-            'background',json(CASE WHEN COALESCE(json_extract(body,'$.kind.background'),0)
-                OR (SELECT r.status FROM runs r WHERE r.id=items.run_id)!='running'
-                THEN 'true' ELSE 'false' END)) FROM items
-         WHERE thread_id=?1 AND kind_type='agent'
-            AND status IN ('running','awaiting_user') ORDER BY position DESC",
+        include_str!("sql/inspector/agents.sql"),
         [thread.as_str()],
     )?;
     for agent in &mut agents {

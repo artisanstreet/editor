@@ -310,13 +310,7 @@ pub(super) enum Item {
         id: String,
     },
     CollabAgentToolCall(CollabCall),
-    #[serde(rename_all = "camelCase")]
-    SubAgentActivity {
-        agent_thread_id: String,
-        agent_path: String,
-        kind: SubAgentActivityKind,
-        model: Option<String>,
-    },
+    SubAgentActivity(SubAgentActivity),
     #[serde(rename_all = "camelCase")]
     Sleep {
         id: String,
@@ -418,6 +412,16 @@ pub(super) struct CollabCall {
     pub agents_states: HashMap<String, AgentState>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SubAgentActivity {
+    pub id: String,
+    pub agent_thread_id: String,
+    pub agent_path: String,
+    pub kind: SubAgentActivityKind,
+    pub model: Option<String>,
+}
+
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) enum SubAgentActivityKind {
@@ -434,6 +438,8 @@ pub(super) enum SubAgentActivityKind {
 pub(super) enum CollabTool {
     SpawnAgent,
     SendInput,
+    SendMessage,
+    FollowupTask,
     Wait,
     #[serde(other)]
     Other,

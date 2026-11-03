@@ -84,9 +84,11 @@ while IFS= read -r line; do
           printf '{"method":"thread/started","params":{"thread":{"id":"child-%s","parentThreadId":"%s","agentNickname":"Helper"}}}\n' "$thread" "$thread"
           printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"child-msg-%s","text":"child of %s","phase":"final_answer"},"threadId":"child-%s","turnId":"child-turn"}}\n' "$thread" "$thread" "$thread"
         fi
-        if [ "$text" = activity ]; then
+        if [ "$text" = activity ] || [ "$text" = activity-followup ]; then
+          activity_kind=started
+          if [ "$text" = activity-followup ]; then activity_kind=interacted; fi
           printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"child-msg-%s","text":"child of %s","phase":"final_answer"},"threadId":"child-%s","turnId":"child-turn"}}\n' "$thread" "$thread" "$thread"
-          printf '{"method":"item/completed","params":{"item":{"type":"subAgentActivity","id":"spawn-%s","kind":"started","agentThreadId":"child-%s","agentPath":"/root/worker","model":"worker-model"},"threadId":"%s","turnId":"%s"}}\n' "$thread" "$thread" "$thread" "$turn"
+          printf '{"method":"item/completed","params":{"item":{"type":"subAgentActivity","id":"spawn-%s","kind":"%s","agentThreadId":"child-%s","agentPath":"/root/worker","model":"worker-model"},"threadId":"%s","turnId":"%s"}}\n' "$thread" "$activity_kind" "$thread" "$thread" "$turn"
           printf '{"method":"item/completed","params":{"item":{"type":"subAgentActivity","id":"done-%s","kind":"completed","agentThreadId":"child-%s","agentPath":"/root/worker"},"threadId":"%s","turnId":"%s"}}\n' "$thread" "$thread" "$thread" "$turn"
         fi
         printf '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-%s","text":"reply on %s to %s","phase":"final_answer"},"threadId":"%s","turnId":"%s"}}\n' "$turn" "$thread" "$text" "$thread" "$turn"

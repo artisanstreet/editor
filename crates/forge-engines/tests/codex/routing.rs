@@ -40,3 +40,16 @@ async fn native_activity_claims_buffered_child_frames_without_cross_thread_leaks
         }
     )));
 }
+
+#[tokio::test]
+async fn a_followup_in_a_later_run_recovers_the_existing_child() {
+    let fixture = Fixture::new();
+    let (_, initial) = run(fixture.turn("activity", None)).await;
+    let root = session(&initial);
+    let child = format!("child-{root}");
+    let (outcome, events) = run(fixture.turn("activity-followup", Some(&root))).await;
+    assert_eq!(outcome.status, artisan_api::RunStatus::Done);
+    assert!(events.iter().any(|event| matches!(event, EngineEvent::Item { key, kind: ItemKind::Agent { .. }, .. } if key == &child)));
+    assert!(events.iter().any(|event| matches!(event, EngineEvent::Item { parent: Some(parent), kind: ItemKind::AssistantMessage { .. }, .. } if parent == &child)));
+    assert!(!events.iter().any(|event| matches!(event, EngineEvent::Item { kind: ItemKind::Agent { agent_id: Some(agent), .. }, .. } if agent == &root)));
+}

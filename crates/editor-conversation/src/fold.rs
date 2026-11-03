@@ -189,6 +189,21 @@ impl PlainSection {
         }
     }
     pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
+        if self == Self::AgentTask
+            && let ItemKind::Agent {
+                prompt: None,
+                description,
+                name,
+                ..
+            } = &item.kind
+            && let Some(description) = description.inline()
+            && (description.is_empty()
+                || name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("/root") && name == description))
+        {
+            return Some("Task message not provided by the harness.");
+        }
         if self == Self::AgentMessage
             && let ItemKind::Tool {
                 tool:
