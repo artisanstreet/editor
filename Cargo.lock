@@ -338,7 +338,7 @@ dependencies = [
 [[package]]
 name = "aqua"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-a11y-uia",
  "aqua-core",
@@ -363,7 +363,7 @@ dependencies = [
 [[package]]
 name = "aqua-a11y-uia"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "accesskit 0.25.2",
  "accesskit_windows 0.35.2",
@@ -375,12 +375,12 @@ dependencies = [
 [[package]]
 name = "aqua-core"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 
 [[package]]
 name = "aqua-fonts-system"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "memmap2",
  "skrifa 0.46.2",
@@ -389,7 +389,7 @@ dependencies = [
 [[package]]
 name = "aqua-gpu-d3d11"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -402,7 +402,7 @@ dependencies = [
 [[package]]
 name = "aqua-gpu-ref"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -413,7 +413,7 @@ dependencies = [
 [[package]]
 name = "aqua-graph"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
 ]
@@ -421,7 +421,7 @@ dependencies = [
 [[package]]
 name = "aqua-ime-tsf"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-protocol",
@@ -433,12 +433,12 @@ dependencies = [
 [[package]]
 name = "aqua-kernels"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 
 [[package]]
 name = "aqua-layout"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-motion",
@@ -450,7 +450,7 @@ dependencies = [
 [[package]]
 name = "aqua-media"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -465,7 +465,7 @@ dependencies = [
 [[package]]
 name = "aqua-motion"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
 ]
@@ -473,7 +473,7 @@ dependencies = [
 [[package]]
 name = "aqua-protocol"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -484,12 +484,12 @@ dependencies = [
 [[package]]
 name = "aqua-reactive"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 
 [[package]]
 name = "aqua-runtime"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-motion",
@@ -504,7 +504,7 @@ dependencies = [
 [[package]]
 name = "aqua-scene"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
 ]
@@ -512,12 +512,12 @@ dependencies = [
 [[package]]
 name = "aqua-shaders"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 
 [[package]]
 name = "aqua-shell-win32"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-protocol",
@@ -536,7 +536,7 @@ dependencies = [
 [[package]]
 name = "aqua-style"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-motion",
@@ -547,7 +547,7 @@ dependencies = [
 [[package]]
 name = "aqua-text"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-fonts-system",
@@ -568,7 +568,7 @@ dependencies = [
 [[package]]
 name = "aqua-transport"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -581,7 +581,7 @@ dependencies = [
 [[package]]
 name = "aqua-ui"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "aqua-core",
  "aqua-layout",
@@ -7920,7 +7920,7 @@ dependencies = [
 [[package]]
 name = "taffy"
 version = "0.15.1"
-source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+source = "git+https://github.com/artisanstreet/aqua?rev=1aa07e25b48d7172cf95be3c97322781097f76a9#1aa07e25b48d7172cf95be3c97322781097f76a9"
 dependencies = [
  "smallvec",
 ]
