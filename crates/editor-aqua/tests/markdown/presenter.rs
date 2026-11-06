@@ -6,6 +6,181 @@ use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
 use std::rc::Rc;
 
 #[test]
+fn completed_image_invalidates_retained_loading_row() {
+    use aqua::images::{ImageAssets, ImageStatus};
+    use aqua_ui::{
+        collection::List,
+        style::{Length, Style},
+        tree::NodeKind,
+    };
+    use base64::Engine as _;
+    use editor_aqua::ui::{
+        markdown::presenter::MediaServices,
+        media::{
+            image::Images,
+            source::{MediaFetcher, MediaSource},
+        },
+    };
+    use std::{
+        cell::Cell,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 1)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let source: MediaSource = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(encoded.into_inner())
+    )
+    .into();
+    let fetcher = MediaFetcher::new("retained-image", |_| {
+        Box::pin(async { Err(editor_aqua::ui::media::source::MediaFailure::Missing) })
+    })
+    .owned_by(&[1], 1);
+    let images = Images::new();
+    let assets = ImageAssets::default();
+    let mut presenter = MarkdownPresenter::default();
+    presenter
+        .prepare(
+            &MarkdownEngine::new().unwrap(),
+            &format!(
+                "```artisan-image\n{}\n```",
+                serde_json::json!({"src": source.raw, "width": 2, "height": 1})
+            ),
+        )
+        .unwrap();
+    presenter
+        .set_media_services(
+            "item",
+            MediaServices {
+                width: 320.0,
+                fetcher: fetcher.clone(),
+                images: images.clone(),
+                player: editor_audio::Player::new(),
+                audio_assets: editor_aqua::ui::media::audio::AudioAssets::new(),
+                model_assets: editor_aqua::ui::media::model::load::ModelAssets::new(),
+                image_assets: assets.clone(),
+                model_capability: Rc::new(|| None),
+                scale: 1.0,
+                effect: Rc::new(|_| {}),
+                wake: Arc::new(|| {}),
+            },
+        )
+        .unwrap();
+    let presenter = Rc::new(presenter);
+    let settled = Rc::new(Cell::new(false));
+    let renders = Rc::new(Cell::new(0));
+    let list = || {
+        let revision = settled.clone();
+        let settled = settled.clone();
+        let presenter = presenter.clone();
+        let renders = renders.clone();
+        List::new()
+            .items([0_usize])
+            .key(|_| "image-row")
+            .revision(move |_| revision.get().then_some(1))
+            .row(move |_| {
+                renders.set(renders.get() + 1);
+                let invalidated = settled.clone();
+                let element = presenter
+                    .render(
+                        "item",
+                        ArtisanTheme::for_mode(ThemeMode::Dark),
+                        BodyTone::Foreground,
+                        SelectionDocumentId(1),
+                        &[1],
+                        |index| SelectionSourceId(index as u64 + 1),
+                        Rc::new(|_, _, _| aqua_ui::element::Box::new().build()),
+                        Rc::new(move || invalidated.set(false)),
+                    )
+                    .unwrap()
+                    .element;
+                settled.set(true);
+                element
+            })
+            .style(
+                Style::new()
+                    .width(Length::Px(400.0))
+                    .height(Length::Px(300.0)),
+            )
+            .build()
+    };
+    let loading = |app: &aqua::UiApp| {
+        app.tree()
+            .traverse()
+            .into_iter()
+            .any(|node| match &app.tree().get(node).unwrap().kind {
+                NodeKind::Text(text) => text.text().contains("Loading image"),
+                _ => false,
+            })
+    };
+    let mut app = aqua::UiApp::new(aqua_text::SharedFonts::new(), aqua_text::SharedRuns::new());
+    app.mount(|_| list()).unwrap();
+    app.set_viewport(400.0, 300.0, 1.0);
+    app.layout().unwrap();
+    assert!(
+        loading(&app),
+        "the pending image must first mount its loading state"
+    );
+    app.refresh(vec![list()]).unwrap();
+    app.layout().unwrap();
+    assert_eq!(renders.get(), 1, "unchanged settled rows must be retained");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let ready = loop {
+        images.drain(&assets);
+        presenter.drain_media();
+        if let Some(result) = images.request(&fetcher, &source, "image-0", 99, Arc::new(|| {})) {
+            break result.unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the synthetic PNG must finish decoding"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(
+        matches!(
+            ready.status(),
+            ImageStatus::Ready {
+                width: 2,
+                height: 1
+            }
+        ),
+        "the completion must contain decoded image pixels"
+    );
+    app.refresh(vec![list()]).unwrap();
+    app.layout().unwrap();
+    assert_eq!(
+        renders.get(),
+        2,
+        "media completion must invalidate the retained row"
+    );
+    assert!(
+        !loading(&app),
+        "the rebuilt row must replace its loading state"
+    );
+    assert!(
+        app.tree()
+            .traverse()
+            .into_iter()
+            .any(|node| match &app.tree().get(node).unwrap().kind {
+                NodeKind::Media(media) => media.image.is_some(),
+                _ => false,
+            }),
+        "the rebuilt row must mount the Ready image"
+    );
+    assert!(
+        !presenter.drain_media(),
+        "an unchanged Ready image must not invalidate again"
+    );
+    assert!(settled.get(), "the rebuilt image row can settle again");
+}
+
+#[test]
 fn preparation_proof_and_complete_selection_follow_source_revision() {
     let engine = MarkdownEngine::new().unwrap();
     let mut presenter = MarkdownPresenter::default();

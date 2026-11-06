@@ -255,6 +255,7 @@ pub struct MarkdownPresenter {
     audio: crate::ui::rich::media::audio::AudioState,
     audio_ids: RefCell<HashMap<String, HashSet<String>>>,
     media_services: RefCell<HashMap<String, MediaServices>>,
+    media_invalidations: RefCell<HashMap<String, Rc<dyn Fn()>>>,
     images: RefCell<
         HashMap<
             String,
@@ -337,6 +338,7 @@ impl Default for MarkdownPresenter {
             audio: crate::ui::rich::media::audio::AudioState::default(),
             audio_ids: RefCell::new(HashMap::new()),
             media_services: RefCell::new(HashMap::new()),
+            media_invalidations: RefCell::new(HashMap::new()),
             images: RefCell::new(HashMap::new()),
             image_ids: RefCell::new(HashMap::new()),
             image_comparisons: RefCell::new(HashMap::new()),
@@ -1137,6 +1139,17 @@ impl MarkdownPresenter {
         for (_, state) in self.image_comparisons.borrow().values() {
             changed |= state.borrow_mut().refresh();
         }
+        if changed {
+            let invalidations: Vec<_> = self
+                .media_invalidations
+                .borrow()
+                .values()
+                .cloned()
+                .collect();
+            for invalidate in invalidations {
+                invalidate();
+            }
+        }
         changed
     }
 
@@ -1160,6 +1173,7 @@ impl MarkdownPresenter {
             .retain(|(owner, _), _| owner != id);
         self.reveals.borrow_mut().remove(id);
         self.media_services.borrow_mut().remove(id);
+        self.media_invalidations.borrow_mut().remove(id);
         let diagram_prefix = format!("{id}-diagram-");
         self.diagrams
             .borrow_mut()
@@ -1445,6 +1459,14 @@ impl MarkdownPresenter {
                 return Err(PresenterError::Unavailable("code fence or rich fallback"));
             }
         };
+        if matches!(
+            &envelope.block,
+            Prepared::Model(_) | Prepared::Image(_) | Prepared::Audio(_) | Prepared::ImageCompare(_)
+        ) {
+            self.media_invalidations
+                .borrow_mut()
+                .insert(id.to_owned(), invalidate.clone());
+        }
         let element = match &envelope.block {
             Prepared::Model(model) => {
                 let media = self
