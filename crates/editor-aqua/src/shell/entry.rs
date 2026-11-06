@@ -175,9 +175,7 @@ impl Entry {
             }
         }
         if let CoreEvent::OpenUrl(url) = event {
-            if let Err(error) =
-                aqua::prelude::OpenTarget::url(url).and_then(|target| target.execute())
-            {
+            if let Err(error) = crate::shell::open_url(url) {
                 tracing::warn!(%error, "could not open URL");
             }
         }

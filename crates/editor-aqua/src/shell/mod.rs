@@ -23,3 +23,19 @@ pub mod titlebar;
 pub mod view;
 pub mod wheel;
 pub mod workspace;
+
+#[cfg(windows)]
+pub(crate) fn open_url(url: &str) -> anyhow::Result<()> {
+    aqua::prelude::OpenTarget::url(url)?.execute()?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn open_url(url: &str) -> anyhow::Result<()> {
+    aqua::prelude::OpenTarget::url(url)?;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "the Aqua native URL service runs on Windows only",
+    )
+    .into())
+}

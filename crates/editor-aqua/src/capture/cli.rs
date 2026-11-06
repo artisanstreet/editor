@@ -1,5 +1,7 @@
+use super::scenario::Scenario;
+#[cfg(windows)]
 use super::{
-    scenario::{Route, Scenario},
+    scenario::Route,
     session::{Options, run_script},
 };
 use anyhow::{Context, Result};
@@ -9,6 +11,7 @@ fn variable(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+#[cfg(windows)]
 fn number(name: &str, default: f64) -> Result<f64> {
     variable(name).map_or(Ok(default), |value| {
         value
@@ -41,6 +44,16 @@ pub fn run_from_environment() -> Result<bool> {
     let Some(script) = variable("ARTISAN_EDITOR_SCRIPT") else {
         return Ok(false);
     };
+    capture(&script)
+}
+
+#[cfg(not(windows))]
+fn capture(_script: &str) -> Result<bool> {
+    anyhow::bail!("Editor capture requires Windows D3D11")
+}
+
+#[cfg(windows)]
+fn capture(script: &str) -> Result<bool> {
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)

@@ -190,9 +190,7 @@ impl<V: SectionViews> ShellApplication<V> {
         for effect in updates.settings_platform_effects {
             match effect {
                 crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url) => {
-                    if let Err(error) =
-                        aqua::prelude::OpenTarget::url(&url).and_then(|target| target.execute())
-                    {
+                    if let Err(error) = crate::shell::open_url(&url) {
                         tracing::warn!(%error, "could not open URL");
                     }
                 }

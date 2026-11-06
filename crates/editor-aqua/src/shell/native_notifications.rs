@@ -3,15 +3,37 @@ use crate::shell::host::Shell;
 use crate::shell::notifications::parse_tag;
 use crate::shell::workspace::NotificationEffects;
 use aqua::AppCtx;
+#[cfg(windows)]
+use aqua::prelude::NotificationCenter;
 use aqua::prelude::{
-    AppIdentity, AquaWindowId, NotificationCenter, NotificationError, NotificationResponse,
-    TaskbarBadge, WindowRequest,
+    AppIdentity, AquaWindowId, NotificationError, NotificationResponse, TaskbarBadge, WindowRequest,
 };
 use std::{
     collections::VecDeque,
     num::NonZeroUsize,
     sync::{Arc, Mutex},
 };
+
+#[cfg(not(windows))]
+struct NotificationCenter;
+
+#[cfg(not(windows))]
+impl NotificationCenter {
+    fn new(
+        _identity: AppIdentity,
+        _respond: Arc<dyn Fn(NotificationResponse) + Send + Sync>,
+    ) -> Result<Self, NotificationError> {
+        Err(NotificationError::Unsupported)
+    }
+
+    fn withdraw(&self, _tag: &str) -> Result<(), NotificationError> {
+        Err(NotificationError::Unsupported)
+    }
+
+    fn show(&self, _notification: aqua::prelude::Notification) -> Result<(), NotificationError> {
+        Err(NotificationError::Unsupported)
+    }
+}
 
 static COLD_LAUNCH: std::sync::OnceLock<NotificationResponse> = std::sync::OnceLock::new();
 
