@@ -84,6 +84,7 @@ pub struct ShellApplication<V> {
     ui: ManagedUiApp,
     notifications: Option<NativeNotifications>,
     notifications_started: bool,
+    notifications_enabled: bool,
     initial: Option<ShellUpdates>,
     mounted: bool,
     font_popup: Option<aqua_ui::overlay::OverlayId>,
@@ -131,7 +132,9 @@ impl<V: SectionViews> ShellApplication<V> {
     #[cfg(feature = "qualification")]
     pub fn for_qualification(core: crate::core::Core, resources: ShellResources, views: V) -> Self {
         let (shell, initial) = Shell::for_qualification(core, resources.images.clone());
-        Self::from_shell(shell, initial, resources, views)
+        let mut app = Self::from_shell(shell, initial, resources, views);
+        app.notifications_enabled = false;
+        app
     }
 
     fn from_shell(
@@ -146,6 +149,7 @@ impl<V: SectionViews> ShellApplication<V> {
             ui: resources.into_managed(),
             notifications: None,
             notifications_started: false,
+            notifications_enabled: true,
             initial: Some(initial),
             mounted: false,
             font_popup: None,
@@ -169,7 +173,7 @@ impl<V: SectionViews> ShellApplication<V> {
     }
 
     fn start_notifications(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) -> bool {
-        if std::mem::replace(&mut self.notifications_started, true) {
+        if !self.notifications_enabled || std::mem::replace(&mut self.notifications_started, true) {
             return false;
         }
         match NativeNotifications::new() {
@@ -1240,3 +1244,7 @@ fn mark(causes: &mut Vec<&'static str>, name: &'static str, changed: bool) -> bo
     }
     changed
 }
+
+#[cfg(all(test, feature = "qualification"))]
+#[path = "../../tests/qualification/native.rs"]
+mod native_tests;
