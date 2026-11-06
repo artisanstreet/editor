@@ -1888,6 +1888,11 @@ impl RootViews {
                     && !workspace.conversation.rows.is_empty()
                     && !workspace.conversation.is_landing()
                     && workspace.conversation.host_is_current(&shell.core)
+                    && crate::shell::thread_navigation::latest_visible(
+                        &workspace.conversation,
+                        &shell.core,
+                        workspace.composer.is_some(),
+                    ) == crate::shell::wheel::keyed_node(ui, "jump-latest").is_some()
                     && self.transcript_shape == Some(transcript_shape(&workspace.conversation))
             })
     }
@@ -2683,6 +2688,11 @@ impl SectionViews for RootViews {
                     );
                     changed |= crate::shell::rebuild_stats::note("viewport", rebuild);
                     self.transcript_viewport = Some(event.viewport);
+                    let was_following = workspace
+                        .conversation
+                        .view
+                        .as_ref()
+                        .is_some_and(|view| view.viewport.state().is_following());
                     let previous = workspace.conversation.rows_epoch();
                     match self.observations.observe_viewport(
                         &mut workspace.conversation,
@@ -2694,7 +2704,16 @@ impl SectionViews for RootViews {
                         clip,
                     ) {
                         Ok(()) => {
-                            changed |= crate::shell::rebuild_stats::note("rows", previous != workspace.conversation.rows_epoch())
+                            changed |= crate::shell::rebuild_stats::note(
+                                "rows",
+                                previous != workspace.conversation.rows_epoch(),
+                            );
+                            changed |= was_following
+                                != workspace
+                                    .conversation
+                                    .view
+                                    .as_ref()
+                                    .is_some_and(|view| view.viewport.state().is_following());
                         }
                         Err(error) => {
                             tracing::warn!(%error, "could not observe transcript viewport")
