@@ -87,8 +87,12 @@ fn embed_resources() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-env-changed=TARGET_CC");
     let out = PathBuf::from(env::var("OUT_DIR")?);
     let script = out.join("resources.rc");
-    let object = out.join("resources.o");
     std::fs::write(&script, resource_script(&icon))?;
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        embed_resource::compile(&script, embed_resource::NONE).manifest_required()?;
+        return Ok(());
+    }
+    let object = out.join("resources.o");
     let windres =
         env::var("TARGET_WINDRES").unwrap_or_else(|_| "x86_64-w64-mingw32-windres".to_owned());
     let preprocessor = env::var("TARGET_CC").unwrap_or_else(|_| "x86_64-w64-mingw32-cc".to_owned());

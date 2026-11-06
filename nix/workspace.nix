@@ -18,11 +18,13 @@ let
   inherit (manifest.workspace.package) version;
   rust = pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml;
   craneLib = (crane.mkLib pkgs).overrideToolchain rust;
+  shaderTools = import ./shaders.nix { inherit pkgs; };
 
   # The crates plus what they embed (skills/) and Cargo's configuration.
   roots = [
     "crates"
     "vendor/highlighting"
+    "vendor/mermaid-rs-renderer"
     "skills"
     ".cargo"
     ".config"
@@ -151,8 +153,13 @@ let
         in
         {
           depsBuildBuild = [ pkgs.stdenv.cc ];
-          # Compile the native D3D11 HLSL on the Linux build host.
-          nativeBuildInputs = nativeTools ++ [ pkgs.vkd3d ];
+          nativeBuildInputs = nativeTools ++ [
+            pkgs.vkd3d
+            pkgs.directx-shader-compiler
+            shaderTools.fxc
+          ];
+          AQUA_DXC = "${pkgs.directx-shader-compiler}/bin/dxc";
+          AQUA_FXC = "${shaderTools.fxc}/bin/aqua-fxc";
           CARGO_BUILD_TARGET = target;
           buildInputs = [
             windowsPkgs.windows.pthreads
@@ -194,6 +201,8 @@ let
         // {
           inherit src version;
           pname = "${name}-${platform}";
+          preBuild = writableTarget + lib.optionalString (platform == "windows" && package == "editor") shaderTools.prepare;
+          postBuild = lib.optionalString (platform == "windows" && package == "editor") shaderTools.cleanup;
           strictDeps = true;
           CARGO_PROFILE = "release";
           cargoExtraArgs = "--locked --offline -p ${package} --bin ${name}";

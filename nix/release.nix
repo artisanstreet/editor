@@ -38,6 +38,7 @@ pkgs.runCommand "artisan-release-${version}"
       if [ "$2" = editor ]; then
         install -m644 ${../vendor/highlighting/NOTICE.txt} "$1/HIGHLIGHTING-NOTICES.txt"
         cp -R ${../crates/editor-assets/licenses} "$1/notices"
+        install -m644 ${../vendor/mermaid-rs-renderer/LICENSE} "$1/MERMAID-LICENSE.txt"
         chmod -R u+w "$1/notices"
       fi
     }

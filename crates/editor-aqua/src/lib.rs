@@ -13,3 +13,6 @@ pub mod shell;
 pub mod sidebar;
 pub mod sources;
 pub mod ui;
+
+mod launch;
+pub use launch::launch;

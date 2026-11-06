@@ -95,15 +95,6 @@ pub const ALL: &[BundledFont] = &[
             include_bytes!("../fonts/test-founders-grotesk-bold.otf"),
         ],
     },
-    BundledFont {
-        file_name: "twemoji-mozilla.ttf",
-        family: "Twemoji Mozilla",
-        weights: (400, 400),
-        license_path: "licenses/twemoji-LICENSE.md",
-        license_text: include_str!("../licenses/twemoji-LICENSE.md"),
-        bytes: include_bytes!("../fonts/twemoji-mozilla.ttf"),
-        static_faces: &[include_bytes!("../fonts/twemoji-mozilla.ttf")],
-    },
 ];
 
 /// Shapes the embedded bytes for `gpui::TextSystem::add_fonts`.
