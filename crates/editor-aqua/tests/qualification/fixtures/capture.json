@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "project-aqua",
+      "path": "/fixture/projects/aqua",
+      "name": "aqua"
+    },
+    {
+      "id": "project-editor",
+      "path": "/fixture/projects/editor",
+      "name": "editor"
+    }
+  ],
+  "threads": [
+    {
+      "id": "thread-content",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Compare the glyph path"
+    },
+    {
+      "id": "thread-second",
+      "project_id": "project-editor",
+      "config": {
+        "engine": "codex",
+        "model": null,
+        "effort": null
+      },
+      "title": "Wire the settings pages"
+    },
+    {
+      "id": "thread-third",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Review the shadow primitives"
+    }
+  ],
+  "runs": [],
+  "items": [
+    {
+      "id": "item-01",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Compare the renderer's glyph path with the reference and list what differs."
+      }
+    },
+    {
+      "id": "item-03",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "## Findings\n\nThe glyph path differs in **two** places:\n\n1. Subpixel positioning rounds to whole pixels in `shape_line`.\n2. The atlas packs `R8` coverage without the gamma ramp.\n\n| Area | Status |\n| --- | --- |\n| Quads | matches |\n| Glyphs | differs |\n| Shadows | pending |\n\n```rust\nfn coverage(alpha: f32, gamma: f32) -> f32 {\n    alpha.powf(1.0 / gamma)\n}\n```\n\n- Inline code such as `Renderer::prepare` keeps its own chip.\n- Links read like [the plan](https://example.invalid/plan).\n\n> Fix the ramp first, then re-capture.",
+        "phase": "final"
+      }
+    }
+  ],
+  "settings": {}
+}

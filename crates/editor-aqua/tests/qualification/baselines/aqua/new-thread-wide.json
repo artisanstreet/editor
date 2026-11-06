@@ -1,0 +1,18 @@
+{
+  "name": "new-thread-wide",
+  "implementation": "Aqua",
+  "route": "new-thread",
+  "logical_width": 1600,
+  "logical_height": 900,
+  "width": 1600,
+  "height": 900,
+  "scale_bits": 1065353216,
+  "backend": "Vulkan",
+  "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+  "pixel_format": "rgba8-unorm",
+  "alpha": "opaque",
+  "color_profile": "gpui-windows-encoded",
+  "surface": "offscreen-client-area-no-native-chrome",
+  "repeat_identical": true,
+  "sha256": "e3ecb9b7f291ed09c71dd7fa95b99f9e907655a25168844551de1855e7f7e156"
+}

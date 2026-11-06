@@ -1,0 +1,271 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "project-aqua",
+      "path": "/fixture/projects/aqua",
+      "name": "aqua"
+    },
+    {
+      "id": "project-editor",
+      "path": "/fixture/projects/editor",
+      "name": "editor"
+    }
+  ],
+  "threads": [
+    {
+      "id": "thread-content",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Compare the glyph path"
+    },
+    {
+      "id": "thread-second",
+      "project_id": "project-editor",
+      "config": {
+        "engine": "codex",
+        "model": null,
+        "effort": null
+      },
+      "title": "Wire the settings pages"
+    },
+    {
+      "id": "thread-third",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Review the shadow primitives"
+    },
+    {
+      "id": "thread-data",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Usage charts and tables"
+    },
+    {
+      "id": "thread-flow",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Funnel, flows and spans"
+    },
+    {
+      "id": "thread-structure",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Callouts, code and comparisons"
+    },
+    {
+      "id": "thread-stream",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Streaming an answer"
+    },
+    {
+      "id": "thread-tool",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Run the conformance tests"
+    }
+  ],
+  "runs": [],
+  "items": [
+    {
+      "id": "item-01",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Compare the renderer's glyph path with the reference and list what differs."
+      }
+    },
+    {
+      "id": "item-03",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "## Findings\n\nThe glyph path differs in **two** places:\n\n1. Subpixel positioning rounds to whole pixels in `shape_line`.\n2. The atlas packs `R8` coverage without the gamma ramp.\n\n| Area | Status |\n| --- | --- |\n| Quads | matches |\n| Glyphs | differs |\n| Shadows | pending |\n\n```rust\nfn coverage(alpha: f32, gamma: f32) -> f32 {\n    alpha.powf(1.0 / gamma)\n}\n```\n\n- Inline code such as `Renderer::prepare` keeps its own chip.\n- Links read like [the plan](https://example.invalid/plan).\n\n> Fix the ramp first, then re-capture.",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "thread-data-u",
+      "thread_id": "thread-data",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Show the usage numbers as charts."
+      }
+    },
+    {
+      "id": "thread-data-a",
+      "thread_id": "thread-data",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "Turns grew quickly after the launch.\n\n```artisan-stats\n{\n  \"tiles\": [\n    { \"label\": \"installs sent a turn\", \"value\": \"85.0k\" },\n    { \"label\": \"turns sent\", \"value\": \"24.0M\", \"delta\": \"+18%\", \"trend\": \"up\", \"good\": \"up\", \"sparkline\": [3, 4, 4, 6, 9, 12] },\n    { \"label\": \"turns, median install\", \"value\": \"27\" },\n    { \"label\": \"of turns from top 1%\", \"value\": \"18%\", \"hint\": \"Share of turns sent by the heaviest 1% of installs.\" }\n  ]\n}\n```\n\n```artisan-chart\n{\n  \"title\": \"Opus 5.5 went from 0 to half of all turns in 3 days\",\n  \"mark\": \"area\",\n  \"stacked\": true,\n  \"normalize\": true,\n  \"categories\": [\"Sep 19\", \"Sep 20\", \"Sep 21\", \"Sep 22\", \"Sep 23\", \"Sep 24\", \"Sep 25\"],\n  \"series\": [\n    { \"name\": \"Opus 5.5\", \"values\": [0, 0, 0, 12, 31, 44, 51] },\n    { \"name\": \"Opus 5\", \"values\": [48, 47, 49, 40, 30, 22, 18] },\n    { \"name\": \"Other\", \"values\": [52, 53, 51, 48, 39, 34, 31] }\n  ],\n  \"y\": { \"unit\": \"%\" },\n  \"annotations\": [{ \"x\": \"Sep 22\", \"label\": \"Opus 5.5 ships\" }],\n  \"caption\": \"Share of sent turns per day, by model family.\"\n}\n```\n\n```artisan-heatmap\n{\n  \"title\": \"Peak is Thursday 3 PM, local time\",\n  \"x\": [\"9a\", \"12p\", \"3p\", \"6p\"],\n  \"y\": [\"Mon\", \"Tue\", \"Wed\", \"Thu\", \"Fri\"],\n  \"values\": [[40, 62, 70, 41], [44, 65, 74, 43], [45, 66, 77, 45], [47, 70, 88, 46], [42, 60, 66, 35]],\n  \"unit\": \"k turns\"\n}\n```\n\n```artisan-distribution\n{ \"mode\": \"cdf\", \"unit\": \"s\", \"threshold\": 60, \"series\": [{ \"name\": \"Claude Code\", \"values\": [12, 20, 33, 41, 45, 60, 75, 120, 300] }, { \"name\": \"Codex\", \"values\": [30, 55, 80, 93, 110, 150, 220, 400] }] }\n```\n\n```artisan-concentration\n{ \"title\": \"The top 10% of installs send 65% of turns\", \"subtitle\": \"Turns per install, last 28 days.\", \"items\": \"installs\", \"total\": \"turns\", \"highlight\": 0.1, \"values\": [900, 420, 310, 120, 80, 60, 45, 30, 22, 18, 15, 12, 10, 9, 7, 6, 5, 4, 3, 2] }\n```\n\nThat is the shape of it.",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "thread-flow-u",
+      "thread_id": "thread-flow",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Where do installs drop off?"
+      }
+    },
+    {
+      "id": "thread-flow-a",
+      "thread_id": "thread-flow",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "Most of the loss is early.\n\n```artisan-funnel\n{ \"steps\": [{ \"label\": \"Installed\", \"value\": 120000 }, { \"label\": \"Opened a thread\", \"value\": 96000 }, { \"label\": \"Sent a turn\", \"value\": 85000 }, { \"label\": \"Sent 10 turns\", \"value\": 41000 }] }\n```\n\n```artisan-sankey\n{ \"links\": [{ \"from\": \"Turns\", \"to\": \"Claude\", \"value\": 60 }, { \"from\": \"Turns\", \"to\": \"Codex\", \"value\": 40 }, { \"from\": \"Claude\", \"to\": \"Completed\", \"value\": 55 }, { \"from\": \"Claude\", \"to\": \"Failed\", \"value\": 5 }, { \"from\": \"Codex\", \"to\": \"Completed\", \"value\": 36 }, { \"from\": \"Codex\", \"to\": \"Failed\", \"value\": 4 }] }\n```\n\n```artisan-hierarchy\n{ \"title\": \"Charts are a third of the renderer\", \"subtitle\": \"Lines of Rust under modules/ui/src/markdown_renderer.\", \"name\": \"markdown_renderer\", \"unit\": \"lines\", \"children\": [{ \"name\": \"rich\", \"children\": [{ \"name\": \"charts\", \"children\": [{ \"name\": \"chart\", \"value\": 1492 }, { \"name\": \"distribution\", \"value\": 852 }, { \"name\": \"sankey\", \"value\": 765 }, { \"name\": \"frame.rs\", \"value\": 440 }, { \"name\": \"heatmap.rs\", \"value\": 387 }] }, { \"name\": \"media\", \"children\": [{ \"name\": \"color.rs\", \"value\": 720 }, { \"name\": \"image_compare.rs\", \"value\": 560 }] }, { \"name\": \"code\", \"value\": 1100 }, { \"name\": \"narrative\", \"value\": 600 }] }, { \"name\": \"prepared.rs\", \"value\": 900 }, { \"name\": \"table.rs\", \"value\": 520 }, { \"name\": \"inline.rs\", \"value\": 410 }] }\n```\n\n```artisan-hierarchy\n{ \"title\": \"Most of a turn is waiting on the model\", \"subtitle\": \"Wall time of one turn, ms.\", \"layout\": \"flame\", \"name\": \"turn\", \"unit\": \"ms\", \"value\": 4200, \"children\": [{ \"name\": \"stream\", \"value\": 3600, \"children\": [{ \"name\": \"first token\", \"value\": 1400 }, { \"name\": \"tokens\", \"value\": 2100 }] }, { \"name\": \"tools\", \"value\": 450, \"children\": [{ \"name\": \"read\", \"value\": 180 }, { \"name\": \"grep\", \"value\": 220 }] }, { \"name\": \"render\", \"value\": 120 }] }\n```\n\n```artisan-spans\n{ \"title\": \"TLS is the slowest step\", \"subtitle\": \"One cold request, ms.\", \"unit\": \"ms\", \"spans\": [{ \"label\": \"DNS\", \"start\": 0, \"end\": 24 }, { \"label\": \"Connect\", \"start\": 24, \"end\": 61 }, { \"label\": \"TLS\", \"start\": 61, \"end\": 180 }, { \"label\": \"Request\", \"start\": 180, \"end\": 196 }, { \"label\": \"Wait\", \"start\": 196, \"end\": 302 }, { \"label\": \"Download\", \"start\": 302, \"end\": 340 }] }\n```\n\n```artisan-spans\n{ \"title\": \"Sync ships before the Marketplace UI\", \"markers\": [{ \"at\": \"2026-10-07\", \"label\": \"Today\" }], \"spans\": [{ \"label\": \"Store and links\", \"lane\": \"Backend\", \"start\": \"2026-09-28\", \"end\": \"2026-10-03\", \"group\": \"Done\" }, { \"label\": \"Engine sync\", \"lane\": \"Backend\", \"start\": \"2026-10-03\", \"end\": \"2026-10-10\", \"group\": \"In progress\" }, { \"label\": \"Marketplace\", \"lane\": \"Frontend\", \"start\": \"2026-10-06\", \"end\": \"2026-10-16\", \"group\": \"In progress\" }, { \"label\": \"Review\", \"lane\": \"Frontend\", \"start\": \"2026-10-14\", \"end\": \"2026-10-18\", \"group\": \"Planned\" }] }\n```",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "thread-structure-u",
+      "thread_id": "thread-structure",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Compare the options and point at the code."
+      }
+    },
+    {
+      "id": "thread-structure-a",
+      "thread_id": "thread-structure",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "The decision, in short.\n\n```artisan-callout\n{ \"kind\": \"warning\", \"title\": \"Stale copy fails CI\", \"body\": \"ci recomputes the policy; --check fails if the committed copy is stale, without writing.\" }\n```\n\n```artisan-compare\n{\n  \"options\": [\"Render HTML\", \"Native blocks\"],\n  \"recommended\": \"Native blocks\",\n  \"rows\": [\n    { \"criterion\": \"Matches the app\", \"values\": [\"Needs CSS token bridge\", \"Uses theme tokens\"] },\n    { \"criterion\": \"Security\", \"values\": [\"Sandbox required\", \"No scripts\"] },\n    { \"criterion\": \"Coverage\", \"values\": [\"Anything\", \"The catalog\"] }\n  ]\n}\n```\n\n```artisan-code-ref\n{ \"ref\": \"src/dispatch/support.ts:12-16\", \"language\": \"ts\", \"excerpt\": \"export function ciDispatchMachineSupport(label, machine) {\\n  if (machine.os !== 'ubuntu') return false;\\n  return machine.cpus < 96;\\n}\", \"note\": \"The only gate both paths share.\" }\n```\n\n```artisan-annotated-code\n{\n  \"path\": \"src/pool.rs\",\n  \"start_line\": 40,\n  \"code\": \"let pool = Pool::new(cfg)?;\\nlet conn = pool.get().await?;\\nconn.execute(sql).await?;\",\n  \"notes\": [{ \"lines\": 41, \"text\": \"Waits forever when the pool is exhausted.\" }, { \"lines\": \"40-41\", \"text\": \"The pool is rebuilt per request.\" }]\n}\n```\n\n```artisan-file-tree\n{ \"entries\": [{ \"path\": \"src/pool.rs\", \"change\": \"modified\" }, { \"path\": \"src/state.rs\", \"change\": \"modified\", \"note\": \"Holds the shared pool\" }, { \"path\": \"tests/pool_timeout.rs\", \"change\": \"added\" }] }\n```\n\n```mermaid\nflowchart LR\n  A[Request] --> B{Cached?}\n  B -->|yes| C[Serve]\n  B -->|no| D[Fetch]\n  D --> C\n```\n\nDone.",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "thread-stream-u",
+      "thread_id": "thread-stream",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Walk me through the fix."
+      }
+    },
+    {
+      "id": "thread-stream-a",
+      "thread_id": "thread-stream",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "running",
+      "kind": {
+        "type": "assistant_message",
+        "text": "I traced the failure to the pool. The pool is rebuilt per request, so each call waits for a connection that never frees.\n\nThe change is small:\n\n1. Build the pool once at startup.\n2. Pass it by reference into each handler.\n3. Add a timeout so exhaustion fails fast instead of hanging",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "tool-item-01",
+      "thread_id": "thread-tool",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Compare the renderer's glyph path with the reference and list what differs."
+      }
+    },
+    {
+      "id": "tool-item-02",
+      "thread_id": "thread-tool",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "tool",
+        "tool": {
+          "kind": "shell",
+          "command": "cargo test -p aqua-render --test conformance",
+          "cwd": "/fixture/projects/aqua"
+        },
+        "title": null,
+        "output": null,
+        "exit_code": 0,
+        "approval": null
+      }
+    },
+    {
+      "id": "tool-item-03",
+      "thread_id": "thread-tool",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "## Findings\n\nThe glyph path differs in **two** places:\n\n1. Subpixel positioning rounds to whole pixels in `shape_line`.\n2. The atlas packs `R8` coverage without the gamma ramp.\n\n| Area | Status |\n| --- | --- |\n| Quads | matches |\n| Glyphs | differs |\n| Shadows | pending |\n\n```rust\nfn coverage(alpha: f32, gamma: f32) -> f32 {\n    alpha.powf(1.0 / gamma)\n}\n```\n\n- Inline code such as `Renderer::prepare` keeps its own chip.\n- Links read like [the plan](https://example.invalid/plan).\n\n> Fix the ramp first, then re-capture.",
+        "phase": "final"
+      }
+    }
+  ],
+  "settings": {}
+}

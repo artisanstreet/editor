@@ -13,12 +13,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "accesskit"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e883d1d28c5fd5568c79ed2d2bd48d9f2fd3945c8974ed0f53690ceddb051be"
+dependencies = [
+ "uuid",
+]
+
+[[package]]
 name = "accesskit_atspi_common"
 version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "023da0e5097f46df7092d5280b02efb9bbf8d93298daeced42652463e357d636"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "accesskit_consumer 0.38.0",
  "atspi-common",
  "phf",
@@ -32,7 +41,7 @@ version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950720ce064757a1b629caad3a408e8d2c63bb01f29b8a3ff8daa331053ffeb"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "hashbrown 0.16.1",
 ]
 
@@ -42,8 +51,18 @@ version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d10a236f96f87d70732e44520046785431ef01d5bcd6b041317bfadd2f88245"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "accesskit_consumer"
+version = "0.39.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3da8f27636015191b2264ee1df681503170a632cafd832fdc1edfdd4e3a2fd3"
+dependencies = [
+ "accesskit 0.25.2",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -52,7 +71,7 @@ version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce02dc63b43f0c9296af9ac946312a2dc8814427d7a64d2d600971dac55b6076"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "accesskit_consumer 0.38.0",
  "hashbrown 0.16.1",
  "objc2 0.5.2",
@@ -66,7 +85,7 @@ version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03e156ed3802e35eefe894ef2671bc6c889303d8a7e110b5e1b48f504b91362f"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "accesskit_atspi_common",
  "async-channel",
  "async-executor",
@@ -84,9 +103,23 @@ version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36e93ac7bf50b964f1cbb75f741629a4e950571baa1ef1274457ab5a80d9bcc2"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "accesskit_consumer 0.37.0",
  "hashbrown 0.16.1",
+ "static_assertions",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+]
+
+[[package]]
+name = "accesskit_windows"
+version = "0.35.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498668b90da9995302a0055aaecad4756932333da2ddef6baee1c00844c430fc"
+dependencies = [
+ "accesskit 0.25.2",
+ "accesskit_consumer 0.39.2",
+ "hashbrown 0.17.1",
  "static_assertions",
  "windows 0.62.2",
  "windows-core 0.62.2",
@@ -303,12 +336,289 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqua"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-a11y-uia",
+ "aqua-core",
+ "aqua-fonts-system",
+ "aqua-gpu-d3d11",
+ "aqua-gpu-ref",
+ "aqua-graph",
+ "aqua-ime-tsf",
+ "aqua-media",
+ "aqua-motion",
+ "aqua-protocol",
+ "aqua-reactive",
+ "aqua-runtime",
+ "aqua-scene",
+ "aqua-shell-win32",
+ "aqua-text",
+ "aqua-transport",
+ "aqua-ui",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "aqua-a11y-uia"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "accesskit 0.25.2",
+ "accesskit_windows 0.35.2",
+ "aqua-core",
+ "aqua-protocol",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "aqua-core"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+
+[[package]]
+name = "aqua-fonts-system"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "memmap2",
+ "skrifa 0.46.2",
+]
+
+[[package]]
+name = "aqua-gpu-d3d11"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-graph",
+ "aqua-protocol",
+ "aqua-shaders",
+ "bytemuck",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "aqua-gpu-ref"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-graph",
+ "aqua-kernels",
+ "aqua-protocol",
+]
+
+[[package]]
+name = "aqua-graph"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+]
+
+[[package]]
+name = "aqua-ime-tsf"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-protocol",
+ "raw-window-handle",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+]
+
+[[package]]
+name = "aqua-kernels"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+
+[[package]]
+name = "aqua-layout"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-motion",
+ "aqua-style",
+ "aqua-text",
+ "taffy 0.15.1",
+]
+
+[[package]]
+name = "aqua-media"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-graph",
+ "aqua-protocol",
+ "image",
+ "kurbo",
+ "resvg",
+ "roxmltree 0.21.1",
+ "tiny-skia",
+]
+
+[[package]]
+name = "aqua-motion"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+]
+
+[[package]]
+name = "aqua-protocol"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-graph",
+ "aqua-motion",
+ "bitflags 2.13.1",
+]
+
+[[package]]
+name = "aqua-reactive"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+
+[[package]]
+name = "aqua-runtime"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-motion",
+ "aqua-protocol",
+ "aqua-reactive",
+ "aqua-scene",
+ "aqua-text",
+ "aqua-ui",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "aqua-scene"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+]
+
+[[package]]
+name = "aqua-shaders"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+
+[[package]]
+name = "aqua-shell-win32"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-protocol",
+ "arboard",
+ "dunce",
+ "percent-encoding",
+ "raw-window-handle",
+ "rfd",
+ "url",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+ "windows-registry",
+ "xmlwriter",
+]
+
+[[package]]
+name = "aqua-style"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-motion",
+ "aqua-text",
+ "taffy 0.15.1",
+]
+
+[[package]]
+name = "aqua-text"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-fonts-system",
+ "aqua-graph",
+ "aqua-media",
+ "aqua-protocol",
+ "harfrust 0.12.0",
+ "icu_segmenter",
+ "png",
+ "roxmltree 0.21.1",
+ "skrifa 0.46.2",
+ "unicode-bidi",
+ "unicode-script",
+ "unicode-segmentation",
+ "zeno",
+]
+
+[[package]]
+name = "aqua-transport"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-graph",
+ "aqua-motion",
+ "aqua-protocol",
+ "aqua-runtime",
+ "aqua-scene",
+]
+
+[[package]]
+name = "aqua-ui"
+version = "0.1.0"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "aqua-core",
+ "aqua-layout",
+ "aqua-motion",
+ "aqua-reactive",
+ "aqua-style",
+ "aqua-text",
+ "taffy 0.15.1",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 dependencies = [
  "derive_arbitrary",
+]
+
+[[package]]
+name = "arboard"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeb9553e62312c8756a5979254fc6d7da8bbeb5986a1e17037fab932f7037917"
+dependencies = [
+ "clipboard-win",
+ "image",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "parking_lot",
+ "percent-encoding",
+ "windows-sys 0.52.0",
+ "x11rb",
 ]
 
 [[package]]
@@ -1207,6 +1517,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipboard-win"
+version = "5.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "052af7878466feccda12ba7a6a67d019d712f296809559b47c12c8cc196d3a9a"
+dependencies = [
+ "error-code",
+]
+
+[[package]]
 name = "cocoa"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2002,6 +2321,72 @@ dependencies = [
 ]
 
 [[package]]
+name = "editor-aqua"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-a11y-uia",
+ "aqua-core",
+ "aqua-gpu-d3d11",
+ "aqua-gpu-ref",
+ "aqua-ime-tsf",
+ "aqua-media",
+ "aqua-protocol",
+ "aqua-reactive",
+ "aqua-runtime",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-account",
+ "artisan-api",
+ "artisan-markdown-index",
+ "artisan-mentions",
+ "artisan-paths",
+ "base64 0.22.1",
+ "chrono",
+ "claude-ai-browser",
+ "color",
+ "data-url",
+ "editor-aqua",
+ "editor-assets",
+ "editor-audio",
+ "editor-ui",
+ "file-rotate",
+ "forge-http",
+ "forge-store",
+ "futures",
+ "glam",
+ "gltf",
+ "hex",
+ "image",
+ "mermaid-rs-renderer 0.3.1",
+ "palette",
+ "ply-rs-bw",
+ "pulldown-cmark",
+ "reqwest",
+ "ropey",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sse-core",
+ "stl_io",
+ "syntect",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "ufbx",
+ "unicode-width",
+ "url",
+ "vte",
+ "webp",
+]
+
+[[package]]
 name = "editor-assets"
 version = "0.0.0"
 
@@ -2198,7 +2583,7 @@ dependencies = [
  "gpui-ce",
  "gpui_ce_platform",
  "image",
- "mermaid-rs-renderer",
+ "mermaid-rs-renderer 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "ply-rs-bw",
  "pulldown-cmark",
  "ropey",
@@ -2328,6 +2713,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "error-code"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
 name = "etagere"
@@ -3160,7 +3551,7 @@ name = "gpui-ce"
 version = "0.2.2"
 source = "git+https://github.com/artisanstreet/gpui-ce?rev=6cd20f9c5deab2b160b68ac66f453ec70820e8a2#6cd20f9c5deab2b160b68ac66f453ec70820e8a2"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "anyhow",
  "async-channel",
  "async-task",
@@ -3214,7 +3605,7 @@ dependencies = [
  "smallvec",
  "spin 0.10.1",
  "strum",
- "taffy",
+ "taffy 0.13.0",
  "thiserror 2.0.20",
  "tracing",
  "unicode-segmentation",
@@ -3277,7 +3668,7 @@ name = "gpui_ce_linux"
 version = "0.1.0"
 source = "git+https://github.com/artisanstreet/gpui-ce?rev=6cd20f9c5deab2b160b68ac66f453ec70820e8a2#6cd20f9c5deab2b160b68ac66f453ec70820e8a2"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "accesskit_unix",
  "anyhow",
  "as-raw-xcb-connection",
@@ -3325,7 +3716,7 @@ name = "gpui_ce_macos"
 version = "0.1.0"
 source = "git+https://github.com/artisanstreet/gpui-ce?rev=6cd20f9c5deab2b160b68ac66f453ec70820e8a2#6cd20f9c5deab2b160b68ac66f453ec70820e8a2"
 dependencies = [
- "accesskit",
+ "accesskit 0.24.1",
  "accesskit_macos",
  "anyhow",
  "async-task",
@@ -3515,8 +3906,8 @@ name = "gpui_ce_windows"
 version = "0.1.0"
 source = "git+https://github.com/artisanstreet/gpui-ce?rev=6cd20f9c5deab2b160b68ac66f453ec70820e8a2#6cd20f9c5deab2b160b68ac66f453ec70820e8a2"
 dependencies = [
- "accesskit",
- "accesskit_windows",
+ "accesskit 0.24.1",
+ "accesskit_windows 0.33.1",
  "anyhow",
  "dunce",
  "etagere",
@@ -3635,6 +4026,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -4590,6 +4984,19 @@ dependencies = [
 [[package]]
 name = "mermaid-rs-renderer"
 version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "json5",
+ "once_cell",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "mermaid-rs-renderer"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6cb5b469222ce6b9896edf0a969cf68464f5a028ef394fd6643f00bd943df117"
 dependencies = [
@@ -4998,6 +5405,7 @@ dependencies = [
  "bitflags 2.13.1",
  "block2 0.6.2",
  "objc2 0.6.4",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
 ]
 
@@ -5076,6 +5484,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-graphics"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
+dependencies = [
+ "bitflags 2.13.1",
+ "dispatch2",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-io-surface",
+]
+
+[[package]]
 name = "objc2-core-image"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5124,6 +5545,17 @@ dependencies = [
  "bitflags 2.13.1",
  "block2 0.6.2",
  "libc",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-io-surface"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "180788110936d59bab6bd83b6060ffdfffb3b922ba1396b312ae795e1de9d81d"
+dependencies = [
+ "bitflags 2.13.1",
  "objc2 0.6.4",
  "objc2-core-foundation",
 ]
@@ -6258,6 +6690,33 @@ dependencies = [
  "tiny-skia",
  "usvg",
  "zune-jpeg",
+]
+
+[[package]]
+name = "rfd"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "js-sys",
+ "libc",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "percent-encoding",
+ "pollster 0.4.0",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "web-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7454,6 +7913,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "taffy"
+version = "0.15.1"
+source = "git+https://github.com/artisanstreet/aqua?rev=059cdd83555cc01d405c0eac418e11f9209cf0ba#059cdd83555cc01d405c0eac418e11f9209cf0ba"
+dependencies = [
+ "smallvec",
+]
+
+[[package]]
 name = "tao-core-video-sys"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8129,6 +8596,7 @@ checksum = "977d0a4abdef933f424a99fe09f95576e089b90aebc6f016a3bc813762493e91"
 dependencies = [
  "base64 0.23.1",
  "data-url",
+ "flate2",
  "fontdb 0.24.0",
  "harfrust 0.12.0",
  "imagesize",

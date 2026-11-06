@@ -1,0 +1,6 @@
+settle
+capture @
+key ctrl-alt-b
+settle
+capture @-inspector-hidden
+quit

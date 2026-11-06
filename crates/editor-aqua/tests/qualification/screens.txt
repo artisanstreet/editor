@@ -1,0 +1,10 @@
+new-thread|new-thread|capture-rich.json|1|screen.txt
+thread-content|thread:thread-content|capture-rich.json|1|thread-content.txt
+settings-general|settings:general|capture-rich.json|1|screen.txt
+settings-threads|settings:threads|capture-rich.json|1|screen.txt
+settings-hosts|settings:hosts|capture-rich.json|1|screen.txt
+settings-about|settings:about|capture-rich.json|1|screen.txt
+settings-extensions|settings:extensions|capture-rich.json|1|screen.txt
+marketplace|marketplace|capture-rich.json|1|screen.txt
+thread-tool|thread:thread-tool|capture-rich.json|1|screen.txt
+thread-stream|thread:thread-stream|capture-rich.json|1|screen.txt
