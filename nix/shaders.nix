@@ -69,8 +69,8 @@ let
           exit
           ;;
         --shutdown)
-          ${wine}/bin/wineserver -k
-          ${wine}/bin/wineserver -w
+          ${wine}/bin/wineserver -k || true
+          ${wine}/bin/wineserver -w || true
           exit
           ;;
       esac
