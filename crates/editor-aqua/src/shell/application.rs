@@ -674,6 +674,14 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         self.drain(ctx, id, changed);
     }
     fn on_frame_completed(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sequence: u64) {
+        #[cfg(feature = "qualification")]
+        if !self.notifications_enabled {
+            if let Err(error) =
+                crate::qualification::observation::record_native_state(&self.shell, sequence)
+            {
+                tracing::warn!(%error, "could not record qualification state");
+            }
+        }
         let _tm = Tm::new("fc");
         let _span = crate::shell::rebuild_stats::span("on_fc");
         if self.start_notifications(ctx, id) {

@@ -3,6 +3,45 @@ use aqua_core::Rect;
 use artisan_api::{Item, Seq};
 use serde::Serialize;
 
+#[derive(Debug, Serialize)]
+pub struct NativeState {
+    pub completed_frame: u64,
+    pub page_loaded: bool,
+    pub page_in_flight: bool,
+    pub load_error: Option<String>,
+    pub row_count: usize,
+    pub measured_row_count: usize,
+    pub landing: bool,
+}
+
+impl NativeState {
+    pub fn observe(shell: &crate::shell::host::Shell, completed_frame: u64) -> Option<Self> {
+        let conversation = &shell.entry.workspace()?.conversation;
+        let view = conversation.view.as_ref();
+        Some(Self {
+            completed_frame,
+            page_loaded: view.is_some_and(|view| view.viewport.loaded()),
+            page_in_flight: view.is_some_and(|view| view.viewport.in_flight),
+            load_error: conversation.load_error.clone(),
+            row_count: conversation.rows.len(),
+            measured_row_count: conversation.row_heights.len(),
+            landing: conversation.landing.is_some(),
+        })
+    }
+}
+
+pub fn record_native_state(
+    shell: &crate::shell::host::Shell,
+    completed_frame: u64,
+) -> anyhow::Result<()> {
+    let Some(path) = std::env::var_os("ARTISAN_AQUA_QUALIFICATION_STATE") else {
+        return Ok(());
+    };
+    let state = NativeState::observe(shell, completed_frame);
+    std::fs::write(path, serde_json::to_vec(&state)?)?;
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Observation {
     pub account: String,
