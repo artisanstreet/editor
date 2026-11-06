@@ -332,7 +332,9 @@ impl Sidebar {
             _ => None,
         };
         if let Screen::Settings(page) = screen {
-            self.settings_motion.sync(*page, std::time::Instant::now());
+            let motion_now = std::time::Instant::now();
+            self.settings_motion.sync(*page, motion_now);
+            self.motion_live |= self.settings_motion.animating(motion_now);
         }
         let host_changed = self.host != host || self.host_instance != instance;
         if host_changed {
