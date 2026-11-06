@@ -85,7 +85,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn prepare(path: &Path) -> Result<()> {
     let request: Preparation = serde_json::from_slice(&std::fs::read(path)?)?;
-    let fixture_path = request.fixture.canonicalize()?;
+    let fixture_path = super::fixture::canonical_path(&request.fixture)?;
     ensure!(
         request.fixture == fixture_path && std::fs::symlink_metadata(&fixture_path)?.is_file(),
         "fixture must be a canonical regular file"

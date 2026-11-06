@@ -45,6 +45,54 @@ fn fixture() -> Fixture {
 }
 
 #[test]
+fn preparation_accepts_normalized_fixture_paths_and_produces_verified_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = editor_aqua::qualification::fixture::canonical_path(directory.path()).unwrap();
+    let paths: Vec<_> = ["forge", "snapshot", "output", "source", "candidate"]
+        .into_iter()
+        .map(|name| root.join(name))
+        .collect();
+    for path in &paths {
+        std::fs::create_dir(path).unwrap();
+        std::fs::write(
+            path.join(".artisan-qualification"),
+            b"artisan-qualification-v1\n",
+        )
+        .unwrap();
+    }
+    let fixture_path = root.join("fixture.json");
+    std::fs::write(&fixture_path, serde_json::to_vec(&fixture()).unwrap()).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let request = serde_json::json!({
+        "fixture": fixture_path,
+        "forge_dir": paths[0],
+        "snapshot_dir": paths[1],
+        "output_dir": paths[2],
+        "source_editor_dir": paths[3],
+        "candidate_editor_dir": paths[4],
+        "listen": address,
+        "host_id": "synthetic-host",
+        "thread_id": "thread-a",
+        "width": 800,
+        "height": 600
+    });
+    let request_path = root.join("prepare.json");
+    std::fs::write(&request_path, serde_json::to_vec(&request).unwrap()).unwrap();
+    editor_aqua::qualification::preparation::prepare(&request_path).unwrap();
+    let bootstrap = root.join("output/candidate-request.json");
+    let verified = editor_aqua::core::runtime::runtime()
+        .block_on(VerifiedBootstrap::load(&bootstrap))
+        .unwrap();
+    assert_eq!(verified.editor_dir, paths[4]);
+    assert_eq!(verified.request.fixture, fixture_path);
+    editor_aqua::core::runtime::runtime()
+        .block_on(verified.server.shutdown_unique())
+        .unwrap();
+}
+
+#[test]
 fn real_forge_seed_snapshot_restores_identical_tree_at_pinned_path() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

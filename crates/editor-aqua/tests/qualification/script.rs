@@ -3,6 +3,48 @@ use editor_aqua::capture::script::{Button, Step, parse, parse_keystroke, types_t
 use std::time::Duration;
 
 #[test]
+fn serving_rejects_an_existing_profile_before_loading_the_fixture() {
+    let directory = tempfile::tempdir().unwrap();
+    let editor = directory.path().join("editor");
+    std::fs::create_dir(&editor).unwrap();
+    let identity = editor.join("identity.json");
+    std::fs::write(&identity, b"existing-profile").unwrap();
+    let result = editor_aqua::capture::scenario::Scenario::serve(
+        &directory.path().join("missing-fixture.json"),
+        directory.path(),
+        &editor,
+    );
+    let error = result.err().expect("an existing profile must be rejected");
+    assert!(error.to_string().contains("empty Editor directory"));
+    assert_eq!(std::fs::read(identity).unwrap(), b"existing-profile");
+    assert!(!directory.path().join("forge").exists());
+}
+
+#[test]
+fn serving_creates_a_synthetic_profile_and_loopback_forge() {
+    let directory = tempfile::tempdir().unwrap();
+    let editor = directory.path().join("editor");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/qualification/fixtures/capture.json");
+    let mut scenario =
+        editor_aqua::capture::scenario::Scenario::serve(&fixture, directory.path(), &editor)
+            .unwrap();
+    let account: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(editor.join("account.json")).unwrap()).unwrap();
+    assert_eq!(account["base_url"], "http://127.0.0.1:1");
+    assert_eq!(account["session_token"], "capture-session");
+    assert_eq!(account["profile"]["email"], "capture@example.invalid");
+    let hosts: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(editor.join("hosts.json")).unwrap()).unwrap();
+    let address = hosts["hosts"][0]["address"].as_str().unwrap();
+    let address: std::net::SocketAddr = address.parse().unwrap();
+    assert!(address.ip().is_loopback());
+    assert_ne!(address.port(), 0);
+    assert!(editor.join("identity.json").is_file());
+    scenario.shutdown();
+}
+
+#[test]
 fn script_lines_parse_like_the_gpui_adapter_and_skip_comments() {
     let steps = parse(
         "# header\n\nwait 250\n  move 10 20\nclick 1.5 2\nrclick 3 4\nscroll 5 6 -200\ntype hello world \nsettle\nsettle 500\ncapture out/a.png\nquit\n",

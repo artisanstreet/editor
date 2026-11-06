@@ -1,6 +1,6 @@
 use crate::core::{Core, EditorFiles, HostId, Screen, SettingsPage, hosts};
 use crate::qualification::fixture::{Fixture, ForgeServer};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use artisan_api::{EngineId, ProjectId, ThreadId};
 use std::path::Path;
 
@@ -62,6 +62,10 @@ impl Scenario {
     }
 
     pub fn serve(fixture_path: &Path, root: &Path, editor_dir: &Path) -> Result<Self> {
+        ensure!(
+            !editor_dir.exists() || std::fs::read_dir(editor_dir)?.next().is_none(),
+            "capture requires an empty Editor directory"
+        );
         Self::launch(fixture_path, root, editor_dir).map(|(scenario, _)| scenario)
     }
 
