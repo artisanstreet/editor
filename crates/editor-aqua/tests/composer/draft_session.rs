@@ -3,6 +3,42 @@ use editor_aqua::composer::draft_session::{DraftSession, Operation};
 use serde_json::json;
 
 #[test]
+fn pending_shutdown_tracks_unsaved_edits_and_clears_only_after_save_or_invalidation() {
+    let mut session = DraftSession::new("new".into());
+    assert!(!session.pending());
+    assert!(matches!(session.next(), Some(Operation::Load)));
+    assert!(!session.pending());
+    session.queue(json!({"text": "edited during load"}));
+    assert!(session.pending());
+    session.loaded(Ok(DraftSnapshot::default()));
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected a draft write");
+    };
+    session.written(&request, edited, Err("offline".into()));
+    assert!(session.pending());
+    session.retry();
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected a retried draft write");
+    };
+    session.written(
+        &request,
+        edited,
+        Ok(DraftWriteResult {
+            saved: true,
+            current: DraftSnapshot {
+                revision: 1,
+                body: request.body.clone(),
+            },
+        }),
+    );
+    assert!(!session.pending());
+    session.queue(json!({"text": "stale pairing"}));
+    assert!(session.pending());
+    session.remove();
+    assert!(!session.pending());
+}
+
+#[test]
 fn picker_tooltip_delay_and_retarget_cancel_stale_deadline() {
     use editor_aqua::composer::picker::{PickerTooltip, TooltipContent, TooltipPlacement};
     use std::time::{Duration, Instant};
@@ -186,12 +222,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
         let type_text = |owner: &mut editor_aqua::composer::view::ComposerOwner,
                          core: &mut Core,
                          text: &str| {
-            owner
-                .controller
-                .borrow()
-                .editor
-                .borrow_mut()
-                .set_text(text);
+            owner.controller.borrow().editor.borrow_mut().set_text(text);
             owner
                 .dispatch_with_change(core, ComposerAction::Editor(EditorEvent::Changed), None)
                 .1

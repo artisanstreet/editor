@@ -186,6 +186,7 @@ impl Workspace {
     }
 
     fn follow_hosts(&mut self, core: &Core) -> NotificationEffects {
+        self.draft_sessions.retain_hosts(core);
         let hosts: Vec<_> = core.hosts().map(|(_, host)| host).collect();
         let ids: Vec<_> = hosts.iter().map(|host| host.id.clone()).collect();
         let withdraw = self.notifications.retain_hosts(&ids);

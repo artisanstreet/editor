@@ -66,6 +66,10 @@ impl DraftSession {
         !self.busy && !self.dirty && self.outgoing.is_none()
     }
 
+    pub fn pending(&self) -> bool {
+        !self.removed && (self.dirty || self.outgoing.is_some())
+    }
+
     pub fn removed(&self) -> bool {
         self.removed
     }

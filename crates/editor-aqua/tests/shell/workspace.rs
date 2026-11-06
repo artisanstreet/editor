@@ -41,3 +41,39 @@ fn start_waits_for_a_host_that_connects_after_the_workspace_mounts() {
         }
     );
 }
+
+#[test]
+fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().to_owned(),
+    })
+    .unwrap();
+    let identity = Identity::generate("workspace-draft-test").unwrap();
+    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let config = host_config(&fingerprint);
+    let client = ForgeClient::new(&config.address, &fingerprint, &identity).unwrap();
+    core.add_test_host(&config, client);
+    core.navigate(Screen::NewThread {
+        host: config.id.clone(),
+        project: None,
+    });
+    let mut ui = ShellResources::new(1.0).unwrap().ui;
+    let (mut workspace, _) = Workspace::new(&core, None, SelectionAllocator::default().workspace());
+    workspace.sync_composer(&core, &mut ui);
+    let draft = {
+        let composer = workspace.composer.as_ref().unwrap().controller.borrow();
+        composer.editor.borrow_mut().set_text("queued draft");
+        composer.save();
+        editor_aqua::composer::persistence::DraftHandle::clone(composer.session.as_ref().unwrap())
+    };
+
+    core.remove_host(&config.id).unwrap();
+    workspace.handle_event(&core, &editor_aqua::core::CoreEvent::HostsChanged, false);
+
+    assert!(draft.read(|state| state.removed()));
+    assert_eq!(
+        draft.read(|state| state.body.clone()),
+        serde_json::Value::Null
+    );
+}

@@ -166,7 +166,23 @@ pub fn launch() -> anyhow::Result<()> {
     #[cfg(windows)]
     aqua::native::startup_mark("app_ready");
     let result = runtime.run(app).map_err(anyhow::Error::msg);
+    let shutdown = crate::core::runtime::runtime().block_on(
+        crate::composer::persistence::drain_pending(std::time::Duration::from_secs(5)),
+    );
+    let shutdown = match shutdown {
+        crate::composer::persistence::ShutdownOutcome::Saved => Ok(()),
+        crate::composer::persistence::ShutdownOutcome::Incomplete { failed, timed_out } => {
+            tracing::error!(
+                failed,
+                timed_out,
+                "Editor closed before all drafts could be saved"
+            );
+            Err(anyhow::anyhow!(
+                "Could not finish saving drafts: {failed} failed, {timed_out} timed out"
+            ))
+        }
+    };
     #[cfg(feature = "qualification")]
     drop(bootstrap);
-    result
+    result.and(shutdown)
 }

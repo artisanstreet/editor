@@ -1,13 +1,15 @@
 use super::draft_session::{DraftSession, Operation, SAVE_DELAY, Submission};
-use crate::core::{ForgeClient, HostId, HostInstance, runtime::runtime};
+use crate::core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use artisan_api::{ItemId, ThreadId};
 use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroUsize,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
+    time::Duration,
 };
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
@@ -27,6 +29,7 @@ struct Inner {
     client: ForgeClient,
     shared: Mutex<Shared>,
     changed: watch::Sender<u64>,
+    cancelled: CancellationToken,
 }
 
 #[derive(Clone)]
@@ -105,6 +108,71 @@ pub struct DraftSessions {
     sessions: HashMap<(HostId, HostInstance, String), DraftHandle>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    Saved,
+    Incomplete { failed: usize, timed_out: usize },
+}
+
+fn pending_shutdown() -> &'static Mutex<Vec<DraftHandle>> {
+    static PENDING: OnceLock<Mutex<Vec<DraftHandle>>> = OnceLock::new();
+    PENDING.get_or_init(Mutex::default)
+}
+
+pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
+    let sessions = std::mem::take(&mut *pending_shutdown().lock().unwrap());
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut failed = 0;
+    let mut timed_out = 0;
+    for session in sessions {
+        let mut changed = session.subscribe();
+        loop {
+            let (pending, error) =
+                session.read(|state| (state.pending(), state.error.is_some() || state.conflict));
+            if !pending {
+                break;
+            }
+            if error {
+                failed += 1;
+                break;
+            }
+            if tokio::time::timeout_at(deadline, changed.changed())
+                .await
+                .is_err()
+            {
+                match session.deadline_outcome() {
+                    ShutdownOutcome::Saved => {}
+                    ShutdownOutcome::Incomplete {
+                        failed: failures,
+                        timed_out: timeouts,
+                    } => {
+                        failed += failures;
+                        timed_out += timeouts;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    match (failed, timed_out) {
+        (0, 0) => ShutdownOutcome::Saved,
+        _ => ShutdownOutcome::Incomplete { failed, timed_out },
+    }
+}
+
+impl Drop for DraftSessions {
+    fn drop(&mut self) {
+        let mut pending = pending_shutdown().lock().unwrap();
+        pending.retain(|session| session.read(|state| state.pending()));
+        for session in self.sessions.values() {
+            session.flush();
+            if session.read(|state| state.pending()) {
+                pending.push(session.clone());
+            }
+        }
+    }
+}
+
 impl DraftSessions {
     pub fn open(
         &mut self,
@@ -143,6 +211,7 @@ impl DraftSessions {
                 version: 0,
             }),
             changed,
+            cancelled: CancellationToken::new(),
         }));
         self.sessions.insert(key, session.clone());
         let lease = DraftLease::new(session.clone());
@@ -150,24 +219,48 @@ impl DraftSessions {
         Some(lease)
     }
 
-    pub fn remove_host(&mut self, host: &HostId) {
-        self.sessions.retain(|(id, _, _), session| {
-            if id != host {
+    pub fn retain_hosts(&mut self, core: &Core) {
+        self.sessions.retain(|(id, instance, _), session| {
+            if core.host_if_instance(id, *instance).is_some() {
                 return true;
             }
-            session.mutate(|shared| {
-                if let Some(timer) = shared.timer.take() {
-                    timer.abort();
-                }
-                shared.state.remove();
-                shared.emit(SessionEvent::Reloaded);
-            });
+            session.remove();
             false
         });
     }
 }
 
 impl DraftHandle {
+    fn deadline_outcome(&self) -> ShutdownOutcome {
+        self.read(
+            |state| match (state.pending(), state.error.is_some() || state.conflict) {
+                (false, _) => ShutdownOutcome::Saved,
+                (true, true) => ShutdownOutcome::Incomplete {
+                    failed: 1,
+                    timed_out: 0,
+                },
+                (true, false) => {
+                    self.0.cancelled.cancel();
+                    ShutdownOutcome::Incomplete {
+                        failed: 0,
+                        timed_out: 1,
+                    }
+                }
+            },
+        )
+    }
+
+    fn remove(&self) {
+        self.mutate(|shared| {
+            if let Some(timer) = shared.timer.take() {
+                timer.abort();
+            }
+            shared.state.remove();
+            self.0.cancelled.cancel();
+            shared.emit(SessionEvent::Reloaded);
+        });
+    }
+
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.changed.subscribe()
     }
@@ -245,49 +338,63 @@ impl DraftHandle {
         };
         let session = self.clone();
         runtime().spawn(async move {
-            let client = &session.0.client;
-            match operation {
-                Operation::Load => {
-                    let scope = session.read(|state| state.scope.clone());
-                    let result = client
-                        .draft(&scope)
-                        .await
-                        .map_err(|error| format!("{error:#}"));
-                    session.mutate(|shared| shared.state.loaded(result));
-                }
-                Operation::Write { request, edited } => {
-                    let scope = session.read(|state| state.scope.clone());
-                    let result = client
-                        .set_draft(&scope, &request)
-                        .await
-                        .map_err(|error| format!("{error:#}"));
-                    session.mutate(|shared| shared.state.written(&request, edited, result));
-                }
-                Operation::Post(request) => {
-                    let result = async {
-                        if let Some(create) = &request.create {
-                            client.create_thread(create).await?;
-                        }
-                        client
-                            .send_message(&request.thread, &request.message)
-                            .await?;
-                        Ok::<(), anyhow::Error>(())
-                    }
-                    .await
-                    .map_err(|error| format!("{error:#}"));
-                    let accepted = result.is_ok();
-                    session.mutate(|shared| {
-                        shared.state.posted(result);
-                        if accepted && !shared.state.removed() {
-                            shared.emit(SessionEvent::Accepted {
-                                thread: request.thread,
-                                item: request.message.id,
-                            });
-                        }
-                    });
-                }
+            let cancelled = session.0.cancelled.clone();
+            tokio::select! {
+                biased;
+                () = cancelled.cancelled() => {}
+                () = session.perform(operation) => {}
             }
-            session.pump();
         });
     }
+
+    async fn perform(self, operation: Operation) {
+        let session = self;
+        let client = &session.0.client;
+        match operation {
+            Operation::Load => {
+                let scope = session.read(|state| state.scope.clone());
+                let result = client
+                    .draft(&scope)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                session.mutate(|shared| shared.state.loaded(result));
+            }
+            Operation::Write { request, edited } => {
+                let scope = session.read(|state| state.scope.clone());
+                let result = client
+                    .set_draft(&scope, &request)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+                session.mutate(|shared| shared.state.written(&request, edited, result));
+            }
+            Operation::Post(request) => {
+                let result = async {
+                    if let Some(create) = &request.create {
+                        client.create_thread(create).await?;
+                    }
+                    client
+                        .send_message(&request.thread, &request.message)
+                        .await?;
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await
+                .map_err(|error| format!("{error:#}"));
+                let accepted = result.is_ok();
+                session.mutate(|shared| {
+                    shared.state.posted(result);
+                    if accepted && !shared.state.removed() {
+                        shared.emit(SessionEvent::Accepted {
+                            thread: request.thread,
+                            item: request.message.id,
+                        });
+                    }
+                });
+            }
+        }
+        session.pump();
+    }
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/persistence/deadline.rs"]
+mod deadline_tests;

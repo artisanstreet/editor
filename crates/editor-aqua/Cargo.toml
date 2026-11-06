@@ -79,6 +79,8 @@ aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "059cdd83
 aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "059cdd83555cc01d405c0eac418e11f9209cf0ba", features = ["double"] }
 
 [dev-dependencies]
+rustls.workspace = true
+tokio-rustls.workspace = true
 editor-aqua = { path = ".", features = ["test-support"] }
 sha2.workspace = true
 hex.workspace = true
