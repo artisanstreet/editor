@@ -978,6 +978,11 @@ impl Conversation {
         else {
             return;
         };
+        if matches!(event, HostEvent::Reset) && self.agent_task.is_some() && self.agent.is_some() {
+            let agent = self.agent.take();
+            self.open_agent(core, agent);
+            return;
+        }
         let Some(view) = &mut self.view else { return };
         let thread = thread.clone();
         match event {
@@ -1033,8 +1038,11 @@ impl Conversation {
                 self.rebuild(core);
             }
             HostEvent::Reset => {
+                self.generation = self.generation.wrapping_add(1);
                 self.page_task = None;
                 self.work_task = None;
+                self.agent_task = None;
+                self.answer_tasks.clear();
                 self.work_reading = None;
                 let effects = view.reset();
                 view.set_live(host.live_targets(&thread));
@@ -1090,11 +1098,11 @@ impl Conversation {
                     fetch,
                     result,
                 } if self.accepts(core, &origin) => {
-                    self.page_task = None;
                     let Some(view) = &mut self.view else { continue };
                     if view.viewport.requested != Some(fetch) {
                         continue;
                     }
+                    self.page_task = None;
                     changed = true;
                     let mut applied = None;
                     let effects = match result {
@@ -1252,3 +1260,7 @@ fn shape_source<'a>(
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/reset.rs"]
+mod reset_tests;
