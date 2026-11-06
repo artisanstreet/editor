@@ -1,0 +1,18 @@
+{
+  "name": "settings-about",
+  "implementation": "Aqua",
+  "route": "settings:about",
+  "logical_width": 1100,
+  "logical_height": 760,
+  "width": 1100,
+  "height": 760,
+  "scale_bits": 1065353216,
+  "backend": "Vulkan",
+  "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+  "pixel_format": "rgba8-unorm",
+  "alpha": "opaque",
+  "color_profile": "gpui-windows-encoded",
+  "surface": "offscreen-client-area-no-native-chrome",
+  "repeat_identical": true,
+  "sha256": "d5b16bbd8a21c2ca94dd673aa0f31189feec81654956396618652447dbcb39d2"
+}

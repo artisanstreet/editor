@@ -1,0 +1,24 @@
+[package]
+edition = "2024"
+name = "mermaid-rs-renderer"
+version = "0.3.1"
+license = "MIT"
+description = "Mermaid renderer, vendored without font database, CLI and PNG output"
+
+[features]
+cli = []
+png = []
+default = []
+
+[lib]
+name = "mermaid_rs_renderer"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+json5 = "1.3"
+once_cell = "1.21.4"
+regex = "1.12"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"

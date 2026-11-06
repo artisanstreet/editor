@@ -1,0 +1,214 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "project-aqua",
+      "path": "/fixture/projects/aqua",
+      "name": "aqua"
+    },
+    {
+      "id": "project-editor",
+      "path": "/fixture/projects/editor",
+      "name": "editor"
+    }
+  ],
+  "threads": [
+    {
+      "id": "thread-content",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Compare the glyph path"
+    },
+    {
+      "id": "thread-second",
+      "project_id": "project-editor",
+      "config": {
+        "engine": "codex",
+        "model": null,
+        "effort": null
+      },
+      "title": "Wire the settings pages"
+    },
+    {
+      "id": "thread-third",
+      "project_id": "project-aqua",
+      "config": {
+        "engine": "claude",
+        "model": null,
+        "effort": null
+      },
+      "title": "Review the shadow primitives"
+    }
+  ],
+  "runs": [],
+  "items": [
+    {
+      "id": "workflow-00",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Turn 1: Inspect the isolated workspace."
+      }
+    },
+    {
+      "id": "workflow-01",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "Turn 1: The fixture has no production accounts.\n\nScroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. ",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "workflow-02",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Turn 2: Inspect the isolated workspace."
+      }
+    },
+    {
+      "id": "workflow-03",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "Turn 2: The fixture has no production accounts.\n\nScroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. ",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "workflow-04",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Turn 3: Inspect the isolated workspace."
+      }
+    },
+    {
+      "id": "workflow-05",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "Turn 3: The fixture has no production accounts.\n\nScroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. ",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "workflow-06",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Turn 4: Inspect the isolated workspace."
+      }
+    },
+    {
+      "id": "workflow-07",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "Turn 4: The fixture has no production accounts.\n\nScroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. ",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "workflow-08",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Turn 5: Inspect the isolated workspace."
+      }
+    },
+    {
+      "id": "workflow-09",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "Turn 5: The fixture has no production accounts.\n\nScroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. ",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "workflow-10",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "user_message",
+        "text": "Turn 6: Inspect the isolated workspace."
+      }
+    },
+    {
+      "id": "workflow-11",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "text": "Turn 6: The fixture has no production accounts.\n\nScroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. Scroll and navigate this transcript. ",
+        "phase": "final"
+      }
+    },
+    {
+      "id": "workflow-image",
+      "thread_id": "thread-content",
+      "run_id": null,
+      "parent_id": null,
+      "native_id": null,
+      "status": "done",
+      "kind": {
+        "type": "assistant_message",
+        "phase": "final",
+        "text": "Open this fixture image, then dismiss the preview.\n\n```artisan-image\n{\"src\": \"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAUAAAAC0CAIAAABqhmJGAAADy0lEQVR4nO3dUQ2AQAwFwXpBBHZxgAM0IQEZlz0mqYFpst9v3vtccsf1LDle3p288zcwL+9OXgHz8oa9AublDXsFzMsb9gqYlzfsFTAvb9grYF7esFfAvLxhr4B5ecNeAfPyhr0C5uUNewXMyxv2CpiXN+wVMC9v2CtgXt6wV8C8vGGvgHl5w14B8/KGvQLm5Q17BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ya+AeXnDXgHz8oa9AublDXsFzMsb9gqYlzfsHY/m5e16BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ya+AeXnDXgHz8oa9AublDXsFzMsb9gqYlzfsFTAvb9grYF7esFfAvLxhr4B5ecNeAfPyhr0C5uUNewXMyxv2CpiXN+wVMC9v2CtgXt6wV8C8vGGvgHl5w14B8/KGvQLm5Q17BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ya95UV7esFfAvLxhr4B5ecNeAfPyhr0C5uUNewXMyxv2CpiXN+wVMC9v2CtgXt6wV8C8vGGvgHl5w14B8/KGvQLm5Q17BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ya+AeXnDXgHz8oa9AublDXsFzMsb9gqYlzfsFTAvb9grYF7esFfAvLxhr4B5ecNeAfPyhr0C5uUNewXMyxv2mhfl5Q17BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ya+AeXnDXgHz8oa9AublDXsFzMsb9gqYlzfsFTAvb9grYF7esFfAvLxhr4B5ecNeAfPyhr0C5uUNewXMyxv2CpiXN+wVMC9v2CtgXt6wV8C8vGGvgHl5w14B8/KGvQLm5Q17BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ya95UV7esFfAvLxhr4B5ecNeAfPyhr0C5uUNewXMyxv2CpiXN+wVMC9v2CtgXt6wV8C8vGGvgHl5w14B8/KGvQLm5Q17BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ya+AeXnDXgHz8oa9AublDXsFzMsb9gqYlzfsFTAvb9grYF7esFfAvLxhr4B5ecNeAfPyhr0C5uUNewXMyxv2mhfl5Q17BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ya+AeXnDXgHz8oa9AublDXsFzMsb9gqYlzfsFTAvb9grYF7esFfAvLxhr4B5ecNeAfPyhr0C5uUNewXMyxv2CpiXN+wVMC9v2CtgXt6wV8C8vGGvgHl5w14B8/KGvQLm5Q17BczLG/YKmJc37BUwL2/YK2Be3rBXwLy8Ye8HsUzReriDa5cAAAAASUVORK5CYII=\", \"alt\": \"Qualification checkerboard\", \"width\": 320, \"height\": 180}\n```"
+      }
+    }
+  ],
+  "settings": {}
+}

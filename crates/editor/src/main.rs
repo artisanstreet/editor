@@ -1,33 +1,43 @@
-//! The Artisan Editor: one window holding the sections. Each section owns
-//! its state; this crate only lays them out, opens the window and handles
-//! what belongs to no section (titlebar, palette, notices, first pairing).
-
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[cfg(not(windows))]
 mod context_meter;
+#[cfg(not(windows))]
 mod entry;
 #[cfg(feature = "dhat-heap")]
+#[cfg(not(windows))]
 mod heap_profile;
+#[cfg(not(windows))]
 mod home;
+#[cfg(not(windows))]
 mod logging;
+#[cfg(not(windows))]
 mod notifications;
+#[cfg(not(windows))]
 mod palette;
+#[cfg(not(windows))]
 mod repository_context;
+#[cfg(not(windows))]
 mod resource_preview;
 #[cfg(feature = "capture")]
+#[cfg(not(windows))]
 mod script;
+#[cfg(not(windows))]
 mod workspace;
 
+#[cfg(not(windows))]
 use actions::{GoBack, NewThread, OpenPalette, OpenSettings, Quit, ToggleInspector, ToggleSidebar};
+#[cfg(not(windows))]
 use editor_core::{Core, Screen};
+#[cfg(not(windows))]
 use entry::EntryRoot;
+#[cfg(not(windows))]
 use gpui::{
     App, AppContext as _, Bounds, Entity, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
     WindowOptions, px, size,
 };
 
-/// The app's actions, in their own module so the expectation below covers
-/// only the macro's derives.
+#[cfg(not(windows))]
 mod actions {
     #![expect(
         clippy::derive_partial_eq_without_eq,
@@ -47,13 +57,14 @@ mod actions {
     );
 }
 
-/// The window's opening height.
+#[cfg(not(windows))]
 const LAUNCH_WINDOW_HEIGHT: f32 = 900.0;
-/// The narrowest window: the chat alone at its floor, both columns hidden.
+#[cfg(not(windows))]
 const MIN_WINDOW_WIDTH: f32 = 480.0;
+#[cfg(not(windows))]
 const MIN_WINDOW_HEIGHT: f32 = 420.0;
 
-/// Fits the chat and both columns to the display, subject to the minimum size.
+#[cfg(not(windows))]
 fn launch_window_geometry(cx: &App) -> (Bounds<Pixels>, Size<Pixels>) {
     let min_size = size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT));
     let mut launch = size(
@@ -68,18 +79,15 @@ fn launch_window_geometry(cx: &App) -> (Bounds<Pixels>, Size<Pixels>) {
     (Bounds::centered(None, launch, cx), min_size)
 }
 
-/// Logs to stderr and, when it opens, the rotating log file.
+#[cfg(not(windows))]
 fn init_logging() {
     use tracing_subscriber::fmt::writer::MakeWriterExt as _;
     let file = logging::file().map(std::sync::Mutex::new);
     let filter = || {
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            // `gpui` prefixes every GPUI crate; the adapter and device
-            // recovery lines are what explain a slow window.
-            .unwrap_or_else(|_| {
-                "info,gpui=warn,gpui_ce_windows::directx_devices=info,gpui_ce_windows::platform=info"
-                    .into()
-            })
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            "info,gpui=warn,gpui_ce_windows::directx_devices=info,gpui_ce_windows::platform=info"
+                .into()
+        })
     };
     match file {
         Some(file) => tracing_subscriber::fmt()
@@ -95,8 +103,7 @@ fn init_logging() {
     }
 }
 
-/// Follows a tapped system notification into its thread. While the gate is
-/// locked, Core keeps the screen and opens it once the gate is `Ready`.
+#[cfg(not(windows))]
 fn follow_notification(
     core: &Entity<Core>,
     response: &gpui::SystemNotificationResponse,
@@ -110,11 +117,11 @@ fn follow_notification(
     });
 }
 
+#[cfg(not(windows))]
 fn main() {
     init_logging();
     #[cfg(feature = "dhat-heap")]
     heap_profile::start();
-    // `artisan-editor artisan://thread/<host>/<thread>` opens that screen.
     let link = std::env::args()
         .skip(1)
         .find_map(|argument| Screen::from_link(&argument));
@@ -211,6 +218,7 @@ fn main() {
     heap_profile::finish();
 }
 
+#[cfg(not(windows))]
 fn bind_keys(cx: &mut App) {
     editor_ui::focus_navigation::bind_actions(cx);
     editor_ui::text_editor::TextEditor::bind_actions(cx);
@@ -235,6 +243,7 @@ fn bind_keys(cx: &mut App) {
 }
 
 #[cfg(feature = "capture")]
+#[cfg(not(windows))]
 fn capture(handle: gpui::WindowHandle<EntryRoot>, cx: &mut App) {
     let Some(path) = std::env::var_os("ARTISAN_EDITOR_CAPTURE") else {
         return;
@@ -265,4 +274,9 @@ fn capture(handle: gpui::WindowHandle<EntryRoot>, cx: &mut App) {
         cx.update(|cx| cx.quit());
     })
     .detach();
+}
+
+#[cfg(windows)]
+fn main() -> anyhow::Result<()> {
+    editor_aqua::launch()
 }

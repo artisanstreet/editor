@@ -25,7 +25,13 @@
         system:
         let
           overlays = [ rust-overlay.overlays.default ];
-          pkgs = import nixpkgs { inherit system overlays; };
+          pkgs = import nixpkgs {
+            inherit system overlays;
+            config.allowUnfreePredicate =
+              package:
+              (package.pname or "") == "windows-sdk-fxc"
+              && (package.version or "") == "10.0.26100.1";
+          };
         in
         import ./nix/workspace.nix {
           inherit

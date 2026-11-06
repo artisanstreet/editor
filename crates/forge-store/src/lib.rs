@@ -140,6 +140,8 @@ pub struct Store {
 }
 
 struct Inner {
+    #[cfg(feature = "qualification")]
+    writer: std::thread::JoinHandle<()>,
     jobs: mpsc::Sender<Job>,
     events: broadcast::Sender<Envelope>,
     revocations: broadcast::Sender<DeviceId>,
@@ -206,15 +208,19 @@ impl Store {
             .context("recover live runs")?;
 
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
-        std::thread::Builder::new()
+        let writer_thread = std::thread::Builder::new()
             .name("forge-store-writer".into())
             .spawn(move || writer.run(queue))
             .context("spawn the store writer")?;
+        #[cfg(not(feature = "qualification"))]
+        drop(writer_thread);
 
         // Warm the bounded read pool.
         let first_reader = open_database(&database)?;
         Ok(Self {
             inner: Arc::new(Inner {
+                #[cfg(feature = "qualification")]
+                writer: writer_thread,
                 jobs,
                 events,
                 revocations: broadcast::channel(64).0,
@@ -229,6 +235,31 @@ impl Store {
                 blob_lock: Mutex::new(()),
             }),
         })
+    }
+
+    #[cfg(feature = "qualification")]
+    pub fn qualification_is_unique(&self) -> bool {
+        Arc::strong_count(&self.inner) == 1
+    }
+
+    #[cfg(feature = "qualification")]
+    pub fn shutdown_unique(self) -> Result<()> {
+        let inner = Arc::try_unwrap(self.inner)
+            .map_err(|_shared| anyhow!("Forge store still has live handles"))?;
+        let Inner {
+            jobs,
+            writer,
+            readers,
+            devices,
+            ..
+        } = inner;
+        drop(readers);
+        drop(devices);
+        drop(jobs);
+        writer
+            .join()
+            .map_err(|_panic| anyhow!("Forge store writer panicked"))?;
+        Ok(())
     }
 
     /// Envelopes with `seq: Some` arrive in seq order, after their commit.

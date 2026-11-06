@@ -8,6 +8,7 @@ members = [
     "crates/artisan-mentions",
     "crates/claude-ai-browser",
     "crates/editor",
+    "crates/editor-aqua",
     "crates/editor-assets",
     "crates/editor-audio",
     "crates/editor-composer",
@@ -32,6 +33,7 @@ exclude = [
     "vendor/highlighting/syntect",
     "vendor/highlighting/onig",
     "vendor/highlighting/validation",
+    "vendor/mermaid-rs-renderer",
 ]
 resolver = "3"
 

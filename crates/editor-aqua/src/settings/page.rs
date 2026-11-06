@@ -1,0 +1,67 @@
+use crate::core::SettingsPage;
+use artisan_api::EngineId;
+
+pub const fn label(page: SettingsPage) -> &'static str {
+    page.label()
+}
+
+pub const fn description(page: SettingsPage) -> &'static str {
+    match page {
+        SettingsPage::Section(section) => match section {
+            crate::core::SettingsSection::Appearance => {
+                "Theme, fonts and text rendering on this device."
+            }
+            crate::core::SettingsSection::Streaming => {
+                "How replies appear while an agent is working."
+            }
+            crate::core::SettingsSection::Notifications => {
+                "When the Editor sends system notifications."
+            }
+            crate::core::SettingsSection::Performance => {
+                "Animation and refresh rate on this device."
+            }
+            crate::core::SettingsSection::Automation => {
+                "When threads retry and carry on automatically on this host."
+            }
+            crate::core::SettingsSection::Assistance => {
+                "Suggestions, notes and titles for threads on this host."
+            }
+            crate::core::SettingsSection::Archive => {
+                "Find and restore archived threads on this host."
+            }
+            crate::core::SettingsSection::ClaudeAi => {
+                "Use claude.ai for Claude turns and manage its session on this host."
+            }
+            crate::core::SettingsSection::Installation(_) => {
+                "Install, update and choose an engine version on this host."
+            }
+            crate::core::SettingsSection::Account(_) => {
+                "Manage this engine’s account on this host."
+            }
+            crate::core::SettingsSection::McpServers => {
+                "Tools shared with every engine on this host."
+            }
+            crate::core::SettingsSection::Skills => "Manage the skills available to your engines.",
+        },
+        SettingsPage::General => "How this Editor behaves on this device.",
+        SettingsPage::Hosts => "The account's Forges this Editor has open.",
+        SettingsPage::Account => {
+            "Your AST account: sign in, sessions, and the Forges on the account."
+        }
+        SettingsPage::About => "Which build of Artisan is running and where it is installed.",
+        SettingsPage::Threads => {
+            "What the host does around your threads, and the ones you archived."
+        }
+        SettingsPage::GlobalPrompt => {
+            "Standing instructions Artisan keeps in every engine. Edit them once here; each engine reads them from its own global file."
+        }
+        SettingsPage::Extensions => {
+            "The MCP servers every engine on this host gets, and the way to its skills."
+        }
+        SettingsPage::Engine(_) => "Installation and sign-in on this host.",
+    }
+}
+
+pub const fn engine_label(engine: EngineId) -> &'static str {
+    engine.display_name()
+}

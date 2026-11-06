@@ -1,0 +1,281 @@
+use std::ops::Range;
+
+use crate::ui::rich::actions::CopyEntry;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Color {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+    pub alpha: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Notation {
+    Hex,
+    Rgb,
+    Hsl,
+    Oklch,
+    Oklab,
+    P3,
+}
+
+impl Notation {
+    pub const ALL: [Self; 6] = [
+        Self::Hex,
+        Self::Rgb,
+        Self::Hsl,
+        Self::Oklch,
+        Self::Oklab,
+        Self::P3,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Hex => "HEX",
+            Self::Rgb => "RGB",
+            Self::Hsl => "HSL",
+            Self::Oklch => "OKLCH",
+            Self::Oklab => "OKLab",
+            Self::P3 => "Display P3",
+        }
+    }
+}
+
+const GAMUT_EPSILON: f64 = 1e-4;
+
+impl Color {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "GPUI converts the clipped channels to f32 before HSL conversion"
+    )]
+    pub fn reference_paint(self) -> aqua_core::GpuiHsla {
+        use palette::IntoColor;
+        let c = self.clipped();
+        let hsla: palette::Hsla =
+            palette::Srgba::new(c.r as f32, c.g as f32, c.b as f32, c.alpha as f32).into_color();
+        aqua_core::GpuiHsla {
+            h: hsla.hue.into_positive_degrees() / 360.0,
+            s: hsla.saturation,
+            l: hsla.lightness,
+            a: hsla.alpha,
+        }
+    }
+    const fn srgb(r: f64, g: f64, b: f64, alpha: f64) -> Self {
+        Self { r, g, b, alpha }
+    }
+
+    pub const fn clipped(self) -> Self {
+        Self::srgb(
+            self.r.clamp(0.0, 1.0),
+            self.g.clamp(0.0, 1.0),
+            self.b.clamp(0.0, 1.0),
+            self.alpha.clamp(0.0, 1.0),
+        )
+    }
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the colour crate converts in f32; channels need no more"
+    )]
+    fn converted<Space: color::ColorSpace>(self) -> [f64; 3] {
+        let value = color::AlphaColor::<color::Srgb>::new([
+            self.r as f32,
+            self.g as f32,
+            self.b as f32,
+            self.alpha as f32,
+        ])
+        .convert::<Space>()
+        .components;
+        [
+            f64::from(value[0]),
+            f64::from(value[1]),
+            f64::from(value[2]),
+        ]
+    }
+    fn to_p3(self) -> [f64; 3] {
+        self.converted::<color::DisplayP3>()
+    }
+    pub fn to_oklab(self) -> [f64; 3] {
+        self.converted::<color::Oklab>()
+    }
+    pub fn to_oklch(self) -> [f64; 3] {
+        self.converted::<color::Oklch>()
+    }
+    pub fn to_hsl(self) -> [f64; 3] {
+        let [h, s, l] = self.clipped().converted::<color::Hsl>();
+        [h, s / 100.0, l / 100.0]
+    }
+
+    pub fn format(self, notation: Notation) -> String {
+        let alpha = |separator: &str| {
+            if self.alpha < 1.0 - GAMUT_EPSILON {
+                format!("{separator}{}", trim(self.alpha, 3))
+            } else {
+                String::new()
+            }
+        };
+        match notation {
+            Notation::Hex => {
+                let c = self.clipped();
+                let byte = |value: f64| {
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a clipped 0..=1 channel scaled and rounded into 0..=255"
+                    )]
+                    let byte = (value * 255.0).round() as u8;
+                    format!("{byte:02x}")
+                };
+                let mut hex = format!("#{}{}{}", byte(c.r), byte(c.g), byte(c.b));
+                if c.alpha < 1.0 - GAMUT_EPSILON {
+                    hex.push_str(&byte(c.alpha));
+                }
+                hex
+            }
+            Notation::Rgb => {
+                let c = self.clipped();
+                format!(
+                    "rgb({} {} {}{})",
+                    trim(c.r * 255.0, 0),
+                    trim(c.g * 255.0, 0),
+                    trim(c.b * 255.0, 0),
+                    alpha(" / ")
+                )
+            }
+            Notation::Hsl => {
+                let [h, s, l] = self.to_hsl();
+                format!(
+                    "hsl({} {}% {}%{})",
+                    trim(h, 0),
+                    trim(s * 100.0, 0),
+                    trim(l * 100.0, 0),
+                    alpha(" / ")
+                )
+            }
+            Notation::Oklch => {
+                let [l, c, h] = self.to_oklch();
+                format!(
+                    "oklch({} {} {}{})",
+                    trim(l, 3),
+                    trim(c, 3),
+                    trim(h, 1),
+                    alpha(" / ")
+                )
+            }
+            Notation::Oklab => {
+                let [l, a, b] = self.to_oklab();
+                format!(
+                    "oklab({} {} {}{})",
+                    trim(l, 3),
+                    trim(a, 3),
+                    trim(b, 3),
+                    alpha(" / ")
+                )
+            }
+            Notation::P3 => {
+                let [r, g, b] = self.to_p3();
+                format!(
+                    "color(display-p3 {} {} {}{})",
+                    trim(r, 3),
+                    trim(g, 3),
+                    trim(b, 3),
+                    alpha(" / ")
+                )
+            }
+        }
+    }
+}
+
+pub fn parse(text: &str) -> Option<Color> {
+    let parsed: color::AlphaColor<color::Srgb> = text.trim().parse().ok()?;
+    let [r, g, b, alpha] = parsed.components;
+    [r, g, b, alpha]
+        .iter()
+        .all(|value| value.is_finite())
+        .then(|| Color::srgb(f64::from(r), f64::from(g), f64::from(b), f64::from(alpha)))
+}
+
+fn trim(value: f64, places: usize) -> String {
+    let text = format!("{value:.places$}");
+    let text = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        text
+    };
+    if text == "-0" { "0".to_owned() } else { text }
+}
+
+const COLOR_FUNCTIONS: [&str; 10] = [
+    "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color",
+];
+
+const MAX_FUNCTION_BYTES: usize = 96;
+
+pub fn color_ranges(text: &str, code: &[Range<usize>]) -> Vec<Range<usize>> {
+    let bytes = text.as_bytes();
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let after_word = at > 0 && (is_word(bytes[at - 1]) || bytes[at - 1] == b'&');
+        if bytes[at] == b'#' && !after_word {
+            let digits = bytes[at + 1..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_hexdigit())
+                .count();
+            let end = at + 1 + digits;
+            let bounded = bytes.get(end).is_none_or(|byte| !is_word(*byte));
+            let in_code = code.iter().any(|range| range.contains(&at));
+            let letters = bytes[at + 1..end].iter().any(u8::is_ascii_alphabetic);
+            let plausible =
+                matches!(digits, 6 | 8) || (matches!(digits, 3 | 4) && (in_code || letters));
+            if bounded && plausible && parse(&text[at..end]).is_some() {
+                found.push(at..end);
+            }
+            at = end.max(at + 1);
+            continue;
+        }
+        if bytes[at].is_ascii_alphabetic() && !after_word {
+            let name_end = at
+                + bytes[at..]
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_alphabetic() || **byte == b'-')
+                    .count();
+            let name = text[at..name_end].to_ascii_lowercase();
+            if bytes.get(name_end) == Some(&b'(') && COLOR_FUNCTIONS.contains(&name.as_str()) {
+                let close = bytes[name_end..]
+                    .iter()
+                    .take(MAX_FUNCTION_BYTES)
+                    .take_while(|byte| **byte != b'\n')
+                    .position(|byte| *byte == b')')
+                    .map(|offset| name_end + offset + 1);
+                if let Some(end) = close
+                    && parse(&text[at..end]).is_some()
+                {
+                    found.push(at..end);
+                    at = end;
+                    continue;
+                }
+            }
+            at = name_end;
+            continue;
+        }
+        at += 1;
+    }
+    found
+}
+
+pub fn color_copy_entries(written: &str) -> Vec<CopyEntry> {
+    let written = written.trim();
+    let mut entries = vec![CopyEntry::primary("Copy Value", written.to_owned())];
+    if let Some(color) = parse(written) {
+        entries.extend(Notation::ALL.iter().map(|notation| {
+            CopyEntry::alternative(
+                format!("Copy as {}", notation.label()),
+                color.format(*notation),
+            )
+        }));
+    }
+    entries
+}

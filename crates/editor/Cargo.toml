@@ -11,20 +11,20 @@ name = "artisan-editor"
 path = "src/main.rs"
 
 [features]
-# Optional Windows renderer fallback; the default uses native D3D11 with the
-# same Cosmic text system. Linux keeps its existing WGPU renderer.
 windows-wgpu = ["gpui_platform/wgpu"]
-# `ARTISAN_EDITOR_CAPTURE=<png>` saves the window after a few seconds and
-# quits; for checking a build by eye without a screen.
-capture = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
-# Records every heap allocation with its call stack and writes
-# logs/dhat-heap.json when the Editor quits; see src/heap_profile.rs.
+capture = ["gpui/test-support", "gpui_platform/test-support", "dep:image", "editor-aqua/capture"]
 dhat-heap = ["dep:dhat"]
+qualification = ["editor-aqua/qualification"]
 
 [dependencies]
+anyhow.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+editor-aqua = { path = "../editor-aqua" }
+
+[target.'cfg(not(windows))'.dependencies]
 image = { workspace = true, features = ["png"], optional = true }
 dhat = { workspace = true, optional = true }
-anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
 editor-ui = { path = "../editor-ui" }
 editor-composer = { path = "../editor-composer" }
@@ -43,9 +43,12 @@ tracing.workspace = true
 file-rotate = "0.8.0"
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
-[dev-dependencies]
+[target.'cfg(not(windows))'.dev-dependencies]
 editor-core = { path = "../editor-core", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[build-dependencies]
+embed-resource = "=3.0.11"
