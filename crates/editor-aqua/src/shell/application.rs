@@ -640,12 +640,18 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn on_start(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) {
         self.ui.on_start(ctx, id);
+        if let Some(window) = ctx.window_state(id) {
+            let ui = self.ui.ui_mut();
+            ui.set_viewport(
+                window.inner_size.width as f32,
+                window.inner_size.height as f32,
+                window.scale_factor as f32,
+            );
+            set_window_scale(ui, window.scale_factor as f32);
+        }
         self.shell.bind(ctx, id);
         if let Some(updates) = self.initial.take() {
             self.update(ctx, id, updates);
-        }
-        if let Some(window) = ctx.window_state(id) {
-            set_window_scale(self.ui.ui_mut(), window.scale_factor as f32);
         }
         if self.fit_launch {
             fit_launch_to_display(ctx, id);
