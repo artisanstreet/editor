@@ -1851,6 +1851,7 @@ impl RootViews {
 fn transcript_shape(conversation: &crate::conversation::controller::Conversation) -> (u64, usize) {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    conversation.is_landing().hash(&mut hasher);
     for (row, _) in &conversation.rows {
         row.key().hash(&mut hasher);
     }
