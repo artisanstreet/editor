@@ -391,7 +391,11 @@ impl Conversation {
                 expanded,
                 |id, slot| {
                     let item = view.item(id)?;
-                    slot.text(item)?.inline().map(str::to_owned)
+                    match slot {
+                        fold::Slot::Plain(section) => section.inline_text(item),
+                        _ => slot.text(item)?.inline(),
+                    }
+                    .map(str::to_owned)
                 },
                 |id, slot| shape_source(view, id, slot),
             );
@@ -587,7 +591,12 @@ impl Conversation {
         &mut self,
         core: &Core,
         scope: &super::presentation::PresentationScope,
-        batch: impl IntoIterator<Item = (super::presentation::BodyKey, super::projection::BodyProjection)>,
+        batch: impl IntoIterator<
+            Item = (
+                super::presentation::BodyKey,
+                super::projection::BodyProjection,
+            ),
+        >,
     ) -> bool {
         let mut published = false;
         let mut bodies = 0;
@@ -1204,12 +1213,13 @@ fn shape_source<'a>(
         _ => 0,
     };
     match (slot, &item.kind) {
-        (
-            fold::Slot::Prose,
-            artisan_api::ItemKind::AssistantMessage { text, .. },
-        ) => {
+        (fold::Slot::Prose, artisan_api::ItemKind::AssistantMessage { text, .. }) => {
             let live = (item.status == artisan_api::Status::Running)
-                .then(|| view.live.get(&artisan_api::LiveTarget::Text { item_id: id.clone() }))
+                .then(|| {
+                    view.live.get(&artisan_api::LiveTarget::Text {
+                        item_id: id.clone(),
+                    })
+                })
                 .flatten();
             match (live, text) {
                 (Some(rope), _) => Some(ShapeSource {

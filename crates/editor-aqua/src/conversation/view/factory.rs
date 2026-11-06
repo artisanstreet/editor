@@ -2444,18 +2444,18 @@ impl RowFactory {
                 self.statuses.borrow_mut().agent(key.clone(), text, theme)
             })
             .transpose()?,
-            Row::Text { id, slot: slot @ Slot::Plain(section), .. } => {
+            Row::Text { id, slot: Slot::Plain(section), .. } => {
                 let item = row
                     .model
                     .items
                     .get(id)
                     .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
-                let Some(TextContent::Inline(text)) = slot.text(item) else {
+                let Some(text) = section.inline_text(item) else {
                     anyhow::bail!("conversation plain text source changed");
                 };
                 Some(match section {
                     fold::PlainSection::ImageCaption => image_caption(text, self.theme),
-                    _ => aqua_ui::element::Text::new(text.clone()).build(),
+                    _ => aqua_ui::element::Text::new(text.to_owned()).build(),
                 })
             }
             _ => anyhow::bail!("conversation row renderer is unavailable for {key:?}"),

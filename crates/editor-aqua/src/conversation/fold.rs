@@ -139,6 +139,42 @@ pub enum PlainSection {
     ImageCaption,
 }
 impl PlainSection {
+    pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
+        if self == Self::AgentTask
+            && let ItemKind::Agent {
+                prompt: None,
+                description,
+                name,
+                ..
+            } = &item.kind
+            && let Some(description) = description.inline()
+        {
+            if name.as_deref().is_some_and(|name| {
+                (name == "/root" || name.starts_with("/root/")) && name == description
+            }) {
+                return Some("[This message is encrypted.]");
+            }
+            if description.is_empty() {
+                return Some("Task message not provided by the harness.");
+            }
+        }
+        if self == Self::AgentMessage
+            && let ItemKind::Tool {
+                tool:
+                    artisan_api::ToolKind::AgentMessage {
+                        text: artisan_api::TextContent::Inline(text),
+                        summary: Some(summary),
+                        ..
+                    },
+                ..
+            } = &item.kind
+            && text.is_empty()
+        {
+            return Some(summary);
+        }
+        self.text(item)?.inline()
+    }
+
     pub(crate) const fn order(self) -> u64 {
         match self {
             Self::User => 0,
@@ -443,7 +479,6 @@ impl Row {
             }
         )
     }
-
 
     pub(crate) fn run(&self) -> Option<&RunId> {
         match self {
@@ -1385,3 +1420,7 @@ fn version(
     }
     hasher.finish()
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/fold.rs"]
+mod tests;
