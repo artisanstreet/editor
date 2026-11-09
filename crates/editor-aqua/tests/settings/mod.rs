@@ -1,4 +1,4 @@
-use editor_aqua::settings::{extensions, prompt, sign_in};
+use editor_aqua::settings::{extensions, prompt};
 
 use artisan_api::{GlobalPrompt, McpServer};
 use extensions::{ExtensionsForm, ServerFields};
@@ -76,15 +76,16 @@ fn prompt_save_preserves_newer_draft_and_rejects_old_host() {
 
 #[test]
 fn second_factor_distinguishes_six_ascii_digits() {
+    use editor_aqua::core::account::SecondFactor;
     assert_eq!(
-        sign_in::second_factor(" 123456 "),
-        (Some("123456".into()), None)
+        SecondFactor::parse(" 123456 "),
+        Some(SecondFactor::Authenticator("123456".into()))
     );
     assert_eq!(
-        sign_in::second_factor("１２３４５６"),
-        (None, Some("１２３４５６".into()))
+        SecondFactor::parse("１２３４５６"),
+        Some(SecondFactor::Recovery("１２３４５６".into()))
     );
-    assert_eq!(sign_in::second_factor("  "), (None, None));
+    assert_eq!(SecondFactor::parse("  "), None);
 }
 
 #[test]

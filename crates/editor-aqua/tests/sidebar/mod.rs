@@ -5,90 +5,6 @@ use editor_aqua::sidebar::geometry::{PageDirection, PagePosition, page_direction
 use editor_aqua::sidebar::list::{AgeGroup, HostSnapshot, RowState, lists};
 use editor_aqua::sidebar::picker::FolderPicker;
 
-#[test]
-fn hover_frame_reports_initial_and_reduced_motion_changes_once() {
-    use aqua::UiApp;
-    use aqua_text::{SharedFonts, SharedRuns};
-    use aqua_ui::element::Box as UiBox;
-    use editor_aqua::sidebar::controller::{HoverFrame, Sidebar};
-    use editor_aqua::ui::{hover::HoverTone, theme::ArtisanTheme};
-
-    let theme = ArtisanTheme::resolved();
-    let mut sidebar = Sidebar::new(true);
-    let pill = sidebar.threads_hover.pill(&theme, 8.0, true);
-    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.mount(|_| {
-        UiBox::new()
-            .width(100.0)
-            .height(80.0)
-            .layout("column")
-            .child(pill)
-            .child(
-                UiBox::new()
-                    .width(100.0)
-                    .height(20.0)
-                    .build()
-                    .with_key("first"),
-            )
-            .child(
-                UiBox::new()
-                    .width(100.0)
-                    .height(20.0)
-                    .build()
-                    .with_key("second"),
-            )
-            .build()
-    })
-    .unwrap();
-    app.set_viewport(100.0, 80.0, 1.0);
-    app.build_frame().unwrap();
-    let root = app.tree().root().unwrap();
-    sidebar
-        .threads_hover
-        .hovered("first", true, HoverTone::Neutral);
-    assert_eq!(
-        sidebar
-            .advance_threads_hover(&mut app, root, &theme, 0.0, false)
-            .unwrap(),
-        HoverFrame {
-            changed: true,
-            animating: false
-        }
-    );
-    app.build_frame().unwrap();
-    assert_eq!(
-        sidebar
-            .advance_threads_hover(&mut app, root, &theme, 0.0, false)
-            .unwrap(),
-        HoverFrame {
-            changed: false,
-            animating: false
-        }
-    );
-    sidebar
-        .threads_hover
-        .hovered("second", true, HoverTone::Neutral);
-    assert_eq!(
-        sidebar
-            .advance_threads_hover(&mut app, root, &theme, 0.1, true)
-            .unwrap(),
-        HoverFrame {
-            changed: true,
-            animating: false
-        }
-    );
-    app.build_frame().unwrap();
-    assert_eq!(
-        sidebar
-            .advance_threads_hover(&mut app, root, &theme, 0.1, true)
-            .unwrap(),
-        HoverFrame {
-            changed: false,
-            animating: false
-        }
-    );
-    sidebar.threads_hover.dispose(&mut app);
-}
 
 struct Host {
     project: Project,
@@ -663,4 +579,36 @@ mod spacer {
         assert!((history_spacer(&column(), 20.0, 0.0) - 12.0).abs() < 1e-4);
         assert!((history_spacer(&column(), 20.0, 1.0) - 12.0).abs() < 1e-4);
     }
+}
+
+#[test]
+fn settlement_moves_to_history_and_new_activity_returns_to_inbox() {
+    let project = Project {
+        id: ProjectId::new(),
+        path: "/work".into(),
+        name: "work".into(),
+        seq: 0,
+        created_at: 0,
+        removed: false,
+    };
+    let record = thread(&project.id, 4, 0);
+    let id = record.id.clone();
+    let mut host = Host {
+        project,
+        threads: vec![record],
+        waiting: vec![],
+        working: vec![],
+    };
+    let initial = lists(&host, Some(&id), 1_000_000_000);
+    assert!(initial.inbox[0].settleable);
+    host.threads[0].settled_seq = 4;
+    let settled = lists(&host, Some(&id), 1_000_000_000);
+    assert!(settled.inbox.is_empty());
+    assert!(settled.history[0].rows[0].selected);
+    host.threads[0].activity_seq = 5;
+    let resumed = lists(&host, Some(&id), 1_000_000_000);
+    assert_eq!(resumed.inbox[0].id, id);
+    assert!(resumed.history.is_empty());
+    host.working.push(id);
+    assert!(!lists(&host, None, 1_000_000_000).inbox[0].settleable);
 }

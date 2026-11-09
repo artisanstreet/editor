@@ -84,15 +84,15 @@ impl Since {
 
 /// Where `forward` puts envelopes: the SSE byte-budgeted queue, or a
 /// tunneled stream's channel.
-pub(crate) trait EnvelopeSink {
-    async fn send(&self, envelope: Envelope) -> anyhow::Result<()>;
+pub trait EnvelopeSink: Sync {
+    fn send(&self, envelope: Envelope) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 impl EnvelopeSink for tokio::sync::mpsc::Sender<Envelope> {
     async fn send(&self, envelope: Envelope) -> anyhow::Result<()> {
         Self::send(self, envelope)
             .await
-            .map_err(|_| anyhow::anyhow!("stream gone"))
+            .map_err(|error| anyhow::anyhow!("stream gone: {error}"))
     }
 }
 
@@ -155,20 +155,15 @@ pub async fn stream(
 
 /// Stored changes after `scope.since`, then the live snapshot, engine
 /// statuses and live changes, until the sink goes away or a Reset is sent.
-pub(crate) async fn forward(
-    app: &App,
-    scope: &Since,
-    sender: &impl EnvelopeSink,
-) -> anyhow::Result<()> {
+pub async fn forward(app: &App, scope: &Since, sender: &impl EnvelopeSink) -> anyhow::Result<()> {
     let since = scope.since;
     let store = app.hub.store();
     let mut changes = store.subscribe();
-    let head = store.head();
     send(
         sender,
         None,
         Event::Hello {
-            head,
+            head: store.head(),
             protocol: artisan_api::PROTOCOL_VERSION,
             forge_version: app.forge_version.clone(),
         },
@@ -246,8 +241,12 @@ pub(crate) async fn forward(
                     | Event::EditorCall { .. }
                     | Event::Reset => {}
                 }
+                let reset = matches!(envelope.event, Event::Reset);
                 if let Some(envelope) = scoped(envelope, scope) {
                     sender.send(envelope).await?;
+                }
+                if reset {
+                    return Ok(());
                 }
             }
             // Fell behind: the client refetches the state and reconnects.
@@ -269,7 +268,7 @@ async fn send_live_snapshot(
     completed_items: &HashSet<artisan_api::ItemId>,
     completed_runs: &HashSet<artisan_api::RunId>,
 ) -> anyhow::Result<u64> {
-    let (live_revision, snapshot) = app.hub.live_snapshot();
+    let (live_revision, snapshot) = app.hub.distributed_live_snapshot().await?;
     for event in snapshot {
         if let Event::Live { target, .. } = &event {
             let completed = match target {

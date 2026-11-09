@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::signin::{
-    MagicConsumeRequest, MagicConsumeResponse, MagicFinalizeRequest, MagicFinalizeResponse,
+    DesktopRedeemRequest, MagicConsumeRequest, MagicConsumeResponse, MagicFinalizeRequest, MagicFinalizeResponse,
     MagicRequest, MagicRequestResponse, MagicStatusRequest, MagicStatusResponse,
 };
 
@@ -117,11 +117,20 @@ pub struct AccountProfile {
     pub account_id: String,
     pub email: String,
     pub display_name: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     pub totp_enrolled: bool,
     #[serde(default)]
     pub machines: Vec<MachineEntry>,
     #[serde(default)]
     pub latest_config_version: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct AccountDetails {
+    username: Option<String>,
 }
 
 /// `GET /v1/sessions` entry (forward-compatible read).
@@ -332,8 +341,6 @@ impl CoreSessionClient {
         .await
     }
 
-    /// Finalize and capture the raw session token from `Set-Cookie`
-    /// (`ast_session=`). The token never appears in a JSON body.
     #[expect(
         clippy::map_err_ignore,
         reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
@@ -357,7 +364,38 @@ impl CoreSessionClient {
             .send()
             .await
             .map_err(|_| NetworkError::Transport)?;
-        let response = Self::check(response, "finish signing in").await?;
+        Self::opened_session(Self::check(response, "finish signing in").await?).await
+    }
+
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
+    )]
+    pub async fn desktop_redeem(
+        &self,
+        code: &str,
+        verifier: &str,
+    ) -> Result<(MagicFinalizeResponse, SessionToken), NetworkError> {
+        let response = self
+            .http
+            .post(self.url("/v1/auth/desktop/redeem"))
+            .json(&DesktopRedeemRequest {
+                code: code.to_owned(),
+                verifier: verifier.to_owned(),
+            })
+            .send()
+            .await
+            .map_err(|_| NetworkError::Transport)?;
+        Self::opened_session(Self::check(response, "finish signing in").await?).await
+    }
+
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
+    )]
+    async fn opened_session(
+        response: reqwest::Response,
+    ) -> Result<(MagicFinalizeResponse, SessionToken), NetworkError> {
         let token = response
             .headers()
             .get_all(reqwest::header::SET_COOKIE)
@@ -377,7 +415,16 @@ impl CoreSessionClient {
     }
 
     pub async fn me(&self, session: &SessionToken) -> Result<AccountProfile, NetworkError> {
-        self.get("/v1/me", Some(session), "load the account").await
+        let mut profile: AccountProfile = self
+            .get("/v1/me", Some(session), "load the account")
+            .await?;
+        if let Ok(details) = self
+            .get::<AccountDetails>("/v1/account/profile", Some(session), "load the profile")
+            .await
+        {
+            profile.username = details.username;
+        }
+        Ok(profile)
     }
 
     pub async fn list_sessions(

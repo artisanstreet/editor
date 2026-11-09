@@ -583,7 +583,7 @@ pub async fn prepare(
     let customisation = hub.customisation().await?;
     let owner = hub.clone();
     let mut launch = tokio::task::spawn_blocking(move || {
-        let _homes = owner.homes_lock();
+        let _homes = owner.homes_lock()?;
         owner.engines().materialize(engine, &customisation)
     })
     .await
@@ -595,8 +595,6 @@ pub async fn prepare(
         forge_engines::with_gateway_mcp(engine, &mut launch, &name, &url);
     }
     launch.readable.push(hub.store().blob_dir().to_path_buf());
-    // A config without a variant (or one the model dropped) runs the
-    // model's default.
     let mut config = thread.config.clone();
     // The transport is the account's choice, not the thread's: every
     // Claude thread on this Forge follows the same one.
@@ -617,7 +615,20 @@ pub async fn prepare(
     if let Some(id) = config.model.as_deref() {
         let status = engines.status(engine);
         if let Some(model) = status.models.iter().find(|model| model.id == id) {
-            config.variant = model.variant_for(config.variant.as_deref());
+            let customizations = hub
+                .store()
+                .setting(artisan_api::MODEL_CUSTOMIZATIONS_KEY)
+                .await?
+                .as_ref()
+                .map(artisan_api::model_customizations)
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or_default();
+            let resolution = model.resolve_config(&config, &customizations);
+            for change in &resolution.changes {
+                tracing::warn!(model = %model.id, requested = %change.requested, reason = %change.reason, "model configuration resolved");
+            }
+            config = resolution.effective;
         }
     }
     Ok(Turn {

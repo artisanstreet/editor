@@ -104,38 +104,48 @@ Every thread in Artisan has an MCP server named `artisan` (Claude shows its
 tools as `mcp__artisan__*`). It acts for the thread you run in, so "this
 thread" and "my agents" need no ids.
 
+**Coordinate concurrent work.** Before overlapping edits or investigating unexpected changes, call `list_relevant_agents` or `list_relevant_threads`. They rank current advisory claims, declared scope, dependencies, and project activity and explain each match. Resources come from your published work and active claims unless supplied explicitly. Discovery defaults to this project's workers, including other threads' children for agent tools; `scope="host"` broadens it and `parent` restricts it.
+
+Publish your objective, exact worktree, intended resources, dependencies, state, summary, and validation evidence with `publish_work`. Updates require the current revision from `get_work`. Use `claim_resources` to declare advisory ownership of paths or named shared resources such as builds, deployments, browser sessions, and ports. Overlapping claims are allowed and reported; claims never restrict filesystem writes. Inspect claims with `list_resource_claims`, renew your own claim when needed, and release it promptly with `release_resources`.
+
+Negotiate boundaries and handoffs with `send_coordination_message` or `request_resource_handoff`. Delivery is not agreement: recipients use `acknowledge_coordination_message` to acknowledge, resolve, or decline and state the actual agreement in their reply. Receipts notify the sender. Read your inbox with `list_coordination_messages`. A `watch_work` subscription notifies this thread when a dependency completes, fails, or is cancelled, even across Forge restarts; do independent work while waiting. Completion evidence belongs in published work. Check it before consuming a result, especially in a shared dirty worktree. Claims are cooperative; do not introduce worktrees or permission gates solely to enforce them.
+
+`list_active_agents` and `list_active_threads` show ongoing activity. `list_agents` and `list_threads` include history. Top-level workers and spawned agents are discoverable; never interpret a list of only your own children as all concurrent work. Use `read_thread_item` to continue long items using `next_offset`; `whole=true` still has a bounded preview.
+
 **Recall other threads.** When the user points at earlier work ("like the
 fix in the sidebar thread", "what did we decide about auth"), look it up
 instead of asking:
 
-- `threads_search` ranks every thread's messages, plans, commands, errors and
+- `search_threads` ranks every thread's messages, plans, commands, errors and
   file paths. Start here with a few distinctive words.
-- `threads_grep` runs a regex line by line, newest first, like `rg`.
-- `thread_read` reads the items around a hit (`thread` + `item`), or a
-  thread's newest page; `whole=true` reads one long item in full.
-- `threads_touching` lists the threads that read or changed a file.
-- `thread_list` lists threads by project, state or title.
+- `grep_threads` runs a regex line by line, newest first, like `rg`.
+- `read_thread` reads the items around a hit (`thread` + `item`), or a
+  thread's newest page; use `read_thread_item` to continue beyond its preview.
+- `find_threads_touching_files` lists the threads that read or changed a file.
+- `list_threads` lists threads by project, state or title.
 
 Tool output is left out unless you pass `include_output=true`; failed
 commands always show theirs. Quote what you found and name the thread.
 
-**Agents on any harness.** `harnesses` lists each harness (claude, codex,
-opencode, grok, cursor) with its models, efforts and sign-in. `agent_spawn`
+**Agents on any harness.** `list_harnesses` lists installation, sign-in and
+discovery status for Claude, Codex and OpenCode. `list_models` returns each
+harness's models and exact configuration choices. `spawn_agent`
 starts one on any of them. It sees only your `prompt`, so make the prompt the
 whole brief: goal, files, constraints, what to report. Settings you leave out
 come from this thread; a fallback is named in `warnings`. Then either
-`agent_wait` (up to 9 minutes per call, call again to keep waiting), or pass
+`wait_for_agents` (up to 9 minutes per call, call again to keep waiting), or pass
 `background=true` and keep working: the result arrives as a message starting
-`[Artisan]`. `agent_message`, `agent_read`, `agent_cancel` and `agent_list`
+`[Artisan]`. `message_agent`, `read_agent`, `cancel_agent` and `list_agents`
 manage them. An agent never gets more permission than this thread, and the
 user sees it, with its harness logo, in the Agents panel.
 
-**The app itself.** `thread_create`, `thread_send`, `thread_cancel`,
-`thread_update`, `requests_list`; `settings_list` / `settings_get` /
-`settings_set`; `hosts_list`, `host_add`, `host_remove`, `host_switch`;
-`projects_list`, `project_add`, `project_remove`; `mcp_servers_*`,
-`skills_list`, `skill_set_enabled`, `global_prompt_get` / `global_prompt_set`,
-`harness_set_default_model`, `harness_install`; `open_thread`,
+**The app itself.** `create_thread`, `message_thread`, `cancel_thread`,
+`update_thread`, `list_requests`; `list_settings` / `get_setting` /
+`set_setting`; `list_hosts`, `add_host`, `remove_host`, `switch_host`;
+`list_projects`, `add_project`, `remove_project`; `list_mcp_servers`,
+`add_mcp_server`, `remove_mcp_server`, `sign_in_mcp_server`;
+`list_skills`, `set_skill_enabled`, `get_global_prompt` / `set_global_prompt`,
+`set_harness_default_model`, `install_harness`; `open_thread`,
 `open_settings`. Do what the user asked and no more: tools that change a
 page take `navigate_user`; set it only when the user asks to be taken there.
 
@@ -145,17 +155,17 @@ page take `navigate_user`; set it only when the user asks to be taken there.
 - Host, Editor-setting and `open_*` tools need the user's Editor open; if
   none answers, say so rather than retrying.
 - An HTTP MCP server that fails with HTTP 401 needs a sign-in:
-  `mcp_server_sign_in` returns the link to give the user, and Artisan keeps
+  `sign_in_mcp_server` returns the link to give the user, and Artisan keeps
   the token for every harness. Don't send the user to settings for it.
 - Tools that change something take `navigate_user`; set it only when the
   user asked to be taken to the page. Otherwise their screen stays put.
 - An HTTP MCP server that needs signing in shows `needs sign-in` in
-  `mcp_servers_list`. `mcp_server_sign_in` starts the sign-in and returns the
+  `list_mcp_servers`. `sign_in_mcp_server` starts the sign-in and returns the
   link to give the user; with `navigate_user` it also opens the browser and
   the server's card. Never send the user looking for it in settings.
 - Pairing a remote host needs the address, code and fingerprint that
   `ae pair` shows on that machine; ask the user for them.
-- Only the user answers approvals and questions; `requests_list` only shows
+- Only the user answers approvals and questions; `list_requests` only shows
   what is waiting.
 
 **Installing skills and MCP servers.** Artisan owns every harness's skills
@@ -163,16 +173,16 @@ and MCP servers and keeps them the same in all of them. Install through it:
 
 - A skill: write the folder (a `SKILL.md` with `name` and `description` front
   matter, plus any files it needs) somewhere outside the harness's config,
-  such as the project or a temp folder, then call `skill_install` with its
+  such as the project or a temp folder, then call `install_skill` with its
   absolute path. Every harness gets it from the next thread on. To change it
-  later, edit your copy and call `skill_install` again with `replace=true`.
-- An MCP server: `mcp_server_add` with a command or a url.
-- Check `skills_list` or `mcp_servers_list` first; if it's already there,
-  turn it on with `skill_set_enabled` rather than installing a second copy.
+  later, edit your copy and call `install_skill` again with `replace=true`.
+- An MCP server: `add_mcp_server` with a command or a url.
+- Check `list_skills` or `list_mcp_servers` first; if it's already there,
+  turn it on with `set_skill_enabled` rather than installing a second copy.
 
 Never write into a harness's own skills folder (`~/.claude/skills`,
 `~/.codex/skills` and the like), and never run `claude mcp add`,
 `codex mcp add` or edit their config files for MCP servers. Artisan removes
 anything it didn't install there, and the other harnesses never see it.
 Skill-writing guides that say to save into those folders mean
-`skill_install` here.
+`install_skill` here.

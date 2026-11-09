@@ -14,6 +14,24 @@ pub trait SectionViews {
     fn glide_active(&self) -> bool {
         false
     }
+    fn take_events(
+        &mut self,
+        _shell: &mut Shell,
+        _ui: &UiApp,
+        _ctx: &mut AppCtx<'_>,
+        _window: AquaWindowId,
+    ) -> bool {
+        false
+    }
+    fn animate(
+        &mut self,
+        _shell: &mut Shell,
+        _ui: &mut UiApp,
+        _ctx: &mut AppCtx<'_>,
+        _window: AquaWindowId,
+    ) -> bool {
+        false
+    }
     fn pre_input(&mut self, _ui: &mut UiApp, _input: &InputEvent) -> Option<bool> {
         None
     }
@@ -23,6 +41,14 @@ pub trait SectionViews {
     fn refresh_transcript(
         &mut self,
         _shell: &mut Shell,
+        _ui: &mut UiApp,
+        _window: &ObservedWindowState,
+    ) -> bool {
+        false
+    }
+    fn refresh_sidebar_frame(
+        &self,
+        _shell: &Shell,
         _ui: &mut UiApp,
         _window: &ObservedWindowState,
     ) -> bool {
@@ -114,6 +140,127 @@ impl ShellApplication<crate::shell::root::RootViews> {
 }
 
 impl<V: SectionViews> ShellApplication<V> {
+    fn refresh_sections(
+        &mut self,
+        ctx: &mut AppCtx<'_>,
+        id: AquaWindowId,
+        refresh: super::refresh::Refresh,
+    ) -> bool {
+        use super::refresh::Refresh;
+        if !self.mounted {
+            return false;
+        }
+        let Some(window) = ctx.window_state(id).cloned() else {
+            return false;
+        };
+        let sidebar = matches!(refresh, Refresh::Sidebar | Refresh::Sections);
+        let sidebar_frame = matches!(refresh, Refresh::SidebarFrame | Refresh::FrameSections);
+        let transcript = matches!(
+            refresh,
+            Refresh::Transcript | Refresh::Sections | Refresh::FrameSections
+        );
+        let sidebar_done = match sidebar_frame {
+            true => self
+                .views
+                .refresh_sidebar_frame(&self.shell, self.ui.ui_mut(), &window),
+            false => {
+                !sidebar
+                    || self
+                        .views
+                        .refresh_sidebar(&self.shell, self.ui.ui_mut(), &window)
+            }
+        };
+        let transcript_done = !transcript
+            || self
+                .views
+                .refresh_transcript(&mut self.shell, self.ui.ui_mut(), &window);
+        let updated = (sidebar || sidebar_frame || transcript) && sidebar_done && transcript_done;
+        if updated {
+            crate::shell::rebuild_stats::record_event("section_refresh");
+            ctx.request_frame(id, FrameReason::ANIMATION);
+        }
+        updated
+    }
+
+    fn advance_hover_animations(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) {
+        let theme = self.shell.preferences.theme();
+        if let Some(owner) = self
+            .shell
+            .entry
+            .workspace_mut()
+            .and_then(|workspace| workspace.composer.as_mut())
+        {
+            if let Err(error) = owner.advance_popups(self.ui.ui_mut(), ctx.now().as_secs_f64()) {
+                tracing::warn!(%error, "could not advance composer popup");
+            }
+            owner.advance_note_ticker(self.ui.ui_mut(), ctx.now().as_secs_f64());
+            let roots = [
+                crate::composer::view::PopupKind::Model,
+                crate::composer::view::PopupKind::Project,
+            ]
+            .map(|kind| owner.popup_root(kind, self.ui.ui()));
+            match owner.advance_picker_hover(
+                self.ui.ui_mut(),
+                &theme,
+                ctx.now().as_secs_f64(),
+                roots,
+            ) {
+                Ok(true) => ctx.request_frame(id, FrameReason::ANIMATION),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "could not advance composer picker hover"),
+            }
+            if owner.needs_animation(self.ui.ui()) {
+                ctx.request_frame(id, FrameReason::ANIMATION);
+            }
+        }
+        let hover_surface = {
+            let ui = self.ui.ui();
+            let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+                "sidebar-threads-hover-surface",
+            ));
+            ui.tree().sole_node_with_key(key)
+        };
+        if let (Some(surface), Some(workspace)) = (hover_surface, self.shell.entry.workspace_mut())
+        {
+            let reduced = self.ui.ui().host().motion().reduced_motion()
+                == aqua_ui::motion::ReducedMotion::Reduce;
+            match workspace.sidebar.advance_threads_hover(
+                self.ui.ui_mut(),
+                surface,
+                &theme,
+                ctx.now().as_secs_f64(),
+                reduced,
+            ) {
+                Ok(frame) if frame.changed || frame.animating => {
+                    ctx.request_frame(id, FrameReason::ANIMATION)
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not advance sidebar hover"),
+            }
+        }
+        let navigator_surface = keyed_node(self.ui.ui(), "turn-navigator-hover-surface");
+        if let (Some(surface), Some(workspace)) =
+            (navigator_surface, self.shell.entry.workspace_mut())
+        {
+            let reduced = self.ui.ui().host().motion().reduced_motion()
+                == aqua_ui::motion::ReducedMotion::Reduce;
+            match workspace.navigator.advance_hover_frame(
+                self.ui.ui_mut(),
+                surface,
+                &theme,
+                ctx.now().as_secs_f64(),
+                reduced,
+            ) {
+                Ok(frame) => {
+                    if frame.changed || frame.animating {
+                        ctx.request_frame(id, FrameReason::ANIMATION);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "could not advance navigator hover"),
+            }
+        }
+    }
+
     pub fn new(files: crate::core::EditorFiles, resources: ShellResources, views: V) -> Self {
         let (shell, initial) = Shell::new(files, resources.images.clone());
         Self::from_shell(shell, initial, resources, views)
@@ -206,30 +353,9 @@ impl<V: SectionViews> ShellApplication<V> {
             }
         }
         if let Some(dark) = updates.theme_transition {
-            if self.ui.ui().host().motion().reduced_motion()
-                != aqua_ui::motion::ReducedMotion::Reduce
-            {
-                let mode = if dark {
-                    crate::ui::theme::ThemeMode::Dark
-                } else {
-                    crate::ui::theme::ThemeMode::Light
-                };
-                let shimmer = crate::ui::theme::ArtisanTheme::for_mode(mode)
-                    .colors
-                    .link
-                    .fade(0.45)
-                    .to_reference_text_color();
-                let transition = aqua_core::scene::GpuiSourceSnapshotTransition {
-                    duration: std::time::Duration::from_millis(700),
-                    band: 0.18,
-                    shimmer,
-                };
-                if let Err(error) = ctx.request_window(
-                    aqua::prelude::WindowRequest::BeginGpuiSourceSnapshotTransition(id, transition),
-                ) {
-                    tracing::warn!(%error, "could not start theme transition");
-                }
-            }
+            let reduced = self.ui.ui().host().motion().reduced_motion()
+                == aqua_ui::motion::ReducedMotion::Reduce;
+            begin_theme_transition(ctx, id, dark, reduced);
         }
         if updates.preferences_changed {
             if let Some(reduced) = self.shell.preferences.reduced_motion {
@@ -538,6 +664,12 @@ impl<V: SectionViews> ShellApplication<V> {
             causes.extend(crate::shell::rebuild_stats::take_notes());
         }
         domain_changed |= mark(&mut causes, "titlebar", self.shell.titlebar.take_changed());
+        domain_changed |= mark(
+            &mut causes,
+            "view_events",
+            self.views
+                .take_events(&mut self.shell, self.ui.ui(), ctx, id),
+        );
         if let Some(workspace) = self.shell.entry.workspace_mut() {
             domain_changed |= mark(
                 &mut causes,
@@ -608,7 +740,8 @@ impl<V: SectionViews> ShellApplication<V> {
             causes.push("unmounted");
         }
         if domain_changed || !self.mounted {
-            let transcript_only = live_only && self.mounted && causes.as_slice() == ["shell_updates"];
+            let transcript_only =
+                live_only && self.mounted && causes.as_slice() == ["shell_updates"];
             if !(transcript_only && self.refresh_transcript(ctx, id, FrameReason::INPUT)) {
                 self.rebuild(ctx, id, FrameReason::INPUT, &causes);
             }
@@ -673,6 +806,37 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         }
         self.drain(ctx, id, changed);
     }
+    fn on_animation_frame(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, _now: Instant) {
+        let _tm = Tm::new("animation");
+        let now = std::time::Instant::now();
+        let landed = self
+            .shell
+            .entry
+            .workspace_mut()
+            .is_some_and(|workspace| workspace.conversation.expire_landing(now));
+        let animated = self
+            .views
+            .animate(&mut self.shell, self.ui.ui_mut(), ctx, id);
+        let mut causes = crate::shell::rebuild_stats::take_notes();
+        if landed {
+            causes.push("landing_expiry");
+        }
+        if animated | landed {
+            let refresh = super::refresh::Refresh::from_causes(&causes);
+            if !self.refresh_sections(ctx, id, refresh) {
+                self.rebuild(ctx, id, FrameReason::ANIMATION, &causes);
+            }
+        }
+        self.advance_hover_animations(ctx, id);
+        if self
+            .shell
+            .live
+            .remaining(now)
+            .is_some_and(|wait| wait.is_zero())
+        {
+            self.drain(ctx, id, false);
+        }
+    }
     fn on_frame_completed(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, sequence: u64) {
         #[cfg(feature = "qualification")]
         if !self.notifications_enabled {
@@ -710,10 +874,6 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             .workspace_mut()
             .and_then(|workspace| workspace.composer.as_mut())
         {
-            if let Err(error) = owner.advance_popups(self.ui.ui_mut(), ctx.now().as_secs_f64()) {
-                tracing::warn!(%error, "could not advance composer popup");
-            }
-            owner.advance_note_ticker(self.ui.ui_mut(), ctx.now().as_secs_f64());
             let identity = {
                 let composer = owner.controller.borrow();
                 (composer.picker.menu == Some(crate::composer::picker::Menu::Model))
@@ -725,6 +885,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                         theme,
                         host,
                         viewport,
+                        crate::shell::wheel::kept_offset(
+                            self.ui.ui(),
+                            crate::shell::wheel::MODEL_MENU,
+                        )
+                        .y,
                         &images,
                         std::time::Instant::now(),
                     ) {
@@ -737,28 +902,13 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                             ) {
                                 tracing::warn!(%error, "could not refresh composer model popup");
                             }
+                            owner.apply_model_hover(self.ui.ui_mut());
                         }
                         Err(error) => {
                             tracing::warn!(%error, "could not build composer model popup")
                         }
                     }
                 }
-            }
-            let roots = [
-                crate::composer::view::PopupKind::Model,
-                crate::composer::view::PopupKind::Project,
-                crate::composer::view::PopupKind::Axis,
-            ]
-            .map(|kind| owner.popup_root(kind, self.ui.ui()));
-            match owner.advance_picker_hover(
-                self.ui.ui_mut(),
-                &theme,
-                ctx.now().as_secs_f64(),
-                roots,
-            ) {
-                Ok(true) => ctx.request_frame(id, FrameReason::ANIMATION),
-                Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "could not advance composer picker hover"),
             }
         }
         let popup_animating = self
@@ -770,52 +920,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         if popup_animating {
             ctx.request_frame(id, FrameReason::ANIMATION);
         }
-        let hover_surface = {
-            let ui = self.ui.ui();
-            let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
-                "sidebar-threads-hover-surface",
-            ));
-            ui.tree().sole_node_with_key(key)
-        };
-        if let (Some(surface), Some(workspace)) = (hover_surface, self.shell.entry.workspace_mut())
-        {
-            let reduced = self.ui.ui().host().motion().reduced_motion()
-                == aqua_ui::motion::ReducedMotion::Reduce;
-            match workspace.sidebar.advance_threads_hover(
-                self.ui.ui_mut(),
-                surface,
-                &theme,
-                ctx.now().as_secs_f64(),
-                reduced,
-            ) {
-                Ok(frame) if frame.changed || frame.animating => {
-                    ctx.request_frame(id, FrameReason::ANIMATION)
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "could not advance sidebar hover"),
-            }
-        }
-        let navigator_surface = keyed_node(self.ui.ui(), "turn-navigator-hover-surface");
-        if let (Some(surface), Some(workspace)) =
-            (navigator_surface, self.shell.entry.workspace_mut())
-        {
-            let reduced = self.ui.ui().host().motion().reduced_motion()
-                == aqua_ui::motion::ReducedMotion::Reduce;
-            match workspace.navigator.advance_hover_frame(
-                self.ui.ui_mut(),
-                surface,
-                &theme,
-                ctx.now().as_secs_f64(),
-                reduced,
-            ) {
-                Ok(frame) => {
-                    if frame.changed || frame.animating {
-                        ctx.request_frame(id, FrameReason::ANIMATION);
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "could not advance navigator hover"),
-            }
-        }
+        self.advance_hover_animations(ctx, id);
         let usage_elapsed = self
             .usage_deadline
             .is_some_and(|deadline| ctx.now() >= deadline);
@@ -840,7 +945,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 "code_actions",
                 workspace.drain_code_actions(&self.shell.core, ctx, id),
             );
-            refresh |= mark(&mut causes, "code_frame", workspace.take_code_frame(ctx.now()));
+            refresh |= mark(
+                &mut causes,
+                "code_frame",
+                workspace.take_code_frame(ctx.now()),
+            );
             if workspace
                 .markdown
                 .borrow()
@@ -848,7 +957,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
-            refresh |= mark(&mut causes, "inspector_tick", workspace.inspector.tick(ctx.now()));
+            refresh |= mark(
+                &mut causes,
+                "inspector_tick",
+                workspace.inspector.tick(ctx.now()),
+            );
             let reduced = self.ui.ui().host().motion().reduced_motion()
                 == aqua_ui::motion::ReducedMotion::Reduce;
             let now = std::time::Instant::now();
@@ -879,27 +992,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 workspace.marketplace.needs_animation(),
             );
         }
-        let sidebar_only = refresh
-            && causes
-                .iter()
-                .all(|cause| matches!(*cause, "sidebar_motion" | "sidebar_tick"));
-        let sidebar_refreshed = sidebar_only
-            && ctx
-                .window_state(id)
-                .cloned()
-                .is_some_and(|window| {
-                    self.views
-                        .refresh_sidebar(&self.shell, self.ui.ui_mut(), &window)
-                });
-        let transcript_only = refresh
-            && self.mounted
-            && causes.iter().all(|cause| {
-                matches!(*cause, "views_frame" | "reveals" | "after_layout" | "al_motion")
-            });
-        if sidebar_refreshed {
-            crate::shell::rebuild_stats::record_event("sidebar_subtree");
-            ctx.request_frame(id, FrameReason::ANIMATION);
-        } else if refresh && !(transcript_only && self.refresh_transcript(ctx, id, FrameReason::ANIMATION)) {
+        if refresh && !self.refresh_sections(ctx, id, super::refresh::Refresh::from_causes(&causes)) {
             self.rebuild(ctx, id, FrameReason::ANIMATION, &causes);
         }
     }
@@ -962,17 +1055,18 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 .entry
                 .workspace_mut()
                 .and_then(|workspace| workspace.composer.as_mut())
-                .is_some_and(
-                    |owner| match owner.dismiss_popups_for_event(self.ui.ui_mut(), input) {
+                .is_some_and(|owner| {
+                    match owner.dismiss_popups_for_event(self.ui.ui_mut(), input) {
                         Ok(consumed) => consumed,
                         Err(error) => {
                             tracing::warn!(%error, "could not dismiss composer popup");
                             false
                         }
-                    },
-                )
+                    }
+                })
         };
         if dismissed {
+            ctx.request_frame(id, FrameReason::ANIMATION);
             self.drain(ctx, id, false);
             return;
         }
@@ -1012,6 +1106,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         }
         let _tm_drain = Tm::new("input.drain");
         self.drain(ctx, id, changed);
+        self.advance_hover_animations(ctx, id);
     }
     fn on_files_dropped_at(
         &mut self,
@@ -1181,9 +1276,11 @@ fn failure_card(message: &str, theme: crate::ui::theme::ArtisanTheme) -> Element
         .padding(20.0)
         .width(480.0)
         .radius(RadiusTokens::value(RadiusStep::Xl))
-        .style(Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-            theme.colors.banner_error.bg.to_reference_paint(),
-        )))
+        .style(
+            Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
+                theme.colors.banner_error.bg.to_reference_paint(),
+            )),
+        )
         .child(title)
         .child(detail)
         .build();
@@ -1256,3 +1353,34 @@ fn mark(causes: &mut Vec<&'static str>, name: &'static str, changed: bool) -> bo
 #[cfg(all(test, feature = "qualification"))]
 #[path = "../../tests/qualification/native.rs"]
 mod native_tests;
+
+pub(crate) fn begin_theme_transition(
+    ctx: &mut AppCtx<'_>,
+    id: AquaWindowId,
+    dark: bool,
+    reduced: bool,
+) {
+    if reduced {
+        return;
+    }
+    let mode = if dark {
+        crate::ui::theme::ThemeMode::Dark
+    } else {
+        crate::ui::theme::ThemeMode::Light
+    };
+    let shimmer = crate::ui::theme::ArtisanTheme::for_mode(mode)
+        .colors
+        .link
+        .fade(0.45)
+        .to_reference_text_color();
+    let transition = aqua_core::scene::GpuiSourceSnapshotTransition {
+        duration: std::time::Duration::from_millis(700),
+        band: 0.18,
+        shimmer,
+    };
+    if let Err(error) = ctx.request_window(
+        aqua::prelude::WindowRequest::BeginGpuiSourceSnapshotTransition(id, transition),
+    ) {
+        tracing::warn!(%error, "could not start theme transition");
+    }
+}

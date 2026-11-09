@@ -74,9 +74,14 @@ fn switch_line(switch: &ModelSwitch, theme: ArtisanTheme) -> Element {
             .child(source_asset_glyph(
                 crate::sidebar::usage_view::engine_icon(&theme, model.engine),
                 14.0,
-                theme.colors.text_muted.to_reference_paint(),
+                theme.colors.text.to_reference_paint(),
             ))
-            .child(text(model.name.clone(), theme))
+            .child(
+                Text::new(model.name.clone())
+                    .gpui_source_color(theme.colors.text.to_reference_text_color())
+                    .style(Style::new().text_wrap(false))
+                    .build(),
+            )
             .build()
     };
     UiBox::new()

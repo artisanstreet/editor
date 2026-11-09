@@ -791,7 +791,7 @@ async fn editor_reply(
     Path(id): Path<String>,
     Json(reply): Json<artisan_api::EditorReply>,
 ) -> StatusCode {
-    if app.hub.answer_editor_call(&id, reply) {
+    if app.hub.answer_distributed_editor_call(&id, reply).await.unwrap_or(false) {
         StatusCode::NO_CONTENT
     } else {
         // Another Editor answered first, or the call gave up waiting.

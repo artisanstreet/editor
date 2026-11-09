@@ -26,7 +26,7 @@ const HARNESS: &str = "claude, codex or opencode";
 fn scope_properties() -> Value {
     json!({
         "thread": { "type": "string", "description": "Only this thread." },
-        "project": { "type": "string", "description": "Only this project's threads (an id from projects_list)." },
+        "project": { "type": "string", "description": "Only this project's threads (an id from list_projects)." },
         "harness": { "type": "string", "description": format!("Only threads on this harness: {HARNESS}.") },
         "kinds": { "type": "array", "items": { "type": "string", "enum": ["user", "assistant", "tool", "agent", "plan", "question", "notice", "error", "image"] }, "description": "Only these item kinds." },
         "since_days": { "type": "number", "description": "Only items from the last this many days." },
@@ -76,8 +76,8 @@ pub fn tools() -> Vec<Tool> {
 fn recall_tools() -> Vec<Tool> {
     vec![
         Tool {
-            name: "threads_search",
-            description: "Ranked full-text search over every thread's messages, plans, commands, errors and file paths. Use it when the user refers to another thread or to earlier work (\"like we did in the thread where...\"). Each hit names its thread and item; read around it with thread_read. Words of three letters or more match anywhere in a word.",
+            name: "search_threads",
+            description: "Ranked full-text search over every thread's messages, plans, commands, errors and file paths. Use it when the user refers to another thread or to earlier work (\"like we did in the thread where...\"). Each hit names its thread and item; read around it with read_thread. Words of three letters or more match anywhere in a word.",
             properties: || {
                 with_scope(json!({
                     "query": { "type": "string", "description": "Words to find; an exact phrase ranks first." },
@@ -87,11 +87,12 @@ fn recall_tools() -> Vec<Tool> {
                 }))
             },
             required: &["query"],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "threads_grep",
+            name: "grep_threads",
             description: "Regex search, line by line, over every thread's messages, plans, commands and errors, newest first, like rg. Returns each matching line with its thread, item and context; when older items remain, it says which cursor continues.",
             properties: || {
                 with_scope(json!({
@@ -104,19 +105,21 @@ fn recall_tools() -> Vec<Tool> {
                 }))
             },
             required: &["pattern"],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "thread_read",
+            name: "read_thread",
             description: "Reads a thread's items: the newest page, older pages by cursor, or the items around one item. Long texts are cut unless whole=true.",
             properties: read_properties,
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "threads_touching",
+            name: "find_threads_touching_files",
             description: "The threads that read, created, edited or deleted a file whose path contains `path`, newest first.",
             properties: || {
                 json!({
@@ -126,11 +129,12 @@ fn recall_tools() -> Vec<Tool> {
                 })
             },
             required: &["path"],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "thread_list",
+            name: "list_threads",
             description: "Threads, newest activity first, with their harness, model and state. Agent threads are listed only with parent.",
             properties: || {
                 json!({
@@ -142,6 +146,7 @@ fn recall_tools() -> Vec<Tool> {
                 })
             },
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
@@ -152,8 +157,8 @@ fn recall_tools() -> Vec<Tool> {
 fn thread_tools() -> Vec<Tool> {
     vec![
         Tool {
-            name: "thread_create",
-            description: "Starts a new top-level thread the user will see in the sidebar, and sends it the prompt. Harness, model, effort, speed, variant, context window, engine options and permissions default to this thread's; anything changed or filled in comes back as a warning. For work you need back, use agent_spawn instead.",
+            name: "create_thread",
+            description: "Starts a new top-level thread the user will see in the sidebar, and sends it the prompt. Harness, model, effort, speed, variant, context window, engine options and permissions default to this thread's; anything changed or filled in comes back as a warning. For work you need back, use spawn_agent instead.",
             properties: || {
                 json!({
                     "title": { "type": "string" },
@@ -161,20 +166,21 @@ fn thread_tools() -> Vec<Tool> {
                     "project": { "type": "string", "description": "Default this thread's project." },
                     "harness": { "type": "string", "description": HARNESS },
                     "model": { "type": "string" },
-                    "effort": { "type": "string", "description": "An effort id from harnesses. For OpenCode reasoning choices use variant." },
-                    "speed": { "type": "string", "description": "A speed id from harnesses." },
-                    "variant": { "type": "string", "description": "A variant id from harnesses (including OpenCode reasoning choices)." },
-                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100_000_000, "description": "A context_windows override_tokens value from harnesses. Use options.context_window=null to restore the standard window." },
+                    "effort": { "type": "string", "description": "An effort id from list_models. For OpenCode reasoning choices use variant." },
+                    "speed": { "type": "string", "description": "A speed id from list_models." },
+                    "variant": { "type": "string", "description": "A variant id from list_models (including OpenCode reasoning choices)." },
+                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100_000_000, "description": "A context_windows override_tokens value from list_models. Use options.context_window=null to restore the standard window." },
                     "options": { "type": "object", "additionalProperties": true, "description": "Engine-specific options, merged over inherited options for the same harness and model. context_window takes precedence over options.context_window." },
                     "permissions": { "type": "string", "enum": ["auto", "full"] },
                 })
             },
             required: &["title"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "thread_send",
+            name: "message_thread",
             description: "Sends a message to another thread: it starts a turn, or steers the running one. It shows as sent by this thread's agent; reaching a full-access thread from an auto one asks the user first.",
             properties: || {
                 json!({
@@ -183,19 +189,21 @@ fn thread_tools() -> Vec<Tool> {
                 })
             },
             required: &["thread", "text"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "thread_cancel",
+            name: "cancel_thread",
             description: "Stops another thread's running turn, and the agents it started.",
             properties: || json!({ "thread": { "type": "string" } }),
             required: &["thread"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "thread_update",
+            name: "update_thread",
             description: "Renames, archives or unarchives a thread, settles it (marks it seen), or marks it unread. The thread defaults to this one.",
             properties: || {
                 json!({
@@ -207,14 +215,16 @@ fn thread_tools() -> Vec<Tool> {
                 })
             },
             required: &[],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "requests_list",
+            name: "list_requests",
             description: "Approvals and questions waiting on the user, across threads. Only the user answers them.",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
@@ -225,37 +235,39 @@ fn thread_tools() -> Vec<Tool> {
 fn agent_tools() -> Vec<Tool> {
     vec![
         Tool {
-            name: "harnesses",
-            description: "Each harness with whether it is installed and signed in, its default model, and its complete model catalog: efforts and notes, speeds, variants, defaults, exact context windows and override values, image support, descriptions, labs and gateways. OpenCode reasoning choices are variants, not efforts. Pick agent_spawn's harness and model from here.",
+            name: "list_harnesses",
+            description: "Each harness with whether it is installed and signed in, its default model, and its complete model catalog: efforts and notes, speeds, variants, defaults, exact context windows and override values, image support, descriptions, labs and gateways. OpenCode reasoning choices are variants, not efforts. Pick spawn_agent's harness and model from here.",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "agent_spawn",
-            description: "Starts an agent on any harness and model, working on `prompt` alone: nothing of this conversation goes along, so the prompt is the whole brief. Left-out settings come from this thread; when the harness differs or a value doesn't fit, a default is used and named in `warnings`. Returns at once with the agent's id. Then agent_wait for its result, or set background=true and the result arrives as a message when it finishes. Permissions never exceed this thread's. The user sees the agent with its harness in the Agents panel.",
+            name: "spawn_agent",
+            description: "Starts a child agent on any harness and model, working on `prompt` alone: nothing of this conversation goes along, so the prompt is the whole brief. Left-out settings come from this thread; when the harness differs or a value doesn't fit, a default is used and named in `warnings`. Returns at once with the agent's id. Then wait_for_agents for its result, or set background=true and the result arrives as a message when it finishes. Permissions never exceed this thread's. The user sees the agent with its harness in the Agents panel.",
             properties: || {
                 json!({
                     "task": { "type": "string", "description": "A few words naming the work; the agent's label." },
                     "prompt": { "type": "string" },
                     "harness": { "type": "string", "description": HARNESS },
                     "model": { "type": "string" },
-                    "effort": { "type": "string", "description": "An effort id from harnesses. For OpenCode reasoning choices use variant." },
-                    "speed": { "type": "string", "description": "A speed id from harnesses." },
-                    "variant": { "type": "string", "description": "A variant id from harnesses (including OpenCode reasoning choices)." },
-                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100_000_000, "description": "A context_windows override_tokens value from harnesses. Use options.context_window=null to restore the standard window." },
+                    "effort": { "type": "string", "description": "An effort id from list_models. For OpenCode reasoning choices use variant." },
+                    "speed": { "type": "string", "description": "A speed id from list_models." },
+                    "variant": { "type": "string", "description": "A variant id from list_models (including OpenCode reasoning choices)." },
+                    "context_window": { "type": "integer", "minimum": 1, "maximum": 100_000_000, "description": "A context_windows override_tokens value from list_models. Use options.context_window=null to restore the standard window." },
                     "options": { "type": "object", "additionalProperties": true, "description": "Engine-specific options, merged over inherited options for the same harness and model. context_window takes precedence over options.context_window." },
                     "permissions": { "type": "string", "enum": ["auto", "full"] },
                     "background": { "type": "boolean" },
                 })
             },
             required: &["task", "prompt"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "agent_wait",
+            name: "wait_for_agents",
             description: "Waits until the agents settle or ask the user something (with any=true: until one does), up to timeout_seconds (default 300, at most 540), and returns each one's state and, once done, its last reply. Call again to keep waiting.",
             properties: || {
                 json!({
@@ -265,12 +277,13 @@ fn agent_tools() -> Vec<Tool> {
                 })
             },
             required: &["agents"],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "agent_message",
-            description: "Sends an agent a follow-up. A finished agent starts working again.",
+            name: "message_agent",
+            description: "Send a discovered peer or child worker a follow-up using its thread or agent ID. Starts a new turn or steers its live turn. Use send_coordination_message when an acknowledgment or agreement must be tracked.",
             properties: || {
                 json!({
                     "agent": { "type": "string" },
@@ -278,12 +291,13 @@ fn agent_tools() -> Vec<Tool> {
                 })
             },
             required: &["agent", "text"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "agent_read",
-            description: "Reads an agent's own thread, like thread_read.",
+            name: "read_agent",
+            description: "Read a discovered peer or child worker's conversation, using its thread or agent ID. read_thread_item continues long items.",
             properties: || {
                 let mut properties = read_properties();
                 if let Some(properties) = properties.as_object_mut() {
@@ -293,22 +307,25 @@ fn agent_tools() -> Vec<Tool> {
                 properties
             },
             required: &["agent"],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "agent_cancel",
-            description: "Stops an agent and every agent it started.",
+            name: "cancel_agent",
+            description: "Stops one of this thread's spawned agents and every agent it started.",
             properties: || json!({ "agent": { "type": "string" } }),
             required: &["agent"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "agent_list",
-            description: "This thread's agents and where each one is.",
+            name: "list_agents",
+            description: "Workers across the current project; use parent to restrict discovery to one parent.",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
@@ -319,26 +336,29 @@ fn agent_tools() -> Vec<Tool> {
 fn setting_tools() -> Vec<Tool> {
     vec![
         Tool {
-            name: "settings_list",
+            name: "list_settings",
             description: "Every setting with its value, owner (forge: shared by every Editor of this host; editor: this device), description and allowed values.",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "settings_get",
+            name: "get_setting",
             description: "One setting's value.",
             properties: || json!({ "key": { "type": "string" } }),
             required: &["key"],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "settings_set",
-            description: "Changes a setting. The value must fit its declaration (settings_list).",
+            name: "set_setting",
+            description: "Changes a setting. The value must fit its declaration (list_settings).",
             properties: || json!({ "key": { "type": "string" }, "value": {}, "navigate_user": navigate_user_schema() }),
             required: &["key", "value"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
@@ -349,15 +369,16 @@ fn setting_tools() -> Vec<Tool> {
 fn host_tools() -> Vec<Tool> {
     vec![
         Tool {
-            name: "hosts_list",
+            name: "list_hosts",
             description: "The Forges this Editor is paired with, and which one is connected. Needs the Editor open.",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "host_add",
+            name: "add_host",
             description: "Pairs the Editor with a Forge: kind this_computer, wsl (with distro), or remote (with address, code and fingerprint, which `ae pair` shows on the other machine; ask the user for them).",
             properties: || {
                 json!({
@@ -370,22 +391,25 @@ fn host_tools() -> Vec<Tool> {
                 })
             },
             required: &["kind"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "host_remove",
+            name: "remove_host",
             description: "Unpairs a host (by id or name). Asks the user first.",
             properties: || json!({ "host": { "type": "string" } }),
             required: &["host"],
+            output_schema: None,
             read_only: false,
             destructive: true,
         },
         Tool {
-            name: "host_switch",
+            name: "switch_host",
             description: "Moves the Editor to another host (by id or name).",
             properties: || json!({ "host": { "type": "string" } }),
             required: &["host"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
@@ -396,26 +420,29 @@ fn host_tools() -> Vec<Tool> {
 fn project_tools() -> Vec<Tool> {
     vec![
         Tool {
-            name: "projects_list",
+            name: "list_projects",
             description: "The projects on this host: id, name and folder.",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "project_add",
+            name: "add_project",
             description: "Adds a folder on this host as a project.",
             properties: || json!({ "path": { "type": "string" }, "name": { "type": "string" } }),
             required: &["path"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "project_remove",
+            name: "remove_project",
             description: "Removes a project from Artisan (the folder stays). Asks the user first.",
             properties: || json!({ "project": { "type": "string" } }),
             required: &["project"],
+            output_schema: None,
             read_only: false,
             destructive: true,
         },
@@ -430,15 +457,16 @@ fn project_tools() -> Vec<Tool> {
 fn extension_tools() -> Vec<Tool> {
     vec![
         Tool {
-            name: "mcp_servers_list",
+            name: "list_mcp_servers",
             description: "The MCP servers every harness gets (environment values hidden).",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "mcp_server_add",
+            name: "add_mcp_server",
             description: "Adds or replaces an MCP server for every harness: a command (with args and env) or a url. Asks the user first. New threads get it.",
             properties: || {
                 json!({
@@ -451,43 +479,48 @@ fn extension_tools() -> Vec<Tool> {
                 })
             },
             required: &["name"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "mcp_server_remove",
+            name: "remove_mcp_server",
             description: "Removes an MCP server from every harness. Asks the user first.",
             properties: || json!({ "name": { "type": "string" } }),
             required: &["name"],
+            output_schema: None,
             read_only: false,
             destructive: true,
         },
         Tool {
-            name: "mcp_server_sign_in",
-            description: "Signs in to an HTTP MCP server that refuses without one (HTTP 401; mcp_servers_list says `needs sign-in`), with the OAuth flow MCP specifies. Returns the link the user approves in their browser; Artisan then keeps the token for every harness and new threads get the server's tools. Needs the Editor open. Don't open settings for this.",
+            name: "sign_in_mcp_server",
+            description: "Signs in to an HTTP MCP server that refuses without one (HTTP 401; list_mcp_servers says `needs sign-in`), with the OAuth flow MCP specifies. Returns the link the user approves in their browser; Artisan then keeps the token for every harness and new threads get the server's tools. Needs the Editor open. Don't open settings for this.",
             properties: || json!({ "name": { "type": "string" }, "navigate_user": navigate_user_schema() }),
             required: &["name"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "skills_list",
+            name: "list_skills",
             description: "The skills Artisan manages and which are on.",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "skill_set_enabled",
+            name: "set_skill_enabled",
             description: "Turns a managed skill on or off in every harness.",
             properties: || json!({ "id": { "type": "string" }, "enabled": { "type": "boolean" } }),
             required: &["id", "enabled"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "skill_install",
+            name: "install_skill",
             description: "Installs a skill folder (with a SKILL.md) for every harness: Artisan copies it into its own store and keeps it in each harness. Use this instead of writing into a harness's skills folder. `replace` updates a skill of the same name and asks the user first.",
             properties: || {
                 json!({
@@ -496,38 +529,43 @@ fn extension_tools() -> Vec<Tool> {
                 })
             },
             required: &["path"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "global_prompt_get",
+            name: "get_global_prompt",
             description: "The global prompt every harness reads.",
             properties: || json!({}),
             required: &[],
+            output_schema: None,
             read_only: true,
             destructive: false,
         },
         Tool {
-            name: "global_prompt_set",
+            name: "set_global_prompt",
             description: "Replaces the global prompt every harness reads. Asks the user first.",
             properties: || json!({ "text": { "type": "string" }, "navigate_user": navigate_user_schema() }),
             required: &["text"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "harness_set_default_model",
+            name: "set_harness_default_model",
             description: "The model new threads on a harness start with.",
             properties: || json!({ "harness": { "type": "string", "description": HARNESS }, "model": { "type": "string" }, "navigate_user": navigate_user_schema() }),
             required: &["harness", "model"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
         Tool {
-            name: "harness_install",
-            description: "Installs or updates a harness. Asks the user first; the install continues in the background (watch harnesses).",
+            name: "install_harness",
+            description: "Installs or updates a harness. Asks the user first; the install continues in the background (watch list_harnesses).",
             properties: || json!({ "harness": { "type": "string", "description": HARNESS }, "navigate_user": navigate_user_schema() }),
             required: &["harness"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
@@ -542,6 +580,7 @@ fn navigation_tools() -> Vec<Tool> {
             description: "Opens a thread in the user's Editor.",
             properties: || json!({ "thread": { "type": "string" } }),
             required: &["thread"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
@@ -550,6 +589,7 @@ fn navigation_tools() -> Vec<Tool> {
             description: "Opens a settings page in the user's Editor: general, hosts, about, threads, global-prompt, extensions, engines, or engines/<harness> for one harness.",
             properties: || json!({ "page": { "type": "string" } }),
             required: &["page"],
+            output_schema: None,
             read_only: false,
             destructive: false,
         },
@@ -588,10 +628,10 @@ fn setting_page(key: &str) -> &'static str {
     }
 }
 
-/// What `mcp_servers_list` says about a server's sign-in.
+/// What `list_mcp_servers` says about a server's sign-in.
 const fn auth_note(status: Option<&artisan_api::McpAuthStatus>) -> &'static str {
     match status {
-        Some(artisan_api::McpAuthStatus::NeedsSignIn) => " · needs sign-in (mcp_server_sign_in)",
+        Some(artisan_api::McpAuthStatus::NeedsSignIn) => " · needs sign-in (sign_in_mcp_server)",
         Some(artisan_api::McpAuthStatus::SignedIn) => " · signed in",
         Some(artisan_api::McpAuthStatus::NeedsToken) => {
             " · refused without a token: it needs an Authorization header, which the user adds on its card"
@@ -622,7 +662,7 @@ fn harness(name: &str) -> Result<EngineId> {
         .find(|engine| engine.as_str() == name.to_ascii_lowercase())
         .ok_or_else(|| {
             Refused(format!(
-                "There is no harness {name}; harnesses are {HARNESS}."
+                "There is no harness {name}; available harnesses are {HARNESS}."
             ))
             .into()
         })
@@ -694,6 +734,7 @@ async fn read_thread(hub: &Hub, thread: &ThreadId, read: Read) -> Result<String>
     let options = Options {
         whole: read.whole,
         output: read.include_output,
+        unbounded: false,
     };
     let (items, older) = if let Some(id) = &read.item {
         let item = store
@@ -785,7 +826,7 @@ async fn approve(hub: &Hub, caller: &ThreadId, tool: &str, description: String) 
 pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) -> Result<String> {
     let store = hub.store();
     match name {
-        "threads_search" => {
+        "search_threads" => {
             #[derive(Deserialize)]
             struct Search {
                 query: String,
@@ -812,7 +853,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             Ok(format::search(&page, offset))
         }
-        "threads_grep" => {
+        "grep_threads" => {
             #[derive(Deserialize)]
             struct Grep {
                 pattern: String,
@@ -845,7 +886,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             Ok(format::grep(&page))
         }
-        "thread_read" => {
+        "read_thread" => {
             let read: Read = args(arguments)?;
             // A hit's item names its thread.
             let thread = match (&read.thread, &read.item) {
@@ -859,7 +900,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             };
             read_thread(hub, &thread, read).await
         }
-        "threads_touching" => {
+        "find_threads_touching_files" => {
             #[derive(Deserialize)]
             struct Touching {
                 path: String,
@@ -882,7 +923,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             Ok(format::touches(&touches))
         }
-        "thread_list" => {
+        "list_threads" => {
             #[derive(Deserialize)]
             struct List {
                 project: Option<String>,
@@ -924,7 +965,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .collect();
             Ok(format::threads(hub, threads))
         }
-        "thread_create" => {
+        "create_thread" => {
             #[derive(Deserialize)]
             struct Create {
                 title: String,
@@ -964,7 +1005,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             format::warnings(&mut out, &warnings);
             Ok(out)
         }
-        "thread_send" => {
+        "message_thread" => {
             #[derive(Deserialize)]
             struct Send {
                 thread: String,
@@ -992,7 +1033,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 },
             )
         }
-        "thread_cancel" => {
+        "cancel_thread" => {
             #[derive(Deserialize)]
             struct Cancel {
                 thread: String,
@@ -1011,7 +1052,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             hub.cancel(&thread).await?;
             Ok(format!("Stopped {}", format::thread(hub, &target)))
         }
-        "thread_update" => {
+        "update_thread" => {
             #[derive(Deserialize)]
             struct Update {
                 thread: Option<String>,
@@ -1060,7 +1101,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             Ok(format!("Now {}", format::thread(hub, &current)))
         }
-        "requests_list" => {
+        "list_requests" => {
             let mut requests = Vec::new();
             for pending in store.items_awaiting_user().await? {
                 let Some(item) = store.item(&pending.id).await? else {
@@ -1093,7 +1134,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             Ok(requests.join("\n"))
         }
-        "harnesses" => {
+        "list_harnesses" => {
             let mut out = String::new();
             for engine in EngineId::ALL {
                 let status = hub.engines().status(engine);
@@ -1115,6 +1156,11 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                         .map(|model| format!(" · new threads start on `{model}`"))
                         .unwrap_or_default(),
                 )?;
+                writeln!(
+                    out,
+                    "{}\n",
+                    status.discovery.description(artisan_api::now())
+                )?;
                 if !installed || status.models.is_empty() {
                     continue;
                 }
@@ -1122,7 +1168,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             Ok(out.trim_end().to_owned())
         }
-        "agent_spawn" => {
+        "spawn_agent" => {
             #[derive(Deserialize)]
             struct Spawn {
                 task: String,
@@ -1162,11 +1208,11 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             out.push_str(if spawn_background {
                 "\nIts result arrives as a message when it finishes."
             } else {
-                "\nWait for it with agent_wait."
+                "\nWait for it with wait_for_agents."
             });
             Ok(out)
         }
-        "agent_wait" => {
+        "wait_for_agents" => {
             #[derive(Deserialize)]
             struct Wait {
                 agents: Vec<String>,
@@ -1185,7 +1231,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .await?;
             Ok(format::agents(&agents))
         }
-        "agent_message" => {
+        "message_agent" => {
             #[derive(Deserialize)]
             struct Message {
                 agent: String,
@@ -1197,7 +1243,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .await?;
             Ok(format!("Sent to {}", format::agent(&info)))
         }
-        "agent_read" => {
+        "read_agent" => {
             let read: Read = args(arguments)?;
             let agent = read
                 .agent
@@ -1206,7 +1252,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let info = hub.agent_status(caller, &agent).await?;
             read_thread(hub, &info.thread, read).await
         }
-        "agent_cancel" => {
+        "cancel_agent" => {
             #[derive(Deserialize)]
             struct Cancel {
                 agent: String,
@@ -1215,14 +1261,14 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let info = hub.cancel_agent(caller, &cancel.agent).await?;
             Ok(format::agent(&info))
         }
-        "agent_list" => {
+        "list_agents" => {
             let agents = hub.agents(caller).await?;
             if agents.is_empty() {
                 return Ok("This thread has started no agents.".to_owned());
             }
             Ok(format::agents(&agents))
         }
-        "settings_list" => {
+        "list_settings" => {
             let mut editor_open = true;
             let mut out = String::from("| Setting | Key | Value | Kept by |\n|---|---|---|---|\n");
             for decl in artisan_api::SETTINGS {
@@ -1249,6 +1295,10 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 };
                 let allowed = match &decl.kind {
                     artisan_api::SettingKind::Bool => "true or false".to_owned(),
+                    artisan_api::SettingKind::ModelCustomizations => {
+                        "versioned model customization object: {version: 1, rules: [...]}"
+                            .to_owned()
+                    }
                     artisan_api::SettingKind::Text { hint } => (*hint).to_owned(),
                     artisan_api::SettingKind::Choice { values } => values
                         .iter()
@@ -1276,7 +1326,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             }
             Ok(out)
         }
-        "settings_get" => {
+        "get_setting" => {
             #[derive(Deserialize)]
             struct Get {
                 key: String,
@@ -1284,7 +1334,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let get: Get = args(arguments)?;
             let decl = setting_decl(&get.key).ok_or_else(|| {
                 Refused(format!(
-                    "There is no setting {}; see settings_list.",
+                    "There is no setting {}; see list_settings.",
                     get.key
                 ))
             })?;
@@ -1300,7 +1350,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             };
             Ok(format!("{} (`{}`) is `{value}`.", decl.label, decl.key))
         }
-        "settings_set" => {
+        "set_setting" => {
             #[derive(Deserialize)]
             struct Set {
                 key: String,
@@ -1311,7 +1361,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let set: Set = args(arguments)?;
             let decl = setting_decl(&set.key).ok_or_else(|| {
                 Refused(format!(
-                    "There is no setting {}; see settings_list.",
+                    "There is no setting {}; see list_settings.",
                     set.key
                 ))
             })?;
@@ -1345,7 +1395,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 decl.label, set.key, set.value
             ))
         }
-        "hosts_list" => {
+        "list_hosts" => {
             let hosts = hub.call_editor(EditorCall::HostsList).await?;
             let lines: Vec<String> = hosts
                 .as_array()
@@ -1380,7 +1430,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 lines.join("\n")
             })
         }
-        "host_add" => {
+        "add_host" => {
             #[derive(Deserialize)]
             struct Add {
                 kind: String,
@@ -1414,7 +1464,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                     .unwrap_or_default(),
             ))
         }
-        "host_remove" => {
+        "remove_host" => {
             #[derive(Deserialize)]
             struct Remove {
                 host: String,
@@ -1433,7 +1483,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             .await?;
             Ok(format!("Unpaired {}.", remove.host))
         }
-        "host_switch" => {
+        "switch_host" => {
             #[derive(Deserialize)]
             struct Switch {
                 host: String,
@@ -1445,7 +1495,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             .await?;
             Ok(format!("The Editor is on {} now.", switch.host))
         }
-        "projects_list" => {
+        "list_projects" => {
             let state = store.state().await?;
             if state.projects.is_empty() {
                 return Ok("No projects.".to_owned());
@@ -1459,7 +1509,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .collect::<Vec<_>>()
                 .join("\n"))
         }
-        "project_add" => {
+        "add_project" => {
             #[derive(Deserialize)]
             struct Add {
                 path: String,
@@ -1481,7 +1531,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 project.name, project.path, project.id
             ))
         }
-        "project_remove" => {
+        "remove_project" => {
             #[derive(Deserialize)]
             struct Remove {
                 project: String,
@@ -1505,7 +1555,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             store.remove_project(&id).await?;
             Ok(format!("Removed {}.", project.name))
         }
-        "mcp_servers_list" => {
+        "list_mcp_servers" => {
             let servers = mcp_servers(hub).await?;
             if servers.is_empty() {
                 return Ok("No MCP servers besides Artisan's own.".to_owned());
@@ -1534,7 +1584,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .collect::<Vec<_>>()
                 .join("\n"))
         }
-        "mcp_server_add" => {
+        "add_mcp_server" => {
             #[derive(Deserialize)]
             struct Add {
                 name: String,
@@ -1592,7 +1642,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             hub.check_mcp_auth().await;
             let sign_in = match hub.mcp_auth().await?.get(&added) {
                 Some(artisan_api::McpAuthStatus::NeedsSignIn) => {
-                    " It needs a sign-in first: mcp_server_sign_in."
+                    " It needs a sign-in first: sign_in_mcp_server."
                 }
                 Some(artisan_api::McpAuthStatus::NeedsToken) => {
                     " It refuses without a token: the user adds an Authorization header on its card."
@@ -1605,7 +1655,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 servers.len()
             ))
         }
-        "mcp_server_remove" => {
+        "remove_mcp_server" => {
             #[derive(Deserialize)]
             struct Remove {
                 name: String,
@@ -1627,7 +1677,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             hub.check_mcp_auth().await;
             Ok(format!("Removed {}.", remove.name))
         }
-        "mcp_server_sign_in" => {
+        "sign_in_mcp_server" => {
             #[derive(Deserialize)]
             struct SignIn {
                 name: String,
@@ -1657,7 +1707,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 )
             })
         }
-        "skills_list" => {
+        "list_skills" => {
             let skills = hub.skill_catalog().await?;
             if skills.is_empty() {
                 return Ok("No skills.".to_owned());
@@ -1680,7 +1730,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .collect::<Vec<_>>()
                 .join("\n"))
         }
-        "skill_set_enabled" => {
+        "set_skill_enabled" => {
             #[derive(Deserialize)]
             struct Enable {
                 id: String,
@@ -1694,7 +1744,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 if enable.enabled { "on" } else { "off" }
             ))
         }
-        "skill_install" => {
+        "install_skill" => {
             #[derive(Deserialize)]
             struct Install {
                 path: String,
@@ -1718,7 +1768,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 "Installed {skill} for every harness. New threads get it."
             ))
         }
-        "global_prompt_get" => {
+        "get_global_prompt" => {
             let prompt = hub.global_prompt().await?;
             Ok(if prompt.text.trim().is_empty() {
                 "The global prompt is empty.".to_owned()
@@ -1726,7 +1776,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 prompt.text
             })
         }
-        "global_prompt_set" => {
+        "set_global_prompt" => {
             #[derive(Deserialize)]
             struct Set {
                 text: String,
@@ -1755,7 +1805,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let note = navigate_if_asked(hub, navigate_user, "global-prompt").await;
             Ok(format!("Saved version {}.{note}", saved.version))
         }
-        "harness_set_default_model" => {
+        "set_harness_default_model" => {
             #[derive(Deserialize)]
             struct Default {
                 harness: String,
@@ -1774,7 +1824,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 .cloned()
                 .ok_or_else(|| {
                     Refused(format!(
-                        "{} has no model {}; see harnesses.",
+                        "{} has no model {}; see list_models.",
                         engine.display_name(),
                         default.model
                     ))
@@ -1788,7 +1838,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 default.model
             ))
         }
-        "harness_install" => {
+        "install_harness" => {
             #[derive(Deserialize)]
             struct Install {
                 harness: String,
@@ -1823,7 +1873,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
             let page = format!("engines/{}", engine.as_str());
             let note = navigate_if_asked(hub, install.navigate_user, &page).await;
             Ok(format!(
-                "Installing {}; harnesses shows when it's ready.{note}",
+                "Installing {}; list_harnesses shows when it's ready.{note}",
                 engine.display_name()
             ))
         }

@@ -72,6 +72,7 @@ fn tool(
         description,
         properties,
         required,
+        output_schema: None,
         read_only,
         destructive: !read_only,
     }

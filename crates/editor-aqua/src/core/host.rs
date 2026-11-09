@@ -912,6 +912,11 @@ impl HostData {
         self.repositories.get(project)?.value.as_ref()
     }
 
+    #[must_use]
+    pub fn repository_checked(&self, project: &ProjectId) -> bool {
+        self.repositories.contains_key(project)
+    }
+
     pub fn load_repository(&mut self, project: &ProjectId, refresh: bool) {
         if !self.projects.contains_key(project)
             || !self.is_live()

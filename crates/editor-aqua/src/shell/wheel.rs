@@ -5,12 +5,14 @@ use aqua_core::{InputEvent, NodeId, Point};
 
 pub const THREADS: &str = "sidebar-threads";
 pub const MODEL_MENU: &str = "composer-model-scroll";
+pub const PROJECT_TREE: &str = "artisan-project-tree";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
     Transcript,
     Threads,
     Model,
+    Tree,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,7 +46,7 @@ pub struct WheelGlides {
     transcript: WheelGlide,
     threads: WheelGlide,
     model: WheelGlide,
-    cadence: bool,
+    tree: WheelGlide,
 }
 
 pub fn key_hash(key: &str) -> aqua_ui::tree::KeyHash {
@@ -72,14 +74,43 @@ pub fn keyed_node(ui: &UiApp, key: &str) -> Option<NodeId> {
     ui.tree().sole_node_with_key(key_hash(key))
 }
 
+#[must_use]
+pub fn hidden_edges(ui: &UiApp, key: &str) -> (bool, bool) {
+    let Some(node) = keyed_node(ui, key) else {
+        return (false, false);
+    };
+    let tree = ui.tree();
+    match (tree.scroll_offset(node), tree.rect(node), tree.content_size(node)) {
+        (Some(offset), Some(rect), Some(content)) => {
+            (offset.y > 1.0, offset.y + rect.h < content.h - 1.0)
+        }
+        _ => (false, false),
+    }
+}
+
+#[must_use]
+pub fn viewport_height(ui: &UiApp, key: &str) -> Option<f32> {
+    keyed_node(ui, key)
+        .and_then(|node| ui.tree().rect(node))
+        .map(|rect| rect.h)
+}
+
+#[must_use]
+pub fn kept_offset(ui: &UiApp, key: &str) -> Point {
+    keyed_node(ui, key)
+        .and_then(|node| ui.tree().scroll_offset(node))
+        .unwrap_or(Point::ZERO)
+}
+
 impl Surface {
-    const ALL: [Self; 3] = [Self::Model, Self::Threads, Self::Transcript];
+    const ALL: [Self; 4] = [Self::Model, Self::Tree, Self::Threads, Self::Transcript];
 
     fn node(self, ui: &UiApp) -> Option<NodeId> {
         match self {
             Self::Transcript => crate::shell::wheel::keyed_node(ui, "conversation-transcript"),
             Self::Threads => keyed_node(ui, THREADS),
             Self::Model => keyed_node(ui, MODEL_MENU),
+            Self::Tree => keyed_node(ui, PROJECT_TREE),
         }
     }
 
@@ -105,7 +136,7 @@ impl Surface {
                 metrics.x,
             ),
             Self::Threads => ui.scroll_collection_to(THREADS, Point::new(metrics.x, offset)),
-            Self::Model => Self::Model
+            Self::Model | Self::Tree => self
                 .node(ui)
                 .is_some_and(|node| ui.tree_mut().scroll_to(node, Point::new(metrics.x, offset))),
         }
@@ -129,6 +160,7 @@ impl WheelGlides {
             Surface::Transcript => &mut self.transcript,
             Surface::Threads => &mut self.threads,
             Surface::Model => &mut self.model,
+            Surface::Tree => &mut self.tree,
         }
     }
 
@@ -190,13 +222,6 @@ impl WheelGlides {
     }
 
     pub fn active(&self) -> bool {
-        self.transcript.active() || self.threads.active() || self.model.active()
-    }
-
-    pub fn cadence_change(&mut self, gliding: bool) -> Option<bool> {
-        (self.cadence != gliding).then(|| {
-            self.cadence = gliding;
-            gliding
-        })
+        self.transcript.active() || self.threads.active() || self.model.active() || self.tree.active()
     }
 }

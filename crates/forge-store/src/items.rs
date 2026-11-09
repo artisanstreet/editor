@@ -11,9 +11,7 @@ use artisan_api::{
 };
 use rusqlite::{OptionalExtension as _, params};
 
-/// What accepting a message changes on its thread besides activity. The run
-/// layer decides it; the store applies it in the input's own commit.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Acceptance {
     /// Becomes the thread's title when it has none.
     pub title: Option<String>,

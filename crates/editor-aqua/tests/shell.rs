@@ -2,6 +2,8 @@
 mod dialogs;
 #[path = "shell/gating.rs"]
 mod gating;
+#[path = "shell/refresh.rs"]
+mod refresh;
 #[path = "shell/host.rs"]
 mod host;
 #[path = "shell/lifetime.rs"]

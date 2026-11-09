@@ -1,4 +1,4 @@
-use crate::shell::layout::{CONTROL_WIDTH, RAIL_WIDTH, TITLEBAR_HEIGHT};
+use crate::shell::layout::{CONTROL_GLYPH, CONTROL_WIDTH, TITLEBAR_HEIGHT};
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua::prelude::{CaptionControl, CaptionRegion, DragRegions, ObservedWindowState};
 use aqua_core::{GpuiBackground, Insets};
@@ -14,7 +14,8 @@ use std::{
     rc::Rc,
 };
 
-const LEAD: &str = "artisan-titlebar-drag-lead";
+pub const LEAD: &str = "artisan-titlebar-drag-lead";
+pub const WORDMARK: &str = "artisan-sidebar-wordmark";
 const DRAG: &str = "artisan-titlebar-drag";
 const METER: &str = "artisan-titlebar-meter";
 const MIN: &str = "artisan-desktop-titlebar-minimize";
@@ -572,10 +573,10 @@ impl Titlebar {
             .width(Length::Pct(100.0))
             .height(TITLEBAR_HEIGHT)
             .style(Style::new().flex_shrink(0.0).align(AlignItems::CENTER))
-            .child(drag(DRAG, true))
+            .child(drag(DRAG))
             .child(self.controls(theme, window))
             .build();
-        self.measured(content, false, false)
+        self.measured(content, false, false, TITLEBAR_HEIGHT)
     }
 
     pub fn workspace(
@@ -609,7 +610,7 @@ impl Titlebar {
         for child in header {
             inner = inner.child(child);
         }
-        inner = inner.child(drag(DRAG, true));
+        inner = inner.child(drag(DRAG));
         let content = UiBox::new()
             .layout("row")
             .height(Length::Pct(100.0))
@@ -625,16 +626,15 @@ impl Titlebar {
         let mut root = UiBox::new()
             .layout("row")
             .width(Length::Pct(100.0))
-            .height(TITLEBAR_HEIGHT)
+            .height(crate::frame::strip::BAR_HEIGHT)
             .style(Style::new().flex_shrink(0.0).align(AlignItems::CENTER))
-            .child(drag(LEAD, false))
             .child(content)
             .child(self.controls(theme, window));
         let has_meter = meter.is_some();
         if let Some(meter) = meter {
             root = root.child(
                 UiBox::new()
-                    .height(TITLEBAR_HEIGHT)
+                    .height(crate::frame::strip::BAR_HEIGHT)
                     .style(
                         Style::new()
                             .absolute_at(None, Some(0.0), Some(meter_right), None)
@@ -663,14 +663,15 @@ impl Titlebar {
             root.build().debug_selector("artisan-desktop-titlebar"),
             true,
             has_meter,
+            crate::frame::strip::BAR_HEIGHT,
         )
     }
 
-    fn measured(&self, content: Element, lead: bool, meter: bool) -> Element {
+    fn measured(&self, content: Element, lead: bool, meter: bool, height: f32) -> Element {
         let regions = self.regions.clone();
         Canvas::new()
             .width(Length::Pct(100.0))
-            .height(TITLEBAR_HEIGHT)
+            .height(height)
             .style(Style::new().flex_shrink(0.0))
             .on_prepaint(move |tree, _| {
                 let bounds = |selector: &str| {
@@ -696,6 +697,7 @@ impl Titlebar {
                     result.draggable.push(bounds(DRAG)?);
                     if lead {
                         result.draggable.push(bounds(LEAD)?);
+                        result.no_drag.push(bounds(WORDMARK)?);
                     }
                     if meter {
                         result.no_drag.push(bounds(METER)?);
@@ -762,12 +764,12 @@ impl Titlebar {
         let glyph = match control {
             CaptionControl::Minimize => crate::ui::asset::source_asset_glyph(
                 editor_assets::AssetId::TABLER_MINUS,
-                16.0,
+                CONTROL_GLYPH,
                 foreground.to_reference_paint(),
             ),
             CaptionControl::Close => crate::ui::asset::source_asset_glyph(
                 editor_assets::AssetId::TABLER_X,
-                16.0,
+                CONTROL_GLYPH,
                 foreground.to_reference_paint(),
             ),
             CaptionControl::Maximize => maximize(theme, maximized, stroke),
@@ -833,19 +835,11 @@ impl Titlebar {
     }
 }
 
-fn drag(selector: &'static str, grow: bool) -> Element {
+fn drag(selector: &'static str) -> Element {
     UiBox::new()
-        .width(if grow {
-            Length::Px(0.0)
-        } else {
-            Length::Px(RAIL_WIDTH)
-        })
+        .width(Length::Px(0.0))
         .height(Length::Pct(100.0))
-        .style(if grow {
-            Style::new().flex_grow(1.0)
-        } else {
-            Style::new().flex_shrink(0.0)
-        })
+        .style(Style::new().flex_grow(1.0))
         .build()
         .debug_selector(selector)
 }

@@ -323,6 +323,10 @@ pub fn glass_layers(theme: &ArtisanTheme, strength: GlassStrength, radius: f32) 
         .build()
 }
 
+pub const KEY_RADIUS: f32 = 6.0;
+pub const COMPOSER_PADDING: f32 = 8.0;
+pub const COMPOSER_RADIUS: f32 = KEY_RADIUS + COMPOSER_PADDING;
+
 pub struct ComposerFrame {
     theme: ArtisanTheme,
     content: Element,
@@ -345,7 +349,7 @@ impl ComposerFrame {
 
     pub fn build(self) -> Element {
         use aqua_ui::style::{Axis, Length};
-        let radius = 18.0;
+        let radius = COMPOSER_RADIUS;
         let shadows = if self.nested {
             glass_rims(&self.theme)
         } else {
@@ -353,12 +357,11 @@ impl ComposerFrame {
         };
         UiBox::new()
             .width(Length::Pct(100.0))
-            .padding(8.0)
+            .padding(COMPOSER_PADDING)
             .radius(radius)
             .style(
                 Style::new()
                     .axis(Axis::Column)
-                    .min_height(Length::Px(112.0))
                     .gpui_shadows(
                         shadows
                             .into_iter()

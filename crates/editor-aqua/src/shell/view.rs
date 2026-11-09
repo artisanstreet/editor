@@ -1,20 +1,15 @@
-use crate::core::Screen;
-use crate::shell::layout::{self, CARD_RADIUS, RAIL_WIDTH, Size};
-use crate::ui::theme::{ArtisanTheme, Elevation, RadiusStep, RadiusTokens};
+use crate::shell::layout::{self, CARD_RADIUS, Size};
+use crate::ui::theme::{ArtisanTheme, Elevation};
 use aqua_core::{CornerRadii, Insets};
 use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::{
     AlignItems, JustifyContent,
-    element::{Box as UiBox, Element, Scroll, Text},
+    element::{Box as UiBox, Element, Text},
     style::{Length, Style},
 };
 
 pub struct WorkspaceElements {
-    pub titlebar: Element,
-    pub sidebar: Element,
-    pub center: Element,
-    pub inspector: Option<Element>,
-    pub notices: Vec<Element>,
+    pub body: Element,
     pub settings_dialog: Option<Element>,
     pub palette: Option<Element>,
     pub resource_preview: Option<Element>,
@@ -201,118 +196,7 @@ pub fn failure_notice(theme: &ArtisanTheme, text: String, dismiss: impl Fn() + '
         .build()
 }
 
-pub fn workspace(
-    workspace_key: u64,
-    theme: &ArtisanTheme,
-    viewport: Size,
-    screen: &Screen,
-    show_sidebar: bool,
-    show_inspector: bool,
-    has_meter: bool,
-    elements: WorkspaceElements,
-) -> Element {
-    let dimensions = layout::workspace_layout(
-        viewport.width,
-        screen,
-        show_sidebar,
-        show_inspector,
-        has_meter,
-    );
-    let line = theme.colors.line.to_paint();
-    let face = UiBox::new()
-        .fill(theme.colors.background.to_paint())
-        .style(
-            Style::new()
-                .absolute_at(Some(RAIL_WIDTH), Some(0.0), Some(0.0), Some(0.0))
-                .corners(CornerRadii {
-                    top_left: CARD_RADIUS,
-                    ..CornerRadii::default()
-                })
-                .border_edges(
-                    Insets {
-                        top: 1.0,
-                        left: 1.0,
-                        ..Insets::default()
-                    },
-                    line,
-                )
-                .shadows(
-                    theme
-                        .elevation
-                        .drops(Elevation::Raised)
-                        .iter()
-                        .copied()
-                        .map(Into::into)
-                        .collect(),
-                ),
-        )
-        .build();
-    let sidebar = UiBox::new()
-        .width(dimensions.frame_width)
-        .height(Length::Pct(100.0))
-        .clip(true)
-        .style(Style::new().flex_shrink(0.0))
-        .child(elements.sidebar)
-        .build();
-    let mut column_style = Style::new()
-        .flex_grow(1.0)
-        .min_width(Length::Px(0.0))
-        .min_height(Length::Px(0.0));
-    if dimensions.sidebar.is_some() {
-        column_style = column_style.border_edges(
-            Insets {
-                left: 1.0,
-                ..Insets::default()
-            },
-            line,
-        );
-    }
-    let center = UiBox::new()
-        .layout("column")
-        .height(Length::Pct(100.0))
-        .style(column_style)
-        .children(elements.notices)
-        .child(
-            UiBox::new()
-                .style(Style::new().flex_grow(1.0).min_height(Length::Px(0.0)))
-                .child(
-                    UiBox::new()
-                        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-                        .child(elements.center)
-                        .build(),
-                )
-                .build(),
-        )
-        .build();
-    let mut content = UiBox::new()
-        .layout("row")
-        .style(
-            Style::new()
-                .flex_grow(1.0)
-                .min_width(Length::Px(0.0))
-                .min_height(Length::Px(0.0)),
-        )
-        .child(face)
-        .child(sidebar)
-        .child(center);
-    if let Some(width) = dimensions.inspector {
-        let mut inspector = UiBox::new().width(width).height(Length::Pct(100.0)).style(
-            Style::new()
-                .flex_shrink(0.0)
-                .min_height(Length::Px(0.0))
-                .border_edges(
-                    Insets {
-                        left: 1.0,
-                        ..Insets::default()
-                    },
-                    line,
-                ),
-        );
-        if let Some(child) = elements.inspector {
-            inspector = inspector.child(child);
-        }
-        content = content.child(inspector.build());
-    }
+pub fn workspace(workspace_key: u64, theme: &ArtisanTheme, elements: WorkspaceElements) -> Element {
     let mut root = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -323,8 +207,7 @@ pub fn workspace(
                 .text_style(base_text(theme, 14.0))
                 .gpui_text_color(theme.colors.text.to_reference_paint()),
         )
-        .child(elements.titlebar)
-        .child(content.build());
+        .child(elements.body);
     for overlay in [
         elements.settings_dialog,
         elements.palette,
@@ -340,66 +223,6 @@ pub fn workspace(
     root.build()
         .with_key(workspace_key)
         .debug_selector("workspace-root")
-}
-
-pub fn entry(
-    theme: &ArtisanTheme,
-    viewport: Size,
-    titlebar: Element,
-    title: &str,
-    body: Element,
-) -> Element {
-    let dimensions = layout::entry_layout(viewport);
-    let heading = Text::new(title.to_owned())
-        .text_style(base_text(theme, 20.0))
-        .gpui_color(theme.colors.text.to_reference_paint())
-        .build();
-    let column = UiBox::new()
-        .layout("column")
-        .gap(16.0)
-        .width(Length::Pct(100.0))
-        .child(heading)
-        .child(body)
-        .build();
-    let card = Scroll::new()
-        .width(dimensions.width)
-        .style(Style::new().max_height(Length::Px(dimensions.max_height)))
-        .child(
-            UiBox::new()
-                .layout("column")
-                .padding(24.0)
-                .width(Length::Pct(100.0))
-                .fill(theme.colors.background.to_paint())
-                .border((1.0, theme.colors.line.to_paint()))
-                .radius(RadiusTokens::value(RadiusStep::X2l))
-                .child(column)
-                .build(),
-        )
-        .build();
-    let center = UiBox::new()
-        .width(Length::Pct(100.0))
-        .style(
-            Style::new()
-                .flex_grow(1.0)
-                .min_height(Length::Px(0.0))
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::CENTER),
-        )
-        .child(card)
-        .build();
-    UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .fill(theme.colors.frame.to_paint())
-        .style(
-            Style::new()
-                .text_style(base_text(theme, 14.0))
-                .gpui_text_color(theme.colors.text.to_reference_paint()),
-        )
-        .child(titlebar)
-        .child(center)
-        .build()
 }
 
 pub fn palette_dialog(
@@ -659,6 +482,34 @@ pub fn centered_body(content: Element) -> Element {
         .build()
 }
 
+pub fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
+    let radius = crate::frame::card::RADIUS - 2.0;
+    let (top, bottom, corners) = match edge {
+        crate::ui::scroll_edge::Edge::Top => (
+            Some(2.0),
+            None,
+            CornerRadii {
+                top_left: radius,
+                top_right: radius,
+                ..CornerRadii::default()
+            },
+        ),
+        crate::ui::scroll_edge::Edge::Bottom => (
+            None,
+            Some(2.0),
+            CornerRadii {
+                bottom_left: radius,
+                bottom_right: radius,
+                ..CornerRadii::default()
+            },
+        ),
+    };
+    Style::new()
+        .width(Length::Auto)
+        .absolute_at(Some(2.0), top, Some(2.0), bottom)
+        .corners(corners)
+}
+
 pub fn conversation_load_error(theme: &ArtisanTheme, text: String) -> Element {
     UiBox::new()
         .width(Length::Pct(100.0))
@@ -696,9 +547,17 @@ pub fn new_conversation(
     theme: &ArtisanTheme,
     parts: ComposerParts,
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    reduced_motion: bool,
 ) -> anyhow::Result<Element> {
+    let artwork = crate::ui::sky::artwork(theme, composer_measurement.clone(), reduced_motion);
     let card = measured_composer(workspace, core, theme, parts, composer_measurement, None)?;
-    Ok(centered_conversation(card))
+    Ok(UiBox::new()
+        .width(Length::Pct(100.0))
+        .height(Length::Pct(100.0))
+        .clip(true)
+        .child(artwork)
+        .child(centered_conversation(card))
+        .build())
 }
 
 pub fn centered_conversation(content: Element) -> Element {

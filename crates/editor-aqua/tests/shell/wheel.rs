@@ -187,3 +187,46 @@ fn a_precise_wheel_gesture_cancels_the_glide_instead_of_queueing_it() {
     assert_eq!(glides.offer(&mut app, &precise), None);
     assert!(!glides.active());
 }
+
+fn model_list(scroll: f32) -> aqua_ui::element::Element {
+    let mut rows = aqua_ui::element::Box::new().layout("column").gap(3.0);
+    for _ in 0..30 {
+        rows = rows.child(
+            aqua_ui::element::Box::new()
+                .style(
+                    aqua_ui::style::Style::new()
+                        .height(aqua_ui::style::px(36.0))
+                        .flex_shrink(0.0),
+                )
+                .build(),
+        );
+    }
+    aqua_ui::element::Scroll::new()
+        .height(192.0)
+        .width(200.0)
+        .offset(Point::new(0.0, scroll))
+        .style(aqua_ui::style::Style::new().column())
+        .child(rows.build())
+        .build()
+        .with_key(editor_aqua::shell::wheel::MODEL_MENU)
+}
+
+#[test]
+fn a_model_list_keeps_its_wheel_position_when_the_menu_rebuilds() {
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.set_viewport(200.0, 192.0, 1.0);
+    app.mount(|_| model_list(0.0)).unwrap();
+    app.build_frame().unwrap();
+    let mut glides = WheelGlides::default();
+
+    assert_eq!(glides.offer(&mut app, &notch(3.0)), Some(Surface::Model));
+    glide_to_rest(&mut app, &mut glides);
+
+    let rested = editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;
+    assert!(rested > 40.0, "the notch moved the list, got {rested}");
+
+    app.refresh_subtree(editor_aqua::shell::wheel::MODEL_MENU, model_list(rested)).unwrap();
+    app.build_frame().unwrap();
+    let kept = editor_aqua::shell::wheel::kept_offset(&app, editor_aqua::shell::wheel::MODEL_MENU).y;
+    assert_eq!(kept, rested);
+}

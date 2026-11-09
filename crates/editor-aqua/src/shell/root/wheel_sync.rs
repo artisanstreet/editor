@@ -48,11 +48,6 @@ impl RootViews {
                 workspace.sidebar.page_at_viewport(&mut shell.core, true);
             }
         }
-        if let Some(gliding) = self.wheel.cadence_change(advance.active) {
-            let _ = ctx.request_window(aqua::prelude::WindowRequest::SetGlideCadence(
-                window, gliding,
-            ));
-        }
         if advance.active {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }

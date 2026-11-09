@@ -225,7 +225,7 @@ impl Navigator {
             .width(40.0)
             .height(height)
             .clip(true)
-            .style(Style::new().align(AlignItems::END).padding_insets(Insets {
+            .style(Style::new().align(AlignItems::START).padding_insets(Insets {
                 top: 8.0,
                 right: 8.0,
                 bottom: 8.0,
@@ -258,7 +258,7 @@ impl Navigator {
                     Style::new()
                         .flex_shrink(0.0)
                         .align(AlignItems::CENTER)
-                        .justify(JustifyContent::END),
+                        .justify(JustifyContent::START),
                 )
                 .child(tick)
                 .on_activate(move || callback(Action::Jump(position)))
@@ -360,7 +360,7 @@ pub fn menu(
         .width(320.0)
         .layout("column")
         .opacity(progress)
-        .style(Style::new().transform(Transform2D::translate(-4.0 * (1.0 - progress), 0.0)))
+        .style(Style::new().transform(Transform2D::translate(4.0 * (1.0 - progress), 0.0)))
         .child(glass_navigator_card(&theme, content))
         .build()
 }

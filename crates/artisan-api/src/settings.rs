@@ -17,6 +17,7 @@ pub enum SettingOwner {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SettingKind {
     Bool,
+    ModelCustomizations,
     /// One of these values (numbers or `null`).
     Choice {
         values: &'static [Option<u32>],
@@ -53,6 +54,7 @@ impl SettingDecl {
     /// The value's type or choice doesn't fit the declaration.
     pub fn check(&self, value: &Value) -> Result<(), String> {
         match self.kind {
+            SettingKind::ModelCustomizations => crate::model_customizations(value).map(|_| ()),
             SettingKind::Bool if value.is_boolean() => Ok(()),
             SettingKind::Bool => Err(format!("{} takes true or false.", self.key)),
             SettingKind::Text { .. } if value.is_string() => Ok(()),
@@ -82,7 +84,27 @@ impl SettingDecl {
 
 pub const THREAD_RETENTION_DAYS_KEY: &str = "thread_retention_days";
 
+pub const SHOW_ALL_MODELS_KEY: &str = "show_all_models";
+
 pub const SETTINGS: &[SettingDecl] = &[
+    SettingDecl {
+        key: crate::HIDE_BAD_MODEL_OPTIONS_KEY,
+        owner: SettingOwner::Editor,
+        kind: SettingKind::Bool,
+        default: "true",
+        label: "Hide bad model options",
+        description: "Hide Max and Ultra for Claude and Codex, plus Light and Extra High for Opus 5.5. Existing selections remain visible.",
+        needs_approval: false,
+    },
+    SettingDecl {
+        key: crate::MODEL_CUSTOMIZATIONS_KEY,
+        owner: SettingOwner::Forge,
+        kind: SettingKind::ModelCustomizations,
+        default: "{\"version\":1,\"rules\":[]}",
+        label: "Model customizations",
+        description: "Scoped labels, normalized semantics and visibility for discovered native model options.",
+        needs_approval: false,
+    },
     SettingDecl {
         key: "suggestions",
         owner: SettingOwner::Forge,
@@ -156,6 +178,15 @@ pub const SETTINGS: &[SettingDecl] = &[
         label: "Computer use",
         description: "Let agents capture and control the configured agent display. A virtual monitor still shares your keyboard and cursor; your input pauses automation. Moving your windows, launching apps and accessing the shared clipboard require approval.",
         needs_approval: true,
+    },
+    SettingDecl {
+        key: SHOW_ALL_MODELS_KEY,
+        owner: SettingOwner::Editor,
+        kind: SettingKind::Bool,
+        default: "false",
+        label: "Show all models",
+        description: "List every Claude and Codex model in the model picker, not only the latest of each class.",
+        needs_approval: false,
     },
     SettingDecl {
         key: "notifications",

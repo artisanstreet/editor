@@ -179,6 +179,8 @@ pub fn build(
     instance: crate::core::HostInstance,
     drag: Option<DraggedThread>,
     visuals: RowVisuals,
+    layout: super::geometry::ThreadLayout,
+    hover: aqua_ui::element::Element,
     emit: std::rc::Rc<dyn Fn(super::view::ViewAction)>,
 ) -> aqua_ui::element::Element {
     use super::view::ViewAction;
@@ -202,22 +204,25 @@ pub fn build(
         .gap(2.0)
         .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
         .child(visuals.title)
-        .child(
-            UiBox::new()
-                .width(Length::Pct(100.0))
-                .gap(5.0)
-                .style(
-                    Style::new()
-                        .align(AlignItems::CENTER)
-                        .min_width(Length::Px(0.0)),
-                )
-                .child(visuals.project_mark)
-                .child(visuals.subtitle)
-                .build(),
-        );
+        .children(match layout {
+            super::geometry::ThreadLayout::Grouped => None,
+            super::geometry::ThreadLayout::Standalone => Some(
+                UiBox::new()
+                    .width(Length::Pct(100.0))
+                    .gap(5.0)
+                    .style(
+                        Style::new()
+                            .align(AlignItems::CENTER)
+                            .min_width(Length::Px(0.0)),
+                    )
+                    .child(visuals.project_mark)
+                    .child(visuals.subtitle)
+                    .build(),
+            ),
+        });
     let mut root = Button::new()
         .width(Length::Pct(100.0))
-        .height(super::geometry::ROW_HEIGHT)
+        .height(layout.height())
         .gap(8.0)
         .radius(RadiusTokens::value(RadiusStep::Md))
         .style(
@@ -232,6 +237,7 @@ pub fn build(
                     bottom: 0.0,
                 }),
         )
+        .child(hover)
         .child(content.build());
     if let Some(dot) = visuals.dot {
         root = root.child(dot);

@@ -10,6 +10,7 @@
 
 mod agents;
 mod approvals;
+mod coordination;
 mod disk;
 mod extensions;
 mod gateway;
@@ -18,6 +19,7 @@ mod mcp_auth;
 mod park;
 mod retention;
 mod run;
+pub mod runtime;
 mod scratch;
 mod side;
 
@@ -53,6 +55,7 @@ pub struct Hub {
 }
 
 struct Inner {
+    generation: Option<runtime::Generation>,
     store: Store,
     engines: Engines,
     data_dir: PathBuf,
@@ -129,7 +132,35 @@ impl Hub {
         data_dir: PathBuf,
         harness_for: HarnessFor,
     ) -> Self {
-        Self::build(store, engines, data_dir, harness_for, disk::Probe::system())
+        Self::build(
+            store,
+            engines,
+            data_dir,
+            harness_for,
+            disk::Probe::system(),
+            None,
+        )
+    }
+
+    pub fn with_generation(
+        store: Store,
+        engines: Engines,
+        data_dir: PathBuf,
+        harness_for: HarnessFor,
+        generation: runtime::Generation,
+    ) -> Self {
+        Self::build(
+            store,
+            engines,
+            data_dir,
+            harness_for,
+            disk::Probe::system(),
+            Some(generation),
+        )
+    }
+
+    pub fn generation(&self) -> Option<&runtime::Generation> {
+        self.inner.generation.as_ref()
     }
 
     fn build(
@@ -138,9 +169,11 @@ impl Hub {
         data_dir: PathBuf,
         harness_for: HarnessFor,
         disk: disk::Probe,
+        generation: Option<runtime::Generation>,
     ) -> Self {
         let hub = Self {
             inner: Arc::new(Inner {
+                generation,
                 store,
                 engines,
                 data_dir,
@@ -168,6 +201,7 @@ impl Hub {
         };
         hub.forward_engine_status();
         hub.start_dispatcher();
+        hub.start_coordination();
         hub
     }
 
@@ -260,6 +294,19 @@ impl Hub {
         message: SendMessage,
         acceptance: forge_store::Acceptance,
     ) -> Result<Item> {
+        if let Some(member) = self.remote_target(thread_id, true)? {
+            return Ok(serde_json::from_value(
+                runtime::request(
+                    &member,
+                    &runtime::Command::Accept {
+                        thread: thread_id.clone(),
+                        message,
+                        acceptance,
+                    },
+                )
+                .await?,
+            )?);
+        }
         let steer = self.is_live(thread_id);
         let (item, created, saved_engine) = self
             .inner
@@ -295,6 +342,17 @@ impl Hub {
             .item(item_id)
             .await?
             .ok_or_else(|| forge_store::ItemNotFound(item_id.clone()))?;
+        if let Some(member) = self.remote_target(&item.thread_id, false)? {
+            runtime::request(
+                &member,
+                &runtime::Command::Answer {
+                    item: item_id.clone(),
+                    answer,
+                },
+            )
+            .await?;
+            return Ok(());
+        }
         if let Answer::Question { answers } = &answer {
             self.inner
                 .store
@@ -403,6 +461,18 @@ impl Hub {
         thread_id: &ThreadId,
         update: artisan_api::UpdateThread,
     ) -> Result<Option<artisan_api::Thread>> {
+        if let Some(member) = self.remote_target(thread_id, false)? {
+            return Ok(serde_json::from_value(
+                runtime::request(
+                    &member,
+                    &runtime::Command::Update {
+                        thread: thread_id.clone(),
+                        update,
+                    },
+                )
+                .await?,
+            )?);
+        }
         let before = self
             .store()
             .thread(thread_id)
@@ -433,6 +503,16 @@ impl Hub {
     }
 
     pub async fn clear_goal(&self, thread_id: &ThreadId) -> Result<()> {
+        if let Some(member) = self.remote_target(thread_id, false)? {
+            runtime::request(
+                &member,
+                &runtime::Command::ClearGoal {
+                    thread: thread_id.clone(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
         let refused = |message: &str| anyhow::Error::new(Refused(message.to_owned()));
         let store = self.store();
         let thread = store
@@ -524,6 +604,25 @@ impl Hub {
 
     /// The caller holds admission across the entire cancellation tree.
     async fn cancel_one(&self, thread_id: &ThreadId) -> Result<()> {
+        if let Some(member) = self.remote_target(thread_id, false)? {
+            runtime::request(
+                &member,
+                &runtime::Command::Cancel {
+                    thread: thread_id.clone(),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        self.cancel_owned(thread_id).await
+    }
+
+    pub async fn cancel_local(&self, thread_id: &ThreadId) -> Result<()> {
+        let _admission = self.inner.admission.lock().await;
+        self.cancel_owned(thread_id).await
+    }
+
+    async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<()> {
         let cutoff = self.store().head();
         if let Some(run) = self.lock().get(thread_id) {
             run.cancel_through.store(cutoff, Ordering::Release);
@@ -568,6 +667,50 @@ impl Hub {
     #[must_use]
     pub fn is_live(&self, thread_id: &ThreadId) -> bool {
         self.lock().contains_key(thread_id)
+            || self.inner.generation.as_ref().is_some_and(|generation| {
+                generation
+                    .registry
+                    .owner(thread_id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            })
+    }
+
+    pub fn active_thread_ids(&self) -> Vec<ThreadId> {
+        let mut ids: std::collections::BTreeSet<_> = self.lock().keys().cloned().collect();
+        if let Some(generation) = &self.inner.generation
+            && let Ok(owners) = generation.registry.owners()
+        {
+            ids.extend(owners.into_iter().map(|(id, _)| id));
+        }
+        ids.into_iter().collect()
+    }
+
+    fn remote_target(&self, thread: &ThreadId, new_work: bool) -> Result<Option<runtime::Member>> {
+        let Some(generation) = &self.inner.generation else {
+            return Ok(None);
+        };
+        let owner = generation.registry.owner(thread)?;
+        let target = match owner {
+            Some(owner) => Some(owner),
+            None if new_work => generation.registry.active()?,
+            None => None,
+        };
+        Ok(target.filter(|target| target.id != generation.member.id))
+    }
+
+    pub fn local_active_count(&self) -> usize {
+        let live = self.lock().len();
+        self.inner.generation.as_ref().map_or(live, |generation| {
+            generation.registry.owners().map_or(live, |owners| {
+                owners
+                    .into_iter()
+                    .filter(|(_, member)| member.id == generation.member.id)
+                    .count()
+                    .max(live)
+            })
+        })
     }
 
     /// The current memory-only text of every live run, and every thread's
@@ -698,17 +841,30 @@ impl Hub {
                         () = hub.inner.shutdown.cancelled() => break,
                         () = hub.inner.dispatch.notified() => {},
                         () = parked => {},
+                        () = async { match &hub.inner.generation { Some(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await, None => std::future::pending().await } } => {},
+                    }
+                    if let Some(generation) = &hub.inner.generation
+                        && generation.accepting()
+                        && let Ok(threads) = hub.store().running_threads().await {
+                        for thread in threads {
+                            if hub.lock().contains_key(&thread) { continue; }
+                            if let Ok(Some(_lease)) = generation.claim(&thread)
+                                && let Err(error) = hub.store().recover_thread(thread.clone()).await {
+                                tracing::error!(%thread,"recover orphaned generation: {error:#}");
+                            }
+                        }
                     }
                     loop {
                         let _admission = hub.inner.admission.lock().await;
                         if hub.inner.shutdown.is_cancelled() {
                             return;
                         }
+                        if hub.inner.generation.as_ref().is_some_and(|generation| !generation.accepting()) { break; }
                         let Ok(permit) = Arc::clone(&hub.inner.harness_slots).try_acquire_owned()
                         else {
                             break;
                         };
-                        let excluded = hub.lock().keys().cloned().collect();
+                        let excluded = hub.active_thread_ids();
                         let next = match hub.store().pending_threads(1, excluded).await {
                             Ok(threads) => threads.into_iter().next(),
                             Err(error) => {
@@ -719,7 +875,17 @@ impl Hub {
                         let Some(thread) = next else {
                             break;
                         };
-                        hub.claim(thread, permit);
+                        let leases = if let Some(generation) = &hub.inner.generation {
+                            let Ok(Some(slot)) = generation.slot() else { break; };
+                            let Ok(Some(owner)) = generation.claim(&thread) else { continue; };
+                            Some((slot, owner))
+                        } else { None };
+                        if leases.is_some()
+                            && let Err(error) = hub.store().recover_thread(thread.clone()).await {
+                            tracing::error!(%thread, "recover abandoned run: {error:#}");
+                            break;
+                        }
+                        hub.claim(thread, permit, leases);
                     }
                 }
             },
@@ -727,7 +893,12 @@ impl Hub {
         );
     }
 
-    fn claim(&self, thread_id: ThreadId, permit: OwnedSemaphorePermit) {
+    fn claim(
+        &self,
+        thread_id: ThreadId,
+        permit: OwnedSemaphorePermit,
+        leases: Option<(runtime::Lease, runtime::Lease)>,
+    ) {
         let (inbox, receiver) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let cancel_through = Arc::new(AtomicU64::new(0));
@@ -745,6 +916,7 @@ impl Hub {
         );
         let hub = self.clone();
         self.inner.tasks.spawn(async move {
+            let _leases = leases;
             let outcome = Box::pin(run::drive(
                 &hub,
                 &thread_id,
@@ -773,13 +945,20 @@ impl Hub {
         });
     }
 
-    /// Serialises writes into engine homes (launches, the catalog, the
-    /// prompt).
-    fn homes_lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.inner
+    fn homes_lock(&self) -> Result<(std::sync::MutexGuard<'_, ()>, std::fs::File)> {
+        let local = self
+            .inner
             .homes
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.inner.data_dir.join("homes.lock"))?;
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok((local, file))
     }
 
     /// `<data>/extensions/skills`, where Forge keeps the skills it installs.

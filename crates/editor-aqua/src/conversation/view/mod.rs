@@ -212,8 +212,8 @@ pub fn thread_frame(
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0));
     let transcript = UiBox::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
+        .style(Style::new().absolute_at(Some(2.0), Some(2.0), Some(2.0), Some(2.0)))
+        .clip(true)
         .opacity(if landing { 0.0 } else { 1.0 })
         .child(transcript)
         .build();

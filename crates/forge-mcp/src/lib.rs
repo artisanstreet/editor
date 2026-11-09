@@ -1,37 +1,33 @@
-//! The Artisan MCP: what an agent can do with Artisan, the way the user does
-//! in the app. Search and read every thread, write to threads, run agents on
-//! any harness, and change settings, hosts, projects and extensions.
-//!
-//! Forge's gateway serves it to every engine over MCP's Streamable HTTP, as
-//! JSON responses (no server-sent stream). The credential in the address
-//! names the calling thread, so "this thread" and "my agents" need no ids.
-
+mod awareness;
+mod coordination;
 mod format;
+mod names;
 pub mod server;
 mod tools;
 mod transcript;
+mod validation;
 
-pub use server::{Content, Tool, ToolSet};
+pub use server::{Content, Tool, ToolResult, ToolSet};
 
 use anyhow::Result;
 use artisan_api::ThreadId;
 use forge_runs::Hub;
 use serde_json::Value;
 
-const INSTRUCTIONS: &str = "Artisan's own tools, for the thread you run in. \
-Recall: threads_search ranks every thread's messages, plans, commands and errors; threads_grep \
-runs a regex over them; thread_read reads a thread around an item; threads_touching finds the \
-threads that read or changed a file. Use them when the user refers to another thread or earlier \
-work. Agents: agent_spawn starts an agent on any harness (Claude, Codex, OpenCode) \
-and model from `harnesses`, with only the prompt you give it; omitted settings come from this \
-thread. Wait for it with agent_wait, or spawn it in the background and its result arrives as a \
-message. The app: thread_*, settings_*, hosts_*, projects_*, mcp_servers_*, skills_*, \
-global_prompt_* and open_* do what the user can do in Artisan. An HTTP MCP server that \
-answers 401 signs in with mcp_server_sign_in, which returns the link for the user. Tools that \
-change something only take the user to its page with navigate_user=true, when they asked for it. Changes that remove something or \
-add trust show the user an approval card first, unless this thread has full access.";
+const INSTRUCTIONS: &str = "Artisan is this workspace's collaboration interface. \
+Before overlapping edits or investigating unexplained changes, use list_relevant_agents or \
+list_relevant_threads; they rank advisory claims, declared scope, dependencies, and project activity. \
+Publish your objective and exact worktree with publish_work, then claim_resources to declare \
+your intended edit or shared-resource scope. Claims are advisory: overlaps invite coordination \
+and never block filesystem writes. Negotiate boundaries with send_coordination_message; delivery \
+is not agreement, so acknowledge requests and state the actual agreement. Release claims after \
+handoff. Publish completion with evidence; watch_work delivers dependency results even after \
+this turn ends. Use search_threads and read_thread for past decisions. Discovery defaults to \
+the caller's project on this Forge; scope=host explicitly broadens it. Top-level and child workers \
+are both discoverable; parent restricts the scope. Administrative tools change only what the user \
+asked for. navigate_user is false unless navigation was requested. User questions and approvals \
+can only be answered by the user. Legacy tool names remain callable for existing sessions.";
 
-/// The Artisan MCP over one [`Hub`].
 #[derive(Clone)]
 pub struct ArtisanMcp {
     hub: Hub,
@@ -41,6 +37,58 @@ impl ArtisanMcp {
     #[must_use]
     pub const fn new(hub: Hub) -> Self {
         Self { hub }
+    }
+
+    async fn invoke(
+        &self,
+        caller: &ThreadId,
+        name: &str,
+        mut arguments: Value,
+    ) -> Result<ToolResult> {
+        if let Some(value) = awareness::call(&self.hub, caller, name, arguments.clone()).await? {
+            return ToolResult::structured(value);
+        }
+        let canonical = names::canonical(name);
+        if let Some(value) =
+            coordination::call(&self.hub, caller, canonical, arguments.clone()).await?
+        {
+            return ToolResult::structured(value);
+        }
+        if matches!(canonical, "read_agent" | "message_agent")
+            && !matches!(name, "agent_read" | "agent_message")
+        {
+            let agent = arguments
+                .get("agent")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("agent ID is required"))?;
+            let thread = awareness::resolve_agent(&self.hub, agent).await?;
+            if canonical == "message_agent" {
+                let text = arguments
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("text is required"))?
+                    .to_owned();
+                let item = self.hub.send_as_agent(caller, &thread, text).await?;
+                return ToolResult::structured(
+                    serde_json::json!({"delivered_item":item.id,"thread":thread,"acknowledged":false}),
+                );
+            }
+            arguments
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("arguments must be an object"))?
+                .remove("agent");
+            arguments["thread"] = serde_json::json!(thread);
+            let text = tools::call(&self.hub, caller, "read_thread", arguments).await?;
+            return Ok(ToolResult {
+                content: vec![Content::Text(text)],
+                structured_content: None,
+            });
+        }
+        let text = tools::call(&self.hub, caller, canonical, arguments).await?;
+        Ok(ToolResult {
+            content: vec![Content::Text(text)],
+            structured_content: None,
+        })
     }
 }
 
@@ -58,11 +106,29 @@ impl ToolSet for ArtisanMcp {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        tools::tools()
+        let core = awareness::tools();
+        let mut tools = tools::tools();
+        tools.retain(|tool| !core.iter().any(|new| new.name == tool.name));
+        core.into_iter()
+            .chain(coordination::tools())
+            .chain(tools)
+            .collect()
     }
 
     async fn call(&self, caller: &ThreadId, name: &str, arguments: Value) -> Result<Vec<Content>> {
-        let text = tools::call(&self.hub, caller, name, arguments).await?;
-        Ok(vec![Content::Text(text)])
+        Ok(self.invoke(caller, name, arguments).await?.content)
+    }
+
+    fn canonical_name<'a>(&self, name: &'a str) -> &'a str {
+        names::canonical(name)
+    }
+
+    async fn call_result(
+        &self,
+        caller: &ThreadId,
+        name: &str,
+        arguments: Value,
+    ) -> Result<ToolResult> {
+        self.invoke(caller, name, arguments).await
     }
 }

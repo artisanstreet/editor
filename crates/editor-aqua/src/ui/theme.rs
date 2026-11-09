@@ -499,6 +499,8 @@ mod polar {
     pub const BLUE_200: Lch = (0.882, 0.059, 254.128);
     pub const BLUE_300: Lch = (0.809, 0.105, 251.813);
     pub const BLUE_400: Lch = (0.707, 0.165, 254.624);
+    pub const SAND_400: Lch = (0.88, 0.045, 82.0);
+    pub const SAND_700: Lch = (0.52, 0.075, 75.0);
     pub const BLUE_500: Lch = (0.623, 0.214, 259.815);
     pub const BLUE_600: Lch = (0.546, 0.245, 262.881);
     pub const BLUE_700: Lch = (0.488, 0.243, 264.376);
@@ -563,7 +565,7 @@ impl ColorTokens {
             INDIGO_900, INDIGO_950, PINK_400, PINK_600, POLAR_50, POLAR_100, POLAR_300, POLAR_400,
             POLAR_500, POLAR_600, POLAR_700, POLAR_800, POLAR_900, POLAR_950, PURPLE_300,
             PURPLE_400, PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400, RED_500, RED_600,
-            RED_700, RED_950, WHITE,
+            RED_700, RED_950, SAND_400, SAND_700, WHITE,
         };
         let dark = mode.is_dark();
         let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
@@ -614,7 +616,7 @@ impl ColorTokens {
             text: token(EMERALD_500),
             contrast: token(EMERALD_950),
         };
-        let link = token(BLUE_400);
+        let link = pick(SAND_700, SAND_400);
         let black = token(BLACK);
         let white = token(WHITE);
         let banner = |scale: StatusScale| BannerColors {

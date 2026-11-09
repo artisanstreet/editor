@@ -158,6 +158,95 @@ pub fn phrase_or_text(
     }
 }
 
+pub fn retained_phrase_or_text(
+    words: Option<&[PhraseWord]>,
+    text: String,
+    mut typography: TextStyle,
+    color: GpuiTextColor,
+    line_height: f32,
+) -> Element {
+    use aqua_ui::motion::{Easing, Motion, Presence};
+    let Some(words) = words else {
+        return label(text, &typography, color);
+    };
+    typography.font_features = vec![FontFeature { tag: *b"tnum", value: 1 }];
+    let mut row = UiBox::new().style(Style::new().axis(Axis::Row).align(AlignItems::CENTER).min_width(Length::Px(0.0)).clip(true));
+    for (index, word) in words.iter().enumerate() {
+        if index > 0 {
+            row = row.child(label(" ".to_owned(), &typography, color).with_key(format!("space-{index}")));
+        }
+        let entering = |text: String| {
+            let key = format!("enter-{text}");
+            UiBox::new().style(Style::new().flex_shrink(0.0))
+                .presence(Presence::new().enter(Motion::tween(0.15, Easing::EaseInOut)).slide(0.0, 4.0))
+                .child(label(text, &typography, color)).build()
+                .with_key(key)
+        };
+        let content = match &word.motion {
+            WordMotion::Still => label(word.text.clone(), &typography, color),
+            WordMotion::Enter => entering(word.text.clone()),
+            WordMotion::Extend { kept } => {
+                let kept = (*kept).min(word.text.len());
+                UiBox::new().layout("row").style(Style::new().flex_shrink(0.0))
+                    .child(label(word.text[..kept].to_owned(), &typography, color))
+                    .child(entering(word.text[kept..].to_owned()))
+                    .build()
+            }
+            WordMotion::Roll { from, up } => {
+                retained_odometer(from, &word.text, *up, line_height, &typography, color)
+            }
+        };
+        row = row.child(UiBox::new().style(Style::new().flex_shrink(0.0)).child(content).build().with_key(format!("word-{index}")));
+    }
+    row.build()
+}
+
+fn retained_odometer(from: &str, to: &str, up: bool, line_height: f32, typography: &TextStyle, color: GpuiTextColor) -> Element {
+    use aqua_ui::motion::{Easing, Motion, Presence};
+    let before: Vec<char> = from.chars().collect();
+    let after: Vec<char> = to.chars().collect();
+    let mut row = UiBox::new().layout("row").style(Style::new().flex_shrink(0.0));
+    for (column, &target) in after.iter().enumerate() {
+        let from_right = after.len() - 1 - column;
+        let source = before.len().checked_sub(1 + from_right).map(|index| before[index]);
+        let content = match source {
+            Some(source) if source != target => {
+                let mut cells = vec![source];
+                if let (Some(mut digit), Some(to)) = (source.to_digit(10), target.to_digit(10)) {
+                    let step = if up { 1 } else { 9 };
+                    while digit != to {
+                        digit = (digit + step) % 10;
+                        cells.push(char::from_digit(digit, 10).unwrap_or(target));
+                    }
+                } else {
+                    cells.push(target);
+                }
+                if !up {
+                    cells.reverse();
+                }
+                let travel = (cells.len() - 1) as f32 * line_height;
+                let target_offset = if up { -travel } else { 0.0 };
+                let slide_offset = if up { travel } else { -travel };
+                let duration = 0.5 + from_right as f64 * 0.04;
+                let strip = UiBox::new()
+                    .style(Style::new().axis(Axis::Column).absolute_at(Some(0.0), Some(0.0), Some(0.0), None)
+                        .transform(Transform2D::translate(0.0, target_offset)))
+                    .presence(Presence::new().enter(Motion::tween(duration, Easing::EaseOut)).slide(0.0, slide_offset).without_fade())
+                    .children(cells.into_iter().map(|cell| UiBox::new().height(line_height)
+                        .style(Style::new().align(AlignItems::CENTER).justify(JustifyContent::CENTER))
+                        .child(label(cell.to_string(), typography, color)).build()))
+                    .build().with_key(format!("reel-{source}-{target}-{up}"));
+                UiBox::new().height(line_height).style(Style::new().flex_shrink(0.0).clip(true))
+                    .child(label(target.to_string(), typography, color).style(Style::new().opacity(0.0)))
+                    .child(strip).build()
+            }
+            _ => label(target.to_string(), typography, color),
+        };
+        row = row.child(UiBox::new().style(Style::new().flex_shrink(0.0)).child(content).build().with_key(format!("digit-{column}")));
+    }
+    row.build()
+}
+
 pub fn phrase_element(
     words: &[PhraseWord],
     mut typography: TextStyle,

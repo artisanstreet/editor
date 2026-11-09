@@ -60,6 +60,7 @@ struct Slot {
 
 #[derive(Default)]
 struct ModelCache {
+    discovery: artisan_api::DiscoveryState,
     generation: u64,
     reads: u64,
     listing: Option<CachedListing>,
@@ -183,6 +184,7 @@ impl Engines {
         let install = self.install_state(engine);
         let listing = lock(&slot.models).listing.clone().unwrap_or_default();
         EngineStatus {
+            discovery: lock(&slot.models).discovery.clone(),
             engine,
             install,
             sign_in: slot.sign_in.state(),
@@ -666,6 +668,9 @@ impl Engines {
         }
         let account = slot.sign_in.context_generation();
         let generation = lock(&slot.models).generation;
+        let last_success_at = lock(&slot.models).discovery.last_success_at();
+        lock(&slot.models).discovery = artisan_api::DiscoveryState::Refreshing { last_success_at };
+        self.publish(engine);
         let lease = self.lease(engine);
         let binary = lease.as_ref().map(|lease| lease.path().to_owned());
         let home = self.home(engine);
@@ -693,11 +698,13 @@ impl Engines {
                         let listing = CachedListing::from(listing);
                         let models = Arc::clone(&listing.models);
                         cache.error = None;
+                        cache.discovery = artisan_api::DiscoveryState::Fresh { observed_at: artisan_api::now() };
                         cache.listing = Some(listing);
                         Some(Ok(models))
                     }
                     Err(error) => {
                         cache.error = Some(format!("{error:#}"));
+                        cache.discovery = cache.discovery.failed(&format!("{error:#}"));
                         Some(Err(error.context(format!(
                             "listing {} models",
                             engine.display_name()
@@ -720,6 +727,7 @@ impl Engines {
         cache.generation = cache.generation.wrapping_add(1);
         cache.listing = None;
         cache.error = None;
+        cache.discovery = artisan_api::DiscoveryState::Unknown;
     }
 
     /// A new binary may list different models.

@@ -20,6 +20,7 @@ pub struct Preferences {
     pub reduced_motion: Option<bool>,
     pub streaming: StreamingMode,
     pub lower_frame_rate: bool,
+    pub vsync: bool,
 }
 
 impl Preferences {
@@ -42,6 +43,7 @@ impl Preferences {
                 StreamingMode::Smooth
             },
             lower_frame_rate: boolean("lower_refresh_rate").unwrap_or(false),
+            vsync: boolean("graphics_vsync").unwrap_or(true),
         }
     }
 
@@ -68,7 +70,7 @@ impl Preferences {
                 None
             },
         ))?;
-        ctx.request_window(WindowRequest::SetVsync(window, true))?;
+        ctx.request_window(WindowRequest::SetVsync(window, self.vsync))?;
         Ok(())
     }
 }

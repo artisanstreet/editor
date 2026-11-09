@@ -24,10 +24,6 @@ enum ConversationAction {
         crate::conversation::presentation::PresentationScope,
         crate::ui::rich::actions::ShowCopyMenu,
     ),
-    Agent(
-        crate::conversation::presentation::PresentationScope,
-        Option<artisan_api::ItemId>,
-    ),
     Copy(
         crate::conversation::presentation::PresentationScope,
         crate::conversation::view::source_actions::CopySource,
@@ -123,6 +119,12 @@ pub struct RootViews {
     motion_epoch: Option<std::time::Instant>,
     ui_now: aqua::Instant,
     context_tooltip: crate::shell::titlebar::ContextMeterTooltip,
+    sidebar: crate::frame::sidebar::Sidebar,
+    seam: Rc<RefCell<crate::frame::seam::motion::Motion>>,
+    avatar: crate::frame::avatar::Avatar,
+    sign_in_dirty: bool,
+    work_clock: Option<std::time::Instant>,
+    account_popup: crate::frame::popup::Popup,
     sidebar_overlays: crate::sidebar::overlay::SidebarOverlays,
     sidebar_drag: Option<crate::sidebar::drag_preview::DragPreviewHost>,
     drag_position: Option<aqua_core::Point>,
@@ -152,22 +154,23 @@ pub struct RootViews {
 struct ResizeKey {
     sidebar: Option<u32>,
     inspector: Option<u32>,
-    wide: bool,
+    size: [u32; 2],
 }
 
 impl ResizeKey {
-    fn of(screen: &Screen, show_sidebar: bool, show_inspector: bool, window_width: f32) -> Self {
-        let dimensions = layout::workspace_layout(
-            window_width,
-            screen,
-            show_sidebar,
-            show_inspector,
-            false,
-        );
+    fn of(
+        screen: &Screen,
+        show_sidebar: bool,
+        show_inspector: bool,
+        window_width: f32,
+        window_height: f32,
+    ) -> Self {
+        let dimensions =
+            layout::workspace_layout(window_width, screen, show_sidebar, show_inspector, false);
         Self {
             sidebar: dimensions.sidebar.map(f32::to_bits),
             inspector: dimensions.inspector.map(f32::to_bits),
-            wide: window_width >= 640.0,
+            size: [window_width.to_bits(), window_height.to_bits()],
         }
     }
 }
@@ -658,7 +661,12 @@ impl RootViews {
             self.row_token
                 .get_or_insert_with(|| Rc::new(Cell::new(true))),
         );
-        let style = (theme, reduced_motion, swift, media_resources.scale.to_bits());
+        let style = (
+            theme,
+            reduced_motion,
+            swift,
+            media_resources.scale.to_bits(),
+        );
         if self.row_style != Some(style) {
             self.row_style = Some(style);
             self.row_style_epoch += 1;
@@ -890,16 +898,24 @@ impl RootViews {
         } else {
             self.thread_loading.reset();
             let mut overlays = vec![
-                self.transcript_edges.band(
-                    "conversation-edge-top",
-                    crate::ui::scroll_edge::Edge::Top,
-                    theme.colors.background,
-                ),
-                self.transcript_edges.band(
-                    "conversation-edge-bottom",
-                    crate::ui::scroll_edge::Edge::Bottom,
-                    theme.colors.background,
-                ),
+                self.transcript_edges
+                    .band(
+                        "conversation-edge-top",
+                        crate::ui::scroll_edge::Edge::Top,
+                        theme.colors.background,
+                    )
+                    .style(view::conversation_edge_style(
+                        crate::ui::scroll_edge::Edge::Top,
+                    )),
+                self.transcript_edges
+                    .band(
+                        "conversation-edge-bottom",
+                        crate::ui::scroll_edge::Edge::Bottom,
+                        theme.colors.background,
+                    )
+                    .style(view::conversation_edge_style(
+                        crate::ui::scroll_edge::Edge::Bottom,
+                    )),
             ];
             if let Some(error) = &workspace.conversation.load_error {
                 overlays.push(view::conversation_load_error(&theme, error.clone()));
@@ -1131,7 +1147,6 @@ impl RootViews {
                 ConversationAction::Source(action) => &action.scope,
                 ConversationAction::Link(scope, _)
                 | ConversationAction::Color(scope, _)
-                | ConversationAction::Agent(scope, _)
                 | ConversationAction::Copy(scope, _)
                 | ConversationAction::Media(scope, _, _, _)
                 | ConversationAction::Blob(scope, _, _, _)
@@ -1226,13 +1241,6 @@ impl RootViews {
                 ConversationAction::Copy(_, source) => {
                     if let Err(error) = ctx.clipboard().set_text(source.into_text()) {
                         tracing::warn!(%error, "could not copy full content");
-                    }
-                }
-                ConversationAction::Agent(_, agent) => {
-                    if let Some(workspace) = shell.entry.workspace_mut() {
-                        let before = workspace.conversation.agent.clone();
-                        workspace.conversation.open_agent(&shell.core, agent);
-                        changed |= before != workspace.conversation.agent;
                     }
                 }
                 ConversationAction::Link(_, LinkAction::OpenReference(reference)) => {
@@ -1462,6 +1470,7 @@ impl RootViews {
             bottom: "conversation-edge-bottom",
             top_color: theme.colors.background,
             bottom_color: theme.colors.background,
+            paint: crate::ui::scroll_edge::EdgePaint::Gradient,
         }
         .advance(ui, reduced, now);
         moving |= EdgeSurface {
@@ -1469,8 +1478,9 @@ impl RootViews {
             scroller: crate::shell::wheel::THREADS,
             top: "sidebar-threads-edge-top",
             bottom: "sidebar-threads-edge-bottom",
-            top_color: theme.colors.background,
-            bottom_color: theme.colors.background,
+            top_color: theme.colors.frame,
+            bottom_color: theme.colors.frame,
+            paint: crate::ui::scroll_edge::EdgePaint::Gradient,
         }
         .advance(ui, reduced, now);
         if let Some(composer) = &workspace.composer {
@@ -1893,6 +1903,307 @@ impl RootViews {
     }
 }
 
+impl RootViews {
+    fn schedule_sidebar(&self, ctx: &mut AppCtx<'_>, window: AquaWindowId) {
+        if self.sidebar.animating() {
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
+        if let Some(deadline) = self.sidebar.deadline() {
+            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            ctx.request_animation_deadline(window, ctx.now() + wait);
+        }
+    }
+
+    fn tick_work_clock(
+        &mut self,
+        shell: &Shell,
+        ctx: &mut AppCtx<'_>,
+        window: AquaWindowId,
+        now: std::time::Instant,
+    ) -> bool {
+        let working = match shell.core.screen() {
+            Screen::Thread { host, thread } => shell
+                .core
+                .host(host)
+                .is_some_and(|host| host.is_working(thread)),
+            _ => false,
+        };
+        if !working {
+            self.work_clock = None;
+            return false;
+        }
+        let due = self.work_clock.is_none_or(|at| now >= at);
+        let next = match (due, self.work_clock) {
+            (false, Some(at)) => at,
+            _ => {
+                let into_second = artisan_api::now().rem_euclid(1_000).unsigned_abs();
+                now + std::time::Duration::from_millis(1_000 - into_second)
+            }
+        };
+        self.work_clock = Some(next);
+        ctx.request_animation_deadline(window, ctx.now() + next.saturating_duration_since(now));
+        due
+    }
+
+    fn reduced(ui: &UiApp) -> bool {
+        ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce
+    }
+
+    fn sync_sign_in(
+        &mut self,
+        shell: &mut Shell,
+        ui: &UiApp,
+        ctx: &mut AppCtx<'_>,
+        window: AquaWindowId,
+    ) {
+        use crate::frame::sign_in::{CODE_FEEDBACK, CODE_PAGE, EMAIL_FEEDBACK, EMAIL_PAGE, Sizes};
+        if !matches!(
+            shell.core.entry_gate(),
+            crate::core::EntryGate::Restoring | crate::core::EntryGate::SignedOut
+        ) {
+            return;
+        }
+        let reduced = Self::reduced(ui);
+        let images = shell.images().clone();
+        let sign_in = &mut shell.entry.sign_in;
+        sign_in.reduced = reduced;
+        let painted = sign_in.art().is_some();
+        sign_in.ensure_art(&images);
+        let height = |selector| {
+            ui.find_debug_selector(selector)
+                .and_then(|node| ui.tree().rect(node))
+                .map_or(0.0, |rect| rect.h)
+        };
+        let sizes = Sizes {
+            email_page: height(EMAIL_PAGE),
+            code_page: height(CODE_PAGE),
+            email_feedback: height(EMAIL_FEEDBACK),
+            code_feedback: height(CODE_FEEDBACK),
+        };
+        let measured = sign_in.measure(sizes, std::time::Instant::now(), reduced);
+        let dirty = measured || painted != sign_in.art().is_some();
+        if dirty || sign_in.animating() {
+            self.sign_in_dirty |= dirty;
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
+    }
+
+    fn apply_account_effects(
+        &mut self,
+        shell: &mut Shell,
+        ctx: &mut AppCtx<'_>,
+        window: AquaWindowId,
+        reduced: bool,
+    ) {
+        use crate::frame::menu::Effect;
+        for effect in self.sidebar.take_effects() {
+            match effect {
+                Effect::FlipTheme => {
+                    let dark = !shell.preferences.theme().colors.mode.is_dark();
+                    crate::shell::application::begin_theme_transition(ctx, window, dark, reduced);
+                    shell.core.set_setting("dark_mode", dark.into());
+                }
+                Effect::OpenSettings => shell.core.navigate(crate::core::Screen::Settings(
+                    crate::core::SettingsPage::General,
+                )),
+                Effect::SignOut => shell.core.account_mut().sign_out(),
+            }
+        }
+        self.apply_navigation(shell);
+    }
+
+    fn track_tree_edges(&mut self, ui: &UiApp) -> bool {
+        let (above, below) =
+            crate::shell::wheel::hidden_edges(ui, crate::shell::wheel::PROJECT_TREE);
+        let offset = crate::shell::wheel::kept_offset(ui, crate::shell::wheel::PROJECT_TREE);
+        self.sidebar
+            .edges(above, below, std::time::Instant::now(), Self::reduced(ui))
+            | self.sidebar.scrolled(offset.y)
+    }
+
+    fn apply_navigation(&mut self, shell: &mut Shell) {
+        use crate::frame::sidebar::Command;
+        let Some(workspace) = shell.entry.workspace_mut() else {
+            return;
+        };
+        let core = &mut shell.core;
+        for command in self.sidebar.take_commands() {
+            match command {
+                Command::Open(thread) => workspace.sidebar.open_thread(core, thread),
+                Command::New => workspace.sidebar.new_thread(core, None),
+                Command::OpenUrl(url) => {
+                    if let Err(error) = crate::shell::open_url(&url) {
+                        tracing::warn!(%error, "could not open repository URL");
+                    }
+                }
+                Command::Settle {
+                    host,
+                    instance,
+                    thread,
+                    observed_seq,
+                } => {
+                    let unchanged = workspace.sidebar.host.as_ref() == Some(&host)
+                        && core
+                            .host_if_instance(&host, instance)
+                            .and_then(|host| host.threads.get(&thread))
+                            .is_some_and(|thread| thread.activity_seq == observed_seq);
+                    if unchanged
+                        && workspace
+                            .sidebar
+                            .lists
+                            .inbox
+                            .iter()
+                            .any(|row| row.id == thread && row.settleable)
+                    {
+                        workspace.sidebar.settle(core, thread);
+                    }
+                }
+            }
+        }
+        if let Some(host) = workspace
+            .sidebar
+            .host
+            .as_ref()
+            .and_then(|id| core.host_mut(id))
+        {
+            host.fill_threads();
+        }
+        if !self.sidebar.refresh_due(std::time::Instant::now()) {
+            return;
+        }
+        let open_project = workspace.sidebar.open.as_ref().and_then(|thread| {
+            let host = core.host(workspace.sidebar.host.as_ref()?)?;
+            Some(host.threads.get(thread)?.project_id.clone())
+        });
+        let Some(host) = workspace
+            .sidebar
+            .host
+            .as_ref()
+            .and_then(|id| core.host_mut(id))
+        else {
+            return;
+        };
+        let projects = host.projects.keys().cloned().collect::<Vec<_>>();
+        for project in &projects {
+            host.load_project_icon(project);
+            if !host.repository_checked(project) || open_project.as_ref() == Some(project) {
+                host.load_repository(project, false);
+            }
+        }
+    }
+
+    fn sidebar_model(
+        &self,
+        theme: &crate::ui::theme::ArtisanTheme,
+        tree: Option<Element>,
+        account: Option<&crate::frame::account::Account>,
+        now: std::time::Instant,
+    ) -> crate::frame::view::Sidebar {
+        crate::frame::view::Sidebar {
+            width: self.sidebar.width(now),
+            open: self.sidebar.open(),
+            wordmark: self.sidebar.wordmark(now),
+            emit: self.sidebar.emit(),
+            footer: account.map(|account| {
+                let emit = self.sidebar.emit();
+                crate::frame::account::trigger(
+                    &theme,
+                    crate::frame::account::Trigger {
+                        account,
+                        menu: self.sidebar.menu(),
+                        now,
+                        emit: Rc::new(move |event| {
+                            emit(crate::frame::sidebar::Event::Account(event))
+                        }),
+                    },
+                )
+            }),
+            tree,
+        }
+    }
+
+    fn account(&mut self, shell: &Shell) -> Option<crate::frame::account::Account> {
+        let url = match shell.core.account().phase() {
+            crate::core::AccountPhase::Authenticated { profile, .. } => {
+                profile.avatar_url.as_deref()
+            }
+            _ => None,
+        };
+        self.avatar.want(url);
+        self.account_snapshot(shell)
+    }
+
+    fn account_snapshot(&self, shell: &Shell) -> Option<crate::frame::account::Account> {
+        let crate::core::AccountPhase::Authenticated { profile, .. } = shell.core.account().phase()
+        else {
+            return None;
+        };
+        Some(crate::frame::account::Account {
+            identity: crate::frame::account::Identity::of(
+                &profile.display_name,
+                &profile.email,
+                profile.username.as_deref(),
+            ),
+            avatar: self.avatar.image(),
+        })
+    }
+
+    fn sync_account_menu(
+        &mut self,
+        shell: &Shell,
+        ui: &mut UiApp,
+        ctx: &mut AppCtx<'_>,
+        window: AquaWindowId,
+    ) {
+        if let Some(mailbox) = self.avatar.mailbox() {
+            ctx.bind_mailbox(window, mailbox);
+        }
+        let theme = shell.preferences.theme();
+        let Some(account) = self.account(shell) else {
+            self.account_popup.dispose(ui);
+            return;
+        };
+        let menu = *self.sidebar.menu();
+        let emit = self.sidebar.emit();
+        let dismissed = Rc::clone(&emit);
+        let width = crate::frame::sidebar::OPEN_WIDTH
+            - crate::frame::view::FOOTER_LEFT
+            - crate::frame::view::SHEET_PADDING;
+        let content = move || {
+            crate::frame::account::menu(
+                &theme,
+                crate::frame::account::Sheet {
+                    account: &account,
+                    menu: &menu,
+                    width,
+                    now: std::time::Instant::now(),
+                    emit: Rc::new(move |event| emit(crate::frame::sidebar::Event::Account(event))),
+                },
+            )
+        };
+        if let Err(error) = self.account_popup.sync(
+            ui,
+            menu.open(),
+            content,
+            ctx.now().as_secs_f64(),
+            Rc::new(move || {
+                dismissed(crate::frame::sidebar::Event::Account(
+                    crate::frame::menu::Event::Dismissed,
+                ))
+            }),
+        ) {
+            tracing::warn!(%error, "could not open the account menu");
+        }
+        if self
+            .account_popup
+            .advance(ui, ctx.now().as_secs_f64())
+            .unwrap_or(false)
+        {
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
+    }
+}
+
 impl SectionViews for RootViews {
     fn refresh_transcript(
         &mut self,
@@ -1911,12 +2222,16 @@ impl SectionViews for RootViews {
         let Some(workspace) = shell.entry.workspace_mut() else {
             return false;
         };
+        let width = (window.inner_size.width as f32
+            - self.sidebar.width(std::time::Instant::now())
+            - crate::frame::view::SHEET_PADDING)
+            .max(0.0);
         let element = match self.thread_content(
             workspace,
             &shell.core,
             ui,
             theme,
-            window.inner_size.width as f32,
+            width,
             window.inner_size.height as f32,
             reduced,
             swift,
@@ -1944,7 +2259,7 @@ impl SectionViews for RootViews {
         }
     }
 
-    fn refresh_sidebar(
+    fn refresh_sidebar_frame(
         &self,
         shell: &Shell,
         ui: &mut UiApp,
@@ -1956,18 +2271,57 @@ impl SectionViews for RootViews {
         if matches!(shell.core.screen(), Screen::Settings(_)) {
             return false;
         }
+        let theme = shell.preferences.theme();
+        let now = std::time::Instant::now();
+        let reduced = Self::reduced(ui);
+        let height = crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
+            .unwrap_or((window.inner_size.height as f32 - 260.0).max(0.0));
+        let tree = workspace
+            .sidebar
+            .host
+            .as_ref()
+            .and_then(|host| shell.core.host(host))
+            .map(|_| {
+                crate::frame::inbox::view(
+                    &workspace.sidebar,
+                    &shell.core,
+                    theme,
+                    height,
+                    reduced,
+                    workspace.sidebar_emit(false),
+                )
+            });
+        let account = self.account_snapshot(shell);
+        let element = crate::frame::view::sidebar_view(
+            &theme,
+            self.sidebar_model(&theme, tree, account.as_ref(), now),
+        );
+        match ui.refresh_subtree(crate::frame::view::SIDEBAR, element) {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                tracing::warn!(%error, "could not refresh sidebar frame");
+                false
+            }
+        }
+    }
+
+    fn refresh_sidebar(&self, shell: &Shell, ui: &mut UiApp, window: &ObservedWindowState) -> bool {
+        let Some(workspace) = shell.entry.workspace() else {
+            return false;
+        };
+        if matches!(shell.core.screen(), Screen::Settings(_)) {
+            return false;
+        }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let element = workspace.sidebar_view(
+        let height = crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
+            .unwrap_or((window.inner_size.height as f32 - 260.0).max(0.0));
+        let element = crate::frame::inbox::view(
+            &workspace.sidebar,
             &shell.core,
             shell.preferences.theme(),
-            aqua_core::Size::new(
-                window.inner_size.width as f32,
-                window.inner_size.height as f32,
-            ),
-            workspace.show_sidebar,
+            height,
             reduced,
-            std::time::Instant::now(),
-            false,
+            workspace.sidebar_emit(false),
         );
         match ui.refresh_subtree(crate::sidebar::view::ROOT_KEY, element) {
             Ok(refreshed) => refreshed,
@@ -2000,6 +2354,7 @@ impl SectionViews for RootViews {
             workspace.show_sidebar,
             workspace.show_inspector,
             window.inner_size.width as f32,
+            window.inner_size.height as f32,
         );
         !(quiet && key == built)
     }
@@ -2012,7 +2367,90 @@ impl SectionViews for RootViews {
         self.wheel.active()
     }
 
+    fn take_events(
+        &mut self,
+        shell: &mut Shell,
+        ui: &UiApp,
+        ctx: &mut AppCtx<'_>,
+        window: AquaWindowId,
+    ) -> bool {
+        let changed = self
+            .sidebar
+            .take_events(std::time::Instant::now(), Self::reduced(ui))
+            | self.track_tree_edges(ui);
+        self.apply_account_effects(shell, ctx, window, Self::reduced(ui));
+        let pictured = self.avatar.drain(shell.images());
+        self.schedule_sidebar(ctx, window);
+        changed | pictured
+    }
+
+    fn animate(
+        &mut self,
+        shell: &mut Shell,
+        ui: &mut UiApp,
+        ctx: &mut AppCtx<'_>,
+        window: AquaWindowId,
+    ) -> bool {
+        let reduced = Self::reduced(ui);
+        let now = std::time::Instant::now();
+        let signing_in = matches!(
+            shell.core.entry_gate(),
+            crate::core::EntryGate::Restoring | crate::core::EntryGate::SignedOut
+        );
+        let signing =
+            (signing_in && shell.entry.sign_in.tick(now)) | std::mem::take(&mut self.sign_in_dirty);
+        if signing_in && shell.entry.sign_in.animating() {
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
+        let sidebar_resizing = self.sidebar.resizing();
+        let causes = [
+            ("anim_events", self.sidebar.take_events(now, reduced)),
+            ("anim_clock", self.tick_work_clock(shell, ctx, window, now)),
+            ("anim_edges", self.track_tree_edges(ui)),
+            ("anim_sidebar", self.sidebar.tick(now, reduced)),
+            ("anim_signing", signing),
+        ];
+        for (cause, fired) in causes {
+            if fired {
+                crate::shell::rebuild_stats::record_event(cause);
+            }
+        }
+        let changed = causes.iter().any(|(_, fired)| *fired);
+        for (cause, fired) in causes {
+            let cause = match cause {
+                "anim_sidebar" if sidebar_resizing && !self.sidebar.resizing() => "anim_sidebar_settled",
+                "anim_sidebar" if sidebar_resizing || self.sidebar.resizing() => "anim_sidebar_resize",
+                cause => cause,
+            };
+            crate::shell::rebuild_stats::note(cause, fired);
+        }
+        self.apply_account_effects(shell, ctx, window, reduced);
+        if self.sidebar.menu().open()
+            && causes.iter().any(|(cause, fired)| *cause == "anim_sidebar" && *fired)
+        {
+            self.sync_account_menu(shell, ui, ctx, window);
+        }
+
+        match self.account_popup.advance(ui, ctx.now().as_secs_f64()) {
+            Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "could not animate the account menu"),
+        }
+        self.schedule_sidebar(ctx, window);
+        changed
+    }
+
     fn pre_input(&mut self, ui: &mut UiApp, input: &InputEvent) -> Option<bool> {
+        match self.account_popup.dismiss(ui, input) {
+            Ok(true) => {
+                (self.sidebar.emit())(crate::frame::sidebar::Event::Account(
+                    crate::frame::menu::Event::Dismissed,
+                ));
+                return Some(true);
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "could not dismiss the account menu"),
+        }
         let dismissal = {
             let _tm = crate::shell::application::Tm::new("pre.overlays");
             self.sidebar_overlays.request_dismissal(ui, input)
@@ -2046,6 +2484,7 @@ impl SectionViews for RootViews {
         window: &ObservedWindowState,
     ) -> anyhow::Result<Element> {
         let theme = shell.preferences.theme();
+        let account = self.account(shell);
         if self.image_preview.as_ref().is_some_and(|preview| {
             !matches!(shell.core.screen(), Screen::Thread { .. })
                 || !shell.entry.workspace().is_some_and(|workspace| {
@@ -2066,10 +2505,9 @@ impl SectionViews for RootViews {
             width: window.inner_size.width as f32,
             height: window.inner_size.height as f32,
         };
-        if let Some(entry) =
-            shell
-                .entry
-                .view(&shell.core, &theme, viewport, &shell.titlebar, window)
+        if let Some(entry) = shell
+            .entry
+            .view(&shell.core, &theme, &shell.titlebar, window)
         {
             self.replace_rows(None);
             self.stored.borrow_mut().drain_cleanup(ui);
@@ -2139,29 +2577,17 @@ impl SectionViews for RootViews {
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let size = aqua_core::Size::new(viewport.width, viewport.height);
         let now = std::time::Instant::now();
+        self.sidebar.fit(viewport.width, now, reduced);
         self.resize_key = Some(ResizeKey::of(
             &screen,
             workspace.show_sidebar,
             workspace.show_inspector,
             viewport.width,
+            viewport.height,
         ));
-        let dimensions = layout::workspace_layout(
-            viewport.width,
-            &screen,
-            workspace.show_sidebar,
-            workspace.show_inspector,
-            false,
-        );
-        let sidebar = workspace.sidebar_view(
-            &shell.core,
-            theme,
-            size,
-            workspace.show_sidebar,
-            reduced,
-            now,
-            false,
-        );
         aqua_core::checkpoint::reach();
+        let card_width =
+            (viewport.width - self.sidebar.width(now) - crate::frame::view::SHEET_PADDING).max(0.0);
         let center = match &screen {
             Screen::Home => workspace.home_view(&shell.core, &theme),
             Screen::Marketplace => workspace.marketplace_view(&shell.core, theme),
@@ -2172,19 +2598,20 @@ impl SectionViews for RootViews {
                     self.replace_rows(None);
                     view::centered_conversation(self.connection.waiting(theme, now, reduced))
                 } else {
-                self.thread_content(
-                    workspace,
-                    &shell.core,
-                    ui,
-                    theme,
-                    viewport.width,
-                    viewport.height,
-                    reduced,
-                    shell.preferences.streaming == crate::shell::preferences::StreamingMode::Swift,
-                    app_media,
-                    now,
-                    false,
-                )?
+                    self.thread_content(
+                        workspace,
+                        &shell.core,
+                        ui,
+                        theme,
+                        card_width,
+                        viewport.height,
+                        reduced,
+                        shell.preferences.streaming
+                            == crate::shell::preferences::StreamingMode::Swift,
+                        app_media,
+                        now,
+                        false,
+                    )?
                 }
             }
             Screen::NewThread { host, .. } => {
@@ -2210,6 +2637,7 @@ impl SectionViews for RootViews {
                             thread_error: None,
                         },
                         Rc::clone(&self.composer_measurement),
+                        reduced,
                     )?
                 }
             }
@@ -2235,15 +2663,6 @@ impl SectionViews for RootViews {
         if !matches!(screen, Screen::NewThread { .. }) {
             self.connection.reset();
         }
-        let notices = workspace
-            .failure
-            .as_ref()
-            .map(|text| {
-                let dismissed = Rc::clone(&self.failure_dismissed);
-                view::failure_notice(&theme, text.clone(), move || dismissed.set(true))
-            })
-            .into_iter()
-            .collect();
         if let Some(palette) = &workspace.palette {
             if self.palette.is_none() {
                 self.palette = Some(crate::shell::palette::view::PaletteView::new(
@@ -2326,25 +2745,6 @@ impl SectionViews for RootViews {
                 )
             })
             .flatten();
-        let header = titlebar_scope
-            .clone()
-            .and_then(|scope| {
-                let (link, _) = self.conversation_callbacks(scope.clone());
-                let actions = Rc::clone(&self.conversation_actions);
-                shell.titlebar.thread_header(
-                    &shell.core,
-                    &workspace.conversation,
-                    theme,
-                    Rc::new(move |url| link(crate::ui::markdown::visual::LinkAction::OpenUrl(url))),
-                    Rc::new(move |agent| {
-                        actions
-                            .borrow_mut()
-                            .push_back(ConversationAction::Agent(scope.clone(), agent))
-                    }),
-                )
-            })
-            .into_iter()
-            .collect();
         self.context_reading = titlebar_scope.and_then(|scope| {
             let host = shell.core.host_if_instance(&scope.host, scope.instance)?;
             let agent = scope.agent.as_ref().map(|id| {
@@ -2364,29 +2764,75 @@ impl SectionViews for RootViews {
             });
             crate::shell::context_meter::reading(host, &scope.thread, agent)
         });
-        let meter = self
-            .context_reading
-            .as_ref()
-            .map(|reading| self.context_tooltip.ring(reading, theme));
         workspace
             .inspector
             .follow(&shell.core, &workspace.conversation, ui);
-        let inspector = if dimensions.inspector.is_some() {
-            Some(workspace.inspector_elements(
-                &shell.core,
-                ui,
-                theme,
-                (viewport.height - layout::TITLEBAR_HEIGHT).max(0.0),
-                reduced,
-                self.ui_now,
-            )?)
-        } else {
-            None
+        let navigation = workspace
+            .sidebar
+            .host
+            .as_ref()
+            .and_then(|id| shell.core.host(id))
+            .map(|host| {
+                let open = workspace.sidebar.open.clone();
+                let tabs = open
+                    .as_ref()
+                    .and_then(|id| {
+                        let thread = host.threads.get(id)?;
+                        let project = host.projects.get(&thread.project_id)?;
+                        Some(crate::frame::strip::Tab {
+                            id: id.clone(),
+                            title: crate::frame::projects::title_of(thread.title.as_deref()),
+                            location: (!project.id.is_scratch()).then(|| host
+                                .repository(&project.id)
+                                .and_then(|repository| repository.web_url.as_deref())
+                                .map(crate::sidebar::list::qualified_label)
+                                .unwrap_or_else(|| project.name.clone())),
+                            url: host
+                                .repository(&project.id)
+                                .and_then(|repository| repository.web_url.clone()),
+                            mark: crate::frame::strip::Mark::of(host, &project.id),
+                            state: crate::sidebar::list::row_state(host, thread),
+                            active: true,
+                        })
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let height =
+                    crate::shell::wheel::viewport_height(ui, crate::sidebar::view::ROOT_KEY)
+                        .unwrap_or((viewport.height - 260.0).max(0.0));
+                let tree = crate::frame::inbox::view(
+                    &workspace.sidebar,
+                    &shell.core,
+                    theme,
+                    height,
+                    reduced,
+                    workspace.sidebar_emit(false),
+                );
+                let strip =
+                    crate::frame::strip::strip(&theme, &tabs, reduced, &self.sidebar.emit());
+                (tree, strip)
+            });
+        let (tree, strip) = match navigation {
+            Some((tree, strip)) => (Some(tree), strip),
+            None => (None, Vec::new()),
         };
+        let overview = (matches!(shell.core.screen(), Screen::Thread { .. })
+            && layout::inspector_width(card_width).is_some())
+        .then(|| {
+            crate::frame::overview::card(
+                &theme,
+                &crate::frame::overview::Overview::of(
+                    &shell.core,
+                    &workspace.inspector.inspector,
+                    self.context_reading.clone(),
+                ),
+                reduced,
+                workspace.inspector_emit(),
+            )
+        })
+        .flatten();
         aqua_core::checkpoint::reach();
-        let titlebar = shell
-            .titlebar
-            .workspace(theme, window, header, meter, dimensions.inspector);
+        let titlebar = shell.titlebar.workspace(theme, window, strip, None, None);
         let image_preview = self.image_preview.as_ref().map(|preview| {
             let events = Rc::clone(&self.preview_actions);
             preview.view.view(
@@ -2399,20 +2845,40 @@ impl SectionViews for RootViews {
                 }),
             )
         });
+        let body = crate::frame::view::body(
+            &theme,
+            titlebar,
+            self.sidebar_model(&theme, tree, account.as_ref(), now),
+            match &screen {
+                Screen::Thread { .. } | Screen::NewThread { .. } => vec![
+                    aqua::Aqua::Box()
+                        .layout("row")
+                        .styles([aqua::Aqua::Style()
+                            .flex_grow(1.0)
+                            .min_width(aqua::px(0.0))
+                            .min_height(aqua::px(0.0))])
+                        .child(
+                            aqua::Aqua::Box()
+                                .layout("column")
+                                .styles([aqua::Aqua::Style()
+                                    .flex_grow(1.0)
+                                    .min_width(aqua::px(0.0))])
+                                .child(center)
+                                .build(),
+                        )
+                        .children(overview)
+                        .build(),
+                ],
+                _ => Vec::new(),
+            },
+            Rc::clone(&self.seam),
+            reduced,
+        );
         Ok(view::workspace(
             workspace.selections.key,
             &theme,
-            viewport,
-            &screen,
-            workspace.show_sidebar,
-            workspace.show_inspector,
-            self.context_reading.is_some(),
             view::WorkspaceElements {
-                titlebar,
-                sidebar,
-                center,
-                inspector,
-                notices,
+                body,
                 settings_dialog: None,
                 palette: None,
                 resource_preview: None,
@@ -2429,6 +2895,8 @@ impl SectionViews for RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) {
+        self.sync_account_menu(shell, ui, ctx, window);
+        self.sync_sign_in(shell, ui, ctx, window);
         self.source_dialogs
             .retain(|export| Self::source_export_is_current(shell, export));
         self.bind_row_sources(ui, ctx, window);
@@ -2539,12 +3007,28 @@ impl SectionViews for RootViews {
         let now = std::time::Instant::now();
         aqua_core::checkpoint::reach();
         self.sync_edges(shell, ui, ctx, window);
-        let mut action_changed = crate::shell::rebuild_stats::note("wheel", self.sync_wheel(shell, ui, ctx, window))
-            | crate::shell::rebuild_stats::note("dispatch", self.dispatch_conversation(shell, ui, ctx, window))
-            | crate::shell::rebuild_stats::note("sidebar", self.sync_sidebar(shell, ui, ctx, window))
-            | crate::shell::rebuild_stats::note("connection_anim", self.connection.animating(now, reduced))
-            | crate::shell::rebuild_stats::note("loading_anim", self.thread_loading.animating(now, reduced))
-            | crate::shell::rebuild_stats::note("landing_anim", self.thread_landing.animating(now, reduced));
+        let mut action_changed =
+            crate::shell::rebuild_stats::note("wheel", self.sync_wheel(shell, ui, ctx, window))
+                | crate::shell::rebuild_stats::note(
+                    "dispatch",
+                    self.dispatch_conversation(shell, ui, ctx, window),
+                )
+                | crate::shell::rebuild_stats::note(
+                    "sidebar",
+                    self.sync_sidebar(shell, ui, ctx, window),
+                )
+                | crate::shell::rebuild_stats::note(
+                    "connection_anim",
+                    self.connection.animating(now, reduced),
+                )
+                | crate::shell::rebuild_stats::note(
+                    "loading_anim",
+                    self.thread_loading.animating(now, reduced),
+                )
+                | crate::shell::rebuild_stats::note(
+                    "landing_anim",
+                    self.thread_landing.animating(now, reduced),
+                );
         if let Some(height) = self.composer_measurement.take() {
             if self
                 .composer_height
@@ -2565,9 +3049,10 @@ impl SectionViews for RootViews {
         };
         let mut changed = crate::shell::rebuild_stats::note("reveals", reveals.frontier_changed);
         let reveal_active = reveals.changed || reveals.animating;
-        let retry = self
-            .pending_stall
-            .observe(reveals.pending && !reveals.changed && !reveals.animating, ui.tree().invalidation_epoch());
+        let retry = self.pending_stall.observe(
+            reveals.pending && !reveals.changed && !reveals.animating,
+            ui.tree().invalidation_epoch(),
+        );
         if changed || reveal_active || retry {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
@@ -2694,7 +3179,10 @@ impl SectionViews for RootViews {
                         clip,
                     ) {
                         Ok(()) => {
-                            changed |= crate::shell::rebuild_stats::note("rows", previous != workspace.conversation.rows_epoch())
+                            changed |= crate::shell::rebuild_stats::note(
+                                "rows",
+                                previous != workspace.conversation.rows_epoch(),
+                            )
                         }
                         Err(error) => {
                             tracing::warn!(%error, "could not observe transcript viewport")
@@ -2892,6 +3380,9 @@ impl SectionViews for RootViews {
         window: AquaWindowId,
     ) -> bool {
         self.sync_context(shell, ui, ctx, window);
+        if self.work_clock.is_none() {
+            self.tick_work_clock(shell, ctx, window, std::time::Instant::now());
+        }
         if self.sync_navigation(ui, ctx, window, shell.preferences.theme()) {
             crate::shell::rebuild_stats::record_event("inv_nav_a");
             self.navigation_invalidated.set(true);

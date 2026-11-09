@@ -169,6 +169,8 @@ fn save_signed_in_account(files: &EditorFiles) -> Result<()> {
         account_id: ACCOUNT_ID.to_owned(),
         email: "capture@example.invalid".to_owned(),
         display_name: "Capture".to_owned(),
+        username: None,
+        avatar_url: None,
         totp_enrolled: false,
         machines: vec![MachineEntry {
             id: MACHINE_ID.to_owned(),

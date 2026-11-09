@@ -369,7 +369,6 @@ impl Workspace {
         let shown = owner.shown_tooltip();
         let node = shown.as_ref().and_then(|shown| {
             [
-                PopupKind::Axis,
                 PopupKind::Model,
                 PopupKind::Project,
                 PopupKind::Mentions,
@@ -486,7 +485,7 @@ impl Workspace {
         now: f64,
     ) -> bool {
         use crate::composer::{
-            picker::{self, Menu},
+            picker::Menu,
             view::{self, PopupKind},
         };
         let Some(owner) = &mut self.composer else {
@@ -503,11 +502,10 @@ impl Workspace {
         let viewport = ui.viewport();
         let actions = Rc::clone(&self.composer_actions);
         let emit: view::Dispatch = Rc::new(move |action| actions.borrow_mut().push_back(action));
-        let (menu, axis, mentions) = {
+        let (menu, mentions) = {
             let composer = owner.controller.borrow();
             (
                 composer.picker.menu,
-                composer.picker.axis,
                 !composer.mentions.rows.is_empty(),
             )
         };
@@ -515,13 +513,11 @@ impl Workspace {
             PopupKind::Model,
             PopupKind::Project,
             PopupKind::Mentions,
-            PopupKind::Axis,
         ] {
             let desired = match kind {
                 PopupKind::Model => menu == Some(Menu::Model),
                 PopupKind::Project => menu == Some(Menu::Project),
                 PopupKind::Mentions => mentions,
-                PopupKind::Axis => menu == Some(Menu::Model) && axis.is_some(),
             };
             if !desired {
                 if owner.popup_is_open(kind, ui) {
@@ -535,12 +531,17 @@ impl Workspace {
                 PopupKind::Model => "composer-model".to_owned(),
                 PopupKind::Project => "composer-project".to_owned(),
                 PopupKind::Mentions => "composer-prompt".to_owned(),
-                PopupKind::Axis => format!("composer-axis-{:?}", axis.unwrap()),
             };
             let content = match kind {
                 PopupKind::Model => {
-                    match owner.model_menu(theme, host, viewport, assets, std::time::Instant::now())
-                    {
+                    match owner.model_menu(
+                        theme,
+                        host,
+                        viewport,
+                        crate::shell::wheel::kept_offset(ui, crate::shell::wheel::MODEL_MENU).y,
+                        assets,
+                        std::time::Instant::now(),
+                    ) {
                         Ok(content) => Some(content),
                         Err(error) => {
                             tracing::warn!(%error, "could not build composer model menu");
@@ -573,40 +574,9 @@ impl Workspace {
                         Rc::clone(&emit),
                     )
                 }
-                PopupKind::Axis => {
-                    let composer = owner.controller.borrow();
-                    let config = composer
-                        .picker
-                        .preview_config(host, composer.effective_config(host));
-                    config.map(|config| {
-                        let model = host.engines.get(&config.engine).and_then(|status| {
-                            config
-                                .model
-                                .as_ref()
-                                .and_then(|id| status.models.iter().find(|model| &model.id == id))
-                        });
-                        let axis = axis.unwrap();
-                        let options = picker::axis_options(axis, &config, model);
-                        view::axis_menu(
-                            theme,
-                            axis,
-                            &options,
-                            composer.picker.keyboard_axis_cursor(),
-                            owner.axis_hover(),
-                            owner.tooltip_target(),
-                            Rc::clone(&emit),
-                        )
-                    })
-                }
             };
             let Some(content) = content else { continue };
-            let anchor = if kind == PopupKind::Axis {
-                owner
-                    .popup_root(PopupKind::Model, ui)
-                    .and_then(|root| keyed_descendant(ui, root, anchor_key.clone().into()))
-            } else {
-                keyed_node(ui, anchor_key.into())
-            };
+            let anchor = keyed_node(ui, anchor_key.into());
             let result = if owner.popup_is_open(kind, ui) {
                 owner.refresh_popup_content(kind, ui, content, now)
             } else if let Some(anchor) = anchor {
@@ -618,7 +588,7 @@ impl Workspace {
                 tracing::warn!(%error, "could not synchronize composer popup");
             }
         }
-        let roots = [PopupKind::Model, PopupKind::Project, PopupKind::Axis]
+        let roots = [PopupKind::Model, PopupKind::Project]
             .map(|kind| owner.popup_root(kind, ui));
         match owner.advance_picker_hover(ui, &theme, now, roots) {
             Ok(changed) => changed,
@@ -627,6 +597,17 @@ impl Workspace {
                 false
             }
         }
+    }
+
+    #[must_use]
+    pub fn inspector_emit(&self) -> Rc<dyn Fn(crate::inspector::InspectorAction)> {
+        let actions = Rc::clone(&self.inspector_actions);
+        let scope = self.inspector.scope();
+        Rc::new(move |action| {
+            actions
+                .borrow_mut()
+                .push_back(crate::inspector::OwnerAction::Inspector { scope, action });
+        })
     }
 
     pub fn inspector_elements(

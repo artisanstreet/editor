@@ -537,11 +537,11 @@ fn launch_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf
     if let Some(model) = config.model.as_deref().filter(|model| !model.is_empty()) {
         args.extend(["--model".to_owned(), model.to_owned()]);
     }
-    // Fast mode is a setting (`fastMode`), not a flag; this run's settings
-    // layer over the engine home's.
     let mut settings = serde_json::Map::new();
-    if config.speed.as_deref() == Some(crate::catalog::CLAUDE_FAST) {
-        settings.insert("fastMode".to_owned(), json!(true));
+    match config.speed.as_deref() {
+        Some(crate::catalog::CLAUDE_FAST) => { settings.insert("fastMode".into(), json!(true)); }
+        Some(crate::catalog::STANDARD_SPEED) => { settings.insert("fastMode".into(), json!(false)); }
+        _ => {}
     }
     if !settings.is_empty() {
         args.extend(["--settings".to_owned(), Value::Object(settings).to_string()]);
@@ -585,10 +585,10 @@ fn title_from_transcript(path: &Path) -> Option<String> {
         })
 }
 
-/// The CLI caps auto-compaction without changing the model's identity.
 fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
     config
-        .context_window_override()
+        .compaction_window_override()
+        .or_else(|| config.context_window_override().filter(|tokens| *tokens == 500_000))
         .map(|tokens| ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", tokens.to_string()))
 }
 
@@ -997,19 +997,19 @@ cat > /dev/null
         };
         assert_eq!(settings(&config), None);
         config.speed = Some("standard".into());
-        assert_eq!(settings(&config), None);
+        assert_eq!(settings(&config).as_deref(), Some(r#"{"fastMode":false}"#));
         config.speed = Some("fast".into());
         assert_eq!(settings(&config).as_deref(), Some(r#"{"fastMode":true}"#));
     }
 
     #[test]
-    fn capped_context_uses_compaction_environment_and_keeps_model_identity() {
+    fn compaction_window_keeps_model_identity() {
         let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
         config.model = Some("claude-opus-test".to_owned());
         assert_eq!(super::context_window_env(&config), None);
         config
             .options
-            .insert("context_window".to_owned(), serde_json::json!(400_000));
+            .insert("compaction_window".to_owned(), serde_json::json!(400_000));
         assert_eq!(
             super::context_window_env(&config),
             Some(("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "400000".to_owned()))

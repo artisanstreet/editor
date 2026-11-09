@@ -930,7 +930,27 @@ pub fn thread_list(
     render: Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
-    use super::geometry::{Entry, READ_AHEAD, entries, entry_keys, history_spacer};
+    thread_entries(
+        sidebar,
+        core,
+        viewport_height,
+        super::geometry::entries(&sidebar.lists, sidebar.history_visible()),
+        "sidebar-threads",
+        render,
+        emit,
+    )
+}
+
+fn thread_entries(
+    sidebar: &Sidebar,
+    core: &Core,
+    viewport_height: f32,
+    entries: Vec<super::geometry::Entry>,
+    scroller: &'static str,
+    render: Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Option<Element> {
+    use super::geometry::{Entry, READ_AHEAD, entry_keys, history_spacer};
     use aqua_ui::{
         collection::List,
         input::{EventPhase, InputKind, InputResponse},
@@ -939,7 +959,6 @@ pub fn thread_list(
     let host = sidebar.host_data(core)?;
     let host_id = host.id.clone();
     let instance = host.instance();
-    let entries = entries(&sidebar.lists, sidebar.history_visible());
     let spacer = history_spacer(&entries, viewport_height, sidebar.history_fraction);
     let heights: Vec<_> = entries
         .iter()
@@ -980,7 +999,7 @@ pub fn thread_list(
                 let visible_projects = viewport_entries[start..end]
                     .iter()
                     .filter_map(|entry| match entry {
-                        Entry::Thread(row) => Some(row.project.clone()),
+                        Entry::Thread(row, _) => Some(row.project.clone()),
                         _ => None,
                     })
                     .collect();
@@ -992,7 +1011,7 @@ pub fn thread_list(
                 });
             })
             .build()
-            .with_key("sidebar-threads")
+            .with_key(scroller)
             .on_input(InputKind::Scroll, EventPhase::Bubble, move |_| {
                 wheel_emit(ViewAction::ThreadWheel {
                     host: host_id.clone(),
@@ -1026,14 +1045,35 @@ pub fn thread_list_view(
     visuals: ThreadVisualFactory,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
-    use super::geometry::{Entry, entries, history_spacer};
+    thread_entries_view(
+        sidebar,
+        core,
+        theme,
+        viewport_height,
+        super::geometry::entries(&sidebar.lists, sidebar.history_visible()),
+        "sidebar-threads",
+        visuals,
+        emit,
+    )
+}
+
+pub fn thread_entries_view(
+    sidebar: &Sidebar,
+    core: &Core,
+    theme: ArtisanTheme,
+    viewport_height: f32,
+    entries: Vec<super::geometry::Entry>,
+    scroller: &'static str,
+    visuals: ThreadVisualFactory,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Option<Element> {
+    use super::geometry::{Entry, history_spacer};
     use aqua_core::Transform2D;
     use std::collections::HashMap;
 
     let host = sidebar.host_data(core)?;
     let host_id = host.id.clone();
     let instance = host.instance();
-    let entries = entries(&sidebar.lists, sidebar.history_visible());
     let history_index = entries
         .iter()
         .position(|entry| matches!(entry, Entry::History));
@@ -1041,7 +1081,7 @@ pub fn thread_list_view(
     let metadata: HashMap<_, _> = entries
         .iter()
         .filter_map(|entry| {
-            let Entry::Thread(row) = entry else {
+            let Entry::Thread(row, _) = entry else {
                 return None;
             };
             let thread = host.threads.get(&row.id)?;
@@ -1057,11 +1097,17 @@ pub fn thread_list_view(
             ))
         })
         .collect();
+    let project_marks: HashMap<_, _> = entries.iter().filter_map(|entry| {
+        let Entry::Project { id, .. } = entry else { return None; };
+        Some((id.clone(), crate::frame::strip::Mark::of(host, id)))
+    }).collect();
+    let row_entries = entries.clone();
     let row_emit = emit.clone();
     let row_host = host_id;
+    let row_hover = sidebar.threads_hover.clone();
     let renderer = Rc::new(move |index: usize, entry: &Entry, fraction: f32| {
         let content = match entry {
-            Entry::Thread(data) => {
+            Entry::Thread(data, layout) => {
                 let meta = metadata.get(&data.id).cloned().unwrap_or(ThreadMetadata {
                     icon: None,
                     repository_host: None,
@@ -1074,9 +1120,18 @@ pub fn thread_list_view(
                     instance,
                     meta.drag,
                     row_visuals,
+                    *layout,
+                    row_hover.background(&format!("sidebar-thread-{}", data.id), &theme, 8.0),
                     row_emit.clone(),
                 )
             }
+            Entry::Project { id, label } => UiBox::new()
+                .height(entry.height())
+                .gap(5.0)
+                .style(Style::new().align(AlignItems::CENTER).padding_insets(Insets { left: 8.0, right: 8.0, top: 0.0, bottom: 0.0 }))
+                .children(project_marks.get(id).map(|mark| mark.view(theme.colors.text_muted)))
+                .child(Text::new(label.clone()).font_size(TypographyTokens::size(TextStep::Xs)).gpui_source_color(theme.colors.text_muted.to_reference_text_color()).build())
+                .build(),
             Entry::Gap(height) => UiBox::new().height(*height).build(),
             Entry::Spacer => UiBox::new().height(spacer).build(),
             Entry::Heading(label) => UiBox::new()
@@ -1098,89 +1153,7 @@ pub fn thread_list_view(
                         .build(),
                 )
                 .build(),
-            Entry::History => {
-                let toggle = row_emit.clone();
-                let caret = crate::ui::icon::disclosure_chevron(
-                    fraction,
-                    12.0,
-                    theme.colors.text_muted.to_reference_paint(),
-                );
-                let button = Button::new()
-                    .height(34.0)
-                    .width(Length::Pct(100.0))
-                    .radius(RadiusTokens::value(RadiusStep::Md))
-                    .style(
-                        Style::new()
-                            .align(AlignItems::CENTER)
-                            .justify(aqua_ui::JustifyContent::SPACE_BETWEEN)
-                            .padding_insets(Insets {
-                                left: 8.0,
-                                right: 8.0,
-                                top: 0.0,
-                                bottom: 0.0,
-                            }),
-                    )
-                    .child(
-                        UiBox::new()
-                            .gap(8.0)
-                            .style(Style::new().align(AlignItems::CENTER))
-                            .child(
-                                UiBox::new()
-                                    .width(16.0)
-                                    .height(16.0)
-                                    .child(source_asset_glyph(
-                                        AssetId::TABLER_ARCHIVE,
-                                        15.0,
-                                        theme.colors.text_muted.to_reference_paint(),
-                                    ))
-                                    .build(),
-                            )
-                            .child(
-                                Text::new("History")
-                                    .font_size(TypographyTokens::size(TextStep::Sm))
-                                    .gpui_source_color(theme.colors.text.to_reference_text_color())
-                                    .build(),
-                            )
-                            .build(),
-                    )
-                    .child(caret)
-                    .on_activate(move || toggle(ViewAction::ToggleHistory))
-                    .build()
-                    .with_key("sidebar-history")
-                    .role(Role::Button)
-                    .aria_label("History")
-                    .cursor(CursorIcon::Pointer);
-                UiBox::new()
-                    .layout("column")
-                    .width(Length::Pct(100.0))
-                    .child(
-                        UiBox::new()
-                            .height(1.0)
-                            .style(
-                                Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                                    theme.colors.line.to_reference_paint(),
-                                )),
-                            )
-                            .style(Style::new().margin_insets(Insets {
-                                bottom: 8.0,
-                                ..Insets::default()
-                            }))
-                            .build(),
-                    )
-                    .child(
-                        UiBox::new()
-                            .width(Length::Pct(100.0))
-                            .style(Style::new().padding_insets(Insets {
-                                left: 8.0,
-                                right: 8.0,
-                                top: 0.0,
-                                bottom: 0.0,
-                            }))
-                            .child(button)
-                            .build(),
-                    )
-                    .build()
-            }
+            Entry::History => history_toggle(theme, fraction, row_emit.clone()),
         };
         let content = if history_index.is_some_and(|history| index > history) {
             UiBox::new()
@@ -1217,7 +1190,99 @@ pub fn thread_list_view(
             .child(content)
             .build()
     });
-    thread_list(sidebar, core, viewport_height, renderer, emit)
+    thread_entries(
+        sidebar,
+        core,
+        viewport_height,
+        row_entries,
+        scroller,
+        renderer,
+        emit,
+    )
+}
+
+pub fn history_toggle(theme: ArtisanTheme, fraction: f32, emit: Rc<dyn Fn(ViewAction)>) -> Element {
+    let toggle = emit;
+    let caret = crate::ui::icon::disclosure_chevron(
+        fraction,
+        12.0,
+        theme.colors.text_muted.to_reference_paint(),
+    );
+    let button = Button::new()
+        .height(34.0)
+        .width(Length::Pct(100.0))
+        .radius(RadiusTokens::value(RadiusStep::Md))
+        .style(
+            Style::new()
+                .align(AlignItems::CENTER)
+                .justify(aqua_ui::JustifyContent::SPACE_BETWEEN)
+                .padding_insets(Insets {
+                    left: 8.0,
+                    right: 8.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                }),
+        )
+        .child(
+            UiBox::new()
+                .gap(8.0)
+                .style(Style::new().align(AlignItems::CENTER))
+                .child(
+                    UiBox::new()
+                        .width(16.0)
+                        .height(16.0)
+                        .child(source_asset_glyph(
+                            AssetId::TABLER_ARCHIVE,
+                            15.0,
+                            theme.colors.text_muted.to_reference_paint(),
+                        ))
+                        .build(),
+                )
+                .child(
+                    Text::new("History")
+                        .font_size(TypographyTokens::size(TextStep::Sm))
+                        .gpui_source_color(theme.colors.text.to_reference_text_color())
+                        .build(),
+                )
+                .build(),
+        )
+        .child(caret)
+        .on_activate(move || toggle(ViewAction::ToggleHistory))
+        .build()
+        .with_key("sidebar-history")
+        .role(Role::Button)
+        .aria_label("History")
+        .cursor(CursorIcon::Pointer);
+    UiBox::new()
+        .layout("column")
+        .width(Length::Pct(100.0))
+        .child(
+            UiBox::new()
+                .height(1.0)
+                .style(
+                    Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
+                        theme.colors.line.to_reference_paint(),
+                    )),
+                )
+                .style(Style::new().margin_insets(Insets {
+                    bottom: 8.0,
+                    ..Insets::default()
+                }))
+                .build(),
+        )
+        .child(
+            UiBox::new()
+                .width(Length::Pct(100.0))
+                .style(Style::new().padding_insets(Insets {
+                    left: 8.0,
+                    right: 8.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                }))
+                .child(button)
+                .build(),
+        )
+        .build()
 }
 
 pub fn build(
@@ -1278,7 +1343,6 @@ pub fn build(
                             bottom: 0.0,
                         }),
                 )
-                .child(sidebar.threads_hover.pill(&theme, 8.0, true))
                 .child(list)
                 .child(sidebar.threads_edges.band(
                     "sidebar-threads-edge-top",

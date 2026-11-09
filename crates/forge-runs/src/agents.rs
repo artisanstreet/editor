@@ -97,7 +97,10 @@ pub struct AgentInfo {
 
 /// The config an agent runs with: `request` over the parent's, checked
 /// against the harness's catalog. Returns what was filled in or changed.
-#[expect(clippy::too_many_lines, reason = "variant/context/options fallbacks in one resolve")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "variant/context/options fallbacks in one resolve"
+)]
 fn resolve(
     parent: &EngineConfig,
     request: &SpawnAgent,
@@ -423,6 +426,17 @@ impl Hub {
         thread: &ThreadId,
         text: String,
     ) -> Result<Item> {
+        self.send_as_agent_with_id(caller, thread, text, ItemId::new())
+            .await
+    }
+
+    pub(crate) async fn send_as_agent_with_id(
+        &self,
+        caller: &ThreadId,
+        thread: &ThreadId,
+        text: String,
+        id: ItemId,
+    ) -> Result<Item> {
         let store = self.store();
         let from = store
             .thread(caller)
@@ -446,7 +460,7 @@ impl Hub {
         self.accept_message(
             thread,
             SendMessage {
-                id: ItemId::new(),
+                id,
                 text,
                 images: Vec::new(),
                 config: None,
@@ -870,6 +884,7 @@ impl Hub {
                 thread: Some(child),
                 ..
             } = &item.kind
+                && self.remote_target(child, false).ok().flatten().is_none()
                 && let Err(error) = self.settle_agent(child).await
             {
                 tracing::error!(thread = %child, "updating an agent: {error:#}");
@@ -877,7 +892,7 @@ impl Hub {
         }
     }
 
-    fn agents_moved(&self) {
+    pub(crate) fn agents_moved(&self) {
         self.inner.agents_changed.send_modify(|count| *count += 1);
     }
 

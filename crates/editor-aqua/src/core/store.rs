@@ -216,6 +216,8 @@ impl Core {
             account_id: "acct_test00000000000000000000".to_owned(),
             email: "test@example.invalid".to_owned(),
             display_name: "Test".to_owned(),
+            username: None,
+            avatar_url: None,
             totp_enrolled: false,
             machines: vec![machine.clone()],
             latest_config_version: None,
@@ -524,15 +526,6 @@ impl Core {
         self.dials.remove(&id);
         self.dial(&id);
     }
-    pub fn complete_setup(&mut self, machine_id: String) -> Result<()> {
-        anyhow::ensure!(
-            self.machine_live(&machine_id),
-            "connect the Forge first, then finish setup"
-        );
-        self.account.complete_onboarding(machine_id)?;
-        self.reconcile();
-        Ok(())
-    }
     fn dial(&mut self, id: &HostId) {
         if self.hosts.contains_key(id) || self.dials.contains_key(id) {
             return;
@@ -731,8 +724,17 @@ impl Core {
         if let Some(machine_id) = local.filter(|_| !reading) {
             self.dial(&HostId(machine_id));
         }
-        if let (EntryGate::Ready { .. }, Some(machine_id)) = (&gate, onboarded) {
-            self.dial(&HostId(machine_id));
+        if matches!(gate, EntryGate::Ready { .. }) {
+            let chosen = onboarded.filter(|id| access::live_machine(&profile, id).is_some());
+            let machines: Vec<String> = match chosen {
+                Some(machine_id) => vec![machine_id],
+                None => access::live_machines(&profile)
+                    .map(|machine| machine.id.clone())
+                    .collect(),
+            };
+            for machine_id in machines {
+                self.dial(&HostId(machine_id));
+            }
         }
         if matches!(gate, EntryGate::Ready { .. })
             && let Some(screen) = self.pending_screen.take()

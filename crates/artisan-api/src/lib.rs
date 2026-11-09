@@ -7,6 +7,7 @@
 mod agent_names;
 mod content;
 mod engine;
+mod model;
 mod event;
 mod extensions;
 mod ids;
@@ -24,6 +25,7 @@ pub mod transport;
 pub use agent_names::*;
 pub use content::*;
 pub use engine::*;
+pub use model::*;
 pub use event::*;
 pub use extensions::*;
 pub use ids::*;
