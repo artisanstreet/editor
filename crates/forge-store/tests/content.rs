@@ -207,6 +207,8 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
          DROP TABLE content_chunks;
          DROP TABLE content;
          DROP TABLE continues;
+         DROP TABLE coordination_events;
+         DROP TABLE coordination_records;
          PRAGMA user_version=12;",
     )
     .unwrap();

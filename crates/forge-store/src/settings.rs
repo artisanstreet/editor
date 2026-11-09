@@ -16,6 +16,9 @@ impl Store {
     }
 
     pub async fn set_setting(&self, key: String, value: serde_json::Value) -> Result<()> {
+        if key == artisan_api::MODEL_CUSTOMIZATIONS_KEY {
+            artisan_api::model_customizations(&value).map_err(anyhow::Error::msg)?;
+        }
         self.write(move |tx| tx.save_setting(key, value)).await
     }
 
@@ -121,7 +124,9 @@ impl Store {
                     .unwrap_or_else(|| artisan_api::EngineConfig::new(engine)),
             };
             config.model = Some(model.id.clone());
-            model.fit(&mut config);
+            let customizations = read::setting(tx, artisan_api::MODEL_CUSTOMIZATIONS_KEY)?
+                .as_ref().map(artisan_api::model_customizations).transpose().map_err(anyhow::Error::msg)?.unwrap_or_default();
+            config = model.resolve_config(&config, &customizations).effective;
             tx.save_setting(
                 "default_engine_config".into(),
                 serde_json::to_value(&config)?,
@@ -140,8 +145,11 @@ impl Store {
         model: &artisan_api::Model,
     ) -> Result<artisan_api::EngineConfig> {
         config.model = Some(model.id.clone());
-        model.fit(&mut config);
+        let model = model.clone();
         self.write(move |tx| {
+            let customizations = read::setting(tx, artisan_api::MODEL_CUSTOMIZATIONS_KEY)?
+                .as_ref().map(artisan_api::model_customizations).transpose().map_err(anyhow::Error::msg)?.unwrap_or_default();
+            config = model.resolve_config(&config, &customizations).effective;
             tx.remember_model_config(&config)?;
             Ok(config)
         })
