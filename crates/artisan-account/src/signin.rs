@@ -91,6 +91,13 @@ pub struct MagicFinalizeRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopRedeemRequest {
+    pub code: String,
+    pub verifier: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MagicFinalizeResponse {
     pub session_id: String,
     pub account_id: String,
