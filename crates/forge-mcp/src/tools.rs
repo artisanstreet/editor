@@ -123,7 +123,7 @@ fn recall_tools() -> Vec<Tool> {
             description: "The threads that read, created, edited or deleted a file whose path contains `path`, newest first.",
             properties: || {
                 json!({
-                    "path": { "type": "string", "description": "A path or part of one, such as scene.rs or crates/editor/." },
+                    "path": { "type": "string", "description": "A path or part of one, such as scene.rs or crates/editor-aqua/." },
                     "project": { "type": "string" },
                     "limit": { "type": "integer", "description": "Default 30." },
                 })

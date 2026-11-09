@@ -52,20 +52,12 @@ let
       ) parts);
   };
 
-  # Libraries the Linux Editor links or loads (GPUI: Wayland, X11/xcb,
-  # xkbcommon, Vulkan, fontconfig/freetype).
   libraries = with pkgs; [
     fontconfig
     freetype
-    libxkbcommon
     wayland
     libX11
-    libXcursor
-    libXi
-    libXrandr
     libxcb
-    vulkan-loader
-    libGL
     openssl
     sqlite
   ];
@@ -177,9 +169,6 @@ let
     };
   };
 
-  # One shipped binary for one platform, in Cargo's `release` profile
-  # (Cargo.toml). Each binary compiles only its own dependency graph, so
-  # `ae` never waits on GPUI.
   binary =
     {
       platform,
@@ -197,19 +186,9 @@ let
           pname = "${name}-${platform}";
           preBuild =
             writableTarget
-            + lib.optionalString (
-              platform == "windows"
-              && builtins.elem package [
-                "editor"
-                "editor-aqua"
-              ]
-            ) shaderTools.prepare;
+            + lib.optionalString (platform == "windows" && package == "editor-aqua") shaderTools.prepare;
           postBuild = lib.optionalString (
-            platform == "windows"
-            && builtins.elem package [
-              "editor"
-              "editor-aqua"
-            ]
+            platform == "windows" && package == "editor-aqua"
           ) shaderTools.cleanup;
           strictDeps = true;
           CARGO_PROFILE = "release";
@@ -255,25 +234,6 @@ let
     package = "forge";
     name = "forge";
   };
-  editorUnwrapped = binary {
-    platform = "linux";
-    package = "editor";
-    name = "artisan-editor";
-  };
-  # The Nix Editor finds its graphics libraries in the store, plus the host
-  # GPU drivers (NixOS, WSLg).
-  editor =
-    pkgs.runCommand "artisan-editor-${version}"
-      {
-        nativeBuildInputs = [ pkgs.makeWrapper ];
-        passthru.unwrapped = editorUnwrapped;
-        meta.mainProgram = "artisan-editor";
-      }
-      ''
-        makeWrapper ${editorUnwrapped}/bin/artisan-editor "$out/bin/artisan-editor" \
-          --prefix LD_LIBRARY_PATH : ${graphicsLibraryPath} \
-          --run 'for dir in /run/opengl-driver/lib /usr/lib/wsl/lib; do [ -d "$dir" ] && LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$dir"; done; export LD_LIBRARY_PATH'
-      '';
   windows = lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
     ae-windows = binary {
       platform = "windows";
@@ -297,7 +257,6 @@ let
       inherit pkgs version;
       linux = {
         inherit ae forge;
-        editor = editorUnwrapped;
       };
       windows = {
         ae = windows.ae-windows;
@@ -392,10 +351,10 @@ let
       }
     );
   };
-  dev = import ./dev.nix { inherit pkgs graphicsLibraryPath; };
+  dev = import ./dev.nix { inherit pkgs; };
   # Upstream release packaging rejects Nix glibc; build its pinned source here.
   devfast = import ./dev.nix {
-    inherit pkgs graphicsLibraryPath;
+    inherit pkgs;
     blazePackage =
       let
         upstream = import blaze.inputs.nixpkgs {
@@ -432,7 +391,7 @@ let
   # `nix run .#release`: the dev loop with Cargo's release profile. The
   # signed release archives stay `nix build .#release` (packages, not apps).
   devRelease = import ./dev.nix {
-    inherit pkgs graphicsLibraryPath;
+    inherit pkgs;
     profile = "release";
   };
 in
@@ -465,7 +424,6 @@ in
   packages = {
     default = ae;
     inherit ae forge;
-    artisan-editor = editor;
   }
   // windows
   // release;

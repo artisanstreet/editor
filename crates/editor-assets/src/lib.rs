@@ -215,8 +215,6 @@ impl fmt::Display for Family {
 /// rendering, whereas full-color raster would pin the glyph to black.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Presentation {
-    /// Alpha-mask rendering painted in GPUI text color; the asset tints and
-    /// inverts with the theme.
     Tinted,
     /// Authored-color rendering over the embedded bytes; nothing recolored.
     FullColor,
