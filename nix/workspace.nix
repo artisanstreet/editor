@@ -1,10 +1,3 @@
-# Packages, checks and shells of the workspace.
-#
-# Three shipped apps: `ae` (crates/ae: installs and manages the others),
-# `forge` (crates/forge) and `artisan-editor` (crates/editor), built for
-# Linux and cross-built for Windows (x86_64-pc-windows-gnu, MinGW-w64).
-# `release` lays them out the way `ae install` expects (nix/release.nix);
-# signing is `scripts/release`.
 {
   self,
   pkgs,
@@ -192,6 +185,7 @@ let
       platform,
       package,
       name,
+      bin ? name,
     }:
     let
       host = platforms.${platform};
@@ -201,11 +195,25 @@ let
         // {
           inherit src version;
           pname = "${name}-${platform}";
-          preBuild = writableTarget + lib.optionalString (platform == "windows" && package == "editor") shaderTools.prepare;
-          postBuild = lib.optionalString (platform == "windows" && package == "editor") shaderTools.cleanup;
+          preBuild =
+            writableTarget
+            + lib.optionalString (
+              platform == "windows"
+              && builtins.elem package [
+                "editor"
+                "editor-aqua"
+              ]
+            ) shaderTools.prepare;
+          postBuild = lib.optionalString (
+            platform == "windows"
+            && builtins.elem package [
+              "editor"
+              "editor-aqua"
+            ]
+          ) shaderTools.cleanup;
           strictDeps = true;
           CARGO_PROFILE = "release";
-          cargoExtraArgs = "--locked --offline -p ${package} --bin ${name}";
+          cargoExtraArgs = "--locked --offline -p ${package} --bin ${bin}";
           doCheck = false;
         };
       profileDirectory = "target/${lib.optionalString (platform == "windows") "${host.target}/"}release";
@@ -231,7 +239,7 @@ let
         doNotPostBuildInstallCargoBinaries = true;
         installPhaseCommand = ''
           mkdir -p "$out/bin"
-          install -m755 "${profileDirectory}/${host.exe name}" "$out/bin/${host.exe name}"
+          install -m755 "${profileDirectory}/${host.exe bin}" "$out/bin/${host.exe name}"
         '';
         meta.mainProgram = name;
       }
@@ -279,8 +287,9 @@ let
     };
     artisan-editor-windows = binary {
       platform = "windows";
-      package = "editor";
+      package = "editor-aqua";
       name = "artisan-editor";
+      bin = "editor-aqua";
     };
   };
   release = lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
