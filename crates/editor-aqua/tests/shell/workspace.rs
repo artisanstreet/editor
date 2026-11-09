@@ -77,3 +77,29 @@ fn removing_host_invalidates_its_workspace_draft_before_the_save_timer() {
         serde_json::Value::Null
     );
 }
+
+#[test]
+fn sidebar_theme_changes_request_the_snapshot_sweep_in_both_sidebars() {
+    for settings in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut core = Core::for_tests(EditorFiles {
+            dir: directory.path().to_owned(),
+        })
+        .unwrap();
+        let (mut workspace, _) =
+            Workspace::new(&core, None, SelectionAllocator::default().workspace());
+        let emit = workspace.sidebar_emit(settings);
+
+        for dark in [false, true] {
+            emit(editor_aqua::sidebar::view::ViewAction::SetDarkMode(dark));
+            workspace.dispatch_actions(&mut core);
+
+            assert_eq!(
+                core.settings.get("dark_mode"),
+                Some(&serde_json::Value::Bool(dark))
+            );
+            assert_eq!(workspace.take_theme_transition(), Some(dark));
+            assert_eq!(workspace.take_theme_transition(), None);
+        }
+    }
+}

@@ -86,7 +86,7 @@ pub struct Workspace {
     settings_sidebar_actions: Rc<RefCell<VecDeque<crate::sidebar::view::ViewAction>>>,
     marketplace_actions: Rc<RefCell<VecDeque<crate::marketplace::view::ViewAction>>>,
     settings_actions: Rc<RefCell<VecDeque<crate::settings::view::ViewAction>>>,
-    settings_theme_transition: Option<bool>,
+    theme_transition: Option<bool>,
     settings_platform_effects: Vec<SettingsPlatformEffect>,
     pub palette: Option<Palette>,
     pub resource_preview: Option<crate::shell::resource_preview::ResourcePreview>,
@@ -162,7 +162,7 @@ impl Workspace {
             marketplace_reveal_pending: false,
             marketplace_actions,
             settings_actions: Rc::new(RefCell::new(VecDeque::new())),
-            settings_theme_transition: None,
+            theme_transition: None,
             settings_platform_effects: Vec::new(),
             palette: None,
             resource_preview: None,
@@ -1264,10 +1264,16 @@ impl Workspace {
         let mut changed = false;
         let sidebar = std::mem::take(&mut *self.sidebar_actions.borrow_mut());
         for action in sidebar {
+            if let crate::sidebar::view::ViewAction::SetDarkMode(dark) = &action {
+                self.theme_transition = Some(*dark);
+            }
             changed |= crate::sidebar::view::dispatch(&mut self.sidebar, core, action);
         }
         let settings_sidebar = std::mem::take(&mut *self.settings_sidebar_actions.borrow_mut());
         for action in settings_sidebar {
+            if let crate::sidebar::view::ViewAction::SetDarkMode(dark) = &action {
+                self.theme_transition = Some(*dark);
+            }
             changed |= crate::sidebar::view::dispatch(&mut self.settings_sidebar, core, action);
         }
         changed
@@ -1314,7 +1320,7 @@ impl Workspace {
         for action in settings {
             match &action {
                 crate::settings::view::ViewAction::SetDarkMode(dark) => {
-                    self.settings_theme_transition = Some(*dark)
+                    self.theme_transition = Some(*dark)
                 }
                 crate::settings::view::ViewAction::OpenUrl(url) => self
                     .settings_platform_effects
@@ -1334,7 +1340,7 @@ impl Workspace {
     }
 
     pub fn take_theme_transition(&mut self) -> Option<bool> {
-        self.settings_theme_transition.take()
+        self.theme_transition.take()
     }
 
     pub fn drain_domains(&mut self, core: &mut Core, assets: &aqua::images::ImageAssets) -> bool {
