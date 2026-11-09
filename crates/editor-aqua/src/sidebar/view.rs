@@ -308,6 +308,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
                 .map(|current| (&current.id, current.instance()))
                 == Some((&host, instance))
             {
+                sidebar.menu_hover.clear();
                 sidebar.menu_generation = sidebar.menu_generation.wrapping_add(1);
                 sidebar.menu = Some(ThreadMenu { thread, position });
             }
@@ -590,6 +591,12 @@ pub fn thread_menu(
         let selected_instance = host.instance();
         let generation = sidebar.menu_generation;
         let selected_emit = emit.clone();
+        let hover = sidebar.menu_hover.clone();
+        let hover_style = if destructive {
+            HoverColors::new(&theme, HoverTone::Destructive).style(HoverFill::Edged)
+        } else {
+            crate::frame::account::hover_style(&theme)
+        };
         let item = Button::new()
             .width(Length::Pct(100.0))
             .gap(8.0)
@@ -604,6 +611,9 @@ pub fn thread_menu(
                         bottom: 8.0,
                     }),
             )
+            .child(sidebar.menu_hover.background(
+                id, &theme, crate::frame::account::menu_radius() - 6.0,
+            ).style(hover_style))
             .child(
                 UiBox::new()
                     .width(16.0)
@@ -638,11 +648,7 @@ pub fn thread_menu(
             })
             .build()
             .with_key(id)
-            .hover_style(if destructive {
-                HoverColors::new(&theme, HoverTone::Destructive).style(HoverFill::Edged)
-            } else {
-                crate::frame::account::hover_style(&theme)
-            })
+            .on_hover_change(move |hovered| hover.hovered(id, hovered, HoverTone::Neutral))
             .role(Role::MenuItem)
             .aria_label(label)
             .cursor(CursorIcon::Pointer);
@@ -658,7 +664,7 @@ pub fn thread_menu(
             "Thread actions",
             menu.position,
             theme,
-            content.build(),
+            content.build().with_key("thread-menu-hover-surface"),
             viewport,
             move || {
                 dismiss(ViewAction::DismissThreadMenuFor {
