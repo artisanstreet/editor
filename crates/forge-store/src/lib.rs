@@ -12,6 +12,8 @@ pub mod admin;
 mod blobs;
 mod collection;
 mod content;
+pub mod coordination;
+pub mod discovery;
 #[cfg(any(feature = "legacy-import", test))]
 mod import_writes;
 mod items;

@@ -10,6 +10,7 @@
 
 mod agents;
 mod approvals;
+mod coordination;
 mod disk;
 mod extensions;
 mod gateway;
@@ -168,6 +169,7 @@ impl Hub {
         };
         hub.forward_engine_status();
         hub.start_dispatcher();
+        hub.start_coordination();
         hub
     }
 
@@ -563,6 +565,10 @@ impl Hub {
                 grace.as_secs()
             );
         }
+    }
+
+    pub fn active_thread_ids(&self) -> Vec<ThreadId> {
+        self.lock().keys().cloned().collect()
     }
 
     #[must_use]

@@ -16,6 +16,8 @@ tokio = { workspace = true, features = ["sync", "rt", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
+forge-engines = { path = "../forge-engines" }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

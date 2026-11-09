@@ -1,6 +1,10 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
 
+#[cfg(test)]
+#[path = "../tests/schema/model.rs"]
+mod model_migration_tests;
+
 /// One step of a migration: SQL, or a data translation SQL cannot express.
 enum Step {
     Sql(&'static str),
@@ -332,10 +336,9 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
         "CREATE TABLE IF NOT EXISTS removed_threads(id TEXT PRIMARY KEY, seq INTEGER NOT NULL);
          CREATE INDEX IF NOT EXISTS removed_threads_seq ON removed_threads(seq);",
     )],
+    &[Step::Sql(include_str!("sql/coordination/schema.sql"))],
 ];
 
-/// Gives every remembered model config the permissions its old access and
-/// approvals meant: what never asked stays Full, everything else is Auto.
 fn migrate_model_permissions(conn: &Connection) -> Result<()> {
     use serde_json::Value;
     let Some(text) = conn
@@ -832,46 +835,6 @@ mod canonical_migration_tests {
                 .unwrap(),
             17
         );
-    }
-
-    /// The old Editor's per-model choices keep their access: what never
-    /// asked comes back as Full access, the rest as Auto.
-    #[test]
-    fn remembered_model_configs_keep_full_access() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        migrate_to(&mut conn, MIGRATIONS.len() - 2).unwrap();
-        let configs = json!({
-            "claude-opus-5-5": {"engine":"claude","model":"claude-opus-5-5","effort":"medium",
-                "access":"full","approvals":"never","options":{"permission_mode":"bypassPermissions"}},
-            "claude-sonnet-5-5": {"engine":"claude","model":"claude-sonnet-5-5","effort":"medium",
-                "access":"full","approvals":"on_request","options":{"permission_mode":"auto"}},
-        });
-        conn.execute(
-            "INSERT INTO kv VALUES ('model_engine_configs',7,?1)",
-            [configs.to_string()],
-        )
-        .unwrap();
-        migrate(&mut conn).unwrap();
-        let value: String = conn
-            .query_row(
-                "SELECT value FROM kv WHERE key='model_engine_configs'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let value: Value = serde_json::from_str(&value).unwrap();
-        let config = |model: &str| {
-            artisan_api::saved_model_config(&value, artisan_api::EngineId::Claude, model).unwrap()
-        };
-        assert_eq!(
-            config("claude-opus-5-5").permissions,
-            artisan_api::Permissions::Full
-        );
-        assert_eq!(
-            config("claude-sonnet-5-5").permissions,
-            artisan_api::Permissions::Auto
-        );
-        assert!(config("claude-opus-5-5").options.is_empty());
     }
 }
 

@@ -5,6 +5,8 @@ use super::*;
 
 #[path = "../tests/run/activity.rs"]
 mod activity;
+#[path = "../tests/coordination/notifications.rs"]
+mod coordination;
 use artisan_api::{
     ApprovalRequest, CreateProject, CreateThread, Decision, EngineConfig, ItemsQuery, Permissions,
     Phase, ProjectId, RunStatus, ToolKind,
