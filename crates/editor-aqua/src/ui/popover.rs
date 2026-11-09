@@ -15,7 +15,7 @@ pub struct PopoverPanel {
     viewport_width: f32,
     viewport_height: f32,
     menu_padding: f32,
-    quiet_glass: bool,
+    glass: Option<GlassStrength>,
     select_menu: bool,
 }
 
@@ -34,7 +34,7 @@ impl PopoverPanel {
             viewport_width,
             viewport_height,
             menu_padding: 6.0,
-            quiet_glass: false,
+            glass: None,
             select_menu: false,
         }
     }
@@ -44,7 +44,11 @@ impl PopoverPanel {
         self
     }
     pub const fn quiet_glass_menu(mut self) -> Self {
-        self.quiet_glass = true;
+        self.glass = Some(GlassStrength::Quiet);
+        self
+    }
+    pub const fn strong_glass_menu(mut self) -> Self {
+        self.glass = Some(GlassStrength::Strong);
         self
     }
     pub const fn select_menu(mut self) -> Self {
@@ -53,7 +57,7 @@ impl PopoverPanel {
     }
 
     pub fn build(self) -> Element {
-        let radius = RadiusTokens::value(if self.select_menu || self.quiet_glass {
+        let radius = RadiusTokens::value(if self.select_menu || self.glass.is_some() {
             RadiusStep::X2l
         } else {
             RadiusStep::Lg
@@ -75,14 +79,14 @@ impl PopoverPanel {
                     .map(aqua_ui::style::GpuiShadowLayer::from),
             );
             style = style.gpui_shadows(shadows);
-        } else {
+        } else if self.glass.is_none() {
             style = style.gpui_border(
                 aqua_core::Insets::uniform(1.0),
                 self.theme.colors.line.to_reference_paint(),
                 false,
             );
         }
-        if self.quiet_glass {
+        if self.glass.is_some() {
             style = style.gpui_shadows(
                 glass_card_shadows(&self.theme, Elevation::Overlay)
                     .into_iter()
@@ -110,9 +114,9 @@ impl PopoverPanel {
             .build();
         let mut root = UiBox::new()
             .style(style)
-            .clip(self.select_menu || self.quiet_glass);
-        if self.quiet_glass {
-            root = root.child(glass_layers(&self.theme, GlassStrength::Quiet, radius));
+            .clip(self.select_menu || self.glass.is_some());
+        if let Some(strength) = self.glass {
+            root = root.child(glass_layers(&self.theme, strength, radius));
         }
         root.child(scroll).build().with_key(self.id)
     }
@@ -127,7 +131,7 @@ pub struct Popover {
     viewport: aqua_core::Size,
     dismiss: std::rc::Rc<dyn Fn()>,
     menu_padding: f32,
-    quiet_glass: bool,
+    glass: Option<GlassStrength>,
 }
 
 impl Popover {
@@ -149,7 +153,7 @@ impl Popover {
             viewport,
             dismiss: std::rc::Rc::new(dismiss),
             menu_padding: 6.0,
-            quiet_glass: false,
+            glass: None,
         }
     }
     pub const fn menu_padding(mut self, padding: f32) -> Self {
@@ -157,7 +161,11 @@ impl Popover {
         self
     }
     pub const fn quiet_glass_menu(mut self) -> Self {
-        self.quiet_glass = true;
+        self.glass = Some(GlassStrength::Quiet);
+        self
+    }
+    pub const fn strong_glass_menu(mut self) -> Self {
+        self.glass = Some(GlassStrength::Strong);
         self
     }
     pub fn into_parts(self) -> (Element, aqua_ui::popup::PopupOptions) {
@@ -171,9 +179,7 @@ impl Popover {
             self.viewport.h,
         )
         .menu_padding(self.menu_padding);
-        if self.quiet_glass {
-            panel = panel.quiet_glass_menu();
-        }
+        panel.glass = self.glass;
         let tab_dismiss = self.dismiss.clone();
         let panel = panel.build().role(Role::Menu).aria_label(self.label).debug_selector(crate::shell::menu_keys::POPOVER_MENU).on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
             if matches!(&event.input, RoutedInput::Native(InputEvent::KeyDown(key)) if key.key == InputKey::Named(NamedKey::Tab)) {

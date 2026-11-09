@@ -19,6 +19,7 @@ use crate::core::{Core, HostId, HostInstance, Screen};
 use crate::ui::{
     asset::source_asset_glyph,
     glass::glass_menu_separator,
+    hover::{HoverColors, HoverFill, HoverTone},
     popover::Popover,
     theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens},
 };
@@ -638,6 +639,17 @@ pub fn thread_menu(
             })
             .build()
             .with_key(id)
+            .hover_style(
+                HoverColors::new(
+                    &theme,
+                    if destructive {
+                        HoverTone::Destructive
+                    } else {
+                        HoverTone::Neutral
+                    },
+                )
+                .style(HoverFill::Edged),
+            )
             .role(Role::MenuItem)
             .aria_label(label)
             .cursor(CursorIcon::Pointer);
@@ -663,8 +675,8 @@ pub fn thread_menu(
                 })
             },
         )
-        .menu_padding(4.0)
-        .quiet_glass_menu()
+        .menu_padding(6.0)
+        .strong_glass_menu()
         .into_parts(),
     )
 }
