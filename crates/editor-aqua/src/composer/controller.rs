@@ -124,13 +124,14 @@ impl Composer {
         let attachments = core
             .host(target.host())
             .map(|host| Attachments::new(host.client.clone()));
+        let picker = PickerState::for_target(core, target.host());
         Self {
             target,
             editor: Rc::new(RefCell::new(editor)),
             questionnaire: QuestionnairePanel::default(),
             strip: super::goal_strip::StripState::default(),
             mentions: Mentions::default(),
-            picker: PickerState::default(),
+            picker,
             config: None,
             project: None,
             attachments,
@@ -168,7 +169,7 @@ impl Composer {
         self.questionnaire = QuestionnairePanel::default();
         self.strip = super::goal_strip::StripState::default();
         self.mentions = Mentions::default();
-        self.picker = PickerState::default();
+        self.picker = PickerState::for_target(core, target.host());
         self.target = target;
         self.target_generation = self.target_generation.wrapping_add(1);
         self.edit_revision = 0;
@@ -393,7 +394,10 @@ impl Composer {
             self.picker.project_edges.reset();
         }
         if menu == Menu::Model {
-            self.picker.browsing = self.effective_config(host).map(|config| config.engine);
+            self.picker.open_serial += 1;
+            self.picker.axis = None;
+            self.picker.axis_cursor = None;
+            self.picker.model_edges.reset();
         }
         self.refresh_picker(host);
     }
@@ -416,7 +420,6 @@ impl Composer {
             return None;
         }
         let config = PickerState::model_config(host, self.effective_config(host), engine, id)?;
-        self.picker.preview_model = Some((engine, id.to_owned()));
         self.config = Some(config.clone());
         self.edited();
         Some(config)
@@ -996,6 +999,6 @@ fn default_config(host: &HostData) -> Option<EngineConfig> {
         .or_else(|| status.models.first());
     let mut config = EngineConfig::new(status.engine);
     config.model = model.map(|model| model.id.clone());
-    config.effort = model.and_then(|model| model.default_effort.clone());
+    config.effort = None;
     Some(config)
 }

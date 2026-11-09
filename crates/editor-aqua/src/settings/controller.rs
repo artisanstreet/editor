@@ -39,7 +39,6 @@ pub struct SettingsController {
     pub streaming_select: Rc<RefCell<crate::ui::select::SelectState<&'static str>>>,
     pub sign_in: super::sign_in::SignInForm,
     pub forge_code: Rc<RefCell<Editor>>,
-    pub forge_finishing: Option<String>,
     pub forge_error: Option<String>,
     pub archive: ArchiveForm,
     pub engines: EnginesForm,
@@ -72,7 +71,6 @@ impl Default for SettingsController {
             ))),
             sign_in: super::sign_in::SignInForm::default(),
             forge_code: Rc::new(RefCell::new(Editor::new("", Mode::SingleLine))),
-            forge_finishing: None,
             forge_error: None,
             archive: ArchiveForm::default(),
             engines: EnginesForm::default(),
@@ -191,31 +189,7 @@ impl SettingsController {
             | crate::core::CoreEvent::ScreenChanged => self.archive.invalidate(),
             _ => {}
         }
-        if let Some(machine) = self
-            .forge_finishing
-            .clone()
-            .filter(|id| core.machine_live(id))
-        {
-            self.forge_finishing = None;
-            self.forge_error = core
-                .complete_setup(machine)
-                .err()
-                .map(|error| format!("{error:#}"));
-        }
         self.sync(core);
-    }
-
-    pub fn use_forge(&mut self, core: &mut Core, machine: String) {
-        self.forge_error = None;
-        if core.machine_live(&machine) {
-            self.forge_error = core
-                .complete_setup(machine)
-                .err()
-                .map(|error| format!("{error:#}"));
-        } else {
-            core.connect_machine(&machine);
-            self.forge_finishing = Some(machine);
-        }
     }
 
     pub fn claim_forge(&mut self, core: &mut Core) {

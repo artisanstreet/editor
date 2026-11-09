@@ -143,6 +143,11 @@ impl InspectorOwner {
         }
     }
 
+    #[must_use]
+    pub const fn scope(&self) -> u64 {
+        self.scope
+    }
+
     pub fn close_terminal(&mut self, ui: &mut UiApp) {
         self.terminal.borrow_mut().close();
         self.reveal_pending = false;

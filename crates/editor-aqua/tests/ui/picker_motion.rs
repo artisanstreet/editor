@@ -61,7 +61,7 @@ fn hover_pill_tracks_measured_rows_and_cancels_motion_on_dispose() {
     assert!(!unchanged.changed);
     assert!(!unchanged.animating);
     app.build_frame().unwrap();
-    let start = app.tree().rect(pill).unwrap().y;
+    let start = app.tree().visual_rect(pill).unwrap().y;
     surface.hovered("second", true, HoverTone::Neutral);
     assert!(
         surface
@@ -74,7 +74,7 @@ fn hover_pill_tracks_measured_rows_and_cancels_motion_on_dispose() {
             .unwrap()
     );
     app.build_frame().unwrap();
-    let midway = app.tree().rect(pill).unwrap().y;
+    let midway = app.tree().visual_rect(pill).unwrap().y;
     assert!(midway > start && midway < start + 20.0);
     let settled = surface
         .advance_frame(&mut app, root, &theme, true, 0.3, false)
@@ -82,7 +82,7 @@ fn hover_pill_tracks_measured_rows_and_cancels_motion_on_dispose() {
     assert!(settled.changed);
     assert!(!settled.animating);
     app.build_frame().unwrap();
-    assert!((app.tree().rect(pill).unwrap().y - start - 20.0).abs() < 0.01);
+    assert!((app.tree().visual_rect(pill).unwrap().y - start - 20.0).abs() < 0.01);
     surface.hovered("first", true, HoverTone::Neutral);
     assert!(
         surface

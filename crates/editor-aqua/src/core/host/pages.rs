@@ -4,8 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio_util::task::AbortOnDropHandle;
 
 const PAGE: u32 = 200;
-const WINDOW: usize = 600;
-const BYTES: usize = 8 * 1024 * 1024;
+const CHANGES: usize = 600;
 
 #[derive(Clone, Copy)]
 pub enum ThreadPageDirection {
@@ -42,6 +41,12 @@ impl HostData {
     pub fn thread_page(&self, archived: bool) -> &ThreadPage {
         &self.thread_pages.pages[usize::from(archived)]
     }
+    pub fn fill_threads(&mut self) {
+        let page = self.thread_page(false);
+        if page.loaded && !page.loading && page.error.is_none() && page.next.is_some() {
+            self.load_threads(false, ThreadPageDirection::Older);
+        }
+    }
     pub fn thread_load_error(&self, id: &ThreadId) -> Option<&str> {
         self.thread_pages.errors.get(id).map(String::as_str)
     }
@@ -71,8 +76,8 @@ impl HostData {
             at_latest: true,
             ..ThreadPage::default()
         };
-        trim_page(&mut page, &self.threads, false);
         self.thread_pages.pages[0] = page;
+        self.fill_threads();
     }
     pub fn load_threads(&mut self, archived: bool, direction: ThreadPageDirection) {
         let page = &mut self.thread_pages.pages[usize::from(archived)];
@@ -161,6 +166,7 @@ impl HostData {
             .changed
             .clear();
         self.prune_threads();
+        self.fill_threads();
         true
     }
     fn merge_thread_page(
@@ -230,7 +236,6 @@ impl HostData {
                 .cmp(&self.threads[a].activity_seq)
                 .then_with(|| b.cmp(a))
         });
-        trim_page(page, &self.threads, older);
     }
 
     pub fn ensure_thread(&mut self, id: &ThreadId) {
@@ -330,7 +335,7 @@ impl HostData {
         for page in &mut self.thread_pages.pages {
             if page.loading {
                 page.changed.insert(id.clone());
-                if page.changed.len() > WINDOW {
+                if page.changed.len() > CHANGES {
                     page.task = None;
                     page.loading = false;
                     page.loaded = true;
@@ -353,7 +358,6 @@ impl HostData {
                     .cmp(&self.threads[a].activity_seq)
                     .then_with(|| b.cmp(a))
             });
-            trim_page(page, &self.threads, false);
         }
         self.prune_threads();
     }
@@ -406,62 +410,4 @@ impl HostData {
             .errors
             .retain(|id, _| self.thread_pages.recent.contains(id));
     }
-}
-fn trim_page(page: &mut ThreadPage, threads: &HashMap<ThreadId, Thread>, evict_newest: bool) {
-    let mut bytes: usize = page.ids.iter().map(|id| thread_bytes(&threads[id])).sum();
-    let mut trimmed = false;
-    while page.ids.len() > WINDOW || bytes > BYTES && page.ids.len() > 1 {
-        let id = if evict_newest {
-            page.at_latest = false;
-            page.ids.remove(0)
-        } else {
-            let Some(id) = page.ids.pop() else {
-                break;
-            };
-            id
-        };
-        bytes = bytes.saturating_sub(thread_bytes(&threads[&id]));
-        trimmed = true;
-    }
-    if trimmed && !evict_newest {
-        page.next = page.ids.last().map(|id| ThreadCursor {
-            activity_seq: threads[id].activity_seq,
-            id: id.clone(),
-        });
-    }
-}
-
-fn thread_bytes(thread: &Thread) -> usize {
-    let config = &thread.config;
-    std::mem::size_of::<Thread>()
-        + thread.title.as_ref().map_or(0, String::len)
-        + [
-            &config.model,
-            &config.effort,
-            &config.speed,
-            &config.variant,
-        ]
-        .into_iter()
-        .map(|value| value.as_ref().map_or(0, String::len))
-        .sum::<usize>()
-        + config
-            .options
-            .iter()
-            .map(|(key, value)| key.len() + json_bytes(value))
-            .sum::<usize>()
-}
-
-fn json_bytes(value: &serde_json::Value) -> usize {
-    std::mem::size_of::<serde_json::Value>()
-        + match value {
-            serde_json::Value::String(text) => text.len(),
-            serde_json::Value::Array(values) => values.iter().map(json_bytes).sum(),
-            serde_json::Value::Object(values) => values
-                .iter()
-                .map(|(key, value)| std::mem::size_of::<String>() + key.len() + json_bytes(value))
-                .sum(),
-            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-                0
-            }
-        }
 }

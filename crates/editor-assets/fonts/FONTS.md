@@ -73,3 +73,10 @@ the user-supplied Klim desktop test fonts, family `Test Founders Grotesk`,
 carried over from the previous Editor where they draw the titlebar's
 `Artisan Editor` wordmark. See `../licenses/founders-grotesk-test.txt` for
 provenance; they are for local evaluation only.
+
+## Sigurd wordmark
+
+`sigurd-400.ttf` is the static weight-400 instance of the dashboard's Sigurd
+Variable web font that draws the sidebar wordmark. Size: 103876 bytes.
+SHA-256: `3bd4098eb6fe40f576fd653683bc43fe8ad8fc70ab14a2ad1970ea64e6c288ed`.
+See `../licenses/sigurd-NOTES.md` for provenance and licensing status.

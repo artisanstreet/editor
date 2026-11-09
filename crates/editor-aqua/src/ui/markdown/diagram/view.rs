@@ -35,8 +35,6 @@ pub(crate) struct DiagramState {
     zoom: f32,
     pan: Point,
     drag: Option<Point>,
-    viewport: (f32, f32),
-    displayed: (f32, f32),
 }
 
 impl DiagramState {
@@ -75,28 +73,19 @@ impl DiagramState {
         self.drag = None;
     }
 
-    fn constrain_pan(&mut self) {
-        let x = ((self.displayed.0 - self.viewport.0) / 2.0).max(0.0);
-        let y = ((self.displayed.1 - self.viewport.1) / 2.0).max(0.0);
-        self.pan.x = self.pan.x.clamp(-x, x);
-        self.pan.y = self.pan.y.clamp(-y, y);
-    }
-
     fn destination(&mut self, bounds: Rect, diagram: &DiagramSvg) -> Rect {
-        self.viewport = (bounds.w, bounds.h);
         let fit = (bounds.w / diagram.width())
             .min(bounds.h / diagram.height())
             .min(1.0);
-        self.displayed = (
+        let displayed = (
             diagram.width() * fit * self.zoom,
             diagram.height() * fit * self.zoom,
         );
-        self.constrain_pan();
         Rect {
-            x: bounds.x + (bounds.w - self.displayed.0) / 2.0 + self.pan.x,
-            y: bounds.y + (bounds.h - self.displayed.1) / 2.0 + self.pan.y,
-            w: self.displayed.0,
-            h: self.displayed.1,
+            x: bounds.x + (bounds.w - displayed.0) / 2.0 + self.pan.x,
+            y: bounds.y + (bounds.h - displayed.1) / 2.0 + self.pan.y,
+            w: displayed.0,
+            h: displayed.1,
         }
     }
 
@@ -192,7 +181,7 @@ pub(crate) fn view(
         .build()
         .with_key(format!("{id}-viewport"))
         .focusable(true)
-        .aria_label("Mermaid diagram. Drag to pan; Control or Command scroll to zoom; 0 to fit.")
+        .aria_label("Mermaid diagram. Drag to pan; scroll to zoom; 0 to fit.")
         .cursor(if dragging {
             CursorIcon::Grabbing
         } else {
@@ -217,7 +206,7 @@ pub(crate) fn view(
                 stop_propagation: true,
                 focus: FocusRequest::Focus,
                 pointer_capture: CaptureRequest::Capture,
-                ..InputResponse::default()
+                ..InputResponse::handled()
             }
         })
         .on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
@@ -226,6 +215,10 @@ pub(crate) fn view(
             };
             if move_state.borrow_mut().drag_to(pointer.position) {
                 move_invalidate();
+                return InputResponse {
+                    stop_propagation: true,
+                    ..InputResponse::handled()
+                };
             }
             InputResponse::default()
         })
@@ -233,25 +226,22 @@ pub(crate) fn view(
             release();
             InputResponse {
                 pointer_capture: CaptureRequest::Release,
-                ..InputResponse::default()
+                stop_propagation: true,
+                ..InputResponse::handled()
             }
         })
         .on_input(InputKind::PointerCancel, EventPhase::Bubble, move |_| {
             cancel();
             InputResponse {
                 pointer_capture: CaptureRequest::Release,
-                ..InputResponse::default()
+                stop_propagation: true,
+                ..InputResponse::handled()
             }
         })
         .on_input(InputKind::Scroll, EventPhase::Bubble, move |event| {
             let RoutedInput::Native(InputEvent::Scroll { delta, .. }) = &event.input else {
                 return InputResponse::default();
             };
-            if !event.modifiers.contains(Modifiers::CONTROL)
-                && !event.modifiers.contains(Modifiers::LOGO)
-            {
-                return InputResponse::default();
-            }
             wheel_state
                 .borrow_mut()
                 .zoom_by((-delta.y * WHEEL_ZOOM_PER_PIXEL).exp());

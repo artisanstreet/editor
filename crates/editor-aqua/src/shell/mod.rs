@@ -14,6 +14,7 @@ pub mod notifications;
 pub mod palette;
 pub mod preferences;
 pub mod rebuild_stats;
+pub mod refresh;
 pub mod repository;
 pub mod root;
 pub mod selection;

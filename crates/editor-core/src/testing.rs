@@ -31,6 +31,8 @@ impl Core {
             account_id: "acct_test00000000000000000000".to_owned(),
             email: "test@example.invalid".to_owned(),
             display_name: "Test".to_owned(),
+            username: None,
+            avatar_url: None,
             totp_enrolled: false,
             machines: vec![machine.clone()],
             latest_config_version: None,

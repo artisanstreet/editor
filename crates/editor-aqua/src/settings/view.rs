@@ -40,7 +40,6 @@ pub enum ViewAction {
     AccountRefresh,
     AccountSignOut,
     AccountSignOutEverywhere,
-    ForgeUse(String),
     ForgeOpen(String),
     ForgeConnect(String),
     ForgeRemove(String),
@@ -72,9 +71,12 @@ pub enum ViewAction {
     SetFont(&'static str),
     SetDarkMode(bool),
     SetOutlineText(bool),
+    SetShowAllModels(bool),
+    SetHideBadModelOptions(bool),
     StreamingMenu(bool),
     SetStreaming(&'static str),
     SetFrameRate(bool),
+    SetVsync(bool),
     SetNotifications(bool),
     SetHostSetting(
         crate::core::HostId,
@@ -148,7 +150,6 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         ViewAction::AccountRefresh => core.account_mut().refresh(),
         ViewAction::AccountSignOut => core.account_mut().sign_out(),
         ViewAction::AccountSignOutEverywhere => core.account_mut().sign_out_everywhere(),
-        ViewAction::ForgeUse(machine) => _controller.use_forge(core, machine),
         ViewAction::ForgeOpen(machine) => core.navigate(Screen::NewThread {
             host: crate::core::HostId(machine),
             project: None,
@@ -204,8 +205,15 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         ViewAction::SetFont(font) => core.set_setting("font_set", font.into()),
         ViewAction::SetDarkMode(enabled) => core.set_setting("dark_mode", enabled.into()),
         ViewAction::SetOutlineText(enabled) => core.set_setting("outline_text", enabled.into()),
+        ViewAction::SetShowAllModels(enabled) => {
+            core.set_setting(artisan_api::SHOW_ALL_MODELS_KEY, enabled.into());
+        }
+        ViewAction::SetHideBadModelOptions(enabled) => {
+            core.set_setting(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY, enabled.into());
+        }
         ViewAction::SetStreaming(mode) => core.set_setting("streaming_mode", mode.into()),
         ViewAction::SetFrameRate(enabled) => core.set_setting("lower_refresh_rate", enabled.into()),
+        ViewAction::SetVsync(enabled) => core.set_setting("graphics_vsync", enabled.into()),
         ViewAction::SetNotifications(enabled) => core.set_setting("notifications", enabled.into()),
         ViewAction::SetHostSetting(host, instance, key, enabled) => {
             _controller.set_host_setting_for(core, host, instance, key, enabled.into())
@@ -753,19 +761,48 @@ fn performance(
         lowered,
         "lower refresh rate",
     )
-    .on_change(move |enabled| emit(ViewAction::SetFrameRate(enabled)))
+    .on_change({
+        let emit = Rc::clone(&emit);
+        move |enabled| emit(ViewAction::SetFrameRate(enabled))
+    })
     .build();
     let row = ui::row(
         theme,
         "Lower refresh rate",
-        "Caps animation and scrolling at 60 frames per second to save power. Off, the Editor matches your monitor's refresh rate.",
+        "Caps animation and scrolling at 60 frames per second to save power.",
         Some(control),
+    );
+    let monitor_sync = core
+        .settings
+        .get("graphics_vsync")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let monitor_control = Switch::new(
+        "settings-monitor-refresh-rate",
+        *theme,
+        SwitchSize::Default,
+        monitor_sync,
+        "match monitor refresh rate",
+    )
+    .on_change(move |enabled| emit(ViewAction::SetVsync(enabled)))
+    .build();
+    let monitor_row = ui::row(
+        theme,
+        "Match monitor refresh rate",
+        "Synchronizes presentation to the current monitor. With both limits off, rendering is uncapped.",
+        Some(monitor_control),
     );
     let page = SettingsPage::Section(SettingsSection::Performance);
     section_page(
         theme,
         page,
-        ui::section(theme, "Performance", None, None, ui::card(theme, vec![row])),
+        ui::section(
+            theme,
+            "Performance",
+            None,
+            None,
+            ui::card(theme, vec![row, monitor_row]),
+        ),
         include_header,
     )
 }
@@ -931,6 +968,30 @@ fn appearance(
         .get("outline_text")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
+    let show_models = emit.clone();
+    let hide_options = emit.clone();
+    let hide_bad = Switch::new(
+        "settings-switch-hide-bad-model-options",
+        *theme,
+        SwitchSize::Default,
+        core.settings.get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
+            .and_then(serde_json::Value::as_bool).unwrap_or(true),
+        "Hide bad model options",
+    )
+    .on_change(move |enabled| hide_options(ViewAction::SetHideBadModelOptions(enabled)))
+    .build();
+    let all_models = Switch::new(
+        "settings-switch-show-all-models",
+        *theme,
+        SwitchSize::Default,
+        core.settings
+            .get(artisan_api::SHOW_ALL_MODELS_KEY)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        "switch show all models",
+    )
+    .on_change(move |enabled| show_models(ViewAction::SetShowAllModels(enabled)))
+    .build();
     let outline = Switch::new(
         "settings-switch-outline-text",
         *theme,
@@ -958,6 +1019,18 @@ fn appearance(
             "Outline text rendering",
             "Unhinted grayscale glyphs with no gamma or contrast correction, so letters keep their designed shapes. Turn off if text looks too soft or thin.",
             Some(outline),
+        ),
+        ui::row(
+            theme,
+            "Show all models",
+            "List every Claude and Codex model in the model picker, not only the latest of each class.",
+            Some(all_models),
+        ),
+        ui::row(
+            theme,
+            "Hide bad model options",
+            "Hide Max and Ultra for Claude and Codex, plus Light and Extra High for Opus 5.5. Your current selection is kept.",
+            Some(hide_bad),
         ),
     ];
     let page = SettingsPage::Section(SettingsSection::Appearance);
@@ -1041,6 +1114,7 @@ impl ViewSnapshot {
                     crate::shell::preferences::StreamingMode::Swift
                 ))),
                 Some(serde_json::json!(preferences.lower_frame_rate)),
+                Some(serde_json::json!(preferences.vsync)),
                 Some(serde_json::json!(
                     core.settings
                         .get("notifications")

@@ -124,6 +124,7 @@ impl Session {
     fn frame(&mut self) -> Result<()> {
         self.aqua.dispatch_wake(&mut self.app, self.id);
         let now = self.aqua.clock();
+        self.aqua.draw_ready(&mut self.app, now);
         self.surface
             .register_externals(&mut self.app, &self.observed, now);
         self.app.build_scene(&self.observed, now);
@@ -134,7 +135,7 @@ impl Session {
             feedback: Vec::new(),
             present_at: now,
         });
-        self.surface.draw(self.render.scene())?;
+        self.surface.draw(self.render.scene(), now)?;
         self.sequence += 1;
         self.aqua
             .dispatch_frame_completed(&mut self.app, self.id, self.sequence);

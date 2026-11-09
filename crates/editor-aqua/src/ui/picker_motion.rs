@@ -381,8 +381,8 @@ impl HoverSurface {
             .paint(pill)
             .ok_or_else(|| "hover pill is missing".to_owned())?;
         layout.absolute = Some(Absolute {
-            left: Some(rect.left),
-            top: Some(rect.top),
+            left: Some(0.0),
+            top: Some(0.0),
             right: None,
             bottom: None,
         });
@@ -397,6 +397,7 @@ impl HoverSurface {
             .style(fill)
             .opacity(if state.visible() { 1.0 } else { 0.0 })
             .apply_to(&mut layout, &mut paint);
+        paint.transform = Some(aqua_core::Transform2D::translate(rect.left, rect.top));
         drop(state);
         let layout_changed = app
             .tree()

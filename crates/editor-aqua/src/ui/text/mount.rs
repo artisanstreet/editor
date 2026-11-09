@@ -696,6 +696,7 @@ fn wrap_prompt_scroll(
     }
     let metrics = EditorMetrics::resolve(theme, mode, bare, inset);
     let scroll = Scroll::new()
+        .preserve_offset(true)
         .style(
             Style::new()
                 .axis(Axis::Column)

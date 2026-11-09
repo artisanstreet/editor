@@ -122,8 +122,8 @@ pub fn launch() -> anyhow::Result<()> {
     config.window.inner_size.width = width;
     config.window.inner_size.height = height;
     let mut minimum = config.window.inner_size;
-    minimum.width = 480.0;
-    minimum.height = 420.0;
+    minimum.width = f64::from(crate::shell::layout::MIN_WINDOW_WIDTH);
+    minimum.height = f64::from(crate::shell::layout::MIN_WINDOW_HEIGHT);
     config.window.min_size = Some(minimum);
     config.window.titlebar = aqua::config::Titlebar::Overlay;
     #[cfg(windows)]

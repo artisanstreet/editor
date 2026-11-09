@@ -264,7 +264,7 @@ impl Attachments {
                     Err(error) => {
                         if let Some(item) = self.items.iter_mut().find(|item| item.key == key) {
                             item.shown = true;
-                            item.state.accept(&Input::Failed(error));
+                            fail(item, error);
                         }
                     }
                     Ok((bytes, placeholder)) => {
@@ -329,11 +329,11 @@ impl Attachments {
                                     item.encoded = Some(bytes);
                                 }
                                 Err(error) => {
-                                    item.state.accept(&Input::Failed(error.to_string()));
+                                    fail(item, error.to_string());
                                 }
                             },
                             Err(error) => {
-                                item.state.accept(&Input::Failed(error));
+                                fail(item, error);
                             }
                         }
                     }
@@ -346,8 +346,7 @@ impl Attachments {
                                 item.revealed = Some(Instant::now());
                             }
                             Err(error) => {
-                                item.state
-                                    .accept(&Input::Failed(format!("Upload failed: {error}")));
+                                fail(item, format!("Upload failed: {error}"));
                             }
                         }
                     }
@@ -400,7 +399,7 @@ impl Attachments {
                 }
                 ImageStatus::Failed(error) => {
                     if matches!(item.state, State::Encoding) {
-                        item.state.accept(&Input::Failed(error.to_string()));
+                        fail(item, error.to_string());
                     } else {
                         item.preview_error = Some(error.to_string());
                     }
@@ -412,4 +411,9 @@ impl Attachments {
         }
         changed
     }
+}
+
+fn fail(item: &mut Attachment, reason: String) {
+    tracing::warn!(key = item.key, name = %item.name, %reason, "pasted image failed");
+    item.state.accept(&Input::Failed(reason));
 }

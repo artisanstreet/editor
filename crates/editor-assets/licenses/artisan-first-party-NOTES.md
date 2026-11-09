@@ -29,6 +29,10 @@ These are first-party Artisan product graphics:
   Tabler Icons' `edit`, `shopping-bag` and `chart-column` (MIT, see the Tabler
   notes); the bag's three items (dot, spark, gem) are first-party.
 
+- `art/mountain.png` (1983×793): the mountain artwork behind the sign-in card,
+  copied unchanged from the auth site (`web/apps/auth/static/images/art/
+  mountain-1.png`). The Editor dithers it at runtime exactly as the site does.
+
 These notes record historical source provenance. The current catalog is
 `crates/editor-assets/src/lib.rs`. First-party repository code and artwork are
 covered by the repository's Artisan Street Terms (AST) in `LICENSE.md`;

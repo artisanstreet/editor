@@ -114,8 +114,13 @@ pub fn record_rebuild(reasons: &[&'static str]) {
 }
 
 pub fn note(name: &'static str, changed: bool) -> bool {
-    if changed && enabled() {
-        NOTES.with(|notes| notes.borrow_mut().push(name));
+    if changed {
+        NOTES.with(|notes| {
+            let mut notes = notes.borrow_mut();
+            if !notes.contains(&name) {
+                notes.push(name);
+            }
+        });
     }
     changed
 }

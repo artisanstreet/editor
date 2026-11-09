@@ -1,6 +1,6 @@
 use super::{controller::SettingsController, ui, view::ViewAction};
 use crate::{
-    core::{AccountPhase, Core, EntryGate, LocalForge},
+    core::{AccountPhase, Core, LocalForge},
     ui::{
         button::{Button, ButtonVariant},
         text::{
@@ -105,8 +105,14 @@ pub fn sign_in(
         .gap(8.0)
         .style(Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color()));
     match core.account().phase() {
-        AccountPhase::SignedOut | AccountPhase::Requesting | AccountPhase::Error { .. } => {
-            let busy = matches!(core.account().phase(), AccountPhase::Requesting);
+        AccountPhase::SignedOut
+        | AccountPhase::Requesting
+        | AccountPhase::Browser { .. }
+        | AccountPhase::Error { .. } => {
+            let busy = matches!(
+                core.account().phase(),
+                AccountPhase::Requesting | AccountPhase::Browser { .. }
+            );
             body = body
                 .child(text(theme, "Email", false))
                 .child(editor(
@@ -163,11 +169,8 @@ pub fn sign_in(
                 .child(text(theme, "Waiting for the email approval…", true))
                 .child(actions().child(start()).build());
         }
-        AccountPhase::EmailApproved {
-            email,
-            totp_required,
-            ..
-        } => {
+        AccountPhase::EmailApproved { approval, .. } => {
+            let (email, totp_required) = (&approval.email, &approval.totp_required);
             body = body
                 .child(text(theme, format!("Approved for {email}"), false))
                 .child(text(
@@ -202,7 +205,7 @@ pub fn sign_in(
                     .build(),
             );
         }
-        AccountPhase::Finalizing => {
+        AccountPhase::Finalizing { .. } => {
             body = body.child(text(theme, "Finishing the sign-in…", true));
         }
         AccountPhase::Authenticated { .. } => {}
@@ -216,7 +219,6 @@ pub fn forges(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let setup = matches!(core.entry_gate(), EntryGate::NeedsSetup { .. });
     let account = core.account();
     let email = account
         .profile()
@@ -242,14 +244,7 @@ pub fn forges(
     for machine in machines {
         let id = machine.id.clone();
         let live = core.machine_live(&id);
-        let (kind, label, variant, action) = if setup {
-            (
-                "use",
-                "Use this Forge",
-                ButtonVariant::Default,
-                ViewAction::ForgeUse(id.clone()),
-            )
-        } else if live {
+        let (kind, label, variant, action) = if live {
             (
                 "open",
                 "Open",
@@ -390,21 +385,6 @@ pub fn forges(
         rows = rows.child(
             Text::new(error)
                 .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                .build(),
-        );
-    }
-    if setup {
-        rows = rows.child(
-            actions()
-                .child(button(
-                    theme,
-                    "forges-use-another",
-                    "Use another account",
-                    ButtonVariant::Ghost,
-                    false,
-                    ViewAction::AccountSignOut,
-                    emit,
-                ))
                 .build(),
         );
     }

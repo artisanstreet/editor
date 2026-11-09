@@ -6,3 +6,6 @@ mod drag_preview;
 
 #[path = "sidebar/settings_nav.rs"]
 mod settings_nav;
+
+#[path = "sidebar/geometry.rs"]
+mod geometry;

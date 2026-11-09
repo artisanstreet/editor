@@ -11,7 +11,6 @@ use crate::core::hosts::{read_json, write_json};
 pub enum EntryGate {
     Restoring,
     SignedOut,
-    NeedsSetup { account_id: String, email: String },
     Ready { account_id: String },
 }
 
@@ -36,30 +35,18 @@ pub fn live_machine<'a>(
     live_machines(profile).find(|machine| machine.id == machine_id)
 }
 
-pub fn entry_gate(phase: &AccountPhase, onboarding: Option<&OnboardingRecord>) -> EntryGate {
+pub fn entry_gate(phase: &AccountPhase) -> EntryGate {
     match phase {
         AccountPhase::Restoring => EntryGate::Restoring,
-        AccountPhase::Authenticated { profile, .. } => {
-            let onboarded = onboarding.is_some_and(|record| {
-                record.account_id == profile.account_id
-                    && live_machine(profile, &record.machine_id).is_some()
-            });
-            if onboarded {
-                EntryGate::Ready {
-                    account_id: profile.account_id.clone(),
-                }
-            } else {
-                EntryGate::NeedsSetup {
-                    account_id: profile.account_id.clone(),
-                    email: profile.email.clone(),
-                }
-            }
-        }
+        AccountPhase::Authenticated { profile, .. } => EntryGate::Ready {
+            account_id: profile.account_id.clone(),
+        },
         AccountPhase::SignedOut
         | AccountPhase::Requesting
+        | AccountPhase::Browser { .. }
         | AccountPhase::Pending { .. }
         | AccountPhase::EmailApproved { .. }
-        | AccountPhase::Finalizing
+        | AccountPhase::Finalizing { .. }
         | AccountPhase::Error { .. } => EntryGate::SignedOut,
     }
 }
