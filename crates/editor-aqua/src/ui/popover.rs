@@ -112,6 +112,13 @@ impl PopoverPanel {
             )
             .child(self.content)
             .build();
+        if self.glass == Some(GlassStrength::Strong) {
+            return crate::frame::account::menu_surface(&self.theme, vec![scroll])
+                .style(Style::new()
+                    .max_width(Length::Px((self.viewport_width - 16.0).max(1.0)))
+                    .max_height(Length::Px((self.viewport_height - 16.0).max(1.0))))
+                .with_key(self.id);
+        }
         let mut root = UiBox::new()
             .style(style)
             .clip(self.select_menu || self.glass.is_some());
