@@ -18,7 +18,6 @@ use super::{
 use crate::core::{Core, HostId, HostInstance, Screen};
 use crate::ui::{
     asset::source_asset_glyph,
-    glass::glass_menu_separator,
     hover::{HoverColors, HoverFill, HoverTone},
     popover::Popover,
     theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens},
@@ -548,7 +547,7 @@ pub fn thread_menu(
     let mut content = UiBox::new().layout("column").width(198.0);
     for action in actions {
         if action == MenuAction::Archive || (action == MenuAction::Rename && row.settleable) {
-            content = content.child(glass_menu_separator(&theme));
+            content = content.child(crate::frame::card::double_rule(&theme, 6.0));
         }
         let (id, icon, label, destructive) = match action {
             MenuAction::Settle => (
@@ -594,7 +593,7 @@ pub fn thread_menu(
         let item = Button::new()
             .width(Length::Pct(100.0))
             .gap(8.0)
-            .radius(RadiusTokens::value(RadiusStep::LgMid))
+            .radius(crate::frame::account::menu_radius() - 6.0)
             .style(
                 Style::new()
                     .align(AlignItems::CENTER)
@@ -639,17 +638,11 @@ pub fn thread_menu(
             })
             .build()
             .with_key(id)
-            .hover_style(
-                HoverColors::new(
-                    &theme,
-                    if destructive {
-                        HoverTone::Destructive
-                    } else {
-                        HoverTone::Neutral
-                    },
-                )
-                .style(HoverFill::Edged),
-            )
+            .hover_style(if destructive {
+                HoverColors::new(&theme, HoverTone::Destructive).style(HoverFill::Edged)
+            } else {
+                crate::frame::account::hover_style(&theme)
+            })
             .role(Role::MenuItem)
             .aria_label(label)
             .cursor(CursorIcon::Pointer);

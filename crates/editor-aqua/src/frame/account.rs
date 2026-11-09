@@ -207,22 +207,9 @@ pub struct Sheet<'a> {
 }
 
 #[must_use]
-pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
+pub fn menu_surface(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
     let palette = Palette::of(theme);
-    let lit = |spot| sheet.menu.highlight(spot);
-    let entry = |spot, title: &str, icon| {
-        item(theme, &palette, spot, title, icon, lit(spot), sheet.now, &sheet.emit)
-    };
-    let theme_icon = if palette.dark {
-        AssetId::TABLER_MOON
-    } else {
-        AssetId::TABLER_SUN
-    };
-    let mut shadows = vec![
-        layer(0.0, -1.0, 0.0, 0.0, false, WHITE.with_alpha(0.14)),
-        layer(0.0, 1.0, 0.0, 0.0, true, WHITE.with_alpha(0.1)),
-        layer(0.0, -1.0, 0.0, 0.0, true, palette.rim_shade),
-    ];
+    let mut shadows = vec![layer(0.0, -1.0, 0.0, 0.0, false, WHITE.with_alpha(0.14))];
     shadows.extend(
         palette
             .overlay
@@ -232,14 +219,65 @@ pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
     Aqua::Box()
         .layout("column")
         .styles([
-            Aqua::Style()
-                .width(px(sheet.width))
-                .padding(px(MENU_PADDING))
-                .radius(px(RADIUS))
-                .clip(true),
+            Aqua::Style().radius(px(RADIUS)).clip(true),
             Style::new().shadows(shadows),
         ])
         .child(glass(&palette))
+        .children(children)
+        .build()
+}
+
+pub const fn menu_radius() -> f32 {
+    RADIUS
+}
+
+pub fn hover_style(theme: &ArtisanTheme) -> Style {
+    hover_material(&Palette::of(theme))
+}
+
+fn hover_material(palette: &Palette) -> Style {
+    let (top, bottom) = palette.hover;
+    Style::new()
+        .gpui_background(GpuiBackground::LinearGradient {
+            angle: 180.0,
+            color_space: GpuiGradientColorSpace::Oklab,
+            stops: [
+                stop(0.0, palette.ink.with_alpha(top)),
+                stop(1.0, palette.ink.with_alpha(bottom)),
+            ],
+        })
+        .shadows(vec![layer(
+            0.0,
+            0.0,
+            0.0,
+            0.5,
+            true,
+            palette.ink.with_alpha(palette.hover_edge),
+        )])
+}
+
+pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
+    let palette = Palette::of(theme);
+    let lit = |spot| sheet.menu.highlight(spot);
+    let entry = |spot, title: &str, icon| {
+        item(
+            theme,
+            &palette,
+            spot,
+            title,
+            icon,
+            lit(spot),
+            sheet.now,
+            &sheet.emit,
+        )
+    };
+    let theme_icon = if palette.dark {
+        AssetId::TABLER_MOON
+    } else {
+        AssetId::TABLER_SUN
+    };
+    let content = Aqua::Box()
+        .layout("column")
         .child(header(theme, &palette, &sheet))
         .child(crate::frame::card::double_rule(theme, MENU_PADDING))
         .child(entry(Spot::Theme, "Theme", theme_icon))
@@ -252,7 +290,13 @@ pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
         .child(upgrade(theme, &palette, &sheet))
         .child(crate::frame::card::double_rule(theme, MENU_PADDING))
         .child(entry(Spot::SignOut, "Sign out", AssetId::TABLER_LOGOUT))
-        .build()
+        .build();
+    menu_surface(theme, vec![content])
+        .style(
+            Style::new()
+                .width(px(sheet.width))
+                .padding(px(MENU_PADDING)),
+        )
         .with_key("artisan-account-menu")
         .role(Role::Menu)
 }
@@ -464,28 +508,11 @@ fn lease(image: &Arc<ImageHandle>) -> Arc<dyn std::any::Any + Send + Sync> {
 }
 
 fn highlight(palette: &Palette, lit: Highlight, now: Instant, height: f32, radius: f32) -> Element {
-    let (top, bottom) = palette.hover;
     let scale = lit.scale(now);
     Aqua::Box()
-        .styles([Style::new()
+        .styles([hover_material(palette)
             .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
             .radius(px(radius))
-            .gpui_background(GpuiBackground::LinearGradient {
-                angle: 180.0,
-                color_space: GpuiGradientColorSpace::Oklab,
-                stops: [
-                    stop(0.0, palette.ink.with_alpha(top)),
-                    stop(1.0, palette.ink.with_alpha(bottom)),
-                ],
-            })
-            .shadows(vec![layer(
-                0.0,
-                0.0,
-                0.0,
-                0.5,
-                true,
-                palette.ink.with_alpha(palette.hover_edge),
-            )])
             .opacity(lit.opacity(now))
             .transform(
                 Transform2D::translate(0.0, -height)
@@ -497,6 +524,7 @@ fn highlight(palette: &Palette, lit: Highlight, now: Instant, height: f32, radiu
 }
 
 fn glass(palette: &Palette) -> Element {
+    let rim_shade = palette.rim_shade.to_reference_paint();
     let base = palette.ink.with_alpha(0.05).to_reference_paint();
     let near = palette.glass_near.with_alpha(0.22);
     let far = palette.glass_far.with_alpha(0.16);
@@ -527,6 +555,30 @@ fn glass(palette: &Palette) -> Element {
                 },
                 gradient(145.0, near, far, 1.0),
                 gradient(180.0, sheen.0, sheen.1, 0.44),
+                DisplayItem::GpuiShadow {
+                    bounds,
+                    corners,
+                    layer: aqua_core::scene::GpuiShadowLayer {
+                        dx: 0.0,
+                        dy: 1.0,
+                        blur: 0.0,
+                        spread: 0.0,
+                        inset: true,
+                        color: WHITE.with_alpha(0.1).to_reference_paint(),
+                    },
+                },
+                DisplayItem::GpuiShadow {
+                    bounds,
+                    corners,
+                    layer: aqua_core::scene::GpuiShadowLayer {
+                        dx: 0.0,
+                        dy: -1.0,
+                        blur: 0.0,
+                        spread: 0.0,
+                        inset: true,
+                        color: rim_shade,
+                    },
+                },
             ]
         })
         .build()
