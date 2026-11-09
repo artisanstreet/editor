@@ -238,6 +238,17 @@ impl<V: SectionViews> ShellApplication<V> {
                 Err(error) => tracing::warn!(%error, "could not advance sidebar hover"),
             }
         }
+        let menu_surface = keyed_node(self.ui.ui(), "thread-menu-hover-surface");
+        if let (Some(surface), Some(workspace)) = (menu_surface, self.shell.entry.workspace_mut()) {
+            let reduced = self.ui.ui().host().motion().reduced_motion()
+                == aqua_ui::motion::ReducedMotion::Reduce;
+            let frame = workspace.sidebar.menu_hover.advance_frame(
+                self.ui.ui_mut(), surface, std::time::Instant::now(), reduced,
+            );
+            if frame.changed || frame.animating {
+                ctx.request_frame(id, FrameReason::ANIMATION);
+            }
+        }
         let navigator_surface = keyed_node(self.ui.ui(), "turn-navigator-hover-surface");
         if let (Some(surface), Some(workspace)) =
             (navigator_surface, self.shell.entry.workspace_mut())
