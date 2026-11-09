@@ -583,7 +583,7 @@ pub async fn prepare(
     let customisation = hub.customisation().await?;
     let owner = hub.clone();
     let mut launch = tokio::task::spawn_blocking(move || {
-        let _homes = owner.homes_lock();
+        let _homes = owner.homes_lock()?;
         owner.engines().materialize(engine, &customisation)
     })
     .await

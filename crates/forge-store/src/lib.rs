@@ -146,6 +146,7 @@ struct Inner {
     writer: std::thread::JoinHandle<()>,
     jobs: mpsc::Sender<Job>,
     events: broadcast::Sender<Envelope>,
+    local_live: broadcast::Sender<Envelope>,
     revocations: broadcast::Sender<DeviceId>,
     head: Arc<AtomicU64>,
     live_revision: AtomicU64,
@@ -174,17 +175,36 @@ pub struct PendingInputs {
 }
 
 impl Store {
-    /// Opens (or creates) `forge.sqlite3` and `blobs/` in `dir`, recovers
-    /// runs left live by a previous process. The server owns maintenance.
     pub fn open(dir: &Path) -> Result<Self> {
         let blob_dir = dir.join("blobs");
         std::fs::create_dir_all(&blob_dir)
             .with_context(|| format!("create {}", blob_dir.display()))?;
         blobs::name_files(&blob_dir)?;
-        Self::start(dir.join("forge.sqlite3"), blob_dir)
+        Self::start(dir.join("forge.sqlite3"), blob_dir, true)
     }
 
-    fn start(database: PathBuf, blob_dir: PathBuf) -> Result<Self> {
+    pub fn join(dir: &Path) -> Result<Self> {
+        let database = dir.join("forge.sqlite3");
+        ensure!(
+            database.is_file(),
+            "there is no running Forge store to join"
+        );
+        let conn = open_database(&database)?;
+        let version: usize = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        ensure!(
+            version == schema::version(),
+            "online upgrade requires database schema {}, running store uses {version}; the current Forge was left running",
+            schema::version()
+        );
+        drop(conn);
+        Self::start(database, dir.join("blobs"), false)
+    }
+
+    pub const fn schema_version() -> usize {
+        schema::version()
+    }
+
+    fn start(database: PathBuf, blob_dir: PathBuf, recover: bool) -> Result<Self> {
         let mut conn = open_database(&database)?;
         {
             let mode: String = conn
@@ -196,18 +216,18 @@ impl Store {
             );
         }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        schema::migrate(&mut conn)?;
+        if recover {
+            schema::migrate(&mut conn)?;
+        }
 
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let head = Arc::new(AtomicU64::new(0));
-        let mut writer = Writer::new(conn, Arc::clone(&head), events.clone())?;
-        #[expect(
-            clippy::redundant_closure_for_method_calls,
-            reason = "`Tx::recover` binds the impl lifetime early; the job must be generic over it"
-        )]
-        writer
-            .transact(|tx| tx.recover())
-            .context("recover live runs")?;
+        let mut writer = Writer::new(conn, Arc::clone(&head), recover.then(|| events.clone()))?;
+        if recover {
+            writer
+                .transact(|tx| tx.recover_threads(None))
+                .context("recover live runs")?;
+        }
 
         let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
         let writer_thread = std::thread::Builder::new()
@@ -225,6 +245,7 @@ impl Store {
                 writer: writer_thread,
                 jobs,
                 events,
+                local_live: broadcast::channel(EVENT_CAPACITY).0,
                 revocations: broadcast::channel(64).0,
                 head,
                 live_revision: AtomicU64::new(0),
@@ -272,6 +293,22 @@ impl Store {
 
     /// Fans out a memory-only event (streaming text, shell output).
     pub fn publish_live(&self, event: Event) {
+        self.inner
+            .local_live
+            .send(Envelope {
+                seq: None,
+                live_revision: 0,
+                event: event.clone(),
+            })
+            .ok();
+        self.relay_live(event);
+    }
+
+    pub fn subscribe_local_live(&self) -> broadcast::Receiver<Envelope> {
+        self.inner.local_live.subscribe()
+    }
+
+    pub fn relay_live(&self, event: Event) {
         let live_revision = self.inner.live_revision.fetch_add(1, Ordering::AcqRel) + 1;
         // No subscribers is fine: live events are not replayed.
         self.inner
@@ -293,6 +330,37 @@ impl Store {
     #[must_use]
     pub fn head(&self) -> Seq {
         self.inner.head.load(Ordering::Acquire)
+    }
+
+    pub async fn synchronize(&self, cursor: &mut Seq) -> Result<()> {
+        if let Some(changes) = self.changes_since(*cursor, 20_000).await? {
+            for envelope in changes {
+                if let Some(seq) = envelope.seq {
+                    *cursor = (*cursor).max(seq);
+                }
+                self.inner.events.send(envelope).ok();
+            }
+        } else {
+            *cursor = self.read(read::max_seq).await?;
+            self.relay_live(Event::Reset);
+        }
+        self.inner.head.fetch_max(*cursor, Ordering::AcqRel);
+        Ok(())
+    }
+
+    pub async fn recover_thread(&self, thread: ThreadId) -> Result<()> {
+        self.write(move |tx| tx.recover_threads(Some(vec![thread])))
+            .await
+    }
+
+    pub async fn running_threads(&self) -> Result<Vec<ThreadId>> {
+        self.read(|conn| {
+            let mut statement = conn.prepare(include_str!("sql/recovery/threads.sql"))?;
+            Ok(statement
+                .query_map([], |row| Ok(ThreadId::from(row.get::<_, String>(0)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
     }
 
     async fn write<R, F>(&self, job: F) -> Result<R>

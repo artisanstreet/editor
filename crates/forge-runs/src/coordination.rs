@@ -104,6 +104,7 @@ impl Hub {
                 tokio::select! {
                     () = hub.inner.shutdown.cancelled() => break,
                     _tick = interval.tick() => {
+                        if hub.generation().is_some_and(|generation| !generation.accepting()) { continue; }
                         if let Err(error) = hub.deliver_work_watches().await {
                             tracing::warn!("coordination watches: {error:#}");
                         }

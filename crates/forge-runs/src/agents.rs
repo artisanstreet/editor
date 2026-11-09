@@ -884,6 +884,7 @@ impl Hub {
                 thread: Some(child),
                 ..
             } = &item.kind
+                && self.remote_target(child, false).ok().flatten().is_none()
                 && let Err(error) = self.settle_agent(child).await
             {
                 tracing::error!(thread = %child, "updating an agent: {error:#}");

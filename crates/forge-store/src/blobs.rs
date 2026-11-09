@@ -167,6 +167,7 @@ impl Store {
                 .blob_lock
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            let _generation = inner.lock_blobs()?;
             put(&inner.blob_dir, &bytes)
         })
         .await
@@ -182,6 +183,7 @@ impl Store {
                 .blob_lock
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            let _generation = inner.lock_blobs()?;
             put(&inner.blob_dir, &bytes)
         })
         .await
@@ -216,6 +218,18 @@ impl Store {
 }
 
 impl Inner {
+    fn lock_blobs(&self) -> Result<std::fs::File> {
+        use fs2::FileExt as _;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.blob_dir.with_extension("lock"))?;
+        file.lock_exclusive()?;
+        Ok(file)
+    }
+
     fn gc_blobs(&self) -> Result<usize> {
         // A plain snapshot suffices: a new reference names a blob uploaded
         // within GC_MIN_AGE (an upload refreshes an existing file's age) or
@@ -244,6 +258,7 @@ impl Inner {
             .blob_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let _generation = self.lock_blobs()?;
         gc(&self.blob_dir, &referenced)
     }
 }

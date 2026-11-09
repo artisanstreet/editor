@@ -217,10 +217,9 @@ pub async fn sync_config(
             .map(ConfigOutcome::Current)
             .context("Core has no config bundle yet");
     };
-    if let Some(current) = previous
-        .as_ref()
-        .filter(|state| state.bundle_id == bundle.id && state.content_hash == bundle.content_hash)
-    {
+    if let Some(current) = previous.as_ref().filter(|state| {
+        (&state.bundle_id, &state.content_hash) == (&bundle.id, &bundle.content_hash)
+    }) {
         return Ok(ConfigOutcome::Current(current.clone()));
     }
     let bytes = core
@@ -234,27 +233,7 @@ pub async fn sync_config(
         .await
         .context("read the manifest")?;
     let synced_before = previous.map(|state| state.mcp_servers).unwrap_or_default();
-    let applied = async {
-        anyhow::ensure!(
-            hex::encode(sha2::Sha256::digest(&bytes)) == bundle.content_hash,
-            "the manifest does not match the bundle hash"
-        );
-        let manifest: EditorManifest =
-            serde_json::from_slice(&bytes).context("read the manifest")?;
-        anyhow::ensure!(
-            manifest.format == MANIFEST_FORMAT,
-            "unknown manifest format {}",
-            manifest.format
-        );
-        let changed = apply(hub, &manifest, &synced_before).await?;
-        let synced = manifest
-            .mcp_servers
-            .into_iter()
-            .map(|server| server.name)
-            .collect();
-        anyhow::Ok((changed, synced))
-    }
-    .await;
+    let applied = apply_manifest(hub, &bytes, &bundle.content_hash, &synced_before).await;
     let (changed, mcp_servers) = match applied {
         Ok(applied) => applied,
         Err(error) => {
@@ -287,6 +266,31 @@ pub async fn sync_config(
     Ok(ConfigOutcome::Updated(state))
 }
 
+async fn apply_manifest(
+    hub: &forge_runs::Hub,
+    bytes: &[u8],
+    content_hash: &str,
+    synced_before: &[String],
+) -> Result<(Vec<String>, Vec<String>)> {
+    anyhow::ensure!(
+        hex::encode(sha2::Sha256::digest(bytes)) == content_hash,
+        "the manifest does not match the bundle hash"
+    );
+    let manifest: EditorManifest = serde_json::from_slice(bytes).context("read the manifest")?;
+    anyhow::ensure!(
+        manifest.format == MANIFEST_FORMAT,
+        "unknown manifest format {}",
+        manifest.format
+    );
+    let changed = apply(hub, &manifest, synced_before).await?;
+    let synced = manifest
+        .mcp_servers
+        .into_iter()
+        .map(|server| server.name)
+        .collect();
+    anyhow::Ok((changed, synced))
+}
+
 /// Skills go first, so a skill that cannot install leaves the prompt and
 /// the MCP servers as they were.
 async fn apply(
@@ -308,9 +312,7 @@ async fn apply(
             let entry = catalog
                 .iter()
                 .find(|entry| {
-                    entry.id == skill.name
-                        || entry.name == skill.name
-                        || entry.id.ends_with(&suffix)
+                    [&entry.id, &entry.name].contains(&&skill.name) || entry.id.ends_with(&suffix)
                 })
                 .with_context(|| {
                     format!(
@@ -460,7 +462,7 @@ pub fn load_machine_identity(data_dir: &Path) -> Result<Option<MachineIdentity>>
         .decode(secret_b64u.as_bytes())
         .context("read the machine secret")?
         .try_into()
-        .map_err(|_| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
+        .map_err(|_bytes| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
     Ok(Some(MachineIdentity {
         machine_id,
         account_id: file.account_id,

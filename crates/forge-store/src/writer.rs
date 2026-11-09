@@ -9,7 +9,7 @@ use artisan_api::{
     RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
 };
 use forge_content::ItemTexts as _;
-use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
+use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,25 +19,19 @@ pub type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
 pub struct Writer {
     conn: Connection,
-    seq: Seq,
     head: Arc<AtomicU64>,
-    events: broadcast::Sender<Envelope>,
+    events: Option<broadcast::Sender<Envelope>>,
 }
 
 impl Writer {
     pub(crate) fn new(
         conn: Connection,
         head: Arc<AtomicU64>,
-        events: broadcast::Sender<Envelope>,
+        events: Option<broadcast::Sender<Envelope>>,
     ) -> Result<Self> {
         let seq = read::max_seq(&conn)?;
         head.store(seq, Ordering::Release);
-        Ok(Self {
-            conn,
-            seq,
-            head,
-            events,
-        })
+        Ok(Self { conn, head, events })
     }
 
     pub(crate) fn run(mut self, mut jobs: mpsc::Receiver<Job>) {
@@ -46,12 +40,14 @@ impl Writer {
         }
     }
 
-    /// Runs `job` in a transaction. Seqs it took become visible (head, events)
-    /// only after the commit; a failed job rolls back and leaves no gap.
     pub(crate) fn transact<R>(&mut self, job: impl FnOnce(&mut Tx<'_>) -> Result<R>) -> Result<R> {
-        let seq = self.seq;
+        let sql = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("begin write transaction")?;
+        let seq = read::max_seq(&sql)?;
         let mut tx = Tx {
-            sql: self.conn.transaction().context("begin write transaction")?,
+            sql,
             seq,
             events: Vec::new(),
             #[cfg(any(feature = "legacy-import", test))]
@@ -62,11 +58,11 @@ impl Writer {
             sql, seq, events, ..
         } = tx;
         sql.commit().context("commit write transaction")?;
-        self.seq = seq;
-        self.head.store(seq, Ordering::Release);
-        for envelope in events {
-            // No subscribers is fine.
-            self.events.send(envelope).ok();
+        self.head.fetch_max(seq, Ordering::AcqRel);
+        if let Some(sender) = &self.events {
+            for envelope in events {
+                sender.send(envelope).ok();
+            }
         }
         Ok(result)
     }
@@ -552,14 +548,12 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Live runs become interrupted and unfinished engine output is cancelled.
-    /// Accepted user input stays pending so startup can deliver it. Bodies are re-saved through
-    /// the normal path so columns, bodies and seqs stay consistent and
-    /// resuming clients see the change.
-    pub(crate) fn recover(&mut self) -> Result<()> {
+    pub(crate) fn recover_threads(&mut self, threads: Option<Vec<ThreadId>>) -> Result<()> {
+        let scope = threads
+            .map(|threads| serde_json::to_string(&threads))
+            .transpose()?;
         let ended_at = now();
-        let runs: Vec<Run> =
-            read::many(self, "SELECT body FROM runs WHERE status = 'running'", [])?;
+        let runs: Vec<Run> = read::many(self, include_str!("sql/recovery/runs.sql"), [&scope])?;
         let interrupted = runs.len();
         let mut continued = 0;
         for mut run in runs {
@@ -570,12 +564,7 @@ impl Tx<'_> {
                 continued += 1;
             }
         }
-        let items: Vec<Item> = read::items(
-            self,
-            "SELECT body FROM items WHERE status IN ('running', 'awaiting_user')
-             AND kind_type != 'user_message' ORDER BY position",
-            [],
-        )?;
+        let items: Vec<Item> = read::items(self, include_str!("sql/recovery/items.sql"), [&scope])?;
         let mut cancelled = 0;
         for mut item in items {
             if matches!(

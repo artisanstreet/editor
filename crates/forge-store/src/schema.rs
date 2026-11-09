@@ -339,6 +339,10 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
     &[Step::Sql(include_str!("sql/coordination/schema.sql"))],
 ];
 
+pub const fn version() -> usize {
+    MIGRATIONS.len()
+}
+
 fn migrate_model_permissions(conn: &Connection) -> Result<()> {
     use serde_json::Value;
     let Some(text) = conn

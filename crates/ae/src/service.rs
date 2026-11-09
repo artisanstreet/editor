@@ -72,25 +72,39 @@ fn unit_quote(value: &str) -> String {
     serde_json::to_string(&value.replace('%', "%%")).unwrap_or_default()
 }
 
-/// The unit. `PATH` is the installing shell's, so engines find git and the
-/// user's tools.
-///
-/// glibc gives every thread that allocates its own malloc arena, and the
-/// runtime's workers free what other workers allocated, so arenas fragment
-/// and never shrink: Forge held ~85 MB of heap around ~6 MB of live data
-/// after an hour and a half. Two arenas are plenty for its load.
-fn unit_text(forge: &Path) -> String {
+#[derive(Clone, Copy)]
+enum StopMode {
+    Gateway,
+    ProcessGroup,
+}
+
+fn unit_text(forge: &Path, mode: StopMode) -> String {
+    let kill_mode = match mode {
+        StopMode::Gateway => "mixed",
+        StopMode::ProcessGroup => "control-group",
+    };
     let path = unit_quote(&format!(
         "PATH={}",
         std::env::var("PATH").unwrap_or_default()
     ));
     format!(
         "[Unit]\nDescription=Artisan Forge\nAfter=network-online.target\n\n\
-         [Service]\nType=simple\nExecStart={}\nEnvironment={path}\n\
+         [Service]\nType=notify\nNotifyAccess=all\nExecStart={}\nEnvironment={path}\n\
          Environment=GLIBC_TUNABLES=glibc.malloc.arena_max=2\n\
-         Restart=on-failure\nRestartSec=5\nTimeoutStopSec=30\n\n[Install]\nWantedBy=default.target\n",
+         Restart=on-failure\nRestartSec=5\nTimeoutStartSec=180\nTimeoutStopSec=30\nKillMode={kill_mode}\nSendSIGKILL=no\n\n[Install]\nWantedBy=default.target\n",
         unit_quote(&forge.to_string_lossy())
     )
+}
+
+pub fn prepare_bootstrap_stop() -> Result<()> {
+    if uses_systemd() {
+        sys::write(
+            &unit_path()?,
+            &unit_text(&App::Forge.binary()?, StopMode::ProcessGroup),
+        )?;
+        sys::run("systemctl", &["--user", "daemon-reload"])?;
+    }
+    Ok(())
 }
 
 /// Makes Forge start at login: the systemd unit, or the Windows Run entry.
@@ -98,7 +112,7 @@ fn unit_text(forge: &Path) -> String {
 pub fn enable_autostart() -> Result<&'static str> {
     let forge = App::Forge.binary()?;
     if systemd_available() {
-        sys::write(&unit_path()?, &unit_text(&forge))?;
+        sys::write(&unit_path()?, &unit_text(&forge, StopMode::Gateway))?;
         sys::run("systemctl", &["--user", "daemon-reload"])?;
         sys::run("systemctl", &["--user", "enable", UNIT])?;
         Ok("starts at login (systemd)")
@@ -290,6 +304,13 @@ pub fn running_pid() -> Option<u32> {
     }
     let executable = process.exe()?.to_string_lossy().into_owned();
     let executable = executable.strip_suffix(" (deleted)").unwrap_or(&executable);
+    #[cfg(unix)]
+    if let Some(gateway) = forge_http::upgrade::gateway(&data().ok()?).ok().flatten()
+        && gateway.pid == pid
+        && same_path(Path::new(executable), &gateway.binary)
+    {
+        return Some(pid);
+    }
     same_path(Path::new(executable), &App::Forge.binary().ok()?).then_some(pid)
 }
 
@@ -336,9 +357,9 @@ mod tests {
     #[test]
     fn only_a_unit_running_this_forge_is_ours() {
         let forge = Path::new("/home/a/.local/share/artisan-street/forge/forge");
-        assert!(unit_runs(&unit_text(forge), forge));
+        assert!(unit_runs(&unit_text(forge, StopMode::Gateway), forge));
         let quoted = Path::new("/tmp/quoted \"percent%h\" forge");
-        assert!(unit_runs(&unit_text(quoted), quoted));
+        assert!(unit_runs(&unit_text(quoted, StopMode::Gateway), quoted));
         assert!(!unit_runs(
             "[Service]\nExecStart=\"/home/a/.local/share/artisan/bin/ae\" forge serve\n",
             forge

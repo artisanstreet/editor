@@ -12,6 +12,7 @@ qualification = []
 [dependencies]
 artisan-markdown-index = { path = "../artisan-markdown-index" }
 tempfile.workspace = true
+fs2.workspace = true
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
 forge-content = { path = "../forge-content" }
