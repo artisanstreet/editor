@@ -61,7 +61,7 @@ let
     openssl
     sqlite
   ];
-  graphicsLibraryPath = lib.makeLibraryPath (libraries ++ [ pkgs.mesa ]);
+  libraryPath = lib.makeLibraryPath libraries;
   nativeTools = with pkgs; [
     git
     pkg-config
@@ -325,10 +325,7 @@ let
       buildInputs = libraries;
       inherit (platforms.linux.environment) LIBCLANG_PATH;
       shellHook = ''
-        export LD_LIBRARY_PATH="${graphicsLibraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-        for dir in /usr/lib/wsl/lib /run/opengl-driver/lib; do
-          if [ -d "$dir" ]; then export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$dir"; fi
-        done
+        export LD_LIBRARY_PATH="${libraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         export CARGO_BUILD_JOBS="''${CARGO_BUILD_JOBS:-2}"
       '';
     };
@@ -415,10 +412,6 @@ in
     performance = shell [
       pkgs.perf
       pkgs.hyperfine
-    ];
-    visual = shell [
-      pkgs.vulkan-tools
-      pkgs.mesa-demos
     ];
   };
   packages = {
