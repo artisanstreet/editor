@@ -15,16 +15,16 @@ qualification = ["test-support", "dep:forge-http", "dep:forge-store", "forge-sto
 capture = ["qualification", "dep:aqua-gpu-d3d11", "dep:aqua-gpu-ref", "dep:aqua-runtime"]
 
 [dependencies]
-aqua = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
-aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
-aqua-protocol = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
-aqua-text = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
-aqua-ui = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
-aqua-reactive = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
-aqua-runtime = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6", optional = true }
-aqua-media = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
-aqua-gpu-d3d11 = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6", optional = true }
-aqua-gpu-ref = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6", optional = true }
+aqua = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc" }
+aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc" }
+aqua-protocol = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc" }
+aqua-text = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc" }
+aqua-ui = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc" }
+aqua-reactive = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc" }
+aqua-runtime = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc", optional = true }
+aqua-media = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc" }
+aqua-gpu-d3d11 = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc", optional = true }
+aqua-gpu-ref = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc", optional = true }
 artisan-api = { path = "../artisan-api", features = ["tls"] }
 artisan-account = { path = "../artisan-account" }
 artisan-paths = { path = "../artisan-paths" }
@@ -74,8 +74,8 @@ data-url.workspace = true
 file-rotate = "0.8.0"
 
 [target.'cfg(windows)'.dev-dependencies]
-aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
-aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6", features = ["double"] }
+aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc" }
+aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "687bccc60faf0155b9332aae3792add815e34fbc", features = ["double"] }
 
 [dev-dependencies]
 rustls.workspace = true
