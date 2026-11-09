@@ -81,7 +81,7 @@ fn resource_script(icon: &Path) -> String {
 
 fn embed_resources() -> Result<(), Box<dyn Error>> {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let icon = manifest.join("../editor/assets/artisan-editor.ico");
+    let icon = manifest.join("../editor-assets/app/artisan-editor.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-env-changed=TARGET_WINDRES");
     println!("cargo:rerun-if-env-changed=TARGET_CC");

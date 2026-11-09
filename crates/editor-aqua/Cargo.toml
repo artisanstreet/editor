@@ -3,7 +3,7 @@ name = "editor-aqua"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
-description = "Pixel-parity Aqua port of the Artisan Editor"
+description = "The native Windows Artisan Editor, built with Aqua"
 build = "build.rs"
 autotests = true
 
@@ -13,7 +13,6 @@ heap-probe = ["aqua/probe-allocator"]
 profile-heap = ["aqua/profile-alloc"]
 qualification = ["test-support", "dep:forge-http", "dep:forge-store", "forge-store/qualification", "dep:rusqlite", "dep:sha2", "dep:hex"]
 capture = ["qualification", "dep:aqua-gpu-d3d11", "dep:aqua-gpu-ref", "dep:aqua-runtime"]
-source-parity = ["dep:editor-ui"]
 
 [dependencies]
 aqua = { git = "https://github.com/artisanstreet/aqua", rev = "495df19b0b15f0b28f5e398a3a2e2671d38634f6" }
@@ -38,7 +37,6 @@ forge-store = { path = "../forge-store", optional = true }
 rusqlite = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
-editor-ui = { path = "../editor-ui", optional = true }
 palette = "0.7"
 anyhow.workspace = true
 futures.workspace = true
@@ -120,12 +118,6 @@ derivable_impls = "allow"
 clone_on_copy = "allow"
 arc_with_non_send_sync = "allow"
 rc_buffer = "allow"
-
-[[test]]
-name = "source-parity"
-path = "tests/ui/theme.rs"
-required-features = ["source-parity"]
-
 
 [build-dependencies]
 embed-resource = "=3.0.11"

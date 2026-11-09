@@ -1,5 +1,5 @@
 {
-  description = "Artisan: ae and the Editor for Linux and Windows, the release, the dev loop and a NixOS Forge service";
+  description = "Artisan: Forge and ae for Linux and Windows, the native Windows Aqua Editor, releases and development tools";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
@@ -28,9 +28,7 @@
           pkgs = import nixpkgs {
             inherit system overlays;
             config.allowUnfreePredicate =
-              package:
-              (package.pname or "") == "windows-sdk-fxc"
-              && (package.version or "") == "10.0.26100.1";
+              package: (package.pname or "") == "windows-sdk-fxc" && (package.version or "") == "10.0.26100.1";
           };
         in
         import ./nix/workspace.nix {

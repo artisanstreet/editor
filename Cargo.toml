@@ -7,19 +7,9 @@ members = [
     "crates/artisan-paths",
     "crates/artisan-mentions",
     "crates/claude-ai-browser",
-    "crates/editor",
     "crates/editor-aqua",
     "crates/editor-assets",
     "crates/editor-audio",
-    "crates/editor-composer",
-    "crates/editor-conversation",
-    "crates/editor-core",
-    "crates/editor-inspector",
-    "crates/editor-marketplace",
-    "crates/editor-settings",
-    "crates/editor-sources",
-    "crates/editor-sidebar",
-    "crates/editor-ui",
     "crates/forge",
     "crates/forge-content",
     "crates/forge-computer",
@@ -74,8 +64,6 @@ fs2 = "=0.4.3"
 futures = { version = "=0.3.34", default-features = false, features = ["executor", "std"] }
 gethostname = "=1.1.0"
 getrandom = { version = "=0.4.3", default-features = false }
-gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "6cd20f9c5deab2b160b68ac66f453ec70820e8a2" }
-gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "6cd20f9c5deab2b160b68ac66f453ec70820e8a2", features = ["cosmic-text"] }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 ufbx = "=0.11.3"
@@ -138,16 +126,6 @@ zip = { version = "=4.6.1", default-features = false, features = ["deflate"] }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
-# Two build modes: Debug (`dev`, the default, into target/debug) and Release
-# (`release`, into target/release). Tests and benches inherit them.
-#
-# Debug: the development loop's build, so it trades runtime speed for build
-# time. Dependencies (GPUI, wgpu, and the rest) build at opt-level 3: they are
-# compiled once and cached, and an unoptimized GPUI Editor renders at a small
-# fraction of its frame rate. The workspace's own crates, recompiled on every
-# change, build at opt-level 1. Line tables only, everywhere: backtraces name
-# file and line in every frame, and the Windows Editor stays small enough to
-# copy and start quickly (full debug info made it 530 MB).
 [profile.dev]
 opt-level = 1
 codegen-units = 16
@@ -155,18 +133,8 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
-# MinGW keeps DWARF inside the exe: dependency line tables made the dev
-# Editor ~380 MB, ~260 MB of it debug sections. Our own crates keep theirs.
 debug = false
 
-# Release: every stable setting that trades build time for a faster, smaller
-# binary. Speed wins where the two conflict, so opt-level 3 rather than "s" or
-# "z". Whole-program (fat) LTO over one codegen unit lets LLVM inline and drop
-# dead code across every crate, including GPUI and wgpu. Panics abort instead
-# of unwinding, which also removes the unwind tables; the panic message still
-# names file and line, but `catch_unwind` (the Mermaid guard in editor-ui)
-# catches nothing. No debug info and no symbols. The CPU baseline (x86-64-v3)
-# lives in .cargo/config.toml.
 [profile.release]
 opt-level = 3
 lto = "fat"
@@ -183,8 +151,6 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 doc_markdown = "allow"
 must_use_candidate = "allow"
-# Restriction lints are picked one by one; the group as a whole contradicts
-# itself.
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
@@ -202,12 +168,6 @@ missing_assert_message = "deny"
 unwrap_in_result = "deny"
 map_err_ignore = "deny"
 
-[workspace.metadata.gpui-fork]
-repository = "https://github.com/artisanstreet/gpui-ce"
-branch = "main"
-purpose = "native D3D11 renderer on Windows (WGPU elsewhere), backdrop blur materials, Oklab gradients, native color emoji"
-
-# Bounded Oniguruma search with the original fancy engine as the limit fallback.
 [patch.crates-io]
 syntect = { path = "vendor/highlighting/syntect" }
 onig = { path = "vendor/highlighting/onig" }

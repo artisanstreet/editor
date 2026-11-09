@@ -1,7 +1,5 @@
 # shellcheck shell=bash
 # The dev loop behind `nix run .#dev`; usage is in nix/dev.nix.
-# nix/dev.nix prepends ARTISAN_DEV_GRAPHICS_LIBRARY_PATH.
-: "${ARTISAN_DEV_GRAPHICS_LIBRARY_PATH:=}"
 : "${ARTISAN_DEV_BLAZE:=}"
 
 say() { echo "dev: $*" >&2; }
@@ -24,7 +22,7 @@ editor    Build and install the native Windows Aqua Editor and ae.
 build     Build without installing.
 
 --dhat    Enable Forge heap profiling (Forge-only builds).
---linux   Forge-only builds on Linux; the Aqua preview requires Windows.
+--linux   Forge-only builds on Linux; the Aqua Editor requires Windows.
 
 Replacement readiness is checked before traffic is handed over. A failed
 candidate leaves the current Forge running. The first installation of the
@@ -107,9 +105,8 @@ if [[ "$want_forge" == true ]]; then
     if [[ "$dhat" == true ]]; then linux_args+=(--features forge/dhat-heap); fi
 fi
 editor_args=(-p editor-aqua --bin editor-aqua --features capture)
-if [[ "$want_editor" == true && "$windows" == false ]]; then die "the native Aqua Editor preview requires Windows; use 'forge' for a Forge-only build"; fi
-if [[ "$dhat" == true && "$want_editor" == true ]]; then die "the native Aqua Editor does not expose the legacy GPUI heap profiler feature"; fi
-if [[ "$want_editor" == true && "$windows" == false ]]; then linux_args+=("${editor_args[@]}"); fi
+if [[ "$want_editor" == true && "$windows" == false ]]; then die "the native Aqua Editor requires Windows; use 'forge' for a Forge-only build"; fi
+if [[ "$dhat" == true && "$want_editor" == true ]]; then die "--dhat is supported only for Forge builds"; fi
 if [[ -n "$ARTISAN_DEV_BLAZE" ]]; then
     # Blaze's incremental path accepts one package per invocation.
     cargo_build cargo-linux linux -p ae --bin ae
@@ -117,9 +114,6 @@ if [[ -n "$ARTISAN_DEV_BLAZE" ]]; then
         forge_args=(-p forge --bin forge)
         if [[ "$dhat" == true ]]; then forge_args+=(--features forge/dhat-heap); fi
         cargo_build cargo-linux linux "${forge_args[@]}"
-    fi
-    if [[ "$want_editor" == true && "$windows" == false ]]; then
-        cargo_build cargo-linux linux "${editor_args[@]}"
     fi
 else
     cargo_build cargo-linux linux "${linux_args[@]}"
@@ -161,20 +155,10 @@ forge_place=none
 editor_place=none
 if [[ "$want_forge" == true ]]; then forge_place=here; fi
 if [[ "$want_editor" == true ]]; then
-    if [[ "$windows" == true ]]; then editor_place=windows; else editor_place=here; fi
+    editor_place=windows
 fi
 
-# The Linux Editor finds its graphics libraries through the environment
-# `ae` starts it with; nothing else gets them (they break system tools).
-if [[ "$editor_place" == here ]]; then
-    library_path="$ARTISAN_DEV_GRAPHICS_LIBRARY_PATH"
-    for dir in /usr/lib/wsl/lib /run/opengl-driver/lib; do
-        if [[ -d "$dir" ]]; then library_path="$library_path:$dir"; fi
-    done
-    export LD_LIBRARY_PATH="$library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-else
-    unset LD_LIBRARY_PATH
-fi
+unset LD_LIBRARY_PATH
 install_args=("$stage/linux/ae" install --from "$stage" --forge "$forge_place" --editor "$editor_place" --yes)
 if [[ "$want_forge" == true ]] && command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
     say "installing through an independent update job; running agents stay with their current Forge generation"

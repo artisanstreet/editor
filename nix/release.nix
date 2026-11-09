@@ -1,15 +1,3 @@
-# The unsigned release: what `ae install` reads (crates/ae/src/release.rs),
-# minus `release.json.sig`. One archive per app and platform:
-#
-#   release.json                            {"version", "artifacts": [{app, os, arch, file, sha256}]}
-#   ae-<v>-linux-x86_64.tar.gz              ae
-#   forge-<v>-linux-x86_64.tar.gz           forge
-#   editor-<v>-linux-x86_64.tar.gz          artisan-editor, notices
-#   ae-<v>-windows-x86_64.zip               ae.exe          (and so on)
-#   install.sh, install.ps1                 the bootstrap installers (fetch ae, run `ae install`)
-#
-# `scripts/release` builds this, copies it out and signs release.json with a
-# key that never enters the store. Archives are byte-reproducible.
 {
   pkgs,
   version,
@@ -81,7 +69,6 @@ pkgs.runCommand "artisan-release-${version}"
 
     linux ae ${linux.ae}/bin/ae
     linux forge ${linux.forge}/bin/forge
-    linux editor ${linux.editor}/bin/artisan-editor
     windows ae ${windows.ae}/bin/ae.exe
     windows forge ${windows.forge}/bin/forge.exe
     windows editor ${windows.editor}/bin/artisan-editor.exe "Artisan Editor.exe"
