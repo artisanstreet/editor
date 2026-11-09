@@ -211,39 +211,55 @@ impl Shell {
         let live = &mut self.live;
         let now = std::time::Instant::now();
         const MESSAGES_PER_DRAIN: usize = 256;
+        const DRAIN_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
         let mut live_changed = false;
         let mut exhausted = true;
+        let mut live_events = super::live_batch::LiveBatch::default();
+        let mut apply_event = |core: &mut Core, event: CoreEvent| {
+            match &event {
+                CoreEvent::Host {
+                    host,
+                    event: HostEvent::Live { thread_id, .. },
+                } if is_watched(watched.as_ref(), host, thread_id) => {
+                    live_changed |= live.arrive(now)
+                }
+                CoreEvent::Host {
+                    host,
+                    event: HostEvent::Item(item),
+                } if is_streaming_prose(item) && is_watched(watched.as_ref(), host, &item.thread_id) => {
+                    live_changed |= live.arrive(now)
+                }
+                _ => changed |= event_changes_view(&event, watched.as_ref()),
+            };
+            preferences_changed |= matches!(event, CoreEvent::SettingsChanged);
+            if let Some(effects) = entry.handle_event(core, &event, window_active, ui) {
+                notifications.push(effects);
+            }
+            if let Some(workspace) = entry.workspace_mut() {
+                workspace.handle_domain_event(core, &event, window_active, ui);
+            }
+        };
         for _ in 0..MESSAGES_PER_DRAIN {
             let mut received = false;
             let pending = self.core.drain_step(|core, event| {
                 received = true;
-                match &event {
-                    CoreEvent::Host {
-                        host,
-                        event: HostEvent::Live { thread_id, .. },
-                    } if is_watched(watched.as_ref(), host, thread_id) => {
-                        live_changed |= live.arrive(now)
+                if let Some(event) = live_events.push(event) {
+                    for pending in live_events.take() {
+                        apply_event(core, pending);
                     }
-                    CoreEvent::Host {
-                        host,
-                        event: HostEvent::Item(item),
-                    } if is_streaming_prose(item) && is_watched(watched.as_ref(), host, &item.thread_id) => {
-                        live_changed |= live.arrive(now)
-                    }
-                    _ => changed |= event_changes_view(&event, watched.as_ref()),
-                };
-                preferences_changed |= matches!(event, CoreEvent::SettingsChanged);
-                if let Some(effects) = entry.handle_event(core, &event, window_active, ui) {
-                    notifications.push(effects);
-                }
-                if let Some(workspace) = entry.workspace_mut() {
-                    workspace.handle_domain_event(core, &event, window_active, ui);
+                    apply_event(core, event);
                 }
             });
             if !received && !pending {
                 exhausted = false;
                 break;
             }
+            if pending && now.elapsed() >= DRAIN_BUDGET {
+                break;
+            }
+        }
+        for event in live_events.take() {
+            apply_event(&mut self.core, event);
         }
         if exhausted {
             self.core.wake();

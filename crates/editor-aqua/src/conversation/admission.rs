@@ -152,6 +152,11 @@ impl RevealQueue {
     }
     pub fn rush(&mut self, before: u64) {
         self.rushed_before = self.rushed_before.max(before);
+        for row in self.rows.values_mut() {
+            if row.order.0 < self.rushed_before {
+                row.settling = false;
+            }
+        }
     }
     pub const fn rushed(&self, position: u64) -> bool {
         position < self.rushed_before

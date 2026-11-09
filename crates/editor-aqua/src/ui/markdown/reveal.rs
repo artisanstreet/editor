@@ -6,15 +6,13 @@ use std::time::{Duration, Instant};
 
 use crate::ui::motion::MotionCurve;
 
-const FADE: Duration = Duration::from_millis(400);
-const INTERVAL: Duration = Duration::from_millis(150);
+const FADE: Duration = Duration::from_millis(120);
 const MAX_LEAVES: usize = 128;
 
 struct Leaf {
     text: Arc<str>,
     visible: usize,
     marks: VecDeque<(Range<usize>, Instant)>,
-    next_tick: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,7 +173,7 @@ impl PreparedReveal {
             * self.block_growth(slot)
     }
     pub fn block_entrance(&self, slot: usize) -> Option<(f32, f32)> {
-        if self.reduced.get() {
+        if self.reduced.get() || self.swift.get() || self.rushed.get() {
             return None;
         }
         let mut blocks = self.blocks.borrow_mut();
@@ -192,22 +190,20 @@ impl PreparedReveal {
         }
         let started = *started.get_or_insert(self.now.get());
         let elapsed = self.now.get().saturating_duration_since(started);
-        if elapsed >= Duration::from_millis(400) {
+        if elapsed >= FADE {
             return None;
         }
         self.animating.set(true);
-        self.settling
-            .set(self.settling.get() || elapsed < Duration::from_millis(205));
-        let alpha = MotionCurve::EaseOut.sample_f32(
-            (elapsed
-                .saturating_sub(Duration::from_millis(80))
-                .as_secs_f64()
-                / 0.25)
-                .clamp(0.0, 1.0),
-        );
+        self.settling.set(self.settling.get() || elapsed < FADE / 2);
+        let progress = MotionCurve::EaseOut
+            .sample_f32((elapsed.as_secs_f64() / FADE.as_secs_f64()).clamp(0.0, 1.0));
+        let alpha = 0.65_f32.mul_add(progress, 0.35);
         Some((alpha, 4.0 * (1.0 - alpha)))
     }
     pub fn block_growth(&self, slot: usize) -> f32 {
+        if self.reduced.get() || self.swift.get() || self.rushed.get() {
+            return 1.0;
+        }
         self.blocks
             .borrow()
             .get(&slot)
@@ -220,13 +216,13 @@ impl PreparedReveal {
                         .get()
                         .saturating_duration_since(started)
                         .as_secs_f64()
-                        / 0.25)
-                        .clamp(0.0, 1.0),
+                        / FADE.as_secs_f64())
+                    .clamp(0.0, 1.0),
                 )
             })
     }
     pub fn fades(&self, slot: usize, text: Arc<str>) -> Vec<Fade> {
-        if self.reduced.get() {
+        if self.reduced.get() || self.swift.get() || self.rushed.get() {
             self.leaves.borrow_mut().clear();
             return Vec::new();
         }
@@ -234,13 +230,11 @@ impl PreparedReveal {
         if !leaves.contains_key(&slot) && leaves.len() >= MAX_LEAVES {
             return Vec::new();
         }
-        let streaming = self.streaming.get() && self.tail.get() == Some(slot);
         let now = self.now.get();
         let leaf = leaves.entry(slot).or_insert_with(|| Leaf {
             text: text.clone(),
             visible: if self.fresh.get() { 0 } else { text.len() },
             marks: VecDeque::new(),
-            next_tick: now,
         });
         if !Arc::ptr_eq(&leaf.text, &text) {
             if !text.starts_with(leaf.text.as_ref()) {
@@ -249,56 +243,9 @@ impl PreparedReveal {
             }
             leaf.text = text.clone();
         }
-        if self.rushed.get() && leaf.visible < text.len() {
+        if !self.paused.get() && leaf.visible < text.len() {
             leaf.marks.push_back((leaf.visible..text.len(), now));
             leaf.visible = text.len();
-        }
-        let swift = self.swift.get();
-        if !self.paused.get() && (swift || now >= leaf.next_tick) {
-            let start = leaf.visible;
-            while leaf.visible < text.len() {
-                let rest = &text[leaf.visible..];
-                let mut end = leaf.visible;
-                let mut word = false;
-                let mut complete = false;
-                for (offset, ch) in rest.char_indices() {
-                    if ch.is_whitespace() && word {
-                        end = leaf.visible + offset + ch.len_utf8();
-                        complete = true;
-                        break;
-                    }
-                    word |= !ch.is_whitespace();
-                }
-                if !complete {
-                    if streaming {
-                        break;
-                    }
-                    end = text.len();
-                }
-                if end <= leaf.visible {
-                    break;
-                }
-                if swift {
-                    leaf.marks.push_back((leaf.visible..end, now));
-                }
-                leaf.visible = end;
-            }
-            if leaf.visible > start && !swift {
-                let chunk_bytes = (leaf.visible - start).div_ceil(512).max(3);
-                let count = (leaf.visible - start).div_ceil(chunk_bytes).max(1);
-                let step = INTERVAL / u32::try_from(count).unwrap_or(u32::MAX);
-                let mut from = start;
-                let mut mark = 0u32;
-                for (offset, ch) in text[start..leaf.visible].char_indices() {
-                    let end = start + offset + ch.len_utf8();
-                    if end - from >= chunk_bytes || end == leaf.visible {
-                        leaf.marks.push_back((from..end, now + step * mark));
-                        from = end;
-                        mark += 1;
-                    }
-                }
-                leaf.next_tick = now + INTERVAL;
-            }
         }
         while leaf
             .marks
@@ -311,36 +258,19 @@ impl PreparedReveal {
         if waiting {
             self.fully_visible.set(false);
         }
-        let pending_words = if streaming {
-            text[leaf.visible..]
-                .rfind(char::is_whitespace)
-                .is_some_and(|end| {
-                    text[leaf.visible..leaf.visible + end]
-                        .split_whitespace()
-                        .next()
-                        .is_some()
-                })
-        } else {
-            waiting
-        };
-        self.settling.set(
-            self.settling.get()
-                || pending_words
-                || leaf
-                    .marks
-                    .back()
-                    .is_some_and(|(_, started)| now.saturating_duration_since(*started) < FADE / 2),
-        );
-        self.animating.set(
-            self.animating.get() || (!self.paused.get() && pending_words) || !leaf.marks.is_empty(),
-        );
+        self.settling.set(self.settling.get() || waiting);
+        self.animating
+            .set(self.animating.get() || (!self.paused.get() && waiting) || !leaf.marks.is_empty());
         let mut fades = Vec::with_capacity(leaf.marks.len() + usize::from(waiting));
         for (range, started) in &leaf.marks {
             let progress =
                 now.saturating_duration_since(*started).as_secs_f64() / FADE.as_secs_f64();
             fades.push(Fade {
                 range: range.clone(),
-                opacity: MotionCurve::EaseOut.sample_f32(progress.clamp(0.0, 1.0)),
+                opacity: 0.65_f32.mul_add(
+                    MotionCurve::EaseOut.sample_f32(progress.clamp(0.0, 1.0)),
+                    0.35,
+                ),
             });
         }
         if waiting {

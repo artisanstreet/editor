@@ -66,3 +66,24 @@ fn reveal_queue_holds_later_rows_until_the_prior_row_settles() {
     assert!(queue.rushed(1));
     assert!(!queue.rushed(2));
 }
+
+#[test]
+fn reader_interruption_releases_loaded_rows_without_rushing_future_replies() {
+    let mut queue = RevealQueue::default();
+    let first = RowKey::Item(artisan_api::ItemId("first".into()));
+    let second = RowKey::Item(artisan_api::ItemId("second".into()));
+    assert!(!queue.begin(first.clone(), (1, 1, 0), true));
+    queue.finish(&first, true);
+    assert!(queue.begin(second.clone(), (2, 1, 0), true));
+    queue.finish(&second, true);
+    queue.rush(2);
+    assert_eq!(queue.frontier_key(), Some(second));
+    queue.rush(3);
+    assert_eq!(queue.frontier_key(), None);
+    assert!(!queue.rushed(3));
+    assert!(!queue.begin(
+        RowKey::Item(artisan_api::ItemId("next".into())),
+        (3, 1, 0),
+        true
+    ));
+}

@@ -10,6 +10,8 @@ mod host;
 mod lifetime;
 #[path = "shell/live_throttle.rs"]
 mod live_throttle;
+#[path = "shell/notifications.rs"]
+mod notifications;
 #[path = "shell/menu_keys.rs"]
 mod menu_keys;
 #[path = "shell/navigation_viewport.rs"]

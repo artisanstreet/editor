@@ -878,7 +878,7 @@ fn streaming(
     let row = ui::row(
         theme,
         "Text Streaming",
-        "How conversations in Artisan Editor streams. We recommend you leave it at smooth, but for models with higher TPS you should try swift.",
+        "Smooth fades new text in briefly as it arrives. Swift shows it immediately without reveal animation.",
         Some(control),
     );
     let page = SettingsPage::Section(SettingsSection::Streaming);

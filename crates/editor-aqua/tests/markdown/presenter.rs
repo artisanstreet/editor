@@ -505,7 +505,7 @@ fn projected_reveal_metadata_tracks_keyed_cells_and_streaming_tail() {
     reveal.begin_frame(std::time::Instant::now(), true, true, false, false);
     let text = row.reveal_text(&reveal);
     assert_eq!(text[0].end, text[0].text.len());
-    assert_eq!(&text[1].text[..text[1].end], "two ");
+    assert_eq!(&text[1].text[..text[1].end], "two words");
     assert!(std::sync::Arc::ptr_eq(
         &row.selection_batch,
         &same.selection_batch

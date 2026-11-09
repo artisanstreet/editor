@@ -8,6 +8,7 @@ pub mod application;
 pub mod dialogs;
 pub mod entry;
 pub mod host;
+pub mod live_batch;
 pub mod live_throttle;
 pub mod native_notifications;
 pub mod notifications;
