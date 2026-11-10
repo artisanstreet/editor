@@ -259,6 +259,9 @@ impl Run {
                     self.pump(turn)?;
                     if self.cancelling && !interrupt_sent {
                         interrupt_sent = self.interrupt()?;
+                        if interrupt_sent {
+                            deadline = Some(Instant::now() + INTERRUPT_GRACE);
+                        }
                         if !interrupt_sent && self.idle() {
                             return Ok(Outcome::cancelled());
                         }
@@ -292,7 +295,11 @@ impl Run {
                         self.flush()?;
                     }
                     self.conn.retire();
-                    return Err(anyhow!("Codex did not confirm the turn stopped after an interrupt; requested thread unload and retired the server. Underlying work may still be running."));
+                    let reason = match interrupt_sent {
+                        true => "Codex did not confirm the turn stopped after an interrupt",
+                        false => "Codex did not return the started turn ID before cancellation timed out",
+                    };
+                    return Err(anyhow!("{reason}; requested thread unload and retired the server. Underlying work may still be running."));
                 }
             }
         }
