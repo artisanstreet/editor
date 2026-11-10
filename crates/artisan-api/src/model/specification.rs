@@ -227,10 +227,7 @@ impl Model {
                 ModelAxis::Context,
                 ModelChoice {
                     id: window.tokens.to_string(),
-                    label: window.override_tokens.map_or_else(
-                        || format!("Default · {}", token_label(window.tokens)),
-                        |_| token_label(window.tokens),
-                    ),
+                    label: token_label(window.tokens),
                     semantic: match window.override_tokens {
                         None => ChoiceSemantic::Default,
                         Some(_) => ChoiceSemantic::Native,

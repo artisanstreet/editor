@@ -3336,7 +3336,7 @@ fn model_menu_items(
                     super::picker::Axis::Special => "None".into(),
                     super::picker::Axis::Activation => "On".into(),
                     super::picker::Axis::Thinking => "Special mode".into(),
-                    _ => "Default".into(),
+                    _ => "Not set".into(),
                 });
             items.push(ModelMenuItem {
                 pane: Some(axis),
