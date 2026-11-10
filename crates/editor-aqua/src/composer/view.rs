@@ -1385,8 +1385,12 @@ impl ComposerVisible {
 
 impl ComposerRest {
     fn capture(composer: &super::controller::Composer) -> Self {
+        let mut picker = composer.picker.clone();
+        picker.axis_cursor = picker.axis_cursor.filter(|cursor| {
+            matches!(cursor, super::picker::AxisCursor::Keys(_))
+        });
         Self {
-            picker: composer.picker.clone(),
+            picker,
             mention: (
                 composer.mentions.current.clone(),
                 composer.mentions.rows.clone(),
