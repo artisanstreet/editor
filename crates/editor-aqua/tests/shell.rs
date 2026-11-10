@@ -10,6 +10,8 @@ mod host;
 mod lifetime;
 #[path = "shell/live_throttle.rs"]
 mod live_throttle;
+#[path = "shell/notifications.rs"]
+mod notifications;
 #[path = "shell/menu_keys.rs"]
 mod menu_keys;
 #[path = "shell/navigation_viewport.rs"]
@@ -20,6 +22,8 @@ mod navigator_menu;
 mod root;
 #[path = "shell/scale.rs"]
 mod scale;
+#[path = "shell/settings_scroll.rs"]
+mod settings_scroll;
 #[path = "shell/scroll_edge.rs"]
 mod scroll_edge;
 #[cfg(windows)]

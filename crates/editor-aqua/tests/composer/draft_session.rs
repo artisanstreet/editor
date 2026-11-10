@@ -555,3 +555,130 @@ fn engine_light_flies_on_tab_change_but_not_on_remeasurement() {
     );
     assert!(!light.animating());
 }
+
+fn submission() -> editor_aqua::composer::draft_session::Submission {
+    let thread = artisan_api::ThreadId::from("new-thread");
+    editor_aqua::composer::draft_session::Submission {
+        create: Some(artisan_api::CreateThread {
+            id: thread.clone(),
+            project_id: artisan_api::ProjectId::from("project"),
+            config: artisan_api::EngineConfig::new(artisan_api::EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        }),
+        thread,
+        message: artisan_api::SendMessage {
+            id: artisan_api::ItemId::from("original-message"),
+            text: "Keep my draft".into(),
+            images: Vec::new(),
+            config: None,
+            draft: None,
+        },
+    }
+}
+
+fn save_next(session: &mut DraftSession) {
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected a draft write");
+    };
+    session.written(
+        &request,
+        edited,
+        Ok(DraftWriteResult {
+            saved: true,
+            current: DraftSnapshot {
+                revision: request.expected_revision + 1,
+                body: request.body.clone(),
+            },
+        }),
+    );
+}
+
+fn assert_original_submission(session: &mut DraftSession) {
+    let Some(Operation::Post(request)) = session.next() else {
+        panic!("expected the original submission to resume");
+    };
+    let original = submission();
+    assert_eq!(request.message.id, original.message.id);
+    assert_eq!(request.message.text, original.message.text);
+    assert_eq!(request.thread, original.thread);
+    assert_eq!(request.create.unwrap().id, original.create.unwrap().id);
+    session.posted(Ok(()));
+    assert!(!session.sending());
+    assert!(!session.pending());
+    assert!(session.body.is_null());
+}
+
+#[test]
+fn draft_load_failure_unlocks_the_queued_send_and_retry_preserves_its_identity() {
+    let mut session = DraftSession::new("new:project".into());
+    assert!(matches!(session.next(), Some(Operation::Load)));
+    let body = json!({"text": "Keep my draft"});
+    session.queue(body.clone());
+    session.submit(submission());
+    assert!(session.sending());
+    session.loaded(Err("offline".into()));
+    assert!(!session.sending());
+    assert_eq!(session.body, body);
+    assert!(session.pending());
+    assert!(session.next().is_none());
+    session.retry();
+    assert!(session.sending());
+    assert!(matches!(session.next(), Some(Operation::Load)));
+    session.loaded(Ok(DraftSnapshot::default()));
+    save_next(&mut session);
+    assert_original_submission(&mut session);
+}
+
+#[test]
+fn draft_write_failure_unlocks_the_queued_send_without_losing_the_draft() {
+    let mut session = DraftSession::new("new:project".into());
+    session.loaded(Ok(DraftSnapshot::default()));
+    let body = json!({"text": "Keep my draft"});
+    session.queue(body.clone());
+    session.submit(submission());
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected a draft write");
+    };
+    session.written(&request, edited, Err("offline".into()));
+    assert!(!session.sending());
+    assert_eq!(session.body, body);
+    assert!(session.pending());
+    session.retry();
+    save_next(&mut session);
+    assert_original_submission(&mut session);
+}
+
+#[test]
+fn a_submitted_draft_conflict_unlocks_and_resumes_only_after_resolution() {
+    let mut session = DraftSession::new("new:project".into());
+    session.loaded(Ok(DraftSnapshot::default()));
+    let body = json!({"text": "Keep my draft"});
+    session.queue(body.clone());
+    session.submit(submission());
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected a draft write");
+    };
+    session.written(
+        &request,
+        edited,
+        Ok(DraftWriteResult {
+            saved: false,
+            current: DraftSnapshot {
+                revision: 7,
+                body: json!({"text": "other client"}),
+            },
+        }),
+    );
+    assert!(!session.sending());
+    assert_eq!(session.body, body);
+    assert!(session.conflict);
+    session.retry();
+    assert!(!session.sending());
+    assert!(session.next().is_none());
+    session.keep_local();
+    assert!(session.sending());
+    save_next(&mut session);
+    assert_original_submission(&mut session);
+}

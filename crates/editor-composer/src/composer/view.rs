@@ -3059,7 +3059,10 @@ pub fn project_menu(
         AlignItems,
         element::{Button as UiButton, Scroll},
     };
-    let mut rows = UiBox::new().layout("column");
+    let mut rows = UiBox::new()
+        .layout("column")
+        .width(Length::Pct(100.0))
+        .style(Style::new().min_width(Length::Px(0.0)));
     for id in &picker.projects {
         let Some(project) = host.projects.get(id) else {
             continue;
@@ -3126,7 +3129,11 @@ pub fn project_menu(
         );
     }
     let count = picker.projects.len();
-    let mut list = UiBox::new().layout("column").padding(8.0);
+    let mut list = UiBox::new()
+        .layout("column")
+        .width(Length::Pct(100.0))
+        .padding(8.0)
+        .style(Style::new().min_width(Length::Px(0.0)));
     if count > 0 {
         list = list
             .child(
@@ -3135,6 +3142,7 @@ pub fn project_menu(
                     .clip(true)
                     .child(
                         Scroll::new()
+                            .width(Length::Pct(100.0))
                             .height((count.min(8) as f32) * 36.0)
                             .child(rows.build())
                             .build()
@@ -3234,19 +3242,39 @@ pub fn project_menu(
         ComposerAction::NewProject,
     ));
     let radius = RadiusTokens::value(RadiusStep::Lg);
+    let width = 320.0_f32.min((viewport.w - 32.0).max(0.0));
     UiBox::new()
         .layout("column")
-        .width(320.0_f32.min(viewport.w - 32.0))
+        .width(width)
+        .clip(true)
         .radius(radius)
         .style(
-            Style::new().shadows(
-                glass_card_shadows(&theme, Elevation::Overlay)
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-            ),
+            Style::new()
+                .min_width(Length::Px(width))
+                .max_width(Length::Px(width))
+                .flex_shrink(0.0)
+                .shadows(
+                    glass_card_shadows(&theme, Elevation::Overlay)
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                ),
         )
-        .child(glass_layers(&theme, GlassStrength::Quiet, radius))
+        .child(glass_layers(&theme, GlassStrength::Strong, radius))
+        .child(
+            UiBox::new()
+                .radius(radius)
+                .fill(
+                    theme
+                        .colors
+                        .pressed
+                        .at(editor_ui::theme::Opacity::Glass)
+                        .to_paint(),
+                )
+                .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
+                .build()
+                .exclude_from_hit_testing(),
+        )
         .child(
             hover_surface
                 .borrow()

@@ -322,6 +322,18 @@ impl Workspace {
         window_active: bool,
         ui: &mut aqua::UiApp,
     ) {
+        if matches!(
+            event,
+            CoreEvent::Host {
+                event: HostEvent::Live { .. },
+                ..
+            }
+        ) {
+            self.conversation.core_event(core, event, window_active);
+            self.inspector
+                .on_core_event(core, &self.conversation, ui, event);
+            return;
+        }
         self.sidebar.sync(core, artisan_api::now());
         self.settings_sidebar.sync(core, artisan_api::now());
         if matches!(

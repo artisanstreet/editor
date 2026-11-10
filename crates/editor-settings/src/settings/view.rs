@@ -362,12 +362,18 @@ pub fn build(
             .build(),
     };
     Scroll::new()
+        .preserve_offset(true)
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
+        .style(Style::new().column())
         .child(
             UiBox::new()
                 .width(Length::Pct(100.0))
-                .style(Style::new().justify(JustifyContent::CENTER))
+                .style(
+                    Style::new()
+                        .justify(JustifyContent::CENTER)
+                        .flex_shrink(0.0),
+                )
                 .child(
                     UiBox::new()
                         .layout("column")
@@ -872,7 +878,7 @@ fn streaming(
     let row = ui::row(
         theme,
         "Text Streaming",
-        "How conversations in Artisan Editor streams. We recommend you leave it at smooth, but for models with higher TPS you should try swift.",
+        "Smooth fades new text in briefly as it arrives. Swift shows it immediately without reveal animation.",
         Some(control),
     );
     let page = SettingsPage::Section(SettingsSection::Streaming);

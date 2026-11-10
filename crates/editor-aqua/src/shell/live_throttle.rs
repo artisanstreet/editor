@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-pub const INTERVAL: Duration = Duration::from_millis(66);
+pub const INTERVAL: Duration = Duration::from_micros(16_667);
 
 #[derive(Default)]
 pub struct LiveThrottle {

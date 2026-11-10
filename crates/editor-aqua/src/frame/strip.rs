@@ -1,6 +1,6 @@
 use crate::ui::chrome::card::Surfaces;
 use crate::frame::sidebar::{Command, Event};
-use crate::frame::tree::{PULSE_MS, hover, inherited_label};
+use crate::frame::tree::{PULSE_MS, inherited_label};
 use crate::sidebar::list::RowState;
 use crate::ui::theme::ArtisanTheme;
 use aqua::Style;
@@ -129,7 +129,10 @@ fn location(
         .child(crate::frame::tree::label(
             theme,
             location_label,
-            surfaces.ink_dim,
+            match tab.url {
+                Some(_) => theme.colors.link,
+                None => surfaces.ink_dim,
+            },
             false,
         ))
         .build();
@@ -145,7 +148,6 @@ fn location(
                 .role(Role::Button)
                 .aria_label(format!("Open {location_label}"))
                 .cursor(CursorIcon::Pointer)
-                .hover_style(hover(theme))
         }
         None => content,
     }

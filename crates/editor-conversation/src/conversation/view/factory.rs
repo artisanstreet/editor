@@ -669,6 +669,12 @@ impl RowFactory {
         use crate::conversation::view::resources::ResourceKey;
         use crate::conversation::view::row_sources::{RowSourceAction, RowSourceActionKind};
         use aqua_ui::element::Text;
+        let theme = match &field {
+            crate::conversation::content::SourceField::Question(_) => {
+                super::request::question_theme(item, self.theme)
+            }
+            _ => self.theme,
+        };
         let source = field
             .text(item)
             .ok_or_else(|| anyhow::anyhow!("conversation source field is unavailable"))?;
@@ -697,7 +703,13 @@ impl RowFactory {
                     copies: Vec::new(),
                 };
                 let element = Text::new(text.clone())
-                    .gpui_source_color(self.theme.colors.text.to_reference_text_color())
+                    .wrap(true)
+                    .style(
+                        aqua_ui::style::Style::new()
+                            .width(aqua_ui::style::Length::Pct(100.0))
+                            .min_width(aqua_ui::style::Length::Px(0.0)),
+                    )
+                    .gpui_source_color(theme.colors.text.to_reference_text_color())
                     .selection_source_in(
                         services.document,
                         editor_sources::source_slice(id, 0..text.len()),
@@ -716,29 +728,36 @@ impl RowFactory {
                 batches.borrow_mut().extend(row.batches);
                 return Ok(row.element);
             }
-            return Ok(Text::new(text.clone())
+            let mut element = Text::new(text.clone())
                 .text_style(aqua_text::TextStyle {
                     families: vec![aqua_text::FontFamily::Named(
                         if field == crate::conversation::content::SourceField::ApprovalCommand {
-                            self.theme.typography.mono.family
+                            theme.typography.mono.family
                         } else {
-                            self.theme.typography.sans.family
+                            theme.typography.sans.family
                         }
                         .to_owned(),
                     )],
-                    size_px: self.theme.typography.editor_text_desktop,
-                    line_height_px: self.theme.spacing.steps(6.0),
+                    size_px: theme.typography.editor_text_desktop,
+                    line_height_px: theme.spacing.steps(6.0),
                     letter_spacing_em: Some(
                         if field == crate::conversation::content::SourceField::ApprovalCommand {
                             0.0
                         } else {
-                            self.theme.typography.tracking_em
+                            theme.typography.tracking_em
                         },
                     ),
                     ..Default::default()
                 })
-                .gpui_source_color(self.theme.colors.text.to_reference_text_color())
-                .build());
+                .gpui_source_color(theme.colors.text.to_reference_text_color());
+            if matches!(field, crate::conversation::content::SourceField::Question(_)) {
+                element = element.wrap(true).style(
+                    aqua_ui::style::Style::new()
+                        .width(aqua_ui::style::Length::Pct(100.0))
+                        .min_width(aqua_ui::style::Length::Px(0.0)),
+                );
+            }
+            return Ok(element.build());
         }
         let services = self
             .source_resources
@@ -781,14 +800,7 @@ impl RowFactory {
         let view = owner
             .sources
             .borrow()
-            .view(
-                &item.id,
-                &field,
-                self.theme,
-                services.document,
-                id,
-                callback,
-            )
+            .view(&item.id, &field, theme, services.document, id, callback)
             .ok_or_else(|| anyhow::anyhow!("conversation source view is unavailable"))?;
         let mut retained = owner.batches.borrow_mut();
         anyhow::ensure!(
@@ -810,6 +822,7 @@ impl RowFactory {
     ) -> anyhow::Result<aqua_ui::element::Element> {
         use crate::conversation::view::resources::ResourceKey;
         use crate::conversation::view::row_sources::{RowSourceAction, RowSourceActionKind};
+        let theme = super::request::question_theme(item, self.theme);
         let services = self
             .source_resources
             .as_ref()
@@ -868,7 +881,7 @@ impl RowFactory {
                 });
                 let view = editor_sources::content_view(
                     detail,
-                    self.theme,
+                    theme,
                     services.document,
                     detail_id,
                     callback,
@@ -906,7 +919,7 @@ impl RowFactory {
         let view = owner
             .questions
             .borrow()
-            .view(self.theme, services.document, id, stored_detail, callback)
+            .view(theme, services.document, id, stored_detail, callback)
             .map_err(anyhow::Error::msg)?
             .ok_or_else(|| anyhow::anyhow!("question collection view is unavailable"))?;
         let mut retained = owner.batches.borrow_mut();

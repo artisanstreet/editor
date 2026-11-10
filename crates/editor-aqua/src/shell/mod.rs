@@ -8,6 +8,7 @@ pub mod application;
 pub use crate::ui::dialogs;
 pub mod entry;
 pub mod host;
+pub mod live_batch;
 pub mod live_throttle;
 pub mod native_notifications;
 pub mod notifications;

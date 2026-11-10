@@ -75,9 +75,12 @@ impl DraftSession {
     }
 
     pub fn sending(&self) -> bool {
-        self.outgoing
-            .as_ref()
-            .is_some_and(|outgoing| outgoing.state != Sending::Failed)
+        !self.conflict
+            && self.error.is_none()
+            && self
+                .outgoing
+                .as_ref()
+                .is_some_and(|outgoing| outgoing.state != Sending::Failed)
     }
 
     pub fn queue(&mut self, body: Value) -> bool {
@@ -130,6 +133,9 @@ impl DraftSession {
         }
         self.conflict = false;
         self.error = None;
+        if let Some(outgoing) = &mut self.outgoing {
+            outgoing.state = Sending::Queued;
+        }
     }
 
     pub fn use_remote(&mut self) {
@@ -196,7 +202,7 @@ impl DraftSession {
                 self.snapshot = snapshot;
                 self.loaded = true;
             }
-            Err(error) => self.error = Some(format!("Couldn't load the draft: {error}")),
+            Err(error) => self.fail(format!("Couldn't load the draft: {error}")),
         }
     }
 
@@ -220,14 +226,21 @@ impl DraftSession {
                     }
                 } else {
                     self.conflict = true;
-                    self.error = Some(
+                    self.fail(
                         "This draft changed on another client. Choose which version to keep."
                             .into(),
                     );
                 }
             }
-            Err(error) => self.error = Some(format!("Couldn't save the draft: {error}")),
+            Err(error) => self.fail(format!("Couldn't save the draft: {error}")),
         }
+    }
+
+    fn fail(&mut self, error: String) {
+        if let Some(outgoing) = &mut self.outgoing {
+            outgoing.state = Sending::Failed;
+        }
+        self.error = Some(error);
     }
 
     pub fn posted(&mut self, result: Result<(), String>) {
@@ -245,12 +258,7 @@ impl DraftSession {
                 self.error = None;
                 self.loaded = false;
             }
-            Err(error) => {
-                if let Some(outgoing) = &mut self.outgoing {
-                    outgoing.state = Sending::Failed;
-                }
-                self.error = Some(format!("Couldn't send the message: {error}"));
-            }
+            Err(error) => self.fail(format!("Couldn't send the message: {error}")),
         }
     }
 }
