@@ -35,8 +35,8 @@ pub trait RowResources {
         request::answered(
             questions,
             theme,
-            |field| self.source(item, field, theme),
-            |source| self.stored_questions(item, source, theme),
+            |field| self.source(item, field, request::question_theme(item, theme)),
+            |source| self.stored_questions(item, source, request::question_theme(item, theme)),
             || self.answer(item, theme),
         )
     }

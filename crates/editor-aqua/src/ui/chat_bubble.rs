@@ -154,11 +154,14 @@ impl ChatBubbleSegment {
             );
         }
         if self.answer {
-            style = style.gpui_border(
-                Insets::uniform(1.0),
-                self.theme.colors.gray.step(8).to_reference_paint(),
-                true,
-            );
+            style = style
+                .width(Length::Pct(100.0))
+                .min_width(Length::Px(0.0))
+                .gpui_border(
+                    Insets::uniform(1.0),
+                    self.theme.colors.gray.step(8).to_reference_paint(),
+                    true,
+                );
         }
         let mut frame = UiBox::new().style(style);
         if let Some(tint) = self.tint {

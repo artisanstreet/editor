@@ -245,9 +245,12 @@ pub fn answered<E>(
 ) -> Result<Element, E> {
     let mut asked = UiBox::new()
         .layout("column")
+        .width(Length::Pct(100.0))
         .gap(theme.spacing.steps(1.0))
         .style(
-            Style::new().gpui_source_text_color(theme.colors.text_muted.to_reference_text_color()),
+            Style::new()
+                .min_width(Length::Px(0.0))
+                .gpui_source_text_color(theme.colors.text_muted.to_reference_text_color()),
         );
     match questions {
         Collection::Inline(questions) => {
@@ -257,59 +260,38 @@ pub fn answered<E>(
         }
         Collection::Stored(reference) => asked = asked.child(stored(reference)?),
     }
-    let foot = if theme.colors.mode.is_dark() { 4 } else { 3 };
-    let background = aqua_core::GpuiBackground::LinearGradient {
-        angle: 180.0,
-        color_space: aqua_core::GpuiGradientColorSpace::Oklab,
-        stops: [
-            aqua_core::GpuiGradientStop {
-                percentage: 0.0,
-                color: theme.colors.gray.step(foot + 1).to_reference_paint(),
-            },
-            aqua_core::GpuiGradientStop {
-                percentage: 1.0,
-                color: theme.colors.gray.step(foot).to_reference_paint(),
-            },
-        ],
-    };
     let content = UiBox::new()
         .layout("column")
+        .width(Length::Pct(100.0))
+        .style(Style::new().min_width(Length::Px(0.0)))
         .gap(theme.spacing.steps(2.0))
         .child(asked.build())
         .child(answer()?)
         .build();
-    let bubble = UiBox::new()
-        .radius(crate::ui::theme::RadiusTokens::value(
-            crate::ui::theme::RadiusStep::X2l,
-        ))
-        .style(
-            Style::new()
-                .max_width(Length::Px(576.0))
-                .padding_insets(aqua_core::Insets {
-                    left: 16.0,
-                    right: 16.0,
-                    top: 12.0,
-                    bottom: 12.0,
-                })
-                .gpui_background(background)
-                .gpui_border(
-                    aqua_core::Insets::uniform(1.0),
-                    theme.colors.gray.step(8).to_reference_paint(),
-                    true,
-                )
-                .gpui_shadows(
-                    crate::ui::glass::card_shadows(&theme)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(content)
-        .build();
+    let bubble = crate::ui::chat_bubble::ChatBubbleSegment::new(
+        theme,
+        crate::ui::chat_bubble::SegmentPosition::Single,
+        content,
+    )
+    .answer()
+    .build();
     Ok(UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
         .style(Style::new().align(aqua_ui::AlignItems::END))
         .child(bubble)
         .build())
+}
+
+pub fn question_theme(item: &Item, mut theme: ArtisanTheme) -> ArtisanTheme {
+    if matches!(
+        &item.kind,
+        ItemKind::Question {
+            answer_text: Some(_),
+            ..
+        }
+    ) {
+        theme.colors.text = theme.colors.text_muted;
+    }
+    theme
 }
