@@ -9,7 +9,9 @@ use editor_aqua::ui::marquee::Marquee;
 #[test]
 fn overflow_waits_then_scrolls_and_reduced_motion_stops() {
     let marquee = Marquee::new("note", "A long note that should not fit in a small space");
-    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = UiApp::new(fonts, SharedRuns::new());
     app.mount(|_| {
         UiBox::new()
             .width(60.0)
