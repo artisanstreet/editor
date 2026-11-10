@@ -192,7 +192,7 @@ mod tests {
         assert!(!output.status.success());
         let error = stderr(&output);
         assert!(error.contains("exited while starting"), "{error}");
-        assert!(error.contains("open the store"), "{error}");
+        assert!(error.contains("open database"), "{error}");
         assert!(!instance.listening());
     }
 }

@@ -244,10 +244,9 @@ pub fn stop() -> Result<bool> {
     } else {
         sys::run("kill", &["-TERM", &pid.to_string()])?;
     }
-    // Wait for the process itself: a dying process loses its exe before the
-    // kernel closes its files, so it still holds the port for a while.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while process_exists(pid) {
+    let directory = data()?;
+    while process_exists(pid) || forge_http::lock_data_dir(&directory).is_err() {
         if std::time::Instant::now() >= deadline {
             bail!("Forge (pid {pid}) didn't stop within 30 seconds");
         }
