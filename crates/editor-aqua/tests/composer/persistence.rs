@@ -62,14 +62,96 @@ async fn request(
 }
 
 async fn respond(socket: &mut TlsStream<TcpStream>, body: Value) {
+    respond_status(socket, "200 OK", body).await;
+}
+
+async fn respond_status(socket: &mut TlsStream<TcpStream>, status: &str, body: Value) {
     let body = serde_json::to_vec(&body).unwrap();
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     socket.write_all(headers.as_bytes()).await.unwrap();
     socket.write_all(&body).await.unwrap();
     socket.flush().await.unwrap();
+}
+
+#[test]
+fn rejected_write_unlocks_queued_send_and_retry_preserves_the_message() {
+    use artisan_api::{ItemId, SendMessage, ThreadId};
+    use editor_aqua::composer::draft_session::Submission;
+
+    let (_directory, core, config, _client) = fixture();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let mut sessions = DraftSessions::default();
+        let lease = sessions
+            .open(
+                config.id.clone(),
+                core.host(&config.id).unwrap().instance(),
+                "new".into(),
+                client,
+            )
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        let mut changed = lease.subscribe();
+        let draft = json!({"text": "preserve this prompt"});
+        lease.queue(draft.clone());
+        lease.submit(Submission {
+            thread: ThreadId("thread".into()),
+            create: None,
+            message: SendMessage {
+                id: ItemId("original-message".into()),
+                text: "preserve this prompt".into(),
+                images: Vec::new(),
+                config: None,
+                draft: None,
+            },
+        });
+        assert!(lease.read(|state| state.sending()));
+        let (mut socket, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        respond_status(
+            &mut socket,
+            "500 Internal Server Error",
+            json!({"error": {"code": "internal", "message": "draft write rejected"}}),
+        )
+        .await;
+        drop(socket);
+        while lease.read(|state| state.error.is_none()) {
+            changed.changed().await.unwrap();
+        }
+        assert!(!lease.read(|state| state.sending()));
+        assert_eq!(lease.read(|state| state.body.clone()), draft);
+        assert!(lease.read(|state| state.pending()));
+
+        lease.retry();
+        let (mut socket, route, body) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        assert_eq!(body["body"], draft);
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": draft}}),
+        )
+        .await;
+        drop(socket);
+        let (mut socket, route, body) = request(&listener, &acceptor).await;
+        assert_eq!(route, "POST /threads/thread/messages HTTP/1.1");
+        assert_eq!(body["id"], "original-message");
+        assert_eq!(body["text"], "preserve this prompt");
+        assert_eq!(body["draft"], json!({"scope": "new", "revision": 1}));
+        respond(&mut socket, json!({"id": "original-message", "thread_id": "thread", "position": 1, "seq": 1, "run_id": null, "parent_id": null, "status": "done", "created_at": 0, "updated_at": 0, "kind": {"type": "user_message", "text": "preserve this prompt"}})).await;
+        drop(socket);
+        let (mut socket, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "GET /drafts/new HTTP/1.1");
+        respond(&mut socket, json!({"revision": 2, "body": null})).await;
+        drop(socket);
+        while !lease.read(|state| state.loaded && state.evictable()) {
+            changed.changed().await.unwrap();
+        }
+        assert!(!lease.read(|state| state.sending()));
+        assert!(!lease.read(|state| state.pending()));
+    });
 }
 
 async fn load(lease: &DraftLease, listener: &TcpListener, acceptor: &TlsAcceptor) {
