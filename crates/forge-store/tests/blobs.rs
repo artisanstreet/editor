@@ -1,4 +1,3 @@
-#![expect(clippy::unwrap_used, reason = "a failure fails the test")]
 
 use artisan_api::BlobHash;
 use forge_store::Store;

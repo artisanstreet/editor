@@ -1463,7 +1463,7 @@ mod tests {
         let meta = json!({"data":[{"id":"toggle", "providerID":"test", "variants":[{"id":"none"},{"id":"thinking"}]}]});
         let listing = opencode_listing(&meta, None, None);
         assert_eq!(listing.models[0].default_variant, None);
-        let mut reported = meta.clone();
+        let mut reported = meta;
         reported["data"][0]["defaultVariant"] = json!("thinking");
         assert_eq!(opencode_listing(&reported, None, None).models[0].default_variant.as_deref(), Some("thinking"));
         reported["data"][0]["defaultVariant"] = json!("absent");

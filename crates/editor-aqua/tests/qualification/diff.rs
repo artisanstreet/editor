@@ -68,8 +68,8 @@ pub fn compare(
     let mut bounds: Option<Bounds> = None;
     for (index, (left, right)) in reference
         .rgba
-        .chunks_exact(4)
-        .zip(candidate.rgba.chunks_exact(4))
+        .as_chunks::<4>().0.iter()
+        .zip(candidate.rgba.as_chunks::<4>().0.iter())
         .enumerate()
     {
         let deltas = [0, 1, 2, 3].map(|channel| left[channel].abs_diff(right[channel]));
@@ -203,8 +203,8 @@ pub fn heat_map(reference: &Screen, candidate: &Screen, channel_threshold: u8) -
         height: reference.height,
         rgba: reference
             .rgba
-            .chunks_exact(4)
-            .zip(candidate.rgba.chunks_exact(4))
+            .as_chunks::<4>().0.iter()
+            .zip(candidate.rgba.as_chunks::<4>().0.iter())
             .flat_map(|(left, right)| {
                 let worst = (0..4)
                     .map(|channel| left[channel].abs_diff(right[channel]))

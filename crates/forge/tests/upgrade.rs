@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 #![cfg(unix)]
 
 use artisan_api::PairRequest;

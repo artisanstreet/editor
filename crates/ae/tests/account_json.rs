@@ -224,6 +224,7 @@ fn stdout_json(output: &Output) -> serde_json::Result<serde_json::Value> {
 /// enroll code, pending → claimed transitions, guarded confirm, enrolled
 /// shape — with stdout secret-free throughout.
 #[test]
+#[expect(clippy::too_many_lines, reason = "one account enrollment lifecycle is exercised against a shared server")]
 fn enroll_status_confirm_json_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path().to_owned();

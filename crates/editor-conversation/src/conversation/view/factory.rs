@@ -229,7 +229,7 @@ impl RowFingerprint<'_> {
         self.model.gap.to_bits().hash(&mut hasher);
         self.model.end.to_bits().hash(&mut hasher);
         let mut ui: Vec<_> = self.model.ui.iter().collect();
-        ui.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        ui.sort_by_key(|a| a.0.to_string());
         for (id, state) in ui {
             id.hash(&mut hasher);
             state.hash(&mut hasher);
