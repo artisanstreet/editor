@@ -75,6 +75,22 @@ fn reading_position(conversation: &Conversation, viewport: CollectionViewport) -
         .map(|item| item.position)
 }
 
+pub(super) fn latest_visible(
+    conversation: &Conversation,
+    core: &Core,
+    composer_present: bool,
+) -> bool {
+    conversation.view.as_ref().is_some_and(|view| {
+        show_latest(
+            matches!(core.workspace_screen(), crate::core::Screen::Thread { host, thread } if conversation.open.as_ref().is_some_and(|(open_host, open_thread)| open_host == host && open_thread == thread)),
+            composer_present,
+            conversation.agent.is_some(),
+            view.viewport.state().is_following(),
+            conversation.host_is_current(core),
+        )
+    })
+}
+
 pub fn jump_to_latest(
     conversation: &Conversation,
     core: &Core,
@@ -82,14 +98,7 @@ pub fn jump_to_latest(
     theme: ArtisanTheme,
     dispatch: Dispatch,
 ) -> Option<Element> {
-    let following = conversation.view.as_ref()?.viewport.state().is_following();
-    if !show_latest(
-        matches!(core.workspace_screen(), crate::core::Screen::Thread { host, thread } if conversation.open.as_ref().is_some_and(|(open_host, open_thread)| open_host == host && open_thread == thread)),
-        composer_present,
-        conversation.agent.is_some(),
-        following,
-        conversation.host_is_current(core),
-    ) {
+    if !latest_visible(conversation, core, composer_present) {
         return None;
     }
     let button = crate::ui::button::Button::icon(
