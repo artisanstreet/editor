@@ -80,6 +80,35 @@ impl SlidingTab {
     }
 
     #[must_use]
+    pub fn cutout(&self, bounds: Bounds, header: f32, inset: f32) -> Vec<PathCommand> {
+        let mut path = self.outline(bounds);
+        if header <= 0.0 {
+            return path;
+        }
+        let left = bounds.split + inset;
+        let right = bounds.width - inset;
+        let top = inset;
+        let bottom = header;
+        let radius = (bounds.radius - inset)
+            .max(0.0)
+            .min((right - left).max(0.0) / 2.0)
+            .min((bottom - top).max(0.0) / 2.0);
+        path.extend([
+            PathCommand::Move(Point::new(left + radius, top)),
+            PathCommand::Line(Point::new(right - radius, top)),
+            arc(radius, true, right, top + radius),
+            PathCommand::Line(Point::new(right, bottom - radius)),
+            arc(radius, true, right - radius, bottom),
+            PathCommand::Line(Point::new(left + radius, bottom)),
+            arc(radius, true, left, bottom - radius),
+            PathCommand::Line(Point::new(left, top + radius)),
+            arc(radius, true, left + radius, top),
+            PathCommand::Close,
+        ]);
+        path
+    }
+
+    #[must_use]
     pub fn outline(&self, bounds: Bounds) -> Vec<PathCommand> {
         let Bounds {
             width,

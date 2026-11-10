@@ -30,7 +30,6 @@ pub enum ComposerAction {
     Stop,
     Continue,
     ToggleModel,
-    SetHideBadModelOptions(bool),
     ToggleProject,
     JumpEngine(artisan_api::EngineId),
     OpenEngineSettings(artisan_api::EngineId),
@@ -2119,11 +2118,6 @@ impl ComposerOwner {
         }
         composer.picker.refresh_settings(core, host);
         match action {
-            ComposerAction::SetHideBadModelOptions(enabled) => {
-                composer.picker.hide_bad_model_options = enabled;
-                composer.picker.axis_cursor = None;
-                core.set_setting(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY, enabled.into());
-            }
             ComposerAction::TooltipHover {
                 instance,
                 generation,
@@ -3354,7 +3348,12 @@ fn model_menu_items(
     items
 }
 
-fn model_menu_tab(theme: &ArtisanTheme, tab: super::sliding_tab::SlidingTab, radius: f32) -> Element {
+fn model_menu_tab(
+    theme: &ArtisanTheme,
+    tab: super::sliding_tab::SlidingTab,
+    radius: f32,
+    header: f32,
+) -> Element {
     use aqua_core::{
         DisplayItem, GpuiBackground, Transform2D,
         vector::{FillRule, GpuiPath, GpuiPathStyle, LineCap, LineJoin},
@@ -3371,16 +3370,16 @@ fn model_menu_tab(theme: &ArtisanTheme, tab: super::sliding_tab::SlidingTab, rad
     Canvas::new()
         .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
         .on_paint(move |bounds| {
-            let commands = tab.outline(super::sliding_tab::Bounds {
+            let shape = super::sliding_tab::Bounds {
                 width: bounds.w,
                 height: bounds.h,
                 split: MODEL_SIDE_WIDTH,
                 radius,
-            });
-            let item = |style, background| DisplayItem::GpuiPath {
+            };
+            let item = |commands, style, background| DisplayItem::GpuiPath {
                 transformed_window_logical_bounds: bounds,
                 path: std::sync::Arc::new(GpuiPath {
-                    commands_local: commands.clone(),
+                    commands_local: commands,
                     origin_window_logical: bounds.origin(),
                     element_transform: Transform2D::IDENTITY,
                     style,
@@ -3388,8 +3387,13 @@ fn model_menu_tab(theme: &ArtisanTheme, tab: super::sliding_tab::SlidingTab, rad
                 }),
             };
             vec![
-                item(GpuiPathStyle::Fill { rule: FillRule::NonZero }, fill),
                 item(
+                    tab.cutout(shape, header, MODEL_BAR_INSET),
+                    GpuiPathStyle::Fill { rule: FillRule::EvenOdd },
+                    fill,
+                ),
+                item(
+                    tab.outline(shape),
                     GpuiPathStyle::Stroke {
                         width: 1.0,
                         cap: LineCap::Butt,
@@ -3413,15 +3417,13 @@ fn model_engine_bar(
     tooltip_target: (crate::core::HostInstance, u64),
     dispatch: &Dispatch,
 ) -> Element {
-    use crate::ui::{glass::card_shadows, theme::Opacity};
+    use crate::ui::theme::Opacity;
     use aqua_core::{Insets, Role};
     use aqua_ui::{AlignItems, element::Button as UiButton};
     let mut bar = UiBox::new()
         .height(MODEL_BAR_HEIGHT)
         .gap(4.0)
         .padding(4.0)
-        .radius(RadiusTokens::value(RadiusStep::Lg))
-        .clip(true)
         .style(
             Style::new()
                 .flex_shrink(0.0)
@@ -3430,11 +3432,7 @@ fn model_engine_bar(
                     right: MODEL_BAR_INSET,
                     top: MODEL_BAR_INSET,
                     bottom: 0.0,
-                })
-                .gpui_background(aqua::GpuiBackground::Solid(
-                    theme.colors.selected.to_reference_paint(),
-                ))
-                .shadows(card_shadows(&theme).into_iter().map(Into::into).collect()),
+                }),
         );
     if let Some(engine_light) = engine_light {
         bar = bar.child(engine_light);
@@ -4064,22 +4062,11 @@ pub fn model_menu(
     let radius = RadiusTokens::value(RadiusStep::X3l);
     let inner_radius = RadiusTokens::value(RadiusStep::X2l);
     let key_dispatch = Rc::clone(&dispatch);
-    let hide_dispatch = Rc::clone(&dispatch);
     let resolution_note = current.as_ref().and_then(|config| {
         let model = host.engines.get(&config.engine)?.models.iter().find(|model| config.model.as_ref() == Some(&model.id))?;
         let changes = model.resolve_config(config, &picker.customizations).changes;
         (!changes.is_empty()).then(|| changes.into_iter().map(|change| format!("{}: {}", change.axis.title(), change.reason)).collect::<Vec<_>>().join(" "))
     });
-    let visibility = UiBox::new()
-        .layout("row")
-        .style(Style::new().align(aqua_ui::AlignItems::CENTER).justify(aqua_ui::JustifyContent::SPACE_BETWEEN)
-            .padding_insets(aqua_core::Insets { left: 8.0, right: 8.0, top: 8.0, bottom: 0.0 }))
-        .child(crate::frame::tree::label(&theme, "Hide bad model options", theme.colors.text, false))
-        .child(crate::ui::switch::Switch::new(
-            "composer-hide-bad-model-options", theme, crate::ui::switch::SwitchSize::Default,
-            picker.hide_bad_model_options, "Hide bad model options",
-        ).on_change(move |enabled| hide_dispatch(ComposerAction::SetHideBadModelOptions(enabled))).build())
-        .build();
     UiBox::new()
         .layout("column")
         .width(528.0_f32.min(viewport.w - 32.0))
@@ -4105,12 +4092,16 @@ pub fn model_menu(
         .child(
             UiBox::new()
                 .height(MODEL_PANE_HEIGHT)
-                .child(model_menu_tab(&theme, tab, inner_radius))
+                .child(model_menu_tab(
+                    &theme,
+                    tab,
+                    inner_radius,
+                    if pane.is_none() { MODEL_BAR_HEIGHT + MODEL_BAR_INSET } else { 0.0 },
+                ))
                 .child(list.build())
                 .child(pane_body.build())
                 .build(),
         )
-        .child(visibility)
         .children(resolution_note.map(|note| UiBox::new()
             .layout("column")
             .style(Style::new().min_width(Length::Px(0.0)).padding_insets(aqua_core::Insets { left:8.0, right:8.0, top:8.0, bottom:0.0 }))
