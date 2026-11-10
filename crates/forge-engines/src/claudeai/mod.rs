@@ -352,7 +352,9 @@ async fn drive_turn(
             started = backend.complete(&conversation, &request) => started,
             () = io.cancel.cancelled() => {
                 if let Err(error) = stop(backend, &conversation).await {
-                    return Outcome::failed(format!("Could not stop claude.ai completion: {error:#}"));
+                    return Outcome::failed(format!(
+                        "Could not stop claude.ai completion: {error:#}"
+                    ));
                 }
                 return Outcome::cancelled();
             },
