@@ -8,8 +8,7 @@ use artisan_paths::App;
 use std::path::{Path, PathBuf};
 
 const DESKTOP_FILE: &str = "artisan-editor.desktop";
-/// The `.desktop` entry's `Icon=artisan-editor`.
-const EDITOR_ICON: &str = include_str!("../../editor/assets/artisan-editor.svg");
+const EDITOR_ICON: &str = include_str!("../../editor-assets/app/artisan-editor.svg");
 const SHORTCUT: &str = "Artisan Editor.lnk";
 
 /// Puts `ae` on PATH: its folder on the user `Path` on Windows,

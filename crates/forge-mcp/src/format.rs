@@ -301,7 +301,10 @@ mod tests {
         assert_eq!(catalog[0]["variants"][0]["id"], "xhigh");
         assert_eq!(catalog[0]["default_variant"], "xhigh");
         assert_eq!(catalog[0]["context_window"], 262_144);
-        assert_eq!(catalog[0]["context_windows"][1]["override_tokens"], 1_000_000);
+        assert_eq!(
+            catalog[0]["context_windows"][1]["override_tokens"],
+            1_000_000
+        );
         assert_eq!(catalog[0]["speeds"][0]["default"], true);
         assert_eq!(catalog[0]["effort_notes"][0]["advisory"], "More usage");
         assert_eq!(catalog[0]["supports_images"], true);

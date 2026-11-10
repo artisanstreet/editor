@@ -14,6 +14,7 @@ const WHOLE: usize = 64 * 1024;
 pub struct Options {
     pub whole: bool,
     pub output: bool,
+    pub unbounded: bool,
 }
 
 pub async fn render(store: &Store, items: &[Item], options: &Options) -> Result<String> {
@@ -27,7 +28,14 @@ pub async fn render(store: &Store, items: &[Item], options: &Options) -> Result<
 
 async fn text(store: &Store, text: &TextContent, options: &Options) -> Result<String> {
     let resolved = store.resolve_text(text).await?;
-    Ok(clip(&resolved, if options.whole { WHOLE } else { CLIPPED }))
+    Ok(clip(
+        &resolved,
+        match (options.unbounded, options.whole) {
+            (true, _) => usize::MAX,
+            (_, true) => WHOLE,
+            _ => CLIPPED,
+        },
+    ))
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -39,7 +47,7 @@ fn clip(text: &str, limit: usize) -> String {
         end -= 1;
     }
     format!(
-        "{}\n\n_{} more bytes; read this item with whole=true for all of it._",
+        "{}\n\n_{} more bytes; use read_thread_item with its item ID for byte-range continuation._",
         &text[..end],
         text.len() - end
     )

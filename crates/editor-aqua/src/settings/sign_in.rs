@@ -1,15 +1,3 @@
-pub fn second_factor(input: &str) -> (Option<String>, Option<String>) {
-    let code = input.trim();
-    match (
-        code.is_empty(),
-        code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()),
-    ) {
-        (true, _) => (None, None),
-        (false, true) => (Some(code.to_owned()), None),
-        (false, false) => (None, Some(code.to_owned())),
-    }
-}
-
 use std::{cell::RefCell, rc::Rc};
 
 pub struct SignInForm {
@@ -35,8 +23,8 @@ impl SignInForm {
     }
 
     pub fn finish_sign_in(&mut self, core: &mut crate::core::Core) {
-        let (totp, recovery) = second_factor(self.second_factor.borrow().text());
-        core.account_mut().finish_sign_in(totp, recovery);
+        let factor = crate::core::account::SecondFactor::parse(self.second_factor.borrow().text());
+        core.account_mut().finish_sign_in(factor);
         self.second_factor.borrow_mut().set_text("");
     }
 }

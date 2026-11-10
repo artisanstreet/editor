@@ -18,6 +18,10 @@ const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 /// More than any engine lists; the rest are dropped with a warning.
 const MAX_MODELS: usize = 1024;
 
+#[cfg(test)]
+#[path = "../tests/catalog/speeds.rs"]
+mod speed_tests;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Listing {
     pub models: Vec<Model>,
@@ -60,6 +64,8 @@ pub async fn list(
 
 /// What every engine's listing goes through before the picker sees it.
 fn finish(engine: EngineId, mut listing: Listing) -> Listing {
+    listing.models.retain(|model| !model.id.is_empty() && !model.id.contains(char::is_whitespace));
+    listing.default = listing.default.filter(|id| listing.models.iter().any(|model| &model.id == id));
     for model in &mut listing.models {
         model.name = readable_name(&model.name);
     }
@@ -315,9 +321,16 @@ fn merge_claude(published: Option<&Value>, served: Option<&Value>) -> Listing {
     let mut listing = Listing::default();
     let mut seen = HashSet::new();
     for row in &rows {
-        if let Some(model) = claude_model(row)
+        if let Some(mut model) = claude_model(row)
             && seen.insert(model.id.clone())
         {
+            let account = served.iter().find(|value| value.get("id").and_then(Value::as_str) == Some(model.id.as_str()));
+            for source in &mut model.evidence.sources {
+                let field = match source.field.as_str() { "images" => "capabilities", field => field };
+                source.source = if account.is_some_and(|value| value.get(field).is_some()) {
+                    "claude.account_catalog_cache".into()
+                } else { "claude.published_catalog".into() };
+            }
             listing.models.push(model);
         }
     }
@@ -389,6 +402,7 @@ fn claude_model(value: &Value) -> Option<Model> {
         })
         .collect();
     Some(Model {
+        evidence: evidence(value, "claude.catalog", &["id", "name", "thinking", "runtime", "fast_mode"]),
         id: id.to_owned(),
         name: value
             .get("name")
@@ -452,6 +466,29 @@ fn claude_speeds(fast_mode: Option<&Value>) -> Vec<Speed> {
 
 /// The id of Claude's fast mode option, and the speed that turns it on.
 pub const CLAUDE_FAST: &str = "fast";
+
+fn evidence(value: &Value, source: &str, fields: &[&str]) -> artisan_api::ModelEvidence {
+    let observed_at = artisan_api::now();
+    let mut sources: Vec<_> = fields.iter().filter(|field| value.get(**field).is_some())
+        .map(|field| artisan_api::FieldSource { field: (*field).into(), source: source.into(), observed_at }).collect();
+    let images = match source {
+        "claude.catalog" => value.pointer("/capabilities/mm_images"),
+        "opencode.model.list" => value.pointer("/capabilities/input"),
+        _ => value.get("inputModalities"),
+    };
+    if images.is_some_and(|value| value.is_boolean() || value.is_array()) {
+        sources.push(artisan_api::FieldSource { field: "images".into(), source: source.into(), observed_at });
+    }
+    artisan_api::ModelEvidence { sources }
+}
+
+fn codex_evidence(value: &Value, has_window: bool) -> artisan_api::ModelEvidence {
+    let mut evidence = evidence(value, "codex.model/list", &["id", "displayName", "supportedReasoningEfforts", "defaultReasoningEffort", "serviceTiers", "additionalSpeedTiers"]);
+    if has_window {
+        evidence.sources.push(artisan_api::FieldSource { field: "context_capacity".into(), source: "codex.models_cache".into(), observed_at: artisan_api::now() });
+    }
+    evidence
+}
 
 /// A non-empty string.
 fn text(value: Option<&Value>) -> Option<String> {
@@ -557,6 +594,7 @@ fn codex_listing(rows: &[Value], windows: &[(String, u64, u64)]) -> Listing {
             })
             .collect();
         listing.models.push(Model {
+            evidence: codex_evidence(row, windows.contains_key(id)),
             id: id.to_owned(),
             name: row
                 .get("displayName")
@@ -589,11 +627,6 @@ fn codex_listing(rows: &[Value], windows: &[(String, u64, u64)]) -> Listing {
     listing
 }
 
-/// The model's service tiers (`serviceTiers`: `priority` is "Fast"). Forge
-/// sends the chosen tier's id as `serviceTier`; Codex drops ids the model
-/// doesn't advertise. Without a catalog default the model also runs at the
-/// standard tier, which sends nothing. A model whose default is one of its
-/// tiers can't be asked for less, so it has nothing to choose.
 fn codex_speeds(row: &Value) -> Vec<Speed> {
     let mut tiers: Vec<Speed> = row
         .get("serviceTiers")
@@ -610,19 +643,21 @@ fn codex_speeds(row: &Value) -> Vec<Speed> {
             })
         })
         .collect();
-    // Before `serviceTiers`, Codex named its one extra tier here.
-    if tiers.is_empty()
-        && row
-            .get("additionalSpeedTiers")
-            .and_then(Value::as_array)
-            .is_some_and(|tiers| tiers.iter().any(|tier| tier.as_str() == Some("fast")))
-    {
-        tiers.push(Speed {
-            id: "fast".to_owned(),
-            label: "Fast".to_owned(),
-            description: None,
-            default: false,
-        });
+    if tiers.is_empty() {
+        tiers.extend(
+            row.get("additionalSpeedTiers")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(|id| Speed {
+                    id: id.to_owned(),
+                    label: id.to_owned(),
+                    description: None,
+                    default: false,
+                }),
+        );
     }
     let default = text(row.get("defaultServiceTier"));
     if let Some(default) = &default
@@ -752,11 +787,19 @@ fn opencode_listing(models: &Value, gateways: Option<&Value>, digest: Option<&Va
         }
         let known = digest.and_then(|digest| digest.get("models")?.get(&id));
         let variants = opencode_variants(meta);
-        let default_variant = default_variant(&variants);
+        let default_variant = meta.get("defaultVariant").and_then(Value::as_str)
+            .filter(|id| variants.iter().any(|variant| variant.id == *id)).map(str::to_owned);
         let context = meta.pointer("/limit/context").and_then(Value::as_u64);
         let lab = opencode_lab(meta, known, digest);
         listed.push((
             Model {
+                evidence: {
+                    let mut sources = evidence(meta, "opencode.model.list", &["id", "name", "variants", "limit", "capabilities"]);
+                    if known.is_some() {
+                        sources.sources.push(artisan_api::FieldSource { field: "description_and_lab".into(), source: "models.dev.digest".into(), observed_at: artisan_api::now() });
+                    }
+                    sources
+                },
                 id,
                 name: meta
                     .get("name")
@@ -862,29 +905,6 @@ fn opencode_variants(meta: &Value) -> Vec<Variant> {
         }
     }
     variants
-}
-
-/// The variant a model runs when none is chosen: medium, else the nearest
-/// level above it (an on/off model thinks), else the highest below it.
-fn default_variant(variants: &[Variant]) -> Option<String> {
-    const LEVELS: [&str; 10] = [
-        "none", "minimal", "light", "low", "medium", "thinking", "high", "xhigh", "max", "ultra",
-    ];
-    const MEDIUM: usize = 4;
-    let ranked = || {
-        variants.iter().filter_map(|variant| {
-            Some((
-                LEVELS.iter().position(|level| *level == variant.id)?,
-                &variant.id,
-            ))
-        })
-    };
-    ranked()
-        .filter(|(rank, _)| *rank >= MEDIUM)
-        .min_by_key(|(rank, _)| *rank)
-        .or_else(|| ranked().max_by_key(|(rank, _)| *rank))
-        .map(|(_, id)| id.clone())
-        .or_else(|| variants.first().map(|variant| variant.id.clone()))
 }
 
 /// The lab of a family models.dev doesn't credit directly, from the
@@ -1085,18 +1105,11 @@ fn variant_label(id: &str) -> String {
     }
 }
 
-/// Choices come from reported model limits, never a model-name guess.
 fn context_choices(engine: EngineId, base: u64, max: u64) -> Vec<ContextWindow> {
     if base == 0 || base > 100_000_000 {
         return Vec::new();
     }
     let mut choices = Vec::new();
-    if engine == EngineId::Claude && base >= 1_000_000 {
-        choices.push(ContextWindow {
-            tokens: 500_000,
-            override_tokens: Some(500_000),
-        });
-    }
     choices.push(ContextWindow {
         tokens: base,
         override_tokens: None,
@@ -1145,10 +1158,6 @@ mod tests {
         assert_eq!(
             claude.context_windows,
             [
-                ContextWindow {
-                    tokens: 500_000,
-                    override_tokens: Some(500_000)
-                },
                 ContextWindow {
                     tokens: 1_000_000,
                     override_tokens: None
@@ -1449,34 +1458,15 @@ mod tests {
         assert_eq!(model(&listing, "opencode/big-pickle").lab, None);
     }
 
-    /// No OpenCode model offers a "Default": one without a chosen variant
-    /// runs at medium, or the nearest level above it, so an on/off model
-    /// thinks. Sets as OpenCode 2.1.0 lists them.
     #[test]
-    fn opencode_models_default_to_medium_or_the_nearest_level_above() {
-        let default = |ids: &[&str]| {
-            let variants: Vec<Variant> = ids
-                .iter()
-                .map(|id| Variant {
-                    id: (*id).to_owned(),
-                    label: variant_label(id),
-                })
-                .collect();
-            default_variant(&variants)
-        };
-        assert_eq!(
-            default(&["low", "medium", "high", "xhigh", "max"]).as_deref(),
-            Some("medium")
-        );
-        assert_eq!(
-            default(&["none", "low", "medium", "high"]).as_deref(),
-            Some("medium")
-        );
-        assert_eq!(default(&["low", "high", "max"]).as_deref(), Some("high"));
-        assert_eq!(default(&["none", "thinking"]).as_deref(), Some("thinking"));
-        assert_eq!(default(&["high", "max"]).as_deref(), Some("high"));
-        assert_eq!(default(&["max"]).as_deref(), Some("max"));
-        assert_eq!(default(&["none", "minimal", "low"]).as_deref(), Some("low"));
-        assert_eq!(default(&[]), None);
+    fn opencode_default_is_reported_or_unknown_never_guessed() {
+        let meta = json!({"data":[{"id":"toggle", "providerID":"test", "variants":[{"id":"none"},{"id":"thinking"}]}]});
+        let listing = opencode_listing(&meta, None, None);
+        assert_eq!(listing.models[0].default_variant, None);
+        let mut reported = meta.clone();
+        reported["data"][0]["defaultVariant"] = json!("thinking");
+        assert_eq!(opencode_listing(&reported, None, None).models[0].default_variant.as_deref(), Some("thinking"));
+        reported["data"][0]["defaultVariant"] = json!("absent");
+        assert_eq!(opencode_listing(&reported, None, None).models[0].default_variant, None);
     }
 }

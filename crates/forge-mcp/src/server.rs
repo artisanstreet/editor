@@ -1,37 +1,46 @@
-//! What every MCP server Forge's gateway serves shares.
-//!
-//! JSON-RPC over one POSTed body, `initialize`, `ping`, `tools/list` and
-//! `tools/call`, for any set of tools. The Artisan MCP is one [`ToolSet`];
-//! computer use is another.
-
 use anyhow::Result;
 use artisan_api::ThreadId;
 use serde_json::{Value, json};
 use std::future::Future;
 
-/// The protocol versions these servers speak, newest first.
 const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// One tool: its schema for `tools/list`.
 pub struct Tool {
     pub name: &'static str,
     pub description: &'static str,
-    /// The properties of the input object; `required` lists the musts.
     pub properties: fn() -> Value,
     pub required: &'static [&'static str],
+    pub output_schema: Option<fn() -> Value>,
     pub read_only: bool,
     pub destructive: bool,
 }
 
-/// One block of a tool's result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
     Text(String),
-    /// An image, base64 encoded.
     Image {
         mime_type: &'static str,
         data: String,
     },
+}
+
+pub struct ToolResult {
+    pub content: Vec<Content>,
+    pub structured_content: Option<Value>,
+}
+
+impl ToolResult {
+    pub fn structured(value: Value) -> Result<Self> {
+        let text = serde_json::to_string(&value)?;
+        anyhow::ensure!(
+            text.len() <= 256 * 1024,
+            "response exceeds 256 KiB; use a smaller limit or narrower filters"
+        );
+        Ok(Self {
+            content: vec![Content::Text(text)],
+            structured_content: Some(value),
+        })
+    }
 }
 
 impl Content {
@@ -45,26 +54,37 @@ impl Content {
     }
 }
 
-/// A server's tools and what it tells engines about itself.
 pub trait ToolSet: Send + Sync {
-    /// The name engines know the server by.
     fn name(&self) -> &'static str;
     fn title(&self) -> &'static str;
     fn instructions(&self) -> &'static str;
     fn tools(&self) -> Vec<Tool>;
-    /// Runs tool `name` for the thread `caller`. A [`forge_runs::Refused`]
-    /// error is the agent's to read; any other is logged as Forge's.
     fn call(
         &self,
         caller: &ThreadId,
         name: &str,
         arguments: Value,
     ) -> impl Future<Output = Result<Vec<Content>>> + Send;
+
+    fn canonical_name<'a>(&self, name: &'a str) -> &'a str {
+        name
+    }
+
+    fn call_result(
+        &self,
+        caller: &ThreadId,
+        name: &str,
+        arguments: Value,
+    ) -> impl Future<Output = Result<ToolResult>> + Send {
+        async move {
+            Ok(ToolResult {
+                content: self.call(caller, name, arguments).await?,
+                structured_content: None,
+            })
+        }
+    }
 }
 
-/// Answers one POSTed body: a JSON-RPC message or a batch of them, for the
-/// thread `caller`. `None` when nothing is owed back (notifications and
-/// responses only).
 pub async fn handle<T: ToolSet>(set: &T, caller: &ThreadId, body: Value) -> Option<Value> {
     match body {
         Value::Array(messages) => {
@@ -87,7 +107,6 @@ pub async fn handle<T: ToolSet>(set: &T, caller: &ThreadId, body: Value) -> Opti
 async fn one<T: ToolSet>(set: &T, caller: &ThreadId, message: Value) -> Option<Value> {
     let id = message.get("id").cloned();
     let method = message.get("method").and_then(Value::as_str)?;
-    // A notification (no id) is never answered.
     let id = id?;
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     let result = match method {
@@ -114,7 +133,11 @@ async fn call<T: ToolSet>(
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| (-32602, "tools/call needs a tool name".to_owned()))?;
-    if !set.tools().iter().any(|tool| tool.name == name) {
+    if !set
+        .tools()
+        .iter()
+        .any(|tool| tool.name == set.canonical_name(name))
+    {
         return Err((-32602, format!("Unknown tool {name}")));
     }
     let arguments = params
@@ -122,8 +145,21 @@ async fn call<T: ToolSet>(
         .cloned()
         .filter(|arguments| !arguments.is_null())
         .unwrap_or_else(|| json!({}));
-    let (content, is_error) = match set.call(caller, name, arguments).await {
-        Ok(content) => (content, false),
+    if name == set.canonical_name(name)
+        && let Some(tool) = set.tools().into_iter().find(|tool| tool.name == name)
+        && let Err(message) = crate::validation::validate(
+            &json!({"type":"object","properties":(tool.properties)(),"required":tool.required,"additionalProperties":false}),
+            &arguments,
+            "arguments",
+            0,
+        )
+    {
+        return Ok(
+            json!({"content":[{"type":"text","text":message}],"structuredContent":{"error":{"code":"invalid_arguments","message":message,"retryable":false}},"isError":true}),
+        );
+    }
+    let (result, is_error) = match set.call_result(caller, name, arguments).await {
+        Ok(result) => (result, false),
         Err(error) => {
             let text = if error.downcast_ref::<forge_runs::Refused>().is_some() {
                 format!("{error}")
@@ -136,33 +172,50 @@ async fn call<T: ToolSet>(
                 );
                 format!("Forge couldn't do that: {error:#}")
             };
-            (vec![Content::Text(text)], true)
+            let details = error.downcast_ref::<forge_store::coordination::Conflict>().map_or_else(
+                || json!({"code":"tool_failed","message":text,"retryable":false}),
+                |conflict| json!({"code":"stale_revision","message":text,"retryable":true,"record":conflict.id,"current_revision":conflict.current_revision,"recovery":"get_coordination_record"}),
+            );
+            (
+                ToolResult {
+                    content: vec![Content::Text(text)],
+                    structured_content: Some(json!({ "error": details })),
+                },
+                true,
+            )
         }
     };
-    let content: Vec<Value> = content.iter().map(Content::to_json).collect();
-    Ok(json!({ "content": content, "isError": is_error }))
+    let content: Vec<Value> = result.content.iter().map(Content::to_json).collect();
+    let mut response = json!({ "content": content, "isError": is_error });
+    if let Some(structured) = result.structured_content {
+        response["structuredContent"] = structured;
+    }
+    Ok(response)
 }
 
-/// The `tools/list` entries for `tools`.
 #[must_use]
 pub fn list(tools: &[Tool]) -> Vec<Value> {
     tools
         .iter()
         .map(|tool| {
-            json!({
+            let mut entry = json!({
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": {
                     "type": "object",
                     "properties": (tool.properties)(),
                     "required": tool.required,
+                    "additionalProperties": false,
                 },
                 "annotations": {
                     "readOnlyHint": tool.read_only,
                     "destructiveHint": tool.destructive,
-                    "openWorldHint": false,
+                    "openWorldHint": matches!(tool.name, "install_harness" | "add_mcp_server" | "sign_in_mcp_server"),
+                    "idempotentHint": tool.read_only,
                 },
-            })
+            });
+            if let Some(schema) = tool.output_schema { entry["outputSchema"] = schema(); }
+            entry
         })
         .collect()
 }

@@ -2,8 +2,8 @@ pub const TITLEBAR_HEIGHT: f32 = 48.0;
 pub const COLUMN_WIDTH: f32 = 327.0;
 pub const COLUMN_MIN_WIDTH: f32 = 240.0;
 pub const CHAT_MIN_WIDTH: f32 = 864.0;
-pub const MIN_WINDOW_WIDTH: f32 = 480.0;
-pub const MIN_WINDOW_HEIGHT: f32 = 420.0;
+pub const MIN_WINDOW_WIDTH: f32 = 720.0;
+pub const MIN_WINDOW_HEIGHT: f32 = 480.0;
 pub const CARD_RADIUS: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,6 +81,9 @@ pub fn entry_layout(window: Size) -> EntryLayout {
 
 pub const RAIL_WIDTH: f32 = 48.0;
 pub const CONTROL_WIDTH: f32 = 46.0;
+pub const CONTROL_GLYPH: f32 = 16.0;
+pub const CONTROL_INSET_X: f32 = (CONTROL_WIDTH - CONTROL_GLYPH) / 2.0;
+pub const CONTROL_INK_INSET: f32 = CONTROL_GLYPH * 5.0 / 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorkspaceLayout {

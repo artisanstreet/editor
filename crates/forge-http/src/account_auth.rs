@@ -145,7 +145,7 @@ impl GrantVerifier {
     reason = "test-only helpers; failures fail the test"
 )]
 #[cfg(test)]
-pub(crate) mod tests {
+pub mod tests {
     use super::*;
     use axum::routing::get;
 

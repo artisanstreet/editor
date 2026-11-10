@@ -133,10 +133,10 @@ fn directory(variable: &str, fallback: &str) -> PathBuf {
 }
 
 #[test]
-#[ignore = "needs GPUI reference captures; set AQUA_SCREENS_REFERENCE and AQUA_SCREENS_CANDIDATE"]
+#[ignore = "requires fresh Aqua captures; set AQUA_SCREENS_CANDIDATE"]
 fn candidate_screens_stay_within_the_tolerance_gate() {
-    let reference = directory("AQUA_SCREENS_REFERENCE", "baselines/gpui");
-    let candidate = directory("AQUA_SCREENS_CANDIDATE", "baselines/aqua");
+    let reference = directory("AQUA_SCREENS_REFERENCE", "baselines/aqua");
+    let candidate = directory("AQUA_SCREENS_CANDIDATE", "candidate");
     let gate = gate_from(&directory("AQUA_SCREENS_TOLERANCES", "tolerances.json")).unwrap();
     let reports = judge_directory(
         &gate,

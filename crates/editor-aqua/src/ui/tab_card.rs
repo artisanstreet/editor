@@ -7,7 +7,8 @@ use aqua_core::{
     vector::{FillRule, GpuiPath, GpuiPathStyle, LineCap, LineJoin, PathCommand},
 };
 
-use super::theme::{ArtisanTheme, Elevation, Oklch, Opacity, ShadowLayer};
+use super::glass::{COMPOSER_RADIUS, KEY_RADIUS};
+use super::theme::{ArtisanTheme, Elevation, Oklch, ShadowLayer};
 
 pub struct TabCardStrip {
     pub reveal: f32,
@@ -121,9 +122,9 @@ impl TabCard {
 
 pub const TAB_CARD_PADDING_PX: f32 = 4.0;
 pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
-const TAB_RADIUS: f32 = 14.0;
-const FILLET_RADIUS: f32 = 12.0;
-const SHELL_RADIUS: f32 = 22.0;
+const TAB_RADIUS: f32 = KEY_RADIUS + TAB_CARD_PADDING_PX;
+const FILLET_RADIUS: f32 = 8.0;
+const SHELL_RADIUS: f32 = COMPOSER_RADIUS + TAB_CARD_PADDING_PX;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryKey {
@@ -155,6 +156,7 @@ pub struct Geometry {
     pub well: Vec<PathCommand>,
     pub shell: Vec<PathCommand>,
     pub edge: Vec<PathCommand>,
+    pub highlight: Vec<PathCommand>,
 }
 
 impl Geometry {
@@ -167,11 +169,15 @@ impl Geometry {
         shell.extend(well.clone());
         let edge_bounds = Rect::from_edges(0.5, 0.5, key.size.w - 0.5, key.size.h - 0.5);
         let edge = trace_silhouette(edge_bounds, key.tab_width - 1.0, key.radius - 0.5);
+        let highlight_bounds = Rect::from_edges(1.5, 1.5, key.size.w - 1.5, key.size.h - 1.5);
+        let highlight =
+            trace_silhouette(highlight_bounds, key.tab_width - 3.0, key.radius - 1.5);
         Self {
             strip,
             well,
             shell,
             edge,
+            highlight,
         }
     }
 }
@@ -510,22 +516,16 @@ impl PreparedTabCard {
             });
         }
         let colors = &theme.colors;
-        let pane = |step| colors.gray.step(step).at(Opacity::GlassPane);
-        let sheen = |opacity, end| {
-            background(
-                colors.white.at(opacity),
-                colors.white.at(Opacity::Clear),
-                180.0,
-                end,
-            )
-        };
+        let surfaces = crate::frame::card::Surfaces::of(theme);
+        let bevel = crate::frame::card::Edge::of(surfaces.bg, surfaces.ink);
+        let surface = GpuiBackground::Solid(surfaces.bg.to_reference_paint());
         let mut push = |commands: &[PathCommand],
                         background: GpuiBackground,
                         stroke: bool,
                         local_bounds: Rect| {
             let style = if stroke {
                 GpuiPathStyle::Stroke {
-                    width: 0.5,
+                    width: 1.0,
                     cap: LineCap::Butt,
                     join: LineJoin::Miter,
                     dash: Vec::new(),
@@ -553,23 +553,7 @@ impl PreparedTabCard {
                 StripBottom::Down(drop) => TAB_CARD_TAB_HEIGHT_PX + drop,
             };
             let strip_bounds = Rect::from_edges(tab_width - TAB_RADIUS, 0.0, right, strip_bottom);
-            push(
-                commands,
-                background(
-                    colors.gray.step(8).at(Opacity::GlassPaneLit),
-                    pane(7),
-                    145.0,
-                    1.0,
-                ),
-                false,
-                strip_bounds,
-            );
-            push(
-                commands,
-                sheen(Opacity::SheenFaint, 0.35),
-                false,
-                strip_bounds,
-            );
+            push(commands, surface.clone(), false, strip_bounds);
         }
         let hole = Rect::from_edges(4.0, 40.0, bounds.w - 4.0, bounds.h - 4.0);
         push(
@@ -578,25 +562,19 @@ impl PreparedTabCard {
             false,
             hole,
         );
-        push(
-            &geometry.shell,
-            background(pane(4), pane(2), 145.0, 1.0),
-            false,
-            local,
-        );
-        push(
-            &geometry.shell,
-            sheen(Opacity::SheenFaint, 0.35),
-            false,
-            local,
-        );
+        push(&geometry.shell, surface, false, local);
         push(
             &geometry.edge,
-            GpuiBackground::Solid(colors.text.at(Opacity::HairlineFaint).to_reference_paint()),
+            background(bevel.rim_top, bevel.rim_bottom, 180.0, 1.0),
             true,
             local,
         );
-        push(&geometry.edge, sheen(Opacity::SheenSoft, 0.4), true, local);
+        push(
+            &geometry.highlight,
+            background(bevel.highlight_top, bevel.highlight_bottom, 180.0, 1.0),
+            true,
+            local,
+        );
         Self {
             shadows,
             backdrops,

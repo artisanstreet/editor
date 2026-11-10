@@ -302,8 +302,8 @@ async fn handle_server_text(
         }
         ServerFrame::Ready(_) | ServerFrame::Presence(_) => {}
         ServerFrame::Ping(ping) => {
-            let pong = ClientFrame::Pong(artisan_account::PongFrame { v: 1, t: ping.t });
-            sink.send(Ws::Text(serde_json::to_string(&pong)?.into()))
+            let reply = ClientFrame::Pong(artisan_account::PongFrame { v: 1, t: ping.t });
+            sink.send(Ws::Text(serde_json::to_string(&reply)?.into()))
                 .await?;
         }
         ServerFrame::Error(error) => {

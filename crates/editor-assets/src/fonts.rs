@@ -52,6 +52,15 @@ impl std::error::Error for UnknownFont {}
 /// Every bundled typeface, ordered by family name so lookups binary search.
 pub const ALL: &[BundledFont] = &[
     BundledFont {
+        file_name: "sigurd-400.ttf",
+        family: "Sigurd",
+        weights: (400, 400),
+        license_path: "licenses/sigurd-NOTES.md",
+        license_text: include_str!("../licenses/sigurd-NOTES.md"),
+        bytes: include_bytes!("../fonts/sigurd-400.ttf"),
+        static_faces: &[include_bytes!("../fonts/sigurd-400.ttf")],
+    },
+    BundledFont {
         file_name: "spline-sans-variable.ttf",
         family: "Spline Sans",
         weights: (300, 700),

@@ -326,7 +326,9 @@ impl ThreadNavigation {
             let state = self.interaction.borrow();
             (state.hovered, state.opened, state.epoch)
         };
-        let mut region = UiBox::new().style(Style::new().align(AlignItems::CENTER));
+        let mut region = UiBox::new()
+            .style(Style::new().align(AlignItems::CENTER))
+            .child(rail);
         if hovered {
             let progress = if reduced_motion {
                 1.0
@@ -384,14 +386,13 @@ impl ThreadNavigation {
             region = region.child(
                 UiBox::new()
                     .style(Style::new().padding_insets(aqua_core::Insets {
-                        right: 4.0,
+                        left: 4.0,
                         ..aqua_core::Insets::default()
                     }))
                     .child(menu)
                     .build(),
             );
         }
-        region = region.child(rail);
         let interaction = Rc::downgrade(&self.interaction);
         let navigator = Rc::downgrade(&self.navigator);
         let count = markers.len();
@@ -426,7 +427,7 @@ impl ThreadNavigation {
                 .layout("column")
                 .style(
                     Style::new()
-                        .absolute_at(None, Some(8.0), Some(8.0), Some(above))
+                        .absolute_at(Some(8.0), Some(8.0), None, Some(above))
                         .justify(JustifyContent::CENTER),
                 )
                 .child(region)

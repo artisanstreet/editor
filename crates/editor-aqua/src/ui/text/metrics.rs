@@ -12,6 +12,7 @@ pub struct EditorMetrics {
     pub radius: f32,
     pub border_width: f32,
     pub foreground: aqua_core::Oklch,
+    pub caret: aqua_core::Oklch,
     pub placeholder: aqua_core::Oklch,
     pub background: aqua_core::Oklch,
     pub border: aqua_core::Oklch,
@@ -33,7 +34,7 @@ impl EditorMetrics {
                     theme.spacing.steps(3.0),
                     RadiusTokens::value(RadiusStep::Xl),
                 ),
-                Mode::Prompt => (16.0, 24.0, 2.0, 12.0, 8.0, 0.0),
+                Mode::Prompt => (16.0, 24.0, 1.0, 8.0, 4.0, 0.0),
             };
         if inset {
             padding_x = 12.0;
@@ -68,6 +69,7 @@ impl EditorMetrics {
                 1.0
             },
             foreground: colors.text.to_paint(),
+            caret: colors.text_muted.to_paint(),
             placeholder: if mode == Mode::Prompt {
                 colors.text_muted.to_paint()
             } else {
@@ -84,8 +86,8 @@ impl EditorMetrics {
     pub fn text_appearance(&self) -> aqua_ui::tree::TextAppearance {
         aqua_ui::tree::TextAppearance {
             selection: self.selection,
-            caret: self.foreground,
-            caret_width: 2.0,
+            caret: self.caret,
+            caret_width: 1.0,
             ime_underline: self.foreground,
             ime_underline_width: 1.0,
         }
@@ -95,8 +97,8 @@ impl EditorMetrics {
         let foreground = theme.colors.text.to_reference_paint();
         aqua_ui::tree::GpuiTextAppearance {
             selection: theme.colors.text_selection.to_reference_paint(),
-            caret: foreground,
-            caret_width: 2.0,
+            caret: theme.colors.text_muted.to_reference_paint(),
+            caret_width: 1.0,
             ime_underline: foreground,
             ime_underline_width: 1.0,
         }

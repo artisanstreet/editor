@@ -8,11 +8,14 @@ pub mod core;
 mod events;
 mod extensions;
 mod gateway;
+mod generation;
 mod relay;
 mod repository;
 mod routes;
 pub mod sync;
 pub mod tls;
+#[cfg(unix)]
+pub mod upgrade;
 
 use anyhow::{Context, Result};
 use artisan_api::EngineId;
@@ -92,6 +95,7 @@ pub struct Server {
     store: Store,
     hub: Hub,
     shutdown: CancellationToken,
+    drain: CancellationToken,
     tasks: TaskTracker,
     _lock: std::fs::File,
 }
@@ -106,67 +110,100 @@ pub async fn start_with_harness(
     config: ServeConfig,
     harness_for: forge_runs::HarnessFor,
 ) -> Result<Server> {
+    start_mode(config, harness_for, None).await
+}
+
+pub async fn start_generation(
+    config: ServeConfig,
+    registry: forge_runs::runtime::Registry,
+) -> Result<Server> {
+    start_mode(config, Arc::new(forge_engines::harness), Some(registry)).await
+}
+
+pub async fn start_generation_with_harness(
+    config: ServeConfig,
+    registry: forge_runs::runtime::Registry,
+    harness_for: forge_runs::HarnessFor,
+) -> Result<Server> {
+    start_mode(config, harness_for, Some(registry)).await
+}
+
+async fn start_mode(
+    config: ServeConfig,
+    harness_for: forge_runs::HarnessFor,
+    registry: Option<forge_runs::runtime::Registry>,
+) -> Result<Server> {
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("create {}", config.data_dir.display()))?;
-    let lock = lock_data_dir(&config.data_dir)?;
-    let store = Store::open(&config.data_dir).context("open the store")?;
+    let lock = if registry.is_some() {
+        lock_generation_dir(&config.data_dir)?
+    } else {
+        lock_data_dir(&config.data_dir)?
+    };
+    let store = if registry.is_some() {
+        Store::join(&config.data_dir)
+    } else {
+        Store::open(&config.data_dir)
+    }
+    .context("open the store")?;
     let identity = identity(&store).await?;
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls::server_config(&identity)?));
     let shutdown = CancellationToken::new();
+    let drain = CancellationToken::new();
     let tasks = TaskTracker::new();
     let engines = Engines::new(&config.data_dir);
-    let hub = Hub::with_harness(store.clone(), engines, config.data_dir.clone(), harness_for);
+    let inherited = if registry.is_some() {
+        Some(TcpListener::bind(config.listen).await?)
+    } else {
+        None
+    };
+    let (hub, control) = if let Some(registry) = &registry {
+        let (generation, control) = generation::prepare(
+            registry,
+            inherited
+                .as_ref()
+                .context("generation listener missing")?
+                .local_addr()?,
+        )
+        .await?;
+        (
+            Hub::with_generation(
+                store.clone(),
+                engines,
+                config.data_dir.clone(),
+                harness_for,
+                generation,
+            ),
+            Some(control),
+        )
+    } else {
+        (
+            Hub::with_harness(store.clone(), engines, config.data_dir.clone(), harness_for),
+            None,
+        )
+    };
     let startup_shutdown = hub.shutdown_on_drop();
     let prepared = async {
-        if let Err(error) = store.gc_content().await {
+        if registry.is_none()
+            && let Err(error) = store.gc_content().await
+        {
             tracing::warn!("collect unreferenced text sources: {error:#}");
         }
-        if let Err(error) = store.gc_blobs().await {
+        if registry.is_none()
+            && let Err(error) = store.gc_blobs().await
+        {
             tracing::warn!("collect unreferenced blobs: {error:#}");
         }
-        hub.reconcile_global_prompt()
-            .await
-            .context("reconcile global prompt")?;
-        hub.reconcile_skills()
-            .await
-            .context("reconcile managed skills")?;
-        hub.ensure_scratch_project()
-            .await
-            .context("ensure the scratch project")?;
-        let routes_app = routes::App {
-            hub: hub.clone(),
-            forge_version: env!("CARGO_PKG_VERSION").to_owned(),
-            shutdown: shutdown.clone(),
-            tasks: tasks.clone(),
-            repositories: Arc::new(repository::Repositories::new()?),
-            icons: Arc::default(),
+        reconcile_startup(&hub).await?;
+        let listener = match inherited {
+            Some(listener) => listener,
+            None => TcpListener::bind(config.listen)
+                .await
+                .with_context(|| format!("listen on {}", config.listen))?,
         };
-        let app = routes::router(routes_app.clone());
-        // A bound socket is the detached launcher's readiness boundary.
-        // Mandatory setup must succeed before another process can observe it.
-        let listener = TcpListener::bind(config.listen)
-            .await
-            .with_context(|| format!("listen on {}", config.listen))?;
         let address = listener.local_addr()?;
-        // Failed binds must leave durable inputs untouched, without launching
-        // a controller that will never accept its paired clients.
-        gateway::start(&hub, shutdown.clone(), &tasks).await?;
-        tasks.spawn(account_service::run(
-            config.data_dir.clone(),
-            routes_app,
-            shutdown.clone(),
-            tasks.clone(),
-        ));
-        hub.resume_pending();
-        let auth = hub.clone();
-        tasks.spawn(async move { auth.check_mcp_auth().await });
-        let agents = hub.clone();
-        tasks.spawn(async move { agents.reconcile_agents().await });
-        tasks.spawn(remove_inactive_threads(
-            hub.clone(),
-            store.clone(),
-            shutdown.clone(),
-        ));
+        let app =
+            start_services(&hub, &config.data_dir, control, &shutdown, &drain, &tasks).await?;
         anyhow::Ok((listener, address, app))
     }
     .await;
@@ -179,6 +216,37 @@ pub async fn start_with_harness(
             return Err(error);
         }
     };
+    refresh_engines(&hub, &shutdown, &tasks);
+    tracing::info!(%address, data = %config.data_dir.display(), "Forge is serving");
+    let server = Server {
+        listener,
+        acceptor,
+        app,
+        store,
+        hub,
+        shutdown,
+        drain,
+        tasks,
+        _lock: lock,
+    };
+    startup_shutdown.disarm();
+    Ok(server)
+}
+
+async fn reconcile_startup(hub: &Hub) -> Result<()> {
+    hub.reconcile_global_prompt()
+        .await
+        .context("reconcile global prompt")?;
+    hub.reconcile_skills()
+        .await
+        .context("reconcile managed skills")?;
+    hub.ensure_scratch_project()
+        .await
+        .context("ensure the scratch project")?;
+    Ok(())
+}
+
+fn refresh_engines(hub: &Hub, shutdown: &CancellationToken, tasks: &TaskTracker) {
     let engines = hub.engines().clone();
     let stop = shutdown.clone();
     tasks.spawn(async move {
@@ -194,19 +262,52 @@ pub async fn start_with_harness(
             } => {},
         }
     });
-    tracing::info!(%address, data = %config.data_dir.display(), "Forge is serving");
-    let server = Server {
-        listener,
-        acceptor,
-        app,
-        store,
-        hub,
-        shutdown,
-        tasks,
-        _lock: lock,
+}
+
+async fn start_services(
+    hub: &Hub,
+    data_dir: &Path,
+    control: Option<TcpListener>,
+    shutdown: &CancellationToken,
+    drain: &CancellationToken,
+    tasks: &TaskTracker,
+) -> Result<axum::Router> {
+    let routes_app = routes::App {
+        hub: hub.clone(),
+        forge_version: env!("CARGO_PKG_VERSION").to_owned(),
+        shutdown: shutdown.clone(),
+        tasks: tasks.clone(),
+        repositories: Arc::new(repository::Repositories::new()?),
+        icons: Arc::default(),
     };
-    startup_shutdown.disarm();
-    Ok(server)
+    let app = routes::router(routes_app.clone());
+    gateway::start(hub, shutdown.clone(), tasks).await?;
+    if let Some(control) = control {
+        generation::start(hub, control, shutdown, drain, tasks);
+    }
+    if hub.generation().is_none() {
+        tasks.spawn(account_service::run(
+            data_dir.to_path_buf(),
+            routes_app,
+            shutdown.clone(),
+            tasks.clone(),
+        ));
+    } else {
+        generation::start_primary_services(data_dir.to_path_buf(), routes_app, shutdown, tasks);
+    }
+    hub.resume_pending();
+    let auth = hub.clone();
+    tasks.spawn(async move { auth.check_mcp_auth().await });
+    let agents = hub.clone();
+    tasks.spawn(async move { agents.reconcile_agents().await });
+    if hub.generation().is_none() {
+        tasks.spawn(remove_inactive_threads(
+            hub.clone(),
+            hub.store().clone(),
+            shutdown.clone(),
+        ));
+    }
+    Ok(app)
 }
 
 impl Server {
@@ -230,7 +331,9 @@ impl Server {
     /// Serves until `stop` resolves, then stops every run so it ends
     /// interrupted, and carries on when Forge starts again.
     pub async fn run_until(self, stop_requested: impl Future<Output = ()>) -> Result<()> {
+        let connections = TaskTracker::new();
         let store = self.store.clone();
+        let hub = self.hub.clone();
         let stop = self.shutdown.clone();
         self.tasks.spawn(async move {
             let hour = std::time::Duration::from_hours(1);
@@ -240,6 +343,12 @@ impl Server {
                 tokio::select! {
                     () = stop.cancelled() => return,
                     _ = interval.tick() => {}
+                }
+                if hub
+                    .generation()
+                    .is_some_and(|generation| !generation.accepting())
+                {
+                    continue;
                 }
                 // Each batch is its own writer transaction. Yield between them,
                 // allowing accepted input and Item writes to use the same owner.
@@ -259,6 +368,7 @@ impl Server {
         loop {
             let accepted = tokio::select! {
                 () = &mut stop_requested => break,
+                () = self.drain.cancelled() => break,
                 accepted = self.listener.accept() => accepted,
             };
             let (socket, peer) = match accepted {
@@ -273,49 +383,62 @@ impl Server {
             };
             let acceptor = self.acceptor.clone();
             let app = self.app.clone();
-            let stop = self.shutdown.clone();
-            self.tasks.spawn(async move {
-                tokio::select! {
-                    () = stop.cancelled() => {},
-                    () = async {
-                let stream = match acceptor.accept(socket).await {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        tracing::debug!(%peer, "TLS handshake failed: {error}");
-                        return;
-                    }
-                };
-                let Some(certificate) = stream
-                    .get_ref()
-                    .1
-                    .peer_certificates()
-                    .and_then(|certs| certs.first())
-                else {
-                    return;
-                };
-                let client = routes::Client {
-                    certificate: tls::certificate_id(certificate),
-                };
-                let service = hyper::service::service_fn(
-                    move |mut request: hyper::Request<hyper::body::Incoming>| {
-                        request.extensions_mut().insert(client.clone());
-                        app.clone().call(request)
-                    },
-                );
-                if let Err(error) =
-                    hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                        .serve_connection_with_upgrades(TokioIo::new(stream), service)
-                        .await
-                {
-                    tracing::debug!(%peer, "connection ended: {error}");
-                }
-                    } => {},
-                }
+            let drain = self.drain.clone();
+            connections.spawn(async move {
+                serve_connection(socket, peer, acceptor, app, drain).await;
             });
         }
         tracing::info!("stopping: settling live runs");
+        self.drain.cancel();
+        self.store.relay_live(artisan_api::Event::Reset);
         self.hub.stop(STOP_GRACE).await;
+        connections.close();
+        if tokio::time::timeout(STOP_GRACE, connections.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!("HTTP connections exceeded the drain grace period");
+        }
         Ok(())
+    }
+}
+
+async fn serve_connection(
+    socket: tokio::net::TcpStream,
+    peer: SocketAddr,
+    acceptor: tokio_rustls::TlsAcceptor,
+    app: axum::Router,
+    drain: CancellationToken,
+) {
+    let stream = tokio::select! {
+        ()=drain.cancelled()=>return,
+        result=acceptor.accept(socket)=>match result {Ok(stream)=>stream,Err(error)=>{tracing::debug!(%peer,"TLS handshake failed: {error}");return;}}
+    };
+    let Some(certificate) = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+    else {
+        return;
+    };
+    let client = routes::Client {
+        certificate: tls::certificate_id(certificate),
+    };
+    let service =
+        hyper::service::service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
+            request.extensions_mut().insert(client.clone());
+            app.clone().call(request)
+        });
+    let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    tokio::select! {
+        result=&mut connection=>{if let Err(error)=result {tracing::debug!(%peer,"connection ended: {error}");}}
+        ()=drain.cancelled()=>{
+            connection.as_mut().graceful_shutdown();
+            if let Ok(Err(error))=tokio::time::timeout(STOP_GRACE,connection).await {tracing::debug!(%peer,"connection drain: {error}");}
+        }
     }
 }
 
@@ -327,7 +450,6 @@ impl Drop for Server {
     }
 }
 
-/// Forge's certificate, made on first use and kept in the store.
 async fn remove_inactive_threads(hub: Hub, store: Store, shutdown: CancellationToken) {
     loop {
         if let Err(error) = hub.remove_inactive_threads().await {
@@ -335,6 +457,9 @@ async fn remove_inactive_threads(hub: Hub, store: Store, shutdown: CancellationT
         }
         if let Err(error) = store.gc_content().await {
             tracing::warn!("collect unreferenced text sources: {error:#}");
+        }
+        if let Err(error) = store.gc_blobs().await {
+            tracing::warn!("collect unreferenced blobs: {error:#}");
         }
         tokio::select! {
             () = shutdown.cancelled() => return,
@@ -421,5 +546,19 @@ pub fn lock_data_dir(dir: &Path) -> Result<std::fs::File> {
     Ok(file)
 }
 
+fn lock_generation_dir(dir: &Path) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir.join("forge.lock"))?;
+    fs2::FileExt::try_lock_shared(&file).context("an older Forge still exclusively owns this data directory; bootstrap the upgrade-capable service first")?;
+    Ok(file)
+}
+
+#[cfg(test)]
+#[path = "../tests/generation.rs"]
+mod generation_tests;
 #[cfg(test)]
 mod tests;

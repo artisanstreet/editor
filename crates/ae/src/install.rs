@@ -283,7 +283,6 @@ fn choose_forge(release: &Release, version: &str) -> Result<Place> {
         .map_err(ui::prompt_error)
 }
 
-/// Installs `apps` on this machine from `release`, in order.
 fn install_here(runtime: &tokio::runtime::Runtime, release: &Release, apps: &[App]) -> Result<()> {
     let version = release.version(os())?;
     for app in apps {
@@ -298,10 +297,31 @@ fn install_here(runtime: &tokio::runtime::Runtime, release: &Release, apps: &[Ap
             ui::Progress::spinner(format!("Installing {} {version}", app.display_name()));
         let result = (|| -> Result<String> {
             let binary = app.binary()?;
+            #[cfg(unix)]
+            let mut upgraded = false;
+            #[cfg(not(unix))]
+            let upgraded = false;
             match app {
                 App::Forge => {
-                    progress.message("Stopping Forge");
-                    service::stop()?;
+                    #[cfg(unix)]
+                    {
+                        if forge_http::upgrade::gateway(&App::Forge.data()?)?.is_some()
+                            && service::is_running()
+                        {
+                            progress
+                                .message("Checking replacement Forge and handing over new work");
+                            runtime.block_on(forge_http::upgrade::replace(
+                                &App::Forge.data()?,
+                                &incoming.join("forge"),
+                            ))?;
+                            upgraded = true;
+                        }
+                    }
+                    if !upgraded {
+                        progress.message("Bootstrapping Forge's upgrade service");
+                        service::prepare_bootstrap_stop()?;
+                        service::stop()?;
+                    }
                 }
                 App::Editor => {
                     if platform::close_processes(std::slice::from_ref(&binary))? > 0 {
@@ -323,7 +343,9 @@ fn install_here(runtime: &tokio::runtime::Runtime, release: &Release, apps: &[Ap
                 App::Forge => {
                     progress.message("Starting Forge");
                     let autostart = service::enable_autostart()?;
-                    service::start()?;
+                    if !upgraded {
+                        service::start()?;
+                    }
                     format!(
                         "Forge {version} is running on {}; {autostart}",
                         service::address()

@@ -63,7 +63,7 @@ impl Surface {
         };
         Ok(Self {
             device,
-            lowering: Lowering::new(fonts, runs),
+            lowering: Lowering::new(fonts, runs).with_frozen_shaders(aqua_protocol::Instant::ZERO),
             latest: None,
             width,
             height,
@@ -93,7 +93,8 @@ impl Surface {
         }
     }
 
-    pub fn draw(&mut self, scene: &aqua::prelude::Scene) -> Result<()> {
+    pub fn draw(&mut self, scene: &aqua::prelude::Scene, now: aqua_protocol::Instant) -> Result<()> {
+        self.lowering.at(now);
         let size = aqua_core::Size::new(
             self.width as f32 / self.scale,
             self.height as f32 / self.scale,

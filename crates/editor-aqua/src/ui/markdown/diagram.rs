@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict, render_svg,
@@ -103,13 +103,34 @@ fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f3
         let layout = compute_layout(&parsed.graph, &themes[0], &config);
         let size = measure_svg_dimensions(&layout, &config, None);
         let svgs = [
-            render_svg(&layout, &themes[0], &config),
-            render_svg(&layout, &themes[1], &config),
+            outline_text(&render_svg(&layout, &themes[0], &config))?,
+            outline_text(&render_svg(&layout, &themes[1], &config))?,
         ];
         Some((svgs, size.width, size.height))
     }))
     .ok()
     .flatten()
+}
+
+fn outline_text(source: &str) -> Option<String> {
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    let fonts = FONTS.get_or_init(|| {
+        let mut fonts = usvg::fontdb::Database::new();
+        for font in editor_assets::fonts::ALL {
+            for face in font.static_faces {
+                fonts.load_font_data(face.to_vec());
+            }
+        }
+        fonts.set_sans_serif_family(FONT_FAMILY);
+        Arc::new(fonts)
+    });
+    let options = usvg::Options {
+        font_family: FONT_FAMILY.to_owned(),
+        fontdb: Arc::clone(fonts),
+        ..Default::default()
+    };
+    let tree = usvg::Tree::from_str(source, &options).ok()?;
+    Some(tree.to_string(&usvg::WriteOptions::default()))
 }
 
 fn diagram_theme(theme: &ArtisanTheme) -> Theme {
@@ -174,3 +195,7 @@ fn hex(color: Oklch) -> String {
     let channel = |value: f32| format!("{:02x}", (value.clamp(0.0, 1.0) * 255.0).round() as u8);
     format!("#{}{}{}", channel(srgb.r), channel(srgb.g), channel(srgb.b))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/markdown/diagram.rs"]
+mod tests;

@@ -8,11 +8,15 @@ use crate::core::{
     services::Services,
 };
 use anyhow::{Context as _, Result};
+use artisan_account::browser::{self, Arrival, Handoff, Problem};
+pub use artisan_account::browser::Provider;
 use artisan_account::network::{AccountProfile, CoreSessionClient, NetworkError, SessionToken};
 use enrollment::AeBinding;
 pub use enrollment::LocalForge;
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroUsize, time::Duration};
+
+const BROWSER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 use tokio_util::task::AbortOnDropHandle;
 
 pub type AccountMachine = artisan_account::network::MachineEntry;
@@ -22,6 +26,9 @@ pub enum AccountPhase {
     SignedOut,
     Restoring,
     Requesting,
+    Browser {
+        provider: Provider,
+    },
     Pending {
         request_id: String,
         request_secret: String,
@@ -29,12 +36,13 @@ pub enum AccountPhase {
         expires_at: String,
     },
     EmailApproved {
-        request_id: String,
-        request_secret: String,
-        email: String,
-        totp_required: bool,
+        approval: Approval,
+        rejected: Option<Factor>,
     },
-    Finalizing,
+    Finalizing {
+        approval: Approval,
+        factor: Option<SecondFactor>,
+    },
     Authenticated {
         profile: AccountProfile,
         verified: bool,
@@ -42,6 +50,46 @@ pub enum AccountPhase {
     Error {
         message: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval {
+    pub request_id: String,
+    pub request_secret: String,
+    pub email: String,
+    pub totp_required: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Factor {
+    Authenticator,
+    Recovery,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SecondFactor {
+    Authenticator(String),
+    Recovery(String),
+}
+
+impl SecondFactor {
+    #[must_use]
+    pub fn parse(input: &str) -> Option<Self> {
+        let code = input.trim();
+        match (code.is_empty(), code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())) {
+            (true, _) => None,
+            (false, true) => Some(Self::Authenticator(code.to_owned())),
+            (false, false) => Some(Self::Recovery(code.to_owned())),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> Factor {
+        match self {
+            Self::Authenticator(_) => Factor::Authenticator,
+            Self::Recovery(_) => Factor::Recovery,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +129,7 @@ enum Message {
         tokio::sync::oneshot::Sender<()>,
     ),
     Finalized(u64, Result<SessionToken, NetworkError>),
+    BrowserFailed(u64, String),
     Synced(
         u64,
         Result<AccountProfile, NetworkError>,
@@ -246,7 +295,7 @@ impl Account {
             .unwrap_or_default()
     }
     pub fn entry_gate(&self) -> EntryGate {
-        access::entry_gate(&self.phase, self.onboarding.as_ref())
+        access::entry_gate(&self.phase)
     }
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
@@ -302,21 +351,6 @@ impl Account {
                 self.last_error = Some(format!("{error:#}"));
             }
         }
-    }
-    pub(crate) fn complete_onboarding(&mut self, machine_id: String) -> Result<()> {
-        let account_id = self
-            .profile()
-            .map(|profile| profile.account_id.clone())
-            .context("sign in first")?;
-        let record = OnboardingRecord {
-            account_id,
-            base_url: self.base_url.clone(),
-            machine_id,
-        };
-        access::save_onboarding(&self.files.dir, &record)?;
-        self.onboarding = Some(record);
-        self.changed();
-        Ok(())
     }
     pub(crate) fn report(&mut self, error: &anyhow::Error) {
         tracing::warn!("{error:#}");
@@ -421,36 +455,86 @@ impl Account {
         })));
     }
 
-    pub fn finish_sign_in(&mut self, totp_code: Option<String>, recovery_code: Option<String>) {
-        let AccountPhase::EmailApproved {
-            request_id,
-            request_secret,
-            ..
-        } = &self.phase
-        else {
-            return;
+    pub fn sign_in_with(&mut self, provider: Provider, auth_origin: &str) -> Option<String> {
+        let started = Handoff::generate()
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .and_then(|handoff| Ok((handoff, browser::bind()?)));
+        let (handoff, (listener, port)) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                tracing::warn!("couldn't start browser sign-in: {error:#}");
+                self.phase = AccountPhase::Error {
+                    message: format!("Couldn't start {} sign-in. Try again.", provider.name()),
+                };
+                self.changed();
+                return None;
+            }
         };
-        let (id, secret) = (request_id.clone(), request_secret.clone());
         self.sign_generation += 1;
         let generation = self.sign_generation;
         let http = self.http.clone();
         let sender = self.delivery.sender();
-        self.phase = AccountPhase::Finalizing;
+        let origin = auth_origin.to_owned();
+        let url = handoff.start_url(auth_origin, provider, port);
+        self.phase = AccountPhase::Browser { provider };
+        self.last_error = None;
+        self.changed();
+        self.sign_in = Some(AbortOnDropHandle::new(runtime().spawn(async move {
+            let arrival = tokio::time::timeout(
+                BROWSER_TIMEOUT,
+                browser::receive(listener, handoff.state(), &origin),
+            )
+            .await;
+            let message = match arrival {
+                Ok(Ok(Arrival::Code(code))) => Message::Finalized(
+                    generation,
+                    http.desktop_redeem(&code, handoff.verifier())
+                        .await
+                        .map(|(_, token)| token),
+                ),
+                Ok(Ok(Arrival::Problem(problem))) => {
+                    Message::BrowserFailed(generation, problem.message(provider))
+                }
+                Ok(Ok(Arrival::Unrelated)) | Ok(Err(_)) | Err(_) => {
+                    Message::BrowserFailed(generation, Problem::Unfinished.message(provider))
+                }
+            };
+            let _ = sender.send(message).await;
+        })));
+        Some(url)
+    }
+
+    pub fn finish_sign_in(&mut self, factor: Option<SecondFactor>) {
+        let AccountPhase::EmailApproved { approval, .. } = &self.phase else {
+            return;
+        };
+        let approval = approval.clone();
+        let (id, secret) = (approval.request_id.clone(), approval.request_secret.clone());
+        self.sign_generation += 1;
+        let generation = self.sign_generation;
+        let http = self.http.clone();
+        let sender = self.delivery.sender();
+        let (totp, recovery) = match &factor {
+            Some(SecondFactor::Authenticator(code)) => (Some(code.clone()), None),
+            Some(SecondFactor::Recovery(code)) => (None, Some(code.clone())),
+            None => (None, None),
+        };
+        self.phase = AccountPhase::Finalizing { approval, factor };
         self.changed();
         self.sign_in = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = http
-                .magic_finalize(
-                    &id,
-                    &secret,
-                    totp_code.as_deref().filter(|code| !code.trim().is_empty()),
-                    recovery_code
-                        .as_deref()
-                        .filter(|code| !code.trim().is_empty()),
-                )
+                .magic_finalize(&id, &secret, totp.as_deref(), recovery.as_deref())
                 .await
                 .map(|(_, token)| token);
             let _ = sender.send(Message::Finalized(generation, result)).await;
         })));
+    }
+    pub fn clear_rejection(&mut self) {
+        if let AccountPhase::EmailApproved { rejected, .. } = &mut self.phase {
+            if rejected.take().is_some() {
+                self.changed();
+            }
+        }
     }
     pub fn dismiss_error(&mut self) {
         self.sign_in = None;
@@ -692,10 +776,13 @@ impl Account {
                             totp_required,
                         }) => {
                             self.phase = AccountPhase::EmailApproved {
-                                request_id: id,
-                                request_secret: secret,
-                                email,
-                                totp_required,
+                                approval: Approval {
+                                    request_id: id,
+                                    request_secret: secret,
+                                    email,
+                                    totp_required,
+                                },
+                                rejected: None,
                             };
                             self.changed();
                         }
@@ -719,8 +806,28 @@ impl Account {
                             self.changed();
                             self.refresh();
                         }
-                        Err(error) => self.fail_sign_in(&error),
+                        Err(error) => match (&self.phase, &error) {
+                            (
+                                AccountPhase::Finalizing {
+                                    approval,
+                                    factor: Some(factor),
+                                },
+                                NetworkError::Core { code, .. },
+                            ) if code == "forbidden" => {
+                                self.phase = AccountPhase::EmailApproved {
+                                    approval: approval.clone(),
+                                    rejected: Some(factor.kind()),
+                                };
+                                self.changed();
+                            }
+                            _ => self.fail_sign_in(&error),
+                        },
                     }
+                }
+                Message::BrowserFailed(generation, message) if generation == self.sign_generation => {
+                    self.sign_in = None;
+                    self.phase = AccountPhase::Error { message };
+                    self.changed();
                 }
                 Message::Synced(generation, result, applied)
                     if generation == self.sync_generation =>

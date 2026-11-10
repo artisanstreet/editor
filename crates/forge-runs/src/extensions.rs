@@ -80,11 +80,11 @@ impl Hub {
     ) -> Result<R> {
         let hub = self.clone();
         tokio::task::spawn_blocking(move || {
-            let _homes = hub.homes_lock();
-            job()
+            let _homes = hub.homes_lock()?;
+            Ok(job())
         })
         .await
-        .context("engine home task")
+        .context("engine home task")?
     }
 
     /// Read-only skill catalog; ownership changes reconcile explicitly.

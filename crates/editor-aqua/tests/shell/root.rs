@@ -170,6 +170,71 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             1.0,
             "later subtree refreshes must preserve visible scene text"
         );
+        let mut runtime = aqua::Aqua::new(aqua::AquaConfig {
+            headless: true,
+            ..aqua::AquaConfig::default()
+        })
+        .unwrap();
+        runtime.add_headless_window(window.clone());
+        struct Frame<'a> {
+            root: &'a mut RootViews,
+            shell: &'a mut Shell,
+            ui: &'a mut aqua::UiApp,
+        }
+        impl aqua::Application for Frame<'_> {
+            fn on_window_event(
+                &mut self,
+                _: &mut aqua::AppCtx<'_>,
+                _: aqua::prelude::AquaWindowId,
+                _: &aqua::prelude::WindowEvent,
+            ) {
+            }
+            fn on_input(
+                &mut self,
+                _: &mut aqua::AppCtx<'_>,
+                _: aqua::prelude::AquaWindowId,
+                _: &aqua::prelude::InputEvent,
+            ) {
+            }
+            fn build_scene(
+                &mut self,
+                _: &aqua::prelude::ObservedWindowState,
+                _: aqua::Instant,
+            ) -> Option<aqua::Instant> {
+                None
+            }
+            fn on_frame_completed(
+                &mut self,
+                ctx: &mut aqua::AppCtx<'_>,
+                id: aqua::prelude::AquaWindowId,
+                sequence: u64,
+            ) {
+                self.root
+                    .frame_completed(self.shell, self.ui, ctx, id, sequence);
+            }
+        }
+        runtime.dispatch_frame_completed(
+            &mut Frame {
+                root: &mut root,
+                shell: &mut shell,
+                ui: &mut resources.ui,
+            },
+            id,
+            1,
+        );
+        let mut resized = window.clone();
+        assert!(!root.resize_needs_rebuild(&shell, &resized));
+        for (width, height) in [(980.0, 700.0), (960.0, 700.0), (960.0, 600.0), (1000.0, 700.0)] {
+            resized.inner_size.width = width;
+            resized.inner_size.height = height;
+            assert!(root.resize_needs_rebuild(&shell, &resized));
+            resources.ui.set_viewport(width as f32, height as f32, 1.0);
+            let element = root.build(&mut shell, &mut resources.ui, &resized).unwrap();
+            resources.ui.refresh(vec![element]).unwrap();
+            resources.ui.build_frame().unwrap();
+            assert!(!root.resize_needs_rebuild(&shell, &resized));
+            assert_eq!(transcript_opacity(&mut resources.ui), 1.0);
+        }
     }
 }
 

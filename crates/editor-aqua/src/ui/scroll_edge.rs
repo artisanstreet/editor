@@ -17,6 +17,12 @@ pub enum Edge {
     Bottom,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EdgePaint {
+    Gradient,
+    InsetShadow,
+}
+
 #[must_use]
 pub fn target(hidden: f32) -> f32 {
     (hidden / SCROLL_EDGE_RAMP).clamp(0.0, 1.0)
@@ -57,9 +63,18 @@ impl EdgeFade {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+enum Entrance {
+    #[default]
+    Idle,
+    Pending,
+    Running(Instant),
+}
+
 #[derive(Clone, Default)]
 pub struct ScrollEdges {
     fades: Rc<[Cell<EdgeFade>; 2]>,
+    entrance: Rc<[Cell<Entrance>; 2]>,
 }
 
 impl PartialEq for ScrollEdges {
@@ -99,15 +114,85 @@ fn gradient(edge: Edge, color: Oklch, shown: f32) -> Style {
     })
 }
 
+fn inset_shadow(edge: Edge, color: Oklch, shown: f32) -> Style {
+    let reach = SCROLL_EDGE_HEIGHT * 1.5;
+    let dy = match edge {
+        Edge::Top => reach,
+        Edge::Bottom => -reach,
+    };
+    Style::new().gpui_shadows(vec![aqua_ui::style::GpuiShadowLayer {
+        dx: 0.0,
+        dy,
+        blur: SCROLL_EDGE_HEIGHT,
+        spread: -SCROLL_EDGE_HEIGHT,
+        inset: true,
+        color: color.fade(shown).to_reference_paint(),
+    }])
+}
+
+fn edge_style(paint: EdgePaint, edge: Edge, color: Oklch, shown: f32) -> Style {
+    match paint {
+        EdgePaint::Gradient => gradient(edge, color, shown),
+        EdgePaint::InsetShadow => inset_shadow(edge, color, shown),
+    }
+}
+
 impl ScrollEdges {
     fn fade(&self, edge: Edge) -> EdgeFade {
         self.fades[slot(edge)].get()
     }
 
     pub fn reset(&self) {
+        self.entrance
+            .iter()
+            .for_each(|entrance| entrance.set(Entrance::Idle));
         self.fades
             .iter()
             .for_each(|fade| fade.set(EdgeFade::default()));
+    }
+
+    pub fn reveal(&self) {
+        self.reset();
+        self.entrance
+            .iter()
+            .for_each(|entrance| entrance.set(Entrance::Pending));
+    }
+
+    fn advance_fade(
+        &self,
+        edge: Edge,
+        target: f32,
+        reduced: bool,
+        now: Instant,
+    ) -> (EdgeFade, bool) {
+        let entrance = &self.entrance[slot(edge)];
+        let started = match entrance.get() {
+            Entrance::Idle => return self.fade(edge).step(target, reduced, now),
+            Entrance::Pending => {
+                entrance.set(Entrance::Running(now));
+                now
+            }
+            Entrance::Running(started) => started,
+        };
+        let progress = if reduced {
+            1.0
+        } else {
+            (now.saturating_duration_since(started).as_secs_f32()
+                / MotionDuration::Fast.as_duration().as_secs_f32())
+            .clamp(0.0, 1.0)
+        };
+        let moving = progress < 1.0;
+        if !moving {
+            entrance.set(Entrance::Idle);
+        }
+        (
+            EdgeFade {
+                shown: target
+                    * super::motion::MotionCurve::EaseInOut.sample(f64::from(progress)) as f32,
+                at: moving.then_some(now),
+            },
+            moving,
+        )
     }
 
     pub fn band(&self, key: impl Into<Key>, edge: Edge, color: Oklch) -> Element {
@@ -132,22 +217,45 @@ impl ScrollEdges {
             .exclude_from_hit_testing()
     }
 
+    pub fn inset_band(
+        &self,
+        key: impl Into<Key>,
+        edge: Edge,
+        color: Oklch,
+        radius: f32,
+    ) -> Element {
+        UiBox::new()
+            .radius(radius)
+            .style(
+                inset_shadow(edge, color, self.fade(edge).shown()).absolute_at(
+                    Some(0.0),
+                    Some(0.0),
+                    Some(0.0),
+                    Some(0.0),
+                ),
+            )
+            .build()
+            .with_key(key)
+            .exclude_from_hit_testing()
+    }
+
     pub fn advance(
         &self,
         ui: &mut aqua::UiApp,
         edge: Edge,
+        paint_kind: EdgePaint,
         band: NodeId,
         color: Oklch,
         hidden: f32,
         reduced: bool,
         now: Instant,
     ) -> bool {
-        let (fade, moving) = self.fade(edge).step(target(hidden), reduced, now);
+        let (fade, moving) = self.advance_fade(edge, target(hidden), reduced, now);
         let previous = self.fade(edge);
         self.fades[slot(edge)].set(fade);
         if previous.shown() != fade.shown() {
             if let Some(mut paint) = ui.tree().paint(band) {
-                gradient(edge, color, fade.shown())
+                edge_style(paint_kind, edge, color, fade.shown())
                     .apply_to(&mut LayoutStyle::default(), &mut paint);
                 ui.tree_mut().set_paint(band, paint);
             }
@@ -187,6 +295,7 @@ pub struct EdgeSurface<'a> {
     pub bottom: &'a str,
     pub top_color: Oklch,
     pub bottom_color: Oklch,
+    pub paint: EdgePaint,
 }
 
 impl EdgeSurface<'_> {
@@ -201,6 +310,7 @@ impl EdgeSurface<'_> {
             self.edges.advance(
                 ui,
                 Edge::Top,
+                self.paint,
                 band,
                 self.top_color,
                 hidden.above,
@@ -212,6 +322,7 @@ impl EdgeSurface<'_> {
             self.edges.advance(
                 ui,
                 Edge::Bottom,
+                self.paint,
                 band,
                 self.bottom_color,
                 hidden.below,

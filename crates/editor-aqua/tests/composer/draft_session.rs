@@ -164,7 +164,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     use editor_aqua::composer::view::ComposerAction;
     assert!(
         !owner
-            .dispatch_with_change(&mut core, ComposerAction::CloseAxis, None)
+            .dispatch_with_change(&mut core, ComposerAction::SelectPane(None), None)
             .1
     );
     assert!(
@@ -254,7 +254,6 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
                         anchor: content.anchor.clone(),
                         content: Some(content.clone()),
                         hovered: true,
-                        axis: None
                     },
                     None
                 )

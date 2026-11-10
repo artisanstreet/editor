@@ -18,6 +18,7 @@
 use core::fmt;
 use core::str::FromStr;
 
+pub mod art;
 pub mod file_icons;
 pub mod fonts;
 
@@ -214,8 +215,6 @@ impl fmt::Display for Family {
 /// rendering, whereas full-color raster would pin the glyph to black.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Presentation {
-    /// Alpha-mask rendering painted in GPUI text color; the asset tints and
-    /// inverts with the theme.
     Tinted,
     /// Authored-color rendering over the embedded bytes; nothing recolored.
     FullColor,
@@ -614,6 +613,7 @@ catalog! {
     (TABLER_CHEVRON_LEFT, "tabler.chevron-left", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/chevron-left.svg"),
     (TABLER_CHEVRON_RIGHT, "tabler.chevron-right", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/chevron-right.svg"),
     (TABLER_CHEVRON_UP, "tabler.chevron-up", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/chevron-up.svg"),
+    (TABLER_CIRCLE_ARROW_UP, "tabler.circle-arrow-up", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/circle-arrow-up.svg"),
     (TABLER_CIRCLE_CHECK, "tabler.circle-check", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/circle-check.svg"),
     (TABLER_CIRCLE_X, "tabler.circle-x", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/circle-x.svg"),
     (TABLER_CODE, "tabler.code", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/code.svg"),
@@ -639,8 +639,10 @@ catalog! {
     (TABLER_LOADER_2, "tabler.loader-2", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/loader-2.svg"),
     (TABLER_LOCK, "tabler.lock", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/lock.svg"),
     (TABLER_LOGIN, "tabler.login", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/login.svg"),
+    (TABLER_LOGOUT, "tabler.logout", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/logout.svg"),
     (TABLER_MAXIMIZE, "tabler.maximize", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/maximize.svg"),
     (TABLER_MESSAGE_CIRCLE, "tabler.message-circle", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/message-circle.svg"),
+    (TABLER_MESSAGE_CIRCLE_QUESTION, "tabler.message-circle-question", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/message-circle-question.svg"),
     (TABLER_MESSAGE_PLUS, "tabler.message-plus", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/message-plus.svg"),
     (TABLER_MESSAGES, "tabler.messages", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/messages.svg"),
     (TABLER_MINUS, "tabler.minus", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/minus.svg"),
@@ -673,6 +675,7 @@ catalog! {
     (TABLER_TEST_PIPE, "tabler.test-pipe", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/test-pipe.svg"),
     (TABLER_TOOL, "tabler.tool", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/tool.svg"),
     (TABLER_TRASH, "tabler.trash", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/trash.svg"),
+    (TABLER_USER, "tabler.user", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/user.svg"),
     (TABLER_WORLD, "tabler.world", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/world.svg"),
     (TABLER_WORLD_SEARCH, "tabler.world-search", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/world-search.svg"),
     (TABLER_X, "tabler.x", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/x.svg"),

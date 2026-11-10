@@ -30,3 +30,12 @@ mod chat_bubble;
 
 #[path = "ui/media_frame.rs"]
 mod media_frame;
+
+#[path = "ui/solar/sample.rs"]
+mod solar_sample;
+
+#[path = "ui/sky/sample.rs"]
+mod sky_sample;
+
+#[path = "ui/pop_in_hover.rs"]
+mod pop_in_hover;

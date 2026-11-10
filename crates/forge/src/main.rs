@@ -37,6 +37,15 @@ struct Cli {
     /// Append the log to this file instead of the terminal.
     #[arg(long, value_name = "FILE")]
     log: Option<PathBuf>,
+    #[cfg(unix)]
+    #[arg(long, hide = true)]
+    backend: bool,
+    #[cfg(unix)]
+    #[arg(long, hide = true)]
+    ready_file: Option<PathBuf>,
+    #[cfg(unix)]
+    #[arg(long, hide = true)]
+    handoff: Option<PathBuf>,
 }
 
 fn main() -> std::process::ExitCode {
@@ -74,28 +83,56 @@ fn run(cli: Cli) -> Result<()> {
     tracing::info!(version = LONG_VERSION, data = %data_dir.display(), %listen, "starting Forge");
     #[cfg(feature = "dhat-heap")]
     let profiler = {
-        let path = data_dir.join("dhat-heap.json");
-        tracing::info!(
-            "heap profile: writing {} when asked to stop",
-            path.display()
-        );
-        dhat::Profiler::builder()
-            .file_name(path)
-            .trim_backtraces(Some(32))
-            .build()
+        #[cfg(unix)]
+        let enabled = cli.backend;
+        #[cfg(not(unix))]
+        let enabled = true;
+        enabled.then(|| {
+            let path = data_dir.join(format!("dhat-heap-{}.json", std::process::id()));
+            tracing::info!(
+                "heap profile: writing {} when asked to stop",
+                path.display()
+            );
+            dhat::Profiler::builder()
+                .file_name(path)
+                .trim_backtraces(Some(32))
+                .build()
+        })
     };
     let stop = async move {
         stop_requested().await;
-        // Written before the runs settle, so "At t-end" is Forge's live state.
         #[cfg(feature = "dhat-heap")]
         drop(profiler);
     };
-    tokio::runtime::Runtime::new()
-        .context("start the async runtime")?
-        .block_on(forge_http::serve(
-            forge_http::ServeConfig { data_dir, listen },
-            stop,
-        ))
+    let runtime = tokio::runtime::Runtime::new().context("start the async runtime")?;
+    let config = forge_http::ServeConfig { data_dir, listen };
+    #[cfg(unix)]
+    {
+        runtime.block_on(async move {
+            if cli.backend {
+                let registry = forge_runs::runtime::Registry::open(&config.data_dir)?;
+                let server = forge_http::start_generation(config, registry).await?;
+                let ready = cli
+                    .ready_file
+                    .context("backend requires a readiness destination")?;
+                forge_http::upgrade::write(
+                    &ready,
+                    &server
+                        .hub()
+                        .generation()
+                        .context("backend generation missing")?
+                        .member,
+                )?;
+                server.run_until(stop).await
+            } else {
+                forge_http::upgrade::serve(config, cli.handoff, stop).await
+            }
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        runtime.block_on(forge_http::serve(config, stop))
+    }
 }
 
 /// Resolves when the service manager or the terminal asks Forge to stop

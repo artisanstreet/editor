@@ -1,3 +1,4 @@
+pub mod browser;
 mod enrollment;
 mod frames;
 mod grant;

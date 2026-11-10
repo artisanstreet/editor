@@ -44,7 +44,7 @@ pub struct Sidebar {
     motion_live: bool,
     pub rail_motion: super::rail::RailMotion,
     pub settings_motion: super::settings_nav::NavMotion,
-    pub threads_hover: crate::ui::picker_motion::HoverSurface,
+    pub threads_hover: crate::ui::pop_in_hover::PopInHover,
     pub profile_hover: crate::ui::picker_motion::HoverSurface,
     pub machines_hover: crate::ui::picker_motion::HoverSurface,
     pub threads_edges: crate::ui::scroll_edge::ScrollEdges,
@@ -60,6 +60,7 @@ pub struct Sidebar {
     pub error: Option<String>,
     pub menu: Option<ThreadMenu>,
     pub menu_generation: u64,
+    pub menu_hover: crate::ui::pop_in_hover::PopInHover,
     pub rename: Option<ThreadId>,
     pub rename_generation: u64,
     pub(super) drag: Option<(HostId, HostInstance, ThreadId)>,
@@ -154,12 +155,16 @@ impl Sidebar {
         &mut self,
         app: &mut aqua::UiApp,
         surface: aqua_core::NodeId,
-        theme: &crate::ui::theme::ArtisanTheme,
-        now: f64,
+        _theme: &crate::ui::theme::ArtisanTheme,
+        _now: f64,
         reduced_motion: bool,
     ) -> Result<HoverFrame, String> {
-        self.threads_hover
-            .advance_frame(app, surface, theme, true, now, reduced_motion)
+        Ok(self.threads_hover.advance_frame(
+            app,
+            surface,
+            std::time::Instant::now(),
+            reduced_motion,
+        ))
     }
 
     #[cfg(feature = "test-support")]
@@ -239,7 +244,7 @@ impl Sidebar {
             motion_live: false,
             rail_motion: super::rail::RailMotion::default(),
             settings_motion: super::settings_nav::NavMotion::default(),
-            threads_hover: crate::ui::picker_motion::HoverSurface::new("sidebar-threads-hover"),
+            threads_hover: crate::ui::pop_in_hover::PopInHover::new("sidebar-threads-hover"),
             profile_hover: crate::ui::picker_motion::HoverSurface::new("profile-hover"),
             machines_hover: crate::ui::picker_motion::HoverSurface::new("machines-hover"),
             threads_edges: crate::ui::scroll_edge::ScrollEdges::default(),
@@ -253,6 +258,7 @@ impl Sidebar {
             error: None,
             menu: None,
             menu_generation: 0,
+            menu_hover: crate::ui::pop_in_hover::PopInHover::new("thread-menu-hover"),
             rename: None,
             rename_generation: 0,
             drag: None,

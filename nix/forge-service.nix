@@ -69,6 +69,7 @@ in
         pkgs.bash
         pkgs.coreutils
         pkgs.getent
+        pkgs.systemd
       ]
       ++ cfg.extraPackages;
       environment.HOME = "/var/lib/artisan-forge";
@@ -80,6 +81,11 @@ in
       '';
       serviceConfig = {
         ExecStart = lib.getExe' cfg.package "forge";
+        Type = "notify";
+        NotifyAccess = "all";
+        KillMode = "mixed";
+        SendSIGKILL = false;
+        TimeoutStartSec = 180;
         User = "artisan-forge";
         Group = "artisan-forge";
         StateDirectory = "artisan-forge";

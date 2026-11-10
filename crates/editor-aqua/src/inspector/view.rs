@@ -81,7 +81,7 @@ fn text(theme: ArtisanTheme, value: impl Into<String>) -> Element {
 }
 
 #[derive(Clone)]
-struct AgentCard {
+pub struct AgentCard {
     engine: Option<artisan_api::EngineId>,
     model: Option<String>,
     settings: Vec<(AssetId, String)>,
@@ -89,8 +89,8 @@ struct AgentCard {
 }
 
 fn effort_label(word: &str) -> String {
-    if word == "xhigh" {
-        return "Extra High".into();
+    if let Some(level) = artisan_api::ThinkingLevel::from_native(word) {
+        return level.label().into();
     }
     let mut output = String::new();
     for (index, part) in word.split(['_', '-']).enumerate() {
@@ -110,7 +110,7 @@ fn effort_label(word: &str) -> String {
     output
 }
 
-fn agent_card(
+pub fn agent_card(
     agent: &artisan_api::InspectorAgent,
     host: Option<&crate::core::HostData>,
 ) -> AgentCard {
@@ -145,7 +145,7 @@ fn agent_card(
                     .as_ref()
                     .map_or(speed.default, |id| &speed.id == id)
             })
-            .map_or_else(|| "Standard".to_owned(), |speed| speed.label.clone());
+            .map_or_else(|| "Normal".to_owned(), |speed| artisan_api::SpeedLevel::from_native(&speed.id).map_or_else(|| speed.label.clone(), |level| level.label().into()));
         settings.push((AssetId::TABLER_BOLT_FILLED, speed));
     }
     if let Some(tokens) = config
@@ -180,7 +180,7 @@ fn agent_card(
     }
 }
 
-fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
+pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
     use crate::ui::glass::{GlassStrength, glass_card_shadows, glass_layers};
     use crate::ui::theme::{Elevation, Opacity};
     let icon = card.engine.map_or(AssetId::TABLER_BOT_ID, |engine| {

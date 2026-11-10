@@ -4,9 +4,28 @@ pub const RAIL_WIDTH: f32 = 48.0;
 pub const ROW_HEIGHT: f32 = 48.0;
 pub const READ_AHEAD: f32 = 600.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadLayout {
+    Grouped,
+    Standalone,
+}
+
+impl ThreadLayout {
+    pub const fn height(self) -> f32 {
+        match self {
+            Self::Grouped => 32.0,
+            Self::Standalone => ROW_HEIGHT,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
-    Thread(RowData),
+    Thread(RowData, ThreadLayout),
+    Project {
+        id: artisan_api::ProjectId,
+        label: String,
+    },
     History,
     Heading(&'static str),
     Gap(f32),
@@ -16,7 +35,8 @@ pub enum Entry {
 impl Entry {
     pub fn height(&self) -> f32 {
         match self {
-            Self::Thread(_) => ROW_HEIGHT,
+            Self::Thread(_, layout) => layout.height(),
+            Self::Project { .. } => 28.0,
             Self::History => 43.0,
             Self::Heading(_) => 21.0,
             Self::Gap(height) => *height,
@@ -26,12 +46,31 @@ impl Entry {
 }
 
 pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
-    let mut entries = Vec::new();
-    for (index, row) in lists.inbox.iter().enumerate() {
-        if index > 0 {
-            entries.push(Entry::Gap(2.0));
+    let mut groups: Vec<(&artisan_api::ProjectId, Vec<&RowData>)> = Vec::new();
+    for row in &lists.inbox {
+        match groups
+            .iter_mut()
+            .find(|(project, _)| *project == &row.project)
+        {
+            Some((_, rows)) => rows.push(row),
+            None => groups.push((&row.project, vec![row])),
         }
-        entries.push(Entry::Thread(row.clone()));
+    }
+    let mut entries = Vec::new();
+    for (index, (project, rows)) in groups.into_iter().enumerate() {
+        if index > 0 {
+            entries.push(Entry::Gap(12.0));
+        }
+        entries.push(Entry::Project {
+            id: project.clone(),
+            label: rows[0].subtitle.clone(),
+        });
+        for (index, row) in rows.into_iter().enumerate() {
+            if index > 0 {
+                entries.push(Entry::Gap(2.0));
+            }
+            entries.push(Entry::Thread(row.clone(), ThreadLayout::Grouped));
+        }
     }
     if !lists.history.is_empty() {
         entries.push(Entry::Spacer);
@@ -49,7 +88,7 @@ pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
                     if index > 0 {
                         entries.push(Entry::Gap(2.0));
                     }
-                    entries.push(Entry::Thread(row.clone()));
+                    entries.push(Entry::Thread(row.clone(), ThreadLayout::Standalone));
                 }
             }
         }
@@ -124,7 +163,8 @@ pub fn entry_keys(entries: &[Entry]) -> Vec<String> {
     let mut below = String::from("end");
     for (index, entry) in entries.iter().enumerate().rev() {
         keys[index] = match entry {
-            Entry::Thread(row) => format!("thread:{}", row.id),
+            Entry::Thread(row, _) => format!("thread:{}", row.id),
+            Entry::Project { id, .. } => format!("project:{id}"),
             Entry::History => "history".into(),
             Entry::Spacer => "spacer".into(),
             Entry::Heading(label) => format!("heading:{label}"),

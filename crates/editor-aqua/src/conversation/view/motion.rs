@@ -1,6 +1,6 @@
 use crate::conversation::compaction::{CompactionFrame, CompactionMotion, CompactionPhase};
 use crate::ui::motion::MotionCurve;
-use crate::ui::phrase::{PhraseMotion, phrase_or_text};
+use crate::ui::phrase::{PhraseMotion, retained_phrase_or_text};
 use crate::ui::theme::{ArtisanTheme, ProseTypography};
 use aqua_core::GpuiTextColor;
 use aqua_text::{FontFamily, TextStyle};
@@ -102,12 +102,11 @@ impl RowMotion {
         now: f64,
         reduced_motion: bool,
     ) -> Element {
-        let (words, moving) =
+        let (words, _) =
             self.phrases
                 .entry(key.to_owned())
                 .or_default()
                 .words(&text, now, reduced_motion);
-        self.animating |= moving;
         let typography = TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
             size_px: ProseTypography::BODY_SIZE_PX,
@@ -116,7 +115,7 @@ impl RowMotion {
             letter_spacing_em: Some(theme.typography.tracking_em),
             ..TextStyle::default()
         };
-        phrase_or_text(words.as_deref(), text, typography, color, 24.0)
+        retained_phrase_or_text(words.as_deref(), text, typography, color, 24.0)
     }
 
     pub fn chevron(

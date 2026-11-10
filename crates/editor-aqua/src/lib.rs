@@ -3,6 +3,7 @@ pub mod capture;
 pub mod composer;
 pub mod conversation;
 pub mod core;
+pub mod frame;
 pub mod inspector;
 pub mod logging;
 pub mod marketplace;

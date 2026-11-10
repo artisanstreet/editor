@@ -73,6 +73,11 @@ pub struct EngineConfig {
 }
 
 impl EngineConfig {
+    pub fn compaction_window_override(&self) -> Option<u64> {
+        self.options.get("compaction_window").and_then(serde_json::Value::as_u64)
+            .filter(|tokens| (1..=100_000_000).contains(tokens))
+    }
+
     #[must_use]
     pub fn new(engine: EngineId) -> Self {
         Self {
@@ -115,6 +120,8 @@ pub enum Permissions {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Model {
+    #[serde(default)]
+    pub evidence: crate::ModelEvidence,
     pub id: String,
     pub name: String,
     /// What the engine says the model is for.
@@ -191,27 +198,10 @@ impl Model {
             .or_else(|| self.default_variant.clone())
     }
 
-    /// Fits a config chosen for this model earlier to what it offers now:
-    /// an effort, speed, variant or context window it no longer offers
-    /// falls back to the model's own.
     pub fn fit(&self, config: &mut EngineConfig) {
-        self.normalize_context_window(config);
-        if config
-            .effort
-            .as_ref()
-            .is_some_and(|effort| !self.efforts.contains(effort))
-        {
-            config.effort.clone_from(&self.default_effort);
-        }
-        if config
-            .speed
-            .as_ref()
-            .is_some_and(|speed| !self.speeds.iter().any(|offered| &offered.id == speed))
-        {
-            config.speed = None;
-        }
-        config.variant = self.variant_for(config.variant.as_deref());
+        *config = self.resolve_config(config, &[]).effective;
     }
+
 }
 
 /// The Forge setting holding the config last chosen for each model.
@@ -266,6 +256,8 @@ pub struct Variant {
 /// connect and whenever it changes.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EngineStatus {
+    #[serde(default)]
+    pub discovery: crate::DiscoveryState,
     pub engine: EngineId,
     pub install: InstallState,
     pub sign_in: SignInState,
@@ -448,6 +440,9 @@ pub struct ContextWindow {
 impl Model {
     /// Drops a stale, malformed, or unsupported override after a model change.
     pub fn normalize_context_window(&self, config: &mut EngineConfig) {
+        if let Some(migrated) = self.migrate_config(config) {
+            *config = migrated;
+        }
         if config.options.contains_key("context_window")
             && !config.context_window_override().is_some_and(|tokens| {
                 self.context_windows

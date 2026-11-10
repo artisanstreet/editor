@@ -2,7 +2,7 @@
 
 Artisan is two programs. **Forge** runs coding agents ("engines": Claude Code,
 Codex, OpenCode) on a machine and keeps every thread in one
-SQLite database. The **Editor** is a GPUI desktop app that shows and drives
+SQLite database. The **Editor** is a native Windows Aqua app that shows and drives
 the threads of one or more Forges. They speak JSON over HTTPS with mutual
 TLS. `ae` is the host binary: installer, service manager, and Forge itself.
 
@@ -26,19 +26,22 @@ forge
   ae (bin)             CLI, installer, `ae forge serve`                             → http, engines, store
 
 editor
-  editor-ui            theme, components, text editor, markdown  → editor-assets, editor-audio
-  editor-core          Forge client per host, connection, HostData, Screen         → api
-  editor-sources       viewers for stored sources (raw text, collections)          → core, editor-ui
-  editor-sidebar       projects, thread inbox, history, host switcher               → core, editor-ui
-  editor-composer      draft, WebP attachments, model picker, send/steer            → core, sources, editor-ui
-  editor-conversation  the open thread: item window, viewport, pure render         → core, sources, editor-ui, composer
-  editor-inspector     shells, agents, changed files, context/usage                 → core, sources, editor-ui, conversation
-  editor-settings      preferences, engines, skills/MCP/prompt, account & Forges    → core, editor-ui
-  editor (bin)         window, titlebar, layout, palette, notices, sign-in gate     → all
+  editor-assets        vendored icons, fonts, artwork and application resources
+  editor-audio         audio playback
+  editor-aqua          native Windows application, Aqua rendering and input
+    core               paired hosts, Forge clients, connection and application state
+    ui                 theme, components, text editing, markdown and media
+    sources            stored source viewers
+    sidebar            projects, thread inbox, history and host switcher
+    composer           drafts, attachments, model picker, send and steer
+    conversation       transcript window, viewport and prepared bodies
+    inspector          shells, agents, changed files, context and usage
+    settings           preferences, engines, skills, MCP, account and Forges
+    shell              window, application event routing and section layout
 ```
 
-Dependencies point down. The one sideways link is Inspector → Conversation,
-read-only.
+The Editor has no GPUI dependency or legacy frontend. Linux builds provide
+Forge and `ae`; the native Editor is shipped only for Windows.
 
 ## Data model
 
@@ -97,8 +100,8 @@ takes the next seq in the writer thread and is published in commit order.
 - `GET /threads/:id/work?after&before&limit` → the work in a span, newest
   first, for a work section that is open.
 
-The Editor's connection (`editor-core/src/connection.rs`) is a plain state
-enum: disconnected → connecting → live → backoff → retrying, resuming from
+The Editor's connection (`editor-aqua/src/core/connection.rs`) is a plain state
+enum: connecting → live → offline → connecting, resuming from
 its last seq after any drop. `HostData` holds what that Forge sent;
 sections read it and subscribe to `HostEvent`.
 
@@ -197,11 +200,10 @@ sessions and grants; the Relay forwards end-to-end encrypted traffic.
 
 ## Editor
 
-One window. `Core` owns the paired hosts and the current `Screen`
-(`Home | Thread | NewThread | Settings(page)`); `artisan://` links parse into
-a `Screen` at the edge. Each section is one GPUI entity that owns its state,
-reads `Core`/`HostData`, and calls Forge itself through `ForgeClient`.
-No central command enum; the binary only lays sections out.
+One native Aqua window. `Core` owns paired hosts and the current `Screen`;
+`artisan://` links parse into a `Screen` at the edge. Sections retain their
+state and read `Core`/`HostData`. `ShellApplication` routes native input and
+application events through the Aqua tree. Forge requests use `ForgeClient`.
 
 The conversation keeps one copy of the open thread: a window of items keyed
 by position, upserted from events; live text from `HostData`; UI state per
@@ -219,7 +221,7 @@ prepared), so nothing in view moves after it shows.
 ## State machines
 
 Plain `enum State` plus a transition function, only for real lifecycles with
-transitions that matter: Forge connection (editor-core), engine Install
+transitions that matter: Forge connection (editor-aqua/core), engine Install
 (forge-engines), Viewport (conversation), Attachment (composer). No state
 machine library. Everything else is data plus derived functions; stale async
 work is cancelled by dropping its task, not fenced with generation counters.
@@ -242,12 +244,13 @@ reasoning are not carried over.
 
 ## Development
 
-`nix run .#dev` builds `ae` and the Editor with Cargo, runs a dev Forge from
-`~/.local/share/artisan-dev` on port 47901, and launches the Editor (in WSL,
-the Windows build). `nix run .#dev -- import` imports the old dev Forge.
-`nix run .#release` is the same loop built with Cargo's release profile.
-See `nix/dev.nix`. Release archives: `nix build .#release`, signed by
-`scripts/release`.
+`nix run .#dev` builds and installs Forge, `ae`, and the native Windows
+Aqua Editor from WSL. `nix run .#dev -- forge` updates Forge and `ae` without
+building or installing the Editor. Forge upgrades start a healthy replacement
+before handing it new turns while existing turns finish on their generation.
+`nix run .#release` uses Cargo's release profile. Release archives come from
+`nix build .#release`, signed by `scripts/release`: Forge and `ae` for Linux
+and Windows, plus the Aqua Editor for Windows.
 
 ## Tests
 
@@ -255,8 +258,8 @@ A test must be able to fail for a reason a user would notice. There are
 three kinds:
 
 - engine transcripts → item snapshots;
-- Forge scenarios in process (`forge-runs`, `forge-http`, `editor-core`
-  against a real Forge on a temp dir);
-- section scenarios with `gpui::TestAppContext`.
+- Forge scenarios in process (`forge-runs`, `forge-http`, and native Editor
+  clients against a real Forge on a temp dir);
+- native Editor scenarios with Aqua trees, routed input and capture fixtures.
 
 No tests of derives, constants, bounds or single private structs.
