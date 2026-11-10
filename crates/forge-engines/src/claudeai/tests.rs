@@ -17,6 +17,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{Backend, Events, Refusal, Request, drive};
+#[path = "../../tests/claudeai/cancellation.rs"]
+mod cancellation;
 use crate::{EngineEvent, Input, Launch, Outcome, RunIo, Turn, UserInput};
 
 /// One completion claude.ai answers with.
@@ -1752,3 +1754,7 @@ async fn native_compaction_without_a_saved_source_leaf_requires_canonical_fallba
     assert!(backend.sent.lock().unwrap().is_empty());
     assert_eq!(*backend.created.lock().unwrap(), 0);
 }
+
+#[cfg(unix)]
+#[path = "../../tests/claudeai/status.rs"]
+mod status;

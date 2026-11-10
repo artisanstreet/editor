@@ -285,10 +285,7 @@ fn source_provider_tracks_gate_and_host_instance_without_reviving() {
             .is_some()
     );
     let original = core.account().profile().unwrap().clone();
-    let mut no_machine = original.clone();
-    no_machine.machines.clear();
-    let sender = core.account_mut().test_sync_sender();
-    runtime().block_on(sender.profile(no_machine));
+    core.account_mut().sign_out();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while matches!(
         core.entry_gate(),
@@ -324,6 +321,7 @@ fn source_provider_tracks_gate_and_host_instance_without_reviving() {
             .open_collection::<String>(collection.clone())
             .is_none()
     );
+    let sender = core.account_mut().test_sync_sender();
     runtime().block_on(sender.profile(original));
     while !matches!(
         core.entry_gate(),
@@ -332,9 +330,18 @@ fn source_provider_tracks_gate_and_host_instance_without_reviving() {
         assert!(std::time::Instant::now() < deadline, "gate did not reopen");
         core.drain_with(|_, _| {});
     }
-    assert_eq!(core.host(&id).unwrap().instance(), instance);
+    assert!(
+        core.source_provider(&id, instance).is_none(),
+        "signing back in must not revive the signed-out host instance"
+    );
     assert!(!provider.is_available());
-    let refreshed = core.source_provider(&id, instance).unwrap();
+    host(&mut core, "sources");
+    let replacement_instance = core.host(&id).unwrap().instance();
+    assert_ne!(
+        replacement_instance, instance,
+        "the host restored after sign-in must have a new lifetime"
+    );
+    let refreshed = core.source_provider(&id, replacement_instance).unwrap();
     assert!(refreshed.open_content(source.clone()).is_some());
     core.remove_host(&id).unwrap();
     assert!(!refreshed.is_available());
@@ -350,7 +357,10 @@ fn source_provider_tracks_gate_and_host_instance_without_reviving() {
     );
     assert!(refreshed.content_range(source.clone(), 0, 65536).is_none());
     host(&mut core, "sources");
-    assert!(core.source_provider(&id, instance).is_none());
+    assert!(
+        core.source_provider(&id, replacement_instance).is_none(),
+        "recreating the same host must not revive its removed lifetime"
+    );
     assert!(refreshed.open_collection::<String>(collection).is_none());
     assert!(
         core.source_provider(&id, core.host(&id).unwrap().instance())

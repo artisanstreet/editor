@@ -5,6 +5,8 @@ use super::*;
 
 #[path = "../tests/run/activity.rs"]
 mod activity;
+#[path = "../tests/run/cancellation.rs"]
+mod cancellation;
 #[path = "../tests/coordination/notifications.rs"]
 mod coordination;
 #[path = "../tests/runtime/registry.rs"]
@@ -2997,8 +2999,12 @@ for line in sys.stdin:
 
 #[tokio::test(flavor = "multi_thread")]
 async fn live_previews_report_missing_bytes_without_unbounded_sse_frames() {
-    let fixture = fixture(Arc::new(|_turn, mut io| {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let script_started = Arc::clone(&started);
+    let fixture = fixture(Arc::new(move |_turn, mut io| {
+        let started = Arc::clone(&script_started);
         Box::pin(async move {
+            started.notify_one();
             let _ = io.inbox.recv().await;
             Outcome::done()
         })
@@ -3009,6 +3015,9 @@ async fn live_previews_report_missing_bytes_without_unbounded_sse_frames() {
         .send_message(&fixture.thread_id, message("start"))
         .await
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), started.notified())
+        .await
+        .expect("the engine must start before publishing its live previews");
     let text = LiveTarget::Text {
         item_id: ItemId::new(),
     };

@@ -69,7 +69,7 @@ impl HostData {
                 .then_with(|| b.cmp(a))
         });
         ids.truncate(PAGE as usize);
-        let mut page = ThreadPage {
+        let page = ThreadPage {
             ids,
             next,
             loaded: true,

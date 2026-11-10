@@ -248,7 +248,8 @@ impl TestHostTransitions {
             self.sender
                 .send(HostMessage::Update(Update::Status(status)))
                 .await
-                .is_ok()
+                .is_ok(),
+            "host closed before the status transition was delivered"
         );
     }
     pub async fn event(&self, event: Event) {
@@ -268,7 +269,8 @@ impl TestHostTransitions {
                     permit,
                 )))
                 .await
-                .is_ok()
+                .is_ok(),
+            "host closed before the event transition was delivered"
         );
     }
     pub async fn prompt(&self, generation: u64, prompt: artisan_api::GlobalPrompt) {
@@ -279,7 +281,8 @@ impl TestHostTransitions {
                     Ok(prompt),
                 )))
                 .await
-                .is_ok()
+                .is_ok(),
+            "host closed before the prompt transition was delivered"
         );
     }
     pub async fn catalog(&self, generation: u64, catalog: Vec<artisan_api::CatalogSkill>) {
@@ -290,7 +293,8 @@ impl TestHostTransitions {
                     Ok(catalog),
                 )))
                 .await
-                .is_ok()
+                .is_ok(),
+            "host closed before the catalog transition was delivered"
         );
     }
     pub async fn image(
@@ -307,7 +311,8 @@ impl TestHostTransitions {
                     Ok(image),
                 )))
                 .await
-                .is_ok()
+                .is_ok(),
+            "host closed before the image transition was delivered"
         );
     }
 }

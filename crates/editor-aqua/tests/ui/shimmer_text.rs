@@ -10,7 +10,9 @@ use editor_aqua::ui::{
 fn retained_shimmer_updates_only_when_configuration_or_bounds_change() {
     let mut shimmer =
         ShimmerLine::new("status", &ArtisanTheme::resolved()).timing(ShimmerTiming::Status);
-    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = UiApp::new(fonts, SharedRuns::new());
     app.mount(|_| {
         UiBox::new()
             .width(200.0)

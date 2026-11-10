@@ -549,12 +549,15 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             })
             .unwrap()
     };
-    let hidden = ranges(&app);
-    assert_eq!(hidden.len(), 1);
-    assert_eq!(hidden[0].bytes, 0..3);
-    assert_eq!(hidden[0].opacity, 0.0);
+    let initial_ranges = ranges(&app);
+    assert_eq!(initial_ranges.len(), 1);
+    assert_eq!(initial_ranges[0].bytes, 0..3);
+    assert_eq!(
+        initial_ranges[0].opacity, 0.35,
+        "fresh stored text starts readable while its fade begins"
+    );
     reveal.begin_frame(
-        now + std::time::Duration::from_millis(150),
+        now + std::time::Duration::from_millis(60),
         false,
         true,
         false,
@@ -568,9 +571,14 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     assert!(owner.leaf_is_current(&started.proof));
     app.refresh(vec![started.element]).unwrap();
     app.build_frame().unwrap();
-    assert_eq!(ranges(&app)[0].opacity, 0.0);
+    let active = ranges(&app);
+    assert_eq!(active[0].bytes, 0..3);
+    assert!(
+        active[0].opacity > initial_ranges[0].opacity && active[0].opacity < 1.0,
+        "the retained stored text must advance through its fade"
+    );
     reveal.begin_frame(
-        now + std::time::Duration::from_millis(350),
+        now + std::time::Duration::from_millis(150),
         false,
         true,
         false,
@@ -584,8 +592,10 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
     assert!(owner.leaf_is_current(&progressed.proof));
     app.refresh(vec![progressed.element]).unwrap();
     app.build_frame().unwrap();
-    let active = ranges(&app);
-    assert!(active[0].opacity > 0.0 && active[0].opacity < 1.0);
+    assert!(
+        ranges(&app).is_empty(),
+        "settled stored text must release its completed fade ranges"
+    );
     owner.leaves.push_back(LeafEntry {
         key: "table".into(),
         source: source.clone(),

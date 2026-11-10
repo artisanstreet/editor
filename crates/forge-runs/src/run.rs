@@ -342,16 +342,37 @@ async fn execute(
         waiting: HashSet::new(),
     }));
     let auto_answers = forward.clone();
-    let forwarding = {
-        let approvals = Arc::clone(&approvals);
-        async move {
+    let (events, mut reports) = mpsc::channel(256);
+    let harness = (hub.inner.harness_for)(engine);
+    let mut disk = crate::disk::Watch::new(
+        hub.inner.disk.clone(),
+        vec![turn.cwd.clone(), hub.data_dir().to_path_buf()],
+    );
+    // Everything the adapter logs names the thread and run it belongs to.
+    let adapter_outcome = tracing::Instrument::instrument(
+        harness.run(
+            turn,
+            RunIo {
+                inbox: adapter_inbox,
+                events,
+                cancel: cancel.clone(),
+            },
+        ),
+        tracing::warn_span!("run", thread = %run.thread_id, run = %run.id, %engine),
+    );
+    tokio::pin!(adapter_outcome);
+
+    items.initial = Some((initial_ack, initial_ids));
+    let mut forwarding_done = false;
+    let mut adapter_finished = false;
+    let outcome = {
+        let forwarding = async {
             while let Some(input) = inbox.recv().await {
                 if let Input::Steer(message) = &input
                     && !delivered.insert(message.id.clone())
                 {
                     continue;
                 }
-                // Full access approves what already waits.
                 let waiting = match &input {
                     Input::SetPermissions(permissions) => {
                         approvals_lock(&approvals).set(*permissions)
@@ -367,63 +388,66 @@ async fn execute(
                     }
                 }
             }
-        }
-    };
-    tokio::pin!(forwarding);
-    let (events, mut reports) = mpsc::channel(256);
-    let harness = (hub.inner.harness_for)(engine);
-    let mut disk = crate::disk::Watch::new(
-        hub.inner.disk.clone(),
-        vec![turn.cwd.clone(), hub.data_dir().to_path_buf()],
-    );
-    // Everything the adapter logs names the thread and run it belongs to.
-    let outcome = tracing::Instrument::instrument(
-        harness.run(
-            turn,
-            RunIo {
-                inbox: adapter_inbox,
-                events,
-                cancel: cancel.clone(),
-            },
-        ),
-        tracing::warn_span!("run", thread = %run.thread_id, run = %run.id, %engine),
-    );
-    tokio::pin!(outcome);
-
-    items.initial = Some((initial_ack, initial_ids));
-    let mut forwarding_done = false;
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => break Outcome::cancelled(),
-            () = hub.inner.shutdown.cancelled() => { cancel.cancel(); break Outcome::cancelled(); },
-            Some(event) = reports.recv() => {
-                if let Some(key) = approvals_lock(&approvals).observe(&event)
-                    && auto_answers.try_send(allow_once(key.clone())).is_err()
-                {
-                    tracing::warn!(thread = %run.thread_id, run = %run.id, key, "couldn't approve under Full access; it waits for the user");
-                    approvals_lock(&approvals).waiting.insert(key);
+        };
+        tokio::pin!(forwarding);
+        loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break Outcome::cancelled(),
+                () = hub.inner.shutdown.cancelled() => { cancel.cancel(); break Outcome::cancelled(); },
+                Some(event) = reports.recv() => {
+                    if let Some(key) = approvals_lock(&approvals).observe(&event)
+                        && auto_answers.try_send(allow_once(key.clone())).is_err()
+                    {
+                        tracing::warn!(thread = %run.thread_id, run = %run.id, key, "couldn't approve under Full access; it waits for the user");
+                        approvals_lock(&approvals).waiting.insert(key);
+                    }
+                    if let Err(error) = apply(hub, run, items, event).await {
+                        cancel.cancel();
+                        break Outcome::failed(format!("persist engine event: {error:#}"));
+                    }
+                },
+                () = &mut forwarding, if !forwarding_done => { forwarding_done = true; },
+                outcome = &mut adapter_outcome => {
+                    adapter_finished = true;
+                    break outcome;
                 }
-                if let Err(error) = apply(hub, run, items, event).await {
-                    cancel.cancel();
-                    break Outcome::failed(format!("persist engine event: {error:#}"));
-                }
-            },
-            () = &mut forwarding, if !forwarding_done => { forwarding_done = true; },
-            outcome = &mut outcome => {
-                break outcome;
-            }
-            () = disk.due() => {
-                if let Some(stopped) = guard_disk(hub, run, &mut disk).await {
-                    break stopped;
+                () = disk.due() => {
+                    if let Some(stopped) = guard_disk(hub, run, &mut disk).await {
+                        break stopped;
+                    }
                 }
             }
         }
     };
+    inbox.close();
     cancel.cancel();
+    let mut outcome = outcome;
+    if !adapter_finished {
+        let deadline = tokio::time::sleep(Duration::from_secs(45));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                stopped = &mut adapter_outcome => {
+                    if stopped.status == RunStatus::Failed && outcome.status != RunStatus::Failed {
+                        outcome = stopped;
+                    }
+                    break;
+                }
+                Some(event) = reports.recv() => {
+                    if let Err(error) = apply(hub, run, items, event).await {
+                        outcome = Outcome::failed(format!("persist engine event during cancellation: {error:#}"));
+                    }
+                }
+                () = &mut deadline => {
+                    outcome = Outcome::failed("The engine did not confirm it stopped within 45 seconds; underlying work may still be running.".to_owned());
+                    break;
+                }
+            }
+        }
+    }
     // Preserve acknowledgments already published before shutdown/cancellation.
     // The bounded drain also prevents a faulty detached producer delaying teardown.
-    let mut outcome = outcome;
     for _ in 0..256 {
         let Ok(event) = reports.try_recv() else { break };
         if let Err(error) = apply(hub, run, items, event).await {

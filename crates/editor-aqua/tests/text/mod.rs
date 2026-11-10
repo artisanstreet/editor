@@ -248,7 +248,9 @@ fn mounted_vertical_keys_update_authoritative_selection() {
     use editor_aqua::ui::theme::ArtisanTheme;
 
     let controller = EditorController::new(Editor::new("one\nx\nlong", Mode::Document), |_| {});
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
     runtime
         .mount(|_| controller.element(Mode::Document, &ArtisanTheme::resolved(), ""))
         .unwrap();
@@ -581,7 +583,9 @@ fn mounted_mentions_paint_as_glyphs_and_follow_atomic_undo() {
             Vec::new()
         }
     })));
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
     runtime
         .mount(|_| controller.element(Mode::Prompt, &theme, ""))
         .unwrap();
@@ -761,7 +765,9 @@ fn native_text_service_queries_live_selection_and_invalidates_after_edit() {
     let controller =
         EditorController::from_shared(model.clone(), move |event| output.borrow_mut().push(event));
     let theme = ArtisanTheme::resolved();
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
     runtime
         .mount(|_| controller.element(Mode::Document, &theme, ""))
         .unwrap();
@@ -799,7 +805,9 @@ fn inline_source_paints_follow_shaped_slot_and_preserve_layer_order() {
         l: 0.4,
         a: 1.0,
     };
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
     runtime
         .mount(|_| {
             Text::new("a\u{2003}b")
@@ -855,7 +863,9 @@ fn secondary_text_click_reports_shaped_byte_without_selecting() {
 
     let hits = Rc::new(RefCell::new(Vec::new()));
     let recorded = hits.clone();
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
     runtime
         .mount(|_| {
             Text::new("hello world").selectable(true).build().on_input(

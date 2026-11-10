@@ -9,6 +9,9 @@
 //! session's execution events (`started`, `succeeded`, `failed`,
 //! `interrupted`) bound the turn; OpenCode compacts a full context itself.
 
+#[cfg(all(test, unix))]
+#[path = "../tests/opencode/cancellation.rs"]
+mod cancellation_tests;
 mod decoder;
 mod goal;
 #[cfg(test)]
@@ -107,22 +110,22 @@ async fn run(turn: &Turn, io: &mut RunIo) -> Result<Outcome> {
     let config_dir = write_agents(&turn.home, &turn.launch.readable)?;
     let mut server = spawn(turn, &password, &config_dir)?;
     let cancel = io.cancel.clone();
-    let result = tokio::select! {
-        biased;
-        () = cancel.cancelled() => Ok(Outcome::cancelled()),
-        result = async {
-        let base = tokio::time::timeout(READY_TIMEOUT, ready(&mut server))
-            .await
-            .map_err(|_elapsed| {
-                anyhow!(
-                    "OpenCode did not start within {} s",
-                    READY_TIMEOUT.as_secs()
-                )
-            })??;
+    let result = async {
+        let base = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Ok(Outcome::cancelled()),
+            ready = tokio::time::timeout(READY_TIMEOUT, ready(&mut server)) => ready,
+        }
+        .map_err(|_elapsed| {
+            anyhow!(
+                "OpenCode did not start within {} s",
+                READY_TIMEOUT.as_secs()
+            )
+        })??;
         let api = Api::new(base, password)?;
         drive(turn, io, &api, &mut server).await
-        } => result,
-    };
+    }
+    .await;
     server.kill().await;
     let _ = server.wait().await;
     result.map_err(|error| match server.stderr_tail() {
@@ -209,50 +212,55 @@ async fn drive(
         id: session.clone(),
     })
     .await;
-    if let Some(commands) = commands(api).await {
-        io.emit(EngineEvent::Commands(commands)).await;
-    }
-
+    let cancel = io.cancel.clone();
     let mut decoder = Decoder::new(Some(session.clone()));
-    if let Err(error) = goal::refresh(api, &session, &mut decoder, io, false).await {
-        tracing::debug!(session, %error, "OpenCode goal unavailable");
-    }
-    send_input(api, &session, &turn.input, &mut decoder, io).await?;
-    loop {
-        if decoder.idle() {
-            // A steer that raced the end of the turn starts the next one.
-            match io.inbox.try_recv() {
-                Ok(input) => {
-                    handle_input(api, &session, &mut decoder, io, input).await?;
-                    continue;
-                }
-                Err(_) => break,
-            }
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            api.post(&format!("/api/session/{session}/interrupt"), None)
+                .await
+                .context("interrupting OpenCode")?;
+            emit_all(io, decoder.cancel()).await;
+            Ok(Outcome::cancelled())
         }
-        tokio::select! {
-            biased;
-            () = io.cancel.cancelled() => {
-                if let Err(error) = api.post(&format!("/api/session/{session}/interrupt"), None).await {
-                    tracing::warn!(session, "interrupting OpenCode failed: {error:#}");
-                }
-                emit_all(io, decoder.cancel()).await;
-                return Ok(Outcome::cancelled());
+        result = async {
+            if let Some(commands) = commands(api).await {
+                io.emit(EngineEvent::Commands(commands)).await;
             }
-            Some(input) = io.inbox.recv() => handle_input(api, &session, &mut decoder, io, input).await?,
-            event = events.recv() => match event {
-                Some(data) => emit_all(io, decoder.feed(&data)?).await,
-                None => bail!("OpenCode's event stream closed mid-run"),
-            },
-            line = server.next_line() => match line {
-                Ok(Some(line)) => tracing::debug!(target: "engine_stdout", "{line}"),
-                _ => bail!("OpenCode exited mid-run"),
-            },
-        }
+
+            if let Err(error) = goal::refresh(api, &session, &mut decoder, io, false).await {
+                tracing::debug!(session, %error, "OpenCode goal unavailable");
+            }
+            send_input(api, &session, &turn.input, &mut decoder, io).await?;
+            loop {
+                if decoder.idle() {
+                    match io.inbox.try_recv() {
+                        Ok(input) => {
+                            handle_input(api, &session, &mut decoder, io, input).await?;
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                tokio::select! {
+                    biased;
+                    Some(input) = io.inbox.recv() => handle_input(api, &session, &mut decoder, io, input).await?,
+                    event = events.recv() => match event {
+                        Some(data) => emit_all(io, decoder.feed(&data)?).await,
+                        None => bail!("OpenCode's event stream closed mid-run"),
+                    },
+                    line = server.next_line() => match line {
+                        Ok(Some(line)) => tracing::debug!(target: "engine_stdout", "{line}"),
+                        _ => bail!("OpenCode exited mid-run"),
+                    },
+                }
+            }
+            Ok(decoder
+                .error
+                .take()
+                .map_or_else(Outcome::done, Outcome::failed))
+        } => result,
     }
-    Ok(decoder
-        .error
-        .take()
-        .map_or_else(Outcome::done, Outcome::failed))
 }
 
 async fn handle_input(

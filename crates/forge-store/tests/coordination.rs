@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use artisan_api::{CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, ThreadId, now};
 use forge_store::{
     Store,

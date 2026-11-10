@@ -4,7 +4,7 @@ use editor_aqua::ui::media::color::{Notation, color_copy_entries, color_ranges, 
 fn prose_and_code_find_colors_without_interpreting_issue_numbers() {
     let text = "Emerald #10B981, rgb(255 0 0 / 50%) and #502; code #333";
     let code = text.find("#333").unwrap();
-    let values: Vec<_> = color_ranges(text, &[code..code + 4])
+    let values: Vec<_> = color_ranges(text, std::slice::from_ref(&(code..code + 4)))
         .into_iter()
         .map(|range| &text[range])
         .collect();

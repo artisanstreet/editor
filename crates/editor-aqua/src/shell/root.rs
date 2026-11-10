@@ -2952,10 +2952,11 @@ impl SectionViews for RootViews {
             let _tm = crate::shell::application::Tm::new("input.views.context");
             self.sync_context(shell, ui, ctx, window);
         }
-        if {
+        let navigation_changed = {
             let _tm = crate::shell::application::Tm::new("input.views.navigation");
             self.sync_navigation(ui, ctx, window, shell.preferences.theme())
-        } {
+        };
+        if navigation_changed {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_fc");
             self.navigation_invalidated.set(true);
         }
