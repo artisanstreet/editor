@@ -217,12 +217,39 @@ impl PickerState {
         picker
     }
 
-    pub fn axis_options(&self, axis: Axis, config: &EngineConfig, model: Option<&Model>) -> Vec<AxisOption> {
-        model.map_or_else(Vec::new, |model| model.specification(config.engine, &self.customizations)
-            .visible_choices(axis, config, self.hide_bad_model_options)
-            .into_iter().map(|choice| {
+    pub fn axis_options(
+        &self,
+        axis: Axis,
+        config: &EngineConfig,
+        model: Option<&Model>,
+    ) -> Vec<AxisOption> {
+        let Some(model) = model else {
+            return Vec::new();
+        };
+        let mut effective = model.resolve_config(config, &self.customizations).effective;
+        effective.effort = effective.effort.or_else(|| model.default_effort.clone());
+        effective.variant = effective.variant.or_else(|| model.default_variant.clone());
+        effective.speed = effective.speed.or_else(|| {
+            model
+                .speeds
+                .iter()
+                .find(|speed| speed.default)
+                .map(|speed| speed.id.clone())
+        });
+        model
+            .specification(config.engine, &self.customizations)
+            .visible_choices(axis, &effective, self.hide_bad_model_options)
+            .into_iter()
+            .filter(|choice| {
+                choice.semantic != artisan_api::ChoiceSemantic::Default
+                    || matches!(choice.binding, artisan_api::ConfigBinding::Context(_))
+            })
+            .map(|choice| {
                 let description = match choice.hidden {
-                    true => Some(format!("Selected option hidden by preference. {}", choice.description.as_deref().unwrap_or_default())),
+                    true => Some(format!(
+                        "Selected option hidden by preference. {}",
+                        choice.description.as_deref().unwrap_or_default()
+                    )),
                     false => choice.description.clone(),
                 };
                 AxisOption {
@@ -230,10 +257,11 @@ impl PickerState {
                     special: matches!(choice.semantic, artisan_api::ChoiceSemantic::Special),
                     description,
                     advisory: choice.advisory.clone(),
-                    selected: choice.binding.selected(config),
+                    selected: choice.binding.selected(&effective),
                     apply: choice.apply(config),
                 }
-            }).collect())
+            })
+            .collect()
     }
 
     pub fn keyboard_axis_cursor(&self) -> Option<usize> {
