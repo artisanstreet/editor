@@ -1,5 +1,5 @@
-use crate::frame::glide::{CubicBezier, Glide, Transition};
-use crate::frame::menu::{self, Effect, Menu};
+use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
+use crate::ui::chrome::menu::{self, Effect, Menu};
 use crate::frame::projects::{Metrics, Section, pinned};
 use crate::frame::scramble::Rows;
 use crate::frame::tabs::Tabs;

@@ -1,4 +1,4 @@
-use crate::frame::card::{self, Surfaces as Palette, hex, outlined, radial_glow, rest_shadows};
+use crate::ui::chrome::card::{self, Surfaces as Palette, hex, outlined, radial_glow, rest_shadows};
 use crate::frame::sign_in::model::{Feedback, Link, Provider, View, page_of};
 use crate::frame::sign_in::{
     CODE_PAGE, EMAIL_PAGE, Event, PAGE, REVEAL, SWAP, SignIn, Slot, pattern,
@@ -811,7 +811,7 @@ pub fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element
                     .align(AlignItems::CENTER)
                     .justify(JustifyContent::CENTER)
                     .padding_insets(Insets {
-                        bottom: crate::shell::layout::TITLEBAR_HEIGHT,
+                        bottom: crate::ui::chrome::TITLEBAR_HEIGHT,
                         ..Insets::default()
                     })])
                 .child(card)
@@ -819,4 +819,3 @@ pub fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element
         )
         .build()
 }
-

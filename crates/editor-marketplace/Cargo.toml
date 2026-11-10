@@ -1,0 +1,57 @@
+[package]
+name = "editor-marketplace"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+test-support = ["editor-core/test-support", "editor-ui/test-support"]
+
+[dependencies]
+aqua = { workspace = true }
+aqua-core = { workspace = true }
+aqua-text = { workspace = true }
+aqua-ui = { workspace = true }
+artisan-api = { path = "../artisan-api", features = ["tls"] }
+editor-assets = { path = "../editor-assets" }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }
+tokio-util.workspace = true
+editor-core = { path = "../editor-core" }
+editor-ui = { path = "../editor-ui" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+allow_attributes_without_reason = "deny"
+undocumented_unsafe_blocks = "deny"
+str_to_string = "deny"
+missing_assert_message = "deny"
+unwrap_in_result = "deny"
+collapsible_if = "allow"
+collapsible_match = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+useless_conversion = "allow"
+needless_borrow = "allow"
+needless_borrows_for_generic_args = "allow"
+large_enum_variant = "allow"
+should_implement_trait = "allow"
+manual_clamp = "allow"
+manual_flatten = "allow"
+unnecessary_fold = "allow"
+unnecessary_unwrap = "allow"
+unnecessary_to_owned = "allow"
+unnecessary_result_map_or_else = "allow"
+let_and_return = "allow"
+derivable_impls = "allow"
+clone_on_copy = "allow"
+arc_with_non_send_sync = "allow"
+rc_buffer = "allow"

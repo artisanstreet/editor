@@ -8,6 +8,15 @@ members = [
     "crates/artisan-mentions",
     "crates/claude-ai-browser",
     "crates/editor-aqua",
+    "crates/editor-core",
+    "crates/editor-ui",
+    "crates/editor-sources",
+    "crates/editor-composer",
+    "crates/editor-conversation",
+    "crates/editor-sidebar",
+    "crates/editor-inspector",
+    "crates/editor-settings",
+    "crates/editor-marketplace",
     "crates/editor-assets",
     "crates/editor-audio",
     "crates/forge",
@@ -35,6 +44,18 @@ rust-version = "1.98.0"
 version = "0.0.0"
 
 [workspace.dependencies]
+aqua = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-protocol = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-text = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-ui = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-reactive = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-runtime = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-media = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-gpu-d3d11 = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-gpu-ref = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
+aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "29a3543ddc27e1fdd7365237abb8f9e93a3ccf55" }
 ropey = "=1.6.1"
 glam = "=0.34.1"
 color = "=0.3.3"

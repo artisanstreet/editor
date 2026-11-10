@@ -6,7 +6,7 @@ mod code_copy;
 mod color_copy_menu;
 #[path = "ui/hover_tooltip.rs"]
 mod hover_tooltip;
-#[path = "ui/inline_code_text.rs"]
+#[path = "../../editor-ui/tests/ui/inline_code_text.rs"]
 mod inline_code_text;
 #[path = "ui/popover.rs"]
 mod popover;
@@ -31,10 +31,10 @@ mod chat_bubble;
 #[path = "ui/media_frame.rs"]
 mod media_frame;
 
-#[path = "ui/solar/sample.rs"]
+#[path = "../../editor-ui/tests/ui/solar/sample.rs"]
 mod solar_sample;
 
-#[path = "ui/sky/sample.rs"]
+#[path = "../../editor-ui/tests/ui/sky/sample.rs"]
 mod sky_sample;
 
 #[path = "ui/pop_in_hover.rs"]

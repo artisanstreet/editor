@@ -1,5 +1,5 @@
 use crate::core::Core;
-use crate::frame::card::{self, INSET_RADIUS, Surfaces};
+use crate::ui::chrome::card::{self, INSET_RADIUS, Surfaces};
 use crate::inspector::{AgentCard, Inspector, InspectorAction, agent_card, render_agent_card};
 use crate::shell::context_meter::{ContextReading, ContextTone};
 use crate::ui::asset::source_asset_glyph;
@@ -230,7 +230,7 @@ fn subagent(
     emit: Rc<dyn Fn(InspectorAction)>,
 ) -> Element {
     let icon = agent.engine.map_or(AssetId::TABLER_BOT_ID, |engine| {
-        crate::sidebar::usage_view::engine_icon(theme, engine)
+        crate::ui::engine::engine_icon(theme, engine)
     });
     let color = match agent.status {
         Status::Running | Status::AwaitingUser => surfaces.ink,

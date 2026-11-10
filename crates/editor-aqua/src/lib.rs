@@ -1,19 +1,19 @@
 #[cfg(feature = "capture")]
 pub mod capture;
-pub mod composer;
-pub mod conversation;
-pub mod core;
+pub use editor_composer as composer;
+pub use editor_conversation as conversation;
+pub use editor_core as core;
 pub mod frame;
-pub mod inspector;
+pub use editor_inspector as inspector;
 pub mod logging;
-pub mod marketplace;
+pub use editor_marketplace as marketplace;
 #[cfg(feature = "qualification")]
 pub mod qualification;
-pub mod settings;
+pub use editor_settings as settings;
 pub mod shell;
-pub mod sidebar;
-pub mod sources;
-pub mod ui;
+pub use editor_sidebar as sidebar;
+pub use editor_sources as sources;
+pub use editor_ui as ui;
 
 mod launch;
 pub use launch::launch;

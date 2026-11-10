@@ -1,4 +1,4 @@
-pub const TITLEBAR_HEIGHT: f32 = 48.0;
+pub use crate::ui::chrome::TITLEBAR_HEIGHT;
 pub const COLUMN_WIDTH: f32 = 327.0;
 pub const COLUMN_MIN_WIDTH: f32 = 240.0;
 pub const CHAT_MIN_WIDTH: f32 = 864.0;

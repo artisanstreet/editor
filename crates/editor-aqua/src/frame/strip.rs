@@ -1,22 +1,16 @@
-use crate::core::HostData;
-use crate::frame::card::Surfaces;
+use crate::ui::chrome::card::Surfaces;
 use crate::frame::sidebar::{Command, Event};
 use crate::frame::tree::{PULSE_MS, inherited_label};
 use crate::sidebar::list::RowState;
-use crate::sidebar::project_mark::project_mark;
 use crate::ui::theme::ArtisanTheme;
-use crate::ui::theme::Oklch;
 use aqua::Style;
-use aqua::images::ImageHandle;
 use aqua::{Aqua, px};
 use aqua_core::scene::GpuiQuadPulse;
 use aqua_core::{CursorIcon, Insets, Role};
 use aqua_ui::AlignItems;
 use aqua_ui::element::Element;
-use artisan_api::ProjectId;
 use artisan_api::ThreadId;
 use std::rc::Rc;
-use std::sync::Arc;
 
 pub const BAR_HEIGHT: f32 = HEIGHT + 4.0;
 pub(super) const HEIGHT: f32 = 32.0;
@@ -24,39 +18,8 @@ const RADIUS: f32 = 8.0;
 const MIN_WIDTH: f32 = 96.0;
 const MAX_WIDTH: f32 = 720.0;
 const PAD: f32 = 12.0;
-const ICON: f32 = 16.0;
 
-pub struct Mark {
-    icon: Option<Arc<ImageHandle>>,
-    forge: Option<Option<String>>,
-}
-
-impl Mark {
-    #[must_use]
-    pub fn of(host: &HostData, project: &ProjectId) -> Self {
-        Self {
-            icon: host.project_icon(project),
-            forge: host
-                .repository(project)
-                .map(|repository| repository.host.clone()),
-        }
-    }
-
-    pub(crate) fn view(&self, tint: Oklch) -> Element {
-        Aqua::Box()
-            .styles([Aqua::Style()
-                .width(px(ICON))
-                .height(px(ICON))
-                .flex_shrink(0.0)])
-            .child(project_mark(
-                self.icon.clone(),
-                self.forge.as_ref().map(Option::as_deref),
-                ICON,
-                tint.to_reference_paint(),
-            ))
-            .build()
-    }
-}
+pub use crate::sidebar::project_mark::Mark;
 
 pub struct Tab {
     pub id: ThreadId,

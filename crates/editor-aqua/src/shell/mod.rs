@@ -1,11 +1,11 @@
 pub mod connection;
 pub mod context_meter;
 pub mod layout;
-pub mod menu_keys;
+pub use crate::ui::menu_keys;
 pub mod resource_preview;
 
 pub mod application;
-pub mod dialogs;
+pub use crate::ui::dialogs;
 pub mod entry;
 pub mod host;
 pub mod live_batch;
@@ -13,8 +13,8 @@ pub mod live_throttle;
 pub mod native_notifications;
 pub mod notifications;
 pub mod palette;
-pub mod preferences;
-pub mod rebuild_stats;
+pub use crate::ui::preferences;
+pub use crate::core::diagnostics::rebuild_stats;
 pub mod refresh;
 pub mod repository;
 pub mod root;

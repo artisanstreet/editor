@@ -1,7 +1,7 @@
 pub mod motion;
 pub mod outline;
 
-use crate::frame::card::{self, Edge};
+use crate::ui::chrome::card::{self, Edge};
 use crate::ui::theme::ArtisanTheme;
 use aqua::{Aqua, Style};
 use aqua_core::shape::{ShapeProgram, ShapeTransition};
