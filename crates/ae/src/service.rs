@@ -142,9 +142,25 @@ pub fn disable_autostart() -> Result<()> {
     Ok(())
 }
 
-/// Starts Forge and waits until it accepts connections. Returns its pid
-/// when it was started detached.
+fn operation_lock() -> Result<std::fs::File> {
+    let directory = data()?;
+    std::fs::create_dir_all(&directory)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(directory.join("service.lock"))?;
+    file.lock().context("lock Forge service operation")?;
+    Ok(file)
+}
+
 pub fn start() -> Result<Option<u32>> {
+    let _operation = operation_lock()?;
+    start_unlocked()
+}
+
+fn start_unlocked() -> Result<Option<u32>> {
     let address = address();
     if uses_systemd() {
         sys::run("systemctl", &["--user", "start", UNIT])?;
@@ -173,7 +189,6 @@ pub fn start() -> Result<Option<u32>> {
     }
     let pid = sys::spawn_detached(
         Command::new(&forge)
-            // A Nix shell's libraries would reach the engines' tools.
             .env_remove("LD_LIBRARY_PATH")
             .arg("--log")
             .arg(&log)
@@ -182,8 +197,7 @@ pub fn start() -> Result<Option<u32>> {
     )?;
     std::fs::write(pid_file()?, pid.to_string()).context("write forge.pid")?;
     if let Err(error) = wait_listening(address, || running_pid() == Some(pid)) {
-        // Best effort: the start failure is the error worth reporting.
-        stop().ok();
+        stop_unlocked().ok();
 
         return Err(error);
     }
@@ -229,8 +243,12 @@ fn recent_log() -> String {
     }
 }
 
-/// Stops Forge. Returns whether it was running.
 pub fn stop() -> Result<bool> {
+    let _operation = operation_lock()?;
+    stop_unlocked()
+}
+
+fn stop_unlocked() -> Result<bool> {
     if uses_systemd() {
         let was = is_running();
         sys::run("systemctl", &["--user", "stop", UNIT])?;
@@ -244,10 +262,9 @@ pub fn stop() -> Result<bool> {
     } else {
         sys::run("kill", &["-TERM", &pid.to_string()])?;
     }
-    // Wait for the process itself: a dying process loses its exe before the
-    // kernel closes its files, so it still holds the port for a while.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while process_exists(pid) {
+    let directory = data()?;
+    while process_exists(pid) || forge_http::lock_data_dir(&directory).is_err() {
         if std::time::Instant::now() >= deadline {
             bail!("Forge (pid {pid}) didn't stop within 30 seconds");
         }
@@ -258,6 +275,7 @@ pub fn stop() -> Result<bool> {
 }
 
 pub fn restart() -> Result<Option<u32>> {
+    let _operation = operation_lock()?;
     if uses_systemd() {
         sys::run("systemctl", &["--user", "restart", UNIT])?;
         wait_listening(address(), || {
@@ -265,8 +283,8 @@ pub fn restart() -> Result<Option<u32>> {
         })?;
         return Ok(None);
     }
-    stop()?;
-    start()
+    stop_unlocked()?;
+    start_unlocked()
 }
 
 pub fn is_running() -> bool {

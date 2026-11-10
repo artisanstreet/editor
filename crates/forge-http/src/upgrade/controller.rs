@@ -186,6 +186,10 @@ pub async fn serve(
     handoff: Option<PathBuf>,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
+    tokio::pin!(stop);
+    if futures::poll!(&mut stop).is_ready() {
+        return Ok(());
+    }
     let registry = Registry::open(&config.data_dir)?;
     let binary = std::env::current_exe()?.canonicalize()?;
     let Binding {
@@ -257,7 +261,6 @@ pub async fn serve(
     });
     backend.release();
     let mut connections = JoinSet::new();
-    tokio::pin!(stop);
     let replaced = loop {
         tokio::select! {
             ()=&mut stop=>break false,
@@ -276,9 +279,9 @@ pub async fn serve(
         }
     };
     drop(tcp);
-    drain(&service, replaced, &mut connections).await?;
     stop_token.cancel();
     maintenance_task.await?;
+    drain(&service, replaced, &mut connections).await?;
     control_task.await??;
     Ok(())
 }
