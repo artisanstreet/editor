@@ -592,6 +592,10 @@ fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
         .map(|tokens| ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", tokens.to_string()))
 }
 
+#[cfg(all(test, unix))]
+#[path = "../tests/claude/cancellation.rs"]
+mod cancellation_tests;
+
 #[cfg(test)]
 mod tests {
     use super::ClaudeDecoder;
