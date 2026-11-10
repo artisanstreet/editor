@@ -1,5 +1,3 @@
-# Tests state what must hold; an unwrap or panic there is the assertion.
-# Production code stays under `unwrap_used`, `expect_used` and `panic`.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
