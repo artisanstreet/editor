@@ -4,9 +4,9 @@ use crate::conversation::compaction::{CompactionFrame, CompactionPhase};
 use crate::conversation::content::SourceField;
 use crate::conversation::disclosure::RowDisclosure;
 use crate::conversation::fold::{Row, Slot};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::Element;
 use artisan_api::{Collection, CollectionRef, Item, ItemId, ModelSwitch, Question, Timestamp};
+use editor_ui::theme::ArtisanTheme;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -132,7 +132,8 @@ pub fn render(
                     theme,
                     |text, color, mono| resources.truncate(text, color, mono, theme),
                     Rc::clone(&dispatch),
-                ),
+                    || resources.source(entry, SourceField::Output, theme),
+                )?,
                 artisan_api::ItemKind::Agent { .. } => work::agent(
                     entry,
                     theme,
@@ -222,7 +223,8 @@ pub fn render(
                         theme,
                         |text, color, mono| resources.truncate(text, color, mono, theme),
                         Rc::clone(&dispatch),
-                    )
+                        || resources.source(entry, SourceField::Output, theme),
+                    )?
                 }
                 artisan_api::ItemKind::Plan { .. } => work::plan_entry(entry, theme),
                 artisan_api::ItemKind::Notice { .. } => notice::render(
