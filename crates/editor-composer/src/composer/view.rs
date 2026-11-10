@@ -3969,6 +3969,19 @@ pub fn model_menu(
         engine_light,
     } = frame;
     let engines = super::picker::offered_engines(host, current.as_ref().map(|config| config.engine));
+    let model_icon = picker.pane_config(host, current.clone()).map(|config| {
+        host.engines
+            .get(&config.engine)
+            .and_then(|status| {
+                status
+                    .models
+                    .iter()
+                    .find(|model| config.model.as_ref() == Some(&model.id))
+            })
+            .and_then(|model| model.lab.as_deref())
+            .and_then(lab_icon)
+            .unwrap_or_else(|| engine_icon(&theme, config.engine))
+    });
     let mut list = UiBox::new()
         .layout("column")
         .width(MODEL_SIDE_WIDTH)
@@ -3996,6 +4009,25 @@ pub fn model_menu(
                     }),
             );
         let aria = format!("{}: {}", item.label, item.value);
+        let mut value = UiBox::new()
+            .gap(6.0)
+            .style(Style::new().align(aqua_ui::AlignItems::CENTER));
+        if let Some(icon) = model_icon.filter(|_| target.is_none()) {
+            value = value.child(editor_ui::asset::source_asset_glyph(
+                icon,
+                16.0,
+                theme.colors.text.to_reference_paint(),
+            ));
+        }
+        let value = value
+            .child(medium(
+                &theme,
+                item.value.clone(),
+                14.0,
+                20.0,
+                theme.colors.text.to_reference_text_color(),
+            ))
+            .build();
         buttons = buttons.child(
             body.child(
                 UiBox::new()
@@ -4019,13 +4051,7 @@ pub fn model_menu(
                     ))
                     .build(),
             )
-            .child(medium(
-                &theme,
-                item.value.clone(),
-                14.0,
-                20.0,
-                theme.colors.text.to_reference_text_color(),
-            ))
+            .child(value)
             .on_activate(move || action(ComposerAction::SelectPane(target)))
             .build()
             .with_key(format!("composer-pane-{position}"))
