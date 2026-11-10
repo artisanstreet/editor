@@ -1,10 +1,3 @@
-//! Engine adapters.
-//!
-//! Each adapter maps one engine's wiring onto the item model in
-//! `artisan-api` (see `ARCHITECTURE.md`, "Engines and the item model").
-//! Decoding is a pure step (`feed(line) -> Result<Vec<EngineEvent>>`) separate from
-//! process I/O, so recorded transcripts test it directly.
-
 mod account;
 mod catalog;
 pub(crate) mod claude;
@@ -53,7 +46,6 @@ pub use usage::{UsageCache, has_usage_reader, read_usage};
 use artisan_api::EngineId;
 use std::sync::Arc;
 
-/// The adapter for an engine.
 #[must_use]
 pub fn harness(engine: EngineId) -> Arc<dyn Harness> {
     match engine {

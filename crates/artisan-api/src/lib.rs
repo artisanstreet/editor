@@ -1,9 +1,3 @@
-//! The vocabulary Forge and the Editor share.
-//!
-//! Everything here is plain data with serde. Forge owns every value; the
-//! Editor holds copies it receives from `GET` endpoints and the event stream
-//! and replaces them by id. See `ARCHITECTURE.md` for the protocol.
-
 mod agent_names;
 mod content;
 mod engine;
@@ -38,10 +32,8 @@ pub use transport::*;
 pub use tunnel::*;
 pub use reassembly::*;
 
-/// Milliseconds since the Unix epoch.
 pub type Timestamp = i64;
 
-/// The current time as a [`Timestamp`].
 #[must_use]
 pub fn now() -> Timestamp {
     std::time::SystemTime::now()
@@ -51,7 +43,6 @@ pub fn now() -> Timestamp {
         })
 }
 
-/// The wire-schema version both endpoints must support. Build hashes may differ.
 pub const PROTOCOL_VERSION: u32 = 7;
 
 mod collection;

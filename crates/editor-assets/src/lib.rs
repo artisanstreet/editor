@@ -1,20 +1,3 @@
-//! Sealed catalog of first-party, vendored visual assets.
-//!
-//! Every static SVG source used by the editor is embedded in this crate.
-//! Consumers resolve stable [`AssetId`]s to
-//! embedded `&'static str` source bytes and metadata without npm packages,
-//! Svelte components, browser runtimes, filesystem access, or any external
-//! loader: the only content this crate exposes is checked-in catalog data.
-//!
-//! [`AssetId`] seals an internal catalog index next to the stable string key.
-//! The single `catalog!` invocation below generates one associated constant
-//! per asset, the sorted [`ALL`] table, and the parallel
-//! [`AssetId::CONSTANTS`]; indices are validated against the id table during
-//! constant evaluation, so code outside this crate cannot construct an
-//! identifier that does not denote an entry. Dynamic strings reach an id only
-//! through [`lookup`] or `FromStr`, which validate before returning an
-//! indexed value.
-
 use core::fmt;
 use core::str::FromStr;
 
@@ -22,30 +5,13 @@ pub mod art;
 pub mod file_icons;
 pub mod fonts;
 
-/// Stable identifier for a vendored asset.
-///
-/// The string form is `<family>.<name>` (for example `tabler.check`). The internal index is assigned at
-/// compile time from the catalog and can never be invalid.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AssetId {
-    /// Position in [`ALL`], fixed by constant evaluation.
     index: usize,
-    /// Stable catalog key.
     id: &'static str,
 }
 
 impl AssetId {
-    /// Seals a catalog literal into an identifier, resolving its index during
-    /// constant evaluation.
-    ///
-    /// # Compile-time-only invariant
-    ///
-    /// This constructor is private and `const`, and the sole caller is the
-    /// `catalog!` expansion below, which passes string *literals*. An unknown
-    /// key therefore aborts compilation inside [`locate`]; the panic in
-    /// [`locate`] can never observe runtime or external input. Runtime strings
-    /// reach an id exclusively through [`lookup`] / `FromStr`, which validate
-    /// against the catalog first.
     const fn from_id(id: &'static str) -> Self {
         Self {
             index: locate(id),
@@ -53,14 +19,12 @@ impl AssetId {
         }
     }
 
-    /// Returns the stable catalog key.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         self.id
     }
 }
 
-/// Byte-wise `str` equality for const evaluation.
 const fn str_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
@@ -76,7 +40,6 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
-/// Whether `a` sorts strictly before `b`, bytewise like `str::cmp`.
 const fn str_lt(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     let mut i = 0;
@@ -89,8 +52,6 @@ const fn str_lt(a: &str, b: &str) -> bool {
     a.len() < b.len()
 }
 
-// `lookup` binary-searches the catalog: a row out of order would make its
-// asset, and others, silently unfindable, so the order fails the build.
 const _: () = {
     let mut i = 1;
     while i < CATALOG_IDS.len() {
@@ -102,14 +63,6 @@ const _: () = {
     }
 };
 
-/// Resolves a catalog key to its position in [`CATALOG_IDS`].
-///
-/// # Compile-time-only invariant
-///
-/// Reachable only from `AssetId::from_id`, which is private, `const`, and
-/// called only by the `catalog!` macro with `&'static str` literals. The
-/// panic below therefore fires during constant evaluation of a bad literal —
-/// a build failure — and can never be triggered by runtime or external input.
 #[expect(
     clippy::panic,
     reason = "evaluated at compile time: an unknown id fails the build"
@@ -139,27 +92,18 @@ impl FromStr for AssetId {
     }
 }
 
-/// Source family of a vendored asset.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Family {
-    /// First-party Artisan product artwork.
     Artisan,
-    /// Brand marks served through legacy `<img>` wrappers.
     Brand,
-    /// JetBrains-curated file icons (the svelte mark carries dual provenance).
     Jetbrains,
-    /// Lobe Icons marks carried as inline Svelte components upstream.
     Lobe,
-    /// Simple Icons path marks vendored by the legacy frontend.
     SimpleIcons,
-    /// Logos distributed through the svgl project.
     Svgl,
-    /// Tabler icon glyphs.
     Tabler,
 }
 
 impl Family {
-    /// All families ordered by their id prefixes.
     pub const ALL: [Self; 7] = [
         Self::Artisan,
         Self::Brand,
@@ -170,7 +114,6 @@ impl Family {
         Self::Tabler,
     ];
 
-    /// Returns the id prefix used by every asset of this family.
     #[must_use]
     pub const fn prefix(self) -> &'static str {
         match self {
@@ -191,41 +134,12 @@ impl fmt::Display for Family {
     }
 }
 
-/// How a vendored asset is presented natively.
-///
-/// This is catalog-owned rendering policy, deliberately independent of
-/// [`Asset::monochrome`], which stays the validator-derived artwork property
-/// (docs/ui/ASSETS.md §10). Legacy call sites carried a second, different
-/// predicate: `EngineMark.monochrome` / `RepositoryMark.monochrome` meant "a
-/// single-color logo that must invert with the theme". Artwork-mono agrees
-/// with that policy everywhere except the marks whose legacy call sites flag
-/// non-inverting while their artwork is single-paint, because alpha-mask
-/// tinting would flatten their authored brand colors. Exactly two such marks
-/// exist in this catalog and they override the default:
-///
-/// - `svgl.claude-ai` — Claude clay `#D97757`, served for engine `claude`
-///   and provider `anthropic`;
-/// - `svgl.deepseek` — `DeepSeek` blue `#4D6BFE`, served for provider
-///   `deepseek`.
-///
-/// Everything else follows the monochrome-derived default. Notably,
-/// currentColor artwork (`svgl.qwen`, `lobe.*`, `simple-icons.*`) stays
-/// [`Presentation::Tinted`]: painting with text color
-/// is the native equivalent of its theme-adaptive or chip-whitened legacy
-/// rendering, whereas full-color raster would pin the glyph to black.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Presentation {
     Tinted,
-    /// Authored-color rendering over the embedded bytes; nothing recolored.
     FullColor,
 }
 
-/// Resolves a catalog row's presentation: the monochrome-derived default,
-/// overridden by exactly the brand marks whose legacy call sites proved their
-/// authored single-hue colors must survive (see [`Presentation`]).
-///
-/// Key comparison goes through [`str_eq`] because string-literal match
-/// patterns are not yet allowed in const functions.
 const fn presentation_policy(id: &str, monochrome: bool) -> Presentation {
     if str_eq(id, "svgl.claude-ai") || str_eq(id, "svgl.deepseek") {
         Presentation::FullColor
@@ -236,32 +150,20 @@ const fn presentation_policy(id: &str, monochrome: bool) -> Presentation {
     }
 }
 
-/// One vendored SVG asset: metadata plus embedded source text.
 #[derive(Clone, Copy, Debug)]
 pub struct Asset {
-    /// Stable identifier, unique across [`ALL`].
     pub id: AssetId,
-    /// Source family.
     pub family: Family,
-    /// Root `viewBox` when the source declares one.
     pub view_box: Option<&'static str>,
-    /// Whether the artwork's paint derives from a single color (see
-    /// `docs/ui/ASSETS.md` §10 for the derivation rule).
     pub monochrome: bool,
-    /// Catalog-owned presentation route; see [`Presentation`] for the policy
-    /// and its evidenced exceptions to the monochrome default.
     pub presentation: Presentation,
-    /// Checked-in location relative to `crates/editor-assets/`.
     pub source_path: &'static str,
-    /// Embedded standalone SVG source, byte-identical to the checked-in file.
     pub source: &'static str,
 }
 
-/// Width and height parsed from an asset's `viewBox`.
 type Dimensions = (f32, f32);
 
 impl Asset {
-    /// Intrinsic catalog dimensions, parsed once rather than during painting.
     pub fn intrinsic_dimensions(self) -> Option<Dimensions> {
         static DIMENSIONS: std::sync::OnceLock<Box<[Option<Dimensions>]>> =
             std::sync::OnceLock::new();
@@ -287,21 +189,16 @@ impl Asset {
 
 macro_rules! catalog {
     ($(($const_name:ident, $id:literal, $family:expr, $view_box:expr, $monochrome:literal, $path:literal)),* $(,)?) => {
-        /// Stable id keys in catalog order; backs compile-time index sealing.
         const CATALOG_IDS: &[&str] = &[$($id),*];
 
         impl AssetId {
             $(
-                /// Catalog constant for this asset.
                 pub const $const_name: AssetId = AssetId::from_id($id);
             )*
 
-            /// The same ids as [`ALL`], spelled through the constants, in
-            /// catalog order; proves total constant/catalog coverage.
             pub const CONSTANTS: &[AssetId] = &[$(AssetId::$const_name),*];
         }
 
-        /// Every vendored asset, sorted by id so lookups can binary search.
         pub const ALL: &[Asset] = &[
             $(
                 Asset {
@@ -683,22 +580,14 @@ catalog! {
     (TABLER_ZOOM_OUT, "tabler.zoom-out", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/zoom-out.svg"),
 }
 
-/// An embedded license or attribution document.
 #[derive(Clone, Copy, Debug)]
 pub struct LicenseFile {
-    /// Path relative to `crates/editor-assets/`.
     pub path: &'static str,
-    /// Embedded document contents.
     pub contents: &'static str,
 }
 
-/// Failure returned when a string does not name a cataloged asset.
-///
-/// First-party by hand rather than through a derive crate so this catalog
-/// stays dependency-free.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnknownAsset {
-    /// The rejected identifier.
     pub id: String,
 }
 
@@ -710,7 +599,6 @@ impl fmt::Display for UnknownAsset {
 
 impl std::error::Error for UnknownAsset {}
 
-/// Embedded license and attribution material, ordered by path.
 pub const LICENSE_FILES: &[LicenseFile] = &[
     LicenseFile {
         path: "licenses/artisan-first-party-NOTES.md",
@@ -754,24 +642,11 @@ pub const LICENSE_FILES: &[LicenseFile] = &[
     },
 ];
 
-/// Returns the cataloged asset for `id`.
-///
-/// Infallible by construction: the index sealed inside [`AssetId`] is fixed
-/// during constant evaluation against this catalog, so this is a direct
-/// lookup with no failure mode and no invariant panic.
 #[must_use]
 pub const fn get(id: AssetId) -> &'static Asset {
     &ALL[id.index]
 }
 
-/// Resolves a dynamic string to its cataloged asset.
-///
-/// Deterministic: [`ALL`] is sorted by key (checked at compile time), so this is a
-/// plain binary search over the stable string keys.
-///
-/// # Errors
-///
-/// Returns [`UnknownAsset`] when `id` does not name a vendored asset.
 pub fn lookup(id: &str) -> Result<&'static Asset, UnknownAsset> {
     ALL.binary_search_by(|probe| probe.id.as_str().cmp(id))
         .map_or_else(
@@ -784,7 +659,6 @@ pub fn lookup(id: &str) -> Result<&'static Asset, UnknownAsset> {
         )
 }
 
-/// Returns the embedded license/attribution document at `path`.
 #[must_use]
 pub fn license(path: &str) -> Option<&'static LicenseFile> {
     LICENSE_FILES.iter().find(|file| file.path == path)

@@ -1,3 +1,1 @@
 * text=auto eol=lf
-modules/cli/src/entry.ts linguist-language=TypeScript
-modules/installer/src/entry.ts linguist-language=TypeScript

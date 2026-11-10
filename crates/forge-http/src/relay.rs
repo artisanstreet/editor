@@ -1,60 +1,22 @@
-//! Outbound Relay connector: Forge → Relay → Editor.
-//!
-//! The Forge holds one WebSocket to its Relay room and serves Noise
-//! channels as the responder (the opener is always the client/Editor).
-//! Admission is JWT + Ed25519 proof-of-possession; every channel runs the
-//! standard `Noise_XX` session (`contracts/e2e.md`), then mutual key
-//! confirmation binds the session to the Core identities: the initiator's
-//! grant JWT travels INSIDE its encrypted confirm, the Forge verifies that
-//! grant itself (Core JWKS) and takes ONLY the verified `cnf` key for the
-//! binding check. No static-key registry, no per-session publishing step,
-//! no Core cnf endpoint. Relay admission alone never authorizes execution:
-//! stored verified claims must also carry `forge:execute` before anything
-//! runs. Relay sees only opaque bodies.
-//!
-//! Flow control (`contracts/wire.md`): the connector acks every received
-//! Relay data frame (cumulative); senders that stall the window are
-//! dropped by Relay.
-//!
-//! Application protocol (see `docs/plans/ast-account-wire.md`): unary
-//! `TunnelRequest`/`TunnelResponse` calls plus event streaming. A
-//! `SUBSCRIBE` call opens a bounded server→client stream on its channel
-//! (backlog + live envelopes, `Reset` on lag, explicit `end`); closing
-//! the Relay channel cancels the stream. Streams run on their own
-//! channels with per-channel Noise sessions, so unary calls proceed
-//! while a stream is open.
-
 use anyhow::{Context, Result};
 use artisan_account::{ChannelCtx, ClientFrame, NoiseChannel, Phase, ServerFrame};
 use futures::{SinkExt as _, StreamExt as _};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// One live channel on the Relay connection.
 struct Channel {
     noise: NoiseChannel,
-    /// Verified in-confirm grant claims; `None` until confirmation.
-    /// Dispatch and streaming both require `forge:execute` + unexpired.
     claims: Option<artisan_account::GrantClaims>,
     account: String,
     machine: String,
 }
 
-/// Work finished off the socket loop, headed back to one channel.
 enum StreamMsg {
     Frame(Vec<u8>),
     End { reason: &'static str },
     Response(artisan_api::TunnelResponse),
 }
 
-/// Per-channel send window mirroring the Relay room's accounting
-/// (`room.ts`: at most 64 unacked frames AND 1 MiB unacked bytes per
-/// channel per direction). Sizes are the BASE64 STRING
-/// `frame.body.length` exactly as Relay counts them (4/3 expansion
-/// included) — never a guessed raw count. Overflow parks in a bounded
-/// per-channel queue and drains as forwarded cumulative acks slide the
-/// window. Queue overflow fails the channel (fail-closed) rather than
-/// overflowing Relay.
 struct SendWindow {
     sent_high: Option<u64>,
     acked_high: Option<u64>,
@@ -91,9 +53,6 @@ impl SendWindow {
             && self.unacked_bytes.saturating_add(body_len as u64) <= SEND_WINDOW_BYTES
     }
 
-    /// Strict FIFO: once anything parks, every later ciphertext parks
-    /// behind it even if it would fit the remaining window. Bypassing
-    /// would reorder Noise nonces (peer decrypt failure).
     fn should_park(&self, body_len: usize) -> bool {
         !self.parked.is_empty() || !self.has_space(body_len)
     }
@@ -104,11 +63,6 @@ impl SendWindow {
         self.unacked_bytes = self.unacked_bytes.saturating_add(body_len as u64);
     }
 
-    /// Release everything up to `ack_seq` (cumulative). Mirrors the room:
-    /// duplicates and ahead-of-sent acks are ignored. Releases exactly the
-    /// frames implied by the previous ack cursor (ack_seq+1 entries on the
-    /// first ack), bounded by the actual unacked queue — never fabricates
-    /// credit beyond what was sent.
     fn on_ack(&mut self, ack_seq: u64) {
         if self.acked_high.is_some_and(|acked| ack_seq <= acked) {
             return;
@@ -136,8 +90,6 @@ impl SendWindow {
 
 use artisan_api::Reassembly;
 
-/// One live tunneled event stream. Dropping it aborts the pump and the
-/// forwarder; the pump also ends on its own when the receiver closes.
 struct Stream {
     _pump: tokio_util::task::AbortOnDropHandle<()>,
     _forwarder: tokio_util::task::AbortOnDropHandle<()>,
@@ -162,12 +114,6 @@ fn b64u_decode(text: &str) -> Result<Vec<u8>> {
         .context("bad base64url body")
 }
 
-/// Serve Relay channels into the local Forge app until the socket closes.
-///
-/// `grant_jwt`/`grant_jti`/`cnf_secret`: fresh machine grant for admission
-/// (`aud=ast-relay`, `relay:connect`) and its proof key. `forge_cnf_secret`:
-/// the enrolled machine Ed25519 key that signs key confirmations. The
-/// caller refreshes grants by reconnecting (short TTLs by design).
 #[expect(
     clippy::too_many_arguments,
     reason = "one connection turn needs all of these; callers pass a config struct next"
@@ -270,7 +216,6 @@ async fn handle_server_text(
     stream_tx: &tokio::sync::mpsc::Sender<(String, StreamMsg)>,
 ) -> Result<()> {
     use tokio_tungstenite::tungstenite::Message as Ws;
-    // A frame this build does not know (a newer Relay) is skipped, never fatal.
     let frame = match serde_json::from_str(text)
         .map_err(anyhow::Error::from)
         .and_then(|value| artisan_account::read_server_frame(value).map_err(anyhow::Error::from))
@@ -316,7 +261,6 @@ async fn handle_server_text(
                 machine: machine.to_owned(),
                 channel: name.clone(),
             };
-            // Fresh Noise static per channel (pure DH randomness).
             let static_secret = fresh_static()?;
             let noise = NoiseChannel::responder(&static_secret, None, ctx)?;
             channels.insert(
@@ -333,9 +277,6 @@ async fn handle_server_text(
         }
         ServerFrame::Data(data) => {
             let name = data.channel.clone();
-            // Ack every received data frame first (cumulative), so the
-            // sender never stalls the window — even for unknown channels
-            // (Relay ignores acks for closed/foreign channels).
             send_ack(&name, data.seq, sink).await?;
             let expected = relay_recv_seq.get(&name).copied().unwrap_or(0);
             if data.seq != expected {
@@ -394,9 +335,6 @@ async fn handle_server_text(
             windows.remove(&closed.channel);
         }
         ServerFrame::Ack(ack) => {
-            // Relay forwards the recipient's cumulative ack to the
-            // original sender: slide our send window and drain parked
-            // frames. Stale acks for closed/foreign channels are ignored.
             if let Some(window) = windows.get_mut(&ack.channel) {
                 window.on_ack(ack.seq);
                 drain_parked(&ack.channel, windows, sink).await?;
@@ -406,8 +344,6 @@ async fn handle_server_text(
     Ok(())
 }
 
-/// Ends one channel: drops its state and tells the peer. Only a failed
-/// socket write is returned, since that ends the whole connection anyway.
 async fn close_channel(
     name: &str,
     reason: &str,
@@ -438,7 +374,6 @@ fn fresh_static() -> Result<[u8; 32]> {
     Ok(secret)
 }
 
-/// One inbound channel payload: handshake, confirm, or transport data.
 #[expect(
     clippy::too_many_arguments,
     reason = "one channel turn needs all of these; see serve_channel"
@@ -459,7 +394,6 @@ async fn handle_channel_bytes(
     let Some(channel) = channels.get_mut(name) else {
         anyhow::bail!("unknown channel");
     };
-    // Handshake bytes travel as data bodies until Split.
     if channel.noise.phase() == Phase::Handshake {
         channel.noise.receive_handshake_message(raw)?;
         let mut reply = Vec::new();
@@ -468,7 +402,6 @@ async fn handle_channel_bytes(
         }
         return Ok(());
     }
-    // Key confirmation carries the initiator grant JWT.
     if channel.noise.phase() == Phase::Confirm {
         let confirm = channel.noise.receive_initiator_confirm(raw)?;
         let jwt = std::str::from_utf8(&confirm.jwt).context("grant is not text")?;
@@ -483,7 +416,6 @@ async fn handle_channel_bytes(
         send_data(name, &reply, windows, sink).await?;
         return Ok(());
     }
-    // Transport data: requires a stored execution-capable grant.
     let plaintext = channel.noise.receive_data(raw)?;
     let Some(claims) = channel.claims.as_ref() else {
         anyhow::bail!("no verified grant on this channel");
@@ -494,7 +426,6 @@ async fn handle_channel_bytes(
     if claims.exp <= now_sec() {
         anyhow::bail!("grant expired mid-channel");
     }
-    // Chunked transfers reassemble here (bounded per transfer + per conn).
     if let Ok(chunk) = serde_json::from_slice::<artisan_api::TunnelChunk>(&plaintext) {
         if let Some(reassembled) = reassembly.feed(name, &chunk)? {
             dispatch_app_bytes(
@@ -567,8 +498,6 @@ async fn dispatch_app_bytes(
                 send_response(name, &response, channels, windows, sink).await?;
                 return Ok(());
             };
-            // Off the socket loop: a slow route must not stall acks, pings
-            // or any other channel.
             let router = crate::routes::router(app.clone());
             let tx = stream_tx.clone();
             let name = name.to_owned();
@@ -581,7 +510,6 @@ async fn dispatch_app_bytes(
     Ok(())
 }
 
-/// Start a bounded event stream on this channel.
 #[expect(
     clippy::too_many_arguments,
     reason = "subscribe fans out to the pump; see serve_channel"
@@ -614,7 +542,6 @@ async fn subscribe(
     let (sender, mut receiver) =
         tokio::sync::mpsc::channel::<artisan_api::Envelope>(artisan_api::STREAM_QUEUE_ENVELOPES);
     let pump_app = app.clone();
-    // The stream id IS the channel (one stream per channel, v1).
     let response = artisan_api::TunnelResponse::ok(
         &request.id,
         serde_json::json!({"$stream": {"stream": stream_id}}),
@@ -626,10 +553,6 @@ async fn subscribe(
             .ok();
     });
     let pump = tokio_util::task::AbortOnDropHandle::new(pump);
-    // Forward envelopes from the pump queue to the channel as $event frames.
-    // Ends with an explicit end marker; dropping the Stream aborts both
-    // tasks (cancel on channel close), which ends the pump via its closed
-    // receiver.
     let tx = stream_tx.clone();
     let name_owned = name.to_owned();
     let forwarder = tokio::spawn(async move {
@@ -660,18 +583,12 @@ async fn subscribe(
     Ok(())
 }
 
-/// Unique transfer names per chunked payload: responses and stream
-/// envelopes share one Reassembly namespace per channel, so a constant
-/// transfer name would collide a second large payload with the drained
-/// state of the first. A process-wide counter keeps every batch distinct.
 fn next_transfer_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static IDS: AtomicU64 = AtomicU64::new(1);
     IDS.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Work that finished off the socket loop, sent back on its channel. A
-/// channel closed meanwhile just drops it.
 async fn handle_stream_msg(
     name: &str,
     msg: StreamMsg,
@@ -712,7 +629,6 @@ async fn send_response(
     .await
 }
 
-/// Seals one application payload, chunked when it exceeds the plaintext budget.
 async fn send_payload(
     name: &str,
     bytes: &[u8],
@@ -736,13 +652,6 @@ async fn send_payload(
     Ok(())
 }
 
-/// Send one Relay data frame, windowed. Bodies that arrive while the
-/// window is full park in a bounded per-channel queue; queue overflow
-/// fails the channel (fail-closed) rather than overflowing the Relay.
-/// Once anything parks, EVERY later ciphertext parks behind it (strict
-/// FIFO) even if it would fit the remaining window — otherwise a small
-/// final chunk could bypass parked full-size ciphertexts and reorder the
-/// Noise nonces (decrypt failure on the peer).
 async fn send_data(
     name: &str,
     raw: &[u8],
@@ -783,7 +692,6 @@ async fn send_frame(name: &str, seq: u64, body: &str, sink: &mut WsSink) -> Resu
     Ok(())
 }
 
-/// Drain parked frames while the window has space (called after an ack).
 async fn drain_parked(
     name: &str,
     windows: &mut HashMap<String, SendWindow>,
@@ -845,7 +753,6 @@ async fn dispatch_request(
         "DELETE" => axum::http::Method::DELETE,
         _ => return artisan_api::TunnelResponse::error(&request.id, 400, "bad tunneled method"),
     };
-    // The event stream never ends, so a unary call to it would never answer.
     if request.path == "/events" || request.path.starts_with("/events?") {
         return artisan_api::TunnelResponse::error(
             &request.id,
@@ -864,8 +771,6 @@ async fn dispatch_request(
     let Ok(mut http_request) = http_request else {
         return artisan_api::TunnelResponse::error(&request.id, 400, "bad tunneled call");
     };
-    // Grant-based authorization: verified at channel confirmation, carried
-    // per request (the direct path keeps using device certificates).
     http_request
         .extensions_mut()
         .insert(crate::routes::TunnelAuth {
@@ -978,8 +883,6 @@ mod tests {
     fn editor_grant(issuer: &ed25519_dalek::SigningKey, cnf_secret: &[u8; 32]) -> String {
         use base64::Engine as _;
         use ed25519_dalek::Signer as _;
-        // Valid *now*: the verifier checks iat/exp against the real clock
-        // with TTL ≤ 300 s.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(1_700_000_100, |elapsed| elapsed.as_secs().cast_signed());
@@ -1013,14 +916,9 @@ mod tests {
         )
     }
 
-    /// Full journey against a stub Relay: admission, Noise handshake,
-    /// JWT-in-confirm verification, unary dispatch, acks, and an event
-    /// stream — with concurrency between stream and unary calls.
     #[expect(clippy::too_many_lines, reason = "one stub-relay journey step by step")]
     #[tokio::test]
     async fn tunneled_state_unary_and_stream_against_stub_relay() {
-        // Bounded reads everywhere: a stalled peer fails fast instead of
-        // hanging the suite (regression guard for the ~3min idle hang).
         async fn recv_text(
             source: &mut futures::stream::SplitStream<
                 tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
@@ -1060,7 +958,6 @@ mod tests {
                           "use": "sig", "alg": "EdDSA"}],
             }))
             .await;
-        // Forge side keys: machine grant cnf + enrolled confirm key.
         let forge_cnf = [0x44_u8; 32];
         let editor_cnf = [0x33_u8; 32];
         let editor_noise = [0x11_u8; 32];
@@ -1069,18 +966,15 @@ mod tests {
             .to_bytes();
         let (grant_jwt, grant_jti) = machine_grant(&issuer_key, &[0x45_u8; 32]);
 
-        // Local Forge app under test: state route only (dispatch path).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let ws_url = format!("ws://{address}/v1/route/x/y");
 
-        // Stub Relay: verify admission, then drive one channel as the room.
         let stub = tokio::spawn(async move {
             let stream = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
                 .await
                 .unwrap();
             let (mut sink, mut source) = stream.split();
-            // Admission.
             let hello = recv_text(&mut source).await;
             let hello: artisan_account::ClientFrame = serde_json::from_str(&hello).unwrap();
             let grant = match hello {
@@ -1157,7 +1051,6 @@ mod tests {
             )
             .await;
 
-            // Noise XX as initiator (client side), no static pinning.
             let mut init = NoiseChannel::initiator(&editor_noise, None, ctx("ch1")).unwrap();
             let mut relay_seq = 0_u64;
             let mut send_data = async |sink: &mut futures::stream::SplitSink<_, Ws>,
@@ -1178,7 +1071,6 @@ mod tests {
                 loop {
                     let text = recv_text(&mut source).await;
                     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    // Acks are assertions, not protocol steps here.
                     if value.get("type").and_then(|t| t.as_str()) == Some("ack") {
                         let ack: artisan_account::ClientFrame =
                             serde_json::from_value(value).unwrap();
@@ -1197,7 +1089,6 @@ mod tests {
                 }
             };
 
-            // m1 → m2 → m3.
             let mut m1 = Vec::new();
             init.next_handshake_message(&mut m1).unwrap();
             send_data(&mut sink, m1).await;
@@ -1216,15 +1107,11 @@ mod tests {
             let mut m3 = Vec::new();
             init.next_handshake_message(&mut m3).unwrap();
             send_data(&mut sink, m3).await;
-            // Responder sends exactly one handshake message (m2); m3
-            // completes its handshake with no further reply.
-            // Initiator confirm carrying the editor grant JWT.
             let grant = editor_grant(&issuer_key, &editor_cnf);
             let c1 = init
                 .emit_initiator_confirm(&editor_cnf, grant.as_bytes())
                 .unwrap();
             send_data(&mut sink, c1).await;
-            // Responder confirm; verify against the Forge enrolled key.
             let c2 = match next_server_frame().await {
                 ServerFrame::Data(data) => b64u_decode(&data.body).unwrap(),
                 other @ (ServerFrame::Challenge(_)
@@ -1240,7 +1127,6 @@ mod tests {
                 .unwrap();
             assert_eq!(init.phase(), artisan_account::Phase::Open);
 
-            // Unary call through the tunnel (real route on the test app).
             let request = artisan_api::TunnelRequest {
                 id: "r1".into(),
                 method: "GET".into(),
@@ -1268,8 +1154,6 @@ mod tests {
         });
 
         let app = test_app();
-        // Bounded whole-journey timeout: any stall fails fast with a log
-        // instead of hanging the suite.
         let serve = tokio::spawn(serve_channel(
             ws_url,
             grant_jwt,
@@ -1288,7 +1172,6 @@ mod tests {
 
     fn test_app() -> crate::routes::App {
         let dir = tempfile::tempdir().unwrap();
-        // Leak the tempdir: the hub owns its data for the test lifetime.
         let dir = Box::leak(Box::new(dir)).path().to_owned();
         let store = forge_store::Store::open(&dir).unwrap();
         let engines = forge_engines::Engines::new(&dir);
@@ -1305,23 +1188,14 @@ mod tests {
 
     #[test]
     fn parked_full_chunks_hold_back_a_fitting_final_chunk() {
-        // Regression: once full-size ciphertexts park, a later small final
-        // chunk must park behind them (strict FIFO) — never bypass them
-        // and reorder Noise nonces.
         let mut window = SendWindow::new();
-        // Fill the byte window with max-size bodies without hitting the
-        // frame cap: 64 frames would trip first, so use few large bodies.
         let big = "x".repeat(300_000);
         window.noted_sent(0, big.len());
         window.noted_sent(1, big.len());
         window.noted_sent(2, big.len());
-        // ~900 KiB unacked: a further ~150 KiB body no longer fits the
-        // 1 MiB cap and must park.
         let full = "y".repeat(150_000);
         assert!(!window.has_space(full.len()));
         window.parked.push_back(full.clone());
-        // A small final chunk WOULD fit the remaining bytes, but must still
-        // park behind the older ciphertext.
         let small = "z".repeat(100);
         assert!(window.has_space(small.len()));
         assert!(
@@ -1336,9 +1210,6 @@ mod tests {
 
     #[test]
     fn first_cumulative_ack_releases_exactly_what_was_sent() {
-        // Regression: the first cumulative ack (acked_high None) must
-        // release exactly ack_seq+1 entries, bounded by the queue — never
-        // jump acked_high to ack_seq after popping a single size.
         let mut window = SendWindow::new();
         window.noted_sent(0, 100);
         window.noted_sent(1, 100);
@@ -1351,7 +1222,6 @@ mod tests {
         assert_eq!(window.acked_high, Some(2));
         assert!(window.sizes.is_empty());
         assert_eq!(window.unacked_bytes, 0);
-        // Duplicate acks are ignored; ahead-of-sent acks are ignored.
         window.on_ack(2);
         assert_eq!(window.acked_high, Some(2));
         window.on_ack(9);
