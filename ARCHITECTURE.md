@@ -28,15 +28,17 @@ forge
 editor
   editor-assets        vendored icons, fonts, artwork and application resources
   editor-audio         audio playback
+  editor-core          paired hosts, Forge clients, connection and application state
+  editor-ui            theme, components, text editing, markdown and media
+  editor-sources       stored source viewers
+  editor-sidebar       projects, thread inbox, history and host switcher
+  editor-composer      drafts, attachments, model picker, send and steer
+  editor-conversation  transcript window, viewport and prepared bodies
+  editor-inspector     shells, agents, changed files, context and usage
+  editor-settings      preferences, engines, skills, MCP, account and Forges
+  editor-marketplace   skill discovery and installation
   editor-aqua          native Windows application, Aqua rendering and input
-    core               paired hosts, Forge clients, connection and application state
-    ui                 theme, components, text editing, markdown and media
-    sources            stored source viewers
-    sidebar            projects, thread inbox, history and host switcher
-    composer           drafts, attachments, model picker, send and steer
-    conversation       transcript window, viewport and prepared bodies
-    inspector          shells, agents, changed files, context and usage
-    settings           preferences, engines, skills, MCP, account and Forges
+    frame              navigation, overview, project tree and application chrome
     shell              window, application event routing and section layout
 ```
 
@@ -100,7 +102,7 @@ takes the next seq in the writer thread and is published in commit order.
 - `GET /threads/:id/work?after&before&limit` → the work in a span, newest
   first, for a work section that is open.
 
-The Editor's connection (`editor-aqua/src/core/connection.rs`) is a plain state
+The Editor's connection (`editor-core/src/core/connection.rs`) is a plain state
 enum: connecting → live → offline → connecting, resuming from
 its last seq after any drop. `HostData` holds what that Forge sent;
 sections read it and subscribe to `HostEvent`.
