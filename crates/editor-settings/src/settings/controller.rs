@@ -464,6 +464,14 @@ impl SettingsController {
     }
 
     pub fn save_prompt(&mut self, core: &Core) {
+        self.submit_prompt(core, None);
+    }
+
+    pub fn resolve_prompt(&mut self, core: &Core, resolution: artisan_api::ResolvePrompt) {
+        self.submit_prompt(core, Some(resolution));
+    }
+
+    fn submit_prompt(&mut self, core: &Core, resolution: Option<artisan_api::ResolvePrompt>) {
         if core.active_host().map(|host| host.instance()) != self.active_instance
             || core.active_host().map(|host| &host.id.0) != self.prompt.host.as_ref()
         {
@@ -485,10 +493,11 @@ impl SettingsController {
         self.tasks.retain(|task| !task.is_finished());
         self.tasks.push(tokio_util::task::AbortOnDropHandle::new(
             runtime::runtime().spawn(async move {
-                let result = client
-                    .save_global_prompt(&request.save)
-                    .await
-                    .map_err(|error| format!("{error:#}"));
+                let result = match resolution {
+                    Some(resolution) => client.resolve_global_prompt(&resolution).await,
+                    None => client.save_global_prompt(&request.save).await,
+                }
+                .map_err(|error| format!("{error:#}"));
                 let _ = sender
                     .send(HostCompletion {
                         host: id,
