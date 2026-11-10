@@ -17,6 +17,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::{Backend, Events, Refusal, Request, drive};
+#[path = "../../tests/claudeai/cancellation.rs"]
+mod cancellation;
 use crate::{EngineEvent, Input, Launch, Outcome, RunIo, Turn, UserInput};
 
 /// One completion claude.ai answers with.

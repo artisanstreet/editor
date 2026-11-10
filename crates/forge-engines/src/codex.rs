@@ -222,6 +222,7 @@ impl Run {
 
     async fn drive(&mut self, turn: &Turn) -> Result<Outcome> {
         let mut inbox_open = true;
+        let mut interrupt_sent = false;
         let mut deadline: Option<Instant> = None;
         loop {
             tokio::select! {
@@ -256,6 +257,12 @@ impl Run {
                         }
                     }
                     self.pump(turn)?;
+                    if self.cancelling && !interrupt_sent {
+                        interrupt_sent = self.interrupt()?;
+                        if !interrupt_sent && self.idle() {
+                            return Ok(Outcome::cancelled());
+                        }
+                    }
                     if self.idle()
                         && self.queued.is_empty()
                         && !self.nudge
@@ -273,21 +280,35 @@ impl Run {
                 },
                 () = self.io.cancel.cancelled(), if !self.cancelling => {
                     self.cancelling = true;
-                    let (Some(thread), Some(turn_id)) = (self.decoder.thread(), self.decoder.active_turn()) else {
+                    interrupt_sent = self.interrupt()?;
+                    if !interrupt_sent && self.idle() {
                         return Ok(Outcome::cancelled());
-                    };
-                    let params = json!({ "threadId": thread, "turnId": turn_id });
-                    self.decoder.request("turn/interrupt", params);
-                    self.flush()?;
+                    }
                     deadline = Some(Instant::now() + INTERRUPT_GRACE);
                 }
                 () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
-                    tracing::warn!(thread = %turn.thread_id, "Codex did not stop after an interrupt; later runs use a fresh app-server");
+                    if let Some(thread) = self.decoder.thread() {
+                        self.decoder.request("thread/unsubscribe", json!({ "threadId": thread }));
+                        self.flush()?;
+                    }
                     self.conn.retire();
-                    return Ok(Outcome::cancelled());
+                    return Err(anyhow!("Codex did not confirm the turn stopped after an interrupt; requested thread unload and retired the server. Underlying work may still be running."));
                 }
             }
         }
+    }
+
+    fn interrupt(&mut self) -> Result<bool> {
+        let (Some(thread), Some(turn_id)) = (self.decoder.thread(), self.decoder.active_turn())
+        else {
+            return Ok(false);
+        };
+        self.decoder.request(
+            "turn/interrupt",
+            json!({ "threadId": thread, "turnId": turn_id }),
+        );
+        self.flush()?;
+        Ok(true)
     }
 
     /// No turn running and nothing on its way to Codex.

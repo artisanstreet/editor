@@ -10,6 +10,8 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "../../tests/codex/routing.rs"]
 mod activity_routing;
+#[path = "../../tests/codex/cancellation.rs"]
+mod cancellation;
 
 /// Answers each turn with "reply on <thread> to <text>" after a short delay,
 /// so turns of different threads overlap ("slow" waits longer). A turn whose

@@ -377,7 +377,7 @@ async fn execute(
         vec![turn.cwd.clone(), hub.data_dir().to_path_buf()],
     );
     // Everything the adapter logs names the thread and run it belongs to.
-    let outcome = tracing::Instrument::instrument(
+    let adapter_outcome = tracing::Instrument::instrument(
         harness.run(
             turn,
             RunIo {
@@ -388,10 +388,11 @@ async fn execute(
         ),
         tracing::warn_span!("run", thread = %run.thread_id, run = %run.id, %engine),
     );
-    tokio::pin!(outcome);
+    tokio::pin!(adapter_outcome);
 
     items.initial = Some((initial_ack, initial_ids));
     let mut forwarding_done = false;
+    let mut adapter_finished = false;
     let outcome = loop {
         tokio::select! {
             biased;
@@ -410,7 +411,8 @@ async fn execute(
                 }
             },
             () = &mut forwarding, if !forwarding_done => { forwarding_done = true; },
-            outcome = &mut outcome => {
+            outcome = &mut adapter_outcome => {
+                adapter_finished = true;
                 break outcome;
             }
             () = disk.due() => {
@@ -421,9 +423,32 @@ async fn execute(
         }
     };
     cancel.cancel();
+    let mut outcome = outcome;
+    if !adapter_finished {
+        let deadline = tokio::time::sleep(Duration::from_secs(45));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                stopped = &mut adapter_outcome => {
+                    if stopped.status == RunStatus::Failed && outcome.status != RunStatus::Failed {
+                        outcome = stopped;
+                    }
+                    break;
+                }
+                Some(event) = reports.recv() => {
+                    if let Err(error) = apply(hub, run, items, event).await {
+                        outcome = Outcome::failed(format!("persist engine event during cancellation: {error:#}"));
+                    }
+                }
+                () = &mut deadline => {
+                    outcome = Outcome::failed("The engine did not confirm it stopped within 45 seconds; underlying work may still be running.".to_owned());
+                    break;
+                }
+            }
+        }
+    }
     // Preserve acknowledgments already published before shutdown/cancellation.
     // The bounded drain also prevents a faulty detached producer delaying teardown.
-    let mut outcome = outcome;
     for _ in 0..256 {
         let Ok(event) = reports.try_recv() else { break };
         if let Err(error) = apply(hub, run, items, event).await {

@@ -351,7 +351,9 @@ async fn drive_turn(
         let started = tokio::select! {
             started = backend.complete(&conversation, &request) => started,
             () = io.cancel.cancelled() => {
-                stop(backend, &conversation).await.ok();
+                if let Err(error) = stop(backend, &conversation).await {
+                    return Outcome::failed(format!("Could not stop claude.ai completion: {error:#}"));
+                }
                 return Outcome::cancelled();
             },
         };
@@ -384,6 +386,11 @@ async fn drive_turn(
         if !matches!(read, Read::Ended) {
             let stopped = stop(backend, &conversation).await;
             if matches!(read, Read::Cancelled) {
+                if let Err(error) = stopped {
+                    return Outcome::failed(format!(
+                        "Could not stop claude.ai completion: {error:#}"
+                    ));
+                }
                 return Outcome::cancelled();
             }
             if let Err(error) = stopped {
