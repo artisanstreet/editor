@@ -237,3 +237,7 @@ fn a_local_build_installs_with_its_version() {
         "0.5.0-dev+abc1234"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[path = "ae/release-feed.rs"]
+mod release_feed;

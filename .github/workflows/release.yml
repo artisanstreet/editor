@@ -1,0 +1,250 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: 'master for nightly, or a stable vMAJOR.MINOR.PATCH tag'
+        default: master
+        required: true
+        type: string
+      dry_run:
+        description: Build and validate without signing or publishing
+        default: true
+        type: boolean
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  select:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.select.outputs.sha }}
+      version: ${{ steps.select.outputs.version }}
+      tag: ${{ steps.select.outputs.tag }}
+      skip: ${{ steps.select.outputs.skip }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+      - id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ github.event_name == 'push' && github.ref_name || inputs.release_ref || 'master' }}
+          ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
+        run: |
+          python3 src/release.py key > /dev/null
+          python3 - <<'PY'
+          import datetime
+          import os
+          from src.release import version_for, run
+          reference = os.environ['RELEASE_REF']
+          version_for(reference, '0' * 40, '20000101000000')
+          sha = run('git', 'rev-parse', f'{reference}^{{commit}}')
+          run('git', 'merge-base', '--is-ancestor', sha, 'origin/master')
+          version, tag = version_for(reference, sha, datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S'))
+          skip = False
+          if tag == 'nightly':
+              refs = run('git', 'ls-remote', 'origin', 'refs/tags/nightly').split()
+              skip = bool(refs) and refs[0] == sha
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'sha={sha}\nversion={version}\ntag={tag}\nskip={str(skip).lower()}\n')
+          PY
+          sha="$(git rev-parse "$RELEASE_REF^{commit}")"
+          python3 src/release.py gate --repository "$GITHUB_REPOSITORY" --sha "$sha"
+  build:
+    needs: select
+    if: needs.select.outputs.skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            os: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            os: macos
+            arch: aarch64
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            os: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - runner: windows-11-arm
+            os: windows
+            arch: aarch64
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_VERSION: ${{ needs.select.outputs.version }}
+      EDITOR_COMMIT: ${{ needs.select.outputs.sha }}
+      ARTISAN_COMMIT: ${{ needs.select.outputs.sha }}
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-cpu=x86-64-v3 -C target-feature=+crt-static
+      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
+      CARGO_BUILD_JOBS: 2
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          restore-keys: release-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
+      - name: Prepare the native build
+        run: |
+          key="$(python3 src/release.py key)"
+          echo "ARTISAN_RELEASE_PUBLIC_KEY_HEX=$key" >> "$GITHUB_ENV"
+          python3 src/release.py stamp --version "$RELEASE_VERSION"
+          rustup target add "$RELEASE_TARGET"
+          rustup show
+      - name: Build native Forge and installer
+        run: cargo build --locked --release --target "$RELEASE_TARGET" -p ae -p forge
+      - name: Check the installer version contract
+        run: |
+          suffix=""
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          actual="$("target/$RELEASE_TARGET/release/ae$suffix" --version)"
+          [[ "$actual" == "ae $RELEASE_VERSION ($ARTISAN_COMMIT, $RELEASE_TARGET)" ]]
+      - name: Package native Forge and installer
+        env:
+          RELEASE_OS: ${{ matrix.os }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          python3 src/release.py package --binaries "target/$RELEASE_TARGET/release" --output dist --app ae --os "$RELEASE_OS" --arch "$RELEASE_ARCH" --version "$RELEASE_VERSION"
+          python3 src/release.py package --binaries "target/$RELEASE_TARGET/release" --output dist --app forge --os "$RELEASE_OS" --arch "$RELEASE_ARCH" --version "$RELEASE_VERSION"
+      - name: Locate Windows shader compilers
+        if: matrix.os == 'windows' && matrix.arch == 'x86_64'
+        shell: pwsh
+        run: |
+          $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Directory | Sort-Object Name -Descending | Where-Object { (Test-Path (Join-Path $_.FullName 'x64\dxc.exe')) -and (Test-Path (Join-Path $_.FullName 'x64\fxc.exe')) } | Select-Object -First 1
+          if (-not $sdk) { throw 'Windows SDK shader compilers are unavailable' }
+          "AQUA_DXC=$(Join-Path $sdk.FullName 'x64\dxc.exe')" >> $env:GITHUB_ENV
+          "AQUA_FXC=$(Join-Path $sdk.FullName 'x64\fxc.exe')" >> $env:GITHUB_ENV
+      - name: Build and package the Windows Editor
+        if: matrix.os == 'windows' && matrix.arch == 'x86_64'
+        run: |
+          cargo build --locked --release --target "$RELEASE_TARGET" -p editor-aqua --bin editor-aqua
+          python3 src/release.py package --binaries "target/$RELEASE_TARGET/release" --output dist --app editor --os windows --arch x86_64 --version "$RELEASE_VERSION"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+  assemble:
+    needs: [select, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: release-*
+          path: downloads
+      - name: Validate and assemble the complete release
+        env:
+          RELEASE_VERSION: ${{ needs.select.outputs.version }}
+          RELEASE_SHA: ${{ needs.select.outputs.sha }}
+        run: python3 src/release.py assemble --source downloads --output dist --version "$RELEASE_VERSION" --sha "$RELEASE_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-complete-unsigned
+          path: dist/
+          if-no-files-found: error
+  publish:
+    needs: [select, assemble]
+    environment: release
+    if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.select.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-complete-unsigned
+          path: dist
+      - name: Recheck exact-SHA CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.select.outputs.sha }}
+        run: python3 src/release.py gate --repository "$GITHUB_REPOSITORY" --sha "$RELEASE_SHA"
+      - name: Sign and verify the manifest
+        env:
+          ARTISAN_RELEASE_SIGNING_KEY_PEM: ${{ secrets.ARTISAN_RELEASE_SIGNING_KEY_PEM }}
+          ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
+        run: python3 src/release.py sign --output dist
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ secrets.ARTISAN_RELEASE_GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.select.outputs.tag }}
+          RELEASE_SHA: ${{ needs.select.outputs.sha }}
+          RELEASE_VERSION: ${{ needs.select.outputs.version }}
+          ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
+        run: |
+          test -n "$GH_TOKEN"
+          if [[ "$RELEASE_TAG" == nightly ]]; then
+            immutable="nightly-$RELEASE_SHA"
+            if gh release view "$immutable" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > immutable-draft; then
+              if [[ "$(cat immutable-draft)" == true ]]; then
+                gh release upload "$immutable" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+                gh release edit "$immutable" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+              fi
+            else
+              gh release create "$immutable" dist/* --repo "$GITHUB_REPOSITORY" --target "$RELEASE_SHA" --prerelease --latest=false --draft --title "Artisan nightly $RELEASE_VERSION" --notes "Source commit: $RELEASE_SHA"
+              gh release edit "$immutable" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+            fi
+            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$immutable" --jq .sha)"
+            [[ "$actual" == "$RELEASE_SHA" ]]
+            gh release download "$immutable" --repo "$GITHUB_REPOSITORY" --dir immutable-release
+            python3 src/release.py verify --output immutable-release --sha "$RELEASE_SHA"
+            if ! gh release view nightly --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              gh release create nightly --repo "$GITHUB_REPOSITORY" --target "$RELEASE_SHA" --prerelease --latest=false --draft --title 'Artisan nightly' --notes 'Nightly builds from successful master CI.'
+            fi
+            gh release upload nightly immutable-release/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit nightly --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" -f sha="$RELEASE_SHA" -F force=true
+          else
+            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
+            [[ "$actual" == "$RELEASE_SHA" ]]
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > existing-draft; then
+              [[ "$(cat existing-draft)" == true ]]
+              gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+            else
+              gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Artisan $RELEASE_VERSION" --generate-notes
+            fi
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi

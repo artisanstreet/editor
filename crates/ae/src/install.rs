@@ -171,7 +171,7 @@ pub fn install(args: &InstallArgs) -> Result<()> {
         sys::remove(&file)?;
     }
     legacy::migrate(&here)?;
-    install_here(&runtime, &release, &here)?;
+    install_here(&runtime, &release, &source, &here)?;
     if let Place::Wsl(distro) = &forge {
         install_in_wsl(&runtime, &release, &source, distro)?;
     }
@@ -283,7 +283,12 @@ fn choose_forge(release: &Release, version: &str) -> Result<Place> {
         .map_err(ui::prompt_error)
 }
 
-fn install_here(runtime: &tokio::runtime::Runtime, release: &Release, apps: &[App]) -> Result<()> {
+fn install_here(
+    runtime: &tokio::runtime::Runtime,
+    release: &Release,
+    source: &Source,
+    apps: &[App],
+) -> Result<()> {
     let version = release.version(os())?;
     for app in apps {
         let dir = app.dir()?;
@@ -333,6 +338,10 @@ fn install_here(runtime: &tokio::runtime::Runtime, release: &Release, apps: &[Ap
             replace(&dir, &incoming)?;
             std::fs::write(dir.join("version"), format!("{version}\n"))
                 .with_context(|| format!("write {}", dir.join("version").display()))?;
+            if let Some(feed) = source.update_feed() {
+                std::fs::write(dir.join("release-feed"), format!("{feed}\n"))
+                    .context("remember the app's release feed")?;
+            }
             platform::register_uninstall(*app, &version)?;
             Ok(match app {
                 App::Ae => platform::add_to_path()?.map_or_else(
@@ -497,8 +506,6 @@ fn install_in_windows(
 pub fn update(apps: &[App], yes: bool) -> Result<()> {
     ui::intro("Artisan update");
     let runtime = runtime()?;
-    let release = resolve(&runtime, &Source::new(None, None)?)?;
-    let version = release.version(os())?;
     let wanted: Vec<App> = if apps.is_empty() {
         App::ALL.to_vec()
     } else {
@@ -506,13 +513,23 @@ pub fn update(apps: &[App], yes: bool) -> Result<()> {
     };
     let mut lines = Vec::new();
     let mut outdated = Vec::new();
+    let mut plans = Vec::new();
     for app in &wanted {
         let Some(current) = installed(*app) else {
             continue;
         };
+        let feed = match std::fs::read_to_string(app.dir()?.join("release-feed")) {
+            Ok(feed) => Some(feed.trim().to_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).context("read the app's release feed"),
+        };
+        let source = Source::new(feed.as_deref(), None)?;
+        let release = resolve(&runtime, &source)?;
+        let version = release.version(os())?;
         if release::newer(&version, &current) {
             lines.push(format!("{:<8} {current} → {version}", app.id()));
             outdated.push(*app);
+            plans.push((*app, source, release));
         } else {
             lines.push(format!("{:<8} {current} ✓ up to date", app.id()));
         }
@@ -545,7 +562,11 @@ pub fn update(apps: &[App], yes: bool) -> Result<()> {
             .map_err(ui::prompt_error)?;
     }
     outdated.sort();
-    install_here(&runtime, &release, &outdated)?;
+    for (app, source, release) in plans {
+        if outdated.contains(&app) {
+            install_here(&runtime, &release, &source, &[app])?;
+        }
+    }
     for distro in &distros {
         ui::step(format!("Updating {distro} (WSL)"));
         let status = wsl::ae(distro)

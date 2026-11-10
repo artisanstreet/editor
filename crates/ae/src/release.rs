@@ -25,14 +25,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_FEED: &str =
-    "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release.json";
+    "https://github.com/artisanstreet/editor/releases/latest/download/release.json";
 const MANIFEST: &str = "release.json";
 
-/// The release signing key (raw Ed25519, hex). Release builds set
-/// `ARTISAN_RELEASE_PUBLIC_KEY_HEX`; the fallback is the development key.
 const PUBLIC_KEY_HEX: &str = match option_env!("ARTISAN_RELEASE_PUBLIC_KEY_HEX") {
     Some(key) => key,
-    None => "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    None => "400a4b35cffdfa088227b9824176affb37b807fb26eb3c59b48ae56fbf5e4d8b",
 };
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +82,22 @@ impl Source {
         match self {
             Self::Url(url) => url.clone(),
             Self::Dir(dir) => dir.display().to_string(),
+        }
+    }
+
+    pub fn update_feed(&self) -> Option<&str> {
+        match self {
+            Self::Url(url)
+                if url
+                    .strip_prefix("https://github.com/artisanstreet/editor/releases/download/v")
+                    .and_then(|version| version.strip_suffix("/release.json"))
+                    .and_then(|version| semver::Version::parse(version).ok())
+                    .is_some_and(|version| version.pre.is_empty()) =>
+            {
+                Some(DEFAULT_FEED)
+            }
+            Self::Url(url) => Some(url),
+            Self::Dir(_) => None,
         }
     }
 
@@ -362,3 +376,7 @@ pub fn newer(candidate: &str, installed: &str) -> bool {
         _ => candidate != installed,
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/release/feed.rs"]
+mod tests;
