@@ -176,7 +176,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 .refresh_transcript(&mut self.shell, self.ui.ui_mut(), &window);
         let updated = (sidebar || sidebar_frame || transcript) && sidebar_done && transcript_done;
         if updated {
-            crate::shell::rebuild_stats::record_event("section_refresh");
+            crate::core::diagnostics::rebuild_stats::record_event("section_refresh");
             ctx.request_frame(id, FrameReason::ANIMATION);
         }
         updated
@@ -405,9 +405,9 @@ impl<V: SectionViews> ShellApplication<V> {
         causes: &[&'static str],
     ) {
         let _tm = Tm::new("rebuild");
-        let _rebuild_span = crate::shell::rebuild_stats::span("rb_total");
+        let _rebuild_span = crate::core::diagnostics::rebuild_stats::span("rb_total");
         self.shell.live.flushed(std::time::Instant::now());
-        crate::shell::rebuild_stats::record_rebuild(causes);
+        crate::core::diagnostics::rebuild_stats::record_rebuild(causes);
         let Some(window) = ctx.window_state(id).cloned() else {
             return;
         };
@@ -437,7 +437,7 @@ impl<V: SectionViews> ShellApplication<V> {
         aqua_ui::style::set_root_letter_spacing_em(Some(
             self.shell.preferences.theme().typography.tracking_em,
         ));
-        let build_span = crate::shell::rebuild_stats::span("rb_build");
+        let build_span = crate::core::diagnostics::rebuild_stats::span("rb_build");
         let built = self.views.build(&mut self.shell, self.ui.ui_mut(), &window);
         drop(build_span);
         aqua_core::checkpoint::reach();
@@ -450,7 +450,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 return;
             }
         };
-        let refresh_span = crate::shell::rebuild_stats::span("rb_refresh");
+        let refresh_span = crate::core::diagnostics::rebuild_stats::span("rb_refresh");
         let result = if self.mounted {
             self.ui.ui_mut().refresh(vec![element])
         } else {
@@ -462,7 +462,7 @@ impl<V: SectionViews> ShellApplication<V> {
             Ok(()) => {
                 self.mounted = true;
                 self.shell.entry.sync_editors(self.ui.ui_mut());
-                let mounted_span = crate::shell::rebuild_stats::span("rb_mounted");
+                let mounted_span = crate::core::diagnostics::rebuild_stats::span("rb_mounted");
                 self.views
                     .mounted(&mut self.shell, self.ui.ui_mut(), ctx, id);
                 drop(mounted_span);
@@ -548,7 +548,7 @@ impl<V: SectionViews> ShellApplication<V> {
         if !refreshed {
             return false;
         }
-        crate::shell::rebuild_stats::record_event("transcript_subtree");
+        crate::core::diagnostics::rebuild_stats::record_event("transcript_subtree");
         self.shell.live.flushed(std::time::Instant::now());
         self.views
             .mounted(&mut self.shell, self.ui.ui_mut(), ctx, id);
@@ -672,7 +672,7 @@ impl<V: SectionViews> ShellApplication<V> {
         let tm_workspace = Tm::new("drain.workspace");
         let mut domain_changed = mark(&mut causes, "sections", sections_changed);
         if sections_changed {
-            causes.extend(crate::shell::rebuild_stats::take_notes());
+            causes.extend(crate::core::diagnostics::rebuild_stats::take_notes());
         }
         domain_changed |= mark(&mut causes, "titlebar", self.shell.titlebar.take_changed());
         domain_changed |= mark(
@@ -708,7 +708,7 @@ impl<V: SectionViews> ShellApplication<V> {
             }
         }
         drop(tm_workspace);
-        let drain_span = crate::shell::rebuild_stats::span("shell_drain");
+        let drain_span = crate::core::diagnostics::rebuild_stats::span("shell_drain");
         let tm_shell = Tm::new("drain.shell");
         let updates = self.shell.drain(active, self.ui.ui_mut());
         drop(tm_shell);
@@ -809,7 +809,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn on_wake(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) {
         let _tm = Tm::new("wake");
-        let _span = crate::shell::rebuild_stats::span("on_wake");
+        let _span = crate::core::diagnostics::rebuild_stats::span("on_wake");
         self.ui.on_wake(ctx, id);
         let changed = self.views.wake(&mut self.shell, self.ui.ui_mut(), ctx, id);
         if self.views.glide_active() {
@@ -828,7 +828,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         let animated = self
             .views
             .animate(&mut self.shell, self.ui.ui_mut(), ctx, id);
-        let mut causes = crate::shell::rebuild_stats::take_notes();
+        let mut causes = crate::core::diagnostics::rebuild_stats::take_notes();
         if landed {
             causes.push("landing_expiry");
         }
@@ -858,11 +858,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             }
         }
         let _tm = Tm::new("fc");
-        let _span = crate::shell::rebuild_stats::span("on_fc");
+        let _span = crate::core::diagnostics::rebuild_stats::span("on_fc");
         if self.start_notifications(ctx, id) {
             self.drain(ctx, id, false);
         }
-        crate::conversation::open_timing::presented();
+        crate::core::diagnostics::open_timing::presented();
         self.ui.on_frame_completed(ctx, id, sequence);
         self.shell.bind(ctx, id);
         let views_changed =
@@ -898,7 +898,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                         viewport,
                         crate::shell::wheel::kept_offset(
                             self.ui.ui(),
-                            crate::shell::wheel::MODEL_MENU,
+                            crate::ui::scroll::MODEL_MENU,
                         )
                         .y,
                         &images,
@@ -936,7 +936,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             .usage_deadline
             .is_some_and(|deadline| ctx.now() >= deadline);
         let mut causes: Vec<&'static str> = Vec::new();
-        let notes = crate::shell::rebuild_stats::take_notes();
+        let notes = crate::core::diagnostics::rebuild_stats::take_notes();
         let mut refresh = mark(&mut causes, "views_frame", views_changed);
         if views_changed {
             causes.extend(notes);
@@ -1173,10 +1173,10 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         {
             let _queued = self.shell.core.wake_mailbox().sender().send(());
         }
-        crate::conversation::open_timing::externals_begin();
+        crate::core::diagnostics::open_timing::externals_begin();
         let started = std::time::Instant::now();
         self.ui.externals(frame);
-        crate::conversation::open_timing::scene(started.elapsed());
+        crate::core::diagnostics::open_timing::scene(started.elapsed());
     }
     fn build_scene(&mut self, window: &ObservedWindowState, now: Instant) -> Option<Instant> {
         let _tm = Tm::new("scene");
@@ -1315,7 +1315,7 @@ pub(crate) struct Tm(
     &'static str,
     std::time::Instant,
     aqua::profile::alloc::HeapCounts,
-    crate::shell::rebuild_stats::Span,
+    crate::core::diagnostics::rebuild_stats::Span,
 );
 impl Tm {
     pub(crate) fn threshold_ms() -> f64 {
@@ -1329,12 +1329,12 @@ impl Tm {
     }
 
     pub(crate) fn new(name: &'static str) -> Self {
-        crate::shell::rebuild_stats::record_event(name);
+        crate::core::diagnostics::rebuild_stats::record_event(name);
         Self(
             name,
             std::time::Instant::now(),
             aqua::profile::alloc::snapshot(),
-            crate::shell::rebuild_stats::span(name),
+            crate::core::diagnostics::rebuild_stats::span(name),
         )
     }
 }

@@ -4,7 +4,7 @@ use aqua::UiApp;
 use aqua_core::{InputEvent, NodeId, Point};
 
 pub const THREADS: &str = "sidebar-threads";
-pub const MODEL_MENU: &str = "composer-model-scroll";
+pub use crate::ui::scroll::MODEL_MENU;
 pub const PROJECT_TREE: &str = "artisan-project-tree";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,26 +49,7 @@ pub struct WheelGlides {
     tree: WheelGlide,
 }
 
-pub fn key_hash(key: &str) -> aqua_ui::tree::KeyHash {
-    thread_local! {
-        static HASHES: std::cell::RefCell<std::collections::HashMap<String, aqua_ui::tree::KeyHash>> =
-            std::cell::RefCell::new(std::collections::HashMap::new());
-    }
-    HASHES.with(|hashes| {
-        let mut hashes = hashes.borrow_mut();
-        match hashes.get(key) {
-            Some(hash) => *hash,
-            None => {
-                if hashes.len() >= 65_536 {
-                    hashes.clear();
-                }
-                let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key));
-                hashes.insert(key.to_owned(), hash);
-                hash
-            }
-        }
-    })
-}
+pub use crate::ui::scroll::key_hash;
 
 pub fn keyed_node(ui: &UiApp, key: &str) -> Option<NodeId> {
     ui.tree().sole_node_with_key(key_hash(key))

@@ -1,4 +1,4 @@
-use crate::frame::glide::{CubicBezier, Glide, Transition};
+use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
 use aqua_core::Rect;
 use std::time::{Duration, Instant};
 

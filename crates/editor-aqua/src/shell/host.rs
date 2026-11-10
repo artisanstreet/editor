@@ -1,7 +1,7 @@
 use crate::core::{Core, CoreEvent, EditorFiles, HostEvent, HostId, Screen};
 use artisan_api::ThreadId;
 use crate::shell::entry::Entry;
-use crate::shell::preferences::Preferences;
+use crate::ui::preferences::Preferences;
 use crate::shell::workspace::{NotificationEffects, Workspace};
 use aqua::AppCtx;
 use aqua::images::ImageAssets;
@@ -17,7 +17,7 @@ pub struct Shell {
     pub models: crate::ui::media::model::load::ModelAssets,
     pub meshes_supported: std::rc::Rc<std::cell::Cell<Option<bool>>>,
     pub meshes_changed: std::cell::Cell<bool>,
-    pub dialogs: crate::shell::dialogs::DialogRoutes,
+    pub dialogs: crate::ui::dialogs::DialogRoutes,
     pub live: crate::shell::live_throttle::LiveThrottle,
     images: ImageAssets,
 }

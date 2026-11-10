@@ -1488,54 +1488,39 @@ dependencies = [
  "aqua-ui",
  "artisan-account",
  "artisan-api",
- "artisan-markdown-index",
- "artisan-mentions",
- "artisan-paths",
  "base64 0.22.1",
- "chrono",
- "claude-ai-browser",
  "color",
- "data-url",
  "editor-aqua",
  "editor-assets",
  "editor-audio",
+ "editor-composer",
+ "editor-conversation",
+ "editor-core",
+ "editor-inspector",
+ "editor-marketplace",
+ "editor-settings",
+ "editor-sidebar",
+ "editor-sources",
+ "editor-ui",
  "embed-resource",
  "file-rotate",
  "forge-http",
  "forge-store",
  "futures",
- "glam",
- "gltf",
  "hex",
  "image",
- "mermaid-rs-renderer",
  "palette",
- "ply-rs-bw",
- "pulldown-cmark",
- "reqwest",
- "ropey",
  "rusqlite",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "sse-core",
- "stl_io",
- "syntect",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "ufbx",
- "unicode-width",
- "url",
- "usvg",
- "vte",
- "webp",
 ]
 
 [[package]]
@@ -1551,6 +1536,220 @@ dependencies = [
  "futures",
  "pulseaudio",
  "rodio",
+]
+
+[[package]]
+name = "editor-composer"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-core",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "artisan-mentions",
+ "editor-assets",
+ "editor-composer",
+ "editor-core",
+ "editor-ui",
+ "image",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "webp",
+]
+
+[[package]]
+name = "editor-conversation"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-core",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "artisan-mentions",
+ "editor-assets",
+ "editor-composer",
+ "editor-conversation",
+ "editor-core",
+ "editor-sources",
+ "editor-ui",
+ "image",
+ "ropey",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "editor-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "artisan-account",
+ "artisan-api",
+ "artisan-paths",
+ "base64 0.22.1",
+ "claude-ai-browser",
+ "editor-core",
+ "futures",
+ "reqwest",
+ "ropey",
+ "serde",
+ "serde_json",
+ "sse-core",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "editor-inspector"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-core",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "editor-assets",
+ "editor-conversation",
+ "editor-core",
+ "editor-sidebar",
+ "editor-sources",
+ "editor-ui",
+ "palette",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "editor-marketplace"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-core",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "editor-assets",
+ "editor-core",
+ "editor-ui",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "editor-settings"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-core",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "claude-ai-browser",
+ "editor-core",
+ "editor-ui",
+ "serde_json",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "editor-sidebar"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-core",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "artisan-mentions",
+ "editor-assets",
+ "editor-core",
+ "editor-ui",
+ "image",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "editor-sources"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "editor-core",
+ "editor-ui",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "editor-ui"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "aqua",
+ "aqua-core",
+ "aqua-media",
+ "aqua-protocol",
+ "aqua-reactive",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "artisan-markdown-index",
+ "artisan-mentions",
+ "base64 0.22.1",
+ "chrono",
+ "color",
+ "data-url",
+ "editor-assets",
+ "editor-audio",
+ "editor-core",
+ "editor-ui",
+ "futures",
+ "glam",
+ "gltf",
+ "image",
+ "mermaid-rs-renderer",
+ "palette",
+ "ply-rs-bw",
+ "pulldown-cmark",
+ "serde",
+ "serde_json",
+ "stl_io",
+ "syntect",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "ufbx",
+ "unicode-width",
+ "url",
+ "usvg",
+ "vte",
 ]
 
 [[package]]

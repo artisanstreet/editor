@@ -483,7 +483,7 @@ pub fn centered_body(content: Element) -> Element {
 }
 
 pub fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
-    let radius = crate::frame::card::RADIUS - 2.0;
+    let radius = crate::ui::chrome::card::RADIUS - 2.0;
     let (top, bottom, corners) = match edge {
         crate::ui::scroll_edge::Edge::Top => (
             Some(2.0),

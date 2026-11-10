@@ -3,7 +3,7 @@ pub mod dither;
 pub mod model;
 pub mod pattern;
 
-use crate::frame::glide::{CubicBezier, Glide, Transition};
+use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
 use aqua::images::{ImageAssets, ImageHandle};
 use model::{EmailProblem, Feedback, Link, Page, Provider};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Arc, time::Duration, time::Instant};

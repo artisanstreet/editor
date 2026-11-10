@@ -1,4 +1,4 @@
-use crate::frame::account::AVATAR_INSET;
+use crate::ui::chrome::account::AVATAR_INSET;
 use crate::frame::scramble::Rows;
 use crate::frame::sidebar::{COLLAPSED_WIDTH, Event, OPEN_WIDTH};
 use crate::frame::tree::ROW_PAD;

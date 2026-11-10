@@ -697,7 +697,7 @@ impl RootViews {
                 reduced_motion,
                 workspace.selections.source_allocator(),
                 Rc::new(move || {
-                    crate::shell::rebuild_stats::record_event("inv_rows");
+                    crate::core::diagnostics::rebuild_stats::record_event("inv_rows");
                     invalidated.set(true);
                     invalidate_settled.borrow_mut().clear();
                 }),
@@ -934,7 +934,7 @@ impl RootViews {
                     now,
                     Rc::clone(&dispatch),
                     Rc::new(move || {
-                        crate::shell::rebuild_stats::record_event("inv_nav_cb");
+                        crate::core::diagnostics::rebuild_stats::record_event("inv_nav_cb");
                         invalidated.set(true)
                     }),
                 ) {
@@ -1099,19 +1099,19 @@ impl RootViews {
         use crate::ui::color_copy_menu::ColorCopyEffect;
         use crate::ui::markdown::visual::LinkAction;
         self.connection.dispatch(&mut shell.core);
-        let mut changed = crate::shell::rebuild_stats::note(
+        let mut changed = crate::core::diagnostics::rebuild_stats::note(
             "conv_invalidated",
             self.conversation_invalidated.replace(false),
         );
         if self.navigation_invalidated.replace(false) {
-            changed |= crate::shell::rebuild_stats::note(
+            changed |= crate::core::diagnostics::rebuild_stats::note(
                 "navigation",
                 self.refresh_navigation(shell, ui, ctx, window),
             );
         }
         self.bind_row_sources(ui, ctx, window);
         if let Some(workspace) = shell.entry.workspace_mut() {
-            changed |= crate::shell::rebuild_stats::note(
+            changed |= crate::core::diagnostics::rebuild_stats::note(
                 "conv_stored",
                 self.stored
                     .borrow_mut()
@@ -1119,7 +1119,7 @@ impl RootViews {
             );
         }
         self.stored.borrow_mut().drain_cleanup(ui);
-        changed |= crate::shell::rebuild_stats::note(
+        changed |= crate::core::diagnostics::rebuild_stats::note(
             "conv_row_sources",
             self.drain_row_sources(shell, ctx, window),
         );
@@ -1280,7 +1280,7 @@ impl RootViews {
                 }
             }
         }
-        changed |= crate::shell::rebuild_stats::note(
+        changed |= crate::core::diagnostics::rebuild_stats::note(
             "conv_image_preview",
             self.sync_image_preview(shell, ui, ctx, window),
         );
@@ -1995,7 +1995,7 @@ impl RootViews {
         window: AquaWindowId,
         reduced: bool,
     ) {
-        use crate::frame::menu::Effect;
+        use crate::ui::chrome::menu::Effect;
         for effect in self.sidebar.take_effects() {
             match effect {
                 Effect::FlipTheme => {
@@ -2096,7 +2096,7 @@ impl RootViews {
         &self,
         theme: &crate::ui::theme::ArtisanTheme,
         tree: Option<Element>,
-        account: Option<&crate::frame::account::Account>,
+        account: Option<&crate::ui::chrome::account::Account>,
         now: std::time::Instant,
     ) -> crate::frame::view::Sidebar {
         crate::frame::view::Sidebar {
@@ -2106,9 +2106,9 @@ impl RootViews {
             emit: self.sidebar.emit(),
             footer: account.map(|account| {
                 let emit = self.sidebar.emit();
-                crate::frame::account::trigger(
+                crate::ui::chrome::account::trigger(
                     &theme,
-                    crate::frame::account::Trigger {
+                    crate::ui::chrome::account::Trigger {
                         account,
                         menu: self.sidebar.menu(),
                         now,
@@ -2122,7 +2122,7 @@ impl RootViews {
         }
     }
 
-    fn account(&mut self, shell: &Shell) -> Option<crate::frame::account::Account> {
+    fn account(&mut self, shell: &Shell) -> Option<crate::ui::chrome::account::Account> {
         let url = match shell.core.account().phase() {
             crate::core::AccountPhase::Authenticated { profile, .. } => {
                 profile.avatar_url.as_deref()
@@ -2133,13 +2133,13 @@ impl RootViews {
         self.account_snapshot(shell)
     }
 
-    fn account_snapshot(&self, shell: &Shell) -> Option<crate::frame::account::Account> {
+    fn account_snapshot(&self, shell: &Shell) -> Option<crate::ui::chrome::account::Account> {
         let crate::core::AccountPhase::Authenticated { profile, .. } = shell.core.account().phase()
         else {
             return None;
         };
-        Some(crate::frame::account::Account {
-            identity: crate::frame::account::Identity::of(
+        Some(crate::ui::chrome::account::Account {
+            identity: crate::ui::chrome::account::Identity::of(
                 &profile.display_name,
                 &profile.email,
                 profile.username.as_deref(),
@@ -2170,9 +2170,9 @@ impl RootViews {
             - crate::frame::view::FOOTER_LEFT
             - crate::frame::view::SHEET_PADDING;
         let content = move || {
-            crate::frame::account::menu(
+            crate::ui::chrome::account::menu(
                 &theme,
-                crate::frame::account::Sheet {
+                crate::ui::chrome::account::Sheet {
                     account: &account,
                     menu: &menu,
                     width,
@@ -2188,7 +2188,7 @@ impl RootViews {
             ctx.now().as_secs_f64(),
             Rc::new(move || {
                 dismissed(crate::frame::sidebar::Event::Account(
-                    crate::frame::menu::Event::Dismissed,
+                    crate::ui::chrome::menu::Event::Dismissed,
                 ))
             }),
         ) {
@@ -2212,11 +2212,11 @@ impl SectionViews for RootViews {
         window: &ObservedWindowState,
     ) -> bool {
         if !self.transcript_refreshable(shell, ui) {
-            crate::shell::rebuild_stats::record_event("tf_not_refreshable");
+            crate::core::diagnostics::rebuild_stats::record_event("tf_not_refreshable");
             return false;
         }
         let theme = shell.preferences.theme();
-        let swift = shell.preferences.streaming == crate::shell::preferences::StreamingMode::Swift;
+        let swift = shell.preferences.streaming == crate::ui::preferences::StreamingMode::Swift;
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let app_media = Self::app_media(shell, window);
         let Some(workspace) = shell.entry.workspace_mut() else {
@@ -2248,7 +2248,7 @@ impl SectionViews for RootViews {
         match ui.refresh_subtree("conversation-transcript", element) {
             Ok(refreshed) => {
                 if !refreshed {
-                    crate::shell::rebuild_stats::record_event("tf_subtree_false");
+                    crate::core::diagnostics::rebuild_stats::record_event("tf_subtree_false");
                 }
                 refreshed
             }
@@ -2412,7 +2412,7 @@ impl SectionViews for RootViews {
         ];
         for (cause, fired) in causes {
             if fired {
-                crate::shell::rebuild_stats::record_event(cause);
+                crate::core::diagnostics::rebuild_stats::record_event(cause);
             }
         }
         let changed = causes.iter().any(|(_, fired)| *fired);
@@ -2422,7 +2422,7 @@ impl SectionViews for RootViews {
                 "anim_sidebar" if sidebar_resizing || self.sidebar.resizing() => "anim_sidebar_resize",
                 cause => cause,
             };
-            crate::shell::rebuild_stats::note(cause, fired);
+            crate::core::diagnostics::rebuild_stats::note(cause, fired);
         }
         self.apply_account_effects(shell, ctx, window, reduced);
         if self.sidebar.menu().open()
@@ -2444,7 +2444,7 @@ impl SectionViews for RootViews {
         match self.account_popup.dismiss(ui, input) {
             Ok(true) => {
                 (self.sidebar.emit())(crate::frame::sidebar::Event::Account(
-                    crate::frame::menu::Event::Dismissed,
+                    crate::ui::chrome::menu::Event::Dismissed,
                 ));
                 return Some(true);
             }
@@ -2469,7 +2469,7 @@ impl SectionViews for RootViews {
         }
         let cycled = {
             let _tm = crate::shell::application::Tm::new("pre.cycle");
-            crate::shell::menu_keys::cycle(ui, input)
+            crate::ui::menu_keys::cycle(ui, input)
         };
         if cycled {
             return Some(true);
@@ -2607,7 +2607,7 @@ impl SectionViews for RootViews {
                         viewport.height,
                         reduced,
                         shell.preferences.streaming
-                            == crate::shell::preferences::StreamingMode::Swift,
+                            == crate::ui::preferences::StreamingMode::Swift,
                         app_media,
                         now,
                         false,
@@ -2790,7 +2790,7 @@ impl SectionViews for RootViews {
                             url: host
                                 .repository(&project.id)
                                 .and_then(|repository| repository.web_url.clone()),
-                            mark: crate::frame::strip::Mark::of(host, &project.id),
+                            mark: crate::sidebar::project_mark::Mark::of(host, &project.id),
                             state: crate::sidebar::list::row_state(host, thread),
                             active: true,
                         })
@@ -2938,7 +2938,7 @@ impl SectionViews for RootViews {
         self.mount_palette(shell, ui);
         self.mount_resource(shell, ui);
         if self.sync_image_preview(shell, ui, ctx, window) {
-            crate::shell::rebuild_stats::record_event("inv_preview");
+            crate::core::diagnostics::rebuild_stats::record_event("inv_preview");
             self.conversation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
         }
@@ -2951,11 +2951,11 @@ impl SectionViews for RootViews {
             let _tm = crate::shell::application::Tm::new("input.views.navigation");
             self.sync_navigation(ui, ctx, window, shell.preferences.theme())
         } {
-            crate::shell::rebuild_stats::record_event("inv_nav_fc");
+            crate::core::diagnostics::rebuild_stats::record_event("inv_nav_fc");
             self.navigation_invalidated.set(true);
         }
         if self.sync_sidebar(shell, ui, ctx, window) {
-            crate::shell::rebuild_stats::record_event("inv_sidebar_a");
+            crate::core::diagnostics::rebuild_stats::record_event("inv_sidebar_a");
             self.conversation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
         }
@@ -2993,7 +2993,7 @@ impl SectionViews for RootViews {
         self.sync_resource_jump(ui, ctx, window);
         self.sync_context(shell, ui, ctx, window);
         if self.sync_navigation(ui, ctx, window, shell.preferences.theme()) {
-            crate::shell::rebuild_stats::record_event("inv_nav_wake");
+            crate::core::diagnostics::rebuild_stats::record_event("inv_nav_wake");
             self.navigation_invalidated.set(true);
         }
         if let Some(menu) = &mut self.color_menu {
@@ -3008,24 +3008,24 @@ impl SectionViews for RootViews {
         aqua_core::checkpoint::reach();
         self.sync_edges(shell, ui, ctx, window);
         let mut action_changed =
-            crate::shell::rebuild_stats::note("wheel", self.sync_wheel(shell, ui, ctx, window))
-                | crate::shell::rebuild_stats::note(
+            crate::core::diagnostics::rebuild_stats::note("wheel", self.sync_wheel(shell, ui, ctx, window))
+                | crate::core::diagnostics::rebuild_stats::note(
                     "dispatch",
                     self.dispatch_conversation(shell, ui, ctx, window),
                 )
-                | crate::shell::rebuild_stats::note(
+                | crate::core::diagnostics::rebuild_stats::note(
                     "sidebar",
                     self.sync_sidebar(shell, ui, ctx, window),
                 )
-                | crate::shell::rebuild_stats::note(
+                | crate::core::diagnostics::rebuild_stats::note(
                     "connection_anim",
                     self.connection.animating(now, reduced),
                 )
-                | crate::shell::rebuild_stats::note(
+                | crate::core::diagnostics::rebuild_stats::note(
                     "loading_anim",
                     self.thread_loading.animating(now, reduced),
                 )
-                | crate::shell::rebuild_stats::note(
+                | crate::core::diagnostics::rebuild_stats::note(
                     "landing_anim",
                     self.thread_landing.animating(now, reduced),
                 );
@@ -3035,7 +3035,7 @@ impl SectionViews for RootViews {
                 .is_none_or(|previous| (previous - height).abs() >= 0.5)
             {
                 self.composer_height = Some(height);
-                action_changed = crate::shell::rebuild_stats::note("composer_height", true);
+                action_changed = crate::core::diagnostics::rebuild_stats::note("composer_height", true);
             }
         }
         let Some(rows) = &self.rows else {
@@ -3047,7 +3047,7 @@ impl SectionViews for RootViews {
         let Some(reveals) = early_reveals else {
             return action_changed;
         };
-        let mut changed = crate::shell::rebuild_stats::note("reveals", reveals.frontier_changed);
+        let mut changed = crate::core::diagnostics::rebuild_stats::note("reveals", reveals.frontier_changed);
         let reveal_active = reveals.changed || reveals.animating;
         let retry = self.pending_stall.observe(
             reveals.pending && !reveals.changed && !reveals.animating,
@@ -3130,7 +3130,7 @@ impl SectionViews for RootViews {
                     candidate
                 })
                 .collect();
-            crate::conversation::open_timing::gate(
+            crate::core::diagnostics::open_timing::gate(
                 reveals.reason,
                 reveals.pending,
                 reveals.changed,
@@ -3166,7 +3166,7 @@ impl SectionViews for RootViews {
                         event.viewport,
                         reduced,
                     );
-                    changed |= crate::shell::rebuild_stats::note("viewport", rebuild);
+                    changed |= crate::core::diagnostics::rebuild_stats::note("viewport", rebuild);
                     self.transcript_viewport = Some(event.viewport);
                     let previous = workspace.conversation.rows_epoch();
                     match self.observations.observe_viewport(
@@ -3179,7 +3179,7 @@ impl SectionViews for RootViews {
                         clip,
                     ) {
                         Ok(()) => {
-                            changed |= crate::shell::rebuild_stats::note(
+                            changed |= crate::core::diagnostics::rebuild_stats::note(
                                 "rows",
                                 previous != workspace.conversation.rows_epoch(),
                             )
@@ -3191,7 +3191,7 @@ impl SectionViews for RootViews {
                 }
             }
             if landing_before && workspace.conversation.landing.is_none() {
-                changed |= crate::shell::rebuild_stats::note("landed", true);
+                changed |= crate::core::diagnostics::rebuild_stats::note("landed", true);
             }
         }
         drop(_tm_events);
@@ -3201,7 +3201,7 @@ impl SectionViews for RootViews {
             &mut workspace.conversation,
             events.heights,
         );
-        changed |= crate::shell::rebuild_stats::note(
+        changed |= crate::core::diagnostics::rebuild_stats::note(
             "projections",
             rows.publish_projections(&mut workspace.conversation, &shell.core),
         );
@@ -3217,13 +3217,13 @@ impl SectionViews for RootViews {
         if after_layout.repaint || after_layout.rebuild {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
-        changed |= crate::shell::rebuild_stats::note("after_layout", motion_due);
+        changed |= crate::core::diagnostics::rebuild_stats::note("after_layout", motion_due);
         let disclosure = workspace.conversation.advance_disclosure_frame(
             &shell.core,
             std::time::Instant::now(),
             reduced,
         );
-        changed |= crate::shell::rebuild_stats::note(
+        changed |= crate::core::diagnostics::rebuild_stats::note(
             "disclosure",
             !disclosure.changed.is_empty() || disclosure.refold || disclosure.active,
         );
@@ -3245,7 +3245,7 @@ impl SectionViews for RootViews {
     ) -> bool {
         self.sync_context(shell, ui, ctx, window);
         if self.sync_navigation(ui, ctx, window, shell.preferences.theme()) {
-            crate::shell::rebuild_stats::record_event("inv_nav_input");
+            crate::core::diagnostics::rebuild_stats::record_event("inv_nav_input");
             self.navigation_invalidated.set(true);
         }
         if let InputEvent::Scroll { at, delta } = input {
@@ -3274,24 +3274,24 @@ impl SectionViews for RootViews {
             let _tm = crate::shell::application::Tm::new("input.views.wheel");
             self.sync_wheel(shell, ui, ctx, window)
         };
-        let palette_changed = crate::shell::rebuild_stats::note("in_wheel", wheel_changed)
+        let palette_changed = crate::core::diagnostics::rebuild_stats::note("in_wheel", wheel_changed)
             | {
                 let _tm = crate::shell::application::Tm::new("input.views.palette");
-                crate::shell::rebuild_stats::note(
+                crate::core::diagnostics::rebuild_stats::note(
                     "in_palette",
                     self.dispatch_palette(shell, ui) | self.dispatch_resource(shell, ui, ctx),
                 )
             }
             | {
                 let _tm = crate::shell::application::Tm::new("input.views.conversation");
-                crate::shell::rebuild_stats::note(
+                crate::core::diagnostics::rebuild_stats::note(
                     "in_conversation",
                     self.dispatch_conversation(shell, ui, ctx, window),
                 )
             }
             | {
                 let _tm = crate::shell::application::Tm::new("input.views.sidebar");
-                crate::shell::rebuild_stats::note(
+                crate::core::diagnostics::rebuild_stats::note(
                     "in_sidebar",
                     self.sync_sidebar(shell, ui, ctx, window),
                 )
@@ -3384,7 +3384,7 @@ impl SectionViews for RootViews {
             self.tick_work_clock(shell, ctx, window, std::time::Instant::now());
         }
         if self.sync_navigation(ui, ctx, window, shell.preferences.theme()) {
-            crate::shell::rebuild_stats::record_event("inv_nav_a");
+            crate::core::diagnostics::rebuild_stats::record_event("inv_nav_a");
             self.navigation_invalidated.set(true);
         }
         let palette_changed = self.dispatch_palette(shell, ui)

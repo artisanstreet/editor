@@ -1,4 +1,4 @@
-use crate::frame::account::{MENU_GAP, TRIGGER};
+use crate::ui::chrome::account::{MENU_GAP, TRIGGER};
 use crate::ui::popover::{AnimatedPickerHost, PickerEntrance};
 use aqua::UiApp;
 use aqua_ui::element::Element;

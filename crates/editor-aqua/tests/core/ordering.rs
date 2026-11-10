@@ -1,3 +1,4 @@
+use editor_sources::SourceProviderExt;
 use aqua::images::ImageAssets;
 use aqua_media::decode::DecodedImage;
 use artisan_api::{BlobHash, Event, GlobalPrompt};

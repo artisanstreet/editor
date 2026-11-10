@@ -1,9 +1,9 @@
-pub mod account;
+pub use crate::ui::chrome::account;
 pub mod avatar;
-pub mod card;
-pub mod glide;
+pub use crate::ui::chrome::card;
+pub use crate::ui::chrome::glide;
 pub mod inbox;
-pub mod menu;
+pub use crate::ui::chrome::menu;
 pub mod overview;
 pub mod popup;
 pub mod projects;

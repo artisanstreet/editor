@@ -538,7 +538,7 @@ impl Workspace {
                         theme,
                         host,
                         viewport,
-                        crate::shell::wheel::kept_offset(ui, crate::shell::wheel::MODEL_MENU).y,
+                        crate::shell::wheel::kept_offset(ui, crate::ui::scroll::MODEL_MENU).y,
                         assets,
                         std::time::Instant::now(),
                     ) {
@@ -700,7 +700,7 @@ impl Workspace {
     pub fn drain_inspector(
         &mut self,
         core: &mut Core,
-        routes: &crate::shell::dialogs::DialogRoutes,
+        routes: &crate::ui::dialogs::DialogRoutes,
         ui: &mut aqua::UiApp,
         ctx: &mut aqua::AppCtx<'_>,
         window: aqua::prelude::AquaWindowId,
@@ -1114,7 +1114,7 @@ impl Workspace {
     pub fn drain_question_source(
         &mut self,
         core: &Core,
-        routes: &crate::shell::dialogs::DialogRoutes,
+        routes: &crate::ui::dialogs::DialogRoutes,
         ctx: &mut aqua::AppCtx<'_>,
         window: aqua::prelude::AquaWindowId,
     ) -> bool {
