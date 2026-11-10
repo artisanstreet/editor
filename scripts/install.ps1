@@ -1,18 +1,8 @@
-# Installs Artisan on Windows:
-#
-#   irm https://github.com/sandersonstabo/artisan-editor/releases/latest/download/install.ps1 | iex
-#   & ([scriptblock]::Create((irm …/install.ps1))) --forge wsl:Ubuntu     (arguments go to `ae install`)
-#
-# Downloads release.json and the Windows `ae.exe`, checks it against the
-# SHA-256 in release.json, and runs `ae install`, which verifies
-# release.json's Ed25519 signature before installing anything and asks what
-# goes where. $env:ARTISAN_RELEASES overrides the feed (a release.json URL
-# or a directory holding a release).
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$feed = 'https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release.json'
+$feed = 'https://github.com/artisanstreet/editor/releases/latest/download/release.json'
 if ($env:ARTISAN_RELEASES) { $feed = $env:ARTISAN_RELEASES }
 $source = $feed
 $remote = $feed -match '^https?://'

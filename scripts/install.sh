@@ -1,17 +1,7 @@
 #!/bin/sh
-# Installs Artisan on Linux or macOS:
-#
-#   curl -fsSL https://github.com/sandersonstabo/artisan-editor/releases/latest/download/install.sh | sh
-#   curl -fsSL …/install.sh | sh -s -- --forge here --editor none   (arguments go to `ae install`)
-#
-# Downloads release.json and this platform's `ae`, checks it against the
-# SHA-256 in release.json, and runs `ae install`, which verifies
-# release.json's Ed25519 signature before installing anything and asks what
-# goes where. ARTISAN_RELEASES overrides the feed (a release.json URL or a
-# directory holding a release).
 set -eu
 
-feed="${ARTISAN_RELEASES:-https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release.json}"
+feed="${ARTISAN_RELEASES:-https://github.com/artisanstreet/editor/releases/latest/download/release.json}"
 source="$feed"
 case "$feed" in
     http://* | https://*) base="${feed%/*}" ;;
@@ -46,7 +36,6 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 fetch "$feed" "$tmp/release.json"
 fetch "$feed.sig" "$tmp/release.json.sig"
 
-# release.json lists one artifact per line.
 line="$(grep '"app":"ae"' "$tmp/release.json" | grep "\"os\":\"$os\"" | grep "\"arch\":\"$arch\"" | head -n1 || true)"
 [ -n "$line" ] || fail "this release has no build for $os $arch"
 file="$(printf '%s\n' "$line" | sed -n 's/.*"file":"\([^"]*\)".*/\1/p')"
@@ -68,7 +57,6 @@ fi
 
 mkdir "$tmp/unpacked"
 tar -xzf "$tmp/$file" -C "$tmp/unpacked" ae
-# Piped into sh, stdin is this script; `ae install` asks on the terminal.
 if [ -r /dev/tty ] && [ -t 2 ]; then
     "$tmp/unpacked/ae" install --from "$source" "$@" < /dev/tty
 else
