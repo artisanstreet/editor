@@ -102,9 +102,9 @@ impl ModelAxis {
             Self::Special => "Special mode",
             Self::Variant => "Variant",
             Self::Speed => "Speed",
-            Self::Context => "Context limit",
+            Self::Context => "Context Window",
             Self::Compaction => "Compaction window",
-            Self::Permission => "Access",
+            Self::Permission => "Permission",
         }
     }
 
