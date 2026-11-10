@@ -36,7 +36,7 @@ impl EditorMetrics {
                 ),
                 Mode::Prompt => (16.0, 24.0, 1.0, 8.0, 4.0, 0.0),
             };
-        if inset {
+        if inset && mode == Mode::Document {
             padding_x = 12.0;
             padding_y = 10.0;
             radius = RadiusTokens::value(RadiusStep::Lg);
