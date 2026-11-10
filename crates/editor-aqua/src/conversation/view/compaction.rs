@@ -175,12 +175,18 @@ pub fn sync_label(
     reduced_motion: bool,
 ) -> bool {
     let key = hash_key(Key::from(SHIMMER_KEY));
+    let identity = app
+        .tree()
+        .get(row)
+        .and_then(|record| record.key)
+        .unwrap_or(key);
     let mut stack = vec![row];
     while let Some(node) = stack.pop() {
         if let Some(record) = app.tree().get(node) {
             stack.extend(record.children.iter().copied());
             if record.key == Some(key) {
-                let mut motion = ShimmerMotion::new(theme, ShimmerTiming::Progress);
+                let mut motion = ShimmerMotion::new(theme, ShimmerTiming::Progress)
+                    .with_identity(hash_key((identity, SHIMMER_KEY)));
                 motion.set_active(
                     displayed_phase(phase, has_switch, frame) == CompactionPhase::Running,
                 );

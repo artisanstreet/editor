@@ -40,6 +40,7 @@ pub struct ShimmerMotion {
     timing: ShimmerTiming,
     target: aqua_core::GpuiTextColor,
     active: bool,
+    identity: Option<u64>,
 }
 
 impl ShimmerMotion {
@@ -48,7 +49,13 @@ impl ShimmerMotion {
             timing,
             target: theme.colors.background.to_reference_text_color(),
             active: true,
+            identity: None,
         }
+    }
+
+    pub fn with_identity(mut self, identity: u64) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     pub fn set_active(&mut self, active: bool) {
@@ -76,7 +83,9 @@ impl ShimmerMotion {
                     spread: 50.0,
                     target: self.target,
                 },
-                key: (u64::from(raw.generation) << 32) | u64::from(raw.index),
+                key: self
+                    .identity
+                    .unwrap_or((u64::from(raw.generation) << 32) | u64::from(raw.index)),
                 duration,
                 delay,
             })
