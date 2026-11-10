@@ -67,6 +67,8 @@ pub enum ViewAction {
     PromptPresentationChanged,
     SavePrompt,
     LoadLatestPrompt,
+    RetryPrompt,
+    ResolvePrompt(artisan_api::ResolvePrompt),
     FontMenu(bool),
     SetFont(&'static str),
     SetDarkMode(bool),
@@ -200,6 +202,13 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         ViewAction::PromptPresentationChanged => {}
         ViewAction::SavePrompt => _controller.save_prompt(core),
         ViewAction::LoadLatestPrompt => _controller.load_latest_prompt(core),
+        ViewAction::ResolvePrompt(resolution) => _controller.resolve_prompt(core, resolution),
+        ViewAction::RetryPrompt => {
+            let host = core.active_host().map(|host| host.id.clone());
+            if let Some(host) = host.and_then(|id| core.host_mut(&id)) {
+                host.load_prompt(true);
+            }
+        }
         ViewAction::FontMenu(open) => _controller.reported_font_menu = open,
         ViewAction::StreamingMenu(open) => _controller.reported_streaming_menu = open,
         ViewAction::SetFont(font) => core.set_setting("font_set", font.into()),
@@ -701,17 +710,28 @@ fn prompt(
         .child(ui::header(
             theme,
             SettingsPage::GlobalPrompt.label(),
-            "Instructions shared by every engine, in every thread.",
+            page::description(SettingsPage::GlobalPrompt),
         ))
         .child(
             Scroll::new()
                 .width(Length::Pct(100.0))
-                .style(Style::new().flex_grow(1.0).min_height(Length::Px(0.0)))
+                .style(
+                    Style::new()
+                        .axis(aqua_ui::style::Axis::Column)
+                        .gap(20.0)
+                        .flex_grow(1.0)
+                        .min_height(Length::Px(0.0)),
+                )
+                .child(prompt_reconciliation(controller, core, theme, emit.clone()))
                 .child(editor.element_with_notice_keyed(
                     "settings-global-prompt-editor",
                     Mode::Document,
                     theme,
-                    "Write your global instructions…",
+                    if form.loaded {
+                        "Write your global instructions…"
+                    } else {
+                        "Reading the global prompt…"
+                    },
                     false,
                     true,
                 ))
@@ -724,9 +744,28 @@ fn prompt(
     }) {
         page = page.child(editor_ui::page::notice(theme, error).build());
     }
+    page = page.child(
+        editor_ui::page::notice(
+            theme,
+            &form.status(&controller.prompt_editor.borrow().text()),
+        )
+        .build(),
+    );
     let mut actions = UiBox::new()
         .gap(8.0)
         .style(Style::new().justify(JustifyContent::END).flex_shrink(0.0));
+    if core
+        .active_host()
+        .is_some_and(|host| host.prompt_load().error.is_some())
+    {
+        let send = emit.clone();
+        actions = actions.child(
+            Button::text("settings-global-prompt-retry", *theme, "Retry")
+                .variant(ButtonVariant::Outline)
+                .on_activate(move |_| send(ViewAction::RetryPrompt))
+                .build(),
+        );
+    }
     if form.newer {
         let send = emit.clone();
         actions = actions.child(
@@ -747,6 +786,131 @@ fn prompt(
             .build(),
     );
     page.child(actions.build()).build()
+}
+
+fn prompt_reconciliation(
+    controller: &SettingsController,
+    core: &Core,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    let mut controls = UiBox::new().layout("column").gap(12.0);
+    let Some(prompt) = core
+        .active_host()
+        .and_then(|host| host.global_prompt.as_ref())
+    else {
+        return controls.build();
+    };
+    let disabled = controller.prompt.pending
+        || controller.prompt.newer
+        || controller.prompt_editor.borrow().text() != controller.prompt.saved;
+    for candidate in &prompt.candidates {
+        let engines = candidate
+            .engines
+            .iter()
+            .map(|engine| engine.display_name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let send = emit.clone();
+        let candidate_id = candidate.id.clone();
+        controls = controls.child(
+            UiBox::new()
+                .layout("column")
+                .gap(8.0)
+                .child(
+                    editor_ui::page::notice(theme, &format!("Prompt found in {engines}")).build(),
+                )
+                .child(editor_ui::page::notice(theme, &candidate.text).build())
+                .child(
+                    Button::text(
+                        format!("settings-prompt-candidate-{}", candidate.id),
+                        *theme,
+                        "Use this prompt",
+                    )
+                    .disabled(disabled)
+                    .on_activate(move |_| {
+                        send(ViewAction::ResolvePrompt(
+                            artisan_api::ResolvePrompt::Choose {
+                                candidate_id: candidate_id.clone(),
+                            },
+                        ))
+                    })
+                    .build(),
+                )
+                .build(),
+        );
+    }
+    for engine in &prompt.engines {
+        match engine.status {
+            artisan_api::PromptEngineStatus::Drifted => {
+                let use_send = emit.clone();
+                let restore_send = emit.clone();
+                let id = engine.engine;
+                let mut row = UiBox::new().layout("column").gap(8.0).child(
+                    editor_ui::page::notice(
+                        theme,
+                        &format!(
+                            "{} instructions were edited outside Artisan.",
+                            id.display_name()
+                        ),
+                    )
+                    .build(),
+                );
+                if let Some(text) = &engine.external_text {
+                    row = row.child(editor_ui::page::notice(theme, text).build());
+                }
+                controls = controls.child(
+                    row.child(
+                        UiBox::new()
+                            .gap(8.0)
+                            .child(
+                                Button::text(
+                                    format!("settings-prompt-import-{id}"),
+                                    *theme,
+                                    "Use engine's version",
+                                )
+                                .disabled(disabled)
+                                .on_activate(move |_| {
+                                    use_send(ViewAction::ResolvePrompt(
+                                        artisan_api::ResolvePrompt::UseEngine { engine: id },
+                                    ))
+                                })
+                                .build(),
+                            )
+                            .child(
+                                Button::text(
+                                    format!("settings-prompt-restore-{id}"),
+                                    *theme,
+                                    "Restore Artisan's version",
+                                )
+                                .disabled(disabled)
+                                .on_activate(move |_| {
+                                    restore_send(ViewAction::ResolvePrompt(
+                                        artisan_api::ResolvePrompt::RestoreEngine { engine: id },
+                                    ))
+                                })
+                                .build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+                );
+            }
+            artisan_api::PromptEngineStatus::Failed => {
+                if let Some(reason) = &engine.reason {
+                    controls = controls.child(
+                        editor_ui::page::notice(
+                            theme,
+                            &format!("{}: {reason}", engine.engine.display_name()),
+                        )
+                        .build(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    controls.build()
 }
 
 fn performance(
@@ -980,8 +1144,10 @@ fn appearance(
         "settings-switch-hide-bad-model-options",
         *theme,
         SwitchSize::Default,
-        core.settings.get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
-            .and_then(serde_json::Value::as_bool).unwrap_or(true),
+        core.settings
+            .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
         "Hide bad model options",
     )
     .on_change(move |enabled| hide_options(ViewAction::SetHideBadModelOptions(enabled)))
