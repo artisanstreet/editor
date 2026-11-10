@@ -40,6 +40,9 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock', '.cargo/config.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Release tooling tests
+        if: ${{ hashFiles('tests/release.py') != '' }}
+        run: python3 tests/release.py
       - name: Clippy
         run: nix develop .#cargo-linux --command cargo clippy --locked --workspace --all-targets
       - name: Build service integration fixtures
