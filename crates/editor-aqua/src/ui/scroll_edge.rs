@@ -63,9 +63,18 @@ impl EdgeFade {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+enum Entrance {
+    #[default]
+    Idle,
+    Pending,
+    Running(Instant),
+}
+
 #[derive(Clone, Default)]
 pub struct ScrollEdges {
     fades: Rc<[Cell<EdgeFade>; 2]>,
+    entrance: Rc<[Cell<Entrance>; 2]>,
 }
 
 impl PartialEq for ScrollEdges {
@@ -134,9 +143,56 @@ impl ScrollEdges {
     }
 
     pub fn reset(&self) {
+        self.entrance
+            .iter()
+            .for_each(|entrance| entrance.set(Entrance::Idle));
         self.fades
             .iter()
             .for_each(|fade| fade.set(EdgeFade::default()));
+    }
+
+    pub fn reveal(&self) {
+        self.reset();
+        self.entrance
+            .iter()
+            .for_each(|entrance| entrance.set(Entrance::Pending));
+    }
+
+    fn advance_fade(
+        &self,
+        edge: Edge,
+        target: f32,
+        reduced: bool,
+        now: Instant,
+    ) -> (EdgeFade, bool) {
+        let entrance = &self.entrance[slot(edge)];
+        let started = match entrance.get() {
+            Entrance::Idle => return self.fade(edge).step(target, reduced, now),
+            Entrance::Pending => {
+                entrance.set(Entrance::Running(now));
+                now
+            }
+            Entrance::Running(started) => started,
+        };
+        let progress = if reduced {
+            1.0
+        } else {
+            (now.saturating_duration_since(started).as_secs_f32()
+                / MotionDuration::Fast.as_duration().as_secs_f32())
+            .clamp(0.0, 1.0)
+        };
+        let moving = progress < 1.0;
+        if !moving {
+            entrance.set(Entrance::Idle);
+        }
+        (
+            EdgeFade {
+                shown: target
+                    * super::motion::MotionCurve::EaseInOut.sample(f64::from(progress)) as f32,
+                at: moving.then_some(now),
+            },
+            moving,
+        )
     }
 
     pub fn band(&self, key: impl Into<Key>, edge: Edge, color: Oklch) -> Element {
@@ -171,8 +227,12 @@ impl ScrollEdges {
         UiBox::new()
             .radius(radius)
             .style(
-                inset_shadow(edge, color, self.fade(edge).shown())
-                    .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)),
+                inset_shadow(edge, color, self.fade(edge).shown()).absolute_at(
+                    Some(0.0),
+                    Some(0.0),
+                    Some(0.0),
+                    Some(0.0),
+                ),
             )
             .build()
             .with_key(key)
@@ -190,7 +250,7 @@ impl ScrollEdges {
         reduced: bool,
         now: Instant,
     ) -> bool {
-        let (fade, moving) = self.fade(edge).step(target(hidden), reduced, now);
+        let (fade, moving) = self.advance_fade(edge, target(hidden), reduced, now);
         let previous = self.fade(edge);
         self.fades[slot(edge)].set(fade);
         if previous.shown() != fade.shown() {

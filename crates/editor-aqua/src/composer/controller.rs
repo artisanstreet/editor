@@ -397,7 +397,7 @@ impl Composer {
             self.picker.open_serial += 1;
             self.picker.axis = None;
             self.picker.axis_cursor = None;
-            self.picker.model_edges.reset();
+            self.picker.model_edges.reveal();
         }
         self.refresh_picker(host);
     }
