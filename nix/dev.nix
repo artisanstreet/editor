@@ -33,7 +33,7 @@ in
 {
   type = "app";
   program = "${runner}/bin/${runner.name}";
-  meta.description = "Build (${profile} profile) and install Forge, the Editor and ae${
+  meta.description = "Build (${profile} profile) and install Forge, the Editor and ae, or launch Aqua with --client-only${
     if blazePackage == null then "" else " with Blaze"
   }";
 }
