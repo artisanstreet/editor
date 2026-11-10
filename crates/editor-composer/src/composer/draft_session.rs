@@ -237,6 +237,7 @@ impl DraftSession {
     }
 
     fn fail(&mut self, error: String) {
+        tracing::warn!(scope = %self.scope, %error, "draft operation failed; releasing queued submission");
         if let Some(outgoing) = &mut self.outgoing {
             outgoing.state = Sending::Failed;
         }
