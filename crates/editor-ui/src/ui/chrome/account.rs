@@ -353,7 +353,7 @@ fn identity_lines(theme: &ArtisanTheme, palette: &Palette, identity: &Identity) 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "one account menu item receives its presentation and event context")]
 fn item(
     theme: &ArtisanTheme,
     palette: &Palette,

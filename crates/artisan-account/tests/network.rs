@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use artisan_account::network::{CoreSessionClient, SessionToken};
 use std::{
     io::{BufRead as _, BufReader, Write as _},
@@ -55,7 +57,7 @@ async fn account_reads_the_username_from_the_profile_endpoint() {
 
 #[tokio::test]
 async fn an_unavailable_profile_does_not_discard_a_valid_account() {
-    let profile = read_profile(404, r#"{}"#).await;
+    let profile = read_profile(404, "{}").await;
     assert_eq!(profile.account_id, "account");
     assert_eq!(profile.username, None);
 }

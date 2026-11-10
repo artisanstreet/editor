@@ -347,7 +347,7 @@ fn transcript_follows_the_native_tail_and_yields_to_glides_and_the_reader() {
     let mut scroll = SmoothScroll::default();
     assert!(!following_tail(&app));
 
-    assert_eq!(apply_step(&mut app, Step::FollowTail, 0.0), true);
+    assert!(apply_step(&mut app, Step::FollowTail, 0.0));
     app.build_frame().unwrap();
     assert!(following_tail(&app));
     let root = app.tree().root().unwrap();

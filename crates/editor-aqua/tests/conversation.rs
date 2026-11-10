@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 #[path = "conversation/compaction_view.rs"]
 mod compaction_view;
 #[path = "conversation/host_lifetime.rs"]

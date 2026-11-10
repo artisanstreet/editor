@@ -34,7 +34,9 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
     let factory = sidebar.thread_visual_factory(ArtisanTheme::resolved(), false);
     let visuals = factory(&row, None, None);
     let runs = SharedRuns::new();
-    let mut app = UiApp::new(SharedFonts::new(), runs.clone());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = UiApp::new(fonts, runs.clone());
     app.mount(|_| {
         UiBox::new()
             .width(90.0)

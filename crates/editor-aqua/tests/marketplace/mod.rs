@@ -290,7 +290,9 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
         &mut core,
         view::ViewAction::ToggleFound
     ));
-    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = aqua::UiApp::new(fonts, SharedRuns::new());
     app.mount(|_| view::build(&controller, &core, ArtisanTheme::resolved(), emit))
         .unwrap();
     app.set_viewport(1000.0, 900.0, 1.0);

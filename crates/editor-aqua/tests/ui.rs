@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 #[path = "ui/page.rs"]
 mod page;
 #[path = "ui/code_copy.rs"]

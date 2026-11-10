@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 #[path = "shell/dialogs.rs"]
 mod dialogs;
 #[path = "shell/gating.rs"]

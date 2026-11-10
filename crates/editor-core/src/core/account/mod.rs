@@ -152,7 +152,8 @@ impl TestAccountTransitions {
             self.sender
                 .send(Message::Synced(self.generation, Ok(profile), applied))
                 .await
-                .is_ok()
+                .is_ok(),
+            "account closed before the test transition was delivered"
         );
     }
     pub async fn transport_failure(&self) {
@@ -168,7 +169,8 @@ impl TestAccountTransitions {
                     applied
                 ))
                 .await
-                .is_ok()
+                .is_ok(),
+            "account closed before the test transition was delivered"
         );
         acknowledged
     }

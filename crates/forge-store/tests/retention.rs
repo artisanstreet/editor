@@ -1,4 +1,4 @@
-#![expect(clippy::unwrap_used, reason = "a failure fails the test")]
+#![cfg(test)]
 
 use artisan_api::{
     BlobHash, CreateProject, CreateThread, EngineConfig, EngineId, Event, ItemId, ItemKind,
@@ -145,7 +145,17 @@ async fn idle_threads_go_with_their_images_and_busy_families_stay() {
         Event::Thread { thread } => thread.id != idle,
         Event::Item { item } => item.thread_id != idle,
         Event::Run { run } => run.thread_id != idle,
-        _ => true,
+        Event::Hello { .. }
+        | Event::Project { .. }
+        | Event::ThreadRemoved { .. }
+        | Event::ItemState { .. }
+        | Event::Setting { .. }
+        | Event::Live { .. }
+        | Event::Suggestion { .. }
+        | Event::Engine { .. }
+        | Event::EngineInstall { .. }
+        | Event::EditorCall { .. }
+        | Event::Reset => true,
     }));
     assert_eq!(
         changes.last().map(|envelope| &envelope.event),

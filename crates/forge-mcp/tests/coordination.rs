@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use artisan_api::{CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, ThreadId};
 use forge_engines::Engines;
 use forge_mcp::{ArtisanMcp, server};
@@ -235,18 +237,15 @@ async fn long_item_continuation_preserves_every_utf8_character() {
             .await;
         assert_eq!(page["isError"], false, "{page}");
         rendered.push_str(page["structuredContent"]["text"].as_str().unwrap());
-        match page["structuredContent"]["next_offset"].as_u64() {
-            Some(next) => {
-                assert!(next > offset);
-                offset = next;
-            }
-            None => {
-                assert_eq!(
-                    page["structuredContent"]["total_bytes"].as_u64().unwrap() as usize,
-                    rendered.len()
-                );
-                break;
-            }
+        if let Some(next) = page["structuredContent"]["next_offset"].as_u64() {
+            assert!(next > offset);
+            offset = next;
+        } else {
+            assert_eq!(
+                usize::try_from(page["structuredContent"]["total_bytes"].as_u64().unwrap()).unwrap(),
+                rendered.len()
+            );
+            break;
         }
     }
     assert!(rendered.contains(&text));

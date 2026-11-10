@@ -22,7 +22,7 @@ fn outlined_labels_render_with_bundled_fonts_and_keep_span_colors() {
     let count = |start: usize, end: usize, red: bool| {
         raster
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .enumerate()
             .filter(|(index, pixel)| {
                 (start..end).contains(&(index % 200))

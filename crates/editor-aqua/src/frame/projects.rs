@@ -43,7 +43,7 @@ pub fn groups<'a>(
         .into_iter()
         .filter(|project| !project.removed)
         .collect::<Vec<_>>();
-    idle.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    idle.sort_by_key(|a| a.name.to_lowercase());
     let mut groups: Vec<Group> = Vec::new();
     for thread in threads {
         let Some(project) = idle.iter().find(|project| project.id == thread.project_id) else {

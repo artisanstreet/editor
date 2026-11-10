@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use artisan_account::browser::{
     Arrival, Handoff, Problem, Provider, arrival, bind, done_location, receive, request_target,
 };

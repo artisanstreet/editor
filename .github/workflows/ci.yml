@@ -1,81 +1,92 @@
-name: Cargo and Nix
+name: CI
 on:
   push:
+    branches: [master]
   pull_request:
+    branches: [master]
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  INSTA_UPDATE: 'no'
+  CI: 'true'
 jobs:
-  linux-checks:
+  linux:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        check: [clippy, tests]
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-            max-jobs = 1
-            cores = 2
-      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
-        if: vars.CACHIX_CACHE != ''
+      - name: Validate workflows
+        run: nix shell --inputs-from . nixpkgs#actionlint --command actionlint
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          name: ${{ vars.CACHIX_CACHE }}
-          skipPush: true
-      - run: nix build -L .#checks.x86_64-linux.${{ matrix.check }} --no-link
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock', '.cargo/config.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Release tooling tests
+        if: ${{ hashFiles('tests/release.py') != '' }}
+        run: python3 tests/release.py
+      - name: Clippy
+        run: nix develop .#cargo-linux --command cargo clippy --locked --workspace --all-targets
+      - name: Build service integration fixtures
+        run: nix develop .#cargo-linux --command cargo build --locked -p ae -p forge
+      - name: Tests
+        run: nix develop .#cargo-linux --command cargo test --locked --workspace
   windows:
+    needs: linux
     runs-on: windows-2025
     timeout-minutes: 45
-    env:
-      CARGO_BUILD_JOBS: 2
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
       - run: rustup show
       - run: cargo clippy --locked --workspace --all-targets
+      - run: cargo build --locked -p ae -p forge
       - run: cargo test --locked --workspace
-  packages:
-    needs: [linux-checks, windows]
-    runs-on: ubuntu-24.04
+  macos:
+    needs: linux
+    runs-on: macos-15
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-            max-jobs = 1
-            cores = 2
-      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
-        if: vars.CACHIX_CACHE != ''
-        with:
-          name: ${{ vars.CACHIX_CACHE }}
-          skipPush: true
-      - name: Build the unsigned release
-        run: |
-          nix build -L .#release --out-link result-release
-          mkdir artifacts
-          cp -L result-release/* artifacts/
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: artisan-release-unsigned
-          path: artifacts/
-          if-no-files-found: error
-      - name: Cache successful outputs from the default branch
-        if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && vars.CACHIX_CACHE != ''
-        env:
-          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          CACHIX_CACHE: ${{ vars.CACHIX_CACHE }}
-        run: |
-          test -n "$CACHIX_AUTH_TOKEN"
-          nix path-info --recursive ./result-release | cachix push "$CACHIX_CACHE"
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - run: rustup show
+      - name: Build the CLI and Forge without Aqua
+        run: cargo build --locked -p ae -p forge
+      - name: Test shared backend contracts
+        run: cargo test --locked -p artisan-api -p artisan-account -p artisan-paths -p forge-store
