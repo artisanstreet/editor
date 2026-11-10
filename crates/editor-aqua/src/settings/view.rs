@@ -362,12 +362,18 @@ pub fn build(
             .build(),
     };
     Scroll::new()
+        .preserve_offset(true)
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
+        .style(Style::new().column())
         .child(
             UiBox::new()
                 .width(Length::Pct(100.0))
-                .style(Style::new().justify(JustifyContent::CENTER))
+                .style(
+                    Style::new()
+                        .justify(JustifyContent::CENTER)
+                        .flex_shrink(0.0),
+                )
                 .child(
                     UiBox::new()
                         .layout("column")

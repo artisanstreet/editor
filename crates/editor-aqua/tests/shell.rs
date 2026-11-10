@@ -20,6 +20,8 @@ mod navigator_menu;
 mod root;
 #[path = "shell/scale.rs"]
 mod scale;
+#[path = "shell/settings_scroll.rs"]
+mod settings_scroll;
 #[path = "shell/scroll_edge.rs"]
 mod scroll_edge;
 #[cfg(windows)]
