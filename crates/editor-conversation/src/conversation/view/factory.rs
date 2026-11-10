@@ -611,6 +611,31 @@ impl RowFactory {
         Ok(result)
     }
 
+    fn activity_row(
+        &self,
+        owner: &Rc<super::row_cache::RowOwner>,
+        item: &artisan_api::Item,
+        expanded: bool,
+        names: &std::collections::HashMap<artisan_api::ItemId, String>,
+        dispatch: super::Dispatch,
+        batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
+    ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
+        let collected = RefCell::new(Vec::new());
+        let used = RefCell::new(std::collections::HashSet::new());
+        let result = super::work::activity_row(
+            item,
+            expanded,
+            names,
+            self.theme,
+            |text, color, mono| truncate(text, color, mono, self.theme),
+            dispatch,
+            || self.source_field(owner, item, crate::conversation::content::SourceField::Output, &collected, &used),
+        )?;
+        owner.retain_batches(&used.into_inner());
+        batches.extend(collected.into_inner());
+        Ok(result)
+    }
+
     fn notice_row(
         &self,
         owner: &Rc<super::row_cache::RowOwner>,
@@ -1988,14 +2013,14 @@ impl RowFactory {
                     | ItemKind::UserMessage {
                         from_agent: Some(_),
                         ..
-                    } => work::activity_row(
+                    } => self.activity_row(
+                        &row_owner,
                         item,
                         expanded,
                         &work.names,
-                        self.theme,
-                        |text, color, mono| truncate(text, color, mono, self.theme),
                         Rc::clone(dispatch),
-                    ),
+                        &mut batches,
+                    )?,
                     ItemKind::Plan { .. } => work::plan_entry(item, self.theme),
                     ItemKind::Notice { .. } => self.notice_row(&row_owner, item, &mut batches)?,
                     ItemKind::Question { .. } => self.question_card(&row_owner, item, &mut batches)?,
@@ -2397,7 +2422,7 @@ impl RowFactory {
                     } else {
                         let work = self.work.as_ref().ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
                         match &item.kind {
-                            ItemKind::Tool { .. } | ItemKind::UserMessage { from_agent: Some(_), .. } => work::activity_row(item, row.model.ui.get(id).and_then(|ui| ui.expanded).unwrap_or(false), &work.names, self.theme, |text, color, mono| truncate(text, color, mono, self.theme), Rc::clone(dispatch)),
+                            ItemKind::Tool { .. } | ItemKind::UserMessage { from_agent: Some(_), .. } => self.activity_row(&row_owner, item, row.model.ui.get(id).and_then(|ui| ui.expanded).unwrap_or(false), &work.names, Rc::clone(dispatch), &mut batches)?,
                             ItemKind::Agent { .. } => work::agent(item, self.theme, |text, color| truncate(text, color, false, self.theme), Rc::clone(dispatch)),
                             ItemKind::Plan { .. } => work::plan_entry(item, self.theme),
                             ItemKind::Notice { .. } => self.notice_row(&row_owner, item, &mut batches)?,

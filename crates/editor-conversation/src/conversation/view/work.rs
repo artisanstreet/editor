@@ -3,14 +3,14 @@ use crate::conversation::activity;
 use crate::conversation::adapter::Action;
 use crate::conversation::fold::RunSummary;
 use crate::conversation::phase;
-use editor_ui::asset::source_asset_glyph;
-use editor_ui::theme::{ArtisanTheme, ProseTypography};
 use aqua_core::{CursorIcon, Insets};
 use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::AlignItems;
 use aqua_ui::element::{Box as UiBox, Button as UiButton, Element, Text};
 use aqua_ui::style::{Length, Style};
 use artisan_api::{Item, ItemId, ItemKind, RunId, Status, TextContent, Timestamp};
+use editor_ui::asset::source_asset_glyph;
+use editor_ui::theme::{ArtisanTheme, ProseTypography};
 use std::collections::HashMap;
 
 fn label(
@@ -222,19 +222,17 @@ pub fn activity_row(
     theme: ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor, bool) -> Element,
     dispatch: Dispatch,
-) -> Option<Element> {
-    activity::category(item)?;
+    stored_failure: impl FnOnce() -> anyhow::Result<Element>,
+) -> anyhow::Result<Option<Element>> {
+    if activity::category(item).is_none() {
+        return Ok(None);
+    }
     let words = activity::line(item, agents);
     let failure = match &item.kind {
         ItemKind::Tool {
             output: Some(output),
             ..
-        } if item.status == Status::Failed => output
-            .text
-            .inline()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(str::to_owned),
+        } if item.status == Status::Failed && output.text.byte_len() > 0 => Some(&output.text),
         _ => None,
     };
     let has_details = failure.is_some()
@@ -287,7 +285,7 @@ pub fn activity_row(
             .child(line)
             .build()
     };
-    match failure.filter(|_| expanded && has_details) {
+    Ok(match failure.filter(|_| expanded && has_details) {
         Some(error) => Some(
             UiBox::new()
                 .layout("column")
@@ -300,8 +298,9 @@ pub fn activity_row(
                             bottom: theme.spacing.steps(1.0),
                             ..Insets::default()
                         }))
-                        .child(
-                            Text::new(error)
+                        .child(match error {
+                            TextContent::Stored(_) => stored_failure()?,
+                            TextContent::Inline(error) => Text::new(error.trim().to_owned())
                                 .text_style(TextStyle {
                                     families: vec![FontFamily::Named(
                                         theme.typography.sans.family.to_owned(),
@@ -313,13 +312,13 @@ pub fn activity_row(
                                     theme.colors.destructive_text.to_reference_text_color(),
                                 )
                                 .build(),
-                        )
+                        })
                         .build(),
                 )
                 .build(),
         ),
         None => Some(sentence),
-    }
+    })
 }
 
 pub fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
@@ -349,3 +348,7 @@ pub fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
     }
     Some(content.build())
 }
+
+#[cfg(test)]
+#[path = "../../../tests/conversation/view/work.rs"]
+mod tests;
