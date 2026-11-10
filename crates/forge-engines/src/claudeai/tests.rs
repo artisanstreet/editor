@@ -1752,3 +1752,7 @@ async fn native_compaction_without_a_saved_source_leaf_requires_canonical_fallba
     assert!(backend.sent.lock().unwrap().is_empty());
     assert_eq!(*backend.created.lock().unwrap(), 0);
 }
+
+#[cfg(unix)]
+#[path = "../../tests/claudeai/status.rs"]
+mod status;
