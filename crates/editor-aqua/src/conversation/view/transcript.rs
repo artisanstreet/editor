@@ -857,6 +857,16 @@ pub fn reader_scrolled(
     source_prefix: bool,
     revealed_count: usize,
 ) {
+    if let Some(position) = conversation
+        .view
+        .as_ref()
+        .and_then(|view| view.items.values().map(|item| item.position).max())
+    {
+        conversation
+            .reveal
+            .borrow_mut()
+            .rush(position.saturating_add(1));
+    }
     let maximum = viewport.distance_from_start + viewport.distance_from_end;
     let gap_shown = crate::conversation::scroll::gap_visible(
         &conversation.rows,
