@@ -3833,7 +3833,13 @@ fn model_axis_pane(
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
-        if !detail.is_empty() {
+        if !matches!(
+            axis,
+            super::picker::Axis::Speed
+                | super::picker::Axis::Thinking
+                | super::picker::Axis::Permission
+        ) && !detail.is_empty()
+        {
             text = text.child(paragraph(
                 &theme,
                 detail,
@@ -3891,15 +3897,10 @@ fn model_axis_pane(
                         hovered,
                         crate::ui::hover::HoverTone::Neutral,
                     );
-                })
-                .on_input(
-                    aqua_ui::input::InputKind::PointerEnter,
-                    aqua_ui::input::EventPhase::Bubble,
-                    move |_| {
+                    if hovered {
                         pointer_action(ComposerAction::AxisPointer { axis, index });
-                        aqua_ui::input::InputResponse::default()
-                    },
-                ),
+                    }
+                }),
         );
     }
     Scroll::new()
