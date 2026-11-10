@@ -97,7 +97,16 @@ async fn cancellation_interrupts_the_session_and_reaps_the_server_even_during_a_
         assert_eq!(outcome.status, RunStatus::Cancelled, "{:?}", outcome.error);
         assert!(dir.path().join("interrupted").exists());
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
-        assert!(!Path::new("/proc").join(pid).exists());
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            "cancelled CLI process must have been reaped"
+        );
         drain.await.unwrap();
     }
 }

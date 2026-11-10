@@ -73,7 +73,16 @@ done
         assert_eq!(outcome.status, RunStatus::Cancelled, "{:?}", outcome.error);
         assert!(dir.path().join("interrupted").exists());
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
-        assert!(!std::path::Path::new("/proc").join(pid.trim()).exists());
+        assert!(
+            !std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success(),
+            "cancelled CLI process must have been reaped"
+        );
         drain.await.unwrap();
     }
 }
