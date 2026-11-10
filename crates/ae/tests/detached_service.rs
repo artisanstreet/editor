@@ -154,6 +154,49 @@ mod tests {
     }
 
     #[test]
+    fn service_operations_wait_for_the_existing_lifecycle_owner() {
+        let instance = Instance::new(unused_loopback_address());
+        for action in ["start", "restart", "stop"] {
+            let first = std::fs::read(instance.data.join("forge.pid")).ok();
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(instance.data.join("service.lock"))
+                .unwrap();
+            lock.lock().unwrap();
+            let mut command = instance.command(action);
+            let mut child = command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+            let blocked = child.try_wait().unwrap().is_none();
+            let unchanged = std::fs::read(instance.data.join("forge.pid")).ok() == first
+                && instance.listening() == first.is_some();
+            drop(lock);
+            let output = child.wait_with_output().unwrap();
+            assert!(blocked, "{action} must wait for the lifecycle owner");
+            assert!(
+                unchanged,
+                "{action} must preserve the running instance while waiting"
+            );
+            assert!(output.status.success(), "{action}: {}", stderr(&output));
+        }
+        assert!(
+            !instance.listening(),
+            "the serialized stop closes the listener"
+        );
+        assert!(
+            !instance.data.join("forge.pid").exists(),
+            "the serialized stop removes its PID"
+        );
+        let _released = forge_http::lock_data_dir(&instance.data).unwrap();
+    }
+
+    #[test]
     fn start_refuses_an_occupied_port_without_starting_forge() {
         let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
         let instance = Instance::new(occupied.local_addr().unwrap());
