@@ -363,7 +363,7 @@ impl TranscriptObservations {
             .find_map(|(row, version)| {
                 matches!(row, Row::Text { .. }).then(|| is_ready(row, *version))
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
         {
             let ObservationState {
                 key_hashes,
