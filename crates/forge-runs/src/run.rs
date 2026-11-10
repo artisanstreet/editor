@@ -342,34 +342,6 @@ async fn execute(
         waiting: HashSet::new(),
     }));
     let auto_answers = forward.clone();
-    let forwarding = {
-        let approvals = Arc::clone(&approvals);
-        async move {
-            while let Some(input) = inbox.recv().await {
-                if let Input::Steer(message) = &input
-                    && !delivered.insert(message.id.clone())
-                {
-                    continue;
-                }
-                // Full access approves what already waits.
-                let waiting = match &input {
-                    Input::SetPermissions(permissions) => {
-                        approvals_lock(&approvals).set(*permissions)
-                    }
-                    Input::Steer(_) | Input::Answer { .. } | Input::ClearGoal => Vec::new(),
-                };
-                if forward.send(input).await.is_err() {
-                    break;
-                }
-                for key in waiting {
-                    if forward.send(allow_once(key)).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    };
-    tokio::pin!(forwarding);
     let (events, mut reports) = mpsc::channel(256);
     let harness = (hub.inner.harness_for)(engine);
     let mut disk = crate::disk::Watch::new(
@@ -393,35 +365,62 @@ async fn execute(
     items.initial = Some((initial_ack, initial_ids));
     let mut forwarding_done = false;
     let mut adapter_finished = false;
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => break Outcome::cancelled(),
-            () = hub.inner.shutdown.cancelled() => { cancel.cancel(); break Outcome::cancelled(); },
-            Some(event) = reports.recv() => {
-                if let Some(key) = approvals_lock(&approvals).observe(&event)
-                    && auto_answers.try_send(allow_once(key.clone())).is_err()
+    let outcome = {
+        let forwarding = async {
+            while let Some(input) = inbox.recv().await {
+                if let Input::Steer(message) = &input
+                    && !delivered.insert(message.id.clone())
                 {
-                    tracing::warn!(thread = %run.thread_id, run = %run.id, key, "couldn't approve under Full access; it waits for the user");
-                    approvals_lock(&approvals).waiting.insert(key);
+                    continue;
                 }
-                if let Err(error) = apply(hub, run, items, event).await {
-                    cancel.cancel();
-                    break Outcome::failed(format!("persist engine event: {error:#}"));
+                let waiting = match &input {
+                    Input::SetPermissions(permissions) => {
+                        approvals_lock(&approvals).set(*permissions)
+                    }
+                    Input::Steer(_) | Input::Answer { .. } | Input::ClearGoal => Vec::new(),
+                };
+                if forward.send(input).await.is_err() {
+                    break;
                 }
-            },
-            () = &mut forwarding, if !forwarding_done => { forwarding_done = true; },
-            outcome = &mut adapter_outcome => {
-                adapter_finished = true;
-                break outcome;
+                for key in waiting {
+                    if forward.send(allow_once(key)).await.is_err() {
+                        break;
+                    }
+                }
             }
-            () = disk.due() => {
-                if let Some(stopped) = guard_disk(hub, run, &mut disk).await {
-                    break stopped;
+        };
+        tokio::pin!(forwarding);
+        loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break Outcome::cancelled(),
+                () = hub.inner.shutdown.cancelled() => { cancel.cancel(); break Outcome::cancelled(); },
+                Some(event) = reports.recv() => {
+                    if let Some(key) = approvals_lock(&approvals).observe(&event)
+                        && auto_answers.try_send(allow_once(key.clone())).is_err()
+                    {
+                        tracing::warn!(thread = %run.thread_id, run = %run.id, key, "couldn't approve under Full access; it waits for the user");
+                        approvals_lock(&approvals).waiting.insert(key);
+                    }
+                    if let Err(error) = apply(hub, run, items, event).await {
+                        cancel.cancel();
+                        break Outcome::failed(format!("persist engine event: {error:#}"));
+                    }
+                },
+                () = &mut forwarding, if !forwarding_done => { forwarding_done = true; },
+                outcome = &mut adapter_outcome => {
+                    adapter_finished = true;
+                    break outcome;
+                }
+                () = disk.due() => {
+                    if let Some(stopped) = guard_disk(hub, run, &mut disk).await {
+                        break stopped;
+                    }
                 }
             }
         }
     };
+    inbox.close();
     cancel.cancel();
     let mut outcome = outcome;
     if !adapter_finished {
