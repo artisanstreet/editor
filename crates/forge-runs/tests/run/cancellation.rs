@@ -132,6 +132,10 @@ async fn cancellation_timeout_reports_unconfirmed_work_as_failed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one cancellation told from request to cleanup"
+)]
 async fn cancellation_rejects_answers_and_goal_updates_while_cleanup_is_pending() {
     let release = Arc::new(tokio::sync::Notify::new());
     let script_release = Arc::clone(&release);

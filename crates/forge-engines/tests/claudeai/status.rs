@@ -19,9 +19,14 @@ async fn timed_out_commands_fail_while_normal_nonzero_exits_complete() {
         )
         .await;
         assert_eq!(outcome.status, RunStatus::Done);
-        let status = log.iter().rev().find_map(|event| match event {
-            EngineEvent::Item { key, status, .. } if key == "command" => Some(*status),
-            _ => None,
+        let status = log.iter().rev().find_map(|event| {
+            if let EngineEvent::Item { key, status, .. } = event
+                && key == "command"
+            {
+                Some(*status)
+            } else {
+                None
+            }
         });
         assert_eq!(status, Some(expected));
     }
