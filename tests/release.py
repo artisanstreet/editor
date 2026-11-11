@@ -1,3 +1,4 @@
+import datetime
 import importlib.util
 import json
 from pathlib import Path
@@ -18,6 +19,13 @@ class Release(unittest.TestCase):
         for reference in ("v01.2.3", "v1.2.3-rc1", "feature/branch", "--help"):
             with self.assertRaises(ValueError):
                 release.version_for(reference, sha, "20261111031700")
+
+    def test_nightly_runs_at_oslo_midnight_in_summer_and_winter_time(self):
+        utc = lambda month, hour: datetime.datetime(2026, month, 15, hour, 20, tzinfo=datetime.timezone.utc)
+        self.assertTrue(release.midnight_in_oslo(utc(7, 22)))
+        self.assertFalse(release.midnight_in_oslo(utc(7, 23)))
+        self.assertFalse(release.midnight_in_oslo(utc(1, 22)))
+        self.assertTrue(release.midnight_in_oslo(utc(1, 23)))
 
     def test_gate_rejects_pr_runs_and_newer_failed_or_pending_runs(self):
         sha = "a" * 40

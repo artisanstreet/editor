@@ -3,7 +3,8 @@ on:
   push:
     tags: ['v*']
   schedule:
-    - cron: '17 3 * * *'
+    - cron: '0 22 * * *'
+    - cron: '0 23 * * *'
   workflow_dispatch:
     inputs:
       release_ref:
@@ -45,19 +46,21 @@ jobs:
           python3 - <<'PY'
           import datetime
           import os
-          from src.release import version_for, run
+          from src.release import midnight_in_oslo, version_for, run
           reference = os.environ['RELEASE_REF']
+          now = datetime.datetime.now(datetime.timezone.utc)
           version_for(reference, '0' * 40, '20000101000000')
           sha = run('git', 'rev-parse', f'{reference}^{{commit}}')
           run('git', 'merge-base', '--is-ancestor', sha, 'origin/master')
-          version, tag = version_for(reference, sha, datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S'))
-          skip = False
+          version, tag = version_for(reference, sha, now.strftime('%Y%m%d%H%M%S'))
+          skip = os.environ['GITHUB_EVENT_NAME'] == 'schedule' and not midnight_in_oslo(now)
           if tag == 'nightly':
               refs = run('git', 'ls-remote', 'origin', 'refs/tags/nightly').split()
-              skip = bool(refs) and refs[0] == sha
+              skip = skip or (bool(refs) and refs[0] == sha)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'sha={sha}\nversion={version}\ntag={tag}\nskip={str(skip).lower()}\n')
           PY
+          if grep -qx 'skip=true' "$GITHUB_OUTPUT"; then exit 0; fi
           sha="$(git rev-parse "$RELEASE_REF^{commit}")"
           python3 src/release.py gate --repository "$GITHUB_REPOSITORY" --sha "$sha"
   build:

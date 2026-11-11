@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 import zipfile
+from zoneinfo import ZoneInfo
 
 ANCHOR = "400a4b35cffdfa088227b9824176affb37b807fb26eb3c59b48ae56fbf5e4d8b"
 PLATFORMS = {(system, arch) for system in ("linux", "macos", "windows") for arch in ("x86_64", "aarch64")}
@@ -39,6 +40,10 @@ def version_for(reference, sha, date):
     if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", reference):
         raise ValueError("release ref must be master or a stable vMAJOR.MINOR.PATCH tag")
     return reference[1:], reference
+
+
+def midnight_in_oslo(moment):
+    return moment.astimezone(ZoneInfo("Europe/Oslo")).hour == 0
 
 
 def ci_green(runs, sha):
