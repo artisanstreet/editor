@@ -2,16 +2,15 @@ use crate::conversation::compaction::{CompactionFrame, CompactionPhase, eased};
 use editor_ui::{
     asset::source_asset_glyph,
     motion::MotionCurve,
-    shimmer_text::{ShimmerMotion, ShimmerTiming},
+    shimmer_text::{ShimmerTiming, sweep},
     theme::{ArtisanTheme, ProseTypography},
 };
-use aqua_core::{CornerRadii, DisplayItem, GpuiBackground, NodeId, Rect};
+use aqua_core::{CornerRadii, DisplayItem, GpuiBackground, Rect, scene::TextShimmer};
 use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::{
     AlignItems, JustifyContent,
-    element::{Box as UiBox, Canvas, Element, Key, Text},
+    element::{Box as UiBox, Canvas, Element, Text},
     style::{Length, Style},
-    tree::hash_key,
 };
 use artisan_api::{Item, ItemKind, ModelSwitch, NamedModel, Status};
 
@@ -66,7 +65,18 @@ fn text(value: impl Into<String>, theme: ArtisanTheme) -> Element {
         .build()
 }
 
-fn switch_line(switch: &ModelSwitch, theme: ArtisanTheme) -> Element {
+fn shimmering(style: Style, shimmer: Option<TextShimmer>) -> Style {
+    match shimmer {
+        Some(shimmer) => style.text_shimmer(shimmer),
+        None => style,
+    }
+}
+
+fn switch_line(
+    switch: &ModelSwitch,
+    shimmer: Option<TextShimmer>,
+    theme: ArtisanTheme,
+) -> Element {
     let model = |model: &NamedModel| {
         UiBox::new()
             .gap(4.0)
@@ -86,11 +96,12 @@ fn switch_line(switch: &ModelSwitch, theme: ArtisanTheme) -> Element {
     };
     UiBox::new()
         .gap(6.0)
-        .style(
+        .style(shimmering(
             Style::new()
                 .align(AlignItems::CENTER)
                 .gpui_source_text_color(theme.colors.text_muted.to_reference_text_color()),
-        )
+            shimmer,
+        ))
         .child(text("Changed from", theme))
         .child(model(&switch.from))
         .child(text("to", theme))
@@ -114,23 +125,32 @@ pub fn label(
     switch: Option<&ModelSwitch>,
     frame: CompactionFrame,
     theme: ArtisanTheme,
+    shimmer_key: Option<u64>,
 ) -> Element {
     let widest = if phase == CompactionPhase::Stopped {
         CompactionPhase::Stopped
     } else {
         CompactionPhase::Running
     };
-    let content = |value: CompactionPhase| {
+    let content = |value: CompactionPhase, shimmer: Option<TextShimmer>| {
         switch.map_or_else(
-            || text(value.label(), theme),
-            |switch| switch_line(switch, theme),
+            || {
+                UiBox::new()
+                    .style(shimmering(Style::new(), shimmer))
+                    .child(text(value.label(), theme))
+                    .build()
+            },
+            |switch| switch_line(switch, shimmer, theme),
         )
     };
     let placeholder = UiBox::new()
         .style(Style::new().opacity(0.0))
-        .child(content(widest))
+        .child(content(widest, None))
         .build();
     let shown = displayed_phase(phase, switch.is_some(), frame);
+    let shimmer = shimmer_key
+        .filter(|_| shown == CompactionPhase::Running)
+        .map(|key| sweep(&theme, ShimmerTiming::Progress, key));
     let (opacity, top, blur) = match frame.swap.filter(|_| switch.is_none()) {
         Some((_, swap)) if swap < 0.5 => {
             let out = eased(MotionCurve::EaseInOut, swap * 2.0);
@@ -156,45 +176,13 @@ pub fn label(
     }
     let visible = UiBox::new()
         .style(visible_style)
-        .child(content(shown).with_key(SHIMMER_KEY))
+        .child(content(shown, shimmer).with_key(SHIMMER_KEY))
         .build();
     UiBox::new()
         .style(Style::new().flex_shrink(0.0))
         .child(placeholder)
         .child(visible)
         .build()
-}
-
-pub fn sync_label(
-    app: &mut aqua::UiApp,
-    row: NodeId,
-    phase: CompactionPhase,
-    has_switch: bool,
-    frame: CompactionFrame,
-    theme: &ArtisanTheme,
-    reduced_motion: bool,
-) -> bool {
-    let key = hash_key(Key::from(SHIMMER_KEY));
-    let identity = app
-        .tree()
-        .get(row)
-        .and_then(|record| record.key)
-        .unwrap_or(key);
-    let mut stack = vec![row];
-    while let Some(node) = stack.pop() {
-        if let Some(record) = app.tree().get(node) {
-            stack.extend(record.children.iter().copied());
-            if record.key == Some(key) {
-                let mut motion = ShimmerMotion::new(theme, ShimmerTiming::Progress)
-                    .with_identity(hash_key((identity, SHIMMER_KEY)));
-                motion.set_active(
-                    displayed_phase(phase, has_switch, frame) == CompactionPhase::Running,
-                );
-                return motion.sync(app, node, reduced_motion);
-            }
-        }
-    }
-    false
 }
 
 pub fn row(

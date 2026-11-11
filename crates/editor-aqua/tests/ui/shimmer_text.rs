@@ -1,61 +1,61 @@
 use aqua::UiApp;
-use aqua_text::{SharedFonts, SharedRuns};
-use aqua_ui::element::{Box as UiBox, Text};
+use aqua_core::DisplayItem;
+use aqua_text::{SharedFonts, SharedRuns, TextStyle};
 use editor_aqua::ui::{
-    shimmer_text::{ShimmerLine, ShimmerTiming},
+    shimmer_text::{ShimmerText, ShimmerTiming},
     theme::ArtisanTheme,
 };
+use std::time::Duration;
+
+fn sweeps(app: &mut UiApp) -> Vec<(u64, Duration, Duration)> {
+    app.tree_mut()
+        .emit_scene()
+        .into_iter()
+        .filter_map(|(_, item)| match item {
+            DisplayItem::PushGpuiTextShimmer(shimmer) => {
+                Some((shimmer.key, shimmer.duration, shimmer.delay))
+            }
+            _ => None,
+        })
+        .collect()
+}
 
 #[test]
-fn retained_shimmer_updates_only_when_configuration_or_bounds_change() {
-    let mut shimmer =
-        ShimmerLine::new("status", &ArtisanTheme::resolved()).timing(ShimmerTiming::Status);
+fn status_text_shimmers_from_its_first_frame_and_only_while_active() {
+    let theme = ArtisanTheme::resolved();
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
     let mut app = UiApp::new(fonts, SharedRuns::new());
-    app.mount(|_| {
-        UiBox::new()
-            .width(200.0)
-            .height(30.0)
-            .child(shimmer.build(Text::new("Working").build().with_key("status")))
-            .build()
-    })
-    .unwrap();
+    let render = |text: &str, active: bool, reduced_motion: bool| {
+        ShimmerText::new("status", text, theme)
+            .timing(ShimmerTiming::Status)
+            .active(active)
+            .reduced_motion(reduced_motion)
+            .build(TextStyle::default())
+    };
+    app.mount(|_| render("Thinking", true, false)).unwrap();
     app.set_viewport(200.0, 30.0, 1.0);
     app.build_frame().unwrap();
-    let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("status"));
-    let node = app
-        .tree()
-        .traverse()
-        .into_iter()
-        .find(|node| {
-            app.tree()
-                .get(*node)
-                .is_some_and(|record| record.key == Some(key))
-        })
-        .unwrap();
-    assert!(shimmer.motion.sync(&mut app, node, false));
-    let retained = app.tree().paint(node).unwrap().gpui_text_shimmer.unwrap();
+    let first = sweeps(&mut app);
     assert_eq!(
-        retained.map.bounds,
-        app.tree().pre_transform_rect(node).unwrap()
+        first.iter().map(|sweep| (sweep.1, sweep.2)).collect::<Vec<_>>(),
+        vec![(Duration::from_secs(3), Duration::from_millis(1_500))],
+        "a status sweeps for three seconds after a pause"
     );
-    assert_eq!(retained.duration, std::time::Duration::from_secs(3));
-    assert_eq!(retained.delay, std::time::Duration::from_millis(1_500));
-    assert!(!shimmer.motion.sync(&mut app, node, false));
-    assert!(shimmer.motion.sync(&mut app, node, true));
-    assert!(app.tree().paint(node).unwrap().gpui_text_shimmer.is_none());
-    assert!(shimmer.motion.sync(&mut app, node, false));
+
+    app.refresh(vec![render("Working", true, false)]).unwrap();
+    app.build_frame().unwrap();
     assert_eq!(
-        app.tree()
-            .paint(node)
-            .unwrap()
-            .gpui_text_shimmer
-            .unwrap()
-            .key,
-        retained.key
+        sweeps(&mut app),
+        first,
+        "new status text keeps the same sweep clock"
     );
-    shimmer.motion.set_active(false);
-    assert!(shimmer.motion.sync(&mut app, node, false));
-    assert!(app.tree().paint(node).unwrap().gpui_text_shimmer.is_none());
+
+    app.refresh(vec![render("Working", true, true)]).unwrap();
+    app.build_frame().unwrap();
+    assert!(sweeps(&mut app).is_empty(), "reduced motion stops the sweep");
+
+    app.refresh(vec![render("Worked", false, false)]).unwrap();
+    app.build_frame().unwrap();
+    assert!(sweeps(&mut app).is_empty(), "a settled status is still");
 }

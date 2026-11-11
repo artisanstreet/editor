@@ -1,11 +1,9 @@
-use aqua_core::{
-    NodeId,
-    scene::{GpuiTextColorMap, GpuiTextShimmer},
-};
+use aqua_core::scene::TextShimmer;
 use aqua_text::{StyledSpan, TextStyle, overflow::OverflowMode};
 use aqua_ui::{
     element::{Box as UiBox, Element, Key, Text},
-    style::{LayoutStyle, Length, Style},
+    style::{Length, Style},
+    tree::hash_key,
 };
 
 use super::theme::ArtisanTheme;
@@ -36,64 +34,14 @@ impl ShimmerTiming {
     }
 }
 
-pub struct ShimmerMotion {
-    timing: ShimmerTiming,
-    target: aqua_core::GpuiTextColor,
-    active: bool,
-    identity: Option<u64>,
-}
-
-impl ShimmerMotion {
-    pub fn new(theme: &ArtisanTheme, timing: ShimmerTiming) -> Self {
-        Self {
-            timing,
-            target: theme.colors.background.to_reference_text_color(),
-            active: true,
-            identity: None,
-        }
-    }
-
-    pub fn with_identity(mut self, identity: u64) -> Self {
-        self.identity = Some(identity);
-        self
-    }
-
-    pub fn set_active(&mut self, active: bool) {
-        self.active = active;
-    }
-
-    pub fn set_theme(&mut self, theme: &ArtisanTheme) {
-        self.target = theme.colors.background.to_reference_text_color();
-    }
-
-    pub fn sync(&self, app: &mut aqua::UiApp, node: NodeId, reduced_motion: bool) -> bool {
-        let Some(bounds) = app.tree().pre_transform_rect(node) else {
-            return false;
-        };
-        let Some(mut paint) = app.tree().paint(node) else {
-            return false;
-        };
-        let style = if self.active && !reduced_motion && bounds.w > 0.0 {
-            let raw = node.raw();
-            let (duration, delay) = self.timing.durations();
-            Style::new().gpui_text_shimmer(GpuiTextShimmer {
-                map: GpuiTextColorMap {
-                    bounds,
-                    phase: 0.0,
-                    spread: 50.0,
-                    target: self.target,
-                },
-                key: self
-                    .identity
-                    .unwrap_or((u64::from(raw.generation) << 32) | u64::from(raw.index)),
-                duration,
-                delay,
-            })
-        } else {
-            Style::new().clear_text_color_map()
-        };
-        style.apply_to(&mut LayoutStyle::default(), &mut paint);
-        app.tree_mut().set_paint(node, paint)
+pub fn sweep(theme: &ArtisanTheme, timing: ShimmerTiming, key: u64) -> TextShimmer {
+    let (duration, delay) = timing.durations();
+    TextShimmer {
+        key,
+        spread: 50.0,
+        target: theme.colors.background.to_reference_text_color(),
+        duration,
+        delay,
     }
 }
 
@@ -104,7 +52,9 @@ pub struct ShimmerText {
     tone: ShimmerTone,
     truncate: bool,
     spans: Vec<StyledSpan>,
-    pub motion: ShimmerMotion,
+    timing: ShimmerTiming,
+    active: bool,
+    reduced_motion: bool,
 }
 
 impl ShimmerText {
@@ -116,17 +66,24 @@ impl ShimmerText {
             tone: ShimmerTone::Foreground,
             truncate: false,
             spans: Vec::new(),
-            motion: ShimmerMotion::new(&theme, ShimmerTiming::Status),
+            timing: ShimmerTiming::Status,
+            active: true,
+            reduced_motion: false,
         }
     }
 
     pub fn timing(mut self, timing: ShimmerTiming) -> Self {
-        self.motion.timing = timing;
+        self.timing = timing;
         self
     }
 
     pub fn active(mut self, active: bool) -> Self {
-        self.motion.set_active(active);
+        self.active = active;
+        self
+    }
+
+    pub fn reduced_motion(mut self, reduced_motion: bool) -> Self {
+        self.reduced_motion = reduced_motion;
         self
     }
 
@@ -158,46 +115,22 @@ impl ShimmerText {
         if self.truncate {
             text = text.overflow(OverflowMode::EndEllipsis);
         }
+        let style = Style::new()
+            .min_width(Length::Px(0.0))
+            .gpui_source_text_color(color);
+        let style = if self.active && !self.reduced_motion {
+            style.text_shimmer(sweep(
+                &self.theme,
+                self.timing,
+                hash_key(self.id.clone()),
+            ))
+        } else {
+            style
+        };
         UiBox::new()
-            .style(
-                Style::new()
-                    .min_width(Length::Px(0.0))
-                    .gpui_source_text_color(color),
-            )
+            .style(style)
             .child(text.build())
             .build()
             .with_key(self.id.clone())
-    }
-}
-
-pub struct ShimmerLine {
-    id: Key,
-    pub motion: ShimmerMotion,
-}
-
-impl ShimmerLine {
-    pub fn new(id: impl Into<Key>, theme: &ArtisanTheme) -> Self {
-        Self {
-            id: id.into(),
-            motion: ShimmerMotion::new(theme, ShimmerTiming::Status),
-        }
-    }
-
-    pub fn timing(mut self, timing: ShimmerTiming) -> Self {
-        self.motion.timing = timing;
-        self
-    }
-
-    pub fn active(mut self, active: bool) -> Self {
-        self.motion.set_active(active);
-        self
-    }
-
-    pub fn build(&self, child: Element) -> Element {
-        child
-    }
-
-    pub fn id(&self) -> &Key {
-        &self.id
     }
 }

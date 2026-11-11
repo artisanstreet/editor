@@ -1,8 +1,9 @@
 use aqua::UiApp;
 use aqua_text::{SharedFonts, SharedRuns};
+use aqua_core::{DisplayItem, scene::GpuiTextShimmer};
 use aqua_ui::{
     element::{Box as UiBox, Key},
-    tree::{NodeKind, hash_key},
+    tree::hash_key,
 };
 use editor_aqua::{
     conversation::{
@@ -35,150 +36,135 @@ fn node(app: &UiApp, key: &str) -> aqua_core::NodeId {
         .unwrap()
 }
 
-#[test]
-fn retained_label_switches_from_running_to_done_and_removes_shimmer() {
-    let theme = ArtisanTheme::resolved();
+const CLOCK: u64 = 41;
+
+fn scopes(app: &mut UiApp) -> Vec<GpuiTextShimmer> {
+    app.tree_mut()
+        .emit_scene()
+        .into_iter()
+        .filter_map(|(_, item)| match item {
+            DisplayItem::PushGpuiTextShimmer(shimmer) => Some(shimmer),
+            _ => None,
+        })
+        .collect()
+}
+
+fn app() -> UiApp {
     let fonts = SharedFonts::new();
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
-    let mut app = UiApp::new(fonts, SharedRuns::new());
-    let render = |phase, current| {
-        UiBox::new()
-            .width(400.0)
-            .height(40.0)
-            .child(compaction::label(phase, None, current, theme))
-            .build()
-            .with_key("row")
-    };
-    app.mount(|_| render(CompactionPhase::Running, frame(None)))
-        .unwrap();
-    app.set_viewport(400.0, 40.0, 1.0);
-    app.build_frame().unwrap();
-    let row = node(&app, "row");
-    assert!(compaction::sync_label(
-        &mut app,
-        row,
-        CompactionPhase::Running,
-        false,
-        frame(None),
-        &theme,
-        false
-    ));
-    let text = node(&app, "compaction-shimmer");
-    assert!(app.tree().paint(text).unwrap().gpui_text_shimmer.is_some());
-    assert!(!compaction::sync_label(
-        &mut app,
-        row,
-        CompactionPhase::Running,
-        false,
-        frame(None),
-        &theme,
-        false
-    ));
-    let outgoing = frame(Some((CompactionPhase::Running, 0.25)));
-    app.refresh(vec![render(CompactionPhase::Done, outgoing)])
-        .unwrap();
-    app.build_frame().unwrap();
-    let text = node(&app, "compaction-shimmer");
-    let NodeKind::Text(content) = &app.tree().get(text).unwrap().kind else {
-        panic!("expected text")
-    };
-    assert_eq!(content.text(), "Compacting");
-    compaction::sync_label(
-        &mut app,
-        row,
-        CompactionPhase::Done,
-        false,
-        outgoing,
-        &theme,
-        false,
-    );
-    assert!(app.tree().paint(text).unwrap().gpui_text_shimmer.is_some());
-    let incoming = frame(Some((CompactionPhase::Running, 0.75)));
-    app.refresh(vec![render(CompactionPhase::Done, incoming)])
-        .unwrap();
-    app.build_frame().unwrap();
-    let text = node(&app, "compaction-shimmer");
-    let NodeKind::Text(content) = &app.tree().get(text).unwrap().kind else {
-        panic!("expected text")
-    };
-    assert_eq!(content.text(), "Compacted");
-    compaction::sync_label(
-        &mut app,
-        row,
-        CompactionPhase::Done,
-        false,
-        incoming,
-        &theme,
-        false,
-    );
-    assert!(app.tree().paint(text).unwrap().gpui_text_shimmer.is_none());
+    UiApp::new(fonts, SharedRuns::new())
 }
 
 #[test]
-fn compaction_shimmer_keeps_its_clock_when_the_entrance_subtree_is_replaced() {
+fn label_shimmers_only_while_it_reads_as_running() {
     let theme = ArtisanTheme::resolved();
-    let fonts = SharedFonts::new();
-    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
-    let mut app = UiApp::new(fonts, SharedRuns::new());
-    let render = |key: &str| {
+    let mut app = app();
+    let render = |phase, current, clock| {
         UiBox::new()
             .width(400.0)
             .height(40.0)
-            .child(
-                compaction::label(CompactionPhase::Running, None, frame(None), theme)
-                    .with_key(key.to_owned()),
-            )
+            .child(compaction::label(phase, None, current, theme, clock))
             .build()
             .with_key("row")
     };
-    app.mount(|_| render("entering")).unwrap();
+    app.mount(|_| render(CompactionPhase::Running, frame(None), Some(CLOCK)))
+        .unwrap();
     app.set_viewport(400.0, 40.0, 1.0);
     app.build_frame().unwrap();
-    let row = node(&app, "row");
-    compaction::sync_label(
-        &mut app,
-        row,
-        CompactionPhase::Running,
-        false,
-        frame(None),
-        &theme,
-        false,
-    );
-    let first_node = node(&app, "compaction-shimmer");
-    let first = app
-        .tree()
-        .paint(first_node)
-        .unwrap()
-        .gpui_text_shimmer
+    assert_eq!(scopes(&mut app).len(), 1, "a running compaction shimmers");
+
+    let outgoing = frame(Some((CompactionPhase::Running, 0.25)));
+    app.refresh(vec![render(CompactionPhase::Done, outgoing, Some(CLOCK))])
         .unwrap();
-    let mut clocks = aqua::render::text::ShimmerClocks::default();
-    clocks.begin_frame();
-    assert_eq!(clocks.phase(&first, 0.0), 0.0);
-    clocks.end_frame();
-    app.refresh(vec![render("settled")]).unwrap();
     app.build_frame().unwrap();
-    let row = node(&app, "row");
-    compaction::sync_label(
-        &mut app,
-        row,
-        CompactionPhase::Running,
-        false,
-        frame(None),
-        &theme,
-        false,
+    assert_eq!(
+        scopes(&mut app).len(),
+        1,
+        "the outgoing Compacting label keeps shimmering until it has faded"
     );
-    let next_node = node(&app, "compaction-shimmer");
-    assert_ne!(first_node, next_node);
-    let next = app
-        .tree()
-        .paint(next_node)
-        .unwrap()
-        .gpui_text_shimmer
+
+    let incoming = frame(Some((CompactionPhase::Running, 0.75)));
+    app.refresh(vec![render(CompactionPhase::Done, incoming, Some(CLOCK))])
         .unwrap();
-    clocks.begin_frame();
-    assert!((clocks.phase(&next, 0.55) - 0.275).abs() < 0.001);
-    clocks.end_frame();
-    clocks.begin_frame();
-    assert!((clocks.phase(&next, 1.0) - 0.5).abs() < 0.001);
-    clocks.end_frame();
+    app.build_frame().unwrap();
+    assert!(
+        scopes(&mut app).is_empty(),
+        "the incoming Compacted label is still"
+    );
+
+    app.refresh(vec![render(CompactionPhase::Running, frame(None), None)])
+        .unwrap();
+    app.build_frame().unwrap();
+    assert!(
+        scopes(&mut app).is_empty(),
+        "reduced motion leaves a running label still"
+    );
+}
+
+#[test]
+fn a_rebuilt_model_switch_label_never_paints_a_frame_without_its_shimmer() {
+    let theme = ArtisanTheme::resolved();
+    let mut app = app();
+    let switch = artisan_api::ModelSwitch {
+        from: artisan_api::NamedModel {
+            engine: artisan_api::EngineId::Codex,
+            name: "GPT 6.1 Sol".into(),
+        },
+        to: artisan_api::NamedModel {
+            engine: artisan_api::EngineId::Claude,
+            name: "Opus 5.5".into(),
+        },
+    };
+    let render = |pulse: f32| {
+        let mut current = frame(None);
+        current.pulse = Some(pulse);
+        UiBox::new()
+            .width(400.0)
+            .height(40.0)
+            .child(compaction::label(
+                CompactionPhase::Running,
+                Some(&switch),
+                current,
+                theme,
+                Some(CLOCK),
+            ))
+            .build()
+            .with_key("row")
+    };
+    app.mount(|_| render(0.1)).unwrap();
+    app.set_viewport(400.0, 40.0, 1.0);
+    app.build_frame().unwrap();
+    let mut clocks = aqua::render::text::ShimmerClocks::default();
+    let mut paint = |app: &mut UiApp, now: f64| {
+        let scopes = scopes(app);
+        clocks.begin_frame();
+        let phases: Vec<f32> = scopes
+            .iter()
+            .map(|shimmer| clocks.phase(shimmer, now))
+            .collect();
+        clocks.end_frame();
+        phases
+    };
+    assert_eq!(paint(&mut app, 0.0), vec![0.0], "the sweep starts");
+    let label = node(&app, "compaction-shimmer");
+    let width = app.tree().rect(label).unwrap().w;
+    for (step, now) in [(0.2, 0.5), (0.3, 1.0), (0.4, 1.5)] {
+        app.refresh(vec![render(step)]).unwrap();
+        app.build_frame().unwrap();
+        let phases = paint(&mut app, now);
+        assert_eq!(
+            phases.len(),
+            1,
+            "the frame painted right after a rebuild still shimmers"
+        );
+        assert!(
+            (phases[0] - (now / 2.0) as f32).abs() < 0.001,
+            "the sweep continues across rebuilds instead of restarting: {phases:?} at {now}"
+        );
+    }
+    let scope = scopes(&mut app)[0];
+    assert!(
+        (scope.map.bounds.w - width).abs() < 0.5,
+        "the sweep spans the whole switch line"
+    );
 }

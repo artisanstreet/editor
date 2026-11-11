@@ -154,7 +154,6 @@ pub struct RealizedRow {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AfterLayout {
-    pub repaint: bool,
     pub rebuild: bool,
 }
 
@@ -189,16 +188,6 @@ pub struct RowFactory {
     stored: Option<StoredResources>,
     row_cache: Rc<RefCell<super::row_cache::RowCache>>,
     realized_owners: RefCell<HashMap<RowKey, std::rc::Weak<super::row_cache::RowOwner>>>,
-    compactions: RefCell<
-        HashMap<
-            RowKey,
-            (
-                crate::conversation::compaction::CompactionPhase,
-                bool,
-                crate::conversation::compaction::CompactionFrame,
-            ),
-        >,
-    >,
     active: Rc<Cell<bool>>,
     live: Cell<bool>,
     settled: Rc<RefCell<HashMap<RowKey, u64>>>,
@@ -1251,7 +1240,6 @@ impl RowFactory {
             stored: None,
             row_cache: Rc::new(RefCell::new(row_cache)),
             realized_owners: RefCell::new(HashMap::new()),
-            compactions: RefCell::new(HashMap::new()),
             active: Rc::new(Cell::new(true)),
             live: Cell::new(true),
             settled: Rc::default(),
@@ -1571,13 +1559,12 @@ impl RowFactory {
     pub fn dispose(&self) {
         self.live.set(false);
         self.realized_owners.borrow_mut().clear();
-        self.compactions.borrow_mut().clear();
         self.pending_projections.borrow_mut().clear();
         self.pending_live.borrow_mut().clear();
     }
 
     pub fn sync_after_layout(&self, app: &mut aqua::UiApp) -> bool {
-        self.after_layout(app).repaint
+        self.after_layout(app).rebuild
     }
 
     pub fn after_layout(&self, app: &mut aqua::UiApp) -> AfterLayout {
@@ -1591,27 +1578,6 @@ impl RowFactory {
         {
             return AfterLayout::default();
         }
-        let shimmer = self.statuses.borrow().sync(app, self.reduced_motion);
-        let mut compaction = false;
-        let frames = self.compactions.borrow();
-        for node in app.tree().traverse() {
-            let Some(key) = app.tree().get(node).and_then(|record| record.key) else {
-                continue;
-            };
-            for (row, (phase, has_switch, frame)) in frames.iter() {
-                if key == aqua_ui::tree::hash_key(aqua_ui::element::Key::from(format!("{row:?}"))) {
-                    compaction |= super::compaction::sync_label(
-                        app,
-                        node,
-                        *phase,
-                        *has_switch,
-                        *frame,
-                        &self.theme,
-                        self.reduced_motion,
-                    );
-                }
-            }
-        }
         let reveal = self.markdown.borrow().reveal_heatmaps(app);
         let stored_reveal = self
             .stored
@@ -1624,8 +1590,7 @@ impl RowFactory {
             .filter_map(|node| app.tree().get(node)?.key)
             .collect();
         let note = editor_core::diagnostics::rebuild_stats::note;
-        let rebuild = note("al_compaction", compaction)
-            | note("al_reveal", reveal)
+        let rebuild = note("al_reveal", reveal)
             | note("al_stored", stored_reveal)
             | note(
                 "al_motion",
@@ -1637,10 +1602,7 @@ impl RowFactory {
                         .is_some_and(|owner| owner.motion.borrow().animating())
                 }),
             );
-        AfterLayout {
-            repaint: rebuild || shimmer,
-            rebuild,
-        }
+        AfterLayout { rebuild }
     }
 
     pub fn sync_reveals(
@@ -2447,7 +2409,7 @@ impl RowFactory {
             Row::Compaction(id) => {
                 use crate::conversation::compaction::CompactionPhase;
                 let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation compaction item is unavailable"))?;
-                let ItemKind::Compaction { switch, .. } = &item.kind else {
+                let ItemKind::Compaction { .. } = &item.kind else {
                     anyhow::bail!("conversation compaction item has changed");
                 };
                 let work = self.work.as_ref().ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
@@ -2458,18 +2420,24 @@ impl RowFactory {
                 };
                 let fresh = row.model.ui.get(id).is_some_and(|ui| ui.fresh());
                 let frame = row_owner.motion.borrow_mut().compaction(id, phase, fresh, work.now, self.reduced_motion);
-                self.compactions.borrow_mut().insert(key.clone(), (phase, switch.is_some(), frame));
-                super::compaction::row(item, frame, self.theme, super::compaction::label)
+                let shimmer_key = (!self.reduced_motion).then(|| {
+                    aqua_ui::tree::hash_key(("compaction-shimmer", format!("{key:?}")))
+                });
+                super::compaction::row(item, frame, self.theme, |phase, switch, frame, theme| {
+                    super::compaction::label(phase, switch, frame, theme, shimmer_key)
+                })
             }
             Row::AgentResult(_) => None,
             Row::Status(run) => status::run(&row.model, run, self.theme, |text, live, theme| {
                 self.statuses
                     .borrow_mut()
-                    .render(key.clone(), text, live, theme)
+                    .render(key.clone(), text, live, self.reduced_motion, theme)
             })
             .transpose()?,
             Row::AgentStatus(_, working) => status::agent(*working, self.theme, |text, theme| {
-                self.statuses.borrow_mut().agent(key.clone(), text, theme)
+                self.statuses
+                    .borrow_mut()
+                    .agent(key.clone(), text, self.reduced_motion, theme)
             })
             .transpose()?,
             Row::Text { id, slot: Slot::Plain(section), .. } => {
