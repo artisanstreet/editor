@@ -909,11 +909,15 @@ pub struct CardParts {
     pub attachments: Option<Element>,
     pub mention_overlay: Option<Element>,
     pub thread_error: Option<Element>,
+    pub draft_error: Option<Element>,
 }
 
 pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Element {
     let mut card = UiBox::new().layout("column").width(Length::Pct(100.0));
     if let Some(error) = parts.thread_error {
+        card = card.child(error);
+    }
+    if let Some(error) = parts.draft_error {
         card = card.child(error);
     }
     if let Some(questionnaires) = parts.questionnaires {
@@ -965,7 +969,16 @@ pub fn draft_error(
             theme.colors.destructive_text.to_reference_text_color(),
         ))
         .build();
-    let mut root = UiBox::new().layout("column").gap(8.0).child(text);
+    let mut root = UiBox::new()
+        .layout("column")
+        .gap(8.0)
+        .style(Style::new().padding_insets(Insets {
+            left: 0.0,
+            right: 0.0,
+            top: 10.0,
+            bottom: 6.0,
+        }))
+        .child(text);
     if conflict {
         let local = Rc::clone(&dispatch);
         let remote = Rc::clone(&dispatch);
@@ -2767,6 +2780,15 @@ impl ComposerOwner {
         let generation = controller.generation();
         let host_id = controller.target.host().clone();
         let dispatch = Rc::clone(&self.dispatch);
+        let draft_error = controller
+            .session
+            .as_ref()
+            .and_then(|session| {
+                session.read(|state| state.error.clone().map(|error| (error, state.conflict)))
+            })
+            .map(|(error, conflict)| {
+                draft_error(theme, &error, conflict, Rc::clone(&self.dispatch))
+            });
         composer_card(
             theme,
             nested,
@@ -2784,6 +2806,7 @@ impl ComposerOwner {
                 attachments,
                 mention_overlay,
                 thread_error,
+                draft_error,
             },
         )
         .on_input(
