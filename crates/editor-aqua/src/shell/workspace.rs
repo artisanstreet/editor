@@ -64,6 +64,7 @@ pub struct Workspace {
     composer_focus_pending: bool,
     composer_was_focused: bool,
     composer_mentions_dirty: bool,
+    retiring_tooltips: Vec<crate::ui::hover_tooltip::TooltipHost>,
     composer_tooltip: Option<(
         crate::composer::picker::TooltipContent,
         aqua_core::NodeId,
@@ -146,6 +147,7 @@ impl Workspace {
             composer_was_focused: false,
             composer_mentions_dirty: true,
             composer_tooltip: None,
+            retiring_tooltips: Vec::new(),
             question_option_actions: Rc::new(RefCell::new(VecDeque::new())),
             question_source_actions: Rc::new(RefCell::new(VecDeque::new())),
             question_source: None,
@@ -357,6 +359,9 @@ impl Workspace {
     }
 
     pub fn dispose_composer_popups(&mut self, ui: &mut aqua::UiApp) {
+        for tooltip in self.retiring_tooltips.drain(..) {
+            tooltip.dispose(ui);
+        }
         if let Some((_, _, tooltip)) = self.composer_tooltip.take() {
             tooltip.dispose(ui);
         }
@@ -378,6 +383,13 @@ impl Workspace {
             return false;
         };
         let mut changed = owner.advance_tooltip(now);
+        for tooltip in &mut self.retiring_tooltips {
+            match tooltip.sync(ui) {
+                Ok(moving) => changed |= moving,
+                Err(error) => tracing::warn!(%error, "could not animate closing tooltip"),
+            }
+        }
+        self.retiring_tooltips.retain(|tooltip| tooltip.is_open(ui));
         let shown = owner.shown_tooltip();
         let node = shown.as_ref().and_then(|shown| {
             [
@@ -397,8 +409,13 @@ impl Workspace {
                 shown.as_ref() != Some(content) || node != Some(*anchor) || !host.is_open(ui)
             })
         {
-            if let Some((_, _, tooltip)) = self.composer_tooltip.take() {
-                tooltip.dispose(ui);
+            if let Some((_, _, mut tooltip)) = self.composer_tooltip.take() {
+                if tooltip.is_open(ui) {
+                    if let Err(error) = tooltip.begin_close(ui) {
+                        tracing::warn!(%error, "could not close composer tooltip");
+                    }
+                    self.retiring_tooltips.push(tooltip);
+                }
             }
             changed = true;
         }

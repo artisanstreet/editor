@@ -277,3 +277,26 @@ fn removed_owner_generation_does_not_own_replacement_popup() {
     replacement.dispose(&mut app);
     assert_eq!(app.tree().focused(), Some(replacement_owner));
 }
+
+#[test]
+fn menus_keep_their_surface_and_callback_until_the_exit_finishes() {
+    let (mut app, owner) = app();
+    let closed = Rc::new(Cell::new(0));
+    let capture = closed.clone();
+    let mut options = aqua_ui::popup::PopupOptions::menu();
+    options.on_close = Some(Rc::new(move |_| capture.set(capture.get() + 1)));
+    let mut host =
+        AnimatedPickerHost::open_options(&mut app, owner, panel(), options, 0.0).unwrap();
+    host.advance(&mut app, 0.25).unwrap();
+    let root = host.root(&app).unwrap();
+    host.begin_close(&mut app, 0.25).unwrap();
+    host.advance(&mut app, 0.30).unwrap();
+    assert!(host.is_open(&app));
+    assert_eq!(closed.get(), 0);
+    let paint = app.tree().paint(root).unwrap();
+    assert!(paint.opacity.unwrap() > 0.0 && paint.opacity.unwrap() < 1.0);
+    assert!(paint.transform.unwrap().a > 0.99 && paint.transform.unwrap().a < 1.0);
+    host.advance(&mut app, 0.41).unwrap();
+    assert!(!host.is_open(&app));
+    assert_eq!(closed.get(), 1);
+}

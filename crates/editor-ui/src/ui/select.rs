@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use super::picker_motion::MenuMotion;
 
-pub const MENU_MOTION: Duration = Duration::from_millis(100);
+pub const MENU_MOTION: Duration = super::picker_motion::DROPDOWN_OPEN;
 pub const OPTION_HEIGHT: f32 = 36.0;
 pub const MENU_MIN_WIDTH: f32 = 160.0;
 
@@ -666,6 +666,8 @@ pub struct SelectPopupHost<V: Clone + Eq + 'static> {
     factory: Rc<dyn Fn() -> Element>,
     on_open_change: Option<OpenChange>,
     flight: Option<(u64, bool, f64)>,
+    scale: f32,
+    from_scale: f32,
     now: f64,
     hover: Rc<RefCell<super::picker_motion::HoverSurface>>,
     theme: ArtisanTheme,
@@ -718,6 +720,8 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
             factory,
             on_open_change,
             flight: None,
+            scale: super::picker_motion::DROPDOWN_PRE_SCALE,
+            from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
             now,
             hover,
             theme,
@@ -748,19 +752,27 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
             .as_ref()
             .is_none_or(|(old, _, _)| *old != generation)
         {
+            self.from_scale = self.scale;
             self.flight = Some((generation, closing, now));
         }
         let Some((_, _, started)) = self.flight else {
             return Ok(());
         };
-        let duration = MENU_MOTION.as_secs_f64();
-        let progress = if duration > 0.0 {
+        let duration = if closing {
+            super::picker_motion::DROPDOWN_CLOSE
+        } else {
+            MENU_MOTION
+        }
+        .as_secs_f64();
+        let reduced =
+            app.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
+        let progress = if duration > 0.0 && !reduced {
             ((now - started) / duration).clamp(0.0, 1.0) as f32
         } else {
             1.0
         };
         let settled = progress >= 1.0;
-        let (opacity, offset) = {
+        let (opacity, _) = {
             let mut state = self.state.borrow_mut();
             state
                 .motion
@@ -771,13 +783,14 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
             }
             frame
         };
-        let presence = 1.0 - (offset / 8.0).clamp(0.0, 1.0);
-        let rest = if closing {
+        let target_scale = if closing {
             super::picker_motion::DROPDOWN_CLOSING_SCALE
         } else {
-            super::picker_motion::DROPDOWN_PRE_SCALE
+            1.0
         };
-        let scale = (1.0 - rest).mul_add(presence, rest);
+        self.scale = (target_scale - self.from_scale)
+            .mul_add(super::picker_motion::smooth_out(progress), self.from_scale);
+        let scale = self.scale;
         let element = (self.factory)().style(
             Style::new()
                 .opacity(opacity)
@@ -888,7 +901,6 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
     }
 
     pub fn is_animating(&self, _app: &aqua::UiApp) -> bool {
-        self.flight.is_some()
-            || self.hover.borrow().is_animating()
+        self.flight.is_some() || self.hover.borrow().is_animating()
     }
 }

@@ -8,7 +8,6 @@ use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::{
     AlignItems,
     element::{Box as UiBox, Button, Element, Key, Text},
-    motion::{Easing, MotionHandle, MotionKind, MotionValue},
     overlay::OverlayId,
     style::{Axis, Length, Style},
     tree::hash_key,
@@ -18,8 +17,8 @@ use editor_assets::AssetId;
 use super::{
     asset::source_asset_glyph,
     hover::HoverTone,
-    picker_motion::{HoverSurface, smooth_out},
-    popover::Popover,
+    picker_motion::HoverSurface,
+    popover::{AnimatedPickerHost, Popover},
     rich::actions::{CopyKind, ShowCopyMenu},
     theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens},
 };
@@ -36,7 +35,9 @@ pub struct ColorCopyMenuHost {
     pending_close: Rc<Cell<bool>>,
     alive: Rc<Cell<bool>>,
     hover: Rc<RefCell<HoverSurface>>,
-    flight: Option<MotionHandle>,
+    popup: AnimatedPickerHost,
+    now: f64,
+    effect: Rc<dyn Fn(ColorCopyEffect)>,
     theme: ArtisanTheme,
     entries: usize,
     reduced_motion: bool,
@@ -167,34 +168,18 @@ impl ColorCopyMenuHost {
                 closed_effect(ColorCopyEffect::Dismissed);
             }
         }));
-        let overlay = app
-            .open_popup_measured(owner, panel, options)
-            .map_err(|error| error.to_string())?;
-        let flight = if reduced_motion {
-            None
-        } else {
-            let motion = app.host_mut().motion_mut();
-            let handle = motion.spawn(
-                Some(owner),
-                MotionValue::Scalar(0.0),
-                MotionKind::Tween {
-                    duration_secs: 0.25,
-                    easing: Easing::Linear,
-                },
-                now,
-            );
-            motion
-                .set_target(handle, MotionValue::Scalar(1.0), now)
-                .map_err(|error| format!("{error:?}"))?;
-            effect(ColorCopyEffect::RequestFrame);
-            Some(handle)
-        };
+        let mut popup = AnimatedPickerHost::open_options(app, owner, panel, options, now)?;
+        popup.set_reduced_motion(reduced_motion);
+        let overlay = popup.overlay();
+        effect(ColorCopyEffect::RequestFrame);
         let mut host = Self {
             overlay,
             pending_close,
             alive,
             hover,
-            flight,
+            popup,
+            now,
+            effect,
             theme,
             entries,
             reduced_motion,
@@ -211,23 +196,17 @@ impl ColorCopyMenuHost {
         self.alive.get() && app.host().is_open(self.overlay)
     }
 
-    pub fn dispose(mut self, app: &mut aqua::UiApp) {
-        if let Some(handle) = self.flight.take() {
-            app.host_mut().motion_mut().remove(handle);
-        }
+    pub fn dispose(self, app: &mut aqua::UiApp) {
         self.hover.borrow_mut().dispose(app);
-        app.close_popup(self.overlay);
+        self.popup.dispose(app);
         self.alive.set(false);
     }
 
     pub fn sync(&mut self, app: &mut aqua::UiApp) {
         if self.pending_close.replace(false) && self.is_open(app) {
-            app.close_popup(self.overlay);
+            let _ = self.popup.begin_close(app, self.now);
         }
         if !self.is_open(app) {
-            if let Some(handle) = self.flight.take() {
-                app.host_mut().motion_mut().remove(handle);
-            }
             self.hover.borrow_mut().dispose(app);
         }
     }
@@ -235,6 +214,10 @@ impl ColorCopyMenuHost {
     pub fn handle_input(&mut self, app: &mut aqua::UiApp, event: &InputEvent) -> bool {
         if app.host().service().topmost() != Some(self.overlay) {
             return false;
+        }
+        if self.popup.request_dismissal(app, event).unwrap_or(false) {
+            (self.effect)(ColorCopyEffect::RequestFrame);
+            return true;
         }
         if let InputEvent::KeyDown(key) = event {
             let backwards = match key.key {
@@ -281,31 +264,15 @@ impl ColorCopyMenuHost {
     }
 
     pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<bool, String> {
+        self.now = now;
         self.sync(app);
+        if self.popup.is_open(app) {
+            self.popup.advance(app, now)?;
+        }
         let Some(root) = self.root(app) else {
             return Ok(false);
         };
-        let mut animating = false;
-        if let Some(handle) = self.flight {
-            let value = match app.host_mut().motion_mut().sample(handle, now) {
-                Some(MotionValue::Scalar(value)) => smooth_out(value),
-                _ => 1.0,
-            };
-            let mut paint = app
-                .tree()
-                .paint(root)
-                .ok_or_else(|| "copy menu root is unavailable".to_owned())?;
-            let scale = 0.03_f32.mul_add(value, 0.97);
-            paint.opacity = Some(value);
-            paint.transform = Some(aqua_core::Transform2D::scale(scale, scale));
-            app.tree_mut().set_paint(root, paint);
-            if app.host().motion().is_settled(handle) {
-                app.host_mut().motion_mut().remove(handle);
-                self.flight = None;
-            } else {
-                animating = true;
-            }
-        }
+        let animating = self.popup.is_animating(app);
         let rows_key = hash_key(Key::from("copy-menu-rows"));
         let mut stack = vec![root];
         while let Some(node) = stack.pop() {

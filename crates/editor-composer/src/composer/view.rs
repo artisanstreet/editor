@@ -1157,7 +1157,7 @@ pub struct ComposerOwner {
     reduced_motion: bool,
     model_popup: Option<editor_ui::popover::AnimatedPickerHost>,
     mention_popup: Option<editor_ui::popover::AnimatedPickerHost>,
-    project_popup: Option<editor_ui::popover::PickerPopupHost>,
+    project_popup: Option<editor_ui::popover::AnimatedPickerHost>,
     engine_light: std::cell::RefCell<super::engine_light::EngineLight>,
     engine_light_image: std::cell::RefCell<super::engine_light::EngineLightImage>,
     tab_geometry: Rc<std::cell::RefCell<editor_ui::tab_card::GeometryCache>>,
@@ -1634,7 +1634,7 @@ impl ComposerOwner {
             popup.dispose(app);
         }
         if let Some(popup) = self.project_popup.take() {
-            popup.close(app);
+            popup.dispose(app);
         }
     }
 
@@ -1648,17 +1648,11 @@ impl ComposerOwner {
     ) -> Result<(), String> {
         use editor_ui::popover::{AnimatedPickerHost, PickerEntrance};
         use aqua_ui::popup::PopupFocus;
-        let (entrance, open_ms, close_ms) = match kind {
-            PopupKind::Model => (PickerEntrance::Slide, 100, 100),
-            PopupKind::Mentions => (
-                PickerEntrance::Scale {
-                    origin: aqua_core::Point::new(0.5, 1.0),
-                },
-                250,
-                150,
-            ),
-            PopupKind::Project => return Err("project menu is not animated".into()),
+        let entrance = PickerEntrance::Scale {
+            origin: aqua_core::Point::new(0.0, 1.0),
         };
+        let open_duration = editor_ui::picker_motion::DROPDOWN_OPEN;
+        let close_duration = editor_ui::picker_motion::DROPDOWN_CLOSE;
         let action = Rc::clone(&self.dispatch);
         let popup = AnimatedPickerHost::open_above(
             app,
@@ -1667,8 +1661,16 @@ impl ComposerOwner {
             kind.gap(),
             PopupFocus::Preserve,
             entrance,
-            std::time::Duration::from_millis(if self.reduced_motion { 0 } else { open_ms }),
-            std::time::Duration::from_millis(if self.reduced_motion { 0 } else { close_ms }),
+            if self.reduced_motion {
+                std::time::Duration::ZERO
+            } else {
+                open_duration
+            },
+            if self.reduced_motion {
+                std::time::Duration::ZERO
+            } else {
+                close_duration
+            },
             now,
             move |_| {
                 action(match kind {
@@ -1680,7 +1682,7 @@ impl ComposerOwner {
         match kind {
             PopupKind::Model => self.model_popup = Some(popup),
             PopupKind::Mentions => self.mention_popup = Some(popup),
-            PopupKind::Project => {}
+            PopupKind::Project => self.project_popup = Some(popup),
         }
         Ok(())
     }
@@ -1695,26 +1697,14 @@ impl ComposerOwner {
     ) -> Result<(), String> {
         use editor_ui::popover::{AnimatedPickerHost, PickerEntrance};
         use aqua_ui::popup::PopupFocus;
-        if kind == PopupKind::Project {
-            if self.popup_is_open(kind, app) {
-                return self.refresh_popup_content(kind, app, initial, now);
-            }
-            return self.open_project_popup(app, anchor, initial);
-        }
         if self.popup_is_open(kind, app) {
             return self.refresh_popup_content(kind, app, initial, now);
         }
-        let (entrance, open_ms, close_ms) = match kind {
-            PopupKind::Model => (PickerEntrance::Slide, 100, 100),
-            PopupKind::Mentions => (
-                PickerEntrance::Scale {
-                    origin: aqua_core::Point::new(0.5, 1.0),
-                },
-                250,
-                150,
-            ),
-            PopupKind::Project => unreachable!(),
+        let entrance = PickerEntrance::Scale {
+            origin: aqua_core::Point::new(0.0, 1.0),
         };
+        let open_duration = editor_ui::picker_motion::DROPDOWN_OPEN;
+        let close_duration = editor_ui::picker_motion::DROPDOWN_CLOSE;
         let action = Rc::clone(&self.dispatch);
         let popup = AnimatedPickerHost::open_content(
             app,
@@ -1723,8 +1713,16 @@ impl ComposerOwner {
             kind.gap(),
             PopupFocus::Preserve,
             entrance,
-            std::time::Duration::from_millis(if self.reduced_motion { 0 } else { open_ms }),
-            std::time::Duration::from_millis(if self.reduced_motion { 0 } else { close_ms }),
+            if self.reduced_motion {
+                std::time::Duration::ZERO
+            } else {
+                open_duration
+            },
+            if self.reduced_motion {
+                std::time::Duration::ZERO
+            } else {
+                close_duration
+            },
             now,
             move |_| {
                 action(match kind {
@@ -1736,7 +1734,7 @@ impl ComposerOwner {
         let slot = match kind {
             PopupKind::Model => &mut self.model_popup,
             PopupKind::Mentions => &mut self.mention_popup,
-            PopupKind::Project => unreachable!(),
+            PopupKind::Project => &mut self.project_popup,
         };
         if let Some(old) = slot.replace(popup) {
             old.dispose(app);
@@ -1792,9 +1790,14 @@ impl ComposerOwner {
                 }),
             PopupKind::Project => self
                 .project_popup
-                .as_ref()
+                .as_mut()
                 .filter(|popup| popup.is_open(app))
-                .map_or(Ok(()), |popup| popup.refresh(app, content)),
+                .map_or(Ok(()), |popup| {
+                    if popup.is_closing() {
+                        popup.begin_open(app, now)?;
+                    }
+                    popup.refresh_content(app, content)
+                }),
         }
     }
 
@@ -1804,14 +1807,7 @@ impl ComposerOwner {
         anchor: aqua_core::NodeId,
         content: Element,
     ) -> Result<(), String> {
-        self.project_popup = Some(open_popup(
-            app,
-            anchor,
-            content,
-            PopupKind::Project,
-            Rc::clone(&self.dispatch),
-        )?);
-        Ok(())
+        self.open_popup_content(app, anchor, PopupKind::Project, content, 0.0)
     }
 
     pub fn close_popup(
@@ -1832,8 +1828,8 @@ impl ComposerOwner {
                 }
             }
             PopupKind::Project => {
-                if let Some(popup) = self.project_popup.take() {
-                    popup.close(app);
+                if let Some(popup) = &mut self.project_popup {
+                    popup.begin_close(app, now)?;
                 }
             }
         }
@@ -1855,6 +1851,10 @@ impl ComposerOwner {
                 .is_some_and(|popup| popup.is_animating(app))
             || self
                 .mention_popup
+                .as_ref()
+                .is_some_and(|popup| popup.is_animating(app))
+            || self
+                .project_popup
                 .as_ref()
                 .is_some_and(|popup| popup.is_animating(app))
     }
@@ -1947,6 +1947,7 @@ impl ComposerOwner {
         for popup in [
             &mut self.model_popup,
             &mut self.mention_popup,
+            &mut self.project_popup,
         ] {
             if let Some(popup) = popup {
                 if popup.is_open(app) {
@@ -1978,6 +1979,7 @@ impl ComposerOwner {
         for (popup, close) in [
             (&mut self.model_popup, ComposerAction::ClosePicker),
             (&mut self.mention_popup, ComposerAction::DismissMentions),
+            (&mut self.project_popup, ComposerAction::ClosePicker),
         ] {
             if let Some(popup) = popup {
                 if popup.is_open(app) && !popup.is_closing() && popup.request_dismissal(app, event)? {

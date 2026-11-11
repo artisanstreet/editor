@@ -4,8 +4,8 @@ use aqua::UiApp;
 use aqua_ui::element::Element;
 use std::{rc::Rc, time::Duration};
 
-const OPEN: Duration = Duration::from_millis(250);
-const CLOSE: Duration = Duration::from_millis(150);
+const OPEN: Duration = crate::ui::picker_motion::DROPDOWN_OPEN;
+const CLOSE: Duration = crate::ui::picker_motion::DROPDOWN_CLOSE;
 
 #[derive(Default)]
 pub struct Popup {
@@ -68,7 +68,11 @@ impl Popup {
         Ok(host.is_animating(ui))
     }
 
-    pub fn dismiss(&mut self, ui: &mut UiApp, input: &aqua_core::InputEvent) -> Result<bool, String> {
+    pub fn dismiss(
+        &mut self,
+        ui: &mut UiApp,
+        input: &aqua_core::InputEvent,
+    ) -> Result<bool, String> {
         match &mut self.host {
             Some(host) if !host.is_closing() => host.request_dismissal(ui, input),
             _ => Ok(false),

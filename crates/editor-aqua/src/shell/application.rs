@@ -113,9 +113,9 @@ pub struct ShellApplication<V> {
     notifications_enabled: bool,
     initial: Option<ShellUpdates>,
     mounted: bool,
-    font_popup: Option<aqua_ui::overlay::OverlayId>,
-    streaming_popup: Option<aqua_ui::overlay::OverlayId>,
-    retention_popup: Option<aqua_ui::overlay::OverlayId>,
+    font_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    streaming_popup: Option<crate::ui::popover::AnimatedPickerHost>,
+    retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     usage_deadline: Option<Instant>,
     fit_launch: bool,
     render_tap: Option<std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>>>,
@@ -184,6 +184,23 @@ impl<V: SectionViews> ShellApplication<V> {
 
     fn advance_hover_animations(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) {
         let theme = self.shell.preferences.theme();
+        for popup in [
+            &mut self.font_popup,
+            &mut self.streaming_popup,
+            &mut self.retention_popup,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if popup.is_open(self.ui.ui()) {
+                if let Err(error) = popup.advance(self.ui.ui_mut(), ctx.now().as_secs_f64()) {
+                    tracing::warn!(%error, "could not animate settings popup");
+                }
+                if popup.is_animating(self.ui.ui()) {
+                    ctx.request_frame(id, FrameReason::ANIMATION);
+                }
+            }
+        }
         if let Some(owner) = self
             .shell
             .entry
@@ -484,7 +501,7 @@ impl<V: SectionViews> ShellApplication<V> {
                     }
                 }
                 aqua_core::checkpoint::reach();
-                self.sync_settings_popups();
+                self.sync_settings_popups(ctx.now().as_secs_f64());
                 if matches!(
                     self.shell.core.workspace_screen(),
                     crate::core::Screen::Usage
@@ -576,7 +593,7 @@ impl<V: SectionViews> ShellApplication<V> {
         ctx.request_frame(id, reason);
     }
 
-    fn sync_settings_popups(&mut self) {
+    fn sync_settings_popups(&mut self, now: f64) {
         let Some(workspace) = self.shell.entry.workspace() else {
             close_popup(self.ui.ui_mut(), &mut self.font_popup);
             close_popup(self.ui.ui_mut(), &mut self.streaming_popup);
@@ -624,18 +641,21 @@ impl<V: SectionViews> ShellApplication<V> {
             &mut self.font_popup,
             "settings-font-set",
             font,
+            now,
         );
         sync_popup(
             self.ui.ui_mut(),
             &mut self.streaming_popup,
             "settings-streaming-mode",
             streaming,
+            now,
         );
         sync_popup(
             self.ui.ui_mut(),
             &mut self.retention_popup,
             "settings-thread-retention",
             retention,
+            now,
         );
     }
 
@@ -1057,6 +1077,23 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn on_input(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, input: &InputEvent) {
         let _tm = Tm::new("input");
+        for popup in [
+            &mut self.font_popup,
+            &mut self.streaming_popup,
+            &mut self.retention_popup,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            match popup.request_dismissal(self.ui.ui_mut(), input) {
+                Ok(true) => {
+                    ctx.request_frame(id, FrameReason::ANIMATION);
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "could not dismiss settings popup"),
+            }
+        }
         let dismissed = {
             let _tm = Tm::new("input.dismiss");
             self.shell
@@ -1195,30 +1232,35 @@ fn keyed_node(ui: &UiApp, key: &str) -> Option<NodeId> {
     ui.tree().sole_node_with_key(key)
 }
 
-fn close_popup(ui: &mut UiApp, slot: &mut Option<aqua_ui::overlay::OverlayId>) {
-    if let Some(id) = slot.take() {
-        ui.close_popup(id);
+fn close_popup(ui: &mut UiApp, slot: &mut Option<crate::ui::popover::AnimatedPickerHost>) {
+    if let Some(popup) = slot.take() {
+        popup.dispose(ui);
     }
 }
 
 fn sync_popup(
     ui: &mut UiApp,
-    slot: &mut Option<aqua_ui::overlay::OverlayId>,
+    slot: &mut Option<crate::ui::popover::AnimatedPickerHost>,
     key: &str,
     content: Option<(Element, aqua_ui::popup::PopupOptions)>,
+    now: f64,
 ) {
+    if slot.as_ref().is_some_and(|popup| !popup.is_open(ui)) {
+        *slot = None;
+    }
     let Some((element, options)) = content else {
-        close_popup(ui, slot);
+        if let Some(popup) = slot.as_mut().filter(|popup| !popup.is_closing()) {
+            if let Err(error) = popup.begin_close(ui, now) {
+                tracing::warn!(%error, "could not close settings popup");
+            }
+        }
         return;
     };
-    if let Some(id) = *slot {
-        if ui.host().is_open(id) {
-            if let Err(error) = ui.refresh_popup(id, element) {
-                tracing::warn!(%error, "could not refresh settings popup");
-            }
-            return;
+    if let Some(popup) = slot.as_mut() {
+        if let Err(error) = popup.refresh_content(ui, element) {
+            tracing::warn!(%error, "could not refresh settings popup");
         }
-        *slot = None;
+        return;
     }
     let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key));
     let mut nodes = ui.tree().nodes_with_key(hash).into_iter();
@@ -1228,8 +1270,8 @@ fn sync_popup(
     if nodes.next().is_some() {
         return;
     }
-    match ui.open_popup_measured(owner, element, options) {
-        Ok(id) => *slot = Some(id),
+    match crate::ui::popover::AnimatedPickerHost::open_options(ui, owner, element, options, now) {
+        Ok(popup) => *slot = Some(popup),
         Err(error) => tracing::warn!(%error, "could not open settings popup"),
     }
 }

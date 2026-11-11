@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use super::hover::HoverTone;
 
+pub const DROPDOWN_OPEN: Duration = Duration::from_millis(250);
+pub const DROPDOWN_CLOSE: Duration = Duration::from_millis(150);
 pub const HOVER_FLIGHT: Duration = Duration::from_millis(250);
 pub const DROPDOWN_PRE_SCALE: f32 = 0.97;
 pub const DROPDOWN_CLOSING_SCALE: f32 = 0.99;

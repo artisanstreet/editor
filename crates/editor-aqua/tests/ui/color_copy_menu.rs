@@ -117,7 +117,7 @@ fn disposal_during_entrance_releases_motion_and_restores_focus() {
     )
     .unwrap()
     .unwrap();
-    assert_eq!(app.host().motion().len(), 1);
+    assert!(host.is_open(&app));
     host.dispose(&mut app);
     assert!(app.host().motion().is_empty());
     assert_eq!(app.tree().focused(), Some(owner));

@@ -114,9 +114,11 @@ impl PopoverPanel {
             .build();
         if self.glass == Some(GlassStrength::Strong) {
             return crate::ui::chrome::account::menu_surface(&self.theme, vec![scroll])
-                .style(Style::new()
-                    .max_width(Length::Px((self.viewport_width - 16.0).max(1.0)))
-                    .max_height(Length::Px((self.viewport_height - 16.0).max(1.0))))
+                .style(
+                    Style::new()
+                        .max_width(Length::Px((self.viewport_width - 16.0).max(1.0)))
+                        .max_height(Length::Px((self.viewport_height - 16.0).max(1.0))),
+                )
                 .with_key(self.id);
         }
         let mut root = UiBox::new()
@@ -264,6 +266,8 @@ pub struct AnimatedPickerHost {
     factory: Option<std::rc::Rc<dyn Fn() -> Element>>,
     motion: super::picker_motion::MenuMotion,
     entrance: PickerEntrance,
+    scale: f32,
+    from_scale: f32,
     open_duration: std::time::Duration,
     close_duration: std::time::Duration,
     flight: Option<(u64, f64)>,
@@ -271,6 +275,23 @@ pub struct AnimatedPickerHost {
 }
 
 impl AnimatedPickerHost {
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.open_duration = if reduced {
+            std::time::Duration::ZERO
+        } else {
+            super::picker_motion::DROPDOWN_OPEN
+        };
+        self.close_duration = if reduced {
+            std::time::Duration::ZERO
+        } else {
+            super::picker_motion::DROPDOWN_CLOSE
+        };
+    }
+
+    pub fn overlay(&self) -> aqua_ui::overlay::OverlayId {
+        self.popup.overlay
+    }
+
     pub fn root(&self, app: &aqua::UiApp) -> Option<aqua_core::NodeId> {
         self.popup.root(app)
     }
@@ -335,6 +356,42 @@ impl AnimatedPickerHost {
             entrance,
             open_duration,
             close_duration,
+            scale: super::picker_motion::DROPDOWN_PRE_SCALE,
+            from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
+            flight: None,
+            now,
+        };
+        host.advance(app, now)?;
+        Ok(host)
+    }
+
+    pub fn open_options(
+        app: &mut aqua::UiApp,
+        owner: aqua_core::NodeId,
+        content: Element,
+        mut options: aqua_ui::popup::PopupOptions,
+        now: f64,
+    ) -> Result<Self, String> {
+        let origin = match options.placement.preferred {
+            aqua_ui::overlay::Side::Above => aqua_core::Point::new(0.0, 1.0),
+            aqua_ui::overlay::Side::Before => aqua_core::Point::new(1.0, 0.0),
+            _ => aqua_core::Point::new(0.0, 0.0),
+        };
+        options.dismiss = aqua_ui::overlay::DismissPolicy::MANUAL;
+        let overlay = app
+            .open_popup_measured(owner, content, options)
+            .map_err(|error| error.to_string())?;
+        let mut motion = super::picker_motion::MenuMotion::default();
+        motion.begin_open();
+        let mut host = Self {
+            popup: PickerPopupHost { overlay },
+            factory: None,
+            motion,
+            entrance: PickerEntrance::Scale { origin },
+            open_duration: super::picker_motion::DROPDOWN_OPEN,
+            close_duration: super::picker_motion::DROPDOWN_CLOSE,
+            scale: super::picker_motion::DROPDOWN_PRE_SCALE,
+            from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
             flight: None,
             now,
         };
@@ -375,6 +432,7 @@ impl AnimatedPickerHost {
             .as_ref()
             .is_none_or(|(old, _)| *old != generation)
         {
+            self.from_scale = self.scale;
             self.flight = Some((generation, now));
         }
         let Some((_, started)) = self.flight else {
@@ -386,14 +444,22 @@ impl AnimatedPickerHost {
             self.open_duration
         }
         .as_secs_f64();
-        let progress = if duration > 0.0 {
+        let reduced =
+            app.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
+        let progress = if duration > 0.0 && !reduced {
             ((now - started) / duration).clamp(0.0, 1.0) as f32
         } else {
             1.0
         };
         let settled = progress >= 1.0;
-        self.motion
-            .apply_progress(generation, super::picker_motion::smooth_out(progress));
+        let eased = super::picker_motion::smooth_out(progress);
+        let target_scale = if closing {
+            super::picker_motion::DROPDOWN_CLOSING_SCALE
+        } else {
+            1.0
+        };
+        self.scale = (target_scale - self.from_scale).mul_add(eased, self.from_scale);
+        self.motion.apply_progress(generation, eased);
         self.apply_frame(app)?;
         if settled {
             self.flight = None;
@@ -409,16 +475,10 @@ impl AnimatedPickerHost {
 
     fn frame_values(&self, app: &aqua::UiApp) -> (f32, aqua_core::Transform2D) {
         let (opacity, offset) = self.motion.frame();
-        let closing = self.motion.phase() == super::picker_motion::MenuPhase::Closing;
         let transform = match self.entrance {
             PickerEntrance::Slide => aqua_core::Transform2D::translate(0.0, offset),
             PickerEntrance::Scale { origin } => {
-                let rest = if closing {
-                    super::picker_motion::DROPDOWN_CLOSING_SCALE
-                } else {
-                    super::picker_motion::DROPDOWN_PRE_SCALE
-                };
-                let scale = (1.0 - rest).mul_add(1.0 - (offset / 8.0).clamp(0.0, 1.0), rest);
+                let scale = self.scale;
                 let bounds = app
                     .host()
                     .service()
@@ -530,8 +590,7 @@ impl AnimatedPickerHost {
     }
 
     pub fn is_animating(&self, _app: &aqua::UiApp) -> bool {
-        self.motion.transition().is_some()
-            && self.flight.is_some()
+        self.motion.transition().is_some() && self.flight.is_some()
     }
 }
 

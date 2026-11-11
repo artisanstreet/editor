@@ -26,7 +26,7 @@ struct Identity {
 
 struct Menu {
     identity: Identity,
-    overlay: OverlayId,
+    popup: AnimatedPickerHost,
 }
 
 struct Rename {
@@ -44,13 +44,13 @@ struct Profile {
 struct Anchored {
     owner: NodeId,
     generation: u64,
-    overlay: OverlayId,
+    popup: AnimatedPickerHost,
 }
 
 struct Tooltip {
     owner: NodeId,
     key: (artisan_api::EngineId, usize),
-    overlay: OverlayId,
+    popup: AnimatedPickerHost,
 }
 
 struct Picker {
@@ -160,6 +160,7 @@ pub struct SidebarOverlays {
     machines: Option<Anchored>,
     tooltip: Option<Tooltip>,
     picker: Option<Picker>,
+    retiring: Vec<AnimatedPickerHost>,
 }
 
 impl SidebarOverlays {
@@ -192,27 +193,31 @@ impl SidebarOverlays {
                 generation: sidebar.menu_generation,
             });
         if self.menu.as_ref().is_some_and(|menu| {
-            Some(&menu.identity) != menu_identity.as_ref() || !app.host().is_open(menu.overlay)
+            Some(&menu.identity) != menu_identity.as_ref() || !menu.popup.is_open(app)
         }) {
-            if let Some(menu) = self.menu.take() {
-                app.close_popup(menu.overlay);
+            if let Some(mut menu) = self.menu.take() {
+                if menu.popup.is_open(app) {
+                    menu.popup.begin_close(app, now)?;
+                    self.retiring.push(menu.popup);
+                }
             }
         }
         if let Some(identity) = menu_identity {
             if let Some((element, options)) =
                 view::thread_menu(sidebar, core, theme, app.viewport(), emit.clone())
             {
-                if let Some(menu) = &self.menu {
-                    app.refresh_popup(menu.overlay, element)
-                        .map_err(|error| error.to_string())?;
+                if let Some(menu) = &mut self.menu {
+                    menu.popup.refresh_content(app, element)?;
                 } else {
-                    let overlay = app
-                        .open_popup_measured(owner, element, options)
-                        .map_err(|error| error.to_string())?;
-                    self.menu = Some(Menu { identity, overlay });
+                    let popup =
+                        AnimatedPickerHost::open_options(app, owner, element, options, now)?;
+                    self.menu = Some(Menu { identity, popup });
                 }
-            } else if let Some(menu) = self.menu.take() {
-                app.close_popup(menu.overlay);
+            } else if let Some(mut menu) = self.menu.take() {
+                if menu.popup.is_open(app) {
+                    menu.popup.begin_close(app, now)?;
+                    self.retiring.push(menu.popup);
+                }
             }
         }
         let rename_identity = host
@@ -343,8 +348,8 @@ impl SidebarOverlays {
                     PickerEntrance::Scale {
                         origin: aqua_core::Point::new(0.0, 1.0),
                     },
-                    std::time::Duration::from_millis(250),
-                    std::time::Duration::from_millis(150),
+                    editor_ui::picker_motion::DROPDOWN_OPEN,
+                    editor_ui::picker_motion::DROPDOWN_CLOSE,
                     now,
                     move |_| {
                         close(ViewAction::CloseProfileFor {
@@ -366,18 +371,20 @@ impl SidebarOverlays {
         if self.machines.as_ref().is_some_and(|entry| {
             Some(entry.owner) != wanted_machine
                 || entry.generation != sidebar.machines_generation
-                || !app.host().is_open(entry.overlay)
+                || !entry.popup.is_open(app)
         }) {
-            if let Some(entry) = self.machines.take() {
-                app.close_popup(entry.overlay);
+            if let Some(mut entry) = self.machines.take() {
+                if entry.popup.is_open(app) {
+                    entry.popup.begin_close(app, now)?;
+                    self.retiring.push(entry.popup);
+                }
             }
         }
         if let Some(machine_owner) = wanted_machine {
             let element =
                 super::profile::machines(sidebar, core, theme, app.viewport().w, emit.clone());
-            if let Some(entry) = &self.machines {
-                app.refresh_popup(entry.overlay, element)
-                    .map_err(|error| error.to_string())?;
+            if let Some(entry) = &mut self.machines {
+                entry.popup.refresh_content(app, element)?;
             } else {
                 let mut options = aqua_ui::popup::PopupOptions::menu();
                 options.focus = aqua_ui::popup::PopupFocus::Preserve;
@@ -393,13 +400,12 @@ impl SidebarOverlays {
                         machines_generation,
                     })
                 }));
-                let overlay = app
-                    .open_popup_measured(machine_owner, element, options)
-                    .map_err(|error| error.to_string())?;
+                let popup =
+                    AnimatedPickerHost::open_options(app, machine_owner, element, options, now)?;
                 self.machines = Some(Anchored {
                     owner: machine_owner,
                     generation: machines_generation,
-                    overlay,
+                    popup,
                 });
             }
         }
@@ -411,19 +417,21 @@ impl SidebarOverlays {
                 .map(|owner| (owner, key))
         });
         if self.tooltip.as_ref().is_some_and(|entry| {
-            Some((entry.owner, entry.key)) != wanted_tooltip || !app.host().is_open(entry.overlay)
+            Some((entry.owner, entry.key)) != wanted_tooltip || !entry.popup.is_open(app)
         }) {
-            if let Some(entry) = self.tooltip.take() {
-                app.close_popup(entry.overlay);
+            if let Some(mut entry) = self.tooltip.take() {
+                if entry.popup.is_open(app) {
+                    entry.popup.begin_close(app, now)?;
+                    self.retiring.push(entry.popup);
+                }
             }
         }
         if let Some((tooltip_owner, key)) = wanted_tooltip {
             if let Some(element) =
                 super::usage_view::tooltip_panel(sidebar, core, theme, artisan_api::now())
             {
-                if let Some(entry) = &self.tooltip {
-                    app.refresh_popup(entry.overlay, element)
-                        .map_err(|error| error.to_string())?;
+                if let Some(entry) = &mut self.tooltip {
+                    entry.popup.refresh_content(app, element)?;
                 } else {
                     let mut options = aqua_ui::popup::PopupOptions::tooltip();
                     options.dismiss = aqua_ui::overlay::DismissPolicy::MANUAL;
@@ -431,14 +439,18 @@ impl SidebarOverlays {
                     options.placement.align = aqua_ui::overlay::Align::Start;
                     options.placement.gap = 8.0;
                     options.placement.flip = false;
-                    let overlay = app
-                        .open_popup_measured(tooltip_owner, element, options)
-                        .map_err(|error| error.to_string())?;
-                    let _ = app.set_popup_uncontained(overlay, true);
+                    let popup = AnimatedPickerHost::open_options(
+                        app,
+                        tooltip_owner,
+                        element,
+                        options,
+                        now,
+                    )?;
+                    let _ = app.set_popup_uncontained(popup.overlay(), true);
                     self.tooltip = Some(Tooltip {
                         owner: tooltip_owner,
                         key,
-                        overlay,
+                        popup,
                     });
                 }
             }
@@ -469,6 +481,17 @@ impl SidebarOverlays {
                 return Ok(true);
             }
         }
+        for popup in [
+            self.menu.as_mut().map(|entry| &mut entry.popup),
+            self.machines.as_mut().map(|entry| &mut entry.popup),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if popup.request_dismissal(app, event)? {
+                return Ok(true);
+            }
+        }
         match &mut self.profile {
             Some(profile) => profile.popup.request_dismissal(app, event),
             None => Ok(false),
@@ -484,6 +507,22 @@ impl SidebarOverlays {
         now: f64,
     ) -> Result<bool, String> {
         let mut animating = false;
+        for popup in self.retiring.iter_mut().chain(
+            [
+                self.menu.as_mut().map(|entry| &mut entry.popup),
+                self.machines.as_mut().map(|entry| &mut entry.popup),
+                self.tooltip.as_mut().map(|entry| &mut entry.popup),
+            ]
+            .into_iter()
+            .flatten(),
+        ) {
+            if popup.is_open(app) {
+                let moving = popup.is_animating(app);
+                popup.advance(app, now)?;
+                animating |= moving || popup.is_animating(app);
+            }
+        }
+        self.retiring.retain(|popup| popup.is_open(app));
         if let Some(profile) = &mut self.profile {
             if profile.popup.is_open(app) {
                 let was_animating = profile.popup.is_animating(app);
@@ -505,9 +544,11 @@ impl SidebarOverlays {
         let machines_surface = self
             .machines
             .as_ref()
-            .filter(|entry| app.host().is_open(entry.overlay))
+            .filter(|entry| entry.popup.is_open(app))
             .and_then(|entry| {
-                app.host().popup_root(entry.overlay)
+                entry
+                    .popup
+                    .root(app)
                     .and_then(|root| keyed_node(app, root, "machines-hover-surface".into()))
             });
         animating |= advance_hover(
@@ -522,17 +563,20 @@ impl SidebarOverlays {
     }
 
     pub fn dispose(&mut self, app: &mut aqua::UiApp) {
+        for popup in self.retiring.drain(..) {
+            popup.dispose(app);
+        }
         if let Some(picker) = self.picker.take() {
             app.close_popup(picker.overlay);
         }
         if let Some(entry) = self.tooltip.take() {
-            app.close_popup(entry.overlay);
+            entry.popup.dispose(app);
         }
         if let Some(entry) = self.machines.take() {
-            app.close_popup(entry.overlay);
+            entry.popup.dispose(app);
         }
         if let Some(menu) = self.menu.take() {
-            app.close_popup(menu.overlay);
+            menu.popup.dispose(app);
         }
         if let Some(rename) = self.rename.take() {
             rename.dialog.dispose(app);
