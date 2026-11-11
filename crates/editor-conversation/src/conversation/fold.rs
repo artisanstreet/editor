@@ -64,6 +64,19 @@ impl Slot {
     pub(crate) const fn literal(self) -> bool {
         matches!(self, Self::Plain(_))
     }
+    pub(crate) const fn is_bubble(self) -> bool {
+        matches!(
+            self,
+            Self::Text(TextSection::User | TextSection::AgentTask | TextSection::AgentMessage)
+        )
+    }
+    pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
+        match self {
+            Self::Plain(section) => section.inline_text(item),
+            Self::Text(section) => section.inline_text(item),
+            Self::Prose | Self::Output | Self::Answer | Self::Preview => self.text(item)?.inline(),
+        }
+    }
     pub(crate) fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
         match self {
             Self::Prose => match &item.kind {
@@ -85,16 +98,9 @@ impl Slot {
     }
 }
 impl std::fmt::Display for Slot {
-    #[expect(
-        clippy::match_same_arms,
-        reason = "one name per slot reads as a table; user bubbles share a name on purpose"
-    )]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Prose => "prose",
-            Self::Plain(PlainSection::User) => "user",
-            Self::Plain(PlainSection::AgentTask) => "agent-task",
-            Self::Plain(PlainSection::AgentMessage) => "agent-message",
             Self::Plain(PlainSection::Error) => "error",
             Self::Plain(PlainSection::ImageCaption) => "caption",
             Self::Text(TextSection::Proposal) => "plan-proposal",
@@ -103,6 +109,8 @@ impl std::fmt::Display for Slot {
             Self::Text(TextSection::Message) => "message",
             Self::Text(TextSection::Note) => "note",
             Self::Text(TextSection::User) => "user",
+            Self::Text(TextSection::AgentTask) => "agent-task",
+            Self::Text(TextSection::AgentMessage) => "agent-message",
             Self::Output => "output",
             Self::Answer => "answer",
             Self::Preview => "preview",
@@ -110,102 +118,24 @@ impl std::fmt::Display for Slot {
     }
 }
 
-const fn user_slot(item: &Item) -> Slot {
-    match &item.kind {
-        ItemKind::UserMessage {
-            text: artisan_api::TextContent::Stored(_),
-            sender: None,
-            ..
-        } => Slot::Plain(PlainSection::User),
-        ItemKind::UserMessage { .. }
-        | ItemKind::AssistantMessage { .. }
-        | ItemKind::Tool { .. }
-        | ItemKind::Agent { .. }
-        | ItemKind::Question { .. }
-        | ItemKind::Plan { .. }
-        | ItemKind::Image { .. }
-        | ItemKind::Compaction { .. }
-        | ItemKind::Notice { .. }
-        | ItemKind::Error { .. } => Slot::Text(TextSection::User),
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PlainSection {
-    User,
-    AgentTask,
-    AgentMessage,
     Error,
     ImageCaption,
 }
 impl PlainSection {
     pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
-        if self == Self::AgentTask
-            && let ItemKind::Agent {
-                prompt: None,
-                description,
-                name,
-                ..
-            } = &item.kind
-            && let Some(description) = description.inline()
-        {
-            if name.as_deref().is_some_and(|name| {
-                (name == "/root" || name.starts_with("/root/")) && name == description
-            }) {
-                return Some("[This message is encrypted.]");
-            }
-            if description.is_empty() {
-                return Some("Task message not provided by the harness.");
-            }
-        }
-        if self == Self::AgentMessage
-            && let ItemKind::Tool {
-                tool:
-                    artisan_api::ToolKind::AgentMessage {
-                        text: artisan_api::TextContent::Inline(text),
-                        summary: Some(summary),
-                        ..
-                    },
-                ..
-            } = &item.kind
-            && text.is_empty()
-        {
-            return Some(summary);
-        }
         self.text(item)?.inline()
     }
 
     pub(crate) const fn order(self) -> u64 {
         match self {
-            Self::User => 0,
-            Self::AgentTask => 1,
-            Self::AgentMessage => 2,
             Self::Error => 3,
             Self::ImageCaption => 4,
         }
     }
-    #[expect(
-        clippy::match_same_arms,
-        reason = "one arm per section and item kind reads as a table"
-    )]
-    pub(crate) fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
+    pub(crate) const fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
         match (self, &item.kind) {
-            (Self::User, ItemKind::UserMessage { text, .. }) => Some(text),
-            (
-                Self::AgentTask,
-                ItemKind::Agent {
-                    description,
-                    prompt,
-                    ..
-                },
-            ) => Some(prompt.as_ref().unwrap_or(description)),
-            (
-                Self::AgentMessage,
-                ItemKind::Tool {
-                    tool: artisan_api::ToolKind::AgentMessage { text, .. },
-                    ..
-                },
-            ) => Some(text),
             (Self::Error, ItemKind::Error { message, .. }) => Some(message),
             (Self::ImageCaption, ItemKind::Image { caption, .. }) => caption.as_ref(),
             _ => None,
@@ -216,7 +146,7 @@ pub fn selection_order(agent_scope: bool, position: u64, slot: Slot) -> Vec<u64>
     if agent_scope {
         vec![
             match slot {
-                Slot::Plain(PlainSection::AgentTask) => 0,
+                Slot::Text(TextSection::AgentTask) => 0,
                 Slot::Text(TextSection::AgentResult) => 2,
                 Slot::Prose
                 | Slot::Plain(_)
@@ -266,8 +196,46 @@ pub enum TextSection {
     Message,
     Note,
     User,
+    AgentTask,
+    AgentMessage,
 }
 impl TextSection {
+    pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
+        if self == Self::AgentTask
+            && let ItemKind::Agent {
+                prompt: None,
+                description,
+                name,
+                ..
+            } = &item.kind
+            && let Some(description) = description.inline()
+        {
+            if name.as_deref().is_some_and(|name| {
+                (name == "/root" || name.starts_with("/root/")) && name == description
+            }) {
+                return Some("[This message is encrypted.]");
+            }
+            if description.is_empty() {
+                return Some("Task message not provided by the harness.");
+            }
+        }
+        if self == Self::AgentMessage
+            && let ItemKind::Tool {
+                tool:
+                    artisan_api::ToolKind::AgentMessage {
+                        text: artisan_api::TextContent::Inline(text),
+                        summary: Some(summary),
+                        ..
+                    },
+                ..
+            } = &item.kind
+            && text.is_empty()
+        {
+            return Some(summary);
+        }
+        self.text(item)?.inline()
+    }
+
     #[expect(
         clippy::match_same_arms,
         reason = "one arm per section and item kind reads as a table"
@@ -277,12 +245,23 @@ impl TextSection {
             (Self::Proposal, ItemKind::Plan { proposal, .. }) => proposal.as_ref(),
             (Self::AgentResult | Self::Report, ItemKind::Agent { result, .. }) => result.as_ref(),
             (
-                Self::Message,
+                Self::Message | Self::AgentMessage,
                 ItemKind::Tool {
                     tool: artisan_api::ToolKind::AgentMessage { text, .. },
                     ..
                 },
             ) => Some(text),
+            (
+                Self::AgentTask,
+                ItemKind::Agent {
+                    description,
+                    prompt,
+                    ..
+                },
+            ) => match prompt {
+                Some(prompt) => Some(prompt),
+                None => Some(description),
+            },
             (
                 Self::Message,
                 ItemKind::UserMessage {
@@ -420,7 +399,7 @@ impl Row {
             Self::Projected { row, visual } => RowKey::Projected(Box::new(row.key()), *visual),
             Self::Text {
                 id,
-                slot: Slot::Plain(PlainSection::AgentTask),
+                slot: Slot::Text(TextSection::AgentTask),
                 block: 0,
                 ..
             } => RowKey::AgentTask(id.clone()),
@@ -435,8 +414,8 @@ impl Row {
                 id,
                 slot:
                     Slot::Prose
-                    | Slot::Text(TextSection::User)
-                    | Slot::Plain(PlainSection::User | PlainSection::AgentMessage | PlainSection::Error),
+                    | Slot::Text(TextSection::User | TextSection::AgentMessage)
+                    | Slot::Plain(PlainSection::Error),
                 block: 0,
                 ..
             } => RowKey::Item(id.clone()),
@@ -470,14 +449,8 @@ impl Row {
         }
     }
 
-    pub(crate) fn is_user(&self) -> bool {
-        matches!(
-            self.semantic(),
-            Self::Text {
-                slot: Slot::Plain(PlainSection::User) | Slot::Text(TextSection::User),
-                ..
-            }
-        )
+    fn is_bubble(&self) -> bool {
+        matches!(self.semantic(), Self::Text { slot, .. } if slot.is_bubble())
     }
 
     pub(crate) fn run(&self) -> Option<&RunId> {
@@ -644,7 +617,7 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
             flush(&mut work, &mut rows);
             rows.push(Row::text(
                 item.id.clone(),
-                Slot::Plain(PlainSection::AgentMessage),
+                Slot::Text(TextSection::AgentMessage),
             ));
             continue;
         }
@@ -660,7 +633,7 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
                 from_agent: Some(_),
                 ..
             } => None,
-            ItemKind::UserMessage { .. } => Some(Row::text(item.id.clone(), user_slot(item))),
+            ItemKind::UserMessage { .. } => Some(Row::text(item.id.clone(), Slot::Text(TextSection::User))),
             ItemKind::AssistantMessage {
                 phase: TextPhase::Final,
                 ..
@@ -723,7 +696,7 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
     if let Some(agent) = scope {
         rows.insert(
             0,
-            Row::text(agent.clone(), Slot::Plain(PlainSection::AgentTask)),
+            Row::text(agent.clone(), Slot::Text(TextSection::AgentTask)),
         );
         if view
             .item(agent)
@@ -1057,10 +1030,7 @@ fn expand_entries(
                 }
                 Some(ItemKind::Compaction { .. }) => emit(Row::Compaction(id)),
                 Some(ItemKind::UserMessage { .. }) => {
-                    let slot = view
-                        .item(&id)
-                        .map_or(Slot::Text(TextSection::User), user_slot);
-                    emit(Row::text(id, slot));
+                    emit(Row::text(id, Slot::Text(TextSection::User)));
                 }
                 _ => emit(Row::WorkEntry {
                     id,
@@ -1234,10 +1204,10 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
             | Row::Chain { run, .. }
             | Row::EarlierWork { run, .. } => run.clone(),
             Row::Text {
-                slot: Slot::Text(section),
+                slot: slot @ Slot::Text(_),
                 run,
                 ..
-            } if *section != TextSection::User => run.clone(),
+            } if !slot.is_bubble() => run.clone(),
             Row::Status(run) => Some(turn_of(view, None, run)),
             other @ (Row::Projected { .. }
             | Row::Text { .. }
@@ -1308,7 +1278,7 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
                     slot: Slot::Text(_),
                     ..
                 },
-            ) if run == previous_run && !row.is_user() && !previous.is_user() => 8.0,
+            ) if run == previous_run && !row.is_bubble() && !previous.is_bubble() => 8.0,
             (
                 Row::Work { .. },
                 Row::Text {
@@ -1320,20 +1290,20 @@ pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
             (
                 _,
                 Row::Text {
-                    slot: Slot::Plain(PlainSection::User) | Slot::Text(TextSection::User),
+                    slot: Slot::Text(TextSection::User),
                     ..
                 },
             ) if run.is_some() && run == previous_run => BLOCK_GAP,
             (
                 _,
                 Row::Text {
-                    slot: Slot::Plain(PlainSection::User) | Slot::Text(TextSection::User),
+                    slot: Slot::Text(TextSection::User),
                     ..
                 },
             ) => TURN_GAP,
             (
                 Row::Text {
-                    slot: Slot::Plain(PlainSection::User) | Slot::Text(TextSection::User),
+                    slot: Slot::Text(TextSection::User),
                     ..
                 },
                 _,

@@ -148,6 +148,7 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
                             open: true,
                             worked: true,
                         }),
+                        author: None,
                         gap: 8.0,
                         end: 0.0,
                     },
@@ -673,6 +674,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
             live: HashMap::new(),
             ui: HashMap::new(),
             run: None,
+            author: None,
             gap: 0.0,
             end: 0.0,
         },
@@ -752,6 +754,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
                 live: HashMap::new(),
                 ui: HashMap::new(),
                 run: None,
+                author: None,
                 gap: 0.0,
                 end: 0.0,
             },
@@ -852,6 +855,7 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
             live: HashMap::new(),
             ui: HashMap::new(),
             run: None,
+            author: None,
             gap: 0.0,
             end: 0.0,
         },
@@ -987,6 +991,157 @@ fn realized_factory_rows_share_registered_sources_and_stale_factory_is_rejected(
         markdown
             .borrow()
             .accepts_projected(&scope, &proof, user_text)
+    );
+}
+
+#[test]
+fn agent_tasks_and_reports_read_as_markdown() {
+    use artisan_api::{EngineId, Item, ItemKind, Status};
+    use editor_aqua::conversation::adapter::RowModel;
+    use editor_aqua::conversation::disclosure::RowDisclosure;
+    use editor_aqua::conversation::fold::{Row, RowKey, TextSection};
+    use editor_aqua::conversation::view::factory::{RealizedRow, RowFactory};
+    use editor_aqua::conversation::view::status::StatusShimmers;
+    use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_owned(),
+    })
+    .unwrap();
+    let config = HostConfig {
+        id: HostId("task-host".into()),
+        name: "Forge".into(),
+        address: "127.0.0.1:1".into(),
+        fingerprint: "0".repeat(64),
+        kind: HostKind::Remote,
+    };
+    let client = ForgeClient::new(
+        &config.address,
+        &config.fingerprint,
+        core.identity.as_ref().unwrap(),
+    )
+    .unwrap();
+    core.add_test_host(&config, client);
+    let thread = ThreadId("thread".into());
+    let mut conversation = Conversation::new(&core);
+    conversation.open_thread(&mut core, config.id, thread.clone());
+    let scope = PresentationScope::capture(&conversation, &core).unwrap();
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.set_viewport(800.0, 600.0, 1.0);
+    let mut markdown = MarkdownOwners::new(SelectionDocumentId(31));
+    markdown.rebind(&mut app, Some(scope.clone()));
+    let id = ItemId("agent".into());
+    let slot = Slot::Text(TextSection::AgentTask);
+    let item = Arc::new(Item {
+        id: id.clone(),
+        thread_id: thread,
+        position: 1,
+        seq: 1,
+        run_id: None,
+        parent_id: None,
+        status: Status::Running,
+        created_at: 0,
+        updated_at: 0,
+        kind: ItemKind::Agent {
+            name: Some("general-purpose".into()),
+            description: "Review the decoder".into(),
+            prompt: Some("## Scope\n\nRun `cargo test` before reporting.".into()),
+            agent_id: None,
+            context_used: None,
+            model: None,
+            background: true,
+            result: Some("### Findings\n\nThe decoder holds.".into()),
+            label: None,
+            engine: None,
+            thread: None,
+        },
+    });
+    let report = Slot::Text(TextSection::Report);
+    let make_row = |slot, block| RealizedRow {
+        model: RowModel {
+            row: Row::Text {
+                id: id.clone(),
+                slot,
+                block,
+                run: None,
+            },
+            version: 1,
+            items: HashMap::from([(id.clone(), Arc::clone(&item))]),
+            live: HashMap::new(),
+            ui: HashMap::new(),
+            run: None,
+            author: Some(EngineId::Claude),
+            gap: 0.0,
+            end: 0.0,
+        },
+        disclosure: RowDisclosure::default(),
+        held: false,
+    };
+    let next = Rc::new(Cell::new(60));
+    let allocator = Rc::clone(&next);
+    let factory = Rc::new(RowFactory::new(
+        vec![make_row(slot, 0), make_row(slot, 1), make_row(report, 0)],
+        scope,
+        Rc::new(RefCell::new(markdown)),
+        Rc::new(RefCell::new(StatusShimmers::default())),
+        *ArtisanTheme::for_mode(ThemeMode::Dark),
+        true,
+        Rc::new(move || {
+            let value = allocator.get() + 1;
+            allocator.set(value);
+            SelectionSourceId(value)
+        }),
+        Rc::new(|| {}),
+        Rc::new(|_| {}),
+        Rc::new(|_| {}),
+        Rc::new(|_| {}),
+    ));
+    let keys = [
+        RowKey::AgentTask(id.clone()),
+        RowKey::Text(id.clone(), slot, 1),
+        RowKey::Text(id, report, 0),
+    ];
+    let callback = factory.callback();
+    let list_keys = keys.clone();
+    let list = aqua_ui::collection::List::new()
+        .items(vec![0_usize, 1, 2])
+        .key(|index: &usize| format!("task-row-{index}"))
+        .try_batched_row(move |index: &usize| callback(*index, &list_keys[*index]))
+        .virtualize()
+        .estimated_row_height(aqua_ui::style::Length::Px(30.0))
+        .style(
+            aqua_ui::style::Style::new()
+                .width(aqua_ui::style::Length::Px(600.0))
+                .height(aqua_ui::style::Length::Px(300.0)),
+        )
+        .build();
+    app.mount(|_| list).unwrap();
+    app.layout().unwrap();
+    let painted: Vec<String> = app
+        .tree()
+        .traverse()
+        .into_iter()
+        .filter_map(|node| match &app.tree().get(node)?.kind {
+            aqua_ui::tree::NodeKind::Text(content) => Some(content.text().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        painted.iter().any(|text| text == "Scope"),
+        "the heading is typeset without its marker: {painted:?}"
+    );
+    assert!(
+        painted
+            .iter()
+            .any(|text| text.contains("cargo test") && !text.contains('`')),
+        "inline code is typeset without its backticks: {painted:?}"
+    );
+    assert!(
+        painted.iter().any(|text| text == "Findings"),
+        "an opened report is typeset too: {painted:?}"
     );
 }
 

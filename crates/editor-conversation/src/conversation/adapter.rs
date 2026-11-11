@@ -156,6 +156,7 @@ pub struct RowModel {
     pub live: HashMap<LiveTarget, Arc<ropey::Rope>>,
     pub ui: HashMap<ItemId, ItemUi>,
     pub run: Option<RunSummary>,
+    pub author: Option<artisan_api::EngineId>,
     pub gap: f32,
     pub end: f32,
 }
@@ -230,6 +231,12 @@ fn row_model_from(
         .filter_map(|id| Some((id.clone(), view.ui.get(id)?.clone())))
         .collect();
     let run = row.run().and_then(|run| runs.get(run)).cloned();
+    let author = row
+        .anchor()
+        .and_then(|id| items.get(id))
+        .and_then(|item| item.run_id.as_ref())
+        .and_then(|run| view.runs.get(run))
+        .map(|run| run.engine);
     let gap = fold::gap(view, rows, index);
     let end = if index + 1 == rows.len() {
         if agent {
@@ -260,6 +267,7 @@ fn row_model_from(
         live,
         ui,
         run,
+        author,
         gap,
         end,
     })

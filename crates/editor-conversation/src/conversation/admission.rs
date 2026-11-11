@@ -1,4 +1,4 @@
-use super::fold::{PlainSection, Row, RowKey, Slot, TextSection};
+use super::fold::{Row, RowKey, Slot, TextSection};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -7,7 +7,7 @@ pub fn immediate(row: &Row) -> bool {
         row.semantic(),
         Row::Work { .. }
             | Row::Text {
-                slot: Slot::Plain(PlainSection::User) | Slot::Text(TextSection::User),
+                slot: Slot::Text(TextSection::User),
                 ..
             }
     )

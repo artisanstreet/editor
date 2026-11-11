@@ -389,14 +389,7 @@ impl Conversation {
             }
             let projected = self.projections.expand(
                 expanded,
-                |id, slot| {
-                    let item = view.item(id)?;
-                    match slot {
-                        fold::Slot::Plain(section) => section.inline_text(item),
-                        _ => slot.text(item)?.inline(),
-                    }
-                    .map(str::to_owned)
-                },
+                |id, slot| slot.inline_text(view.item(id)?).map(str::to_owned),
                 |id, slot| shape_source(view, id, slot),
             );
             let rows = self.disclosures.retain_disclosure_rows(projected);
@@ -1254,6 +1247,12 @@ fn shape_source<'a>(
         ) => Some(ShapeSource {
             text: ShapeText::Inline(source),
             message: true,
+            seq,
+            running: false,
+        }),
+        (fold::Slot::Text(_), _) => slot.inline_text(item).map(|source| ShapeSource {
+            text: ShapeText::Inline(source),
+            message: false,
             seq,
             running: false,
         }),

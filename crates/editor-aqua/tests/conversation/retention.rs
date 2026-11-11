@@ -44,6 +44,7 @@ fn model(status: Status) -> RowModel {
         live: HashMap::new(),
         ui: HashMap::new(),
         run: None,
+        author: None,
         gap: 8.0,
         end: 0.0,
     }

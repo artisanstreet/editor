@@ -82,6 +82,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
                 live: HashMap::new(),
                 ui: HashMap::new(),
                 run: None,
+                author: None,
                 gap: 0.0,
                 end: 0.0,
             },

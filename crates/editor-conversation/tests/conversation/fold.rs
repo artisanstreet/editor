@@ -1,4 +1,4 @@
-use super::{Item, ItemKind, PlainSection};
+use super::{Item, ItemKind, TextSection};
 use artisan_api::{ContentId, ContentRef, ItemId, Status, TextContent, ThreadId};
 
 fn agent(name: &str, description: TextContent, prompt: Option<TextContent>) -> Item {
@@ -33,7 +33,7 @@ fn native_agent_addresses_without_a_prompt_show_the_encryption_fallback() {
     for name in ["/root", "/root/reviewer"] {
         let item = agent(name, name.into(), None);
         assert_eq!(
-            PlainSection::AgentTask.inline_text(&item),
+            TextSection::AgentTask.inline_text(&item),
             Some("[This message is encrypted.]")
         );
     }
@@ -43,10 +43,7 @@ fn native_agent_addresses_without_a_prompt_show_the_encryption_fallback() {
         ("/rooted", "/rooted"),
     ] {
         let item = agent(name, description.into(), None);
-        assert_eq!(
-            PlainSection::AgentTask.inline_text(&item),
-            Some(description)
-        );
+        assert_eq!(TextSection::AgentTask.inline_text(&item), Some(description));
     }
 }
 
@@ -54,7 +51,7 @@ fn native_agent_addresses_without_a_prompt_show_the_encryption_fallback() {
 fn agent_task_uses_the_prompt_and_keeps_stored_prompts_out_of_inline_fallbacks() {
     let item = agent("/root", "/root".into(), Some("Inspect the decoder".into()));
     assert_eq!(
-        PlainSection::AgentTask.inline_text(&item),
+        TextSection::AgentTask.inline_text(&item),
         Some("Inspect the decoder")
     );
     let reference = ContentRef {
@@ -67,9 +64,9 @@ fn agent_task_uses_the_prompt_and_keeps_stored_prompts_out_of_inline_fallbacks()
         "/root".into(),
         Some(TextContent::Stored(reference.clone())),
     );
-    assert_eq!(PlainSection::AgentTask.inline_text(&item), None);
+    assert_eq!(TextSection::AgentTask.inline_text(&item), None);
     assert_eq!(
-        PlainSection::AgentTask.text(&item),
+        TextSection::AgentTask.text(&item),
         Some(&TextContent::Stored(reference))
     );
 }
@@ -78,7 +75,7 @@ fn agent_task_uses_the_prompt_and_keeps_stored_prompts_out_of_inline_fallbacks()
 fn missing_native_task_text_has_an_explanation() {
     let item = agent("reviewer", "".into(), None);
     assert_eq!(
-        PlainSection::AgentTask.inline_text(&item),
+        TextSection::AgentTask.inline_text(&item),
         Some("Task message not provided by the harness.")
     );
 }
@@ -102,9 +99,6 @@ fn empty_agent_messages_use_the_summary_without_replacing_reported_text() {
             exit_code: None,
             approval: None,
         };
-        assert_eq!(
-            PlainSection::AgentMessage.inline_text(&item),
-            Some(expected)
-        );
+        assert_eq!(TextSection::AgentMessage.inline_text(&item), Some(expected));
     }
 }

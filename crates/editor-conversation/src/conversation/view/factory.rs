@@ -93,6 +93,16 @@ fn user_bubble(
     root.child(bubble.build()).build()
 }
 
+fn bubble_sender(
+    item: &artisan_api::Item,
+    author: Option<artisan_api::EngineId>,
+) -> Option<artisan_api::EngineId> {
+    match &item.kind {
+        ItemKind::UserMessage { sender, .. } => sender.as_ref().map(|sender| sender.engine),
+        _ => author,
+    }
+}
+
 struct WorkResources {
     motion: Rc<RefCell<super::motion::RowMotion>>,
     names: HashMap<artisan_api::ItemId, String>,
@@ -362,8 +372,10 @@ impl RowFactory {
         order.push(block as u64);
         let media = if let (Some(width), Some(factory)) = (content_width, &self.media) {
             let mut width = width.min(768.0) - 48.0;
-            if slot == Slot::Text(fold::TextSection::User) {
+            if slot.is_bubble() {
                 width = width.min(576.0) - 32.0;
+            } else if slot.is_card() {
+                width -= self.theme.spacing.steps(6.0);
             }
             width -= leaf.context.lists.len() as f32
                 * editor_ui::theme::ProseTypography::LIST_INDENT_PX;
@@ -1992,27 +2004,29 @@ impl RowFactory {
                 Some(self.literal_row(&row_owner, item, *slot, *section, *block, reference, row.model.version, &mut batches)?)
             }
             Row::Text { id, slot, block, .. }
-                if matches!(slot, Slot::Prose | Slot::Text(fold::TextSection::User))
+                if matches!(slot, Slot::Prose | Slot::Text(_))
                     && row.model.items.get(id).is_some_and(|item| {
-                        item.status != Status::Running && matches!(slot.text(item), Some(TextContent::Stored(_)))
+                        (*slot != Slot::Prose || item.status != Status::Running)
+                            && matches!(slot.text(item), Some(TextContent::Stored(_)))
                     }) => {
                 let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
                 let Some(TextContent::Stored(reference)) = slot.text(item) else { anyhow::bail!("stored source changed") };
                 let (element, proof) = self.stored_row(row, &row_owner, item, *slot, *block, reference, &reveal, content_width, &mut batches)?;
                 stored_proof = proof;
-                Some(if *slot == Slot::Text(fold::TextSection::User) {
+                Some(if slot.is_bubble() {
                     let count = self.stored.as_ref().and_then(|services| services.owner.borrow().current_range(&BodyKey { item: id.clone(), slot: *slot })).map_or(1, |range| range.end);
-                    user_bubble(element, *block, count, false, if *block == 0 { self.user_attachments(item)? } else { None }, match &item.kind { ItemKind::UserMessage { sender, .. } => sender.as_ref().map(|sender| sender.engine), _ => None }, self.theme)
+                    user_bubble(element, *block, count, false, if *block == 0 { self.user_attachments(item)? } else { None }, bubble_sender(item, row.model.author), self.theme)
                 } else { element })
             }
             Row::Text {
                 id,
-                slot: Slot::Text(fold::TextSection::User),
+                slot,
                 block: 0,
                 ..
-            } if row.model.items.get(id).is_some_and(|item| {
-                matches!(&item.kind, ItemKind::UserMessage { text: TextContent::Inline(text), .. } if text.is_empty())
-            }) => {
+            } if matches!(slot, Slot::Text(_))
+                && row.model.items.get(id).is_some_and(|item| {
+                    slot.inline_text(item).is_some_and(str::is_empty)
+                }) => {
                 use aqua_ui::element::Box as UiBox;
                 use aqua_ui::style::{Length, Style};
                 let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
@@ -2024,7 +2038,7 @@ impl RowFactory {
             }
             Row::Text {
                 id,
-                slot: slot @ (Slot::Prose | Slot::Text(fold::TextSection::User)),
+                slot: slot @ (Slot::Prose | Slot::Text(_)),
                 block,
                 ..
             } => 'prose: {
@@ -2047,29 +2061,10 @@ impl RowFactory {
                     reveal.is_some() || (!running && !fresh),
                     "live or fresh prose reveal is unavailable"
                 );
-                let saved = match (&item.kind, slot) {
-                    (
-                        ItemKind::AssistantMessage {
-                            text: TextContent::Inline(source),
-                            ..
-                        },
-                        Slot::Prose,
-                    ) => Some(source.as_str()),
-                    (
-                        ItemKind::AssistantMessage {
-                            text: TextContent::Stored(_),
-                            ..
-                        },
-                        Slot::Prose,
-                    ) if running => None,
-                    (
-                        ItemKind::UserMessage {
-                            text: TextContent::Inline(source),
-                            ..
-                        },
-                        Slot::Text(fold::TextSection::User),
-                    ) => Some(source.as_str()),
-                    _ => anyhow::bail!("stored or mismatched conversation text is unavailable"),
+                let saved = match slot.inline_text(item) {
+                    Some(source) => Some(source),
+                    None if running => None,
+                    None => anyhow::bail!("stored or mismatched conversation text is unavailable"),
                 };
                 let live = if running {
                     let bound = self
@@ -2184,8 +2179,10 @@ impl RowFactory {
                         "stale Markdown leaf geometry"
                     );
                     let mut width = width.min(768.0) - 48.0;
-                    if *slot != Slot::Prose {
+                    if slot.is_bubble() {
                         width = width.min(576.0) - 32.0;
+                    } else if slot.is_card() {
+                        width -= self.theme.spacing.steps(6.0);
                     }
                     let width = width
                         - info.list_depth as f32
@@ -2334,18 +2331,7 @@ impl RowFactory {
                 } else {
                     element
                 };
-                Some(if *slot == Slot::Prose {
-                    if let Some(notice) = preview_notice {
-                        aqua_ui::element::Box::new()
-                            .width(aqua_ui::style::Length::Pct(100.0))
-                            .layout("column")
-                            .child(element)
-                            .child(editor_ui::page::notice(&self.theme, notice).build())
-                            .build()
-                    } else {
-                        element
-                    }
-                } else {
+                Some(if slot.is_bubble() {
                     user_bubble(
                         element,
                         *block,
@@ -2356,14 +2342,18 @@ impl RowFactory {
                         } else {
                             None
                         },
-                        match &item.kind {
-                            ItemKind::UserMessage { sender, .. } => {
-                                sender.as_ref().map(|sender| sender.engine)
-                            }
-                            _ => None,
-                        },
+                        bubble_sender(item, row.model.author),
                         self.theme,
                     )
+                } else if let Some(notice) = preview_notice {
+                    aqua_ui::element::Box::new()
+                        .width(aqua_ui::style::Length::Pct(100.0))
+                        .layout("column")
+                        .child(element)
+                        .child(editor_ui::page::notice(&self.theme, notice).build())
+                        .build()
+                } else {
+                    element
                 })
             }
             Row::Prompt(id) => {
