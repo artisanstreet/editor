@@ -302,6 +302,14 @@ impl Feed {
     }
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        clippy::missing_const_for_fn,
+        clippy::unnecessary_wraps,
+        reason = "only Unix marks a file runnable"
+    )
+)]
 fn make_runnable(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -382,7 +390,7 @@ impl Release {
                         .context("this installer carries no ae for Linux")?,
                 ),
                 (App::Forge, true) => bundle::FORGE
-                    .write(&target)
+                    .write_program(&target)
                     .with_context(|| format!("write {}", target.display())),
                 (App::Editor, true) => copy(
                     carried

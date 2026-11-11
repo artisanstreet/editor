@@ -1,7 +1,7 @@
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use std::io::{Result, Write as _};
+use std::io::{Error, ErrorKind, Result, Write as _};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
@@ -19,9 +19,19 @@ impl<'a> Payload<'a> {
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
+        if !self.present() {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                "this build carries nothing to write there",
+            ));
+        }
         let mut file = std::fs::File::create(path)?;
         std::io::copy(&mut GzDecoder::new(self.0), &mut file)?;
-        file.flush()?;
+        file.flush()
+    }
+
+    pub fn write_program(&self, path: &Path) -> Result<()> {
+        self.write(path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -49,7 +59,13 @@ pub fn embed(variable: &str, name: &str) -> Result<()> {
     let packed = match std::env::var_os(variable).filter(|path| !path.is_empty()) {
         Some(path) => {
             println!("cargo:rerun-if-changed={}", Path::new(&path).display());
-            pack(&std::fs::read(&path)?)?
+            let program = std::fs::read(&path).map_err(|error| {
+                Error::new(
+                    error.kind(),
+                    format!("{variable} names {}: {error}", Path::new(&path).display()),
+                )
+            })?;
+            pack(&program)?
         }
         None => Vec::new(),
     };

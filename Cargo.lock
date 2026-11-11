@@ -569,6 +569,9 @@ version = "0.0.0"
 [[package]]
 name = "artisan-paths"
 version = "0.0.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "artisan-payload"

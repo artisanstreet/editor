@@ -240,12 +240,12 @@ fn move_dir(from: &Path, to: &Path) -> Result<()> {
             .with_context(|| format!("copy {} to {}", from.display(), to.display()))?;
         std::fs::remove_dir_all(from).with_context(|| format!("remove {}", from.display()))?;
     }
+    #[cfg(unix)]
     retarget_links(to, from, to);
     Ok(())
 }
 
-/// Points absolute symlinks into the old folder (engine homes have some,
-/// such as a Nix profile) at the same place in the new one.
+#[cfg(unix)]
 fn retarget_links(dir: &Path, from: &Path, to: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -256,7 +256,6 @@ fn retarget_links(dir: &Path, from: &Path, to: &Path) {
             continue;
         };
         if kind.is_symlink() {
-            #[cfg(unix)]
             if let Ok(target) = std::fs::read_link(&path)
                 && let Ok(rest) = target.strip_prefix(from)
             {

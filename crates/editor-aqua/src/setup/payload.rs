@@ -18,14 +18,14 @@ pub fn stage() -> Result<Staged> {
         .tempdir()
         .context("create a folder for the installer")?;
     let ae = folder.path().join(artisan_paths::App::Ae.binary_name());
-    AE.write(&ae)
+    AE.write_program(&ae)
         .with_context(|| format!("write {}", ae.display()))?;
     let linux_ae = AE_LINUX
         .present()
         .then(|| -> Result<PathBuf> {
             let path = folder.path().join("ae-linux");
             AE_LINUX
-                .write(&path)
+                .write_program(&path)
                 .with_context(|| format!("write {}", path.display()))?;
             Ok(path)
         })

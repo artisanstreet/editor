@@ -23,7 +23,7 @@ fetch() {
 case "$(uname -s)" in
     Linux) os=linux ;;
     Darwin) os=macos ;;
-    *) fail "unsupported OS $(uname -s); on Windows download Artisan Editor from ${base}" ;;
+    *) fail "unsupported OS $(uname -s); on Windows download Artisan Editor from https://github.com/artisanstreet/editor/releases" ;;
 esac
 case "$(uname -m)" in
     x86_64 | amd64) arch=x86_64 ;;

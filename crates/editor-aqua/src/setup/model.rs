@@ -123,6 +123,7 @@ pub struct Setup {
     pub version: String,
     pub default_location: PathBuf,
     pub location: PathBuf,
+    pub relocatable: bool,
     pub machines: Vec<Machine>,
     pub selected: usize,
     pub phase: Phase,
@@ -130,12 +131,13 @@ pub struct Setup {
 
 impl Setup {
     #[must_use]
-    pub fn fresh(version: &str, default_location: PathBuf) -> Self {
+    pub fn fresh(version: &str, default_location: PathBuf, relocatable: bool) -> Self {
         Self {
             kind: Kind::Fresh,
             version: version.to_owned(),
             location: default_location.clone(),
             default_location,
+            relocatable,
             machines: vec![Machine::ThisPc],
             selected: 0,
             phase: Phase::Choosing,
@@ -146,7 +148,7 @@ impl Setup {
     pub fn update(version: &str, from: String, location: PathBuf) -> Self {
         Self {
             kind: Kind::Update { from },
-            ..Self::fresh(version, location)
+            ..Self::fresh(version, location, false)
         }
     }
 
@@ -178,8 +180,10 @@ impl Setup {
                 self.selected = index;
                 None
             }
-            (Phase::Choosing, Event::ChangeLocation) => Some(Effect::PickFolder),
-            (Phase::Choosing, Event::Located(folder)) => {
+            (Phase::Choosing, Event::ChangeLocation) if self.relocatable => {
+                Some(Effect::PickFolder)
+            }
+            (Phase::Choosing, Event::Located(folder)) if self.relocatable => {
                 self.location = if folder.ends_with(FOLDER) {
                     folder
                 } else {

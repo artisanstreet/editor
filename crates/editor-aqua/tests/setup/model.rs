@@ -8,7 +8,7 @@ fn words(arguments: &[&str]) -> Vec<String> {
 }
 
 fn fresh() -> Setup {
-    Setup::fresh("1.2.0", PathBuf::from("/default/Artisan Street"))
+    Setup::fresh("1.2.0", PathBuf::from("/default/Artisan Street"), true)
 }
 
 #[test]
@@ -93,7 +93,8 @@ fn choosing_a_wsl_distro_and_a_folder_installs_forge_there() {
     assert_eq!(setup.selected, 2, "a row that isn't there selects nothing");
     assert_eq!(setup.apply(Event::ChangeLocation), Some(Effect::PickFolder));
     setup.apply(Event::Located(PathBuf::from("/apps")));
-    assert_eq!(setup.location, PathBuf::from("/apps/Artisan Street"));
+    let chosen = PathBuf::from("/apps").join("Artisan Street");
+    assert_eq!(setup.location, chosen);
 
     assert_eq!(
         setup.apply(Event::Started),
@@ -105,7 +106,7 @@ fn choosing_a_wsl_distro_and_a_folder_installs_forge_there() {
             "--forge",
             "wsl:Debian",
             "--location",
-            "/apps/Artisan Street"
+            &chosen.display().to_string()
         ])))
     );
     assert_eq!(setup.apply(Event::Selected(0)), None);

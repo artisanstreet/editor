@@ -51,7 +51,14 @@ pub fn begin() -> Result<Outcome> {
                     window::run(Setup::update(version, from, artisan_paths::root()?))?;
                 }
                 Existing::Absent => {
-                    window::run(Setup::fresh(version, artisan_paths::default_root()?))?;
+                    let nothing_installed = App::ALL
+                        .iter()
+                        .all(|app| !app.binary().is_ok_and(|binary| binary.is_file()));
+                    window::run(Setup::fresh(
+                        version,
+                        artisan_paths::root()?,
+                        nothing_installed,
+                    ))?;
                 }
             }
             Ok(Outcome::Finished)

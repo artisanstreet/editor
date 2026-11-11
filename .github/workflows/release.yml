@@ -276,7 +276,8 @@ jobs:
           ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
         run: |
           test -n "$GH_TOKEN"
-          mapfile -t assets < <(python3 src/release.py assets --output dist)
+          listed="$(python3 src/release.py assets --output dist)"
+          mapfile -t assets <<< "$listed"
           if [[ "$RELEASE_TAG" == nightly ]]; then
             immutable="nightly-$RELEASE_SHA"
             if gh release view "$immutable" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > immutable-draft; then
@@ -295,7 +296,8 @@ jobs:
             if ! gh release view nightly --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
               gh release create nightly --repo "$GITHUB_REPOSITORY" --target "$RELEASE_SHA" --prerelease --latest=false --draft --title 'Artisan nightly' --notes 'Nightly builds from successful master CI.'
             fi
-            mapfile -t rolling < <(python3 src/release.py assets --output immutable-release)
+            listed="$(python3 src/release.py assets --output immutable-release)"
+            mapfile -t rolling <<< "$listed"
             gh release view nightly --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while read -r stale; do
               if [[ ! -e "immutable-release/$stale" ]]; then gh release delete-asset nightly "$stale" --repo "$GITHUB_REPOSITORY" --yes; fi
             done
