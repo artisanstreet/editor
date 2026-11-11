@@ -21,6 +21,8 @@ const WORDMARK_HEIGHT: f32 = 72.0;
 const WORDMARK_WIDTH: f32 = WORDMARK_HEIGHT * 136.675 / 225.15;
 const ROW_RADIUS: f32 = 0.4 * 16.0;
 const ROW_HEIGHT: f32 = 58.0;
+const COMPACT_ROW_HEIGHT: f32 = 36.0;
+const ROOMY_ROWS: usize = 4;
 const ERROR: Oklch = Oklch::new(0.66, 0.2, 22.0);
 
 pub struct Props<'a> {
@@ -143,33 +145,35 @@ fn heading(theme: &ArtisanTheme, palette: &Surfaces, setup: &Setup) -> Element {
 fn choosing(theme: &ArtisanTheme, palette: &Surfaces, props: &Props<'_>) -> Vec<Element> {
     let change = Rc::clone(&props.emit);
     let begin = Rc::clone(&props.emit);
-    let location = Aqua::Box()
+    let folder = Aqua::Box()
+        .layout("column")
+        .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
+        .child(text(
+            theme,
+            &props.setup.location.display().to_string(),
+            13.0,
+            18.0,
+            palette.ink,
+            FontWeight::NORMAL,
+        ))
+        .build();
+    let mut location = Aqua::Box()
         .layout("row")
         .styles([Aqua::Style().gap(12.0).align(AlignItems::CENTER)])
-        .child(
-            Aqua::Box()
-                .layout("column")
-                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
-                .child(text(
-                    theme,
-                    &props.setup.location.display().to_string(),
-                    13.0,
-                    18.0,
-                    palette.ink,
-                    FontWeight::NORMAL,
-                ))
-                .build(),
-        )
-        .child(
+        .child(folder);
+    if props.setup.relocatable {
+        location = location.child(
             Button::text("artisan-setup-change", *theme, "Change…")
                 .variant(ButtonVariant::Outline)
                 .on_activate(move |_| change(Event::ChangeLocation))
                 .build(),
-        )
-        .build();
+        );
+    }
+    let location = location.build();
+    let roomy = props.setup.machines.len() <= ROOMY_ROWS;
     let machines = Aqua::Box()
         .layout("column")
-        .styles([Aqua::Style().gap(8.0)])
+        .styles([Aqua::Style().gap(if roomy { 8.0 } else { 4.0 })])
         .children(
             props
                 .setup
@@ -183,6 +187,7 @@ fn choosing(theme: &ArtisanTheme, palette: &Surfaces, props: &Props<'_>) -> Vec<
                         machine,
                         index,
                         index == props.setup.selected,
+                        roomy,
                         &props.emit,
                     )
                 }),
@@ -226,9 +231,15 @@ fn machine_row(
     machine: &Machine,
     index: usize,
     selected: bool,
+    roomy: bool,
     emit: &Rc<dyn Fn(Event)>,
 ) -> Element {
     let pick = Rc::clone(emit);
+    let height = if roomy {
+        ROW_HEIGHT
+    } else {
+        COMPACT_ROW_HEIGHT
+    };
     let title_ink = if selected {
         palette.ink
     } else {
@@ -254,27 +265,30 @@ fn machine_row(
                     title_ink,
                     FontWeight::MEDIUM,
                 ))
-                .child(text(
-                    theme,
-                    machine.detail(),
-                    12.0,
-                    16.0,
-                    palette.ink_dim,
-                    FontWeight::NORMAL,
-                ))
+                .children(roomy.then(|| {
+                    text(
+                        theme,
+                        machine.detail(),
+                        12.0,
+                        16.0,
+                        palette.ink_dim,
+                        FontWeight::NORMAL,
+                    )
+                }))
                 .build(),
         )
         .build()
         .exclude_from_hit_testing();
     Aqua::Button()
         .styles([Aqua::Style().radius(px(ROW_RADIUS))])
-        .child(card::key_face(palette, ROW_RADIUS, ROW_HEIGHT))
+        .child(card::key_face(palette, ROW_RADIUS, height))
         .child(label)
         .on_activate(move || pick(Event::Selected(index)))
         .build()
         .pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.5)))
         .with_key(format!("artisan-setup-machine-{index}"))
         .aria_label(machine.title())
+        .aria_selected(selected)
         .cursor(CursorIcon::Pointer)
 }
 
