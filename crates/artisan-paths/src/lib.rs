@@ -6,9 +6,11 @@
 //! - Linux: `$XDG_DATA_HOME/artisan-street/{ae,forge,editor}`
 //!
 //! One version of each app is installed; installing replaces its binary.
+//! A `location` file in that default folder names another folder to use as
+//! the root instead.
 
 use std::io::{Error, ErrorKind, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum App {
@@ -90,8 +92,14 @@ impl App {
     }
 }
 
-/// The Artisan Street folder every app lives in.
+const LOCATION: &str = "location";
+
 pub fn root() -> Result<PathBuf> {
+    let default = default_root()?;
+    Ok(chosen_root(&default).unwrap_or(default))
+}
+
+pub fn default_root() -> Result<PathBuf> {
     if cfg!(windows) {
         Ok(var("LOCALAPPDATA")?.join("Artisan Street"))
     } else if cfg!(target_os = "macos") {
@@ -99,6 +107,38 @@ pub fn root() -> Result<PathBuf> {
     } else {
         Ok(xdg_data()?.join("artisan-street"))
     }
+}
+
+fn chosen_root(default: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(default.join(LOCATION)).ok()?;
+    let chosen = PathBuf::from(text.trim());
+    chosen.is_absolute().then_some(chosen)
+}
+
+pub fn choose_root(chosen: &Path) -> Result<()> {
+    let default = default_root()?;
+    let pointer = default.join(LOCATION);
+    if chosen == default {
+        return match std::fs::remove_file(&pointer) {
+            Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    if !chosen.is_absolute() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("{} is not an absolute path", chosen.display()),
+        ));
+    }
+    std::fs::create_dir_all(&default)?;
+    std::fs::write(pointer, format!("{}\n", chosen.display()))
+}
+
+pub fn forget_root() -> Result<()> {
+    let default = default_root()?;
+    choose_root(&default)?;
+    std::fs::remove_dir(default).ok();
+    Ok(())
 }
 
 /// The user's home folder.
@@ -122,3 +162,7 @@ fn var(name: &str) -> Result<PathBuf> {
         .map(PathBuf::from)
         .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("{name} is not set")))
 }
+
+#[cfg(test)]
+#[path = "../tests/paths/location.rs"]
+mod tests;
