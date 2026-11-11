@@ -1,0 +1,46 @@
+[package]
+name = "forge-isolation"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Keeps Forge responsive while engines saturate the machine: cgroups on Linux, process priorities on Windows, I/O policy on macOS."
+
+[dependencies]
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+must_use_candidate = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+allow_attributes_without_reason = "deny"
+clone_on_ref_ptr = "deny"
+rc_buffer = "deny"
+str_to_string = "deny"
+wildcard_enum_match_arm = "deny"
+let_underscore_must_use = "deny"
+missing_assert_message = "deny"
+unwrap_in_result = "deny"
+map_err_ignore = "deny"

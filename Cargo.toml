@@ -24,6 +24,7 @@ members = [
     "crates/forge-computer",
     "crates/forge-engines",
     "crates/forge-http",
+    "crates/forge-isolation",
     "crates/forge-mcp",
     "crates/forge-runs",
     "crates/forge-store",
