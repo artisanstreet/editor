@@ -158,6 +158,11 @@ fn a_release_installs_through_its_own_ae_and_bad_ones_are_refused() {
             installed() == newest,
             "the installed ae is the one {version} published"
         );
+        assert_eq!(
+            std::fs::read_to_string(app.join("version")).unwrap().trim(),
+            env!("CARGO_PKG_VERSION"),
+            "the recorded version is the installer's own"
+        );
     }
     let entries: Vec<_> = std::fs::read_dir(&app)
         .unwrap()

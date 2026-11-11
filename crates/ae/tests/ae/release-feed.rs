@@ -87,5 +87,10 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
         std::fs::read(app.join("ae")).unwrap() == updated,
         "the update installed the newer release's ae"
     );
+    assert_eq!(
+        std::fs::read_to_string(app.join("version")).unwrap().trim(),
+        env!("CARGO_PKG_VERSION"),
+        "the recorded version is the installer's own"
+    );
     server.join().unwrap();
 }

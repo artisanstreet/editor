@@ -107,6 +107,29 @@ impl Plan {
         }
     }
 
+    fn check(&self, release: &Release) -> Result<()> {
+        let missing = |app: App, system: &str| {
+            anyhow::anyhow!(
+                "Artisan {} has no {} for {system}",
+                release.version(os()).unwrap_or_default(),
+                app.display_name()
+            )
+        };
+        if self.forge_here && !release.has(App::Forge, os()) {
+            return Err(missing(App::Forge, os()));
+        }
+        if self.editor == EditorTarget::Here && !release.has(App::Editor, os()) {
+            return Err(missing(App::Editor, os()));
+        }
+        if self.editor == EditorTarget::Windows && !release.has(App::Editor, "windows") {
+            return Err(missing(App::Editor, "windows"));
+        }
+        if !self.distros.is_empty() && !release.has(App::Forge, "linux") {
+            return Err(missing(App::Forge, "WSL"));
+        }
+        Ok(())
+    }
+
     fn here(&self) -> Vec<App> {
         let mut apps = vec![App::Ae];
         if self.forge_here {
@@ -136,6 +159,8 @@ impl Plan {
         Ok(lines)
     }
 }
+
+const LICENSE: &str = include_str!("../../../LICENSE.md");
 
 const fn os() -> &'static str {
     std::env::consts::OS
@@ -231,6 +256,7 @@ pub fn install(args: &InstallArgs) -> Result<()> {
         None => choose_forge(&release, &version)?,
     };
     let plan = Plan::settle(&editor, &forge);
+    plan.check(&release)?;
 
     if !args.apply {
         ui::note("Install", plan.summary(&version)?.join("\n"));
@@ -339,7 +365,7 @@ fn hand_over(
         anyhow::ensure!(status.success(), "installing on Windows failed ({status})");
         editor = Place::Skip;
     }
-    let folder = std::env::temp_dir().join(format!("artisan-install-{}", std::process::id()));
+    let folder = App::Ae.dir()?.join(".installer");
     std::fs::remove_dir_all(&folder).ok();
     let carrier = runtime.block_on(feed.fetch_carrier(os(), &folder))?;
     let mut command = std::process::Command::new(&carrier);
@@ -528,6 +554,8 @@ fn install_here(release: &Release, feed: Option<&str>, apps: &[App]) -> Result<(
                 App::Ae => {}
             }
             replace(&dir, &incoming)?;
+            std::fs::write(dir.join("LICENSE.md"), LICENSE)
+                .with_context(|| format!("write {}", dir.join("LICENSE.md").display()))?;
             std::fs::write(dir.join("version"), format!("{version}\n"))
                 .with_context(|| format!("write {}", dir.join("version").display()))?;
             if let Some(feed) = feed {
