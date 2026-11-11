@@ -357,6 +357,9 @@ impl DraftHandle {
                     .draft(&scope)
                     .await
                     .map_err(|error| format!("{error:#}"));
+                if let Err(error) = &result {
+                    tracing::warn!(%scope, %error, "draft load failed");
+                }
                 session.mutate(|shared| shared.state.loaded(result));
             }
             Operation::Write { request, edited } => {
@@ -365,6 +368,18 @@ impl DraftHandle {
                     .set_draft(&scope, &request)
                     .await
                     .map_err(|error| format!("{error:#}"));
+                match &result {
+                    Err(error) => tracing::warn!(%scope, %error, "draft save failed"),
+                    Ok(written) if !written.saved && written.current.body != request.body => {
+                        tracing::warn!(
+                            %scope,
+                            expected_revision = request.expected_revision,
+                            current_revision = written.current.revision,
+                            "draft save conflicted with another client"
+                        );
+                    }
+                    Ok(_) => {}
+                }
                 session.mutate(|shared| shared.state.written(&request, edited, result));
             }
             Operation::Post(request) => {
@@ -379,6 +394,15 @@ impl DraftHandle {
                 }
                 .await
                 .map_err(|error| format!("{error:#}"));
+                if let Err(error) = &result {
+                    tracing::warn!(
+                        thread = %request.thread,
+                        message = %request.message.id,
+                        creates_thread = request.create.is_some(),
+                        %error,
+                        "message send failed"
+                    );
+                }
                 let accepted = result.is_ok();
                 session.mutate(|shared| {
                     shared.state.posted(result);
