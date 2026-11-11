@@ -376,10 +376,24 @@ fn windows_temp() -> Result<(PathBuf, String)> {
     Ok((folder, windows_folder))
 }
 
+fn remembered_feed() -> Result<String> {
+    match std::fs::read_to_string(App::Ae.dir()?.join("release-feed")) {
+        Ok(feed) => Ok(feed.trim().to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(release::feed_for(
+            installed(App::Ae)
+                .as_deref()
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
+        )
+        .to_owned()),
+        Err(error) => Err(error).context("read the release feed"),
+    }
+}
+
 pub fn install_editor() -> Result<()> {
     install(&InstallArgs {
         editor: Some(Place::Here),
         forge: Some(Place::Skip),
+        from: Some(remembered_feed()?),
         yes: true,
         ..InstallArgs::default()
     })
@@ -662,14 +676,7 @@ pub fn update(yes: bool) -> Result<()> {
     let Some(current) = installed(App::Ae) else {
         bail!("nothing is installed here; run `ae install`");
     };
-    let remembered = match std::fs::read_to_string(App::Ae.dir()?.join("release-feed")) {
-        Ok(feed) => feed.trim().to_owned(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            release::feed_for(&current).to_owned()
-        }
-        Err(error) => return Err(error).context("read the release feed"),
-    };
-    let source = Source::new(Some(&remembered), None, false)?;
+    let source = Source::new(Some(&remembered_feed()?), None, false)?;
     let runtime = runtime()?;
     let Release::Feed(feed) = resolve(&runtime, &source, Carried::default())? else {
         bail!("this install came from a local build; install again to change it");
