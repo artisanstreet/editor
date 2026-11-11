@@ -111,12 +111,11 @@ pub fn default_root() -> Result<PathBuf> {
 
 fn chosen_root(default: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(default.join(LOCATION)).ok()?;
-    let chosen = PathBuf::from(text.trim());
+    let chosen = PathBuf::from(text.trim_end_matches(['\r', '\n']));
     chosen.is_absolute().then_some(chosen)
 }
 
-pub fn choose_root(chosen: &Path) -> Result<()> {
-    let default = default_root()?;
+fn point(default: &Path, chosen: &Path) -> Result<()> {
     let pointer = default.join(LOCATION);
     if chosen == default {
         return match std::fs::remove_file(&pointer) {
@@ -124,19 +123,26 @@ pub fn choose_root(chosen: &Path) -> Result<()> {
             _ => Ok(()),
         };
     }
-    if !chosen.is_absolute() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("{} is not an absolute path", chosen.display()),
-        ));
-    }
-    std::fs::create_dir_all(&default)?;
-    std::fs::write(pointer, format!("{}\n", chosen.display()))
+    let text = chosen
+        .to_str()
+        .filter(|_| chosen.is_absolute())
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("{} is not an absolute, readable path", chosen.display()),
+            )
+        })?;
+    std::fs::create_dir_all(default)?;
+    std::fs::write(pointer, format!("{text}\n"))
+}
+
+pub fn choose_root(chosen: &Path) -> Result<()> {
+    point(&default_root()?, chosen)
 }
 
 pub fn forget_root() -> Result<()> {
     let default = default_root()?;
-    choose_root(&default)?;
+    point(&default, &default)?;
     std::fs::remove_dir(default).ok();
     Ok(())
 }
