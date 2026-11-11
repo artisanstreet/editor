@@ -26,6 +26,11 @@ expression: "(events, outcome)"
                 thread: None,
             },
         },
+        Live {
+            target: Status,
+            text: "Claude is waiting on a background job",
+            append: false,
+        },
         Item {
             key: "toolu_linnea",
             parent: None,

@@ -107,6 +107,11 @@ expression: "(events, outcome)"
                 ),
             },
         ),
+        Live {
+            target: Status,
+            text: "Claude is waiting on a background job",
+            append: false,
+        },
         Item {
             key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
             parent: None,
@@ -369,6 +374,11 @@ expression: "(events, outcome)"
                 phase: Commentary,
             },
         },
+        Live {
+            target: Status,
+            text: "",
+            append: false,
+        },
         Item {
             key: "msg_011CfxiuGbvLcAuCw1QCC5V7:1",
             parent: None,
@@ -416,6 +426,11 @@ expression: "(events, outcome)"
                 ),
             },
         ),
+        Live {
+            target: Status,
+            text: "Claude is waiting on a background job",
+            append: false,
+        },
         Item {
             key: "toolu_01CjjyYz3ZhPmREjmf2wBphq",
             parent: Some(
@@ -445,6 +460,16 @@ expression: "(events, outcome)"
                 exit_code: None,
                 approval: None,
             },
+        },
+        Live {
+            target: Status,
+            text: "",
+            append: false,
+        },
+        Live {
+            target: Status,
+            text: "Claude is waiting on a background job",
+            append: false,
         },
         Item {
             key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
@@ -542,6 +567,11 @@ expression: "(events, outcome)"
                 engine: None,
                 thread: None,
             },
+        },
+        Live {
+            target: Status,
+            text: "",
+            append: false,
         },
         Item {
             key: "msg_011Cfxiyf2uXsZDzs6apBZ8y:0",

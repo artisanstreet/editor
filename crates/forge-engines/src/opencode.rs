@@ -17,6 +17,10 @@ mod goal;
 #[cfg(test)]
 #[path = "../tests/opencode/goal.rs"]
 mod goal_tests;
+
+#[cfg(test)]
+#[path = "../tests/opencode/background.rs"]
+mod background_tests;
 mod side;
 #[cfg(test)]
 mod tests;

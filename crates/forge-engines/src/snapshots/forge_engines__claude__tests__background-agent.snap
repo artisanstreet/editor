@@ -357,6 +357,11 @@ expression: "(events, outcome)"
                 ),
             },
         ),
+        Live {
+            target: Status,
+            text: "Claude is waiting on a background job",
+            append: false,
+        },
         Item {
             key: "toolu_01F5M5oRfcxHN7WK38kHP7DC",
             parent: None,
@@ -457,6 +462,11 @@ expression: "(events, outcome)"
                 engine: None,
                 thread: None,
             },
+        },
+        Live {
+            target: Status,
+            text: "",
+            append: false,
         },
         Item {
             key: "msg_011Cfv3AR8PK2Xo99PzzzgcH:0",
