@@ -596,6 +596,10 @@ fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
 #[path = "../tests/claude/cancellation.rs"]
 mod cancellation_tests;
 
+#[cfg(all(test, unix))]
+#[path = "../tests/claude/background.rs"]
+mod background_tests;
+
 #[cfg(test)]
 mod tests {
     use super::ClaudeDecoder;
