@@ -7,14 +7,26 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import tarfile
 import tempfile
-import zipfile
 from zoneinfo import ZoneInfo
 
 ANCHOR = "400a4b35cffdfa088227b9824176affb37b807fb26eb3c59b48ae56fbf5e4d8b"
-PLATFORMS = {(system, arch) for system in ("linux", "macos", "windows") for arch in ("x86_64", "aarch64")}
-EXPECTED = {(app, system, arch) for system, arch in PLATFORMS for app in ("ae", "forge")} | {("editor", "windows", "x86_64")}
+EXPECTED = {("ae", "linux", "x86_64"), ("ae", "linux", "aarch64"), ("ae", "macos", "aarch64"), ("editor", "windows", "x86_64")}
+OPTIONAL = {("editor", "windows", "aarch64")}
+SYSTEMS = {"linux": "Linux", "macos": "macOS", "windows": "Windows"}
+CHIPS = {("macos", "aarch64"): "Apple Silicon", ("linux", "aarch64"): "ARM64", ("windows", "aarch64"): "ARM64"}
+SUPPORT = {"release.json": "Signed release manifest", "release.json.sig": "Release manifest signature", "install.sh": "Install script for Linux and macOS"}
+LATEST = "releases/latest/download/release.json"
+NIGHTLY = "releases/download/nightly/release.json"
+
+
+def filename(app, system, arch):
+    return f"Artisan-Editor-{arch}.exe" if app == "editor" else f"ae-{system}-{arch}"
+
+
+def label(app, system, arch):
+    product = "Artisan Editor" if app == "editor" else "ae CLI"
+    return f"{product} for {SYSTEMS[system]} ({CHIPS.get((system, arch), arch)})"
 
 
 def run(*args, **kwargs):
@@ -80,36 +92,17 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def package(root, binaries, output, app, system, arch, version):
-    if (app, system, arch) not in EXPECTED:
+def package(binaries, output, app, system, arch):
+    if (app, system, arch) not in EXPECTED | OPTIONAL:
         raise ValueError("unsupported release artifact")
     output.mkdir(parents=True, exist_ok=True)
     binary = "editor-aqua" if app == "editor" else app
     binary += ".exe" if system == "windows" else ""
-    name = "Artisan Editor.exe" if app == "editor" else binary
-    extension = "zip" if system == "windows" else "tar.gz"
-    filename = f"{app}-{version}-{system}-{arch}.{extension}"
-    with tempfile.TemporaryDirectory() as temporary:
-        stage = Path(temporary)
-        shutil.copyfile(binaries / binary, stage / name)
-        (stage / name).chmod(0o755)
-        shutil.copyfile(root / "LICENSE.md", stage / "LICENSE.md")
-        if app == "editor":
-            shutil.copytree(root / "crates/editor-assets/licenses", stage / "notices")
-            shutil.copyfile(root / "vendor/highlighting/NOTICE.txt", stage / "HIGHLIGHTING-NOTICES.txt")
-            shutil.copyfile(root / "vendor/mermaid-rs-renderer/LICENSE", stage / "MERMAID-LICENSE.txt")
-        files = sorted(path for path in stage.rglob("*") if path.is_file())
-        archive = output / filename
-        if system == "windows":
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as writer:
-                for path in files:
-                    writer.write(path, path.relative_to(stage).as_posix())
-        else:
-            with tarfile.open(archive, "w:gz") as writer:
-                for path in files:
-                    writer.add(path, path.relative_to(stage).as_posix(), recursive=False)
-    entry = {"app": app, "os": system, "arch": arch, "file": filename, "sha256": digest(archive)}
-    (output / f"{filename}.json").write_text(json.dumps(entry), encoding="utf-8")
+    name = filename(app, system, arch)
+    shutil.copyfile(binaries / binary, output / name)
+    (output / name).chmod(0o755)
+    entry = {"app": app, "os": system, "arch": arch, "file": name, "sha256": digest(output / name)}
+    (output / f"{name}.json").write_text(json.dumps(entry), encoding="utf-8")
     return entry
 
 
@@ -120,24 +113,32 @@ def assemble(root, source, output, version, sha):
     for metadata in sorted(source.rglob("*.json")):
         entry = json.loads(metadata.read_text(encoding="utf-8"))
         identity = (entry["app"], entry["os"], entry["arch"])
-        if identity not in EXPECTED or identity in seen:
+        if identity not in EXPECTED | OPTIONAL or identity in seen:
             raise ValueError("duplicate or unexpected release artifact")
-        extension = "zip" if entry["os"] == "windows" else "tar.gz"
-        expected_file = f"{entry['app']}-{version}-{entry['os']}-{entry['arch']}.{extension}"
-        if entry["file"] != expected_file:
+        if entry["file"] != filename(*identity):
             raise ValueError("artifact name does not match the release")
-        archive = metadata.parent / expected_file
-        if digest(archive) != entry["sha256"]:
+        artifact = metadata.parent / entry["file"]
+        if digest(artifact) != entry["sha256"]:
             raise ValueError("artifact checksum mismatch")
-        shutil.copyfile(archive, output / expected_file)
+        shutil.copyfile(artifact, output / entry["file"])
         seen.add(identity)
         entries.append(entry)
-    if seen != EXPECTED:
+    if not EXPECTED <= seen:
         raise ValueError("release is missing platform artifacts")
     lines = ",\n".join(json.dumps(entry, separators=(",", ":")) for entry in entries)
     (output / "release.json").write_text(f'{{"version":"{version}","commit":"{sha}","artifacts":[\n{lines}\n]}}\n', encoding="utf-8")
-    for name in ("install.sh", "install.ps1"):
-        shutil.copyfile(root / "scripts" / name, output / name)
+    installer = (root / "scripts/install.sh").read_text(encoding="utf-8")
+    if LATEST not in installer:
+        raise ValueError("install.sh does not name the release feed")
+    if "-nightly." in version:
+        installer = installer.replace(LATEST, NIGHTLY)
+    (output / "install.sh").write_text(installer, encoding="utf-8")
+
+
+def assets(output):
+    manifest_data = json.loads((output / "release.json").read_text(encoding="utf-8"))
+    labelled = [(entry["file"], label(entry["app"], entry["os"], entry["arch"])) for entry in manifest_data["artifacts"]]
+    return [f"{output / name}#{text}" for name, text in labelled + list(SUPPORT.items())]
 
 
 def validate(output, sha=None):
@@ -145,12 +146,12 @@ def validate(output, sha=None):
     seen = set()
     for entry in manifest_data["artifacts"]:
         identity = (entry["app"], entry["os"], entry["arch"])
-        if identity not in EXPECTED or identity in seen or Path(entry["file"]).name != entry["file"]:
+        if identity not in EXPECTED | OPTIONAL or identity in seen or entry["file"] != filename(*identity):
             raise ValueError("invalid signed artifact set")
         if digest(output / entry["file"]) != entry["sha256"]:
             raise ValueError("artifact changed before signing")
         seen.add(identity)
-    if seen != EXPECTED:
+    if not EXPECTED <= seen:
         raise ValueError("signed release is incomplete")
     if sha is not None and manifest_data.get("commit") != sha:
         raise ValueError("manifest commit differs from the release SHA")
@@ -193,7 +194,7 @@ def main():
     check.add_argument("--repository", required=True)
     check.add_argument("--sha", required=True)
     pack = commands.add_parser("package")
-    for name in ("binaries", "output", "app", "os", "arch", "version"):
+    for name in ("binaries", "output", "app", "os", "arch"):
         pack.add_argument(f"--{name}", required=True)
     combine = commands.add_parser("assemble")
     for name in ("source", "output", "version", "sha"):
@@ -205,6 +206,8 @@ def main():
     verification.add_argument("--sha", required=True)
     signing = commands.add_parser("sign")
     signing.add_argument("--output", required=True)
+    listing = commands.add_parser("assets")
+    listing.add_argument("--output", required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     if args.command == "key":
@@ -212,13 +215,15 @@ def main():
     elif args.command == "gate":
         gate(args.repository, args.sha)
     elif args.command == "package":
-        package(root, Path(args.binaries), Path(args.output), args.app, args.os, args.arch, args.version)
+        package(Path(args.binaries), Path(args.output), args.app, args.os, args.arch)
     elif args.command == "assemble":
         assemble(root, Path(args.source), Path(args.output), args.version, args.sha)
     elif args.command == "stamp":
         stamp(root, args.version)
     elif args.command == "verify":
         verify(Path(args.output), public_key(os.environ["ARTISAN_RELEASE_PUBLIC_KEY_HEX"]), args.sha)
+    elif args.command == "assets":
+        print("\n".join(assets(Path(args.output))))
     elif args.command == "sign":
         sign(Path(args.output), os.environ["ARTISAN_RELEASE_SIGNING_KEY_PEM"], public_key(os.environ["ARTISAN_RELEASE_PUBLIC_KEY_HEX"]))
 

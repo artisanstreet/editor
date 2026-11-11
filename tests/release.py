@@ -43,25 +43,24 @@ class Release(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.public_key(key)
 
+    def fixture(self, root):
+        (root / "scripts").mkdir(parents=True)
+        (root / "bin").mkdir()
+        (root / "scripts/install.sh").write_text(f'feed="https://github.com/artisanstreet/editor/{release.LATEST}"\n')
+        for binary in ("ae", "editor-aqua.exe"):
+            (root / "bin" / binary).write_bytes(b"native fixture " + binary.encode())
+
     def test_packaging_assembly_and_signature_reject_corruption(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "LICENSE.md").write_text("license")
-            for path in ("crates/editor-assets/licenses", "vendor/highlighting", "vendor/mermaid-rs-renderer", "scripts", "bin"):
-                (root / path).mkdir(parents=True)
-            (root / "crates/editor-assets/licenses/NOTICE").write_text("notice")
-            (root / "vendor/highlighting/NOTICE.txt").write_text("highlighting")
-            (root / "vendor/mermaid-rs-renderer/LICENSE").write_text("mermaid")
-            for script in ("install.sh", "install.ps1"):
-                (root / "scripts" / script).write_text("installer")
-            for binary in ("ae", "forge", "ae.exe", "forge.exe", "editor-aqua.exe"):
-                (root / "bin" / binary).write_bytes(b"native fixture")
+            self.fixture(root)
             for app, system, arch in release.EXPECTED:
-                release.package(root, root / "bin", root / "input", app, system, arch, "1.2.3")
+                release.package(root / "bin", root / "input", app, system, arch)
             release.assemble(root, root / "input", root / "dist", "1.2.3", "a" * 40)
             manifest = json.loads((root / "dist/release.json").read_text())
-            self.assertEqual(len(manifest["artifacts"]), 13)
-            self.assertEqual(len((root / "dist/release.json").read_text().splitlines()), 15)
+            self.assertEqual(sorted(entry["file"] for entry in manifest["artifacts"]), ["Artisan-Editor-x86_64.exe", "ae-linux-aarch64", "ae-linux-x86_64", "ae-macos-aarch64"])
+            self.assertEqual(len((root / "dist/release.json").read_text().splitlines()), 6)
+            self.assertIn(release.LATEST, (root / "dist/install.sh").read_text())
             key = subprocess.check_output(["openssl", "genpkey", "-algorithm", "ED25519"], text=True)
             public = subprocess.check_output(["openssl", "pkey", "-pubout", "-outform", "DER"], input=key.encode())[-32:].hex()
             release.sign(root / "dist", key, public)
@@ -79,13 +78,30 @@ class Release(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 release.assemble(root, root / "input", root / "broken", "1.2.3", "a" * 40)
 
+    def test_a_release_lists_readable_names_and_takes_the_arm_editor_when_it_built(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.fixture(root)
+            for app, system, arch in release.EXPECTED | release.OPTIONAL:
+                release.package(root / "bin", root / "input", app, system, arch)
+            release.assemble(root, root / "input", root / "dist", "0.0.0-nightly.20261111220000+aaaaaaaaaaaa", "a" * 40)
+            listed = dict(line.rsplit("#", 1) for line in release.assets(root / "dist"))
+            self.assertEqual(listed[str(root / "dist/Artisan-Editor-x86_64.exe")], "Artisan Editor for Windows (x86_64)")
+            self.assertEqual(listed[str(root / "dist/Artisan-Editor-aarch64.exe")], "Artisan Editor for Windows (ARM64)")
+            self.assertEqual(listed[str(root / "dist/ae-macos-aarch64")], "ae CLI for macOS (Apple Silicon)")
+            self.assertEqual(listed[str(root / "dist/ae-linux-x86_64")], "ae CLI for Linux (x86_64)")
+            self.assertEqual(len(listed), 8)
+            for path in listed:
+                self.assertTrue(path.endswith(".sig") or Path(path).is_file(), path)
+            installer = (root / "dist/install.sh").read_text()
+            self.assertIn(release.NIGHTLY, installer)
+            self.assertNotIn(release.LATEST, installer)
+
     def test_assembly_rejects_missing_and_duplicate_platforms(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "LICENSE.md").write_text("license")
-            (root / "bin").mkdir()
-            (root / "bin/ae").write_bytes(b"native fixture")
-            entry = release.package(root, root / "bin", root / "input", "ae", "linux", "x86_64", "1.2.3")
+            self.fixture(root)
+            entry = release.package(root / "bin", root / "input", "ae", "linux", "x86_64")
             with self.assertRaisesRegex(ValueError, "missing platform"):
                 release.assemble(root, root / "input", root / "missing", "1.2.3", "a" * 40)
             (root / "input/duplicate.json").write_text(json.dumps(entry))
