@@ -92,7 +92,7 @@ class Release(unittest.TestCase):
             self.assertEqual(listed[str(root / "dist/ae-linux-x86_64")], "ae CLI for Linux (x86_64)")
             self.assertEqual(len(listed), 8)
             for path in listed:
-                self.assertTrue(path.endswith(".sig") or Path(path).is_file(), path)
+                self.assertTrue(path.endswith("release.json.sig") or Path(path).is_file(), path)
             installer = (root / "dist/install.sh").read_text()
             self.assertIn(release.NIGHTLY, installer)
             self.assertNotIn(release.LATEST, installer)
