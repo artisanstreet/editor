@@ -1,4 +1,4 @@
-use crate::ui::chrome::card::{POLAR_EDGE, POLAR_HAZE, POLAR_HIGHLIGHT, POLAR_INK, polar_face};
+use crate::ui::chrome::card::{POLAR_HAZE, POLAR_INK, polar_face};
 use crate::ui::chrome::limits::{EngineLimits, Limit};
 use crate::ui::chrome::menu::{Event, Highlight, Menu, Spot};
 use crate::ui::engine::engine_icon;
@@ -408,20 +408,6 @@ fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Elemen
         0.0
     };
     let press = &palette.press;
-    let inner = Aqua::Box()
-        .styles([
-            Aqua::Style()
-                .absolute_at(Some(1.0), Some(1.0), Some(1.0), Some(1.0))
-                .radius(px(ITEM_RADIUS - 1.0))
-                .clip(true),
-            Style::new().shadows(vec![
-                layer(0.0, 1.0, 0.0, 0.0, true, POLAR_HIGHLIGHT.with_alpha(0.28)),
-                layer(0.0, -1.0, 0.0, 0.0, true, BLACK.with_alpha(0.22)),
-            ]),
-        ])
-        .child(polar(lift))
-        .build()
-        .exclude_from_hit_testing();
     Aqua::Button()
         .styles([
             Aqua::Style()
@@ -436,11 +422,9 @@ fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Elemen
                     bottom: 4.0,
                     ..Insets::default()
                 }),
-            Style::new()
-                .gpui_background(vertical(POLAR_EDGE, POLAR_EDGE, 1.0))
-                .shadows(vec![layer(0.0, press.0, press.1, press.2, false, press.3)]),
+            Style::new().shadows(vec![layer(0.0, press.0, press.1, press.2, false, press.3)]),
         ])
-        .child(inner)
+        .child(polar(lift))
         .child(source_asset_glyph(
             AssetId::TABLER_CIRCLE_ARROW_UP,
             GLYPH,
@@ -552,7 +536,7 @@ fn limit_row(
 fn polar(lift: f32) -> Element {
     Aqua::Canvas()
         .styles([Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))])
-        .on_paint(move |bounds| vec![polar_face(bounds, lift)])
+        .on_paint(move |bounds| vec![polar_face(bounds, lift, ITEM_RADIUS)])
         .build()
         .exclude_from_hit_testing()
 }
@@ -718,14 +702,6 @@ fn inline_glyph(source: &'static str, edge: f32, tint: Oklch) -> Element {
             }]
         })
         .build()
-}
-
-fn vertical(top: Oklch, bottom: Oklch, end: f32) -> GpuiBackground {
-    GpuiBackground::LinearGradient {
-        angle: 180.0,
-        color_space: GpuiGradientColorSpace::Oklab,
-        stops: [stop(0.0, top), stop(end, bottom)],
-    }
 }
 
 fn stop(percentage: f32, color: Oklch) -> GpuiGradientStop {
