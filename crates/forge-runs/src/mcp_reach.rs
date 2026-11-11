@@ -7,9 +7,9 @@ use tokio_util::sync::CancellationToken;
 const EVERY: Duration = Duration::from_secs(10);
 const PATIENCE: Duration = Duration::from_secs(3);
 
-pub(crate) type Endpoint = (String, u16);
+pub type Endpoint = (String, u16);
 
-pub(crate) fn endpoint(server: &McpServer) -> Option<Endpoint> {
+pub fn endpoint(server: &McpServer) -> Option<Endpoint> {
     let url = url::Url::parse(server.url.as_deref()?).ok()?;
     Some((url.host_str()?.to_owned(), url.port_or_known_default()?))
 }
@@ -75,6 +75,7 @@ impl Hub {
             }
         }
         *known = unreachable;
+        drop(known);
         Ok(())
     }
 
