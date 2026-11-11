@@ -186,8 +186,12 @@ unset LD_LIBRARY_PATH
 install_args=("$stage/linux/ae" install --from "$stage" --forge "$forge_place" --editor "$editor_place" --yes)
 if [[ "$want_forge" == true ]] && command -v systemd-run >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
     say "installing through an independent update job; running agents stay with their current Forge generation"
+    install_environment=(--setenv="PATH=$PATH")
+    for name in WSL_DISTRO_NAME WSL_INTEROP WSLENV; do
+        if [[ -n "${!name:-}" ]]; then install_environment+=(--setenv="$name=${!name}"); fi
+    done
     systemd-run --user --collect --wait --unit="artisan-dev-install-$(date +%s)-$$" \
-        --working-directory="$root" --setenv="PATH=$PATH" "${install_args[@]}"
+        --working-directory="$root" "${install_environment[@]}" "${install_args[@]}"
 else
     "${install_args[@]}"
 fi
