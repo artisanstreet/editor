@@ -187,21 +187,33 @@ fn default_intent_and_invalid_selection_resolution_are_distinct() {
 }
 
 #[test]
-fn claude_legacy_context_migrates_to_compaction_without_changing_capacity() {
-    let model = model("claude-opus-5-5", &["medium"]);
+fn claude_500k_compaction_becomes_the_500k_context_choice() {
+    let model = Model {
+        context_windows: vec![
+            ContextWindow {
+                tokens: 1_000_000,
+                override_tokens: None,
+            },
+            ContextWindow {
+                tokens: 500_000,
+                override_tokens: Some(500_000),
+            },
+        ],
+        ..model("claude-opus-5-5", &["medium"])
+    };
     let mut requested = config(EngineId::Claude, &model.id);
     requested
         .options
-        .insert("context_window".into(), 500_000.into());
+        .insert("compaction_window".into(), 500_000.into());
     let resolved = model.resolve_config(&requested, &[]);
-    assert_eq!(resolved.effective.context_window_override(), None);
-    assert_eq!(
-        resolved.effective.compaction_window_override(),
-        Some(500_000)
-    );
-    assert_eq!(
-        model.specification(requested.engine, &[]).context_capacity,
-        Capability::Supported(1_000_000)
+    assert_eq!(resolved.effective.compaction_window_override(), None);
+    assert_eq!(resolved.effective.context_window_override(), Some(500_000));
+    assert!(
+        model
+            .specification(requested.engine, &[])
+            .visible_choices(ModelAxis::Context, &resolved.effective, false)
+            .iter()
+            .any(|choice| choice.binding == ConfigBinding::Context(Some(500_000)) && choice.label == "500K")
     );
     assert_eq!(resolved.requested, requested);
 }

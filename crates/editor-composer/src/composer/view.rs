@@ -3355,7 +3355,7 @@ fn model_menu_items(
         ),
     }];
     if let Some(config) = &config {
-        for axis in super::picker::Axis::ALL {
+        for axis in super::picker::Axis::PICKER {
             let options = picker.axis_options(axis, config, model);
             if !axis.shown(options.len()) {
                 continue;

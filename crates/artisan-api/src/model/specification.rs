@@ -65,16 +65,16 @@ impl Model {
 
     pub fn migrate_config(&self, requested: &EngineConfig) -> Option<EngineConfig> {
         let legacy = requested.engine == EngineId::Claude
-            && requested.context_window_override() == Some(500_000)
+            && requested.compaction_window_override() == Some(500_000)
             && self
                 .context_window
                 .is_some_and(|capacity| capacity >= 1_000_000);
         legacy.then(|| {
             let mut migrated = requested.clone();
-            migrated.options.remove("context_window");
+            migrated.options.remove("compaction_window");
             migrated
                 .options
-                .entry("compaction_window")
+                .entry("context_window")
                 .or_insert(500_000.into());
             migrated
         })
@@ -93,9 +93,9 @@ impl Model {
         resolved.requested = requested.clone();
         if legacy {
             resolved.changes.push(ResolutionChange {
-                axis: ModelAxis::Compaction,
+                axis: ModelAxis::Context,
                 requested: "500000".into(),
-                reason: "Migrated legacy Claude context choice to its compaction-window setting."
+                reason: "Migrated the Claude 500K compaction window to the 500K context choice."
                     .into(),
             });
         }
@@ -136,7 +136,7 @@ impl Model {
         };
         self.add_reasoning(&mut spec);
         self.add_speeds(&mut spec);
-        self.add_windows(&mut spec, harness);
+        self.add_windows(&mut spec);
         Self::add_permissions(&mut spec, harness);
         self.add_customizations(&mut spec, harness, customizations);
         Self::add_regroup(&mut spec);
@@ -206,20 +206,12 @@ impl Model {
         }
     }
 
-    fn add_windows(&self, spec: &mut ModelSpecification, harness: EngineId) {
+    fn add_windows(&self, spec: &mut ModelSpecification) {
         for window in &self.context_windows {
             if !(1..=100_000_000).contains(&window.tokens)
                 || window
                     .override_tokens
                     .is_some_and(|tokens| !(1..=100_000_000).contains(&tokens))
-            {
-                continue;
-            }
-            if harness == EngineId::Claude
-                && window.override_tokens == Some(500_000)
-                && self
-                    .context_window
-                    .is_some_and(|capacity| capacity >= 1_000_000)
             {
                 continue;
             }
@@ -240,20 +232,6 @@ impl Model {
                     visibility_override: None,
                 },
             );
-        }
-        if harness == EngineId::Claude
-            && self
-                .context_window
-                .is_some_and(|capacity| capacity >= 1_000_000)
-        {
-            for value in [None, Some(500_000)] {
-                spec.push(ModelAxis::Compaction, ModelChoice {
-                    id: value.map_or_else(|| "default".into(), |value| value.to_string()),
-                    label: value.map_or_else(|| "Default".into(), token_label), semantic: match value { None => ChoiceSemantic::Default, Some(_) => ChoiceSemantic::Native },
-                    binding: ConfigBinding::Compaction(value), description: Some("When Claude compacts the conversation; this does not change model capacity.".into()),
-                    advisory: None, origin: OptionOrigin::HarnessPolicy, hidden: false, visibility_override: None,
-                });
-            }
         }
     }
 

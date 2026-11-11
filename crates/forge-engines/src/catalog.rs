@@ -1120,6 +1120,12 @@ fn context_choices(engine: EngineId, base: u64, max: u64) -> Vec<ContextWindow> 
             override_tokens: Some(max),
         });
     }
+    if engine == EngineId::Claude && base >= 1_000_000 {
+        choices.push(ContextWindow {
+            tokens: 500_000,
+            override_tokens: Some(500_000),
+        });
+    }
     choices
 }
 
@@ -1161,6 +1167,10 @@ mod tests {
                 ContextWindow {
                     tokens: 1_000_000,
                     override_tokens: None
+                },
+                ContextWindow {
+                    tokens: 500_000,
+                    override_tokens: Some(500_000)
                 },
             ]
         );

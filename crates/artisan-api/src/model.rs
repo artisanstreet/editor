@@ -84,14 +84,13 @@ pub enum ModelAxis {
 }
 
 impl ModelAxis {
-    pub const ALL: [Self; 8] = [
+    pub const PICKER: [Self; 7] = [
         Self::Activation,
         Self::Thinking,
         Self::Special,
         Self::Variant,
         Self::Speed,
         Self::Context,
-        Self::Compaction,
         Self::Permission,
     ];
 

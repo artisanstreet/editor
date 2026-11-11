@@ -76,7 +76,7 @@ fn axes_offer_only_concrete_choices_and_resolve_inherited_selections() {
         ..model.clone()
     };
     let claude = EngineConfig::new(EngineId::Claude);
-    for axis in Axis::ALL {
+    for axis in Axis::PICKER {
         let options = picker.axis_options(axis, &claude, Some(&coverage));
         assert!(!options.is_empty(), "missing coverage for {axis:?}");
         assert!(
