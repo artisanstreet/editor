@@ -409,6 +409,7 @@ pub struct ColorTokens {
     pub line_strong: Oklch,
     pub text: Oklch,
     pub text_muted: Oklch,
+    pub text_muted_glass: Oklch,
     pub text_faint: Oklch,
     pub ring: Oklch,
     pub text_selection: Oklch,
@@ -461,6 +462,7 @@ mod polar {
     pub const POLAR_800: Lch = (0.2100, 0.0, 0.0);
     pub const POLAR_900: Lch = (0.1757, 0.0, 0.0);
     pub const POLAR_950: Lch = (0.1394, 0.0, 0.0);
+    pub const GLASS_INK_DIM: Lch = (0.82, 0.012, 80.0);
     pub const EMERALD_50: Lch = (0.979, 0.021, 166.113);
     pub const EMERALD_300: Lch = (0.845, 0.143, 164.978);
     pub const EMERALD_400: Lch = (0.765, 0.177, 163.223);
@@ -559,7 +561,7 @@ impl ColorTokens {
             AMBER_50, AMBER_300, AMBER_400, AMBER_500, AMBER_600, AMBER_700, AMBER_950, BLACK,
             BLUE_100, BLUE_200, BLUE_300, BLUE_400, BLUE_500, BLUE_600, BLUE_700, BLUE_900, CHART,
             CLAUDE_CLAY, CYAN_300, CYAN_400, CYAN_600, CYAN_700, EMERALD_50, EMERALD_300,
-            EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700, EMERALD_950, GRAY_50, GRAY_100,
+            EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700, EMERALD_950, GLASS_INK_DIM, GRAY_50, GRAY_100,
             GRAY_200, GRAY_300, GRAY_400, GRAY_500, GRAY_600, GRAY_900, INDIGO_50, INDIGO_100,
             INDIGO_200, INDIGO_300, INDIGO_400, INDIGO_500, INDIGO_600, INDIGO_700, INDIGO_800,
             INDIGO_900, INDIGO_950, PINK_400, PINK_600, POLAR_50, POLAR_100, POLAR_300, POLAR_400,
@@ -691,6 +693,7 @@ impl ColorTokens {
             line_strong: pick(GRAY_300, POLAR_600),
             text: pick(BLACK, WHITE),
             text_muted: pick(GRAY_500, POLAR_300),
+            text_muted_glass: pick(GRAY_500, GLASS_INK_DIM),
             text_faint,
             ring: pick(BLUE_300, BLUE_700),
             text_selection: pick(BLUE_100, BLUE_900),

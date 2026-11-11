@@ -5,12 +5,7 @@ pub struct ContextReading {
     pub window_tokens: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContextTone {
-    Normal,
-    Warning,
-    Danger,
-}
+pub use crate::ui::progress::Tone as ContextTone;
 
 impl ContextReading {
     pub fn new(model_name: String, context_tokens: u64, window_tokens: u64) -> Option<Self> {
@@ -26,14 +21,7 @@ impl ContextReading {
     }
 
     pub fn tone(&self) -> ContextTone {
-        let percent = self.percent();
-        if percent > 80.0 {
-            ContextTone::Danger
-        } else if percent > 50.0 {
-            ContextTone::Warning
-        } else {
-            ContextTone::Normal
-        }
+        ContextTone::of(self.percent())
     }
 
     pub fn percent_sentence(&self) -> String {

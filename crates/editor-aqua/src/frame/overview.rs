@@ -1,7 +1,8 @@
 use crate::core::Core;
 use crate::ui::chrome::card::{self, INSET_RADIUS, Surfaces};
 use crate::inspector::{AgentCard, Inspector, InspectorAction, agent_card, render_agent_card};
-use crate::shell::context_meter::{ContextReading, ContextTone};
+use crate::shell::context_meter::ContextReading;
+use crate::ui::hint_card::{Phrase, hint_card};
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua::{Aqua, Style, pct, px};
@@ -24,7 +25,6 @@ const LINE: f32 = 20.0;
 const GLYPH: f32 = 16.0;
 const ROW_PAD: f32 = 8.0;
 const ROW_RADIUS: f32 = INSET_RADIUS - (PADDING - ROW_PAD);
-const BAR: f32 = 4.0;
 const DOT: f32 = 6.0;
 const PULSE_MS: u32 = 1_600;
 
@@ -184,31 +184,8 @@ fn fact(theme: &ArtisanTheme, surfaces: &Surfaces, icon: AssetId, title: &str, v
 }
 
 fn context(theme: &ArtisanTheme, surfaces: &Surfaces, reading: &ContextReading) -> Element {
-    let share = (reading.percent() / 100.0) as f32;
-    let tone = match reading.tone() {
-        ContextTone::Normal => theme.colors.action_top,
-        ContextTone::Warning => theme.colors.banner_warning.text,
-        ContextTone::Danger => theme.colors.banner_error.text,
-    };
-    let track = Aqua::Box()
-        .styles([Aqua::Style()
-            .height(px(BAR))
-            .radius(px(BAR / 2.0))
-            .flex_grow(1.0)
-            .clip(true)
-            .gpui_background(GpuiBackground::Solid(
-                surfaces.ink.with_alpha(0.08).to_reference_paint(),
-            ))])
-        .child(
-            Aqua::Box()
-                .styles([Aqua::Style()
-                    .width(pct(100.0 * share))
-                    .height(pct(100.0))
-                    .radius(px(BAR / 2.0))
-                    .gpui_background(GpuiBackground::Solid(tone.to_reference_paint()))])
-                .build(),
-        )
-        .build();
+    let percent = reading.percent().round();
+    let theme = *theme;
     Aqua::Box()
         .layout("row")
         .styles([Aqua::Style().align(AlignItems::CENTER).gap(8.0)])
@@ -217,9 +194,25 @@ fn context(theme: &ArtisanTheme, surfaces: &Surfaces, reading: &ContextReading) 
             GLYPH,
             surfaces.ink_dim.to_reference_paint(),
         ))
-        .child(track)
+        .child(
+            Aqua::Box()
+                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
+                .child(crate::ui::progress::bar(&theme, reading.percent(), crate::ui::progress::HEIGHT))
+                .build(),
+        )
         .build()
         .aria_label(reading.percent_sentence())
+        .tooltip(0.5, move || {
+            hint_card(
+                &theme,
+                "Context Window",
+                &[
+                    Phrase::Muted("The context window is ".to_owned()),
+                    Phrase::Strong(format!("{percent:.0}%")),
+                    Phrase::Muted(" full.".to_owned()),
+                ],
+            )
+        })
 }
 
 fn subagent(

@@ -235,58 +235,7 @@ fn context_card(
             vec![reading.model_name.clone(), size],
         ))
         .build();
-    let fraction = (reading.percent() / 100.0) as f32;
-    let fill = match reading.tone() {
-        crate::shell::context_meter::ContextTone::Normal => {
-            aqua_core::GpuiBackground::LinearGradient {
-                angle: 90.0,
-                color_space: aqua_core::GpuiGradientColorSpace::Srgb,
-                stops: [
-                    aqua_core::GpuiGradientStop {
-                        percentage: 0.0,
-                        color: theme.colors.action_bottom.to_reference_paint(),
-                    },
-                    aqua_core::GpuiGradientStop {
-                        percentage: 1.0,
-                        color: theme.colors.action_top.to_reference_paint(),
-                    },
-                ],
-            }
-        }
-        crate::shell::context_meter::ContextTone::Warning => {
-            aqua_core::GpuiBackground::Solid(theme.colors.banner_warning.text.to_reference_paint())
-        }
-        crate::shell::context_meter::ContextTone::Danger => {
-            aqua_core::GpuiBackground::Solid(theme.colors.banner_error.text.to_reference_paint())
-        }
-    };
-    let radius = RadiusTokens::value(RadiusStep::Xs);
-    let progress = UiBox::new()
-        .width(Length::Pct(100.0))
-        .height(8.0)
-        .radius(radius)
-        .clip(true)
-        .style(
-            Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                theme
-                    .colors
-                    .text
-                    .at(Opacity::ProgressTrack)
-                    .to_reference_paint(),
-            )),
-        )
-        .child(
-            UiBox::new()
-                .width(Length::Pct(fraction * 100.0))
-                .height(Length::Pct(100.0))
-                .radius(radius)
-                .style(Style::new().gpui_background(fill))
-                .build(),
-        )
-        .build()
-        .role(aqua_core::Role::ProgressIndicator)
-        .aria_label("Progress")
-        .aria_value(format!("{:.0}%", reading.percent()));
+    let progress = crate::ui::progress::bar(&theme, reading.percent(), 8.0).aria_label("Progress");
     let body = UiBox::new()
         .layout("column")
         .gap(12.0)
