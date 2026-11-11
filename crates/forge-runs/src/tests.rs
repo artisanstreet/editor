@@ -13,6 +13,8 @@ mod coordination;
 mod runtime_registry;
 #[path = "../tests/disk/guard.rs"]
 mod disk_guard;
+#[path = "../tests/run/mcp_reach.rs"]
+mod mcp_reach_tests;
 use artisan_api::{
     ApprovalRequest, CreateProject, CreateThread, Decision, EngineConfig, ItemsQuery, Permissions,
     Phase, ProjectId, RunStatus, ToolKind,

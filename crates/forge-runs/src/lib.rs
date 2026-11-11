@@ -16,6 +16,7 @@ mod extensions;
 mod gateway;
 mod handoff;
 mod mcp_auth;
+mod mcp_reach;
 mod park;
 mod retention;
 mod run;
@@ -91,6 +92,7 @@ struct Inner {
     mcp_flows: Mutex<mcp_auth::Flows>,
     /// Serialises changes to the `mcp_auth` setting.
     mcp_auth_writes: tokio::sync::Mutex<()>,
+    mcp_unreachable: Mutex<std::collections::HashSet<mcp_reach::Endpoint>>,
 }
 
 /// One live run's handles and memory-only text.
@@ -197,6 +199,7 @@ impl Hub {
                 skills_sh: Mutex::new(forge_engines::SKILLS_SH_URL.to_owned()),
                 mcp_flows: Mutex::new(mcp_auth::Flows::default()),
                 mcp_auth_writes: tokio::sync::Mutex::new(()),
+                mcp_unreachable: Mutex::default(),
             }),
         };
         hub.forward_engine_status();
