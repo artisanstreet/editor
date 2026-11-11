@@ -366,20 +366,11 @@ impl ClaudeDecoder {
                     });
                 }
             }
-            // Live background tasks. The CLI waits for agents and workflows
-            // (they report back); shells it reaps once input closes, and
-            // ambient watchers are never work.
             "background_tasks_changed" => {
                 let tasks = frame["tasks"].as_array().map_or(&[][..], Vec::as_slice);
                 self.background = tasks
                     .iter()
-                    .filter(|task| {
-                        (matches!(
-                            str_at(task, "task_type"),
-                            Some("local_agent" | "local_workflow")
-                        ) || task.get("parent_task_id").is_some())
-                            && task["ambient"].as_bool() != Some(true)
-                    })
+                    .filter(|task| task["ambient"].as_bool() != Some(true))
                     .count();
                 self.waiting_agents = tasks
                     .iter()

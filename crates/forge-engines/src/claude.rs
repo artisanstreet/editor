@@ -16,10 +16,12 @@
 //! runs one more turn when it reports back.
 
 mod decoder;
+mod door;
 mod side;
 pub mod tools;
 
 pub use decoder::ClaudeDecoder;
+use door::{Door, Ending, Session};
 
 use crate::process::{self, EngineProcess};
 use crate::{EngineEvent, Harness, Input, Outcome, RunIo, SideReply, Turn, UserInput};
@@ -287,14 +289,9 @@ async fn drive(
     let mut cancelling = false;
     let grace = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
     tokio::pin!(grace);
-    // Background agents outlived a `result`; input stays open for them.
-    let mut waiting_on_background = false;
+    let mut door = Door::Open;
     let settle = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
     tokio::pin!(settle);
-    let mut settling = false;
-    // A `result` left input open for a title request or steer still on its
-    // way; once it is answered with no turn following, input closes.
-    let mut held_for_input = false;
     loop {
         tokio::select! {
             line = engine.next_line() => {
@@ -313,61 +310,37 @@ async fn drive(
                         tracing::warn!(%thread, session = ?decoder.session(), "answering Claude: {error:#}");
                     }
                 }
-                // Closing input ends the session: the CLI then waits only a
-                // bounded while (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`,
-                // about 10 minutes) for background agents, kills them
-                // mid-work and refuses steers meanwhile. So input closes at
-                // a `result` only once no steer, title request or
-                // background agent is still on its way.
-                if decoder.take_result_seen() && engine.stdin_open() {
-                    waiting_on_background |= after_result(engine, decoder, cancelling);
-                    held_for_input = engine.stdin_open() && !decoder.background_running();
-                } else if held_for_input
-                    && engine.stdin_open()
-                    && !decoder.in_turn()
-                    && !decoder.awaiting_input()
-                    && !decoder.background_running()
-                {
-                    // The title answer (or a steer's echo) came after the
-                    // `result`: nothing else would close input, and the CLI
-                    // would wait on it forever.
-                    held_for_input = false;
-                    engine.close_stdin("what held input open after the result was answered");
-                }
-                // The last agent ended: its report starts a follow-up turn
-                // whose `result` closes input; failing that, the grace does.
-                // The grace never closes mid-turn: that turn may still start
-                // an agent, which the CLI would kill once input is closed.
-                if waiting_on_background && !decoder.background_running() && !settling {
-                    engine.note(&format!(
-                        "background work ended; input closes in {}s unless more starts ({})",
-                        SETTLED_INPUT_GRACE.as_secs(),
-                        decoder.background_summary()
-                    ));
-                    settling = true;
+                let session = Session {
+                    in_turn: decoder.in_turn(),
+                    awaiting_input: decoder.awaiting_input(),
+                    background: decoder.background_running(),
+                };
+                let ending = decoder.take_result_seen().then_some(if cancelling {
+                    Ending::Cancelled
+                } else {
+                    Ending::Replied
+                });
+                let next = ending.map_or_else(
+                    || door.after_frame(session),
+                    |ending| door.after_result(session, ending),
+                );
+                if next == Door::Settling && door != Door::Settling {
                     settle.as_mut().reset(tokio::time::Instant::now() + SETTLED_INPUT_GRACE);
-                } else if decoder.background_running() && settling {
-                    engine.note("background work started again; input stays open");
-                    settling = false;
                 }
+                let why = ending.map_or(Moved::Frame, Moved::Result);
+                move_door(engine, decoder, &mut door, next, why);
             }
-            () = &mut settle, if settling => {
-                settling = false;
-                if engine.stdin_open()
-                    && !decoder.in_turn()
-                    && !decoder.awaiting_input()
-                    && !decoder.background_running()
-                {
-                    engine.close_stdin(&format!(
-                        "no background work for {}s ({})",
-                        SETTLED_INPUT_GRACE.as_secs(),
-                        decoder.background_summary()
-                    ));
-                }
+            () = &mut settle, if door == Door::Settling => {
+                let next = door.after_grace(Session {
+                    in_turn: decoder.in_turn(),
+                    awaiting_input: decoder.awaiting_input(),
+                    background: decoder.background_running(),
+                });
+                move_door(engine, decoder, &mut door, next, Moved::Grace);
             }
             input = io.inbox.recv(), if *inbox_open && !cancelling => match input {
                 Some(Input::Steer(steer)) => {
-                    let delivered = engine.stdin_open()
+                    let delivered = door.takes_input()
                         && deliver(engine, decoder, &steer, true).await.is_ok();
                     if !delivered {
                         next.push_back((steer, true));
@@ -426,25 +399,51 @@ async fn drive(
     })
 }
 
-/// A `result` arrived: closes input unless a steer, a title request or
-/// background work still needs it. Returns whether it stays open for
-/// background work.
-fn after_result(engine: &mut EngineProcess, decoder: &ClaudeDecoder, cancelling: bool) -> bool {
-    if cancelling || (!decoder.awaiting_input() && !decoder.background_running()) {
-        engine.close_stdin(&format!(
-            "result (cancelling: {cancelling}; {})",
-            decoder.background_summary()
-        ));
-        false
-    } else if decoder.background_running() {
-        engine.note(&format!(
-            "result; input stays open for background work ({})",
-            decoder.background_summary()
-        ));
-        true
-    } else {
-        engine.note("result; input stays open: a steer or title request is on its way");
-        false
+#[derive(Clone, Copy)]
+enum Moved {
+    Frame,
+    Result(Ending),
+    Grace,
+}
+
+fn move_door(
+    engine: &mut EngineProcess,
+    decoder: &ClaudeDecoder,
+    door: &mut Door,
+    next: Door,
+    why: Moved,
+) {
+    let from = std::mem::replace(door, next);
+    if from == next {
+        return;
+    }
+    let jobs = decoder.background_summary();
+    match (next, why) {
+        (Door::Closed, Moved::Grace) => engine.close_stdin(&format!(
+            "no background work for {}s ({jobs})",
+            SETTLED_INPUT_GRACE.as_secs()
+        )),
+        (Door::Closed, Moved::Result(ending)) => engine.close_stdin(&format!(
+            "result (cancelling: {}; {jobs})",
+            ending == Ending::Cancelled
+        )),
+        (Door::Closed, Moved::Frame) => {
+            engine.close_stdin("what held input open after the result was answered");
+        }
+        (Door::HeldForBackground, Moved::Result(_)) => {
+            engine.note(&format!("result; input stays open for background work ({jobs})"));
+        }
+        (Door::HeldForBackground, Moved::Frame | Moved::Grace) if from == Door::Settling => {
+            engine.note("background work started again; input stays open");
+        }
+        (Door::HeldForReply, Moved::Result(_)) => {
+            engine.note("result; input stays open: a steer or title request is on its way");
+        }
+        (Door::Settling, _) => engine.note(&format!(
+            "background work ended; input closes in {}s unless more starts ({jobs})",
+            SETTLED_INPUT_GRACE.as_secs()
+        )),
+        (Door::Open | Door::HeldForReply | Door::HeldForBackground, _) => {}
     }
 }
 
@@ -595,6 +594,14 @@ fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
 #[cfg(all(test, unix))]
 #[path = "../tests/claude/cancellation.rs"]
 mod cancellation_tests;
+
+#[cfg(all(test, unix))]
+#[path = "../tests/claude/background.rs"]
+mod background_tests;
+
+#[cfg(test)]
+#[path = "../tests/claude/door.rs"]
+mod door_tests;
 
 #[cfg(test)]
 mod tests {
