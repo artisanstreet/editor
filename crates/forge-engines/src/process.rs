@@ -3,7 +3,7 @@
 use crate::Turn;
 use crate::trace::{Kind, Trace};
 use anyhow::{Context, Result};
-use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, KillOnDrop};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -93,9 +93,32 @@ impl Drop for OwnedChild {
     }
 }
 
+#[derive(Debug)]
+struct Isolated;
+
+impl CommandWrapper for Isolated {
+    fn pre_spawn(&mut self, command: &mut Command, _core: &CommandWrap) -> std::io::Result<()> {
+        forge_isolation::contain(command.as_std_mut());
+        Ok(())
+    }
+
+    fn post_spawn(
+        &mut self,
+        _command: &mut Command,
+        child: &mut tokio::process::Child,
+        _core: &CommandWrap,
+    ) -> std::io::Result<()> {
+        if let Some(process_id) = child.id() {
+            forge_isolation::started(process_id);
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn owned_command(command: Command) -> Result<OwnedChild> {
     let mut command = CommandWrap::from(command);
     command.wrap(KillOnDrop);
+    command.wrap(Isolated);
     #[cfg(unix)]
     command.wrap(process_wrap::tokio::ProcessGroup::leader());
     #[cfg(windows)]

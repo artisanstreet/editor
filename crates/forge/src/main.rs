@@ -81,6 +81,14 @@ fn run(cli: Cli) -> Result<()> {
         None => forge_http::configured_listen(&data_dir)?,
     };
     tracing::info!(version = LONG_VERSION, data = %data_dir.display(), %listen, "starting Forge");
+    for outcome in forge_isolation::protect_forge() {
+        match outcome {
+            forge_isolation::Outcome::Applied(measure) => tracing::info!("isolation: {measure}"),
+            forge_isolation::Outcome::Skipped { measure, reason } => {
+                tracing::warn!("isolation unavailable: {measure}: {reason}");
+            }
+        }
+    }
     #[cfg(feature = "dhat-heap")]
     let profiler = {
         #[cfg(unix)]

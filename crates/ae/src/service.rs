@@ -89,7 +89,7 @@ fn unit_text(forge: &Path, mode: StopMode) -> String {
     ));
     format!(
         "[Unit]\nDescription=Artisan Forge\nAfter=network-online.target\n\n\
-         [Service]\nType=notify\nNotifyAccess=all\nExecStart={}\nEnvironment={path}\n\
+         [Service]\nType=notify\nNotifyAccess=all\nDelegate=yes\nDelegateSubgroup=forge\nExecStart={}\nEnvironment={path}\n\
          Environment=GLIBC_TUNABLES=glibc.malloc.arena_max=2\n\
          Restart=on-failure\nRestartSec=5\nTimeoutStartSec=180\nTimeoutStopSec=30\nKillMode={kill_mode}\nSendSIGKILL=no\n\n[Install]\nWantedBy=default.target\n",
         unit_quote(&forge.to_string_lossy())

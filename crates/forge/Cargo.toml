@@ -23,6 +23,7 @@ dhat = { workspace = true, optional = true }
 artisan-paths = { path = "../artisan-paths" }
 clap.workspace = true
 forge-http = { path = "../forge-http" }
+forge-isolation = { path = "../forge-isolation" }
 forge-runs = { path = "../forge-runs" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing.workspace = true

@@ -1976,6 +1976,7 @@ dependencies = [
  "clap",
  "dhat",
  "forge-http",
+ "forge-isolation",
  "forge-runs",
  "forge-store",
  "reqwest",
@@ -2028,6 +2029,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "forge-content",
+ "forge-isolation",
  "fs2",
  "futures",
  "getrandom 0.4.3",
@@ -2095,6 +2097,15 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "forge-isolation"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]
