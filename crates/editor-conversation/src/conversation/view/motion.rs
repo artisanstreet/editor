@@ -1,6 +1,6 @@
 use crate::conversation::compaction::{CompactionFrame, CompactionMotion, CompactionPhase};
 use editor_ui::motion::MotionCurve;
-use editor_ui::phrase::{PhraseMotion, retained_phrase_or_text};
+use editor_ui::phrase::{PhraseMotion, PhraseOverflow, retained_phrase_or_text};
 use editor_ui::theme::{ArtisanTheme, ProseTypography};
 use aqua_core::GpuiTextColor;
 use aqua_text::{FontFamily, TextStyle};
@@ -37,6 +37,7 @@ pub struct RowMotion {
     compactions: HashMap<ItemId, CompactionMotion>,
     entrances: HashMap<crate::conversation::fold::RowKey, EntranceState>,
     animating: bool,
+    refit: Option<Rc<dyn Fn()>>,
 }
 
 impl RowMotion {
@@ -89,6 +90,10 @@ impl RowMotion {
         self.animating = false;
     }
 
+    pub fn on_refit(&mut self, refit: Rc<dyn Fn()>) {
+        self.refit = Some(refit);
+    }
+
     pub fn animating(&self) -> bool {
         self.animating
     }
@@ -102,11 +107,12 @@ impl RowMotion {
         now: f64,
         reduced_motion: bool,
     ) -> Element {
-        let (words, _) =
-            self.phrases
-                .entry(key.to_owned())
-                .or_default()
-                .words(&text, now, reduced_motion);
+        let phrase = self.phrases.entry(key.to_owned()).or_default();
+        let (words, _) = phrase.words(&text, now, reduced_motion);
+        let overflow = PhraseOverflow {
+            fit: phrase.fit(),
+            refit: self.refit.clone(),
+        };
         let typography = TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
             size_px: ProseTypography::BODY_SIZE_PX,
@@ -114,7 +120,7 @@ impl RowMotion {
             weight: ProseTypography::BODY_WEIGHT,
             ..TextStyle::default()
         };
-        retained_phrase_or_text(words.as_deref(), text, typography, color, 24.0)
+        retained_phrase_or_text(words.as_deref(), text, typography, color, 24.0, overflow)
     }
 
     pub fn chevron(

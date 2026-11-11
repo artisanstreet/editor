@@ -1756,6 +1756,10 @@ impl RowFactory {
         let row_owner = self.row_cache.borrow().candidate(key);
         *row_owner.stored_leaf.borrow_mut() = None;
         row_owner.motion.borrow_mut().begin_frame();
+        row_owner
+            .motion
+            .borrow_mut()
+            .on_refit(self.invalidate.clone());
         let reveal = match (&self.reveals, row.model.row.semantic()) {
             (
                 Some(resources),
