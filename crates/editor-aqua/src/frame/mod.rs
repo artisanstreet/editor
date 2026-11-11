@@ -2,6 +2,7 @@ pub use crate::ui::chrome::account;
 pub mod avatar;
 pub use crate::ui::chrome::card;
 pub use crate::ui::chrome::glide;
+pub use crate::ui::chrome::limits;
 pub mod inbox;
 pub use crate::ui::chrome::menu;
 pub mod overview;

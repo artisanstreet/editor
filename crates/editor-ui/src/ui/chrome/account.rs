@@ -1,4 +1,6 @@
+use crate::ui::chrome::limits::{EngineLimits, Limit};
 use crate::ui::chrome::menu::{Event, Highlight, Menu, Spot};
+use crate::ui::engine::engine_icon;
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua::images::ImageHandle;
@@ -34,6 +36,10 @@ const GLYPH: f32 = 16.0;
 const FALLBACK_GLYPH: f32 = 18.0;
 const CHEVRON: f32 = 12.0;
 const UPGRADE_HEIGHT: f32 = ITEM_HEIGHT + 2.0;
+const LIMIT_TEXT: f32 = 12.0;
+const LIMIT_LINE: f32 = 16.0;
+const LIMIT_ROW: f32 = 24.0;
+const LIMIT_LABEL: f32 = 52.0;
 const BLUR: f32 = 20.0;
 const GLOW_ALPHA: f32 = 0.45;
 
@@ -83,6 +89,7 @@ impl Identity {
 pub struct Account {
     pub identity: Identity,
     pub avatar: Option<Arc<ImageHandle>>,
+    pub limits: Vec<EngineLimits>,
 }
 
 struct Shadow(f32, f32, f32, Oklch);
@@ -289,6 +296,7 @@ pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
         ))
         .child(upgrade(theme, &palette, &sheet))
         .child(crate::ui::chrome::card::double_rule(theme, MENU_PADDING))
+        .children(limits(theme, &palette, &sheet.account.limits))
         .child(entry(Spot::SignOut, "Sign out", AssetId::TABLER_LOGOUT))
         .build();
     menu_surface(theme, vec![content])
@@ -463,6 +471,99 @@ fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Elemen
         .on_hover_change(move |inside| hover(Event::Hover(Spot::Upgrade, inside)))
 }
 
+fn limits(theme: &ArtisanTheme, palette: &Palette, engines: &[EngineLimits]) -> Vec<Element> {
+    match engines {
+        [] => Vec::new(),
+        engines => vec![
+            Aqua::Box()
+                .layout("column")
+                .styles([Aqua::Style()
+                    .width(pct(100.0))
+                    .gap(2.0)
+                    .padding_insets(Insets {
+                        left: ITEM_PAD_X,
+                        right: ITEM_PAD_X,
+                        top: ITEM_PAD_Y,
+                        bottom: ITEM_PAD_Y,
+                    })])
+                .children(engines.iter().flat_map(|engine| {
+                    engine.limits.iter().enumerate().map(move |(index, limit)| {
+                        limit_row(theme, palette, engine, (index == 0).then_some(engine.engine), limit)
+                    })
+                }))
+                .build()
+                .with_key("artisan-account-limits"),
+            crate::ui::chrome::card::double_rule(theme, MENU_PADDING),
+        ],
+    }
+}
+
+fn limit_row(
+    theme: &ArtisanTheme,
+    palette: &Palette,
+    engine: &EngineLimits,
+    mark: Option<artisan_api::EngineId>,
+    limit: &Limit,
+) -> Element {
+    let icon = Aqua::Box().styles([Aqua::Style()
+        .width(px(GLYPH))
+        .height(px(GLYPH))
+        .flex_shrink(0.0)
+        .align(AlignItems::CENTER)
+        .justify(JustifyContent::CENTER)]);
+    let icon = match mark {
+        Some(engine) => icon
+            .child(source_asset_glyph(
+                engine_icon(theme, engine),
+                if engine == artisan_api::EngineId::OpenCode { 12.8 } else { GLYPH },
+                palette.ink.to_reference_paint(),
+            ))
+            .build(),
+        None => icon.build(),
+    };
+    let percent = limit.used_percent.round().clamp(0.0, 100.0);
+    Aqua::Box()
+        .styles([Aqua::Style()
+            .width(pct(100.0))
+            .height(px(LIMIT_ROW))
+            .align(AlignItems::CENTER)
+            .gap(10.0)])
+        .child(icon)
+        .child(
+            Aqua::Box()
+                .styles([Aqua::Style().width(px(LIMIT_LABEL)).flex_shrink(0.0).clip(true)])
+                .child(small_label(theme, &limit.label, palette.ink_dim))
+                .build(),
+        )
+        .child(
+            Aqua::Box()
+                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
+                .child(crate::ui::progress::bar(theme, limit.used_percent, crate::ui::progress::HEIGHT))
+                .build(),
+        )
+        .build()
+        .with_key(format!("artisan-account-limit-{}-{}", engine.engine, limit.label))
+        .aria_label(format!(
+            "{} {} limit: {percent:.0}% used",
+            engine.engine.display_name(),
+            limit.label
+        ))
+        .tooltip(0.5, {
+            let theme = *theme;
+            let engine = engine.engine;
+            let limit = limit.clone();
+            move || {
+                let now = chrono::Utc::now().timestamp_millis();
+                let outlook = crate::ui::chrome::limits::outlook(&limit, now);
+                crate::ui::hint_card::hint_card(
+                    &theme,
+                    &crate::ui::chrome::limits::title(engine, &limit),
+                    &crate::ui::chrome::limits::explanation(&limit, outlook, crate::ui::local_time::occasion),
+                )
+            }
+        })
+}
+
 fn glow() -> Element {
     Aqua::Canvas()
         .styles([Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))])
@@ -592,6 +693,21 @@ fn label(theme: &ArtisanTheme, text: &str, color: Oklch, weight: FontWeight) -> 
             size_px: TEXT,
             line_height_px: LINE,
             weight,
+            ..TextStyle::default()
+        })
+        .wrap(false)
+        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+        .gpui_color(color.to_reference_paint())
+        .build()
+}
+
+fn small_label(theme: &ArtisanTheme, text: &str, color: Oklch) -> Element {
+    Aqua::Text(text.to_owned())
+        .text_style(TextStyle {
+            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
+            size_px: LIMIT_TEXT,
+            line_height_px: LIMIT_LINE,
+            weight: FontWeight::NORMAL,
             ..TextStyle::default()
         })
         .wrap(false)

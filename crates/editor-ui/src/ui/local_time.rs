@@ -14,6 +14,20 @@ pub fn moment(at: Timestamp) -> String {
     }
 }
 
+pub fn occasion(at: Timestamp) -> String {
+    let Some(local) = DateTime::from_timestamp_millis(at).map(|at| at.with_timezone(&Local)) else {
+        return String::new();
+    };
+    let local = local.naive_local();
+    let time = clock(local);
+    match (local.date() - Local::now().date_naive()).num_days() {
+        0 => format!("today at {time}"),
+        1 => format!("tomorrow at {time}"),
+        2..=6 => format!("on {} at {time}", local.format("%A")),
+        _ => format!("on {} at {time}", short_date(local)),
+    }
+}
+
 #[cfg(windows)]
 fn parts(at: NaiveDateTime) -> aqua::local_time::LocalDateParts {
     use chrono::{Datelike as _, Timelike as _};

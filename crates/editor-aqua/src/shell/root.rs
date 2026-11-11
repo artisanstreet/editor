@@ -2147,6 +2147,13 @@ impl RootViews {
                 profile.username.as_deref(),
             ),
             avatar: self.avatar.image(),
+            limits: crate::ui::chrome::limits::resolve(
+                shell.core.active_host().into_iter().flat_map(|host| {
+                    host.engines
+                        .values()
+                        .filter_map(|status| status.usage.as_ref().map(|usage| (status.engine, usage)))
+                }),
+            ),
         })
     }
 

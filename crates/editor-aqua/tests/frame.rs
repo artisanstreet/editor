@@ -17,6 +17,8 @@ mod tabs;
 #[path = "frame/wordmark.rs"]
 mod wordmark;
 
+#[path = "frame/limits.rs"]
+mod limits;
 #[path = "frame/account.rs"]
 mod account;
 
