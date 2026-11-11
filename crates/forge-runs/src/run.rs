@@ -604,7 +604,10 @@ pub async fn prepare(
     let engines = hub.engines();
     let binary = binary.with_context(|| format!("{} is not installed", engine.display_name()))?;
     let cwd = hub.thread_folder(thread).await?;
-    let customisation = hub.customisation().await?;
+    let mut customisation = hub.customisation().await?;
+    customisation
+        .mcp_servers
+        .retain(|server| hub.mcp_server_reachable(server));
     let owner = hub.clone();
     let mut launch = tokio::task::spawn_blocking(move || {
         let _homes = owner.homes_lock()?;
