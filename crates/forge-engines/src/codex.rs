@@ -295,9 +295,10 @@ impl Run {
                         self.flush()?;
                     }
                     self.conn.retire();
-                    let reason = match interrupt_sent {
-                        true => "Codex did not confirm the turn stopped after an interrupt",
-                        false => "Codex did not return the started turn ID before cancellation timed out",
+                    let reason = if interrupt_sent {
+                        "Codex did not confirm the turn stopped after an interrupt"
+                    } else {
+                        "Codex did not return the started turn ID before cancellation timed out"
                     };
                     return Err(anyhow!("{reason}; requested thread unload and retired the server. Underlying work may still be running."));
                 }
