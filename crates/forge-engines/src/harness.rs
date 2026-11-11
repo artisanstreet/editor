@@ -126,6 +126,26 @@ pub enum EngineEvent {
     },
 }
 
+impl EngineEvent {
+    #[must_use]
+    pub fn background_wait(engine: artisan_api::EngineId, waiting: bool) -> Self {
+        let name = match engine {
+            artisan_api::EngineId::Claude => "Claude",
+            artisan_api::EngineId::Codex => "Codex",
+            artisan_api::EngineId::OpenCode => "OpenCode",
+        };
+        Self::Live {
+            target: LiveKind::Status,
+            text: if waiting {
+                format!("{name} is waiting on a background job")
+            } else {
+                String::new()
+            },
+            append: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LiveKind {
     /// Streaming text of the item with this key (an `AssistantMessage`).

@@ -10,7 +10,6 @@ pub enum Phase {
     Replying,
     Compacting,
     WaitingOnYou,
-    Background,
     Settled(RunStatus),
 }
 
@@ -87,24 +86,6 @@ pub fn turn_phase<S: BuildHasher>(
     if reasoning {
         return Phase::Thinking;
     }
-    let background = items.iter().filter(running).any(|item| {
-        matches!(
-            &item.kind,
-            ItemKind::Tool {
-                tool: ToolKind::Shell {
-                    background: true,
-                    ..
-                },
-                ..
-            } | ItemKind::Agent {
-                background: true,
-                ..
-            }
-        )
-    });
-    if background {
-        return Phase::Background;
-    }
     Phase::Thinking
 }
 
@@ -114,7 +95,6 @@ pub const fn status_copy(phase: Phase) -> Option<&'static str> {
         Phase::Thinking => Some("Thinking"),
         Phase::Working => Some("Working"),
         Phase::WaitingOnYou => Some("Waiting for you"),
-        Phase::Background => Some("Waiting for background work…"),
         Phase::Unknown | Phase::Replying | Phase::Compacting | Phase::Settled(_) => None,
     }
 }
@@ -137,7 +117,6 @@ pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
         | Phase::Working
         | Phase::Replying
         | Phase::Compacting
-        | Phase::Background
         | Phase::WaitingOnYou
         | Phase::Settled(RunStatus::Running)
             if worked =>
@@ -148,7 +127,6 @@ pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
         | Phase::Working
         | Phase::Replying
         | Phase::Compacting
-        | Phase::Background
         | Phase::WaitingOnYou
         | Phase::Settled(RunStatus::Running) => format!("Thinking for {elapsed}"),
     }
@@ -166,3 +144,7 @@ pub fn format_elapsed(millis: u64) -> String {
         format!("{seconds}s")
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/conversation/phase.rs"]
+mod tests;

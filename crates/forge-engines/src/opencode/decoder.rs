@@ -95,6 +95,7 @@ pub struct Decoder {
     admitted: HashSet<String>,
     delivered: HashSet<String>,
     turn_open: bool,
+    waiting_on_background: bool,
     pending: HashMap<String, Pending>,
     usage: Usage,
     model: Option<String>,
@@ -305,7 +306,16 @@ impl Decoder {
         anyhow::ensure!(!identity.id.trim().is_empty(), "OpenCode event ID is empty");
         let events = self.feed_raw(&event);
         let events = self.reasoning_summary.normalize(events, false);
-        Ok(crate::retained::settle(self, events))
+        let mut events = crate::retained::settle(self, events);
+        let waiting =
+            !self.turn_open && !self.shells.is_empty() && self.error.is_none() && !self.cancelled;
+        if std::mem::replace(&mut self.waiting_on_background, waiting) != waiting {
+            events.push(EngineEvent::background_wait(
+                artisan_api::EngineId::OpenCode,
+                waiting,
+            ));
+        }
+        Ok(events)
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per OpenCode event")]

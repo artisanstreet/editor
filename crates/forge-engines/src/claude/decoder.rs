@@ -56,6 +56,7 @@ pub struct ClaudeDecoder {
     background: usize,
     /// Agent tasks with background work of their own still live.
     waiting_agents: HashSet<String>,
+    waiting_on_background: bool,
     /// Agent tool calls by the task id the CLI gives them.
     agent_tasks: HashMap<String, String>,
     /// Every task's tool call, for a task moved to the background later.
@@ -107,7 +108,15 @@ impl ClaudeDecoder {
         }
         let events = self.feed_raw(&frame);
         let events = self.reasoning_summary.normalize(events, true);
-        Ok(crate::retained::settle(self, events))
+        let mut events = crate::retained::settle(self, events);
+        let waiting = !self.in_turn && self.background > 0;
+        if std::mem::replace(&mut self.waiting_on_background, waiting) != waiting {
+            events.push(EngineEvent::background_wait(
+                artisan_api::EngineId::Claude,
+                waiting,
+            ));
+        }
+        Ok(events)
     }
 
     fn feed_raw(&mut self, frame: &Value) -> Vec<EngineEvent> {
