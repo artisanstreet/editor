@@ -10,6 +10,7 @@ pub use editor_marketplace as marketplace;
 #[cfg(feature = "qualification")]
 pub mod qualification;
 pub use editor_settings as settings;
+pub mod setup;
 pub mod shell;
 pub use editor_sidebar as sidebar;
 pub use editor_sources as sources;

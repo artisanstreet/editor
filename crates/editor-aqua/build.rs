@@ -23,9 +23,41 @@ fn main() -> Result<(), Box<dyn Error>> {
         "cargo:rustc-env=EDITOR_TARGET={}",
         env::var("TARGET").unwrap_or_default()
     );
+    artisan_payload::embed("ARTISAN_AE_PAYLOAD", "ae.gz")?;
+    artisan_payload::embed("ARTISAN_AE_LINUX_PAYLOAD", "ae-linux.gz")?;
+    embed_notices()?;
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         embed_resources()?;
     }
+    Ok(())
+}
+
+fn embed_notices() -> Result<(), Box<dyn Error>> {
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("../..");
+    let licenses = root.join("crates/editor-assets/licenses");
+    println!("cargo:rerun-if-changed={}", licenses.display());
+    let mut files = vec![root.join("LICENSE.md")];
+    let mut bundled: Vec<PathBuf> = std::fs::read_dir(&licenses)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<_, _>>()?;
+    bundled.sort();
+    files.extend(bundled);
+    files.push(root.join("vendor/highlighting/NOTICE.txt"));
+    files.push(root.join("vendor/mermaid-rs-renderer/LICENSE"));
+    let mut notices = Vec::new();
+    for file in files {
+        println!("cargo:rerun-if-changed={}", file.display());
+        let name = file
+            .strip_prefix(&root)?
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        notices.extend_from_slice(format!("==== {name} ====\n\n").as_bytes());
+        notices.extend_from_slice(&std::fs::read(&file)?);
+        notices.extend_from_slice(b"\n\n");
+    }
+    let out = PathBuf::from(env::var("OUT_DIR")?);
+    std::fs::write(out.join("notices.gz"), artisan_payload::pack(&notices)?)?;
     Ok(())
 }
 

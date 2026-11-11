@@ -53,6 +53,9 @@ pub fn launch() -> anyhow::Result<()> {
         }
         aqua::prelude::Launch::Ordinary => {}
     }
+    if matches!(crate::setup::begin()?, crate::setup::Outcome::Finished) {
+        return Ok(());
+    }
     #[cfg(feature = "qualification")]
     if let Some(result) = prepare_qualification() {
         return result;

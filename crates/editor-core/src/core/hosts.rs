@@ -201,7 +201,7 @@ async fn wsl_listing(args: &'static [&'static str]) -> Result<String> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct WslDistro {
+pub struct WslDistro {
     pub name: String,
     pub default: bool,
     pub running: bool,
@@ -228,7 +228,7 @@ pub(crate) fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
         .collect()
 }
 
-pub(crate) async fn wsl_state() -> Result<Vec<WslDistro>> {
+pub async fn wsl_state() -> Result<Vec<WslDistro>> {
     if !cfg!(windows) {
         return Ok(Vec::new());
     }

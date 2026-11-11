@@ -35,6 +35,9 @@ aqua-gpu-d3d11 = { workspace = true, optional = true }
 aqua-gpu-ref = { workspace = true, optional = true }
 artisan-api = { path = "../artisan-api", features = ["tls"] }
 artisan-account = { path = "../artisan-account" }
+artisan-paths = { path = "../artisan-paths" }
+artisan-payload = { path = "../artisan-payload" }
+semver = "=1.0.28"
 editor-assets = { path = "../editor-assets" }
 editor-audio = { path = "../editor-audio" }
 forge-http = { path = "../forge-http", optional = true }
@@ -105,4 +108,5 @@ arc_with_non_send_sync = "allow"
 rc_buffer = "allow"
 
 [build-dependencies]
+artisan-payload = { path = "../artisan-payload" }
 embed-resource = "=3.0.11"
