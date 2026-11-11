@@ -1,8 +1,11 @@
 #![cfg(test)]
 
-use artisan_api::{CreateProject, CreateThread, EngineConfig, EngineId, ProjectId, ThreadId, now};
+use artisan_api::{
+    CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, ProjectId, Status,
+    ThreadId, now,
+};
 use forge_store::{
-    Store,
+    NewItem, Store,
     coordination::{
         ClaimState, Content, Intent, MessageState, Query, Resource, Update, WorkState,
         normalize_path,
@@ -419,4 +422,103 @@ async fn file_discovery_matches_exact_paths_before_pagination_and_resumes_withou
         .await
         .unwrap();
     assert_eq!(partial.activity.len(), 3);
+}
+
+fn message(thread: &ThreadId, status: Status) -> NewItem {
+    NewItem {
+        id: ItemId::new(),
+        thread_id: thread.clone(),
+        run_id: None,
+        parent_id: None,
+        native_id: None,
+        status,
+        kind: ItemKind::UserMessage {
+            text: "which one?".into(),
+            images: Vec::new(),
+            steer: false,
+            from_agent: None,
+            sender: None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn threads_waiting_on_the_user_are_found_without_walking_every_item() {
+    let (directory, store, threads) = setup().await;
+    for _ in 0..40 {
+        store
+            .upsert_item(message(&threads[0], Status::Done))
+            .await
+            .unwrap();
+    }
+    store
+        .upsert_item(message(&threads[1], Status::AwaitingUser))
+        .await
+        .unwrap();
+    let active = store
+        .discover_workers(discovery::Query {
+            active: true,
+            limit: 30,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        active
+            .workers
+            .iter()
+            .map(|worker| (worker.thread.id.clone(), worker.awaiting_user))
+            .collect::<Vec<_>>(),
+        vec![(threads[1].clone(), true)],
+        "only the thread with a question for the user counts as active"
+    );
+    let everyone = store
+        .discover_workers(discovery::Query {
+            limit: 30,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        everyone
+            .workers
+            .iter()
+            .filter(|worker| worker.awaiting_user)
+            .map(|worker| worker.thread.id.clone())
+            .collect::<Vec<_>>(),
+        vec![threads[1].clone()],
+        "a thread with only finished items is not waiting"
+    );
+    let connection = rusqlite::Connection::open_with_flags(
+        directory.path().join("forge.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let mut explain = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            include_str!("../src/sql/coordination/discovery.sql")
+        ))
+        .unwrap();
+    let nothing = rusqlite::types::Null;
+    let plan = explain
+        .query_map(
+            rusqlite::params![
+                nothing, nothing, false, true, "[]", nothing, "", nothing, nothing, nothing,
+                nothing, nothing, 31
+            ],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("items_awaiting_position")),
+        "waiting threads come from the small waiting index: {plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|step| step.contains("items_thread")),
+        "discovery must not read each thread's whole history: {plan:?}"
+    );
 }

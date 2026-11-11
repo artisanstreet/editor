@@ -1,6 +1,6 @@
 SELECT t.body,p.body,
     (SELECT r.body FROM runs r WHERE r.thread_id=t.id ORDER BY r.seq DESC LIMIT 1),
-    EXISTS(SELECT 1 FROM items i WHERE i.thread_id=t.id AND i.status='awaiting_user'),w.body
+    t.id IN (SELECT i.thread_id FROM items i WHERE i.status='awaiting_user'),w.body
 FROM threads t
 JOIN projects p ON p.id=json_extract(t.body,'$.project_id')
 LEFT JOIN coordination_records w ON w.id='work:'||t.id
@@ -9,7 +9,7 @@ AND (?1 IS NULL OR json_extract(t.body,'$.project_id')=?1)
 AND (?2 IS NULL OR json_extract(t.body,'$.parent_thread_id')=?2)
 AND (?3=1 OR json_extract(t.body,'$.spawned_by') IS NULL)
 AND (?4=0 OR t.id IN (SELECT value FROM json_each(?5))
-    OR EXISTS(SELECT 1 FROM items i WHERE i.thread_id=t.id AND i.status='awaiting_user')
+    OR t.id IN (SELECT i.thread_id FROM items i WHERE i.status='awaiting_user')
     OR json_extract(w.body,'$.content.state') IN ('blocked','waiting'))
 AND (?6 IS NULL OR COALESCE(json_extract(t.body,'$.archived'),0)=?6)
 AND (?7='' OR instr(lower(COALESCE(json_extract(t.body,'$.title'),'')),lower(?7))>0
