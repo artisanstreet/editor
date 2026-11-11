@@ -208,6 +208,7 @@ pub(super) fn render(
                 } else {
                     ProseTypography::BODY_WEIGHT
                 },
+                letter_spacing_em: Some(theme.typography.tracking_em),
                 ..TextStyle::default()
             };
             let marker = ui::Text::new(marker)

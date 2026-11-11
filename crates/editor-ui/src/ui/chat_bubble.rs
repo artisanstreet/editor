@@ -126,6 +126,7 @@ impl ChatBubbleSegment {
                 size_px: ProseTypography::BODY_SIZE_PX,
                 line_height_px: ProseTypography::BODY_LINE_PX,
                 weight: ProseTypography::BODY_WEIGHT,
+                letter_spacing_em: Some(self.theme.typography.tracking_em),
                 ..TextStyle::default()
             })
             .gpui_source_text_color(self.theme.colors.text.to_reference_text_color())

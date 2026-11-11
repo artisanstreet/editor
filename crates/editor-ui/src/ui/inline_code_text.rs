@@ -47,6 +47,7 @@ impl InlineRuns {
                     style.weight = FontWeight::NORMAL;
                     style.families =
                         vec![FontFamily::Named(theme.typography.mono.family.to_owned())];
+                    style.letter_spacing_em = Some(0.0);
                 } else {
                     if run.style.strong {
                         style.weight = ProseTypography::STRONG_WEIGHT;

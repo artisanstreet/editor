@@ -742,6 +742,7 @@ pub struct TypographyTokens {
     pub sans: FontRole,
     pub mono: FontRole,
     pub heading: FontRole,
+    pub tracking_em: f32,
     pub control_text: Pixels,
     pub editor_text_desktop: Pixels,
     pub label_text: Pixels,
@@ -837,6 +838,7 @@ pub struct ProseTypography;
 pub struct ProseHeading {
     pub size_px: f32,
     pub line_px: f32,
+    pub tracking_px: f32,
     pub margin_top_px: f32,
     pub margin_bottom_px: f32,
 }
@@ -845,6 +847,12 @@ impl ProseTypography {
     pub const BODY_SIZE_PX: f32 = 16.0;
     pub const BODY_LINE_PX: f32 = 28.0;
     pub const BODY_WEIGHT: FontWeight = FontWeight(410);
+    pub const BODY_TRACKING_PX: f32 = -0.64;
+    pub const TRACKING_EM: f32 = -0.04;
+    #[must_use]
+    pub const fn body_tracking_px(size_px: f32) -> f32 {
+        size_px * Self::TRACKING_EM
+    }
     pub const HEADING_WEIGHT: FontWeight = FontWeight(630);
     pub const STRONG_WEIGHT: FontWeight = FontWeight(600);
     pub const LINK_WEIGHT: FontWeight = FontWeight::MEDIUM;
@@ -868,24 +876,28 @@ impl ProseTypography {
             1 => ProseHeading {
                 size_px: 30.0,
                 line_px: 37.5,
+                tracking_px: -1.35,
                 margin_top_px: 0.0,
                 margin_bottom_px: 80.0 / 3.0,
             },
             2 => ProseHeading {
                 size_px: 24.0,
                 line_px: 30.0,
+                tracking_px: -1.08,
                 margin_top_px: 48.0,
                 margin_bottom_px: 24.0,
             },
             3 => ProseHeading {
                 size_px: 20.0,
                 line_px: 27.5,
+                tracking_px: -0.9,
                 margin_top_px: 32.0,
                 margin_bottom_px: 12.0,
             },
             _ => ProseHeading {
                 size_px: 18.0,
                 line_px: 24.75,
+                tracking_px: -0.81,
                 margin_top_px: 27.0,
                 margin_bottom_px: 9.0,
             },
@@ -1082,9 +1094,20 @@ impl TypographyTokens {
             heading: FontRole {
                 family: fonts.sans(),
             },
+            tracking_em: match fonts {
+                FontSet::Spline => ProseTypography::TRACKING_EM,
+                FontSet::System => 0.0,
+            },
             control_text: px(14.0),
             editor_text_desktop: px(14.0),
             label_text: px(12.0),
+        }
+    }
+    #[must_use]
+    pub const fn heading_tracking_px(&self, heading: &ProseHeading) -> f32 {
+        match self.fonts {
+            FontSet::Spline => heading.tracking_px,
+            FontSet::System => 0.0,
         }
     }
 }

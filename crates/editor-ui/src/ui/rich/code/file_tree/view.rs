@@ -226,6 +226,7 @@ fn text(
             size_px: size,
             line_height_px: line,
             weight,
+            letter_spacing_em: if mono { Some(0.0) } else { None },
             strikethrough: strike,
             ..TextStyle::default()
         })

@@ -206,6 +206,7 @@ pub fn row(
         size_px: ProseTypography::BODY_SIZE_PX,
         line_height_px: 24.0,
         weight: ProseTypography::BODY_WEIGHT,
+        letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
     };
     Some(

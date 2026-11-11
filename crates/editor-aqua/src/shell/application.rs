@@ -451,6 +451,9 @@ impl<V: SectionViews> ShellApplication<V> {
                 workspace.release_question_options(self.ui.ui_mut());
             }
         }
+        aqua_ui::style::set_root_letter_spacing_em(Some(
+            self.shell.preferences.theme().typography.tracking_em,
+        ));
         let build_span = crate::core::diagnostics::rebuild_stats::span("rb_build");
         let built = self.views.build(&mut self.shell, self.ui.ui_mut(), &window);
         drop(build_span);
