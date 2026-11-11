@@ -5,6 +5,7 @@ members = [
     "crates/artisan-api",
     "crates/artisan-markdown-index",
     "crates/artisan-paths",
+    "crates/artisan-payload",
     "crates/artisan-mentions",
     "crates/claude-ai-browser",
     "crates/editor-aqua",

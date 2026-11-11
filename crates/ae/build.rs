@@ -1,7 +1,8 @@
 //! Build info for `--version`: the commit (from `ARTISAN_COMMIT`, e.g. set by
 //! the release build, else git) and the target triple.
 
-fn main() {
+fn main() -> std::io::Result<()> {
+    artisan_payload::embed("ARTISAN_FORGE_PAYLOAD", "forge.gz")?;
     println!("cargo:rerun-if-env-changed=ARTISAN_COMMIT");
     let commit = std::env::var("ARTISAN_COMMIT")
         .ok()
@@ -24,4 +25,5 @@ fn main() {
         "cargo:rustc-env=ARTISAN_TARGET={}",
         std::env::var("TARGET").unwrap_or_default()
     );
+    Ok(())
 }

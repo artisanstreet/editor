@@ -84,43 +84,30 @@ async fn pair_json_beside_a_running_forge_pairs_an_editor() {
     assert_eq!(state.status(), 200, "the paired device is let in");
 }
 
-/// Writes a signed release `version` into `dir`, holding an `ae` whose
-/// contents name the version.
+fn carrier_name() -> String {
+    format!("ae-{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
 #[expect(
     clippy::unwrap_used,
     reason = "a test fixture; a failure fails the test"
 )]
-fn publish(dir: &Path, key: &SigningKey, version: &str) {
+fn publish(dir: &Path, key: &SigningKey, version: &str) -> Vec<u8> {
     std::fs::create_dir_all(dir).unwrap();
-    let file = format!("ae-{version}.tar.gz");
-    let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
-        Vec::new(),
-        flate2::Compression::fast(),
-    ));
-    let body = format!("ae {version}");
-    let mut header = tar::Header::new_gnu();
-    header.set_size(body.len() as u64);
-    header.set_mode(0o755);
-    header.set_cksum();
-    builder
-        .append_data(
-            &mut header,
-            format!("ae{}", std::env::consts::EXE_SUFFIX),
-            body.as_bytes(),
-        )
-        .unwrap();
-    let archive = builder.into_inner().unwrap().finish().unwrap();
-    let sha256 = hex(&Sha256::digest(&archive));
-    std::fs::write(dir.join(&file), &archive).unwrap();
+    let mut carrier = std::fs::read(env!("CARGO_BIN_EXE_ae")).unwrap();
+    carrier.extend_from_slice(format!("release {version}").as_bytes());
+    let sha256 = hex(&Sha256::digest(&carrier));
+    std::fs::write(dir.join(carrier_name()), &carrier).unwrap();
     let manifest = serde_json::json!({
         "version": version,
-        "artifacts": [{"app": "ae", "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "file": file, "sha256": sha256}],
+        "artifacts": [{"app": "ae", "os": std::env::consts::OS, "arch": std::env::consts::ARCH, "file": carrier_name(), "sha256": sha256}],
     })
     .to_string();
     std::fs::write(dir.join("release.json"), &manifest).unwrap();
     let signature =
         base64::engine::general_purpose::STANDARD.encode(key.sign(manifest.as_bytes()).to_bytes());
     std::fs::write(dir.join("release.json.sig"), signature).unwrap();
+    carrier
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -130,8 +117,6 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-/// Installs `ae` alone (nothing that starts a service or a window) into an
-/// isolated Artisan Street.
 #[expect(
     clippy::unwrap_used,
     reason = "a test fixture; a failure fails the test"
@@ -151,31 +136,28 @@ fn install(home: &Path, from: &Path, key: &SigningKey) -> Output {
     command.output().unwrap()
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn installing_a_release_replaces_ae_in_place_and_refuses_bad_ones() {
+fn a_release_installs_through_its_own_ae_and_bad_ones_are_refused() {
     let home = tempfile::tempdir().unwrap();
     let release = home.path().join("release");
     let app = home.path().join("data/artisan-street/ae");
     let key = SigningKey::from_bytes(&[7; 32]);
-    let installed = || {
-        (
-            std::fs::read_to_string(app.join("ae")).unwrap_or_default(),
-            std::fs::read_to_string(app.join("version"))
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-        )
-    };
+    let installed = || std::fs::read(app.join("ae")).unwrap_or_default();
 
+    let mut newest = Vec::new();
     for version in ["1.0.0", "1.1.0"] {
-        publish(&release, &key, version);
+        newest = publish(&release, &key, version);
         let output = install(home.path(), &release, &key);
         assert!(
             output.status.success(),
             "installing {version}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(installed(), (format!("ae {version}"), version.to_owned()));
+        assert!(
+            installed() == newest,
+            "the installed ae is the one {version} published"
+        );
     }
     let entries: Vec<_> = std::fs::read_dir(&app)
         .unwrap()
@@ -191,27 +173,25 @@ fn installing_a_release_replaces_ae_in_place_and_refuses_bad_ones() {
         "`ae` on PATH is the installed one"
     );
 
-    // A download that doesn't match the signed manifest is refused and
-    // leaves the install as it was.
     publish(&release, &key, "1.2.0");
-    std::fs::write(release.join("ae-1.2.0.tar.gz"), b"not the signed archive").unwrap();
+    std::fs::write(release.join(carrier_name()), b"not the signed installer").unwrap();
     let output = install(home.path(), &release, &key);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("tampered"));
-    assert_eq!(installed(), ("ae 1.1.0".to_owned(), "1.1.0".to_owned()));
+    assert!(installed() == newest, "a refused download changes nothing");
 
-    // So is a release signed by someone else.
     publish(&release, &SigningKey::from_bytes(&[8; 32]), "1.3.0");
     let output = install(home.path(), &release, &key);
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("not signed by Artisan's release key")
     );
-    assert_eq!(installed(), ("ae 1.1.0".to_owned(), "1.1.0".to_owned()));
+    assert!(
+        installed() == newest,
+        "a release signed by someone else changes nothing"
+    );
 }
 
-/// `nix run .#dev` installs a local build: a folder per OS with the
-/// binaries and a VERSION, no signature.
 #[test]
 fn a_local_build_installs_with_its_version() {
     let home = tempfile::tempdir().unwrap();

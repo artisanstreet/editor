@@ -42,8 +42,7 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
             }
         }
     });
-    let initial = "0.0.0-nightly.20261110031700+aaaa";
-    publish(&directory, &key, initial);
+    publish(&directory, &key, "1.0.0");
     let mut command = ae();
     isolated(&mut command, home.path());
     let output = command
@@ -68,12 +67,11 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
             .trim(),
         feed
     );
-    let updated = "0.0.0-nightly.20261111031700+bbbb";
-    publish(&directory, &key, updated);
+    let updated = publish(&directory, &key, "1.1.0");
     let mut command = ae();
     isolated(&mut command, home.path());
     let output = command
-        .args(["update", "ae", "--yes"])
+        .args(["update", "--yes"])
         .env(
             "ARTISAN_RELEASE_PUBLIC_KEY_HEX",
             hex(&key.verifying_key().to_bytes()),
@@ -85,9 +83,9 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        std::fs::read_to_string(app.join("version")).unwrap().trim(),
-        updated
+    assert!(
+        std::fs::read(app.join("ae")).unwrap() == updated,
+        "the update installed the newer release's ae"
     );
     server.join().unwrap();
 }

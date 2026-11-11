@@ -5,6 +5,7 @@
 //! so agents and scripts run it without one.
 
 mod account;
+mod bundle;
 mod editor;
 mod engine;
 mod forge;
@@ -50,9 +51,7 @@ enum Command {
     Install(install::InstallArgs),
     /// Update what is installed to the newest release.
     Update {
-        /// Only these apps.
-        apps: Vec<AppArg>,
-        /// Don't ask which.
+        /// Don't ask to confirm.
         #[arg(long, short)]
         yes: bool,
     },
@@ -219,7 +218,7 @@ fn run(cli: Cli) -> Result<()> {
     }
     match cli.command {
         Command::Install(args) => install::install(&args),
-        Command::Update { apps: chosen, yes } => install::update(&apps(chosen), yes),
+        Command::Update { yes } => install::update(yes),
         Command::Uninstall {
             apps: chosen,
             purge,

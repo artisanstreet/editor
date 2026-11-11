@@ -16,11 +16,11 @@ anyhow.workspace = true
 artisan-account = { path = "../artisan-account" }
 artisan-api = { path = "../artisan-api" }
 artisan-paths = { path = "../artisan-paths" }
+artisan-payload = { path = "../artisan-payload" }
 base64.workspace = true
 clap.workspace = true
 cliclack = "=0.5.6"
 ed25519-dalek.workspace = true
-flate2.workspace = true
 forge-engines = { path = "../forge-engines" }
 forge-runs = { path = "../forge-runs" }
 claude-ai-browser = { path = "../claude-ai-browser" }
@@ -35,21 +35,20 @@ sha2.workspace = true
 hex.workspace = true
 semver = "=1.0.28"
 sysinfo = "=0.31.4"
-tar.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-zip.workspace = true
+
+[build-dependencies]
+artisan-payload = { path = "../artisan-payload" }
 
 [dev-dependencies]
 artisan-api = { path = "../artisan-api", features = ["tls"] }
 base64.workspace = true
 ed25519-dalek.workspace = true
-flate2.workspace = true
 forge-http = { path = "../forge-http" }
 serde_json.workspace = true
 sha2.workspace = true
-tar.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

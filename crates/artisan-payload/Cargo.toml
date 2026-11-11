@@ -1,0 +1,15 @@
+[package]
+name = "artisan-payload"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Carries one program inside another: packed by a build script, written out when installing."
+
+[dependencies]
+flate2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
