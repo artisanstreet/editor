@@ -522,7 +522,6 @@ impl RootViews {
             self.smooth_scroll.cancel();
             self.scroll_requests.clear();
             self.row_motion = Rc::default();
-            workspace.status_shimmers.borrow_mut().retain(|_| false);
         }
         workspace
             .markdown
@@ -606,10 +605,6 @@ impl RootViews {
             .iter()
             .map(|(row, _)| row.key())
             .collect();
-        workspace
-            .status_shimmers
-            .borrow_mut()
-            .retain(|key| row_keys.contains(key));
         self.row_cache.borrow_mut().retain_rows(&row_keys);
         media.owners.retain(|item, _| items.contains_key(item));
         for item in items.keys() {
@@ -3231,7 +3226,7 @@ impl SectionViews for RootViews {
         if motion_due {
             self.motion_rebuilt.set(Some(std::time::Instant::now()));
         }
-        if after_layout.repaint || after_layout.rebuild {
+        if after_layout.rebuild {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
         changed |= crate::core::diagnostics::rebuild_stats::note("after_layout", motion_due);
