@@ -49,6 +49,7 @@ impl EditorMetrics {
                 size_px: size,
                 line_height_px: line_height,
                 weight: ProseTypography::BODY_WEIGHT,
+                letter_spacing_em: Some(theme.typography.tracking_em),
                 gpui_source_color: Some([
                     source_color.hue_degrees,
                     source_color.saturation,

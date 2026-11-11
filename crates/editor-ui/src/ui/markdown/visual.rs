@@ -141,6 +141,7 @@ impl PreparedInline {
             size_px: ProseTypography::BODY_SIZE_PX,
             line_height_px: ProseTypography::BODY_LINE_PX,
             weight: ProseTypography::BODY_WEIGHT,
+            letter_spacing_em: Some(theme.typography.tracking_em),
             ..TextStyle::default()
         };
         let mut base_color = match tone {
@@ -155,6 +156,8 @@ impl PreparedInline {
             base.size_px = spec.size_px;
             base.line_height_px = spec.line_px;
             base.weight = ProseTypography::HEADING_WEIGHT;
+            base.letter_spacing_em =
+                Some(theme.typography.heading_tracking_px(&spec) / spec.size_px);
             base_color = theme.colors.text;
         }
         if let Some(header) = table_header {
@@ -184,6 +187,7 @@ impl PreparedInline {
             }
             if run.style.monospace {
                 style.families = vec![FontFamily::Named(theme.typography.mono.family.to_owned())];
+                style.letter_spacing_em = Some(0.0);
             }
             spans.push(styled_span(
                 &self.source.text[run.range.clone()],
@@ -450,6 +454,7 @@ pub fn raw_leaf(
         size_px: ProseTypography::BODY_SIZE_PX,
         line_height_px: ProseTypography::BODY_LINE_PX,
         weight: ProseTypography::BODY_WEIGHT,
+        letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
     };
     let text: Arc<str> = Arc::from(raw);
@@ -668,6 +673,7 @@ fn interactive_leaf_impl(
         size_px: ProseTypography::BODY_SIZE_PX,
         line_height_px: ProseTypography::BODY_LINE_PX,
         weight: ProseTypography::BODY_WEIGHT,
+        letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
     };
     if let Some(level) = heading {
@@ -678,6 +684,7 @@ fn interactive_leaf_impl(
         base.size_px = spec.size_px;
         base.line_height_px = spec.line_px;
         base.weight = ProseTypography::HEADING_WEIGHT;
+        base.letter_spacing_em = Some(theme.typography.heading_tracking_px(&spec) / spec.size_px);
     }
     if let Some(header) = table_header {
         base.size_px = ProseTypography::TABLE_SIZE_PX;
@@ -817,6 +824,7 @@ pub fn prose_leaf(
         size_px: ProseTypography::BODY_SIZE_PX,
         line_height_px: ProseTypography::BODY_LINE_PX,
         weight: ProseTypography::BODY_WEIGHT,
+        letter_spacing_em: Some(theme.typography.tracking_em),
         ..TextStyle::default()
     };
     let text: Arc<str> = flat.source.into();

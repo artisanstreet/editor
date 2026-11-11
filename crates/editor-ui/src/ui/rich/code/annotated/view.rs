@@ -254,6 +254,7 @@ fn text_style(
         size_px: size,
         line_height_px: line,
         weight,
+        letter_spacing_em: mono.then_some(0.0),
         ..TextStyle::default()
     }
 }

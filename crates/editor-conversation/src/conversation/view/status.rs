@@ -43,6 +43,7 @@ impl StatusShimmers {
             size_px: editor_ui::theme::ProseTypography::BODY_SIZE_PX,
             line_height_px: editor_ui::theme::ProseTypography::BODY_LINE_PX,
             weight: editor_ui::theme::ProseTypography::BODY_WEIGHT,
+            letter_spacing_em: Some(theme.typography.tracking_em),
             ..TextStyle::default()
         };
         let spans = runs.map_or_else(Vec::new, |runs| {

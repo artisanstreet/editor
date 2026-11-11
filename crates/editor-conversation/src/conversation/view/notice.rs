@@ -40,6 +40,7 @@ pub fn render<E>(
                     size_px: ProseTypography::BODY_SIZE_PX,
                     line_height_px: theme.spacing.steps(6.0),
                     weight: ProseTypography::BODY_WEIGHT,
+                    letter_spacing_em: Some(theme.typography.tracking_em),
                     ..TextStyle::default()
                 })
                 .gpui_source_color(muted)

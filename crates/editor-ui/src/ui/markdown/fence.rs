@@ -275,6 +275,7 @@ fn line_view(
         size_px: ProseTypography::CODE_SIZE_PX,
         line_height_px: ProseTypography::CODE_LINE_PX,
         weight: FontWeight::NORMAL,
+        letter_spacing_em: Some(0.0),
         ..TextStyle::default()
     };
     let mut spans = Vec::new();
