@@ -437,7 +437,14 @@ pub fn drag_preview(
                 .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
                 .child(
                     Text::new(title.to_owned())
-                        .font_size(14.0)
+                        .text_style(aqua_text::TextStyle {
+                            families: vec![aqua_text::FontFamily::Named(
+                                theme.typography.sans.family.to_owned(),
+                            )],
+                            size_px: 14.0,
+                            line_height_px: 16.8,
+                            ..aqua_text::TextStyle::default()
+                        })
                         .gpui_source_color(theme.colors.text.to_reference_text_color())
                         .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
                         .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))

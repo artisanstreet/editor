@@ -190,6 +190,7 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
         .or_else(|| card.engine.map(|engine| engine.display_name().to_owned()))
         .unwrap_or_else(|| "Agent".into());
     let font = TextStyle {
+        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
         size_px: theme.typography.control_text,
         line_height_px: 18.0,
         weight: FontWeight(600),
@@ -218,6 +219,7 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
         let mut settings = UiBox::new().layout("column").gap(4.0);
         for (icon, value) in &card.settings {
             let font = TextStyle {
+                families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
                 size_px: theme.typography.label_text,
                 line_height_px: 19.0,
                 ..TextStyle::default()
@@ -240,6 +242,7 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
     }
     if !card.purpose.is_empty() {
         let font = TextStyle {
+            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
             size_px: theme.typography.label_text,
             line_height_px: 19.0,
             ..TextStyle::default()
@@ -547,6 +550,7 @@ pub fn inspector_view(
                                         StepStatus::Done | StepStatus::Cancelled
                                     );
                                     let font = TextStyle {
+                                        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
                                         size_px: theme.typography.control_text,
                                         strikethrough: resolved,
                                         ..TextStyle::default()

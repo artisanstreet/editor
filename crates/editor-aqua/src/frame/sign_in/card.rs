@@ -800,7 +800,8 @@ pub fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element
         .styles([Aqua::Style()
             .width(pct(100.0))
             .height(pct(100.0))
-            .gpui_background(GpuiBackground::Solid(theme.colors.frame.to_reference_paint()))])
+            .gpui_background(GpuiBackground::Solid(theme.colors.frame.to_reference_paint()))
+            .text_style(style(theme, 14.0, 16.8, FontWeight::NORMAL))])
         .child(titlebar)
         .child(
             Aqua::Box()

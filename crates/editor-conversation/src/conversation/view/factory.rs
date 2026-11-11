@@ -1034,6 +1034,9 @@ impl RowFactory {
                 };
                 let text = Text::new(message)
                     .text_style(aqua_text::TextStyle {
+                        families: vec![aqua_text::FontFamily::Named(
+                            self.theme.typography.sans.family.to_owned(),
+                        )],
                         size_px: if attachment.is_some() {
                             self.theme.typography.label_text
                         } else {

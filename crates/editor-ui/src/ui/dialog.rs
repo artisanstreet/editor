@@ -178,7 +178,13 @@ impl Dialog {
             .style(
                 Style::new()
                     .axis(Axis::Column)
-                    .max_height(Length::Px((viewport.h - 32.0).max(1.0))),
+                    .max_height(Length::Px((viewport.h - 32.0).max(1.0)))
+                    .text_style(TextStyle {
+                        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
+                        size_px: 14.0,
+                        line_height_px: 16.8,
+                        ..TextStyle::default()
+                    }),
             )
             .child(frame.build())
             .build()
@@ -204,6 +210,7 @@ pub struct DialogHost {
     overlay: aqua_ui::overlay::OverlayId,
     pending: Rc<std::cell::Cell<Option<DialogDismissReason>>>,
     closing: Rc<std::cell::Cell<Option<DialogDismissReason>>>,
+    theme: Rc<std::cell::Cell<ArtisanTheme>>,
     rebuild: DialogRebuild,
 }
 
@@ -220,7 +227,7 @@ impl DialogHost {
             popup::{PopupFocus, PopupOptions},
         };
         let viewport = app.viewport();
-        let theme = dialog.theme;
+        let theme = Rc::new(std::cell::Cell::new(dialog.theme));
         let bare = dialog.bare;
         let soft = dialog.soft_backdrop;
         let dismissible = dialog.dismissible;
@@ -234,11 +241,12 @@ impl DialogHost {
         let viewport_width = dialog.viewport_width;
         let surface = dialog.surface;
         let render_pending = pending.clone();
+        let render_theme = Rc::clone(&theme);
         let rebuild: DialogRebuild = Rc::new(move |content, viewport| {
             let queue = render_pending.clone();
             let dialog = Dialog {
                 id: id.clone(),
-                theme,
+                theme: render_theme.get(),
                 title: title.clone(),
                 description: description.clone(),
                 content,
@@ -279,8 +287,13 @@ impl DialogHost {
             overlay,
             pending,
             closing,
+            theme,
             rebuild,
         })
+    }
+
+    pub fn set_theme(&self, theme: ArtisanTheme) {
+        self.theme.set(theme);
     }
 
     pub fn refresh_content(&self, app: &mut aqua::UiApp, content: Element) -> Result<(), String> {

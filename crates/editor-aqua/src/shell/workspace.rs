@@ -662,6 +662,7 @@ impl Workspace {
         };
         if let Some(dialog) = &self.terminal_dialog {
             if dialog.is_open(ui) {
+                dialog.set_theme(theme);
                 if let Err(error) = dialog.refresh_content(ui, content) {
                     tracing::warn!(%error, "could not refresh terminal dialog");
                 }

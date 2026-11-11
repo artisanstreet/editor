@@ -1732,6 +1732,7 @@ impl RootViews {
         };
         if let Some(dialog) = &self.resource_dialog {
             if dialog.is_open(ui) {
+                dialog.set_theme(shell.preferences.theme());
                 if let Err(error) = dialog.refresh_content(ui, content) {
                     tracing::warn!(%error, "could not refresh resource preview");
                 }
@@ -1816,6 +1817,7 @@ impl RootViews {
         };
         if let Some(dialog) = &self.palette_dialog {
             if dialog.is_open(ui) {
+                dialog.set_theme(shell.preferences.theme());
                 if let Err(error) = dialog.refresh_content(ui, content) {
                     tracing::warn!(%error, "could not refresh command palette");
                 }
@@ -2914,6 +2916,7 @@ impl SectionViews for RootViews {
             };
             if let Some(dialog) = &self.settings {
                 if dialog.is_open(ui) {
+                    dialog.set_theme(shell.preferences.theme());
                     if let Err(error) = dialog.refresh_content(ui, panel) {
                         tracing::warn!(%error, "could not refresh settings dialog");
                     }
