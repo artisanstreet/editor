@@ -51,7 +51,7 @@ fn reduced_motion_jumps_straight_to_the_target() {
 }
 
 #[test]
-fn reopening_at_a_saved_scroll_offset_reveals_both_edges_from_clear() {
+fn an_unscrolled_entrance_reveals_edges_from_clear() {
     use aqua::UiApp;
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::element::Box as UiBox;
@@ -122,4 +122,84 @@ fn reopening_at_a_saved_scroll_offset_reveals_both_edges_from_clear() {
         ));
         assert_eq!(app.tree().paint(node).unwrap().gpui_shadows[0].color.a, 1.0);
     }
+}
+
+#[test]
+fn restored_edges_are_immediate_and_later_scroll_changes_still_animate() {
+    use aqua::UiApp;
+    use aqua_text::{SharedFonts, SharedRuns};
+    use aqua_ui::element::Box as UiBox;
+    use editor_aqua::ui::{
+        scroll_edge::{Edge, EdgePaint, Hidden, ScrollEdges, keyed},
+        theme::ArtisanTheme,
+    };
+    let edges = ScrollEdges::default();
+    edges.reveal();
+    edges.restore(Hidden {
+        above: 100.0,
+        below: 8.0,
+    });
+    let color = ArtisanTheme::resolved().colors.background;
+    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| {
+        UiBox::new()
+            .width(200.0)
+            .height(100.0)
+            .child(edges.inset_band("top", Edge::Top, color, 0.0))
+            .child(edges.inset_band("bottom", Edge::Bottom, color, 0.0))
+            .build()
+    })
+    .unwrap();
+    app.set_viewport(200.0, 100.0, 1.0);
+    app.build_frame().unwrap();
+    let top = keyed(&app, "top").unwrap();
+    let bottom = keyed(&app, "bottom").unwrap();
+    assert_eq!(app.tree().paint(top).unwrap().gpui_shadows[0].color.a, 1.0);
+    assert_eq!(
+        app.tree().paint(bottom).unwrap().gpui_shadows[0].color.a,
+        0.5
+    );
+    let start = Instant::now();
+    assert!(!edges.advance(
+        &mut app,
+        Edge::Top,
+        EdgePaint::InsetShadow,
+        top,
+        color,
+        100.0,
+        false,
+        start
+    ));
+    assert!(!edges.advance(
+        &mut app,
+        Edge::Bottom,
+        EdgePaint::InsetShadow,
+        bottom,
+        color,
+        8.0,
+        false,
+        start
+    ));
+    assert!(edges.advance(
+        &mut app,
+        Edge::Top,
+        EdgePaint::InsetShadow,
+        top,
+        color,
+        0.0,
+        false,
+        start
+    ));
+    assert!(edges.advance(
+        &mut app,
+        Edge::Top,
+        EdgePaint::InsetShadow,
+        top,
+        color,
+        0.0,
+        false,
+        start + Duration::from_millis(16)
+    ));
+    let alpha = app.tree().paint(top).unwrap().gpui_shadows[0].color.a;
+    assert!(alpha > 0.0 && alpha < 1.0);
 }

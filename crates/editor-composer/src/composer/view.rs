@@ -2545,6 +2545,12 @@ impl ComposerOwner {
             scrolling.hide();
             0.0
         };
+        if opening && scroll > 0.0 {
+            picker.model_edges.restore(editor_ui::scroll_edge::Hidden {
+                above: scroll,
+                below: max - scroll,
+            });
+        }
         let spied = scrolling
             .target()
             .or_else(|| layout.spied(&picker.models, scroll, MODEL_LIST_HEIGHT))

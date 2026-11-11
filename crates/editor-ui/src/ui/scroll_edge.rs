@@ -68,6 +68,7 @@ enum Entrance {
     #[default]
     Idle,
     Pending,
+    Restored,
     Running(Instant),
 }
 
@@ -151,6 +152,16 @@ impl ScrollEdges {
             .for_each(|fade| fade.set(EdgeFade::default()));
     }
 
+    pub fn restore(&self, hidden: Hidden) {
+        self.reset();
+        for (edge, hidden) in [(Edge::Top, hidden.above), (Edge::Bottom, hidden.below)] {
+            self.fades[slot(edge)].set(EdgeFade {
+                shown: target(hidden),
+                at: None,
+            });
+        }
+    }
+
     pub fn reveal(&self) {
         self.reset();
         self.entrance
@@ -168,6 +179,10 @@ impl ScrollEdges {
         let entrance = &self.entrance[slot(edge)];
         let started = match entrance.get() {
             Entrance::Idle => return self.fade(edge).step(target, reduced, now),
+            Entrance::Restored => {
+                entrance.set(Entrance::Idle);
+                return self.fade(edge).step(target, true, now);
+            }
             Entrance::Pending => {
                 entrance.set(Entrance::Running(now));
                 now
@@ -304,6 +319,13 @@ impl EdgeSurface<'_> {
         let Some(hidden) = scroller.and_then(|node| hidden_in(ui, node)) else {
             return false;
         };
+        if hidden.above > 0.0 {
+            for entrance in self.edges.entrance.iter() {
+                if matches!(entrance.get(), Entrance::Pending) {
+                    entrance.set(Entrance::Restored);
+                }
+            }
+        }
         let top = keyed(ui, self.top);
         let bottom = keyed(ui, self.bottom);
         let upper = top.is_some_and(|band| {
