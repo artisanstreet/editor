@@ -13,5 +13,7 @@ mod model_line;
 mod model_list;
 #[path = "composer/picker.rs"]
 mod picker;
+#[path = "composer/questionnaire.rs"]
+mod questionnaire;
 #[path = "composer/sliding_tab.rs"]
 mod sliding_tab;

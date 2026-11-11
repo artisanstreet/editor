@@ -710,8 +710,8 @@ pub fn questionnaire(
             };
             let mut text = UiBox::new()
                 .layout("column")
-                .style(Style::new().min_width(Length::Px(0.0)))
-                .child(label(
+                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+                .child(paragraph(
                     &theme,
                     option.label.clone(),
                     14.0,
@@ -725,7 +725,7 @@ pub fn questionnaire(
                         "Full description available below".into()
                     }
                 };
-                text = text.child(label(
+                text = text.child(paragraph(
                     &theme,
                     value,
                     12.0,
