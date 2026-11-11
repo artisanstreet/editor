@@ -90,7 +90,6 @@ fn text_style(theme: &ArtisanTheme, mono: bool) -> TextStyle {
         size_px: TypographyTokens::size(TextStep::XsMid),
         line_height_px: LINE_PX,
         weight: FontWeight::NORMAL,
-        letter_spacing_em: if mono { Some(0.0) } else { None },
         ..TextStyle::default()
     }
 }

@@ -43,11 +43,6 @@ fn truncate(
         },
         line_height_px: 24.0,
         weight: editor_ui::theme::ProseTypography::BODY_WEIGHT,
-        letter_spacing_em: Some(if mono {
-            0.0
-        } else {
-            theme.typography.tracking_em
-        }),
         ..TextStyle::default()
     };
     aqua_ui::element::Text::new(text)
@@ -572,7 +567,6 @@ impl RowFactory {
                 )],
                 size_px,
                 line_height_px,
-                letter_spacing_em: Some(self.theme.typography.tracking_em),
                 ..Default::default()
             })
             .gpui_source_color(color)
@@ -765,13 +759,6 @@ impl RowFactory {
                     )],
                     size_px: theme.typography.editor_text_desktop,
                     line_height_px: theme.spacing.steps(6.0),
-                    letter_spacing_em: Some(
-                        if field == crate::conversation::content::SourceField::ApprovalCommand {
-                            0.0
-                        } else {
-                            theme.typography.tracking_em
-                        },
-                    ),
                     ..Default::default()
                 })
                 .gpui_source_color(theme.colors.text.to_reference_text_color());

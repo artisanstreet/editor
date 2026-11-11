@@ -236,7 +236,6 @@ fn lines_view(
                 size_px: 13.0,
                 line_height_px: 24.0,
                 weight: FontWeight::NORMAL,
-                letter_spacing_em: Some(0.0),
                 ..TextStyle::default()
             };
             let color = if line == prepared.target_line {

@@ -49,7 +49,6 @@ fn painted_runs_apply_source_overrides_and_preserve_raw_color() {
     let spans = runs.styled_spans(&base, color, &theme);
     let mono = spans.iter().find(|span| span.text == "mono").unwrap();
     assert_eq!(mono.style.weight, FontWeight::NORMAL);
-    assert_eq!(mono.style.letter_spacing_em, Some(0.0));
     assert_eq!(
         mono.style.families,
         vec![FontFamily::Named(theme.typography.mono.family.to_owned())]

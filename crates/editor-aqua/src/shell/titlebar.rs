@@ -367,7 +367,6 @@ impl Titlebar {
                     )],
                     size_px: theme.typography.control_text,
                     line_height_px: 14.0 * 1.618_034,
-                    letter_spacing_em: Some(theme.typography.tracking_em),
                     ..aqua_text::TextStyle::default()
                 })
                 .gpui_source_color(color)
@@ -455,7 +454,6 @@ impl Titlebar {
                 )],
                 size_px: theme.typography.control_text,
                 line_height_px: 14.0 * 1.618_034,
-                letter_spacing_em: Some(theme.typography.tracking_em),
                 ..aqua_text::TextStyle::default()
             })
             .gpui_source_color(if !trail.is_empty() && title_hover {
