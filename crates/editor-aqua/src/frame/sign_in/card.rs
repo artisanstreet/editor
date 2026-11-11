@@ -1,4 +1,7 @@
-use crate::ui::chrome::card::{self, Surfaces as Palette, hex, outlined, radial_glow, rest_shadows};
+use crate::ui::chrome::card::{
+    self, POLAR_BLUE, POLAR_EDGE, POLAR_HAZE, POLAR_HIGHLIGHT, POLAR_INK, POLAR_NAVY, POLAR_SKY, Surfaces as Palette, hex,
+    outlined, radial_glow, rest_shadows,
+};
 use crate::frame::sign_in::model::{Feedback, Link, Provider, View, page_of};
 use crate::frame::sign_in::{
     CODE_PAGE, EMAIL_PAGE, Event, PAGE, REVEAL, SWAP, SignIn, Slot, pattern,
@@ -33,11 +36,7 @@ const FEEDBACK_BLUR: f32 = 2.0;
 
 const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
-const SAND_LIGHT: Oklch = Oklch::new(0.92, 0.035, 88.0);
-const SAND_DEEP: Oklch = Oklch::new(0.82, 0.05, 78.0);
-const SAND_INK: Oklch = Oklch::new(0.27, 0.025, 70.0);
-const SAND_GLOW: Oklch = Oklch::new(0.42, 0.1, 55.0);
-const LINK: Oklch = Oklch::new(0.88, 0.045, 82.0);
+const LINK: Oklch = Oklch::new(0.676, 0.075, 250.22);
 const ERROR: Oklch = Oklch::new(0.66, 0.2, 22.0);
 const SUCCESS: Oklch = Oklch::new(0.74, 0.17, 152.0);
 
@@ -498,37 +497,33 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
 }
 
 fn continue_surface() -> String {
-    let top = SAND_LIGHT;
-    let bottom = SAND_DEEP;
-    let middle = top.animate_to(bottom, 0.5);
-    let highlight = top.animate_to(WHITE, 0.3);
-    let rim_top = top.animate_to(BLACK, 0.08);
-    let rim_bottom = bottom.animate_to(BLACK, 0.25);
+    let highlight = POLAR_NAVY.animate_to(POLAR_HIGHLIGHT, 0.28);
+    let shade = POLAR_EDGE.animate_to(BLACK, 0.22);
     let shape = "M0 0H45A8 8 0 0 1 53 8V37A8 8 0 0 1 45 45H0A8 8 0 0 0 8 37V8A8 8 0 0 0 0 0Z";
     let face = "M0 2H45A6 6 0 0 1 51 8V37A6 6 0 0 1 45 43H0Z";
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 53 49"><defs><clipPath id="c"><path d="{shape}"/></clipPath><linearGradient id="r" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="45"><stop offset="0" stop-color="{rt}"/><stop offset="1" stop-color="{rb}"/></linearGradient><linearGradient id="h" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="45"><stop offset="0" stop-color="{hl}"/><stop offset="1" stop-color="{fb}"/></linearGradient><linearGradient id="f" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="45"><stop offset="0" stop-color="{ft}"/><stop offset="0.5" stop-color="{fm}"/><stop offset="1" stop-color="{fb}"/></linearGradient><radialGradient id="g" gradientUnits="userSpaceOnUse" cx="26" cy="47" r="28" gradientTransform="translate(26 47) scale(1 0.8) translate(-26 -47)"><stop offset="0" stop-color="{glow}" stop-opacity="0.45"/><stop offset="1" stop-color="{glow}" stop-opacity="0"/></radialGradient><filter id="d" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1.875" stdDeviation="0.9375" flood-color="#000" flood-opacity="0.3"/></filter></defs><g filter="url(#d)"><path d="{shape}" fill="url(#r)"/><g clip-path="url(#c)"><path d="M0 1H45A7 7 0 0 1 52 8V37A7 7 0 0 1 45 44H0Z" fill="url(#h)"/><path d="{face}" fill="url(#f)"/><path d="{face}" fill="url(#g)"/></g></g></svg>"##,
-        rt = hex(rim_top),
-        rb = hex(rim_bottom),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 53 49"><defs><clipPath id="c"><path d="{shape}"/></clipPath><linearGradient id="r" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="45"><stop offset="0" stop-color="{edge}"/><stop offset="1" stop-color="{shade}"/></linearGradient><linearGradient id="h" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="45"><stop offset="0" stop-color="{hl}"/><stop offset="1" stop-color="{navy}"/></linearGradient><radialGradient id="f" gradientUnits="userSpaceOnUse" cx="25.5" cy="53.25" r="66.3" gradientTransform="translate(25.5 53.25) scale(1 0.866) translate(-25.5 -53.25)"><stop offset="0" stop-color="{haze}"/><stop offset="0.25" stop-color="{sky}"/><stop offset="0.58" stop-color="{blue}"/><stop offset="0.92" stop-color="{navy}"/></radialGradient><filter id="d" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1.875" stdDeviation="0.9375" flood-color="#000" flood-opacity="0.3"/></filter></defs><g filter="url(#d)"><path d="{shape}" fill="url(#r)"/><g clip-path="url(#c)"><path d="M0 1H45A7 7 0 0 1 52 8V37A7 7 0 0 1 45 44H0Z" fill="url(#h)"/><path d="{face}" fill="url(#f)"/></g></g></svg>"##,
+        edge = hex(POLAR_EDGE),
+        shade = hex(shade),
         hl = hex(highlight),
-        ft = hex(top),
-        fm = hex(middle),
-        fb = hex(bottom),
-        glow = hex(SAND_GLOW),
+        haze = hex(POLAR_HAZE),
+        sky = hex(POLAR_SKY),
+        blue = hex(POLAR_BLUE),
+        navy = hex(POLAR_NAVY),
     )
 }
 
 fn continue_arrow() -> String {
     format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" fill="none" stroke="{ink}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 15.5H23.5M18.5 10.5l5 5-5 5"/></svg>"#,
-        ink = hex(SAND_INK),
+        ink = hex(POLAR_INK),
     )
 }
 
 fn continue_spinner(spin: u32) -> String {
     format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" fill="none" stroke="{ink}" stroke-width="3" stroke-linecap="round"><circle cx="15" cy="15" r="8.5" stroke-opacity="0.18"/><path transform="rotate({angle} 15 15)" d="M15 6.5a8.5 8.5 0 0 1 8.5 8.5"/></svg>"#,
-        ink = hex(SAND_INK),
+        ink = hex(POLAR_INK),
         angle = spin * 360 / crate::frame::sign_in::SPIN_STEPS,
     )
 }

@@ -1,3 +1,4 @@
+use crate::ui::chrome::card::{POLAR_EDGE, POLAR_HAZE, POLAR_HIGHLIGHT, POLAR_INK, polar_face};
 use crate::ui::chrome::limits::{EngineLimits, Limit};
 use crate::ui::chrome::menu::{Event, Highlight, Menu, Spot};
 use crate::ui::engine::engine_icon;
@@ -41,18 +42,13 @@ const LIMIT_LINE: f32 = 16.0;
 const LIMIT_ROW: f32 = 24.0;
 const LIMIT_LABEL: f32 = 52.0;
 const BLUR: f32 = 20.0;
-const GLOW_ALPHA: f32 = 0.45;
+const HOVER_LIFT: f32 = 0.06;
 
 const CHEVRON_RIGHT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 3 7.5 6l-3 3"/></svg>"#;
 
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
 const GRAY_900: Oklch = Oklch::new(0.21, 0.034, 264.665);
-const FALLBACK_INK: Oklch = Oklch::new(0.88, 0.045, 82.0);
-const SAND_LIGHT: Oklch = Oklch::new(0.92, 0.035, 88.0);
-const SAND_DEEP: Oklch = Oklch::new(0.82, 0.05, 78.0);
-const SAND_INK: Oklch = Oklch::new(0.27, 0.025, 70.0);
-const SAND_GLOW: Oklch = Oklch::new(0.42, 0.1, 55.0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Identity {
@@ -406,12 +402,11 @@ fn item(
 fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Element {
     let hover = Rc::clone(&sheet.emit);
     let pick = Rc::clone(&sheet.emit);
-    let top = if sheet.menu.highlight(Spot::Upgrade).lit() {
-        SAND_LIGHT.animate_to(WHITE, 0.06)
+    let lift = if sheet.menu.highlight(Spot::Upgrade).lit() {
+        HOVER_LIFT
     } else {
-        SAND_LIGHT
+        0.0
     };
-    let bottom = SAND_DEEP;
     let press = &palette.press;
     let inner = Aqua::Box()
         .styles([
@@ -419,18 +414,12 @@ fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Elemen
                 .absolute_at(Some(1.0), Some(1.0), Some(1.0), Some(1.0))
                 .radius(px(ITEM_RADIUS - 1.0))
                 .clip(true),
-            Style::new()
-                .gpui_background(vertical(top, bottom, 1.0))
-                .shadows(vec![layer(
-                    0.0,
-                    1.0,
-                    0.0,
-                    0.0,
-                    true,
-                    top.animate_to(WHITE, 0.3),
-                )]),
+            Style::new().shadows(vec![
+                layer(0.0, 1.0, 0.0, 0.0, true, POLAR_HIGHLIGHT.with_alpha(0.28)),
+                layer(0.0, -1.0, 0.0, 0.0, true, BLACK.with_alpha(0.22)),
+            ]),
         ])
-        .child(glow())
+        .child(polar(lift))
         .build()
         .exclude_from_hit_testing();
     Aqua::Button()
@@ -448,20 +437,16 @@ fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Elemen
                     ..Insets::default()
                 }),
             Style::new()
-                .gpui_background(vertical(
-                    top.animate_to(BLACK, 0.08),
-                    bottom.animate_to(BLACK, 0.25),
-                    1.0,
-                ))
+                .gpui_background(vertical(POLAR_EDGE, POLAR_EDGE, 1.0))
                 .shadows(vec![layer(0.0, press.0, press.1, press.2, false, press.3)]),
         ])
         .child(inner)
         .child(source_asset_glyph(
             AssetId::TABLER_CIRCLE_ARROW_UP,
             GLYPH,
-            SAND_INK.with_alpha(0.8).to_reference_paint(),
+            POLAR_INK.with_alpha(0.8).to_reference_paint(),
         ))
-        .child(label(theme, "Upgrade to Go", SAND_INK, FontWeight::MEDIUM))
+        .child(label(theme, "Upgrade to Go", POLAR_INK, FontWeight::MEDIUM))
         .on_activate(move || pick(Event::Pick(Spot::Upgrade)))
         .build()
         .with_key("artisan-account-upgrade")
@@ -564,10 +549,10 @@ fn limit_row(
         })
 }
 
-fn glow() -> Element {
+fn polar(lift: f32) -> Element {
     Aqua::Canvas()
         .styles([Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))])
-        .on_paint(|bounds| vec![crate::ui::chrome::card::radial_glow(bounds, SAND_GLOW, GLOW_ALPHA)])
+        .on_paint(move |bounds| vec![polar_face(bounds, lift)])
         .build()
         .exclude_from_hit_testing()
 }
@@ -597,7 +582,7 @@ fn portrait(account: &Account, edge: f32, radius: f32, fallback: f32) -> Element
             .child(source_asset_glyph(
                 AssetId::TABLER_USER,
                 fallback,
-                FALLBACK_INK.to_reference_paint(),
+                POLAR_HAZE.to_reference_paint(),
             ))
             .build(),
     }

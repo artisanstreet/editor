@@ -207,6 +207,37 @@ pub fn hex(color: Oklch) -> String {
     )
 }
 
+pub const POLAR_HAZE: Oklch = Oklch::new(0.8824, 0.0368, 248.24);
+pub const POLAR_SKY: Oklch = Oklch::new(0.6765, 0.0862, 251.28);
+pub const POLAR_BLUE: Oklch = Oklch::new(0.4695, 0.1143, 260.44);
+pub const POLAR_NAVY: Oklch = Oklch::new(0.339, 0.1106, 266.41);
+pub const POLAR_EDGE: Oklch = Oklch::new(0.2214, 0.0814, 267.91);
+pub const POLAR_HIGHLIGHT: Oklch = Oklch::new(0.9369, 0.031, 252.69);
+pub const POLAR_INK: Oklch = Oklch::new(1.0, 0.0, 0.0);
+
+#[must_use]
+pub fn polar_face(bounds: Rect, lift: f32) -> DisplayItem {
+    let (w, h) = (bounds.w.max(1.0), bounds.h.max(1.0));
+    let stop = |color: Oklch| hex(color.animate_to(POLAR_INK, lift));
+    let source = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}"><radialGradient id="p" gradientUnits="userSpaceOnUse" cx="{cx}" cy="{cy}" r="{rx}" gradientTransform="translate({cx} {cy}) scale(1 {ratio}) translate(-{cx} -{cy})"><stop offset="0" stop-color="{haze}"/><stop offset="0.25" stop-color="{sky}"/><stop offset="0.58" stop-color="{blue}"/><stop offset="0.92" stop-color="{navy}"/></radialGradient><rect width="{w}" height="{h}" fill="url(#p)"/></svg>"#,
+        cx = w * 0.5,
+        cy = h * 1.25,
+        rx = w * 1.3,
+        ratio = (h * 1.4) / (w * 1.3),
+        haze = stop(POLAR_HAZE),
+        sky = stop(POLAR_SKY),
+        blue = stop(POLAR_BLUE),
+        navy = stop(POLAR_NAVY),
+    );
+    DisplayItem::GpuiSvg {
+        bounds,
+        source: Arc::<str>::from(source),
+        tint: None,
+        opacity: 1.0,
+    }
+}
+
 #[must_use]
 pub fn radial_glow(bounds: Rect, color: Oklch, alpha: f32) -> DisplayItem {
     let (w, h) = (bounds.w.max(1.0), bounds.h.max(1.0));
