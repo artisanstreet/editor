@@ -10,7 +10,7 @@ fn a_packed_program_is_written_back_byte_for_byte_and_runnable() {
     assert!(payload.present());
     let folder = tempfile::tempdir().expect("temp folder");
     let path = folder.path().join("program");
-    payload.write(&path).expect("write");
+    payload.write_program(&path).expect("write");
     assert_eq!(std::fs::read(&path).expect("read back"), program);
     #[cfg(unix)]
     {
@@ -24,5 +24,11 @@ fn a_packed_program_is_written_back_byte_for_byte_and_runnable() {
     assert!(
         !Payload::new(&[]).present(),
         "a build without one carries nothing"
+    );
+    let missing = folder.path().join("missing");
+    assert!(Payload::new(&[]).write_program(&missing).is_err());
+    assert!(
+        !missing.exists(),
+        "nothing is written for an absent payload"
     );
 }

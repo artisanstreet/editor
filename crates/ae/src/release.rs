@@ -382,7 +382,7 @@ impl Release {
                         .context("this installer carries no ae for Linux")?,
                 ),
                 (App::Forge, true) => bundle::FORGE
-                    .write(&target)
+                    .write_program(&target)
                     .with_context(|| format!("write {}", target.display())),
                 (App::Editor, true) => copy(
                     carried
