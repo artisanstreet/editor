@@ -1100,6 +1100,15 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             }
             let finished_text =
                 status.is_terminal() && matches!(kind, ItemKind::AssistantMessage { .. });
+            let shown = if finished_text
+                && let ItemKind::AssistantMessage { text, .. } = &kind
+            {
+                text.inline()
+                    .map(crate::resources::written_sources)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let shell_done = status.is_terminal() && matches!(kind, ItemKind::Tool { .. });
             if status.is_terminal() && !tracked.status.is_terminal() {
                 items.weighed.finished(&kind, status);
@@ -1122,6 +1131,7 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
                 hub.agent_attention(&thread_id).await;
             }
             if finished_text {
+                hub.snapshot_resources(&thread_id, &id, shown);
                 hub.forget_live(
                     &thread_id,
                     &LiveTarget::Text {

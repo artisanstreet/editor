@@ -384,6 +384,42 @@ async fn rich_resources_use_the_paired_forge_project_and_reject_non_regular_file
             .status(),
         404
     );
+    let shown = [
+        ("path", "reference with spaces.txt"),
+        ("item", "0196f3f0-0000-7000-8000-000000000001"),
+    ];
+    let first_view = editor
+        .http
+        .get(&endpoint)
+        .query(&shown)
+        .send()
+        .await
+        .unwrap();
+    assert!(first_view.status().is_success());
+    std::fs::remove_file(&filename).unwrap();
+    let later_view = editor
+        .http
+        .get(&endpoint)
+        .query(&shown)
+        .send()
+        .await
+        .unwrap();
+    assert!(later_view.status().is_success());
+    assert_eq!(
+        &later_view.bytes().await.unwrap()[..],
+        b"owned by this Forge\n"
+    );
+    assert_eq!(
+        editor
+            .http
+            .get(&endpoint)
+            .query(&shown[..1])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
     #[cfg(unix)]
     {
         let fifo = project_dir.join("waiting-pipe");

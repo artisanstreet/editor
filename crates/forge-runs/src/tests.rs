@@ -15,6 +15,8 @@ mod disk_guard;
 mod mcp_reach_tests;
 #[path = "../tests/resources/paths.rs"]
 mod resource_paths;
+#[path = "../tests/resources/snapshot.rs"]
+mod resource_snapshots;
 #[path = "../tests/runtime/registry.rs"]
 mod runtime_registry;
 use artisan_api::{

@@ -1,4 +1,4 @@
-use crate::resources::{Host, ResourceError, Written, automount_root, host_path};
+use crate::resources::{Host, ResourceError, Written, automount_root, host_path, written_sources};
 use std::path::{Path, PathBuf};
 
 fn written(path: &str) -> Written {
@@ -105,4 +105,52 @@ fn native_paths_resolve_against_the_thread_folder_and_home() {
         host_path(&home, Path::new("/work"), &homeless),
         Err(ResourceError::Refused(_))
     ));
+}
+
+#[test]
+fn a_reply_names_every_local_file_it_shows_once_as_the_editor_asks_for_it() {
+    let reply = r#"Here is the crew.
+
+```artisan-image
+{ "src": " D:/game/front.png ", "alt": "Front" }
+```
+
+![Side view](docs/side.png "Side") and ![remote](https://example.com/a.png).
+
+```artisan-image
+{ "images": ["~/shots/a.png", { "src": "docs/side.png", "caption": "again" }, "data:image/png;base64,AAAA"] }
+```
+
+```artisan-image-compare
+{ "before": { "src": "file:///tmp/before.png" }, "after": { "src": "/tmp/after.png", "label": "After" } }
+```
+
+```artisan-audio
+{ "tracks": [{ "src": "out/notify.wav", "name": "Notification" }] }
+```
+
+```json
+{ "src": "not-shown.png" }
+```
+
+```artisan-image
+{ "src": "broken.png"
+```
+"#;
+    let mut expected = [
+        ("D:/game/front.png", false),
+        ("docs/side.png", false),
+        ("shots/a.png", true),
+        ("file:///tmp/before.png", false),
+        ("/tmp/after.png", false),
+        ("out/notify.wav", false),
+    ]
+    .map(|(path, from_home)| Written {
+        path: path.to_owned(),
+        from_home,
+    });
+    expected.sort();
+    let mut found = written_sources(reply);
+    found.sort();
+    assert_eq!(found, expected);
 }

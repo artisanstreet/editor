@@ -288,14 +288,17 @@ impl ForgeClient {
         thread: &ThreadId,
         path: &str,
         from_home: bool,
+        item: Option<&str>,
     ) -> Result<Vec<u8>> {
+        let shown = item.map(|item| ("item", item));
         self.call_bytes(
             self.http
                 .get(self.url(&format!("/threads/{thread}/resource")))
                 .query(&[
                     ("path", path),
                     ("from_home", if from_home { "true" } else { "false" }),
-                ]),
+                ])
+                .query(&shown.into_iter().collect::<Vec<_>>()),
             RESOURCE_BYTES,
         )
         .await

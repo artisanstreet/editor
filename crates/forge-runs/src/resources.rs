@@ -1,15 +1,18 @@
 use crate::Hub;
 use anyhow::Context as _;
-use artisan_api::Thread;
+use artisan_api::{ItemId, Thread, ThreadId};
+use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 pub const MAX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 
+const SNAPSHOTS_PER_ITEM: usize = 32;
 const KERNEL_RELEASE: &str = "/proc/sys/kernel/osrelease";
 const WSL_CONFIG: &str = "/etc/wsl.conf";
 const WSL_DRIVES: &str = "/mnt";
+const BLOCK_PREFIX: &str = "artisan-";
 
 static HOST: LazyLock<Host> = LazyLock::new(Host::detect);
 
@@ -33,6 +36,107 @@ fn has_scheme(source: &str, scheme: &str) -> bool {
     source
         .get(..scheme.len())
         .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+}
+
+impl Written {
+    #[must_use]
+    pub fn parse(source: &str) -> Option<Self> {
+        let source = source.trim();
+        let remote = ["http://", "https://", "data:"]
+            .iter()
+            .any(|scheme| has_scheme(source, scheme));
+        if source.is_empty() || remote {
+            return None;
+        }
+        let home = match source {
+            "~" => Some(""),
+            _ => source
+                .strip_prefix("~/")
+                .or_else(|| source.strip_prefix("~\\")),
+        };
+        Some(home.filter(|_| !has_scheme(source, "file://")).map_or_else(
+            || Self {
+                path: source.to_owned(),
+                from_home: false,
+            },
+            |rest| Self {
+                path: rest.to_owned(),
+                from_home: true,
+            },
+        ))
+    }
+}
+
+fn block_sources(value: &serde_json::Value, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                match (key.as_str(), value) {
+                    ("src", serde_json::Value::String(source)) => found.push(source.clone()),
+                    ("images" | "paths", serde_json::Value::Array(entries)) => {
+                        for entry in entries {
+                            if let serde_json::Value::String(source) = entry {
+                                found.push(source.clone());
+                            } else {
+                                block_sources(entry, found);
+                            }
+                        }
+                    }
+                    (_, nested) => block_sources(nested, found),
+                }
+            }
+        }
+        serde_json::Value::Array(entries) => {
+            for entry in entries {
+                block_sources(entry, found);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+#[must_use]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "only images and fenced blocks carry sources; every other event is prose"
+)]
+pub fn written_sources(markdown: &str) -> Vec<Written> {
+    let mut found = Vec::new();
+    let mut block: Option<String> = None;
+    for event in Parser::new(markdown) {
+        match event {
+            Event::Start(Tag::Image { dest_url, .. }) => found.push(dest_url.into_string()),
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info)))
+                if info.trim_start().starts_with(BLOCK_PREFIX) =>
+            {
+                block = Some(String::new());
+            }
+            Event::Text(text) => {
+                if let Some(body) = &mut block {
+                    body.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(value) = block
+                    .take()
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                {
+                    block_sources(&value, &mut found);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut written: Vec<Written> = Vec::new();
+    for source in found.iter().filter_map(|source| Written::parse(source)) {
+        if !written.contains(&source) {
+            written.push(source);
+        }
+    }
+    written
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -199,12 +303,59 @@ impl Hub {
     pub async fn read_resource(
         &self,
         thread: &Thread,
+        item: Option<&ItemId>,
         written: &Written,
     ) -> Result<Vec<u8>, ResourceError> {
+        let snapshot = item.and_then(|item| {
+            self.store().resource_snapshot_target(
+                &thread.id,
+                item,
+                &written.path,
+                written.from_home,
+            )
+        });
         let folder = self.thread_folder(thread).await?;
-        let path = host_path(written, &folder, &HOST)?;
-        tokio::task::spawn_blocking(move || read_regular(&path))
-            .await
-            .context("resource read task")?
+        let live = host_path(written, &folder, &HOST);
+        tokio::task::spawn_blocking(move || {
+            if let Some(kept) = snapshot.as_deref().filter(|kept| kept.is_file()) {
+                return read_regular(kept);
+            }
+            let bytes = read_regular(&live?)?;
+            if let Some(target) = &snapshot
+                && let Err(error) = forge_store::keep_resource_snapshot(target, &bytes)
+            {
+                tracing::warn!(path = %target.display(), "keep resource snapshot: {error:#}");
+            }
+            Ok(bytes)
+        })
+        .await
+        .context("resource read task")?
+    }
+
+    pub(crate) fn snapshot_resources(
+        &self,
+        thread_id: &ThreadId,
+        item_id: &ItemId,
+        shown: Vec<Written>,
+    ) {
+        if shown.is_empty() {
+            return;
+        }
+        let (hub, thread_id, item_id) = (self.clone(), thread_id.clone(), item_id.clone());
+        self.inner.tasks.spawn(async move {
+            let Ok(Some(thread)) = hub.store().thread(&thread_id).await else {
+                return;
+            };
+            for written in shown.iter().take(SNAPSHOTS_PER_ITEM) {
+                if let Err(error) = hub.read_resource(&thread, Some(&item_id), written).await {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        item = %item_id,
+                        path = %written.path,
+                        "resource not kept: {error:#}"
+                    );
+                }
+            }
+        });
     }
 }

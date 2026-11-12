@@ -2198,6 +2198,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "image",
+ "pulldown-cmark",
  "reqwest",
  "serde",
  "serde_json",

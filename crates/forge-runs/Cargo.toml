@@ -23,6 +23,7 @@ getrandom.workspace = true
 hex.workspace = true
 tracing.workspace = true
 dirs.workspace = true
+pulldown-cmark.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

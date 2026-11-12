@@ -553,7 +553,12 @@ impl RootViews {
                     let thread = thread.clone();
                     Box::pin(async move {
                         client
-                            .resource(&thread, &request.path, request.from_home)
+                            .resource(
+                                &thread,
+                                &request.path,
+                                request.from_home,
+                                request.item.as_deref(),
+                            )
                             .await
                             .map(std::sync::Arc::<[u8]>::from)
                             .map_err(|error| {
@@ -631,7 +636,8 @@ impl RootViews {
                         media
                             .fetcher
                             .clone()
-                            .owned_by(&[*media.owners.get(&item)?], revision),
+                            .owned_by(&[*media.owners.get(&item)?], revision)
+                            .showing(item.as_str()),
                         revision,
                     ),
                 ))

@@ -671,6 +671,7 @@ struct ResourceQuery {
     path: String,
     #[serde(default)]
     from_home: bool,
+    item: Option<ItemId>,
 }
 
 async fn resource(
@@ -690,7 +691,7 @@ async fn resource(
         from_home: query.from_home,
     };
     app.hub
-        .read_resource(&thread, &written)
+        .read_resource(&thread, query.item.as_ref(), &written)
         .await
         .map(Bytes::from)
         .map_err(|error| match error {
