@@ -1,4 +1,3 @@
-pub mod action_row;
 pub mod asset;
 pub mod attachment_tile;
 pub mod badge;
