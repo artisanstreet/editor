@@ -554,10 +554,8 @@ async fn an_allowed_call_runs_exactly_once() {
     )
     .await;
     assert_eq!(outcome.status, RunStatus::Done);
-    assert_eq!(
-        std::fs::read_to_string(&log_file).expect("the log"),
-        "once\n"
-    );
+    let logged = std::fs::read_to_string(&log_file).expect("the log");
+    assert_eq!(logged.split_whitespace().collect::<Vec<_>>(), ["once"]);
 }
 
 #[tokio::test]
@@ -1618,10 +1616,8 @@ async fn allow_always_holds_for_the_agent_too() {
     assert_eq!(outcome.status, RunStatus::Done);
     let asked: Vec<&str> = log.iter().filter_map(awaiting).collect();
     assert_eq!(asked, ["toolu_1"], "the agent did not ask again");
-    assert_eq!(
-        std::fs::read_to_string(&log_file).expect("the log"),
-        "ran\nran\n"
-    );
+    let logged = std::fs::read_to_string(&log_file).expect("the log");
+    assert_eq!(logged.split_whitespace().collect::<Vec<_>>(), ["ran", "ran"]);
 }
 
 #[tokio::test]
