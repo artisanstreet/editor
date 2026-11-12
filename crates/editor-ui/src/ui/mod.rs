@@ -13,6 +13,7 @@ pub mod clock;
 pub mod fonts;
 pub mod glass;
 pub mod hover;
+pub mod kit;
 pub mod hint_card;
 pub mod hover_tooltip;
 pub mod icon;

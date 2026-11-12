@@ -1,3 +1,4 @@
+use crate::ui::kit::Radius;
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua::{Aqua, Style, px};
 use aqua::ShadowLayer;
@@ -5,8 +6,8 @@ use aqua_core::{DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradien
 use std::sync::Arc;
 use aqua_ui::element::Element;
 
-pub const RADIUS: f32 = 18.4;
-pub const INSET_RADIUS: f32 = 0.65 * 16.0;
+pub const RADIUS: f32 = Radius::Shell.px();
+pub const INSET_RADIUS: f32 = Radius::Panel.px();
 
 const RIM_LIGHT: f32 = 0.04;
 const RIM_SHADE: f32 = 0.25;
