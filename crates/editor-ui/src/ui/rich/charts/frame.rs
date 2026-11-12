@@ -1,4 +1,4 @@
-use crate::ui::kit::{Space, Surface, TextRole, Tone, Tooltip};
+use crate::ui::kit::{Space, Spaced, Surface, TextRole, Tone, Tooltip};
 use crate::ui::rich::narrative::callout::{text, text_with_wrap};
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity, RadiusStep, RadiusTokens};
 use aqua_core::{GpuiHsla, Insets};
@@ -186,7 +186,7 @@ pub(crate) fn concentration_frame(
     ui::Box::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(4.0)
+        .spaced(Space::S4)
         .child(title(y_title))
         .child(plot_row)
         .child(tick_row)
@@ -218,15 +218,7 @@ pub(crate) fn plot_label_positioned(
     color: GpuiHsla,
     below: bool,
 ) -> Element {
-    let style = aqua_text::TextStyle {
-        families: vec![aqua_text::FontFamily::Named(
-            theme.typography.sans.family.to_owned(),
-        )],
-        size_px: 11.0,
-        line_height_px: 16.0,
-        weight: FontWeight::NORMAL,
-        ..aqua_text::TextStyle::default()
-    };
+    let style = TextRole::Caption.style(theme);
     let label = ui::Box::new()
         .radius(RadiusTokens::value(RadiusStep::Xs))
         .style(
@@ -348,7 +340,7 @@ pub(crate) fn readout_rows_at(
         let value = &item.value;
         let mut row = ui::Box::new()
             .layout("row")
-            .gap(8.0)
+            .spaced(Space::S8)
             .style(Style::new().align(aqua_ui::AlignItems::CENTER));
         if let Some(color) = swatch {
             row = row.child(
@@ -387,15 +379,7 @@ pub(crate) fn readout_rows_at(
             .build();
         rendered_rows.push(row);
     }
-    let mut content = ui::Box::new()
-        .layout("column")
-        .gap(4.0)
-        .style(Style::new().padding_insets(Insets {
-            left: 14.0,
-            right: 14.0,
-            top: 12.0,
-            bottom: 12.0,
-        }));
+    let mut content = ui::Box::new().layout("column").spaced(Space::S4);
     if !heading.is_empty() {
         content = content.child(text_with_wrap(
             theme,
@@ -523,15 +507,7 @@ pub(crate) fn numeric_frame_with_labels(
         .height(frame.height)
         .style(Style::new().flex_shrink(0.0));
     for (y, value, color) in labels {
-        let style = aqua_text::TextStyle {
-            families: vec![aqua_text::FontFamily::Named(
-                theme.typography.sans.family.to_owned(),
-            )],
-            size_px: 11.0,
-            line_height_px: 16.0,
-            weight: FontWeight::NORMAL,
-            ..aqua_text::TextStyle::default()
-        };
+        let style = TextRole::Caption.style(theme);
         gutter = gutter.child(
             ui::Box::new()
                 .height(16.0)
@@ -591,7 +567,7 @@ pub(crate) fn numeric_frame_with_labels(
     let mut outer = ui::Box::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(4.0);
+        .spaced(Space::S4);
     if let Some(value) = frame.y_title {
         outer = outer.child(title(&value));
     }
@@ -655,7 +631,7 @@ pub(crate) fn numeric_frame_with_labels(
 pub(crate) fn legend(theme: &ArtisanTheme, entries: Vec<(String, GpuiHsla)>) -> Element {
     let mut legend = ui::Box::new()
         .layout("row")
-        .gap(12.0)
+        .spaced(Space::S12)
         .style(Style::new().wrap(true).align(aqua_ui::AlignItems::CENTER));
     for (name, color) in entries {
         let swatch = ui::Box::new()
@@ -671,7 +647,7 @@ pub(crate) fn legend(theme: &ArtisanTheme, entries: Vec<(String, GpuiHsla)>) -> 
         legend = legend.child(
             ui::Box::new()
                 .layout("row")
-                .gap(6.0)
+                .spaced(Space::S6)
                 .style(Style::new().align(aqua_ui::AlignItems::CENTER))
                 .child(swatch)
                 .child(text_with_wrap(
@@ -690,7 +666,7 @@ pub(crate) fn legend(theme: &ArtisanTheme, entries: Vec<(String, GpuiHsla)>) -> 
 pub(crate) fn stats_hint(theme: &ArtisanTheme, heading: &str, body: &str, left: f32) -> Element {
     let content = ui::Box::new()
         .layout("column")
-        .gap(Space::S4.px())
+        .spaced(Space::S4)
         .child(text(theme, heading, TextRole::Title, theme.colors.text))
         .child(text(
             theme,
