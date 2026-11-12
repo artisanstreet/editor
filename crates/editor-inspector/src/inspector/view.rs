@@ -1,20 +1,31 @@
 use super::{Entry, Inspector};
-use editor_core::Core;
-use editor_ui::{
-    asset::source_asset_glyph,
-    button::Button,
-    theme::{ArtisanTheme, RadiusStep, RadiusTokens},
-};
-use aqua_core::{Insets, Role};
-use aqua_text::{FontFamily, FontWeight, TextStyle};
+use aqua_text::StyledSpan;
+use aqua_text::overflow::OverflowMode;
 use aqua_ui::{
+    AlignItems, JustifyContent,
     collection::List,
-    element::{Box as UiBox, Button as UiButton, Element, Text},
+    element::{Box as UiBox, Element, Text},
     style::{Length, Style},
 };
 use artisan_api::{Collection, Status, StepStatus, TextContent};
 use editor_assets::AssetId;
+use editor_core::Core;
+use editor_ui::kit::{
+    Button, ButtonTone, Density, Divider, IconSize, Row, RowItem, Space, Spaced, Surface,
+    TextRole, Tooltip,
+};
+use editor_ui::theme::{ArtisanTheme, Oklch};
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+
+const LIST: Surface = Surface::Inset;
+const ROW: Row = Row::ListItem(Density::Regular);
+const HEADING: Row = Row::ListHeading;
+const CARD: Surface = Surface::Tooltip(Tooltip::Card);
+const CARD_WIDTH: f32 = 320.0;
+const VALUE_WIDTH: f32 = 150.0;
+const DOT: f32 = 6.0;
+const PULSE_MS: u32 = 1_600;
+const PULSE_FLOOR: f32 = 0.4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InspectorAction {
@@ -28,53 +39,65 @@ pub enum InspectorAction {
     OpenTerminal(artisan_api::ItemId),
 }
 
-fn glyph(theme: ArtisanTheme, icon: AssetId) -> Element {
-    source_asset_glyph(icon, 16.0, theme.colors.text_muted.to_reference_paint())
+fn muted_glyph(theme: &ArtisanTheme, icon: AssetId) -> Element {
+    IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint())
 }
 
-fn row(theme: ArtisanTheme) -> UiBox {
+fn fit(text: Text) -> Element {
+    text.overflow(OverflowMode::EndEllipsis)
+        .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
+        .build()
+}
+
+fn inked(theme: &ArtisanTheme, role: TextRole, words: impl Into<String>, ink: Oklch) -> Text {
+    role.text(theme, words.into())
+        .gpui_source_color(ink.to_reference_text_color())
+}
+
+fn static_row(children: Vec<Element>) -> Element {
     UiBox::new()
         .width(Length::Pct(100.0))
-        .gap(8.0)
-        .radius(RadiusTokens::value(RadiusStep::Md))
+        .height(ROW.height().unwrap_or_default())
+        .padded(ROW.pad().x)
+        .spaced(ROW.gap())
+        .style(Style::new().min_width(Length::Pct(0.0)).align(AlignItems::CENTER))
+        .children(children)
+        .build()
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the agent status dot is a painted status mark, not chrome"
+)]
+fn status_dot(color: Oklch, pulse: Option<u32>) -> Element {
+    let mut style = Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
+        color.to_reference_paint(),
+    ));
+    if let Some(start_ms) = pulse {
+        style = style.gpui_quad_pulse(aqua_core::scene::GpuiQuadPulse {
+            start_ms,
+            period_ms: PULSE_MS,
+            min_opacity: PULSE_FLOOR,
+        });
+    }
+    let edge = IconSize::Md.px();
+    UiBox::new()
+        .width(edge)
+        .height(edge)
         .style(
             Style::new()
-                .min_width(Length::Px(0.0))
-                .padding_insets(Insets {
-                    left: 8.0,
-                    right: 8.0,
-                    top: 8.0,
-                    bottom: 8.0,
-                })
-                .align(aqua_ui::AlignItems::CENTER)
-                .font_size(theme.typography.control_text),
+                .flex_shrink(0.0)
+                .align(AlignItems::CENTER)
+                .justify(JustifyContent::CENTER),
         )
-}
-
-fn row_hover(theme: ArtisanTheme) -> Style {
-    let (top, bottom) = editor_ui::hover::hover_fill_stops(&theme, theme.colors.text);
-    Style::new().gpui_background(aqua::GpuiBackground::LinearGradient {
-        angle: 180.0,
-        color_space: aqua::GpuiGradientColorSpace::Oklab,
-        stops: [
-            aqua::GpuiGradientStop {
-                percentage: 0.0,
-                color: top.to_reference_paint(),
-            },
-            aqua::GpuiGradientStop {
-                percentage: 1.0,
-                color: bottom.to_reference_paint(),
-            },
-        ],
-    })
-}
-
-fn text(theme: ArtisanTheme, value: impl Into<String>) -> Element {
-    Text::new(value.into())
-        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-        .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
-        .font_size(theme.typography.control_text)
-        .gpui_source_color(theme.colors.text.to_reference_text_color())
+        .child(
+            UiBox::new()
+                .width(DOT)
+                .height(DOT)
+                .radius(DOT / 2.0)
+                .style(style)
+                .build(),
+        )
         .build()
 }
 
@@ -179,8 +202,6 @@ pub fn agent_card(
 }
 
 pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
-    use editor_ui::glass::{GlassStrength, glass_card_shadows, glass_layers};
-    use editor_ui::theme::{Elevation, Opacity};
     let icon = card.engine.map_or(AssetId::TABLER_BOT_ID, |engine| {
         editor_ui::engine::engine_icon(&theme, engine)
     });
@@ -189,89 +210,234 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
         .clone()
         .or_else(|| card.engine.map(|engine| engine.display_name().to_owned()))
         .unwrap_or_else(|| "Agent".into());
-    let font = TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: theme.typography.control_text,
-        line_height_px: 18.0,
-        weight: FontWeight(600),
-        ..TextStyle::default()
-    };
-    let mut content = UiBox::new().layout("column").gap(12.0).padding(16.0).child(
+    let mut content = UiBox::new().layout("column").spaced(Space::S12).child(
         UiBox::new()
-            .gap(8.0)
-            .style(Style::new().align(aqua_ui::AlignItems::CENTER))
-            .child(source_asset_glyph(
-                icon,
-                16.0,
-                theme.colors.text.to_reference_paint(),
-            ))
-            .child(
-                Text::new(title)
-                    .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                    .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
-                    .text_style(font)
-                    .gpui_source_color(theme.colors.text.to_reference_text_color())
-                    .build(),
-            )
+            .spaced(Space::S8)
+            .style(Style::new().align(AlignItems::CENTER))
+            .child(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()))
+            .child(fit(TextRole::Title.text(&theme, title)))
             .build(),
     );
     if !card.settings.is_empty() {
-        let mut settings = UiBox::new().layout("column").gap(4.0);
+        let mut settings = UiBox::new().layout("column").spaced(Space::S4);
         for (icon, value) in &card.settings {
-            let font = TextStyle {
-                families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                size_px: theme.typography.label_text,
-                line_height_px: 19.0,
-                ..TextStyle::default()
-            };
             settings = settings.child(
                 UiBox::new()
-                    .gap(8.0)
-                    .style(Style::new().align(aqua_ui::AlignItems::CENTER))
-                    .child(glyph(theme, *icon))
-                    .child(
-                        Text::new(value.clone())
-                            .text_style(font)
-                            .gpui_source_color(theme.colors.text.to_reference_text_color())
-                            .build(),
-                    )
+                    .spaced(Space::S8)
+                    .style(Style::new().align(AlignItems::CENTER))
+                    .child(muted_glyph(&theme, *icon))
+                    .child(TextRole::Caption.text(&theme, value.clone()).build())
                     .build(),
             );
         }
         content = content.child(settings.build());
     }
     if !card.purpose.is_empty() {
-        let font = TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: theme.typography.label_text,
-            line_height_px: 19.0,
-            ..TextStyle::default()
-        };
         content = content.child(
-            Text::new(card.purpose.clone())
-                .text_style(font)
-                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                .wrap(true)
-                .build(),
+            inked(
+                &theme,
+                TextRole::Caption,
+                card.purpose.clone(),
+                theme.colors.text_muted,
+            )
+            .wrap(true)
+            .build(),
         );
     }
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    UiBox::new()
-        .radius(radius)
-        .style(
-            Style::new()
-                .max_width(Length::Px(320.0))
-                .border_of(1.0, theme.colors.text.at(Opacity::GlassBorder).to_paint())
-                .shadows(
-                    glass_card_shadows(&theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                ),
+    CARD.build(&theme, vec![content.build()])
+        .style(Style::new().max_width(Length::Px(CARD_WIDTH)))
+}
+
+fn fact_row(
+    theme: &ArtisanTheme,
+    label: &str,
+    values: &[Option<String>; 4],
+    edits: Option<&artisan_api::EditTotals>,
+) -> Element {
+    let (icon, title, value) = match label {
+        "Project" => (AssetId::TABLER_FOLDER, "Project", values[0].clone()),
+        "Forge" => (AssetId::TABLER_DEVICE_LAPTOP, "Machine", values[1].clone()),
+        "Branch" => (AssetId::TABLER_GIT_BRANCH, "Branch", values[2].clone()),
+        "Worktree" => (AssetId::TABLER_FOLDER_CODE, "Worktree", values[3].clone()),
+        _ => (AssetId::TABLER_FILE_DIFF, "Changes", None),
+    };
+    let mut children = vec![
+        muted_glyph(theme, icon),
+        UiBox::new()
+            .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+            .child(fit(TextRole::Label.text(theme, title)))
+            .build(),
+    ];
+    match (label, edits) {
+        ("Edit operations", Some(edits)) => {
+            children.push(
+                inked(
+                    theme,
+                    TextRole::Label,
+                    format!("+{}", edits.added),
+                    theme.colors.green.text,
+                )
+                .build(),
+            );
+            children.push(
+                inked(
+                    theme,
+                    TextRole::Label,
+                    format!("−{}", edits.removed),
+                    theme.colors.red.text,
+                )
+                .build(),
+            );
+        }
+        ("Edit operations", None) => {}
+        _ => children.push(
+            UiBox::new()
+                .clip(true)
+                .style(
+                    Style::new()
+                        .min_width(Length::Pct(0.0))
+                        .max_width(Length::Px(VALUE_WIDTH)),
+                )
+                .child(fit(TextRole::Label.text(
+                    theme,
+                    value.unwrap_or_else(|| "—".into()),
+                )))
+                .build(),
+        ),
+    }
+    static_row(children)
+}
+
+fn agent_row(
+    theme: ArtisanTheme,
+    agent: &artisan_api::InspectorAgent,
+    card: AgentCard,
+    pulse: Option<u32>,
+    action: Rc<dyn Fn(InspectorAction)>,
+) -> Element {
+    let description = match &agent.description {
+        TextContent::Inline(value) => value.lines().next().unwrap_or_default().to_owned(),
+        TextContent::Stored(_) => "Stored description. Open agent to read.".into(),
+    };
+    let color = match agent.status {
+        Status::Running | Status::AwaitingUser => theme.colors.text,
+        Status::Done => theme.colors.unread,
+        Status::Failed => theme.colors.red.solid,
+        Status::Declined | Status::Cancelled => theme.colors.text_muted,
+    };
+    let icon = agent.engine.map_or(AssetId::TABLER_BOT_ID, |engine| {
+        editor_ui::engine::engine_icon(&theme, engine)
+    });
+    let body = UiBox::new()
+        .width(Length::Pct(100.0))
+        .spaced(ROW.gap())
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(fit(TextRole::Label.text(&theme, agent.label.clone())))
+        .child(
+            UiBox::new()
+                .clip(true)
+                .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+                .child(fit(inked(
+                    &theme,
+                    TextRole::Label,
+                    description,
+                    theme.colors.text_muted,
+                )))
+                .build(),
         )
-        .child(glass_layers(&theme, GlassStrength::Strong, radius))
-        .child(content.build())
-        .build()
+        .build();
+    let id = agent.id.clone();
+    let thread = agent.thread.clone();
+    RowItem::new(
+        format!("inspector-agent-{}", agent.id),
+        theme,
+        ROW,
+        LIST,
+        agent.label.clone(),
+    )
+    .leading(muted_glyph(&theme, icon))
+    .body(body)
+    .trailing(status_dot(color, pulse))
+    .on_activate(move || {
+        action(InspectorAction::OpenAgent {
+            id: id.clone(),
+            thread: thread.clone(),
+        })
+    })
+    .build()
+    .tooltip(0.5, move || render_agent_card(&card, theme))
+}
+
+fn plan_row(
+    theme: ArtisanTheme,
+    index: usize,
+    step: &artisan_api::PlanStep,
+    action: Rc<dyn Fn(InspectorAction)>,
+) -> Element {
+    match &step.text {
+        TextContent::Inline(value) => {
+            let resolved = matches!(step.status, StepStatus::Done | StepStatus::Cancelled);
+            let ink = match resolved {
+                true => theme.colors.text_muted,
+                false => theme.colors.text,
+            };
+            let mut struck = TextRole::Label.style(&theme);
+            struck.strikethrough = resolved;
+            static_row(vec![fit(
+                inked(&theme, TextRole::Label, value.clone(), ink)
+                    .spans(vec![StyledSpan::new(value.clone(), struck)]),
+            )])
+        }
+        TextContent::Stored(source) => {
+            let source = source.clone();
+            let status = match step.status {
+                StepStatus::Pending => "○",
+                StepStatus::InProgress => "●",
+                StepStatus::Done => "✓",
+                StepStatus::Cancelled => "−",
+            };
+            Button::text(
+                format!("inspector-plan-{index}"),
+                theme,
+                ButtonTone::Quiet,
+                format!("{status} Read step"),
+            )
+            .within(LIST)
+            .on_activate(move |_| action(InspectorAction::OpenStep(source.clone())))
+            .build()
+        }
+    }
+}
+
+fn terminal_row(
+    theme: ArtisanTheme,
+    terminal: &artisan_api::InspectorTerminal,
+    action: Rc<dyn Fn(InspectorAction)>,
+) -> Element {
+    let label = match &terminal.command {
+        TextContent::Inline(value) => value
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("Shell")
+            .to_owned(),
+        TextContent::Stored(_) => "Stored shell command".into(),
+    };
+    let icon = match terminal.watch {
+        true => AssetId::TABLER_EYE,
+        false => AssetId::TABLER_TERMINAL_2,
+    };
+    let item = terminal.id.clone();
+    RowItem::new(
+        format!("inspector-terminal-{}", terminal.id),
+        theme,
+        ROW,
+        LIST,
+        label.clone(),
+    )
+    .leading(muted_glyph(&theme, icon))
+    .body(fit(TextRole::Code.text(&theme, label)))
+    .on_activate(move || action(InspectorAction::OpenTerminal(item.clone())))
+    .build()
 }
 
 pub fn inspector_view(
@@ -316,38 +482,27 @@ pub fn inspector_view(
     let entries = inspector.entries.clone();
     let rows = entries.clone();
     let summary = Arc::clone(&inspector.summary);
-    let mut root = UiBox::new()
+    let bleed = LIST.padding_px();
+    let frame = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
+        .height(Length::Pct(100.0));
+    let mut root = LIST
+        .padding()
+        .into_iter()
+        .fold(frame, Spaced::padded)
         .style(
             Style::new()
-                .min_height(Length::Px(0.0))
-                .padding_insets(Insets {
-                    top: 10.0,
-                    bottom: 10.0,
-                    left: 0.0,
-                    right: 0.0,
-                })
+                .min_height(Length::Pct(0.0))
                 .gpui_source_text_color(theme.colors.text.to_reference_text_color()),
         );
     if let Some(error) = &inspector.error {
         let retry = Rc::clone(&action);
         root = root
+            .child(static_row(vec![fit(TextRole::Label.text(&theme, error.clone()))]))
             .child(
-                UiBox::new()
-                    .style(Style::new().padding_insets(Insets {
-                        left: 10.0,
-                        right: 10.0,
-                        top: 0.0,
-                        bottom: 0.0,
-                    }))
-                    .child(text(theme, error.clone()))
-                    .build(),
-            )
-            .child(
-                Button::text("inspector-retry", theme, "Retry")
-                    .variant(editor_ui::button::ButtonVariant::Outline)
+                Button::text("inspector-retry", theme, ButtonTone::Neutral, "Retry")
+                    .within(LIST)
                     .on_activate(move |_| retry(InspectorAction::Retry))
                     .build(),
             );
@@ -357,358 +512,90 @@ pub fn inspector_view(
         .items(entries.into_iter().enumerate())
         .key(|(index, _)| *index)
         .row(move |(index, entry)| {
-            let mut content = row(theme);
-            match entry {
+            let content = match entry {
                 Entry::Heading(label) => {
-                    content = content
-                        .style(Style::new().padding_insets(Insets {
-                            left: 8.0,
-                            right: 8.0,
-                            top: 10.0,
-                            bottom: 4.0,
-                        }))
-                        .child(
-                            Text::new(*label)
-                                .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                                .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
-                                .font_size(theme.typography.label_text)
-                                .gpui_source_color(
-                                    theme.colors.text_muted.to_reference_text_color(),
-                                )
-                                .build(),
-                        )
+                    RowItem::new(format!("inspector-heading-{label}"), theme, HEADING, LIST, *label)
+                        .build()
                 }
-                Entry::Fact(label) => {
-                    let (icon, title, value) = match *label {
-                        "Project" => (AssetId::TABLER_FOLDER, "Project", values[0].clone()),
-                        "Forge" => (AssetId::TABLER_DEVICE_LAPTOP, "Machine", values[1].clone()),
-                        "Branch" => (AssetId::TABLER_GIT_BRANCH, "Branch", values[2].clone()),
-                        "Worktree" => (AssetId::TABLER_FOLDER_CODE, "Worktree", values[3].clone()),
-                        _ => (AssetId::TABLER_FILE_DIFF, "Changes", None),
-                    };
-                    content = content.child(glyph(theme, icon)).child(
-                        UiBox::new()
-                            .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                            .child(text(theme, title))
-                            .build(),
-                    );
-                    if *label == "Edit operations" {
-                        if let Some(edits) = &summary.edits {
-                            content = content
-                                .child(
-                                    Text::new(format!("+{}", edits.added))
-                                        .gpui_source_color(
-                                            theme.colors.green.text.to_reference_text_color(),
-                                        )
-                                        .build(),
-                                )
-                                .child(
-                                    Text::new(format!("−{}", edits.removed))
-                                        .gpui_source_color(
-                                            theme.colors.red.text.to_reference_text_color(),
-                                        )
-                                        .build(),
-                                );
-                        }
-                    } else {
-                        content = content.child(
-                            UiBox::new()
-                                .clip(true)
-                                .style(
-                                    Style::new()
-                                        .min_width(Length::Px(0.0))
-                                        .max_width(Length::Px(150.0)),
-                                )
-                                .child(text(theme, value.unwrap_or_else(|| "—".into())))
-                                .build(),
-                        );
-                    }
-                }
+                Entry::Fact(label) => fact_row(&theme, label, &values, summary.edits.as_ref()),
                 Entry::Agent(index) => {
                     let agent = &summary.agents[*index];
-                    let callback = Rc::clone(&row_action);
-                    let index = *index;
-                    let agent_id = agent.id.clone();
-                    let agent_thread = agent.thread.clone();
-                    let description = match &agent.description {
-                        TextContent::Inline(value) => {
-                            value.lines().next().unwrap_or_default().to_owned()
-                        }
-                        TextContent::Stored(_) => "Stored description. Open agent to read.".into(),
-                    };
-                    let color = match agent.status {
-                        Status::Running | Status::AwaitingUser => theme.colors.text,
-                        Status::Done => theme.colors.unread,
-                        Status::Failed => theme.colors.red.solid,
-                        Status::Declined | Status::Cancelled => theme.colors.text_muted,
-                    };
-                    let mut dot_style = Style::new().gpui_background(
-                        aqua_core::GpuiBackground::Solid(color.to_reference_paint()),
-                    );
-                    if agent.status == Status::Running && !reduced_motion {
-                        let start_ms = *pulse_starts
+                    let pulse = (agent.status == Status::Running && !reduced_motion).then(|| {
+                        *pulse_starts
                             .borrow_mut()
-                            .entry(index)
-                            .or_insert_with(editor_ui::clock::pulse_ms);
-                        dot_style = dot_style.gpui_quad_pulse(aqua_core::scene::GpuiQuadPulse {
-                            start_ms,
-                            period_ms: 1_600,
-                            min_opacity: 0.4,
-                        });
-                    }
-                    let dot = UiBox::new()
-                        .width(6.0)
-                        .height(6.0)
-                        .radius(3.0)
-                        .style(dot_style)
-                        .build();
-                    let icon = agent.engine.map_or(AssetId::TABLER_BOT_ID, |engine| {
-                        editor_ui::engine::engine_icon(&theme, engine)
+                            .entry(*index)
+                            .or_insert_with(editor_ui::clock::pulse_ms)
                     });
-                    let inner = UiBox::new()
-                        .width(Length::Pct(100.0))
-                        .gap(8.0)
-                        .style(Style::new().align(aqua_ui::AlignItems::CENTER))
-                        .child(source_asset_glyph(
-                            icon,
-                            16.0,
-                            theme.colors.text_muted.to_reference_paint(),
-                        ))
-                        .child(text(theme, agent.label.clone()))
-                        .child(
-                            UiBox::new()
-                                .clip(true)
-                                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                                .child(
-                                    Text::new(description)
-                                        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                                        .style(
-                                            Style::new()
-                                                .min_width(Length::Px(0.0))
-                                                .flex_shrink(1.0),
-                                        )
-                                        .gpui_source_color(
-                                            theme.colors.text_muted.to_reference_text_color(),
-                                        )
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .child(
-                            UiBox::new()
-                                .width(16.0)
-                                .height(16.0)
-                                .style(
-                                    Style::new()
-                                        .align(aqua_ui::AlignItems::CENTER)
-                                        .justify(aqua_ui::JustifyContent::CENTER),
-                                )
-                                .child(dot)
-                                .build(),
-                        )
-                        .build();
-                    content = content.child(
-                        UiButton::new()
-                            .width(Length::Pct(100.0))
-                            .on_activate(move || {
-                                callback(InspectorAction::OpenAgent {
-                                    id: agent_id.clone(),
-                                    thread: agent_thread.clone(),
-                                })
-                            })
-                            .child(inner)
-                            .build()
-                            .role(Role::Button)
-                            .cursor(aqua_core::CursorIcon::Pointer)
-                            .hover_style(row_hover(theme))
-                            .aria_label(agent.label.clone())
-                            .with_key(format!("inspector-agent-{}", agent.id))
-                            .tooltip(0.5, {
-                                let card = cards[index].clone();
-                                move || render_agent_card(&card, theme)
-                            }),
-                    );
+                    agent_row(
+                        theme,
+                        agent,
+                        cards[*index].clone(),
+                        pulse,
+                        Rc::clone(&row_action),
+                    )
                 }
                 Entry::PlanCollection => {
                     let callback = Rc::clone(&row_action);
-                    content = content.child(
-                        Button::text(
-                            "inspector-checklist",
-                            theme,
-                            format!("Read {} steps", summary.plan.len()),
-                        )
-                        .variant(editor_ui::button::ButtonVariant::Ghost)
-                        .on_activate(move |_| callback(InspectorAction::OpenPlan))
-                        .build(),
-                    );
+                    Button::text(
+                        "inspector-checklist",
+                        theme,
+                        ButtonTone::Quiet,
+                        format!("Read {} steps", summary.plan.len()),
+                    )
+                    .within(LIST)
+                    .on_activate(move |_| callback(InspectorAction::OpenPlan))
+                    .build()
                 }
-                Entry::Plan(index) => {
-                    if let Collection::Inline(steps) = &summary.plan {
-                        if let Some(step) = steps.get(*index) {
-                            match &step.text {
-                                TextContent::Inline(value) => {
-                                    let resolved = matches!(
-                                        step.status,
-                                        StepStatus::Done | StepStatus::Cancelled
-                                    );
-                                    let font = TextStyle {
-                                        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                                        size_px: theme.typography.control_text,
-                                        strikethrough: resolved,
-                                        ..TextStyle::default()
-                                    };
-                                    content = content.child(
-                                        Text::new(value.clone())
-                                            .overflow(
-                                                aqua_text::overflow::OverflowMode::EndEllipsis,
-                                            )
-                                            .style(
-                                                Style::new()
-                                                    .min_width(Length::Px(0.0))
-                                                    .flex_shrink(1.0),
-                                            )
-                                            .text_style(font)
-                                            .gpui_source_color(if resolved {
-                                                theme.colors.text_muted.to_reference_text_color()
-                                            } else {
-                                                theme.colors.text.to_reference_text_color()
-                                            })
-                                            .build(),
-                                    );
-                                }
-                                TextContent::Stored(source) => {
-                                    let source = source.clone();
-                                    let status = match step.status {
-                                        StepStatus::Pending => "○",
-                                        StepStatus::InProgress => "●",
-                                        StepStatus::Done => "✓",
-                                        StepStatus::Cancelled => "−",
-                                    };
-                                    let callback = Rc::clone(&row_action);
-                                    let index = *index;
-                                    content = content.child(
-                                        Button::text(
-                                            format!("inspector-plan-{index}"),
-                                            theme,
-                                            format!("{status} Read step"),
-                                        )
-                                        .variant(editor_ui::button::ButtonVariant::Ghost)
-                                        .on_activate(move |_| {
-                                            callback(InspectorAction::OpenStep(source.clone()))
-                                        })
-                                        .build(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                Entry::Terminal(index) => {
-                    let terminal = &summary.terminals[*index];
-                    let label = match &terminal.command {
-                        TextContent::Inline(value) => value
-                            .lines()
-                            .find(|line| !line.trim().is_empty())
-                            .unwrap_or("Shell")
-                            .to_owned(),
-                        TextContent::Stored(_) => "Stored shell command".into(),
-                    };
-                    let callback = Rc::clone(&row_action);
-                    let item = terminal.id.clone();
-                    let icon = if terminal.watch {
-                        AssetId::TABLER_EYE
-                    } else {
-                        AssetId::TABLER_TERMINAL_2
-                    };
-                    let font = TextStyle {
-                        families: vec![FontFamily::Named(theme.typography.mono.family.to_owned())],
-                        size_px: theme.typography.label_text,
-                        weight: FontWeight::NORMAL,
-                        ..TextStyle::default()
-                    };
-                    content = content.child(
-                        UiButton::new()
-                            .width(Length::Pct(100.0))
-                            .gap(8.0)
-                            .on_activate(move || {
-                                callback(InspectorAction::OpenTerminal(item.clone()))
-                            })
-                            .child(glyph(theme, icon))
-                            .child(
-                                Text::new(label.clone())
-                                    .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                                    .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
-                                    .text_style(font)
-                                    .gpui_source_color(theme.colors.text.to_reference_text_color())
-                                    .build(),
-                            )
-                            .build()
-                            .role(Role::Button)
-                            .cursor(aqua_core::CursorIcon::Pointer)
-                            .hover_style(row_hover(theme))
-                            .aria_label(label),
-                    );
-                }
+                Entry::Plan(index) => match &summary.plan {
+                    Collection::Inline(steps) => steps.get(*index).map_or_else(
+                        || static_row(Vec::new()),
+                        |step| plan_row(theme, *index, step, Rc::clone(&row_action)),
+                    ),
+                    Collection::Stored(_) => static_row(Vec::new()),
+                },
+                Entry::Terminal(index) => terminal_row(
+                    theme,
+                    &summary.terminals[*index],
+                    Rc::clone(&row_action),
+                ),
                 Entry::Workflow(index) => {
                     let workflow = &summary.workflows[*index];
-                    content = content
-                        .child(glyph(theme, AssetId::TABLER_SITEMAP))
-                        .child(text(
-                            theme,
+                    static_row(vec![
+                        muted_glyph(&theme, AssetId::TABLER_SITEMAP),
+                        fit(TextRole::Label.text(
+                            &theme,
                             workflow.name.clone().unwrap_or_else(|| "Workflow".into()),
-                        ));
+                        )),
+                    ])
                 }
-            }
+            };
             let closes = rows
                 .get(index + 1)
                 .is_none_or(|entry| matches!(entry, Entry::Heading(_)));
-            let mut wrapper =
-                UiBox::new()
+            match closes {
+                true => UiBox::new()
+                    .layout("column")
                     .width(Length::Pct(100.0))
-                    .style(Style::new().padding_insets(Insets {
-                        left: 10.0,
-                        right: 10.0,
-                        top: 0.0,
-                        bottom: if closes { 10.0 } else { 0.0 },
-                    }));
-            if closes {
-                wrapper = wrapper.style(Style::new().border_edges(
-                    Insets {
-                        bottom: 1.0,
-                        ..Insets::default()
-                    },
-                    theme.colors.line.to_paint(),
-                ));
+                    .child(content)
+                    .child(Divider::Rule.build(&theme, bleed))
+                    .build(),
+                false => content,
             }
-            wrapper.child(content.build()).build()
         })
         .virtualize()
-        .style(Style::new().flex_grow(1.0).min_height(Length::Px(0.0)))
+        .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0)))
         .build();
     root = root.child(list);
     for panel in [source, plan].into_iter().flatten() {
-        root = root.child(
-            UiBox::new()
-                .width(Length::Pct(100.0))
-                .style(
-                    Style::new()
-                        .padding_insets(Insets {
-                            left: 10.0,
-                            right: 10.0,
-                            top: 10.0,
-                            bottom: 10.0,
-                        })
-                        .border_edges(
-                            Insets {
-                                bottom: 1.0,
-                                ..Insets::default()
-                            },
-                            theme.colors.line.to_paint(),
-                        ),
-                )
-                .child(panel)
-                .build(),
-        );
+        root = root
+            .child(
+                UiBox::new()
+                    .width(Length::Pct(100.0))
+                    .padded(ROW.pad().x)
+                    .child(panel)
+                    .build(),
+            )
+            .child(Divider::Rule.build(&theme, bleed));
     }
     Ok(root.build())
 }
