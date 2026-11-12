@@ -190,7 +190,7 @@ impl Slider {
         };
         let mut track = Canvas::new()
             .style(layout.clone())
-            .radius(6.0)
+            .radius(super::kit::Radius::Field.px())
             .border((1.0, PaintColor::TRANSPARENT))
             .on_paint(move |bounds| {
                 let fraction = state.borrow().fraction();
