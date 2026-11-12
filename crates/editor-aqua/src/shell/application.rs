@@ -1304,39 +1304,28 @@ fn fit_launch_to_display(ctx: &mut AppCtx<'_>, id: AquaWindowId) {
 }
 
 fn failure_card(message: &str, theme: crate::ui::theme::ArtisanTheme) -> Element {
-    use crate::ui::theme::{RadiusStep, RadiusTokens};
-    use aqua_text::{FontFamily, FontWeight, TextStyle};
-    use aqua_ui::element::{Box as UiBox, Text};
+    use crate::ui::kit::{Space, Spaced, Surface, TextRole, Tone, pane::sheet};
+    use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
-    let style = |size: f32, line: f32, weight: FontWeight| TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: size,
-        line_height_px: line,
-        weight,
-        ..TextStyle::default()
-    };
-    let title = Text::new("Something went wrong drawing this view")
-        .text_style(style(theme.typography.control_text, 20.0, FontWeight(600)))
-        .gpui_source_color(theme.colors.text.to_reference_text_color())
-        .build();
-    let detail = Text::new(message.to_owned())
-        .text_style(style(theme.typography.label_text, 19.0, FontWeight::NORMAL))
-        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-        .build();
-    let card = UiBox::new()
+    const WIDTH: f32 = 480.0;
+    let body = UiBox::new()
         .layout("column")
-        .gap(8.0)
-        .padding(20.0)
-        .width(480.0)
-        .radius(RadiusTokens::value(RadiusStep::Xl))
-        .style(
-            Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                theme.colors.banner_error.bg.to_reference_paint(),
-            )),
+        .spaced(Space::S8)
+        .child(
+            TextRole::Title
+                .text(&theme, "Something went wrong drawing this view")
+                .build(),
         )
-        .child(title)
-        .child(detail)
+        .child(
+            TextRole::Caption
+                .text(&theme, message.to_owned())
+                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                .build(),
+        )
         .build();
+    let card = Surface::Callout(Tone::Danger)
+        .build(&theme, vec![body])
+        .style(Style::new().width(Length::Px(WIDTH)));
     UiBox::new()
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
@@ -1344,11 +1333,9 @@ fn failure_card(message: &str, theme: crate::ui::theme::ArtisanTheme) -> Element
         .style(
             Style::new()
                 .align(aqua_ui::AlignItems::CENTER)
-                .justify(aqua_ui::JustifyContent::CENTER)
-                .gpui_background(aqua_core::GpuiBackground::Solid(
-                    theme.colors.background.to_reference_paint(),
-                )),
+                .justify(aqua_ui::JustifyContent::CENTER),
         )
+        .style(sheet(&theme))
         .child(card)
         .build()
 }

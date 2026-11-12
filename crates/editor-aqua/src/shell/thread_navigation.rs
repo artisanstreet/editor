@@ -5,11 +5,11 @@ use std::{
 };
 
 use aqua_core::Point;
-use aqua_text::{FontFamily, FontWeight, TextStyle, overflow::OverflowMode};
+use aqua_text::overflow::OverflowMode;
 use aqua_ui::{
     AlignItems, JustifyContent,
     collection_runtime::CollectionViewport,
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::{Length, Style},
 };
 use artisan_api::{ItemId, OutlineEntry, Seq};
@@ -23,7 +23,10 @@ use crate::{
         },
     },
     core::{Core, HostInstance},
-    ui::theme::ArtisanTheme,
+    ui::{
+        kit::{Finish, IconButton, IconButtonSize, Space, Spaced, Surface, TextRole},
+        theme::ArtisanTheme,
+    },
 };
 
 pub fn viewport_moves_navigation(
@@ -101,20 +104,23 @@ pub fn jump_to_latest(
     if !latest_visible(conversation, core, composer_present) {
         return None;
     }
-    let button = crate::ui::button::Button::icon(
+    let size = IconButtonSize::Md;
+    let button = IconButton::new(
         "jump-latest",
         theme,
         editor_assets::AssetId::TABLER_CHEVRON_DOWN,
         "Jump to latest",
+        size,
+        Finish::Glass,
     )
-    .variant(crate::ui::button::ButtonVariant::Ghost)
+    .nested(Surface::Pill(size.edge()).radius_px(), 0.0)
     .on_activate(move |_| dispatch(crate::conversation::adapter::Action::JumpLatest))
     .build();
     Some(
         UiBox::new()
             .width(Length::Pct(100.0))
             .style(Style::new().justify(JustifyContent::CENTER))
-            .child(crate::ui::glass::glass_handle(&theme, button))
+            .child(button)
             .build(),
     )
 }
@@ -327,6 +333,7 @@ impl ThreadNavigation {
             (state.hovered, state.opened, state.epoch)
         };
         let mut region = UiBox::new()
+            .spaced(Space::S4)
             .style(Style::new().align(AlignItems::CENTER))
             .child(rail);
         if hovered {
@@ -353,23 +360,14 @@ impl ThreadNavigation {
             });
             let label: Rc<dyn Fn(&str, bool, ArtisanTheme) -> Element> =
                 Rc::new(|label, active, theme| {
-                    Text::new(label.to_owned())
-                        .text_style(TextStyle {
-                            families: vec![FontFamily::Named(
-                                theme.typography.sans.family.to_owned(),
-                            )],
-                            size_px: theme.typography.control_text,
-                            weight: if active {
-                                FontWeight::MEDIUM
-                            } else {
-                                FontWeight::NORMAL
-                            },
-                            ..TextStyle::default()
-                        })
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
+                    let role = match active {
+                        true => TextRole::LabelStrong,
+                        false => TextRole::Label,
+                    };
+                    role.text(&theme, label.to_owned())
                         .overflow(OverflowMode::EndEllipsis)
                         .wrap(false)
-                        .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
+                        .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
                         .build()
                 });
             let menu = navigator::menu(
@@ -383,15 +381,7 @@ impl ThreadNavigation {
                 row_hover,
                 dispatch,
             );
-            region = region.child(
-                UiBox::new()
-                    .style(Style::new().padding_insets(aqua_core::Insets {
-                        left: 4.0,
-                        ..aqua_core::Insets::default()
-                    }))
-                    .child(menu)
-                    .build(),
-            );
+            region = region.child(menu);
         }
         let interaction = Rc::downgrade(&self.interaction);
         let navigator = Rc::downgrade(&self.navigator);

@@ -1,23 +1,26 @@
 use std::{ops::Range, rc::Rc, sync::Arc};
 
-use aqua_text::{
-    FontFamily, FontWeight, TextStyle,
-    document::{
-        SelectionDocumentId, SelectionSource, SelectionSourceError, SelectionSourceId, SourceSlice,
-    },
+use aqua_text::document::{
+    SelectionDocumentId, SelectionSource, SelectionSourceError, SelectionSourceId, SourceSlice,
 };
 use aqua_ui::{
     collection::List,
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::{Length, Style},
 };
 
 use super::{PreviewText, ResourcePreview};
 use crate::ui::{
-    button::{Button, ButtonVariant},
     dialog::Dialog,
+    kit::{Button, ButtonTone, Hover, Space, Spaced, Surface, TextRole},
     theme::ArtisanTheme,
 };
+
+const WELL: Surface = Surface::Inset;
+const LINE: f32 = TextRole::Code.spec().line;
+const GUTTER: f32 = 64.0;
+const CHROME: f32 = 180.0;
+const MIN_HEIGHT: f32 = 120.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
@@ -126,16 +129,20 @@ impl ViewState {
         let generation = self.generation;
         let path = preview.path.clone();
         let copy_path = Rc::clone(&emit);
-        let mut body = UiBox::new().layout("column").gap(12.0).child(
-            Button::text("resource-copy-path", theme, "Copy path")
-                .variant(ButtonVariant::Outline)
-                .on_activate(move |_| {
-                    copy_path(Action::CopyPath {
-                        generation,
-                        text: path.clone(),
-                    })
+        let mut body = UiBox::new().layout("column").spaced(Space::S12).child(
+            Button::text(
+                "resource-copy-path",
+                theme,
+                ButtonTone::Neutral,
+                "Copy path",
+            )
+            .on_activate(move |_| {
+                copy_path(Action::CopyPath {
+                    generation,
+                    text: path.clone(),
                 })
-                .build(),
+            })
+            .build(),
         );
         match &preview.content {
             None => body = body.child(body_text(&theme, "Reading source…")),
@@ -148,15 +155,19 @@ impl ViewState {
                 let copy_file = Rc::clone(&emit);
                 body = body
                     .child(
-                        Button::text("resource-copy-text", theme, "Copy file")
-                            .variant(ButtonVariant::Outline)
-                            .on_activate(move |_| {
-                                copy_file(Action::CopyFile {
-                                    generation,
-                                    text: Arc::clone(&full),
-                                })
+                        Button::text(
+                            "resource-copy-text",
+                            theme,
+                            ButtonTone::Neutral,
+                            "Copy file",
+                        )
+                        .on_activate(move |_| {
+                            copy_file(Action::CopyFile {
+                                generation,
+                                text: Arc::clone(&full),
                             })
-                            .build(),
+                        })
+                        .build(),
                     )
                     .child(body_text(&theme, &content.note()))
                     .child(lines_view(
@@ -208,8 +219,8 @@ fn prepare_text(content: &PreviewText, target_line: usize) -> Prepared {
 }
 
 fn body_text(theme: &ArtisanTheme, text: &str) -> Element {
-    Text::new(text.to_owned())
-        .gpui_source_color(theme.colors.text.to_reference_text_color())
+    TextRole::Label
+        .text(theme, text.to_owned())
         .wrap(true)
         .build()
 }
@@ -223,7 +234,7 @@ fn lines_view(
 ) -> Element {
     let theme = *theme;
     let count = prepared.ranges.len();
-    List::new()
+    let lines = List::new()
         .items(0..count)
         .key(|index| *index)
         .row(move |index| {
@@ -231,68 +242,56 @@ fn lines_view(
             let range = &prepared.ranges[*index];
             let text = &prepared.text[range.clone()];
             let visible = &text[..text.floor_char_boundary(text.len().min(16 * 1024))];
-            let style = TextStyle {
-                families: vec![FontFamily::Named(theme.typography.mono.family.to_owned())],
-                size_px: 13.0,
-                line_height_px: 24.0,
-                weight: FontWeight::NORMAL,
-                letter_spacing_em: Some(0.0),
-                ..TextStyle::default()
-            };
-            let color = if line == prepared.target_line {
-                theme.colors.selected
-            } else {
-                theme.colors.surface
-            };
-            UiBox::new()
+            let target = line == prepared.target_line;
+            let mut row = UiBox::new()
                 .width(Length::Pct(100.0))
-                .height(24.0)
-                .gap(12.0)
-                .style(
-                    Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                        color.to_reference_paint(),
-                    )),
-                )
-                .child(
-                    UiBox::new()
-                        .width(64.0)
-                        .style(Style::new().flex_shrink(0.0))
-                        .child(
-                            Text::new((line + 1).to_string())
-                                .text_style(style.clone())
-                                .gpui_source_color(
-                                    theme.colors.text_muted.to_reference_text_color(),
-                                )
-                                .build(),
-                        )
-                        .build(),
-                )
-                .child(
-                    Text::new(visible.to_owned())
-                        .text_style(style)
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
-                        .selection_source_in(
-                            document,
-                            SourceSlice {
-                                source,
-                                range: range.start..range.start + visible.len(),
-                            },
-                        )
-                        .wrap(false)
-                        .build(),
-                )
-                .build()
+                .height(LINE)
+                .spaced(Space::S12);
+            if target {
+                row = row
+                    .style(Hover::Neutral.style(&theme))
+                    .style(crate::ui::kit::Radius::style(
+                        WELL.child_radius().unwrap_or(crate::ui::kit::Radius::Row),
+                    ));
+            }
+            row.child(
+                UiBox::new()
+                    .width(GUTTER)
+                    .style(Style::new().flex_shrink(0.0))
+                    .child(
+                        TextRole::Code
+                            .text(&theme, (line + 1).to_string())
+                            .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                            .build(),
+                    )
+                    .build(),
+            )
+            .child(
+                TextRole::Code
+                    .text(&theme, visible.to_owned())
+                    .selection_source_in(
+                        document,
+                        SourceSlice {
+                            source,
+                            range: range.start..range.start + visible.len(),
+                        },
+                    )
+                    .wrap(false)
+                    .build(),
+            )
+            .build()
         })
         .virtualize()
         .measured_uniform_rows()
-        .estimated_row_height(Length::Px(24.0))
+        .estimated_row_height(Length::Px(LINE))
         .style(
             Style::new()
                 .width(Length::Pct(100.0))
-                .height(Length::Px((viewport_height - 180.0).max(120.0))),
+                .height(Length::Px((viewport_height - CHROME).max(MIN_HEIGHT))),
         )
         .build()
-        .with_key("resource-lines")
+        .with_key("resource-lines");
+    WELL.build(&theme, vec![lines])
 }
 
 #[cfg(test)]

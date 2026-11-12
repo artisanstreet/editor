@@ -6,7 +6,7 @@ use std::{
 
 use aqua_core::{InputEvent, Key, Modifiers, NamedKey};
 use aqua_ui::{
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
 };
 
@@ -14,8 +14,8 @@ use super::Palette;
 use crate::{
     core::Screen,
     ui::{
-        action_row::ActionRow,
         dialog::{Dialog, DialogDismissReason},
+        kit::{Density, Row, RowItem, Space, Spaced, Surface, TextRole},
         text::{
             Editor, Mode,
             mount::{EditorController, EditorEvent},
@@ -188,23 +188,16 @@ impl PaletteView {
             false,
             false,
         );
-        let mut content = UiBox::new().layout("column").gap(4.0).child(query);
+        let mut content = UiBox::new().layout("column").spaced(Space::S4).child(query);
         if let Some(error) = &palette.search_error {
-            content = content.child(
-                Text::new(error.clone())
-                    .font_size(12.0)
-                    .gpui_source_color(theme.colors.text.to_reference_text_color())
-                    .build(),
-            );
+            content = content.child(TextRole::Caption.text(theme, error.clone()).build());
         }
         for (index, entry) in palette.entries.iter().enumerate() {
             let screen = entry.screen.clone();
             let callback = guarded(self.session, &self.active, emit.clone());
             content = content.child(
-                ActionRow::new(index, *theme, entry.label.clone())
-                    .secondary(entry.detail.clone())
-                    .selected(index == palette.highlighted)
-                    .on_activate(move |_| callback(Action::Select(screen.clone())))
+                row(theme, index, entry, index == palette.highlighted)
+                    .on_activate(move || callback(Action::Select(screen.clone())))
                     .build(),
             );
         }
@@ -253,6 +246,27 @@ impl Drop for PaletteView {
     fn drop(&mut self) {
         self.close();
     }
+}
+
+fn row(theme: &ArtisanTheme, index: usize, entry: &super::Entry, selected: bool) -> RowItem {
+    let row = match entry.detail.is_empty() {
+        true => RowItem::new(
+            index,
+            *theme,
+            Row::ListItem(Density::Regular),
+            Surface::Dialog,
+            entry.label.clone(),
+        ),
+        false => RowItem::new(
+            index,
+            *theme,
+            Row::ListItem(Density::Tall),
+            Surface::Dialog,
+            entry.label.clone(),
+        )
+        .detail(entry.detail.clone()),
+    };
+    row.selected(selected)
 }
 
 fn guarded(

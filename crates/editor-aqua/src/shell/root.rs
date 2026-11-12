@@ -815,15 +815,18 @@ impl RootViews {
             {
                 let actions = Rc::clone(&self.conversation_actions);
                 let scope = scope.clone();
-                let retry =
-                    crate::ui::button::Button::text("retry-thread-controls", theme, "Retry")
-                        .variant(crate::ui::button::ButtonVariant::Ghost)
-                        .on_activate(move |_| {
-                            actions
-                                .borrow_mut()
-                                .push_back(ConversationAction::RetryControls(scope.clone()))
-                        })
-                        .build();
+                let retry = crate::ui::kit::Button::text(
+                    "retry-thread-controls",
+                    theme,
+                    crate::ui::kit::ButtonTone::Neutral,
+                    "Retry",
+                )
+                .on_activate(move |_| {
+                    actions
+                        .borrow_mut()
+                        .push_back(ConversationAction::RetryControls(scope.clone()))
+                })
+                .build();
                 controls.push(
                     crate::ui::page::notice(
                         &theme,
@@ -837,10 +840,12 @@ impl RootViews {
         let above_composer = if controls.is_empty() {
             None
         } else {
-            let mut column = aqua_ui::element::Box::new()
-                .layout("column")
-                .width(aqua_ui::style::Length::Pct(100.0))
-                .gap(8.0);
+            let mut column = crate::ui::kit::Spaced::spaced(
+                aqua_ui::element::Box::new()
+                    .layout("column")
+                    .width(aqua_ui::style::Length::Pct(100.0)),
+                crate::ui::kit::Space::S8,
+            );
             for control in controls {
                 column = column.child(control);
             }
@@ -2855,14 +2860,14 @@ impl SectionViews for RootViews {
                         .layout("row")
                         .styles([aqua::Aqua::Style()
                             .flex_grow(1.0)
-                            .min_width(aqua::px(0.0))
-                            .min_height(aqua::px(0.0))])
+                            .min_width(aqua::pct(0.0))
+                            .min_height(aqua::pct(0.0))])
                         .child(
                             aqua::Aqua::Box()
                                 .layout("column")
                                 .styles([aqua::Aqua::Style()
                                     .flex_grow(1.0)
-                                    .min_width(aqua::px(0.0))])
+                                    .min_width(aqua::pct(0.0))])
                                 .child(center)
                                 .build(),
                         )
