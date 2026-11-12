@@ -34,6 +34,26 @@ fn headings_align_with_menu_item_text() {
 }
 
 #[test]
+fn list_headings_align_with_list_item_text() {
+    for density in [Density::Regular, Density::Tall] {
+        assert_eq!(
+            Row::ListHeading.text_inset(Surface::Inset),
+            Row::ListItem(density).text_inset(Surface::Inset),
+            "a heading in a list lines up with the rows below it"
+        );
+    }
+    assert_eq!(
+        Row::ListHeading.height(),
+        Row::Heading.height(),
+        "list headings are as tall as menu headings"
+    );
+    assert!(
+        !Row::ListHeading.interactive(),
+        "list headings are labels, not targets"
+    );
+}
+
+#[test]
 fn heights_are_lines_plus_padding() {
     assert_eq!(
         Row::ListItem(Density::Regular).height(),

@@ -21,6 +21,7 @@ pub enum Row {
     MenuItem,
     ListItem(Density),
     Heading,
+    ListHeading,
     FormRow,
     KeyRow,
 }
@@ -39,6 +40,7 @@ impl Row {
             Self::ListItem(Density::Regular | Density::Tall) => (Space::S8, Space::S8),
             Self::ListItem(Density::Dense) => (Space::S4, Space::S4),
             Self::Heading => (Space::S12, Space::S6),
+            Self::ListHeading => (Space::S8, Space::S6),
             Self::FormRow => (Space::S12, Space::S12),
         };
         Pad { x, y }
@@ -47,7 +49,7 @@ impl Row {
     #[must_use]
     pub const fn title(self) -> TextRole {
         match self {
-            Self::Heading => TextRole::Caption,
+            Self::Heading | Self::ListHeading => TextRole::Caption,
             _ => TextRole::Label,
         }
     }
@@ -64,7 +66,7 @@ impl Row {
 
     #[must_use]
     pub const fn interactive(self) -> bool {
-        !matches!(self, Self::Heading | Self::FormRow)
+        !matches!(self, Self::Heading | Self::ListHeading | Self::FormRow)
     }
 
     #[must_use]
@@ -275,7 +277,7 @@ impl RowItem {
 
     fn ink(&self) -> Oklch {
         match (self.row, self.hover) {
-            (Row::Heading, _) => self.theme.colors.text_muted,
+            (Row::Heading | Row::ListHeading, _) => self.theme.colors.text_muted,
             (_, Hover::Destructive) => self.theme.colors.destructive_text,
             (_, Hover::Neutral) => self.theme.colors.text,
         }
