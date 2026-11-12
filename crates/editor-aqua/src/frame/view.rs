@@ -4,7 +4,7 @@ use crate::frame::wordmark::LINE_HEIGHTS;
 use crate::shell::layout::{CONTROL_INK_INSET, CONTROL_INSET_X, TITLEBAR_HEIGHT};
 use crate::shell::titlebar::{LEAD, WORDMARK};
 use crate::ui::chrome::account::{AVATAR_INSET, TRIGGER_HEIGHT};
-use crate::ui::kit::{HitArea, Space};
+use crate::ui::kit::{HitArea, Space, TextRole};
 use crate::ui::theme::ArtisanTheme;
 use aqua_core::Role;
 use aqua_ui::element::{Box as UiBox, Element, Text};
@@ -61,7 +61,7 @@ pub fn body(
         .child(
             UiBox::new()
                 .layout("column")
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+                .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
                 .child(crate::frame::seam::surface(*theme, seam, reduced))
                 .child(titlebar)
                 .child(
@@ -78,8 +78,8 @@ pub fn body(
 fn grow() -> Style {
     Style::new()
         .flex_grow(1.0)
-        .min_width(Length::Px(0.0))
-        .min_height(Length::Px(0.0))
+        .min_width(Length::Pct(0.0))
+        .min_height(Length::Pct(0.0))
 }
 
 fn placed(child: Element, left: f32, top: f32, right: f32, bottom: f32) -> Element {
@@ -197,18 +197,15 @@ fn wordmark(theme: &ArtisanTheme, sidebar: &Sidebar) -> Element {
 }
 
 #[expect(
-    clippy::disallowed_types,
     clippy::disallowed_methods,
     reason = "the wordmark is a logotype set in its own face, not UI text"
 )]
 fn wordmark_row(theme: &ArtisanTheme, row: &[Option<char>], line_height: f32) -> Element {
-    let style = aqua_text::TextStyle {
-        families: vec![aqua_text::FontFamily::Named(WORDMARK_FAMILY.to_owned())],
-        size_px: WORDMARK_SIZE,
-        line_height_px: line_height,
-        letter_spacing_em: Some(WORDMARK_TRACKING),
-        ..aqua_text::TextStyle::default()
-    };
+    let mut style = TextRole::Heading.style(theme);
+    style.families = vec![aqua_text::FontFamily::Named(WORDMARK_FAMILY.to_owned())];
+    style.size_px = WORDMARK_SIZE;
+    style.line_height_px = line_height;
+    style.letter_spacing_em = Some(WORDMARK_TRACKING);
     let color = theme.colors.text.to_reference_text_color();
     UiBox::new()
         .layout("row")

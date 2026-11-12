@@ -65,7 +65,7 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
                 .inherit(theme)
                 .gpui_source_text_color(color.to_reference_text_color())
                 .flex_grow(1.0)
-                .min_width(Length::Px(0.0))
+                .min_width(Length::Pct(0.0))
                 .align(AlignItems::CENTER),
         )
         .children(
@@ -149,7 +149,7 @@ fn location(
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
-                .min_width(Length::Px(0.0)),
+                .min_width(Length::Pct(0.0)),
         )
         .child(tab.mark.view(theme.colors.text_muted))
         .child(name)
@@ -170,7 +170,7 @@ fn frame(text: Text, fill: bool) -> Element {
             Style::new()
                 .flex_grow(if fill { 1.0 } else { 0.0 })
                 .flex_shrink(1.0)
-                .min_width(Length::Px(0.0))
+                .min_width(Length::Pct(0.0))
                 .clip(true),
         )
         .child(text.wrap(false).overflow(OverflowMode::EndEllipsis).build())
@@ -186,7 +186,7 @@ fn title(words: &str, pulsing: bool) -> Element {
                 Style::new()
                     .flex_grow(1.0)
                     .flex_shrink(1.0)
-                    .min_width(Length::Px(0.0))
+                    .min_width(Length::Pct(0.0))
                     .gpui_quad_pulse(GpuiQuadPulse {
                         start_ms: 0,
                         period_ms: PULSE_MS,

@@ -5,7 +5,7 @@ use crate::sidebar::{
 };
 use crate::ui::kit::TextRole;
 use crate::ui::theme::ArtisanTheme;
-use aqua::{Aqua, px};
+use aqua::{Aqua, pct, px};
 use aqua_ui::element::Element;
 use std::rc::Rc;
 
@@ -64,8 +64,8 @@ pub fn view(
         .layout("column")
         .styles([Aqua::Style()
             .flex_grow(1.0)
-            .min_width(px(0.0))
-            .min_height(px(0.0))])
+            .min_width(pct(0.0))
+            .min_height(pct(0.0))])
         .children(list)
         .child(sidebar.threads_edges.band(
             "sidebar-threads-edge-top",
@@ -82,8 +82,8 @@ pub fn view(
         .layout("column")
         .styles([Aqua::Style()
             .flex_grow(1.0)
-            .min_width(px(0.0))
-            .min_height(px(0.0))])
+            .min_width(pct(0.0))
+            .min_height(pct(0.0))])
         .child(inbox);
     if !sidebar.lists.history.is_empty() {
         column = column.child(
@@ -114,7 +114,7 @@ pub fn view(
                 .layout("column")
                 .styles([Aqua::Style()
                     .height(px(history_height))
-                    .min_height(px(0.0))
+                    .min_height(pct(0.0))
                     .flex_shrink(0.0)
                     .clip(true)])
                 .children(history)
@@ -137,8 +137,8 @@ pub fn view(
         .layout("column")
         .styles([Aqua::Style()
             .flex_grow(1.0)
-            .min_width(px(0.0))
-            .min_height(px(0.0))])
+            .min_width(pct(0.0))
+            .min_height(pct(0.0))])
         .child(column.build().with_key("sidebar-threads-hover-surface"))
         .build()
         .with_key(view::ROOT_KEY)

@@ -257,7 +257,7 @@ fn body() -> Style {
     Style::new()
         .align(AlignItems::CENTER)
         .flex_grow(1.0)
-        .min_width(Length::Px(0.0))
+        .min_width(Length::Pct(0.0))
 }
 
 #[expect(
@@ -309,7 +309,7 @@ fn label(theme: &ArtisanTheme, words: &str, color: Oklch, span: Span) -> Element
                 .justify(justify)
                 .flex_grow(grow)
                 .flex_shrink(1.0)
-                .min_width(Length::Px(0.0))
+                .min_width(Length::Pct(0.0))
                 .clip(true),
         )
         .child(text)
