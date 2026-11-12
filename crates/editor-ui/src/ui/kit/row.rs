@@ -63,6 +63,24 @@ impl Row {
     }
 
     #[must_use]
+    pub const fn interactive(self) -> bool {
+        !matches!(self, Self::Heading | Self::FormRow)
+    }
+
+    #[must_use]
+    pub const fn wraps(self) -> bool {
+        matches!(self, Self::FormRow)
+    }
+
+    #[must_use]
+    pub const fn gap(self) -> Space {
+        match self {
+            Self::FormRow => Space::S16,
+            _ => Space::S8,
+        }
+    }
+
+    #[must_use]
     pub const fn height(self) -> Option<f32> {
         match self {
             Self::FormRow => None,
@@ -198,25 +216,27 @@ impl RowItem {
         self
     }
 
-    fn text(theme: &ArtisanTheme, words: String, role: TextRole, muted: bool) -> Element {
+    fn text(theme: &ArtisanTheme, words: String, role: TextRole, muted: bool, wraps: bool) -> Element {
         let color = if muted {
             theme.colors.text_muted
         } else {
             theme.colors.text
         };
-        Text::new(words)
+        let text = Text::new(words)
             .text_style(role.style(theme))
-            .overflow(OverflowMode::EndEllipsis)
-            .style(Style::new().min_width(Length::Px(0.0)).text_wrap(false))
-            .gpui_source_color(color.to_reference_text_color())
-            .build()
+            .gpui_source_color(color.to_reference_text_color());
+        match wraps {
+            true => text.wrap(true).build(),
+            false => text
+                .overflow(OverflowMode::EndEllipsis)
+                .style(Style::new().min_width(Length::Px(0.0)).text_wrap(false))
+                .build(),
+        }
     }
 
-    #[must_use]
-    pub fn build(self) -> Element {
+    fn style(&self) -> Style {
         let pad = self.row.pad();
-        let height = self.row.height();
-        let mut style = Style::new()
+        let style = Style::new()
             .width(Length::Pct(100.0))
             .align(AlignItems::CENTER)
             .padding_insets(Insets {
@@ -226,64 +246,97 @@ impl RowItem {
                 bottom: pad.y.px(),
             })
             .radius(Length::Px(self.radius));
-        if let Some(height) = height {
-            style = style.height(Length::Px(height));
+        match self.row.height() {
+            Some(height) => style.height(Length::Px(height)),
+            None => style,
         }
-        let mut button = Button::new().gap(Space::S8.px()).style(style);
-        let interactive = !matches!(self.row, Row::Heading | Row::FormRow);
-        if interactive {
-            button = match (self.lit, self.selected) {
-                (Some((lit, now)), _) => button.child(self.hover.layer(
-                    &self.theme,
-                    lit,
-                    now,
-                    height.unwrap_or_default(),
-                    self.radius,
-                )),
-                (None, true) => button.child(
-                    UiBox::new()
-                        .style(self.hover.style(&self.theme))
-                        .style(
-                            Style::new()
-                                .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                                .radius(Length::Px(self.radius)),
-                        )
-                        .build()
-                        .exclude_from_hit_testing(),
-                ),
-                (None, false) => button,
-            };
-        }
-        if let Some(leading) = self.leading {
-            let edge = IconSize::Md.px();
-            button = button.child(
-                UiBox::new()
-                    .width(edge)
-                    .height(edge)
-                    .style(Style::new().flex_shrink(0.0).align(AlignItems::CENTER))
-                    .child(leading)
-                    .build(),
-            );
-        }
+    }
+
+    fn leading_slot(leading: Element) -> Element {
+        let edge = IconSize::Md.px();
+        UiBox::new()
+            .width(edge)
+            .height(edge)
+            .style(Style::new().flex_shrink(0.0).align(AlignItems::CENTER))
+            .child(leading)
+            .build()
+    }
+
+    fn label(&self) -> Element {
+        let wraps = self.row.wraps();
         let title = Self::text(
             &self.theme,
             self.title.clone(),
             self.row.title(),
             self.row == Row::Heading,
+            wraps,
         );
-        let label = match self.detail.clone() {
+        let grow = Style::new().flex_grow(1.0).min_width(Length::Px(0.0));
+        match self.detail.clone() {
             Some(detail) => UiBox::new()
                 .layout("column")
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+                .style(grow)
                 .child(title)
-                .child(Self::text(&self.theme, detail, TextRole::Caption, true))
+                .child(Self::text(&self.theme, detail, TextRole::Caption, true, wraps))
                 .build(),
-            None => UiBox::new()
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                .child(title)
-                .build(),
+            None => UiBox::new().style(grow).child(title).build(),
+        }
+    }
+
+    fn build_static(mut self) -> Element {
+        let gap = self.row.gap().px();
+        let mut row = UiBox::new().gap(gap).style(self.style());
+        if let Some(leading) = self.leading.take() {
+            row = row.child(Self::leading_slot(leading));
+        }
+        row = row.child(self.label());
+        if self.disabled {
+            row = row.opacity(Opacity::Disabled.alpha());
+        }
+        if let Some(trailing) = self.trailing {
+            row = row.child(
+                UiBox::new()
+                    .style(Style::new().flex_shrink(0.0))
+                    .child(trailing)
+                    .build(),
+            );
+        }
+        let element = row.build().with_key(self.key).aria_label(self.title);
+        element.disabled(self.disabled)
+    }
+
+    #[must_use]
+    pub fn build(mut self) -> Element {
+        if !self.row.interactive() {
+            return self.build_static();
+        }
+        let height = self.row.height();
+        let mut button = Button::new().gap(self.row.gap().px()).style(self.style());
+        button = match (self.lit, self.selected) {
+            (Some((lit, now)), _) => button.child(self.hover.layer(
+                &self.theme,
+                lit,
+                now,
+                height.unwrap_or_default(),
+                self.radius,
+            )),
+            (None, true) => button.child(
+                UiBox::new()
+                    .style(self.hover.style(&self.theme))
+                    .style(
+                        Style::new()
+                            .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                            .radius(Length::Px(self.radius)),
+                    )
+                    .build()
+                    .exclude_from_hit_testing(),
+            ),
+            (None, false) => button,
         };
-        button = button.child(label);
+        if let Some(leading) = self.leading.take() {
+            button = button.child(Self::leading_slot(leading));
+        }
+        button = button.child(self.label());
         if let Some(trailing) = self.trailing {
             button = button.child(trailing);
         }
@@ -297,9 +350,6 @@ impl RowItem {
             .with_key(self.key)
             .aria_label(self.title)
             .disabled(self.disabled);
-        if !interactive {
-            return element.exclude_from_hit_testing();
-        }
         let element = element
             .role(self.role)
             .aria_selected(self.selected)
