@@ -1,4 +1,5 @@
 use super::{Heatmap, HeatmapData, Scale};
+use crate::ui::kit::Space;
 use crate::ui::rich::charts::scale::{f32_of, f32_of_count, f64_of, reading};
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::rich::kit::{diverging_color, sequential_color};
@@ -34,7 +35,7 @@ pub(crate) fn envelope(
     content: Element,
     text: EnvelopeTextFactory,
 ) -> Element {
-    use crate::ui::kit::{Space, Spaced, TextRole as Type};
+    use crate::ui::kit::{Spaced, TextRole as Type};
     let mut body = ui::Box::new().layout("column").spaced(Space::S12).style(
         Style::new()
             .width(Length::Pct(100.0))
@@ -375,7 +376,9 @@ impl Heatmap {
                 reading(self.reach, self.unit.as_deref()),
             ),
         };
-        let mut stops = ui::Box::new().layout("row").style(Style::new().gap(2.0));
+        let mut stops = ui::Box::new()
+            .layout("row")
+            .style(Style::new().gap(Space::S2.px()));
         for step in 0..count {
             let t = f32_of(f64_of(step) / f64_of(count - 1));
             let color = match self.scale {
@@ -398,7 +401,7 @@ impl Heatmap {
             .layout("row")
             .style(
                 Style::new()
-                    .gap(8.0)
+                    .gap(Space::S8.px())
                     .align(aqua_ui::AlignItems::CENTER)
                     .padding_insets(Insets {
                         left: 96.0,
@@ -425,7 +428,7 @@ impl Heatmap {
             .build();
         ui::Box::new()
             .layout("column")
-            .style(Style::new().width(Length::Pct(100.0)).gap(10.0))
+            .style(Style::new().width(Length::Pct(100.0)).gap(Space::S8.px()))
             .child(navigation)
             .child(ramp)
             .build()

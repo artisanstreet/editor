@@ -1,5 +1,8 @@
 use super::AudioBlock;
-use crate::ui::kit::TextRole;
+use crate::ui::kit::Space;
+use crate::ui::kit::{Corner, IconSize, TextRole};
+
+const PLAY: f32 = 28.0;
 use crate::ui::media::{
     audio::AudioAssets,
     source::{MediaFetcher, MediaSource, Parsed},
@@ -186,7 +189,7 @@ fn row() -> ui::Box {
             .min_width(Length::Px(0.0))
             .min_height(Length::Px(32.0))
             .align(aqua_ui::AlignItems::CENTER)
-            .gap(10.0),
+            .gap(Space::S8.px()),
     )
 }
 fn track_path(source: &MediaSource, fetcher: Option<&MediaFetcher>, id: &str) -> Option<PathBuf> {
@@ -233,7 +236,7 @@ impl AudioBlock {
             Style::new()
                 .width(Length::Pct(100.0))
                 .min_width(Length::Px(0.0))
-                .gap(4.0),
+                .gap(Space::S4.px()),
         );
         for (index, track) in self.tracks.iter().enumerate() {
             let row_id = format!("{id}-track-{index}");
@@ -312,15 +315,19 @@ impl AudioBlock {
             let button = ui::Box::new()
                 .style(
                     Style::new()
-                        .width(Length::Px(28.0))
-                        .height(Length::Px(28.0))
+                        .width(Length::Px(PLAY))
+                        .height(Length::Px(PLAY))
                         .flex_shrink(0.0)
                         .align(aqua_ui::AlignItems::CENTER)
                         .justify(aqua_ui::JustifyContent::CENTER)
                         .gpui_background(GpuiBackground::Solid(button_color.to_reference_paint())),
                 )
-                .radius(14.0)
-                .child(glyph(icon, 12.0, theme.colors.text.to_reference_paint()))
+                .radius(Corner::Full.resolve(PLAY))
+                .child(glyph(
+                    icon,
+                    IconSize::Sm.px(),
+                    theme.colors.text.to_reference_paint(),
+                ))
                 .build()
                 .with_key(format!("{row_id}-button"))
                 .cursor(aqua_core::CursorIcon::Pointer)

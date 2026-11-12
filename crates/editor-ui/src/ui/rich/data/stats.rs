@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::ui::kit::TextRole;
+use crate::ui::kit::{IconSize, Space, TextRole};
 use aqua_core::geometry::CornerRadii;
 use aqua_core::{DisplayItem, Insets};
 use aqua_ui::element::{Element, ui};
@@ -125,7 +125,7 @@ impl Stats {
             Style::new()
                 .width(Length::Pct(100.0))
                 .wrap(true)
-                .row_gap(16.0),
+                .row_gap(Space::S16.px()),
         );
         for (index, tile) in self.tiles.iter().enumerate() {
             let tone = tile.tone();
@@ -137,14 +137,14 @@ impl Stats {
             let edge = theme.colors.text.at(Opacity::Rule).to_reference_paint();
             let mut cell = ui::Canvas::new()
                 .layout("column")
-                .gap(2.0)
+                .gap(Space::S4.px())
                 .style(
                     Style::new()
                         .flex_grow(1.0)
                         .min_width(Length::Px(120.0))
                         .padding_insets(Insets {
-                            left: if index > 0 { 16.0 } else { 0.0 },
-                            right: 16.0,
+                            left: if index > 0 { Space::S16.px() } else { 0.0 },
+                            right: Space::S16.px(),
                             top: 0.0,
                             bottom: 0.0,
                         }),
@@ -181,16 +181,10 @@ impl Stats {
                     theme.colors.text_muted,
                 ));
             if tile.delta.is_some() || tile.sparkline.len() >= 2 {
-                let mut row = ui::Box::new().layout("row").gap(8.0).style(
-                    Style::new()
-                        .align(aqua_ui::AlignItems::CENTER)
-                        .padding_insets(Insets {
-                            left: 0.0,
-                            right: 0.0,
-                            top: 4.0,
-                            bottom: 0.0,
-                        }),
-                );
+                let mut row = ui::Box::new()
+                    .layout("row")
+                    .gap(Space::S8.px())
+                    .style(Style::new().align(aqua_ui::AlignItems::CENTER));
                 if let Some(delta) = &tile.delta {
                     let icon = match tile.trend() {
                         Some(Trend::Up) => AssetId::TABLER_CHEVRON_UP,
@@ -200,9 +194,9 @@ impl Stats {
                     row = row.child(
                         ui::Box::new()
                             .layout("row")
-                            .gap(2.0)
+                            .gap(Space::S2.px())
                             .style(Style::new().align(aqua_ui::AlignItems::CENTER))
-                            .child(glyph(icon, 12.0, color.to_reference_paint()))
+                            .child(glyph(icon, IconSize::Sm.px(), color.to_reference_paint()))
                             .child(text(theme, &delta.text(true), TextRole::Caption, color))
                             .build(),
                     );
