@@ -37,6 +37,8 @@ pub enum Event {
 pub enum Command {
     Open(ThreadId),
     OpenUrl(String),
+    Project(ProjectId),
+    Agent(Option<artisan_api::ItemId>),
     Settle {
         host: crate::core::HostId,
         instance: crate::core::HostInstance,

@@ -2033,6 +2033,8 @@ impl RootViews {
             match command {
                 Command::Open(thread) => workspace.sidebar.open_thread(core, thread),
                 Command::New => workspace.sidebar.new_thread(core, None),
+                Command::Project(project) => workspace.sidebar.new_thread(core, Some(project)),
+                Command::Agent(agent) => workspace.conversation.open_agent(core, agent),
                 Command::OpenUrl(url) => {
                     if let Err(error) = crate::shell::open_url(&url) {
                         tracing::warn!(%error, "could not open repository URL");
@@ -2790,6 +2792,14 @@ impl SectionViews for RootViews {
                         let project = host.projects.get(&thread.project_id)?;
                         Some(crate::frame::strip::Tab {
                             id: id.clone(),
+                            project: project.id.clone(),
+                            trail: workspace
+                                .conversation
+                                .open
+                                .as_ref()
+                                .filter(|(shown, thread)| shown == &host.id && thread == id)
+                                .map(|_| workspace.conversation.agent_trail())
+                                .unwrap_or_default(),
                             title: crate::frame::projects::title_of(thread.title.as_deref()),
                             location: (!project.id.is_scratch()).then(|| host
                                 .repository(&project.id)

@@ -9,7 +9,7 @@ use aqua_core::scene::GpuiQuadPulse;
 use aqua_core::{CursorIcon, Insets, Role};
 use aqua_ui::AlignItems;
 use aqua_ui::element::Element;
-use artisan_api::ThreadId;
+use artisan_api::{ItemId, ProjectId, ThreadId};
 use std::rc::Rc;
 
 pub const BAR_HEIGHT: f32 = HEIGHT + 4.0;
@@ -23,6 +23,8 @@ pub use crate::sidebar::project_mark::Mark;
 
 pub struct Tab {
     pub id: ThreadId,
+    pub project: ProjectId,
+    pub trail: Vec<(ItemId, String)>,
     pub title: String,
     pub location: Option<String>,
     pub url: Option<String>,
@@ -51,7 +53,6 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
     } else {
         surfaces.ink_dim
     };
-    let lit = Aqua::Style().gpui_source_text_color(surfaces.ink.to_reference_text_color());
     let id = tab.id.clone();
     let content = Aqua::Box()
         .layout("row")
@@ -74,11 +75,8 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
                 .as_ref()
                 .map(|_| crate::frame::tree::label(theme, "/", surfaces.ink_dim, false)),
         )
-        .child(title(
-            theme,
-            &tab.title,
-            tab.state == RowState::Working && !reduced,
-        ))
+        .child(thread(theme, tab, reduced, Rc::clone(&emit)))
+        .children(agents(theme, tab, &emit))
         .build();
     let button = Aqua::Button()
         .layout("column")
@@ -101,14 +99,19 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
         .build()
         .with_key(format!("artisan-tab-{}", tab.id))
         .role(Role::Group)
-        .aria_label(tab.location.as_ref().map_or_else(
-            || tab.title.clone(),
-            |location| format!("{location} / {}", tab.title),
-        ))
+        .aria_label(
+            tab.location
+                .iter()
+                .map(String::as_str)
+                .chain([tab.title.as_str()])
+                .chain(tab.trail.iter().map(|(_, name)| name.as_str()))
+                .collect::<Vec<_>>()
+                .join(" / "),
+        )
         .cursor(CursorIcon::Pointer);
     match tab.active {
         true => button.debug_selector(crate::frame::seam::ACTIVE),
-        false => button.hover_style(lit),
+        false => button.hover_style(lit(theme)),
     }
 }
 
@@ -118,7 +121,6 @@ fn location(
     location_label: &str,
     emit: Rc<dyn Fn(Event)>,
 ) -> Element {
-    let surfaces = Surfaces::of(theme);
     let content = Aqua::Box()
         .layout("row")
         .styles([Aqua::Style()
@@ -126,15 +128,10 @@ fn location(
             .gap(3.0)
             .min_width(px(0.0))])
         .child(tab.mark.view(theme.colors.text_muted))
-        .child(crate::frame::tree::label(
-            theme,
-            location_label,
-            match tab.url {
-                Some(_) => theme.colors.link,
-                None => surfaces.ink_dim,
-            },
-            false,
-        ))
+        .child(match tab.url {
+            Some(_) => crate::frame::tree::label(theme, location_label, theme.colors.link, false),
+            None => inherited_label(theme, location_label, false),
+        })
         .build();
     match &tab.url {
         Some(url) => {
@@ -149,18 +146,103 @@ fn location(
                 .aria_label(format!("Open {location_label}"))
                 .cursor(CursorIcon::Pointer)
         }
-        None => content,
+        None => {
+            let project = tab.project.clone();
+            Aqua::Button()
+                .styles([
+                    Aqua::Style().min_width(px(0.0)).flex_shrink(1.0),
+                    dim(theme),
+                ])
+                .child(content)
+                .on_activate(move || emit(Event::Navigate(Command::Project(project.clone()))))
+                .build()
+                .with_key("artisan-thread-project-link")
+                .role(Role::Button)
+                .aria_label(format!("New thread in {location_label}"))
+                .cursor(CursorIcon::Pointer)
+                .hover_style(lit(theme))
+        }
     }
 }
 
-fn title(theme: &ArtisanTheme, words: &str, pulsing: bool) -> Element {
-    let label = inherited_label(theme, words, true);
+fn lit(theme: &ArtisanTheme) -> Style {
+    Aqua::Style().gpui_source_text_color(Surfaces::of(theme).ink.to_reference_text_color())
+}
+
+fn dim(theme: &ArtisanTheme) -> Style {
+    Aqua::Style().gpui_source_text_color(Surfaces::of(theme).ink_dim.to_reference_text_color())
+}
+
+fn thread(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)>) -> Element {
+    let words = title(
+        theme,
+        &tab.title,
+        tab.trail.is_empty(),
+        tab.state == RowState::Working && !reduced,
+    );
+    match tab.trail.is_empty() {
+        true => words,
+        false => Aqua::Button()
+            .styles([
+                Aqua::Style().min_width(px(0.0)).flex_shrink(1.0),
+                dim(theme),
+            ])
+            .child(words)
+            .on_activate(move || emit(Event::Navigate(Command::Agent(None))))
+            .build()
+            .with_key("artisan-thread-crumb")
+            .role(Role::Button)
+            .aria_label(format!("Open {}", tab.title))
+            .cursor(CursorIcon::Pointer)
+            .hover_style(lit(theme)),
+    }
+}
+
+fn agents(theme: &ArtisanTheme, tab: &Tab, emit: &Rc<dyn Fn(Event)>) -> Vec<Element> {
+    let surfaces = Surfaces::of(theme);
+    let last = tab.trail.len().saturating_sub(1);
+    tab.trail
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (agent, name))| {
+            let emit = Rc::clone(emit);
+            let target = agent.clone();
+            let crumb = Aqua::Button()
+                .styles([
+                    Aqua::Style()
+                        .min_width(px(0.0))
+                        .flex_grow(if index == last { 1.0 } else { 0.0 })
+                        .flex_shrink(if index == last { 1.0 } else { 0.0 }),
+                    if index == last {
+                        lit(theme)
+                    } else {
+                        dim(theme)
+                    },
+                ])
+                .child(inherited_label(theme, name, index == last))
+                .on_activate(move || emit(Event::Navigate(Command::Agent(Some(target.clone())))))
+                .build()
+                .with_key(format!("artisan-agent-crumb-{agent}"))
+                .role(Role::Button)
+                .aria_label(format!("Open {name}"))
+                .cursor(CursorIcon::Pointer)
+                .hover_style(lit(theme));
+            [
+                crate::frame::tree::label(theme, "/", surfaces.ink_dim, false),
+                crumb,
+            ]
+        })
+        .collect()
+}
+
+fn title(theme: &ArtisanTheme, words: &str, fill: bool, pulsing: bool) -> Element {
+    let label = inherited_label(theme, words, fill);
     match pulsing {
         true => Aqua::Box()
             .layout("row")
             .styles([
                 Aqua::Style()
-                    .flex_grow(1.0)
+                    .flex_grow(if fill { 1.0 } else { 0.0 })
                     .flex_shrink(1.0)
                     .min_width(px(0.0)),
                 Style::new().gpui_quad_pulse(GpuiQuadPulse {
