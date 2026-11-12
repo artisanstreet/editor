@@ -1,17 +1,11 @@
-use aqua_core::Insets;
 use aqua_ui::{
     element::{Box as UiBox, Element},
     style::Style,
 };
 
-use super::kit::{Corner, Inset, Radius};
+use super::kit::surface::glass as kit_glass;
+use super::kit::{Elevation as KitElevation, Inset, Radius};
 use super::theme::{ArtisanTheme, Elevation, Oklch, Opacity, ShadowLayer, ThemeMode};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GlassStrength {
-    Quiet,
-    Strong,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gradient {
@@ -57,39 +51,6 @@ impl From<GlassShadow> for aqua_ui::style::GpuiShadowLayer {
     }
 }
 
-pub const fn glass_blur_radius(strength: GlassStrength) -> f32 {
-    match strength {
-        GlassStrength::Quiet => 12.0,
-        GlassStrength::Strong => 20.0,
-    }
-}
-
-pub fn glass_material(theme: &ArtisanTheme, strength: GlassStrength) -> Gradient {
-    let (from, to) = match strength {
-        GlassStrength::Quiet => (Opacity::GlassFaceQuiet, Opacity::GlassFaceQuietFar),
-        GlassStrength::Strong => (Opacity::GlassFaceStrong, Opacity::GlassFaceStrongFar),
-    };
-    Gradient {
-        angle_degrees: 145.0,
-        start: theme.colors.gray.step(7).at(from),
-        end: theme.colors.gray.step(4).at(to),
-        end_position: 1.0,
-    }
-}
-
-pub fn glass_highlight(theme: &ArtisanTheme, strength: GlassStrength) -> Gradient {
-    let (opacity, end_position) = match strength {
-        GlassStrength::Quiet => (Opacity::Sheen, 0.42),
-        GlassStrength::Strong => (Opacity::SheenStrong, 0.44),
-    };
-    Gradient {
-        angle_degrees: 180.0,
-        start: theme.colors.white.at(opacity),
-        end: theme.colors.white.at(Opacity::Clear),
-        end_position,
-    }
-}
-
 pub fn glass_control_fill(theme: &ArtisanTheme) -> Gradient {
     let colors = &theme.colors;
     let (start, end) = match colors.mode {
@@ -102,44 +63,6 @@ pub fn glass_control_fill(theme: &ArtisanTheme) -> Gradient {
         end,
         end_position: 1.0,
     }
-}
-
-const HANDLE: f32 = 32.0;
-
-pub fn glass_handle(theme: &ArtisanTheme, content: Element) -> Element {
-    let radius = Corner::Full.resolve(HANDLE);
-    UiBox::new()
-        .width(HANDLE)
-        .height(HANDLE)
-        .radius(radius)
-        .style(
-            Style::new()
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_source_text_color(theme.colors.text.to_reference_text_color())
-                .gpui_shadows(
-                    glass_card_shadows(theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(glass_layers(theme, GlassStrength::Quiet, radius))
-        .child(
-            UiBox::new()
-                .width(aqua_ui::style::Length::Pct(100.0))
-                .height(aqua_ui::style::Length::Pct(100.0))
-                .child(content)
-                .build(),
-        )
-        .build()
 }
 
 fn elevation_shadow(layer: ShadowLayer) -> GlassShadow {
@@ -197,61 +120,6 @@ pub fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<Gla
     shadows
 }
 
-pub fn glass_layers(theme: &ArtisanTheme, strength: GlassStrength, radius: f32) -> Element {
-    use aqua_core::{
-        CornerRadii, DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop,
-    };
-    use aqua_ui::element::Canvas;
-
-    let material = glass_material(theme, strength);
-    let highlight = glass_highlight(theme, strength);
-    let base = theme
-        .colors
-        .text
-        .at(Opacity::GlassBase)
-        .to_reference_paint();
-    Canvas::new()
-        .radius(radius)
-        .clip(true)
-        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-        .scroll_stable()
-        .on_paint(move |bounds| {
-            let layer = |gradient: Gradient| DisplayItem::GpuiBackground {
-                bounds,
-                corners: CornerRadii::uniform(radius),
-                background: GpuiBackground::LinearGradient {
-                    angle: gradient.angle_degrees,
-                    color_space: GpuiGradientColorSpace::Oklab,
-                    stops: [
-                        GpuiGradientStop {
-                            percentage: 0.0,
-                            color: gradient.start.to_reference_paint(),
-                        },
-                        GpuiGradientStop {
-                            percentage: gradient.end_position,
-                            color: gradient.end.to_reference_paint(),
-                        },
-                    ],
-                },
-            };
-            vec![
-                DisplayItem::BackdropBlurRounded {
-                    bounds,
-                    radius: glass_blur_radius(strength),
-                    corners: CornerRadii::uniform(radius),
-                },
-                DisplayItem::GpuiBackground {
-                    bounds,
-                    corners: CornerRadii::uniform(radius),
-                    background: GpuiBackground::Solid(base),
-                },
-                layer(material),
-                layer(highlight),
-            ]
-        })
-        .build()
-}
-
 pub const KEY_RADIUS: f32 = Radius::Field.px();
 pub const COMPOSER_PADDING: f32 = Inset::Frame.px();
 pub const COMPOSER_RADIUS: f32 = Radius::Well.px();
@@ -279,26 +147,16 @@ impl ComposerFrame {
     pub fn build(self) -> Element {
         use aqua_ui::style::{Axis, Length};
         let radius = COMPOSER_RADIUS;
-        let shadows = if self.nested {
-            glass_rims(&self.theme)
-        } else {
-            glass_card_shadows(&self.theme, Elevation::Floating)
+        let shadows = match self.nested {
+            true => Vec::new(),
+            false => KitElevation::Overlay.shadows(&self.theme),
         };
         UiBox::new()
             .width(Length::Pct(100.0))
             .padding(COMPOSER_PADDING)
             .radius(radius)
-            .style(
-                Style::new()
-                    .axis(Axis::Column)
-                    .gpui_shadows(
-                        shadows
-                            .into_iter()
-                            .map(aqua_ui::style::GpuiShadowLayer::from)
-                            .collect(),
-                    ),
-            )
-            .child(glass_layers(&self.theme, GlassStrength::Quiet, radius))
+            .style(Style::new().axis(Axis::Column).shadows(shadows))
+            .child(kit_glass::paint(&self.theme, radius))
             .child(self.content)
             .build()
     }

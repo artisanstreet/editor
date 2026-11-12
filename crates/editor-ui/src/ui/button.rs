@@ -8,7 +8,7 @@ use aqua_core::{CursorIcon, Insets, Oklch, Role};
 use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::{
     AlignItems, JustifyContent,
-    element::{Box as UiBox, Button as UiButton, Canvas, Element, Key, Text},
+    element::{Box as UiBox, Button as UiButton, Element, Key, Text},
     style::{Length, Style},
     tree::ActionEvent,
 };
@@ -198,11 +198,7 @@ impl Button {
         } else {
             background
         };
-        let border = if self.glass {
-            t.colors.text.at(Opacity::GlassBorder).to_paint()
-        } else {
-            border
-        };
+        let edge = if self.glass { 0.0 } else { 1.0 };
         let height = self.size.unwrap_or(t.density.control_sm);
         let icon_only = matches!(self.content, Content::Icon(..));
         let label = self.content.label().to_owned();
@@ -230,7 +226,7 @@ impl Button {
             .height(height)
             .gap(4.0)
             .radius(self.radius.unwrap_or(Radius::Field.px()))
-            .border((1.0, border))
+            .border((edge, border))
             .fill(background)
             .style(style);
         if icon_only {
@@ -238,30 +234,7 @@ impl Button {
         }
         if self.glass {
             let radius = self.radius.unwrap_or(Radius::Field.px());
-            let base = t.colors.text.at(Opacity::GlassBase).to_paint();
-            root = root.child(
-                Canvas::new()
-                    .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-                    .scroll_stable()
-                    .on_paint(move |bounds| {
-                        vec![
-                            aqua_core::DisplayItem::BackdropBlurRounded {
-                                bounds,
-                                radius: 12.0,
-                                corners: aqua_core::CornerRadii::uniform(radius),
-                            },
-                            aqua_core::DisplayItem::Rect {
-                                bounds,
-                                radius,
-                                fill: base,
-                                border_width: 0.0,
-                                border_color: Oklch::TRANSPARENT,
-                                shadow: None,
-                            },
-                        ]
-                    })
-                    .build(),
-            );
+            root = root.child(crate::ui::kit::surface::glass::paint(&t, radius));
         }
         let make_text = |text: String| {
             let text = Text::new(text).text_style(TextStyle {

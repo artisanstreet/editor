@@ -2,7 +2,6 @@ pub mod band;
 pub mod glass;
 
 use crate::ui::chrome::card::{Surfaces, outlined};
-use crate::ui::glass::{GlassStrength, glass_layers};
 use crate::ui::kit::tokens::{Corner, Elevation, Inset, Radius, Space};
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::GpuiBackground;
@@ -33,8 +32,6 @@ pub enum Tone {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Material {
     Glass,
-    QuietGlass,
-    Outlined,
     Recessed,
     Key,
     Raised,
@@ -89,9 +86,12 @@ impl Surface {
     #[must_use]
     pub const fn material(self) -> Material {
         match self {
-            Self::Menu | Self::Tooltip(_) | Self::Dialog | Self::Pill(_) => Material::Glass,
-            Self::Composer => Material::QuietGlass,
-            Self::Card => Material::Outlined,
+            Self::Menu
+            | Self::Tooltip(_)
+            | Self::Dialog
+            | Self::Pill(_)
+            | Self::Composer
+            | Self::Card => Material::Glass,
             Self::Inset => Material::Recessed,
             Self::Field => Material::Key,
             Self::Bubble => Material::Raised,
@@ -103,9 +103,13 @@ impl Surface {
     #[must_use]
     pub const fn elevation(self) -> Elevation {
         match self {
-            Self::Menu | Self::Tooltip(_) | Self::Dialog | Self::Pill(_) => Elevation::Overlay,
-            Self::Card | Self::Inset | Self::Bubble | Self::Media(Media::Frame) => Elevation::Rest,
-            Self::Composer => Elevation::Float,
+            Self::Menu
+            | Self::Tooltip(_)
+            | Self::Dialog
+            | Self::Pill(_)
+            | Self::Composer
+            | Self::Card => Elevation::Overlay,
+            Self::Inset | Self::Bubble | Self::Media(Media::Frame) => Elevation::Rest,
             Self::Field => Elevation::Key,
             Self::Media(Media::Thumb) | Self::Callout(_) => Elevation::Flat,
         }
@@ -150,20 +154,10 @@ impl Surface {
         };
         match self.material() {
             Material::Glass => shell()
-                .clip(true)
                 .child(glass::paint(theme, radius))
                 .children(children)
                 .build()
                 .style(sized),
-            Material::QuietGlass => shell()
-                .clip(true)
-                .child(glass_layers(theme, GlassStrength::Quiet, radius))
-                .children(children)
-                .build()
-                .style(sized),
-            Material::Outlined => {
-                outlined(surfaces.ink, surfaces.bg, radius, shadows, children).style(sized)
-            }
             Material::Recessed => {
                 outlined(surfaces.ink, surfaces.inner, radius, shadows, children).style(sized)
             }

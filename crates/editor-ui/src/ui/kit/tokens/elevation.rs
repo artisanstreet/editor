@@ -12,7 +12,6 @@ pub enum Elevation {
     Overlay,
 }
 
-const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
 const GRAY_900: Oklch = Oklch::new(0.21, 0.034, 264.665);
 
@@ -38,27 +37,16 @@ fn overlay(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
     } else {
         (GRAY_900, [0.03, 0.04, 0.04, 0.05])
     };
-    let rim = ShadowLayer {
-        dx: 0.0,
-        dy: -1.0,
-        blur: 0.0,
-        spread: 0.0,
-        inset: false,
-        color: WHITE.with_alpha(0.14).to_paint(),
-    };
-    std::iter::once(rim)
-        .chain(
-            [
-                (1.0, 2.0, 0.0),
-                (4.0, 8.0, -2.0),
-                (12.0, 24.0, -6.0),
-                (24.0, 48.0, -12.0),
-            ]
-            .into_iter()
-            .zip(alphas)
-            .map(|((dy, blur, spread), alpha)| drop(dy, blur, spread, ink.with_alpha(alpha))),
-        )
-        .collect()
+    [
+        (1.0, 2.0, 0.0),
+        (4.0, 8.0, -2.0),
+        (12.0, 24.0, -6.0),
+        (24.0, 48.0, -12.0),
+    ]
+    .into_iter()
+    .zip(alphas)
+    .map(|((dy, blur, spread), alpha)| drop(dy, blur, spread, ink.with_alpha(alpha)))
+    .collect()
 }
 
 fn drop(dy: f32, blur: f32, spread: f32, color: Oklch) -> ShadowLayer {

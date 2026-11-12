@@ -5,8 +5,8 @@ use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Radius, concentric};
 use crate::ui::motion::MotionPolicy;
 use crate::ui::theme::{ArtisanTheme, Opacity};
-use aqua_core::{CornerRadii, CursorIcon, DisplayItem, Role, Transform2D};
-use aqua_ui::element::{Button, Canvas, Element, Key};
+use aqua_core::{CursorIcon, Role, Transform2D};
+use aqua_ui::element::{Button, Element, Key};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::tree::ActionEvent;
 use aqua_ui::{AlignItems, JustifyContent};
@@ -150,29 +150,7 @@ impl IconButton {
     }
 
     fn glass(theme: &ArtisanTheme, radius: f32) -> Element {
-        let base = theme.colors.text.at(Opacity::GlassBase).to_paint();
-        Canvas::new()
-            .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-            .scroll_stable()
-            .on_paint(move |bounds| {
-                vec![
-                    DisplayItem::BackdropBlurRounded {
-                        bounds,
-                        radius: 12.0,
-                        corners: CornerRadii::uniform(radius),
-                    },
-                    DisplayItem::Rect {
-                        bounds,
-                        radius,
-                        fill: base,
-                        border_width: 0.0,
-                        border_color: aqua_core::Oklch::TRANSPARENT,
-                        shadow: None,
-                    },
-                ]
-            })
-            .build()
-            .exclude_from_hit_testing()
+        crate::ui::kit::surface::glass::paint(theme, radius)
     }
 
     #[must_use]
@@ -195,9 +173,7 @@ impl IconButton {
                 .gpui_source_text_color(rest.to_reference_text_color()),
         );
         if self.finish == Finish::Glass {
-            button = button
-                .border((1.0, theme.colors.text.at(Opacity::GlassBorder).to_paint()))
-                .child(Self::glass(&theme, self.radius));
+            button = button.child(Self::glass(&theme, self.radius));
         }
         if self.selected {
             button = button.style(Hover::Neutral.style(&theme));

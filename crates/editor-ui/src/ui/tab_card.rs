@@ -156,7 +156,6 @@ pub struct Geometry {
     pub well: Vec<PathCommand>,
     pub shell: Vec<PathCommand>,
     pub edge: Vec<PathCommand>,
-    pub highlight: Vec<PathCommand>,
 }
 
 impl Geometry {
@@ -169,15 +168,11 @@ impl Geometry {
         shell.extend(well.clone());
         let edge_bounds = Rect::from_edges(0.5, 0.5, key.size.w - 0.5, key.size.h - 0.5);
         let edge = trace_silhouette(edge_bounds, key.tab_width - 1.0, key.radius - 0.5);
-        let highlight_bounds = Rect::from_edges(1.5, 1.5, key.size.w - 1.5, key.size.h - 1.5);
-        let highlight =
-            trace_silhouette(highlight_bounds, key.tab_width - 3.0, key.radius - 1.5);
         Self {
             strip,
             well,
             shell,
             edge,
-            highlight,
         }
     }
 }
@@ -516,9 +511,7 @@ impl PreparedTabCard {
             });
         }
         let colors = &theme.colors;
-        let surfaces = crate::ui::chrome::card::Surfaces::of(theme);
-        let bevel = crate::ui::chrome::card::Edge::of(surfaces.bg, surfaces.ink);
-        let surface = GpuiBackground::Solid(surfaces.bg.to_reference_paint());
+        let fills = crate::ui::kit::surface::glass::fills(theme);
         let mut push = |commands: &[PathCommand],
                         background: GpuiBackground,
                         stroke: bool,
@@ -553,7 +546,9 @@ impl PreparedTabCard {
                 StripBottom::Down(drop) => TAB_CARD_TAB_HEIGHT_PX + drop,
             };
             let strip_bounds = Rect::from_edges(tab_width - TAB_RADIUS, 0.0, right, strip_bottom);
-            push(commands, surface.clone(), false, strip_bounds);
+            for fill in fills {
+                push(commands, fill, false, strip_bounds);
+            }
         }
         let hole = Rect::from_edges(4.0, 40.0, bounds.w - 4.0, bounds.h - 4.0);
         push(
@@ -562,16 +557,26 @@ impl PreparedTabCard {
             false,
             hole,
         );
-        push(&geometry.shell, surface, false, local);
+        for fill in fills {
+            push(&geometry.shell, fill, false, local);
+        }
+        let height = bounds.h.max(1.0);
+        let reach = |span: f32| (span / height).clamp(0.0, 1.0);
+        let [(_, light), (_, shade)] = crate::ui::kit::surface::glass::rims(theme);
         push(
             &geometry.edge,
-            background(bevel.rim_top, bevel.rim_bottom, 180.0, 1.0),
+            background(
+                light,
+                light.with_alpha(0.0),
+                180.0,
+                reach(TAB_CARD_TAB_HEIGHT_PX + radius),
+            ),
             true,
             local,
         );
         push(
-            &geometry.highlight,
-            background(bevel.highlight_top, bevel.highlight_bottom, 180.0, 1.0),
+            &geometry.edge,
+            background(shade, shade.with_alpha(0.0), 0.0, reach(radius)),
             true,
             local,
         );
