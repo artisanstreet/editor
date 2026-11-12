@@ -38,6 +38,7 @@ pub struct Sidebar {
     pub open: Option<ThreadId>,
     last_screen: Option<Screen>,
     pub lists: Lists,
+    pub search: std::rc::Rc<std::cell::RefCell<editor_ui::text::Editor>>,
     pub history_open: bool,
     pub history_fraction: f32,
     history_motion: Option<(std::time::Instant, f32)>,
@@ -238,6 +239,10 @@ impl Sidebar {
             open: None,
             last_screen: None,
             lists: Lists::default(),
+            search: std::rc::Rc::new(std::cell::RefCell::new(editor_ui::text::Editor::new(
+                "",
+                editor_ui::text::Mode::SingleLine,
+            ))),
             history_open: false,
             history_fraction: 0.0,
             history_motion: None,
@@ -389,7 +394,9 @@ impl Sidebar {
             .host
             .as_ref()
             .and_then(|id| core.host(id))
-            .map(|host| lists(host, self.open.as_ref(), now))
+            .map(|host| {
+                lists(host, self.open.as_ref(), now).searched(self.search.borrow().text())
+            })
             .unwrap_or_default();
         self.working_pulses.borrow_mut().retain(|id, _| {
             self.lists

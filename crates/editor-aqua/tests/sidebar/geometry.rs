@@ -74,3 +74,40 @@ fn inbox_groups_by_project_identity_preserving_activity_order_and_history() {
         .collect();
     assert_eq!(history_entries, vec![history.id]);
 }
+
+#[test]
+fn a_search_lists_every_match_from_inbox_and_history_in_one_list() {
+    let project = ProjectId::from("editor");
+    let lists = || Lists {
+        inbox: vec![
+            row(&project, "Subagent status bugs"),
+            row(&project, "Installer binary"),
+        ],
+        history: vec![HistoryGroup {
+            age: AgeGroup::LastDay,
+            rows: vec![
+                row(&project, "Gradient BUTTON variants"),
+                row(&project, "Status line wording"),
+            ],
+        }],
+        next_tick: Some(7),
+    };
+    let titles = |query: &str| {
+        let found = lists().searched(query);
+        assert!(found.history.is_empty());
+        found
+            .inbox
+            .into_iter()
+            .map(|row| row.title)
+            .collect::<Vec<_>>()
+    };
+
+    let unfiltered = lists().searched("  ");
+    assert_eq!((unfiltered.inbox.len(), unfiltered.history.len()), (2, 1));
+    assert_eq!(
+        titles("status"),
+        ["Subagent status bugs", "Status line wording"]
+    );
+    assert_eq!(titles("button grad"), ["Gradient BUTTON variants"]);
+    assert_eq!(titles("nothing here"), Vec::<String>::new());
+}

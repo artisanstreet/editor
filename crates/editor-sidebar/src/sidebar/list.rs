@@ -83,6 +83,30 @@ pub struct Lists {
     pub next_tick: Option<Timestamp>,
 }
 
+impl Lists {
+    #[must_use]
+    pub fn searched(self, query: &str) -> Self {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if words.is_empty() {
+            return self;
+        }
+        let matches = |row: &RowData| {
+            let text = format!("{} {}", row.title, row.subtitle).to_lowercase();
+            words.iter().all(|word| text.contains(word.as_str()))
+        };
+        Self {
+            inbox: self
+                .inbox
+                .into_iter()
+                .chain(self.history.into_iter().flat_map(|group| group.rows))
+                .filter(matches)
+                .collect(),
+            history: Vec::new(),
+            next_tick: self.next_tick,
+        }
+    }
+}
+
 pub const fn listed(thread: &Thread) -> bool {
     !thread.archived && thread.parent_thread_id.is_none()
 }

@@ -31,6 +31,7 @@ pub enum ViewAction {
         thread: ThreadId,
     },
     NewThread(Option<ProjectId>),
+    Search,
     Navigate(Screen),
     OpenThreadMenu {
         host: HostId,
@@ -296,6 +297,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
             }
         }
         ViewAction::NewThread(project) => sidebar.new_thread(core, project),
+        ViewAction::Search => sidebar.sync(core, artisan_api::now()),
         ViewAction::Navigate(screen) => core.navigate(screen),
         ViewAction::OpenThreadMenu {
             host,
@@ -715,6 +717,31 @@ pub fn rename_editor(
             });
         }
     }))
+}
+
+pub fn search_editor(
+    sidebar: &Sidebar,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    use editor_ui::text::{
+        Mode,
+        mount::{EditorController, EditorEvent},
+    };
+
+    EditorController::from_shared(Rc::clone(&sidebar.search), move |event| {
+        if event == EditorEvent::Changed {
+            emit(ViewAction::Search);
+        }
+    })
+    .element_with_notice_keyed(
+        "sidebar-thread-search",
+        Mode::SingleLine,
+        theme,
+        "Search threads",
+        true,
+        false,
+    )
 }
 
 pub fn rename_dialog(

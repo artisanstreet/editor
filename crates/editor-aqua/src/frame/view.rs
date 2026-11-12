@@ -34,6 +34,7 @@ pub struct Sidebar {
     pub wordmark: Rows,
     pub emit: Rc<dyn Fn(Event)>,
     pub footer: Option<Element>,
+    pub search: Option<Element>,
     pub tree: Option<Element>,
 }
 
@@ -119,7 +120,7 @@ pub fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
                 .child(mark)
                 .build(),
         )
-        .child(tree_view(sidebar.width, sidebar.tree))
+        .child(tree_view(sidebar.width, sidebar.search, sidebar.tree))
         .child(
             Aqua::Box()
                 .layout("column")
@@ -136,7 +137,7 @@ pub fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
         .with_key(SIDEBAR)
 }
 
-fn tree_view(width: f32, tree: Option<Element>) -> Element {
+fn tree_view(width: f32, search: Option<Element>, tree: Option<Element>) -> Element {
     let reveal = ((width - COLLAPSED_WIDTH) / (OPEN_WIDTH - COLLAPSED_WIDTH)).clamp(0.0, 1.0);
     let column = Aqua::Box()
         .layout("column")
@@ -151,6 +152,7 @@ fn tree_view(width: f32, tree: Option<Element>) -> Element {
                 top: TREE_GAP,
                 bottom: TREE_GAP,
             })])
+        .children(search)
         .children(tree)
         .build();
     match reveal > 0.0 {

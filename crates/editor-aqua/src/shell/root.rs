@@ -2096,14 +2096,32 @@ impl RootViews {
         }
     }
 
+    fn search_bar(
+        &self,
+        workspace: &crate::shell::workspace::Workspace,
+        theme: &crate::ui::theme::ArtisanTheme,
+    ) -> Element {
+        crate::frame::search::bar(
+            theme,
+            crate::sidebar::view::search_editor(
+                &workspace.sidebar,
+                theme,
+                workspace.sidebar_emit(false),
+            ),
+            self.sidebar.emit(),
+        )
+    }
+
     fn sidebar_model(
         &self,
         theme: &crate::ui::theme::ArtisanTheme,
+        search: Option<Element>,
         tree: Option<Element>,
         account: Option<&crate::ui::chrome::account::Account>,
         now: std::time::Instant,
     ) -> crate::frame::view::Sidebar {
         crate::frame::view::Sidebar {
+            search,
             width: self.sidebar.width(now),
             open: self.sidebar.open(),
             wordmark: self.sidebar.wordmark(now),
@@ -2302,10 +2320,13 @@ impl SectionViews for RootViews {
                     workspace.sidebar_emit(false),
                 )
             });
+        let search = tree
+            .is_some()
+            .then(|| self.search_bar(workspace, &theme));
         let account = self.account_snapshot(shell);
         let element = crate::frame::view::sidebar_view(
             &theme,
-            self.sidebar_model(&theme, tree, account.as_ref(), now),
+            self.sidebar_model(&theme, search, tree, account.as_ref(), now),
         );
         match ui.refresh_subtree(crate::frame::view::SIDEBAR, element) {
             Ok(refreshed) => refreshed,
@@ -2835,6 +2856,9 @@ impl SectionViews for RootViews {
             Some((tree, strip)) => (Some(tree), strip),
             None => (None, Vec::new()),
         };
+        let search = tree
+            .is_some()
+            .then(|| self.search_bar(workspace, &theme));
         let overview = (matches!(shell.core.screen(), Screen::Thread { .. })
             && layout::inspector_width(card_width).is_some())
         .then(|| {
@@ -2867,7 +2891,7 @@ impl SectionViews for RootViews {
         let body = crate::frame::view::body(
             &theme,
             titlebar,
-            self.sidebar_model(&theme, tree, account.as_ref(), now),
+            self.sidebar_model(&theme, search, tree, account.as_ref(), now),
             match &screen {
                 Screen::Thread { .. } | Screen::NewThread { .. } => vec![
                     aqua::Aqua::Box()
