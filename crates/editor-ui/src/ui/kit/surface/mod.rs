@@ -206,3 +206,10 @@ pub fn backdrop(theme: &ArtisanTheme) -> Style {
         theme.colors.background.at(Opacity::Backdrop).to_reference_paint(),
     ))
 }
+
+#[must_use]
+pub fn frame(theme: &ArtisanTheme) -> Style {
+    Style::new().gpui_background(GpuiBackground::Solid(
+        theme.colors.frame.to_reference_paint(),
+    ))
+}
