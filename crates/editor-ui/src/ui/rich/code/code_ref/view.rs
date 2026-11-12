@@ -1,7 +1,6 @@
 use std::rc::Rc;
 
-use aqua_core::Insets;
-use aqua_text::{FontFamily, FontWeight, TextStyle};
+use aqua_text::TextStyle;
 use aqua_ui::{
     AlignItems, JustifyContent,
     collection::List,
@@ -12,12 +11,12 @@ use editor_assets::AssetId;
 
 use super::CodeRefBlock;
 use crate::ui::{
-    button::{Button, ButtonVariant, LabelOverflow},
+    kit::{Button, ButtonSize, ButtonTone, Ellipsis, Label, Space, Spaced, TextRole},
     rich::actions::{OpenReference, ResourceScope},
-    theme::{ArtisanTheme, TextStep, TypographyTokens},
+    theme::ArtisanTheme,
 };
 
-const LINE_PX: f32 = 20.0;
+const LINE_PX: f32 = TextRole::Code.spec().line;
 
 impl CodeRefBlock {
     pub(crate) fn copy(&self) -> String {
@@ -39,18 +38,18 @@ impl CodeRefBlock {
             path: reference.path.clone(),
             line: reference.start,
         };
-        let path = Button::icon_text(
+        let path = Button::new(
             format!("{id}-path"),
             *theme,
-            AssetId::TABLER_FILE_TEXT,
-            reference.display(),
+            ButtonTone::Quiet,
+            ButtonSize::Md,
+            Label::IconText(AssetId::TABLER_FILE_TEXT, reference.display()),
         )
-        .variant(ButtonVariant::Ghost)
-        .label_overflow(LabelOverflow::Start)
+        .ellipsis(Ellipsis::Start)
         .on_activate(move |_| open(action.clone(), instance))
         .build();
         let head = UiBox::new()
-            .gap(8.0)
+            .spaced(Space::S8)
             .style(
                 Style::new()
                     .align(AlignItems::CENTER)
@@ -60,7 +59,7 @@ impl CodeRefBlock {
             .build();
         let mut body = UiBox::new()
             .layout("column")
-            .gap(8.0)
+            .spaced(Space::S8)
             .width(Length::Pct(100.0))
             .style(Style::new().min_width(Length::Px(0.0)))
             .child(head);
@@ -81,17 +80,9 @@ impl CodeRefBlock {
 }
 
 fn text_style(theme: &ArtisanTheme, mono: bool) -> TextStyle {
-    TextStyle {
-        families: vec![FontFamily::Named(if mono {
-            theme.typography.mono.family.to_owned()
-        } else {
-            theme.typography.sans.family.to_owned()
-        })],
-        size_px: TypographyTokens::size(TextStep::XsMid),
-        line_height_px: LINE_PX,
-        weight: FontWeight::NORMAL,
-        letter_spacing_em: if mono { Some(0.0) } else { None },
-        ..TextStyle::default()
+    match mono {
+        true => TextRole::Code.style(theme),
+        false => TextRole::Label.style(theme),
     }
 }
 
@@ -100,8 +91,8 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
     let start = block.reference.start.unwrap_or(1);
     let largest = start.saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
     let gutter = f32::from(u16::try_from(largest.max(1).ilog10() + 1).unwrap_or(u16::MAX))
-        .mul_add(8.0, 20.0);
-    let width = block.width + gutter;
+        .mul_add(Space::S8.px(), Space::S8.px());
+    let width = block.width + gutter + Space::S12.px();
     let height = super::super::super::charts::scale::f32_of_count(count.min(18)) * LINE_PX;
     let lines = block.lines.clone();
     let theme = *theme;
@@ -123,20 +114,13 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
             UiBox::new()
                 .width(Length::Pct(100.0))
                 .height(LINE_PX)
+                .spaced(Space::S12)
                 .style(Style::new().min_width(Length::Px(0.0)))
                 .clip(true)
                 .child(
                     UiBox::new()
                         .width(gutter)
-                        .style(
-                            Style::new()
-                                .flex_shrink(0.0)
-                                .justify(JustifyContent::END)
-                                .padding_insets(Insets {
-                                    right: 12.0,
-                                    ..Insets::default()
-                                }),
-                        )
+                        .style(Style::new().flex_shrink(0.0).justify(JustifyContent::END))
                         .child(number)
                         .build(),
                 )
@@ -146,11 +130,7 @@ fn numbered(theme: &ArtisanTheme, id: &str, block: &CodeRefBlock) -> Element {
                             Style::new()
                                 .flex_grow(1.0)
                                 .min_width(Length::Px(0.0))
-                                .min_height(Length::Px(LINE_PX))
-                                .padding_insets(Insets {
-                                    right: 12.0,
-                                    ..Insets::default()
-                                }),
+                                .min_height(Length::Px(LINE_PX)),
                         )
                         .child(source)
                         .build(),
