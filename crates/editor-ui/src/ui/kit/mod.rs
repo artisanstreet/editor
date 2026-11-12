@@ -1,4 +1,5 @@
 pub mod button;
+pub mod control;
 pub mod divider;
 pub mod hover;
 pub mod row;
@@ -6,6 +7,12 @@ pub mod surface;
 pub mod tokens;
 
 pub use button::{Button, ButtonSize, ButtonTone, Ellipsis, Label};
+pub use control::hit_area::HitArea;
+pub use control::icon_button::{Finish, IconButton, IconButtonSize};
+pub use control::key::{Key, KeyFace, KeySize};
+pub use control::link::{Link, LinkTone};
+pub use control::tabs::{Tabs, TabsStyle};
+pub use control::trigger::{Lead, Trigger, TriggerSize};
 pub use divider::Divider;
 pub use hover::{Highlight, Hover};
 pub use row::{Density, Pad, Row, RowItem};
