@@ -1,14 +1,29 @@
 use std::rc::Rc;
 
-use editor_ui::{
-    button::Button,
-    theme::{ArtisanTheme, RadiusStep, RadiusTokens},
-};
+use aqua_core::Role;
+use aqua_text::overflow::OverflowMode;
 use aqua_ui::{
-    element::{Box as UiBox, Element},
+    AlignItems, JustifyContent,
+    element::{Box as UiBox, Element, Scroll},
     style::{Length, Style},
 };
 use editor_assets::AssetId;
+use editor_ui::{
+    kit::{
+        Button, ButtonTone, Density, Divider, Finish, HitArea, Hover, IconButton, IconButtonSize,
+        IconSize, Inset, Key, KeyFace, KeySize, Lead, Link, LinkTone, Radius, Row, RowItem, Space,
+        Spaced, Surface, TextRole, Tooltip, Trigger, TriggerSize,
+    },
+    theme::{ArtisanTheme, Opacity},
+};
+
+const MODEL_TRIGGER_WIDTH: f32 = 360.0;
+const MENTION_THREAD_DETAIL_WIDTH: f32 = 180.0;
+const MENTION_ROWS_SHOWN: f32 = 9.5;
+const PROJECT_MENU_WIDTH: f32 = 320.0;
+const PROJECT_TAB_WIDTH: f32 = 240.0;
+const PROJECT_ROWS_SHOWN: usize = 8;
+const MENU_VIEWPORT_MARGIN: f32 = 32.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposerAction {
@@ -117,53 +132,11 @@ pub fn primary(theme: ArtisanTheme, face: Primary, disabled: bool, dispatch: Dis
             ComposerAction::Send,
         ),
     };
-    use editor_ui::chrome::card::{Surfaces, key_face};
-    use aqua_core::{CursorIcon, Role, Transform2D};
-    const EDGE: f32 = 32.0;
-    const RADIUS: f32 = editor_ui::glass::KEY_RADIUS;
-    let surfaces = Surfaces::of(&theme);
-    let glyph = UiBox::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .style(
-            Style::new()
-                .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                .align(aqua_ui::AlignItems::CENTER)
-                .justify(aqua_ui::JustifyContent::CENTER),
-        )
-        .child(editor_ui::asset::source_asset_glyph(
-            icon,
-            16.0,
-            surfaces.ink_dim.to_reference_paint(),
-        ))
+    Key::new(id, theme, label, KeySize::Md, KeyFace::Glyph(icon))
+        .disabled(disabled)
+        .on_activate(move |_| dispatch(action.clone()))
         .build()
-        .exclude_from_hit_testing();
-    let mut button = aqua_ui::element::Button::new()
-        .width(EDGE)
-        .height(EDGE)
-        .radius(RADIUS)
-        .style(
-            Style::new()
-                .flex_shrink(0.0)
-                .opacity(if disabled { 0.5 } else { 1.0 }),
-        )
-        .child(key_face(&surfaces, RADIUS, EDGE))
-        .child(glyph);
-    if !disabled {
-        button = button.on_activate(move || dispatch(action.clone()));
-    }
-    let button = button
-        .build()
-        .with_key(id)
         .debug_selector(id)
-        .role(Role::Button)
-        .aria_label(label);
-    match disabled {
-        true => button,
-        false => button
-            .cursor(CursorIcon::Pointer)
-            .pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.5))),
-    }
 }
 
 pub fn frame(theme: ArtisanTheme, nested: bool, content: Element) -> Element {
@@ -178,175 +151,90 @@ pub fn model_trigger(
     model: Option<&artisan_api::Model>,
     dispatch: Dispatch,
 ) -> Element {
-    use editor_ui::asset::source_asset_glyph;
-    use aqua_core::{Insets, Role};
-    use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
-    use aqua_ui::{
-        element::{Button as UiButton, Text},
-        style::Style,
-    };
-    let style = TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: 14.0,
-        line_height_px: 20.0,
-        weight: FontWeight::NORMAL,
-        ..TextStyle::default()
-    };
-    let muted = theme.colors.text_muted.to_reference_text_color();
-    let mut body = UiBox::new()
-        .gap(4.0)
-        .style(Style::new().min_width(Length::Px(0.0)));
-    let token = |label: String, color| {
-        Text::new(label)
-            .text_style(style.clone())
-            .gpui_source_color(color)
-            .wrap(false)
-            .build()
-    };
     let migrated = model.and_then(|model| config.and_then(|config| model.migrate_config(config)));
     let config = migrated.as_ref().or(config);
+    let name = config.map_or_else(
+        || "No model".to_owned(),
+        |config| {
+            model.map_or_else(
+                || config.model.clone().unwrap_or_else(|| "No model".into()),
+                |model| model.name.clone(),
+            )
+        },
+    );
+    let details = config.map(|config| model_details(config, model)).unwrap_or_default();
+    let mut trigger = Trigger::new("composer-model", theme, TriggerSize::Sm, name)
+        .on_activate(move || dispatch(ComposerAction::ToggleModel));
+    if !details.is_empty() {
+        trigger = trigger.detail(details.join(" · "));
+    }
     if let Some(config) = config {
-        let name = model.map_or_else(
-            || config.model.clone().unwrap_or_else(|| "No model".into()),
-            |model| model.name.clone(),
-        );
-        body = body.child(token(name, theme.colors.text.to_reference_text_color()));
-        if let Some(context) =
-            model.and_then(|model| config.context_window_override().or(model.context_window))
-        {
-            let label = if context >= 1_000_000 && context.is_multiple_of(1_000_000) {
-                format!("{}M", context / 1_000_000)
-            } else {
-                format!("{}K", context / 1_000)
-            };
-            body = body.child(token(label, muted));
-        }
-        if let Some(compaction) = config.compaction_window_override() {
-            body = body.child(token(format!("{}K compact", compaction / 1_000), muted));
-        }
-        if config.engine != artisan_api::EngineId::OpenCode
-            && let Some(effort) = &config.effort
-        {
-            let label = artisan_api::ThinkingLevel::from_native(effort)
-                .map_or_else(|| effort.clone(), |level| level.label().into());
-            body = body.child(token(label, muted));
-        }
-        if let Some(model) = model {
-            if let Some(variant) = model
+        trigger = trigger.lead(Lead::Glyph(engine_icon(&theme, config.engine)));
+    }
+    UiBox::new()
+        .style(
+            Style::new()
+                .min_width(Length::Pct(0.0))
+                .max_width(Length::Px(MODEL_TRIGGER_WIDTH)),
+        )
+        .child(trigger.build())
+        .build()
+}
+
+fn model_details(
+    config: &artisan_api::EngineConfig,
+    model: Option<&artisan_api::Model>,
+) -> Vec<String> {
+    let context = model
+        .and_then(|model| config.context_window_override().or(model.context_window))
+        .map(|context| match context >= 1_000_000 && context.is_multiple_of(1_000_000) {
+            true => format!("{}M", context / 1_000_000),
+            false => format!("{}K", context / 1_000),
+        });
+    let compaction = config
+        .compaction_window_override()
+        .map(|compaction| format!("{}K compact", compaction / 1_000));
+    let effort = config
+        .effort
+        .as_ref()
+        .filter(|_| config.engine != artisan_api::EngineId::OpenCode)
+        .map(|effort| {
+            artisan_api::ThinkingLevel::from_native(effort)
+                .map_or_else(|| effort.clone(), |level| level.label().into())
+        });
+    let variant = model
+        .and_then(|model| {
+            model
                 .variant_for(config.variant.as_deref())
                 .and_then(|id| model.variants.iter().find(|variant| variant.id == id))
-            {
-                let label = artisan_api::ThinkingLevel::from_native(&variant.id)
-                    .map_or_else(|| variant.label.clone(), |level| level.label().into());
-                body = body.child(token(label, muted));
-            }
-            if let Some(speed) = config.speed.as_ref().and_then(|id| {
+        })
+        .map(|variant| {
+            artisan_api::ThinkingLevel::from_native(&variant.id)
+                .map_or_else(|| variant.label.clone(), |level| level.label().into())
+        });
+    let speed = model
+        .and_then(|model| {
+            config.speed.as_ref().and_then(|id| {
                 model
                     .speeds
                     .iter()
                     .find(|speed| &speed.id == id && !speed.default)
-            }) {
-                let level = artisan_api::SpeedLevel::from_native(&speed.id);
-                let speed_label = level.map_or_else(|| speed.label.clone(), |level| level.label().into());
-                let gradient = if level == Some(artisan_api::SpeedLevel::Superfast) {
-                    Some((theme.colors.palette[7], theme.colors.palette[3]))
-                } else if level == Some(artisan_api::SpeedLevel::Fast) {
-                    Some((theme.colors.palette[1], theme.colors.palette[4]))
-                } else {
-                    None
-                };
-                let speed_element = if let Some((start, end)) = gradient {
-                    let count = speed_label.chars().count();
-                    let spans = speed_label
-                        .chars()
-                        .enumerate()
-                        .map(|(index, character)| {
-                            let progress = if count > 1 {
-                                index as f32 / (count - 1) as f32
-                            } else {
-                                0.0
-                            };
-                            let color = start.animate_to(end, progress).to_reference_text_color();
-                            StyledSpan::new(character.to_string(), style.clone()).gpui_source_color(
-                                [
-                                    color.hue_degrees,
-                                    color.saturation,
-                                    color.lightness,
-                                    color.alpha,
-                                ],
-                            )
-                        })
-                        .collect();
-                    Text::new("")
-                        .spans(spans)
-                        .text_style(style.clone())
-                        .wrap(false)
-                        .build()
-                } else {
-                    token(
-                        speed_label.clone(),
-                        theme.colors.text.to_reference_text_color(),
-                    )
-                };
-                body = body.child(speed_element);
-            }
-        }
-    } else {
-        body = body.child(token(
-            "No model".into(),
-            theme.colors.text.to_reference_text_color(),
-        ));
-    }
-    let mut trigger = UiButton::new()
-        .height(32.0)
-        .gap(8.0)
-        .radius(editor_ui::glass::KEY_RADIUS)
-        .style(
-            Style::new()
-                .align(aqua_ui::AlignItems::CENTER)
-                .max_width(Length::Px(360.0))
-                .padding_insets(Insets {
-                    left: 8.0,
-                    right: 8.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }),
-        );
-    if let Some(config) = config {
-        let icon = match config.engine {
-            artisan_api::EngineId::Claude => AssetId::SVGL_CLAUDE_AI,
-            artisan_api::EngineId::Codex => AssetId::SVGL_OPENAI,
-            artisan_api::EngineId::OpenCode if theme.colors.mode.is_dark() => {
-                AssetId::BRANDS_OPENCODE
-            }
-            artisan_api::EngineId::OpenCode => AssetId::BRANDS_OPENCODE_LIGHT,
-        };
-        trigger = trigger.child(source_asset_glyph(
-            icon,
-            16.0,
-            theme.colors.text.to_reference_paint(),
-        ));
-    }
-    trigger
-        .child(body.build())
-        .child(source_asset_glyph(
-            AssetId::TABLER_SELECTOR,
-            14.0,
-            theme.colors.text_muted.to_reference_paint(),
-        ))
-        .on_activate(move || dispatch(ComposerAction::ToggleModel))
-        .build()
-        .with_key("composer-model")
-        .role(Role::Button)
-        .aria_label("Choose a model")
-        .focusable(true)
+            })
+        })
+        .map(|speed| {
+            artisan_api::SpeedLevel::from_native(&speed.id)
+                .map_or_else(|| speed.label.clone(), |level| level.label().into())
+        });
+    [context, compaction, effort, variant, speed]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 pub fn controls(primary: Element) -> Element {
-    use aqua_ui::{AlignItems, JustifyContent};
     UiBox::new()
-        .height(32.0)
-        .gap(8.0)
+        .height(KeySize::Md.edge())
+        .spaced(Space::S8)
         .style(
             Style::new()
                 .flex_shrink(0.0)
@@ -358,69 +246,11 @@ pub fn controls(primary: Element) -> Element {
         .with_key("composer-controls")
 }
 
-fn label(
-    theme: &ArtisanTheme,
-    text: String,
-    size: f32,
-    line_height: f32,
-    color: aqua::GpuiTextColor,
-) -> Element {
-    use aqua_text::{FontFamily, FontWeight, TextStyle};
-    use aqua_ui::element::Text;
-    Text::new(text)
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: size,
-            line_height_px: line_height,
-            weight: FontWeight::NORMAL,
-            ..TextStyle::default()
-        })
-        .gpui_source_color(color)
-        .wrap(false)
-        .build()
-}
 
-fn medium(
-    theme: &ArtisanTheme,
-    text: String,
-    size: f32,
-    line_height: f32,
-    color: aqua::GpuiTextColor,
-) -> Element {
-    use aqua_text::{FontFamily, FontWeight, TextStyle};
-    aqua_ui::element::Text::new(text)
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: size,
-            line_height_px: line_height,
-            weight: FontWeight(500),
-            ..TextStyle::default()
-        })
-        .gpui_source_color(color)
-        .wrap(false)
-        .build()
-}
 
-fn paragraph(
-    theme: &ArtisanTheme,
-    text: String,
-    size: f32,
-    line_height: f32,
-    color: aqua::GpuiTextColor,
-) -> Element {
-    use aqua_text::{FontFamily, FontWeight, TextStyle};
-    aqua_ui::element::Text::new(text)
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: size,
-            line_height_px: line_height,
-            weight: FontWeight::NORMAL,
-            ..TextStyle::default()
-        })
-        .gpui_source_color(color)
-        .wrap(true)
-        .build()
-}
+
+
+
 
 pub fn mention_menu(
     theme: ArtisanTheme,
@@ -430,27 +260,22 @@ pub fn mention_menu(
     dispatch: Dispatch,
 ) -> Option<Element> {
     use super::mentions::Kind;
-    use editor_ui::{
-        asset::source_asset_glyph, kit::{Divider, Surface}, popover::PopoverPanel,
-    };
-    use aqua_core::{Insets, Role};
-    use aqua_ui::{AlignItems, element::Button as UiButton};
+    use editor_ui::popover::PopoverPanel;
     if mentions.rows.is_empty() {
         return None;
     }
+    let surface = Surface::Menu;
+    let muted = theme.colors.text_muted;
     let mut entries = UiBox::new().layout("column");
     let mut previous = None;
-    let mut content_height = 0.0_f32;
     for (index, catalog_index) in mentions.rows.iter().copied().enumerate() {
         let Some(row) = mentions.catalog.get(catalog_index) else {
             continue;
         };
         if previous != Some(row.kind) {
             if previous.is_some() {
-                entries = entries.child(Divider::Rule.build(&theme, Surface::Menu.padding_px()));
-                content_height += 9.0;
+                entries = entries.child(Divider::Rule.build(&theme, surface.padding_px()));
             }
-            content_height += 30.0;
             let heading = match row.kind {
                 Kind::Command => "Commands",
                 Kind::Skill => "Skills",
@@ -458,30 +283,17 @@ pub fn mention_menu(
                 Kind::Thread => "Threads",
             };
             entries = entries.child(
-                UiBox::new()
-                    .height(30.0)
-                    .style(
-                        Style::new()
-                            .align(AlignItems::CENTER)
-                            .padding_insets(Insets {
-                                left: 10.0,
-                                right: 10.0,
-                                top: 0.0,
-                                bottom: 0.0,
-                            }),
-                    )
-                    .child(label(
-                        &theme,
-                        heading.into(),
-                        12.0,
-                        16.0,
-                        theme.colors.text_muted.to_reference_text_color(),
-                    ))
-                    .build(),
+                RowItem::new(
+                    format!("composer-mention-heading-{index}"),
+                    theme,
+                    Row::Heading,
+                    surface,
+                    heading,
+                )
+                .build(),
             );
             previous = Some(row.kind);
         }
-        content_height += 36.0;
         let icon = match row.kind {
             Kind::Command => AssetId::TABLER_TERMINAL_2,
             Kind::Skill => AssetId::TABLER_FILE_SPARK,
@@ -490,77 +302,51 @@ pub fn mention_menu(
         };
         let action = Rc::clone(&dispatch);
         let hover = Rc::clone(&dispatch);
-        let title = label(
-            &theme,
-            row.title.clone(),
-            14.0,
-            20.0,
-            theme.colors.text.to_reference_text_color(),
-        );
-        let description = label(
-            &theme,
-            row.description.clone(),
-            14.0,
-            20.0,
-            theme.colors.text_muted.to_reference_text_color(),
-        );
-        let (title_style, description_style) = if row.kind == Kind::Thread {
-            (
-                Style::new().flex_grow(1.0).min_width(Length::Px(0.0)),
-                Style::new().flex_shrink(0.0).max_width(Length::Px(180.0)),
-            )
-        } else {
-            (
-                Style::new().flex_shrink(0.0).max_width(Length::Px(260.0)),
-                Style::new().flex_grow(1.0).min_width(Length::Px(0.0)),
-            )
+        let description_box = match row.kind {
+            Kind::Thread => Style::new()
+                .flex_shrink(0.0)
+                .max_width(Length::Px(MENTION_THREAD_DETAIL_WIDTH)),
+            _ => Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)),
         };
-        let item = UiButton::new()
-            .width(Length::Pct(100.0))
-            .height(36.0)
-            .gap(10.0)
-            .radius(RadiusTokens::value(RadiusStep::LgMid))
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        left: 10.0,
-                        right: 10.0,
-                        top: 0.0,
-                        bottom: 0.0,
-                    }),
-            )
-            .child(source_asset_glyph(
-                icon,
-                16.0,
-                theme.colors.text_muted.to_reference_paint(),
-            ))
-            .child(UiBox::new().style(title_style).child(title).build())
+        let description = UiBox::new()
+            .style(description_box)
             .child(
-                UiBox::new()
-                    .style(description_style)
-                    .child(description)
+                TextRole::Label
+                    .text(&theme, row.description.clone())
+                    .gpui_source_color(muted.to_reference_text_color())
+                    .overflow(OverflowMode::EndEllipsis)
+                    .style(Style::new().min_width(Length::Pct(0.0)).text_wrap(false))
                     .build(),
             )
+            .build();
+        entries = entries.child(
+            RowItem::new(
+                format!("composer-mention-row-{index}"),
+                theme,
+                Row::MenuItem,
+                surface,
+                row.title.clone(),
+            )
+            .leading(IconSize::Md.glyph(icon, muted.to_reference_paint()))
+            .trailing(description)
+            .underlay(None)
+            .selected(index == mentions.highlighted)
             .on_activate(move || action(ComposerAction::SelectMention(index)))
-            .build()
-            .with_key(format!("composer-mention-row-{index}"))
-            .role(Role::MenuItem)
-            .aria_label(row.title.clone())
-            .aria_selected(index == mentions.highlighted)
-            .focusable(true)
-            .on_input(
-                aqua_ui::input::InputKind::PointerEnter,
-                aqua_ui::input::EventPhase::Bubble,
-                move |_| {
+            .on_hover(move |hovered| {
+                if hovered {
                     hover(ComposerAction::HoverMention(index));
-                    aqua_ui::input::InputResponse::default()
-                },
-            );
-        entries = entries.child(item);
+                }
+            })
+            .build(),
+        );
     }
-    let list = aqua_ui::element::Scroll::new()
-        .height(content_height.min(36.0_f32.mul_add(9.5, 30.0)))
+    let cap = Row::MenuItem
+        .height()
+        .unwrap_or_default()
+        .mul_add(MENTION_ROWS_SHOWN, Row::Heading.height().unwrap_or_default());
+    let list = Scroll::new()
+        .layout("column")
+        .style(Style::new().max_height(Length::Px(cap)))
         .child(entries.build())
         .build();
     let panel = PopoverPanel::new("composer-mentions-panel", theme, list, viewport.w, viewport.h).build();
@@ -582,23 +368,21 @@ pub fn questionnaire(
     source_view: Option<Element>,
     dispatch: Dispatch,
 ) -> Option<Element> {
-    use editor_ui::asset::source_asset_glyph;
-    use aqua_core::{Insets, Role};
-    use aqua_ui::{AlignItems, element::Button as UiButton};
     let active = panel.active()?;
+    let muted = theme.colors.text_muted;
+    let surface = Surface::Composer;
     let Some(question) = question else {
-        let mut loading = UiBox::new().layout("column").child(label(
-            &theme,
-            load_error.unwrap_or("Loading question…").into(),
-            14.0,
-            20.0,
-            theme.colors.text.to_reference_text_color(),
-        ));
+        let mut loading = UiBox::new().layout("column").spaced(Space::S8).child(
+            TextRole::Label
+                .text(&theme, load_error.unwrap_or("Loading question…").to_owned())
+                .wrap(true)
+                .build(),
+        );
         if load_error.is_some() {
             let action = Rc::clone(&dispatch);
             loading = loading.child(
-                Button::text("question-page-retry", theme, "Retry")
-                    .variant(editor_ui::button::ButtonVariant::Outline)
+                Button::text("question-page-retry", theme, ButtonTone::Neutral, "Retry")
+                    .within(surface)
                     .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
                     .build(),
             );
@@ -607,117 +391,77 @@ pub fn questionnaire(
     };
     let sending = panel.sending.is_some();
     let action = Rc::clone(&dispatch);
-    let dismiss = UiButton::new()
-        .width(20.0)
-        .height(20.0)
-        .radius(RadiusTokens::value(RadiusStep::Sm))
-        .child(source_asset_glyph(
-            AssetId::TABLER_X,
-            14.0,
-            theme.colors.text_muted.to_reference_paint(),
-        ))
-        .on_activate(move || action(ComposerAction::DismissQuestionnaire))
-        .build()
-        .with_key("composer-question-dismiss")
-        .role(Role::Button)
-        .aria_label("Dismiss questionnaire")
-        .disabled(sending)
-        .focusable(!sending);
+    let dismiss = IconButton::new(
+        "composer-question-dismiss",
+        theme,
+        AssetId::TABLER_X,
+        "Dismiss questionnaire",
+        IconButtonSize::Sm,
+        Finish::Plain,
+    )
+    .muted()
+    .within(surface)
+    .disabled(sending)
+    .on_activate(move |_| action(ComposerAction::DismissQuestionnaire))
+    .build();
     let header = UiBox::new()
-        .gap(8.0)
+        .spaced(Space::S8)
         .style(Style::new().align(AlignItems::CENTER))
-        .child(source_asset_glyph(
-            AssetId::TABLER_MESSAGE_CIRCLE,
-            14.0,
-            theme.colors.text_muted.to_reference_paint(),
-        ))
+        .child(IconSize::Sm.glyph(AssetId::TABLER_MESSAGE_CIRCLE, muted.to_reference_paint()))
         .child(
             UiBox::new()
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                .child(label(
-                    &theme,
-                    question.header.clone().unwrap_or_else(|| "Question".into()),
-                    12.0,
-                    16.0,
-                    theme.colors.text_muted.to_reference_text_color(),
-                ))
+                .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+                .child(
+                    TextRole::Caption
+                        .text(
+                            &theme,
+                            question.header.clone().unwrap_or_else(|| "Question".into()),
+                        )
+                        .gpui_source_color(muted.to_reference_text_color())
+                        .wrap(false)
+                        .build(),
+                )
                 .build(),
         )
         .child(dismiss)
         .build();
     let text = match &question.text {
-        artisan_api::TextContent::Inline(text) => paragraph(
-            &theme,
-            text.clone(),
-            15.0,
-            22.0,
-            theme.colors.text.to_reference_text_color(),
-        ),
+        artisan_api::TextContent::Inline(text) => {
+            TextRole::Label.text(&theme, text.clone()).wrap(true).build()
+        }
         artisan_api::TextContent::Stored(source) => {
             let source = source.clone();
             let action = Rc::clone(&dispatch);
-            Button::text("question-source", theme, "Read full question")
-                .variant(editor_ui::button::ButtonVariant::Ghost)
+            Button::text("question-source", theme, ButtonTone::Quiet, "Read full question")
+                .within(surface)
                 .on_activate(move |_| action(ComposerAction::OpenQuestionSource(source.clone())))
                 .build()
         }
     };
     let mut card = UiBox::new()
         .layout("column")
-        .gap(8.0)
-        .padding(4.0)
+        .spaced(Space::S8)
         .child(header)
-        .child(
-            UiBox::new()
-                .style(Style::new().padding_insets(Insets {
-                    left: 2.0,
-                    right: 2.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }))
-                .child(text)
-                .build(),
-        );
-    let mut rows = UiBox::new().layout("column").gap(2.0);
+        .child(text);
+    let mut rows = UiBox::new().layout("column").spaced(Space::S2);
     if let Some(options) = stored_options {
         rows = rows.child(options);
     }
     if let artisan_api::Collection::Inline(options) = &question.options {
         for (index, option) in options.iter().enumerate() {
             let selected = panel.ticked.contains(&option.id);
-            let marker = if question.multi_select {
-                let mut mark = UiBox::new()
-                    .width(16.0)
-                    .height(16.0)
-                    .radius(RadiusTokens::value(RadiusStep::Xs))
-                    .border((1.0, theme.colors.line.to_paint()));
-                if selected {
-                    mark = mark.child(source_asset_glyph(
-                        AssetId::TABLER_CHECK,
-                        12.0,
-                        theme.colors.text.to_reference_paint(),
-                    ));
-                }
-                mark.build()
-            } else {
-                label(
-                    &theme,
-                    (index + 1).to_string(),
-                    14.0,
-                    20.0,
-                    theme.colors.text_muted.to_reference_text_color(),
-                )
+            let marker = match question.multi_select && selected {
+                true => IconSize::Md.glyph(AssetId::TABLER_CHECK, theme.colors.text.to_reference_paint()),
+                false => TextRole::Label
+                    .text(&theme, (index + 1).to_string())
+                    .gpui_source_color(muted.to_reference_text_color())
+                    .wrap(false)
+                    .build(),
             };
             let mut text = UiBox::new()
                 .layout("column")
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                .child(paragraph(
-                    &theme,
-                    option.label.clone(),
-                    14.0,
-                    20.0,
-                    theme.colors.text.to_reference_text_color(),
-                ));
+                .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+                .child(TextRole::Label.text(&theme, option.label.clone()).wrap(true).build());
             if let Some(description) = &option.description {
                 let value = match description {
                     artisan_api::TextContent::Inline(text) => text.clone(),
@@ -725,13 +469,13 @@ pub fn questionnaire(
                         "Full description available below".into()
                     }
                 };
-                text = text.child(paragraph(
-                    &theme,
-                    value,
-                    12.0,
-                    16.0,
-                    theme.colors.text_muted.to_reference_text_color(),
-                ));
+                text = text.child(
+                    TextRole::Caption
+                        .text(&theme, value)
+                        .gpui_source_color(muted.to_reference_text_color())
+                        .wrap(true)
+                        .build(),
+                );
             }
             let item = active.item.clone();
             let question_id = question.id.clone();
@@ -739,26 +483,27 @@ pub fn questionnaire(
             let multi = question.multi_select;
             let step = panel.step;
             let action = Rc::clone(&dispatch);
-            let mut row = UiButton::new()
-                .gap(10.0)
-                .radius(RadiusTokens::value(RadiusStep::Lg))
-                .style(
-                    Style::new()
-                        .align(AlignItems::FLEX_START)
-                        .padding_insets(Insets {
-                            left: 10.0,
-                            right: 10.0,
-                            top: 6.0,
-                            bottom: 6.0,
-                        }),
+            let body = UiBox::new()
+                .padded(Space::S8)
+                .spaced(Space::S8)
+                .style(Style::new().align(AlignItems::FLEX_START))
+                .child(
+                    UiBox::new()
+                        .width(IconSize::Md.px())
+                        .style(Style::new().flex_shrink(0.0).align(AlignItems::CENTER))
+                        .child(marker)
+                        .build(),
                 )
-                .child(marker)
-                .child(text.build());
-            if selected {
-                row = row.fill(theme.colors.selected.to_paint());
-            }
-            let row = row
-                .on_activate(move || {
+                .child(text.build())
+                .build();
+            let mut row = HitArea::new(
+                format!("composer-question-option-{index}"),
+                Role::Button,
+                option.label.clone(),
+            )
+            .child(body);
+            if !sending {
+                row = row.on_activate(move || {
                     action(ComposerAction::ChooseQuestionOption {
                         item: item.clone(),
                         question: question_id.clone(),
@@ -766,14 +511,9 @@ pub fn questionnaire(
                         id: id.clone(),
                         multi,
                     })
-                })
-                .build()
-                .with_key(format!("composer-question-option-{index}"))
-                .role(Role::Button)
-                .aria_label(option.label.clone())
-                .aria_selected(selected)
-                .disabled(sending)
-                .focusable(!sending);
+                });
+            }
+            let row = choice(&theme, row.build(), selected, sending);
             rows = rows.child(row);
             if let Some(artisan_api::TextContent::Stored(source)) = &option.description {
                 let source = source.clone();
@@ -782,9 +522,10 @@ pub fn questionnaire(
                     Button::text(
                         format!("question-description-{index}"),
                         theme,
+                        ButtonTone::Quiet,
                         "Read description",
                     )
-                    .variant(editor_ui::button::ButtonVariant::Ghost)
+                    .within(surface)
                     .on_activate(move |_| {
                         action(ComposerAction::OpenQuestionSource(source.clone()))
                     })
@@ -804,44 +545,43 @@ pub fn questionnaire(
         };
         let action = Rc::clone(&dispatch);
         rows = rows.child(
-            Button::text("composer-question-continue", theme, text)
-                .variant(editor_ui::button::ButtonVariant::Ghost)
+            Button::text("composer-question-continue", theme, ButtonTone::Primary, text)
+                .within(surface)
                 .on_activate(move |_| action(ComposerAction::ContinueQuestionnaire))
                 .build(),
         );
     }
     card = card.child(rows.build());
     if sending {
-        card = card.child(label(
-            &theme,
-            "Sending your answer…".into(),
-            12.0,
-            16.0,
-            theme.colors.text_muted.to_reference_text_color(),
-        ));
+        card = card.child(
+            TextRole::Caption
+                .text(&theme, "Sending your answer…")
+                .gpui_source_color(muted.to_reference_text_color())
+                .build(),
+        );
     } else if let Some(error) = &panel.error {
         let action = Rc::clone(&dispatch);
         card = card
-            .child(label(
-                &theme,
-                error.clone(),
-                14.0,
-                20.0,
-                theme.colors.destructive_text.to_reference_text_color(),
-            ))
             .child(
-                Button::text("composer-question-retry", theme, "Retry answer")
-                    .variant(editor_ui::button::ButtonVariant::Outline)
+                TextRole::Label
+                    .text(&theme, error.clone())
+                    .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
+                    .wrap(true)
+                    .build(),
+            )
+            .child(
+                Button::text("composer-question-retry", theme, ButtonTone::Neutral, "Retry answer")
+                    .within(surface)
                     .on_activate(move |_| action(ComposerAction::RetryQuestionnaire))
                     .build(),
             );
     }
-    let mut result = UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0))
-        .child(card.build());
-    let mut stack = UiBox::new().layout("column").gap(2.0);
-    for other in panel.visible().filter(|other| other.item != active.item) {
+    let mut stack = UiBox::new().layout("column").spaced(Space::S2);
+    for (position, other) in panel
+        .visible()
+        .filter(|other| other.item != active.item)
+        .enumerate()
+    {
         let title = other
             .questions
             .inline()
@@ -858,51 +598,54 @@ pub fn questionnaire(
             );
         let item = other.item.clone();
         let action = Rc::clone(&dispatch);
-        let mut row = UiButton::new()
-            .gap(8.0)
-            .radius(RadiusTokens::value(RadiusStep::Md))
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        left: 10.0,
-                        right: 10.0,
-                        top: 4.0,
-                        bottom: 4.0,
-                    }),
-            )
-            .child(source_asset_glyph(
-                AssetId::TABLER_CHEVRON_RIGHT,
-                14.0,
-                theme.colors.text_muted.to_reference_paint(),
-            ))
-            .child(label(
-                &theme,
-                title.clone(),
-                13.0,
-                18.0,
-                theme.colors.text_muted.to_reference_text_color(),
-            ));
+        let mut row = RowItem::new(
+            format!("composer-questionnaire-{position}"),
+            theme,
+            Row::ListItem(Density::Dense),
+            surface,
+            title,
+        )
+        .leading(IconSize::Md.glyph(AssetId::TABLER_CHEVRON_RIGHT, muted.to_reference_paint()))
+        .disabled(sending)
+        .on_activate(move || action(ComposerAction::ActivateQuestionnaire(item.clone())));
         if other.questions.len() > 1 {
-            row = row.child(label(
-                &theme,
-                format!("{} questions", other.questions.len()),
-                13.0,
-                18.0,
-                theme.colors.text_muted.to_reference_text_color(),
-            ));
+            row = row.trailing(
+                TextRole::Caption
+                    .text(&theme, format!("{} questions", other.questions.len()))
+                    .gpui_source_color(muted.to_reference_text_color())
+                    .wrap(false)
+                    .build(),
+            );
         }
-        stack = stack.child(
-            row.on_activate(move || action(ComposerAction::ActivateQuestionnaire(item.clone())))
-                .build()
-                .role(Role::Button)
-                .aria_label(title)
-                .disabled(sending)
-                .focusable(!sending),
-        );
+        stack = stack.child(row.build());
     }
-    result = result.child(stack.build());
-    Some(result.build().with_key("composer-questionnaire"))
+    Some(
+        UiBox::new()
+            .layout("column")
+            .width(Length::Pct(100.0))
+            .spaced(Space::S8)
+            .child(card.build())
+            .child(stack.build())
+            .build()
+            .with_key("composer-questionnaire"),
+    )
+}
+
+fn choice(theme: &ArtisanTheme, row: Element, selected: bool, sending: bool) -> Element {
+    let row = row
+        .style(Style::new().height(Length::Auto))
+        .style(Radius::Field.style())
+        .aria_selected(selected)
+        .disabled(sending)
+        .focusable(!sending);
+    let row = match selected {
+        true => row.style(Hover::Neutral.style(theme)),
+        false => row,
+    };
+    match sending {
+        true => row,
+        false => row.hover_style(Hover::Neutral.style(theme)),
+    }
 }
 
 pub struct CardParts {
@@ -932,12 +675,12 @@ pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Ele
     card = card.child(
         UiBox::new()
             .width(Length::Pct(100.0))
-            .gap(8.0)
-            .style(Style::new().align(aqua_ui::AlignItems::END))
+            .spaced(Space::S8)
+            .style(Style::new().align(AlignItems::END))
             .child(
                 UiBox::new()
                     .layout("column")
-                    .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+                    .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
                     .child(parts.prompt)
                     .build(),
             )
@@ -956,61 +699,39 @@ pub fn draft_error(
     conflict: bool,
     dispatch: Dispatch,
 ) -> Element {
-    use aqua_core::Insets;
-    let text = UiBox::new()
-        .style(Style::new().padding_insets(Insets {
-            left: 12.0,
-            right: 12.0,
-            top: 0.0,
-            bottom: 0.0,
-        }))
-        .child(label(
-            &theme,
-            error.to_owned(),
-            13.0,
-            16.25,
-            theme.colors.destructive_text.to_reference_text_color(),
-        ))
-        .build();
-    let mut root = UiBox::new()
+    let surface = Surface::Composer;
+    let choice = |key: &'static str, label: &'static str, action: ComposerAction| {
+        let dispatch = Rc::clone(&dispatch);
+        Button::text(key, theme, ButtonTone::Neutral, label)
+            .within(surface)
+            .on_activate(move |_| dispatch(action.clone()))
+            .build()
+    };
+    let actions = match conflict {
+        true => UiBox::new()
+            .spaced(Space::S8)
+            .child(choice("draft-keep-local", "Keep my draft", ComposerAction::KeepDraft))
+            .child(choice(
+                "draft-use-remote",
+                "Load other draft",
+                ComposerAction::LoadOtherDraft,
+            ))
+            .build(),
+        false => choice("draft-retry", "Retry", ComposerAction::RetryDraft),
+    };
+    UiBox::new()
         .layout("column")
-        .gap(8.0)
-        .style(Style::new().padding_insets(Insets {
-            left: 0.0,
-            right: 0.0,
-            top: 10.0,
-            bottom: 6.0,
-        }))
-        .child(text);
-    if conflict {
-        let local = Rc::clone(&dispatch);
-        let remote = Rc::clone(&dispatch);
-        root = root.child(
-            UiBox::new()
-                .gap(8.0)
-                .child(
-                    Button::text("draft-keep-local", theme, "Keep my draft")
-                        .variant(editor_ui::button::ButtonVariant::Outline)
-                        .on_activate(move |_| local(ComposerAction::KeepDraft))
-                        .build(),
-                )
-                .child(
-                    Button::text("draft-use-remote", theme, "Load other draft")
-                        .variant(editor_ui::button::ButtonVariant::Outline)
-                        .on_activate(move |_| remote(ComposerAction::LoadOtherDraft))
-                        .build(),
-                )
+        .padded(Space::S8)
+        .spaced(Space::S8)
+        .child(
+            TextRole::Label
+                .text(&theme, error.to_owned())
+                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
+                .wrap(true)
                 .build(),
-        );
-    } else {
-        root = root.child(
-            Button::text("draft-retry", theme, "Retry")
-                .variant(editor_ui::button::ButtonVariant::Outline)
-                .on_activate(move |_| dispatch(ComposerAction::RetryDraft))
-                .build(),
-        );
-    }
-    root.build()
+        )
+        .child(actions)
+        .build()
 }
 
 pub fn goal_label(
@@ -1020,9 +741,7 @@ pub fn goal_label(
     dispatch: Dispatch,
 ) -> Element {
     use super::goal_strip::ComposerGoalState as State;
-    use editor_ui::{asset::source_asset_glyph, glass::tinted_card_shadows};
-    use aqua_core::{Insets, Transform2D};
-    use aqua_ui::{AlignItems, element::Button as UiButton};
+    use aqua_core::Transform2D;
     let goal = &frame.goal;
     let safety = matches!(
         goal.state,
@@ -1050,14 +769,9 @@ pub fn goal_label(
         ),
         _ => (AssetId::TABLER_TARGET_ARROW, theme.colors.text_muted),
     };
+    let muted = theme.colors.text_muted.to_reference_text_color();
     let mut style = Style::new()
         .align(AlignItems::CENTER)
-        .padding_insets(Insets {
-            left: 6.0,
-            right: 12.0,
-            top: 0.0,
-            bottom: 0.0,
-        })
         .opacity(frame.label_opacity)
         .transform(Transform2D::translate(0.0, frame.label_offset));
     let blur = (frame.label_offset.abs() / 2.0).min(2.0);
@@ -1066,26 +780,32 @@ pub fn goal_label(
     }
     let mut row = UiBox::new()
         .height(Length::Pct(100.0))
-        .gap(6.0)
+        .padded(Space::S6)
+        .spaced(Space::S6)
         .style(style)
-        .child(source_asset_glyph(icon, 15.0, tone.to_reference_paint()));
+        .child(IconSize::Md.glyph(icon, tone.to_reference_paint()));
     if note {
         row = row.child(
             UiBox::new()
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+                .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
                 .child(ticker)
                 .build(),
         );
     } else {
-        let headline = if safety {
-            tone.to_reference_text_color()
-        } else {
-            theme.colors.text.to_reference_text_color()
+        let headline = match safety {
+            true => tone,
+            false => theme.colors.text,
         };
         row = row.child(
             UiBox::new()
-                .style(Style::new().min_width(Length::Px(0.0)))
-                .child(label(&theme, goal.objective.clone(), 13.0, 18.0, headline))
+                .style(Style::new().min_width(Length::Pct(0.0)))
+                .child(
+                    TextRole::Label
+                        .text(&theme, goal.objective.clone())
+                        .gpui_source_color(headline.to_reference_text_color())
+                        .wrap(false)
+                        .build(),
+                )
                 .build(),
         );
         if matches!(
@@ -1093,76 +813,52 @@ pub fn goal_label(
             State::Active | State::SafetyHolding | State::SafetyRerouted | State::SafetyRefused
         ) && let Some(detail) = &goal.detail
         {
-            row = row.child(label(
-                &theme,
-                detail.clone(),
-                13.0,
-                18.0,
-                theme.colors.text_muted.to_reference_text_color(),
-            ));
+            row = row.child(
+                TextRole::Label
+                    .text(&theme, detail.clone())
+                    .gpui_source_color(muted)
+                    .wrap(false)
+                    .build(),
+            );
         }
-        let pill = match goal.state {
-            State::Paused => Some(("Paused", theme.colors.banner_info)),
-            State::Blocked => Some(("Blocked", theme.colors.banner_warning)),
-            State::UsageLimited => Some(("Usage limit reached", theme.colors.banner_warning)),
-            State::BudgetLimited => Some(("Budget spent", theme.colors.banner_warning)),
+        let status = match goal.state {
+            State::Paused => Some(("Paused", theme.colors.banner_info.text)),
+            State::Blocked => Some(("Blocked", theme.colors.banner_warning.text)),
+            State::UsageLimited => Some(("Usage limit reached", theme.colors.banner_warning.text)),
+            State::BudgetLimited => Some(("Budget spent", theme.colors.banner_warning.text)),
             _ => None,
         };
-        if let Some((text, tone)) = pill {
+        if let Some((text, tone)) = status {
             row = row.child(
-                UiBox::new()
-                    .height(18.0)
-                    .radius(5.0)
-                    .fill(tone.bg.to_paint())
-                    .style(
-                        Style::new()
-                            .align(AlignItems::CENTER)
-                            .padding_insets(Insets {
-                                left: 6.0,
-                                right: 6.0,
-                                top: 0.0,
-                                bottom: 0.0,
-                            })
-                            .shadows(
-                                tinted_card_shadows(&theme, tone.text)
-                                    .into_iter()
-                                    .map(Into::into)
-                                    .collect(),
-                            ),
-                    )
-                    .child(label(
-                        &theme,
-                        text.into(),
-                        12.0,
-                        16.0,
-                        tone.text.to_reference_text_color(),
-                    ))
+                TextRole::Caption
+                    .text(&theme, text)
+                    .gpui_source_color(tone.to_reference_text_color())
+                    .wrap(false)
                     .build(),
             );
         }
         row = row.child(UiBox::new().style(Style::new().flex_grow(1.0)).build());
     }
     if !safety {
-        let (id, action) = if note {
-            ("composer-note-close", ComposerAction::CloseNote)
+        let (id, label, action) = if note {
+            ("composer-note-close", "Close note", ComposerAction::CloseNote)
         } else if goal.state == State::Parked {
-            ("composer-park-cancel", ComposerAction::Unpark)
+            ("composer-park-cancel", "Cancel the parked run", ComposerAction::Unpark)
         } else {
-            ("composer-goal-clear", ComposerAction::ClearGoal)
+            ("composer-goal-clear", "Clear goal", ComposerAction::ClearGoal)
         };
         row = row.child(
-            UiButton::new()
-                .width(15.0)
-                .height(15.0)
-                .child(source_asset_glyph(
-                    AssetId::TABLER_X,
-                    15.0,
-                    theme.colors.text_muted.to_reference_paint(),
-                ))
-                .on_activate(move || dispatch(action.clone()))
-                .build()
-                .with_key(id)
-                .focusable(true),
+            IconButton::new(
+                id,
+                theme,
+                AssetId::TABLER_X,
+                label,
+                IconButtonSize::Sm,
+                Finish::Plain,
+            )
+            .muted()
+            .on_activate(move |_| dispatch(action.clone()))
+            .build(),
         );
     }
     row.build()
@@ -1236,19 +932,8 @@ fn picker_tooltip_surface(
     width: f32,
     fixed: bool,
 ) -> Element {
-    use editor_ui::{
-        glass::{GlassStrength, glass_card_shadows, glass_layers},
-        theme::Elevation,
-    };
-    use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
-    use aqua_ui::element::Text;
-    let style = TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: 12.0,
-        line_height_px: 16.0,
-        weight: FontWeight::NORMAL,
-        ..TextStyle::default()
-    };
+    use aqua_text::StyledSpan;
+    let style = TextRole::Caption.style(theme);
     let mut spans = Vec::new();
     if let Some(advisory) = tooltip.advisory.as_ref().filter(|text| !text.is_empty()) {
         let color = if advisory == "Additional info:" {
@@ -1257,55 +942,36 @@ fn picker_tooltip_surface(
             theme.colors.destructive_text
         }
         .to_reference_text_color();
-        let mut highlighted = style.clone();
-        highlighted.weight = FontWeight(500);
-        spans.push(
-            StyledSpan::new(advisory.clone(), highlighted).gpui_source_color([
-                color.hue_degrees,
-                color.saturation,
-                color.lightness,
-                color.alpha,
-            ]),
-        );
+        spans.push(StyledSpan::new(advisory.clone(), style.clone()).gpui_source_color([
+            color.hue_degrees,
+            color.saturation,
+            color.lightness,
+            color.alpha,
+        ]));
         if !tooltip.text.is_empty() {
             spans.push(StyledSpan::new(" ", style.clone()));
         }
     }
     if !tooltip.text.is_empty() {
-        spans.push(StyledSpan::new(tooltip.text.clone(), style.clone()));
+        spans.push(StyledSpan::new(tooltip.text.clone(), style));
     }
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    let mut layout = Style::new()
-        .max_width(Length::Px(width))
-        .padding_insets(aqua_core::Insets {
-            left: 12.0,
-            right: 12.0,
-            top: 8.0,
-            bottom: 8.0,
-        })
-        .gpui_shadows(
-            glass_card_shadows(theme, Elevation::Overlay)
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        );
+    let mut layout = Style::new().max_width(Length::Px(width));
     if fixed {
         layout = layout.width(Length::Px(width));
     }
-    UiBox::new()
-        .radius(radius)
-        .clip(true)
-        .style(layout)
-        .child(glass_layers(theme, GlassStrength::Strong, radius))
-        .child(
-            Text::new("")
-                .text_style(style)
-                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                .spans(spans)
-                .wrap(true)
-                .build(),
+    Surface::Tooltip(Tooltip::Brief)
+        .build(
+            theme,
+            vec![
+                TextRole::Caption
+                    .text(theme, "")
+                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                    .spans(spans)
+                    .wrap(true)
+                    .build(),
+            ],
         )
-        .build()
+        .style(layout)
         .with_key("composer-picker-tooltip")
 }
 
@@ -2581,7 +2247,7 @@ impl ComposerOwner {
             .unwrap_or_default() as f32;
         let tab = {
             let mut tab = self.model_tab.borrow_mut();
-            let height = MODEL_ITEM_HEIGHT.min(MODEL_PANE_HEIGHT / items.len().max(1) as f32);
+            let height = model_item_height(items.len());
             tab.resize(height);
             tab.aim(active * height, now);
             if opening || self.reduced_motion {
@@ -2598,7 +2264,12 @@ impl ComposerOwner {
                 .map(|index| (index, engine))
         }) {
             let mut light = self.engine_light.borrow_mut();
-            light.measure(engine, 4.0 + index as f32 * 36.0, 32.0, now);
+            light.measure(
+                engine,
+                index as f32 * (MODEL_BAR_HEIGHT + MODEL_BAR_GAP.px()),
+                MODEL_BAR_HEIGHT,
+                now,
+            );
             match light.frame(now) {
                 Some((left, _)) => Some(
                     self.engine_light_image
@@ -2676,9 +2347,9 @@ impl ComposerOwner {
             };
             let tab = Some(
                 UiBox::new()
-                    .height(28.0)
-                    .gap(4.0)
-                    .style(Style::new().align(aqua_ui::AlignItems::CENTER))
+                    .height(TriggerSize::Sm.height())
+                    .spaced(Space::S4)
+                    .style(Style::new().align(AlignItems::CENTER))
                     .child(self.model(theme, &controller, host))
                     .children(project)
                     .build(),
@@ -2693,22 +2364,8 @@ impl ComposerOwner {
                             theme,
                             &frame,
                             UiBox::new()
-                                .style(
-                                    Style::new()
-                                        .gpui_source_text_color(
-                                            theme.colors.text.to_reference_text_color(),
-                                        )
-                                        .text_style(aqua_text::TextStyle {
-                                            families: vec![aqua_text::FontFamily::Named(
-                                                theme.typography.sans.family.to_owned(),
-                                            )],
-                                            size_px: 13.0,
-                                            line_height_px: 18.0,
-                                            weight: aqua_text::FontWeight::NORMAL,
-                                            ..aqua_text::TextStyle::default()
-                                        }),
-                                )
-                                .child(ticker.build(18.0))
+                                .style(TextRole::Label.inherit(&theme))
+                                .child(ticker.build(TextRole::Label.spec().line))
                                 .build(),
                             Rc::clone(&self.dispatch),
                         );
@@ -2895,8 +2552,6 @@ pub fn attachments(
     dispatch: Dispatch,
 ) -> Option<Element> {
     use editor_ui::attachment_tile::AttachmentTile;
-    use aqua_core::Insets;
-    use aqua_ui::{AlignItems, element::Scroll};
     if controller.questionnaire.writing_answer() {
         return None;
     }
@@ -2910,19 +2565,10 @@ pub fn attachments(
         .session
         .as_ref()
         .is_some_and(|session| session.read(|state| !state.sending()));
-    let mut row =
-        UiBox::new()
-            .gap(8.0)
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        left: 4.0,
-                        right: 4.0,
-                        top: 4.0,
-                        bottom: 8.0,
-                    }),
-            );
+    let mut row = UiBox::new()
+        .padded(Space::S4)
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER));
     if let Some(images) = images {
         for image in images.items.iter().filter(|image| image.shown) {
             let key = image.key;
@@ -3016,8 +2662,7 @@ pub enum PopupKind {
 impl PopupKind {
     pub const fn gap(self) -> f32 {
         match self {
-            Self::Project => 10.0,
-            Self::Model | Self::Mentions => 8.0,
+            Self::Project | Self::Model | Self::Mentions => Space::S8.px(),
         }
     }
 }
@@ -3055,10 +2700,9 @@ fn project_mark(
     use aqua_ui::element::Media;
     if let Some(image) = host.project_icon(project) {
         return Media::new(image.as_ref().clone())
-            .width(16.0)
-            .height(16.0)
+            .width(IconSize::Md.px())
+            .height(IconSize::Md.px())
             .fit(ImageFit::Contain)
-            .radius(RadiusTokens::value(RadiusStep::X2sMid))
             .build();
     }
     let icon = match host.repository(project) {
@@ -3074,7 +2718,7 @@ fn project_mark(
             _ => AssetId::SVGL_GIT,
         },
     };
-    editor_ui::asset::source_asset_glyph(icon, 16.0, theme.colors.text_muted.to_reference_paint())
+    IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint())
 }
 
 pub fn project_menu(
@@ -3086,92 +2730,50 @@ pub fn project_menu(
     hover_surface: Rc<std::cell::RefCell<editor_ui::picker_motion::HoverSurface>>,
     dispatch: Dispatch,
 ) -> Element {
-    use editor_ui::{
-        asset::source_asset_glyph,
-        glass::{GlassStrength, glass_card_shadows, glass_layers},
-        kit::Divider,
-        theme::Elevation,
-    };
-    use aqua_core::{Insets, Role};
-    use aqua_ui::{
-        AlignItems,
-        element::{Button as UiButton, Scroll},
+    let surface = Surface::Menu;
+    let row = Row::MenuItem;
+    let muted = theme.colors.text_muted.to_reference_paint();
+    let item = |key: String, title: String, leading: Element, chosen: bool, action: ComposerAction| {
+        let dispatch = Rc::clone(&dispatch);
+        let hover = Rc::clone(&hover_surface);
+        let hover_key = key.clone();
+        let mut item = RowItem::new(key, theme, row, surface, title)
+            .leading(leading)
+            .underlay(None)
+            .on_activate(move || dispatch(action.clone()))
+            .on_hover(move |hovered| {
+                if hovered {
+                    hover
+                        .borrow()
+                        .hovered(&hover_key, true, editor_ui::hover::HoverTone::Neutral);
+                }
+            });
+        if chosen {
+            item = item.trailing(IconSize::Md.glyph(AssetId::TABLER_CHECK, muted));
+        }
+        item.build().aria_selected(chosen)
     };
     let mut rows = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .style(Style::new().min_width(Length::Px(0.0)));
+        .style(Style::new().min_width(Length::Pct(0.0)));
     for id in &picker.projects {
         let Some(project) = host.projects.get(id) else {
             continue;
         };
-        let chosen = selected == Some(id);
-        let action = Rc::clone(&dispatch);
-        let id = id.clone();
-        let row_key = format!("composer-project-{id}");
-        let hover = Rc::clone(&hover_surface);
-        let mut row = UiButton::new()
-            .width(Length::Pct(100.0))
-            .height(36.0)
-            .gap(10.0)
-            .radius(RadiusTokens::value(RadiusStep::Sm))
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        left: 8.0,
-                        right: 8.0,
-                        top: 6.0,
-                        bottom: 6.0,
-                    }),
-            )
-            .child(project_mark(&theme, host, &id))
-            .child(
-                UiBox::new()
-                    .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                    .child(label(
-                        &theme,
-                        project.name.clone(),
-                        14.0,
-                        20.0,
-                        theme.colors.text.to_reference_text_color(),
-                    ))
-                    .build(),
-            );
-        if chosen {
-            row = row.child(label(
-                &theme,
-                "✓".into(),
-                16.0,
-                20.0,
-                theme.colors.text_muted.to_reference_text_color(),
-            ));
-        }
-        rows = rows.child(
-            row.on_activate(move || action(ComposerAction::ChooseProject(id.clone())))
-                .build()
-                .with_key(row_key.clone())
-                .on_hover_change(move |hovered| {
-                    if hovered {
-                        hover.borrow().hovered(
-                            &row_key,
-                            true,
-                            editor_ui::hover::HoverTone::Neutral,
-                        );
-                    }
-                })
-                .role(Role::MenuItem)
-                .aria_label(project.name.clone())
-                .aria_selected(chosen)
-                .focusable(true),
-        );
+        rows = rows.child(item(
+            format!("composer-project-{id}"),
+            project.name.clone(),
+            project_mark(&theme, host, id),
+            selected == Some(id),
+            ComposerAction::ChooseProject(id.clone()),
+        ));
     }
     let count = picker.projects.len();
     let mut list = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .padding(8.0)
-        .style(Style::new().min_width(Length::Px(0.0)));
+        .style(Style::new().min_width(Length::Pct(0.0)));
     if count > 0 {
         list = list
             .child(
@@ -3181,7 +2783,7 @@ pub fn project_menu(
                     .child(
                         Scroll::new()
                             .width(Length::Pct(100.0))
-                            .height((count.min(8) as f32) * 36.0)
+                            .height((count.min(PROJECT_ROWS_SHOWN) as f32) * row.height().unwrap_or_default())
                             .child(rows.build())
                             .build()
                             .with_key(PROJECT_SCROLL),
@@ -3198,128 +2800,47 @@ pub fn project_menu(
                     ))
                     .build(),
             )
-            .child(Divider::Rule.build(&theme, 8.0));
+            .child(Divider::Rule.build(&theme, surface.padding_px()));
     }
     let scratch = artisan_api::ProjectId::scratch();
-    let intake = |label_text: &'static str, glyph, selected: bool, action: ComposerAction| {
-        let action_dispatch = Rc::clone(&dispatch);
-        let hover = Rc::clone(&hover_surface);
-        let row_key = format!("composer-project-{label_text}");
-        let mut row = UiButton::new()
-            .width(Length::Pct(100.0))
-            .height(36.0)
-            .gap(10.0)
-            .radius(RadiusTokens::value(RadiusStep::Sm))
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        left: 8.0,
-                        right: 8.0,
-                        top: 6.0,
-                        bottom: 6.0,
-                    }),
-            )
-            .child(source_asset_glyph(
-                glyph,
-                16.0,
-                theme.colors.text_muted.to_reference_paint(),
-            ))
-            .child(
-                UiBox::new()
-                    .style(Style::new().flex_grow(1.0))
-                    .child(label(
-                        &theme,
-                        label_text.into(),
-                        14.0,
-                        20.0,
-                        theme.colors.text.to_reference_text_color(),
-                    ))
-                    .build(),
-            );
-        if selected {
-            row = row.child(label(
-                &theme,
-                "✓".into(),
-                16.0,
-                20.0,
-                theme.colors.text_muted.to_reference_text_color(),
-            ));
-        }
-        row.on_activate(move || action_dispatch(action.clone()))
-            .build()
-            .with_key(row_key.clone())
-            .on_hover_change(move |hovered| {
-                if hovered {
-                    hover
-                        .borrow()
-                        .hovered(&row_key, true, editor_ui::hover::HoverTone::Neutral);
-                }
-            })
-            .role(Role::MenuItem)
-            .aria_label(label_text)
-            .aria_selected(selected)
-            .focusable(true)
-    };
     if host
         .projects
         .get(&scratch)
         .is_some_and(|project| !project.removed)
     {
-        list = list.child(intake(
-            "No project",
-            AssetId::TABLER_MESSAGE_CIRCLE,
+        list = list.child(item(
+            "composer-project-No project".to_owned(),
+            "No project".to_owned(),
+            IconSize::Md.glyph(AssetId::TABLER_MESSAGE_CIRCLE, muted),
             selected == Some(&scratch),
             ComposerAction::ChooseProject(scratch),
         ));
     }
-    list = list.child(intake(
-        "New project",
-        AssetId::TABLER_FOLDER_PLUS,
+    list = list.child(item(
+        "composer-project-New project".to_owned(),
+        "New project".to_owned(),
+        IconSize::Md.glyph(AssetId::TABLER_FOLDER_PLUS, muted),
         false,
         ComposerAction::NewProject,
     ));
-    let radius = RadiusTokens::value(RadiusStep::Lg);
-    let width = 320.0_f32.min((viewport.w - 32.0).max(0.0));
-    UiBox::new()
-        .layout("column")
-        .width(width)
-        .clip(true)
-        .radius(radius)
+    let width = PROJECT_MENU_WIDTH.min((viewport.w - MENU_VIEWPORT_MARGIN).max(0.0));
+    surface
+        .build(
+            &theme,
+            vec![
+                hover_surface
+                    .borrow()
+                    .pill(&theme, row.radius_in(surface), true),
+                list.build(),
+            ],
+        )
         .style(
             Style::new()
+                .width(Length::Px(width))
                 .min_width(Length::Px(width))
                 .max_width(Length::Px(width))
-                .flex_shrink(0.0)
-                .shadows(
-                    glass_card_shadows(&theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                ),
+                .flex_shrink(0.0),
         )
-        .child(glass_layers(&theme, GlassStrength::Strong, radius))
-        .child(
-            UiBox::new()
-                .radius(radius)
-                .fill(
-                    theme
-                        .colors
-                        .pressed
-                        .at(editor_ui::theme::Opacity::Glass)
-                        .to_paint(),
-                )
-                .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-                .build()
-                .exclude_from_hit_testing(),
-        )
-        .child(
-            hover_surface
-                .borrow()
-                .pill(&theme, RadiusTokens::value(RadiusStep::Sm), false),
-        )
-        .child(list.build())
-        .build()
         .with_key("composer-project-menu")
         .on_hover_change({
             let hover = Rc::clone(&hover_surface);
@@ -3340,13 +2861,20 @@ fn engine_icon(theme: &ArtisanTheme, engine: artisan_api::EngineId) -> AssetId {
     }
 }
 
+const MODEL_MENU_WIDTH: f32 = 528.0;
 const MODEL_PANE_HEIGHT: f32 = 328.0;
 const MODEL_SIDE_WIDTH: f32 = 164.0;
-const MODEL_ITEM_HEIGHT: f32 = 52.0;
-const MODEL_ITEM_GUTTER: f32 = 6.0;
-const MODEL_BAR_HEIGHT: f32 = 40.0;
-const MODEL_BAR_INSET: f32 = 6.0;
-const MODEL_LIST_HEIGHT: f32 = MODEL_PANE_HEIGHT - MODEL_BAR_HEIGHT - MODEL_BAR_INSET;
+const MODEL_ITEM_HEIGHT: f32 = match Row::ListItem(Density::Tall).height() {
+    Some(height) => height,
+    None => 0.0,
+};
+const MODEL_ITEM_GUTTER: f32 = Inset::Menu.px();
+const MODEL_PANE_INSET: f32 = Inset::Menu.px();
+const MODEL_PANE_PADDING: Space = super::model_list::PADDING;
+const MODEL_ENGINE_TAB: IconButtonSize = IconButtonSize::Md;
+const MODEL_BAR_HEIGHT: f32 = MODEL_ENGINE_TAB.edge();
+const MODEL_BAR_GAP: Space = Space::S4;
+const MODEL_LIST_HEIGHT: f32 = MODEL_PANE_HEIGHT - MODEL_BAR_HEIGHT - 2.0 * MODEL_PANE_INSET;
 const MODEL_EDGE_TOP: &str = "composer-model-edge-top";
 const MODEL_EDGE_BOTTOM: &str = "composer-model-edge-bottom";
 
@@ -3418,6 +2946,10 @@ fn model_menu_items(
     items
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "the sliding pane tab is a path-traced silhouette painted on a canvas, like TabCard; its fill and rim are path paints, not box styles"
+)]
 fn model_menu_tab(
     theme: &ArtisanTheme,
     tab: super::sliding_tab::SlidingTab,
@@ -3430,13 +2962,7 @@ fn model_menu_tab(
     };
     use aqua_ui::element::Canvas;
     let fill = GpuiBackground::Solid(theme.colors.background.to_reference_paint());
-    let rim = GpuiBackground::Solid(
-        theme
-            .colors
-            .text
-            .at(editor_ui::theme::Opacity::Hairline)
-            .to_reference_paint(),
-    );
+    let rim = GpuiBackground::Solid(theme.colors.text.at(Opacity::Hairline).to_reference_paint());
     Canvas::new()
         .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
         .on_paint(move |bounds| {
@@ -3458,7 +2984,7 @@ fn model_menu_tab(
             };
             vec![
                 item(
-                    tab.cutout(shape, header, MODEL_BAR_INSET),
+                    tab.cutout(shape, header, MODEL_PANE_INSET),
                     GpuiPathStyle::Fill { rule: FillRule::EvenOdd },
                     fill,
                 ),
@@ -3487,23 +3013,10 @@ fn model_engine_bar(
     tooltip_target: (editor_core::HostInstance, u64),
     dispatch: &Dispatch,
 ) -> Element {
-    use editor_ui::theme::Opacity;
-    use aqua_core::{Insets, Role};
-    use aqua_ui::{AlignItems, element::Button as UiButton};
     let mut bar = UiBox::new()
         .height(MODEL_BAR_HEIGHT)
-        .gap(4.0)
-        .padding(4.0)
-        .style(
-            Style::new()
-                .flex_shrink(0.0)
-                .margin_insets(Insets {
-                    left: MODEL_BAR_INSET,
-                    right: MODEL_BAR_INSET,
-                    top: MODEL_BAR_INSET,
-                    bottom: 0.0,
-                }),
-        );
+        .spaced(MODEL_BAR_GAP)
+        .style(Style::new().flex_shrink(0.0).margin(Length::Px(MODEL_PANE_INSET)));
     if let Some(engine_light) = engine_light {
         bar = bar.child(engine_light);
     }
@@ -3525,49 +3038,39 @@ fn model_engine_bar(
                 _ => unreachable!(),
             }
         }).or_else(|| Some(status.discovery.description(artisan_api::now())));
-        let mut tab = UiButton::new()
-            .width(32.0)
-            .height(32.0)
-            .radius(RadiusTokens::value(RadiusStep::Xl))
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .justify(aqua_ui::JustifyContent::CENTER)
-                    .flex_shrink(0.0),
-            )
-            .child(editor_ui::asset::source_asset_glyph(
-                engine_icon(&theme, engine),
-                16.0,
-                theme.colors.text.to_reference_paint(),
-            ));
-        if gated.is_some() {
-            tab = tab.opacity(Opacity::Unavailable.alpha());
-        }
-        bar = bar.child(
-            tab.on_activate(move || action(ComposerAction::JumpEngine(engine)))
-                .build()
-                .with_key(format!("composer-engine-{engine}"))
-                .role(Role::Button)
-                .aria_label(engine.display_name())
-                .aria_selected(spied == Some(engine))
-                .focusable(true)
-                .on_hover_change(move |hovered| {
-                    if let Some(reason) = &reason {
-                        tooltip_action(ComposerAction::TooltipHover {
-                            instance: tooltip_target.0,
-                            generation: tooltip_target.1,
-                            anchor: tooltip_anchor.clone(),
-                            content: Some(super::picker::TooltipContent {
-                                anchor: tooltip_anchor.clone(),
-                                advisory: None,
-                                text: reason.clone(),
-                                placement: super::picker::TooltipPlacement::Above,
-                            }),
-                            hovered,
-                        });
-                    }
-                }),
-        );
+        let tab = IconButton::new(
+            format!("composer-engine-{engine}"),
+            theme,
+            engine_icon(&theme, engine),
+            engine.display_name(),
+            MODEL_ENGINE_TAB,
+            Finish::Plain,
+        )
+        .nested(Radius::Panel.px(), MODEL_PANE_INSET)
+        .selected(spied == Some(engine))
+        .on_activate(move |_| action(ComposerAction::JumpEngine(engine)))
+        .build()
+        .aria_selected(spied == Some(engine))
+        .on_hover_change(move |hovered| {
+            if let Some(reason) = &reason {
+                tooltip_action(ComposerAction::TooltipHover {
+                    instance: tooltip_target.0,
+                    generation: tooltip_target.1,
+                    anchor: tooltip_anchor.clone(),
+                    content: Some(super::picker::TooltipContent {
+                        anchor: tooltip_anchor.clone(),
+                        advisory: None,
+                        text: reason.clone(),
+                        placement: super::picker::TooltipPlacement::Above,
+                    }),
+                    hovered,
+                });
+            }
+        });
+        bar = bar.child(match gated {
+            Some(_) => tab.style(Style::new().opacity(Opacity::Unavailable.alpha())),
+            None => tab,
+        });
     }
     bar.build()
 }
@@ -3577,22 +3080,24 @@ fn model_gate_row(
     status: &artisan_api::EngineStatus,
     dispatch: &Dispatch,
 ) -> Element {
-    use aqua_ui::element::Button as UiButton;
     let engine = status.engine;
     let reason = super::picker::gate(status).unwrap_or_default();
     let mut body = UiBox::new()
         .layout("column")
         .height(super::model_list::GATE_ROW_HEIGHT)
-        .gap(4.0)
-        .padding(8.0)
+        .padded(Space::S12)
+        .spaced(Space::S4)
         .style(Style::new().flex_shrink(0.0))
-        .child(label(
-            theme,
-            format!("{} is not ready: {}.", engine.display_name(), reason.to_lowercase()),
-            14.0,
-            20.0,
-            theme.colors.text_muted.to_reference_text_color(),
-        ));
+        .child(
+            TextRole::Label
+                .text(
+                    theme,
+                    format!("{} is not ready: {}.", engine.display_name(), reason.to_lowercase()),
+                )
+                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                .wrap(true)
+                .build(),
+        );
     if reason == "Not installed" || reason == "Sign in" {
         let action_label = if reason == "Sign in" {
             format!("Sign in to {}", engine.display_name())
@@ -3601,16 +3106,14 @@ fn model_gate_row(
         };
         let action = Rc::clone(dispatch);
         body = body.child(
-            UiButton::new()
-                .on_activate(move || action(ComposerAction::OpenEngineSettings(engine)))
-                .child(label(
-                    theme,
-                    action_label,
-                    14.0,
-                    20.0,
-                    theme.colors.text.to_reference_text_color(),
-                ))
-                .build(),
+            Link::new(
+                format!("composer-engine-gate-{engine}"),
+                *theme,
+                LinkTone::Link,
+                action_label,
+            )
+            .on_activate(move || action(ComposerAction::OpenEngineSettings(engine)))
+            .build(),
         );
     }
     body.build()
@@ -3625,32 +3128,15 @@ fn model_list_pane(
     hover: &Rc<std::cell::RefCell<editor_ui::pop_in_hover::PopInHover>>,
     dispatch: &Dispatch,
 ) -> Element {
-    use super::model_list::{GROUP_ROW_HEIGHT, MODEL_ROW_HEIGHT, ROW_GAP, SECTION_SPACER};
+    use super::model_list::{GROUP_ROW_HEIGHT, ROW_GAP, SECTION_SPACER};
     use super::picker::ModelRow;
-    use editor_ui::asset::source_asset_glyph;
-    use aqua_core::{Insets, Role};
-    use aqua_ui::{
-        AlignItems,
-        element::{Button as UiButton, Scroll},
-    };
-    let padding = Style::new()
-        .flex_shrink(0.0)
-        .align(AlignItems::CENTER)
-        .padding_insets(Insets {
-            left: 10.0,
-            right: 10.0,
-            top: 0.0,
-            bottom: 0.0,
-        });
+    let muted = theme.colors.text_muted;
+    let radius = model_row_radius();
     let mut rows = UiBox::new()
         .layout("column")
-        .gap(ROW_GAP)
-        .style(Style::new().flex_shrink(0.0).padding_insets(Insets {
-            left: MODEL_BAR_INSET,
-            right: MODEL_BAR_INSET,
-            top: super::model_list::PADDING_TOP,
-            bottom: super::model_list::PADDING_BOTTOM,
-        }));
+        .padded(MODEL_PANE_PADDING)
+        .spaced(ROW_GAP)
+        .style(Style::new().flex_shrink(0.0));
     let mut section = None;
     for entry in &picker.models {
         let engine = entry.engine();
@@ -3666,17 +3152,14 @@ fn model_list_pane(
         match entry {
             ModelRow::Engine(_) => {
                 rows = rows.child(
-                    UiBox::new()
-                        .height(super::model_list::ENGINE_ROW_HEIGHT)
-                        .style(padding.clone())
-                        .child(label(
-                            &theme,
-                            engine.display_name().to_owned(),
-                            12.0,
-                            16.0,
-                            theme.colors.text_muted.to_reference_text_color(),
-                        ))
-                        .build(),
+                    RowItem::new(
+                        format!("composer-model-engine-{engine}"),
+                        theme,
+                        Row::Heading,
+                        Surface::Menu,
+                        engine.display_name(),
+                    )
+                    .build(),
                 );
             }
             ModelRow::Gate(_) => {
@@ -3693,44 +3176,43 @@ fn model_list_pane(
                     name.clone()
                 };
                 let action = Rc::clone(dispatch);
+                let heading = RowItem::new(
+                    format!("composer-model-group-{engine}-{group_label}"),
+                    theme,
+                    Row::Heading,
+                    Surface::Menu,
+                    group_label.clone(),
+                )
+                .trailing(IconSize::Sm.glyph(
+                    if is_open {
+                        AssetId::TABLER_CHEVRON_DOWN
+                    } else {
+                        AssetId::TABLER_CHEVRON_RIGHT
+                    },
+                    muted.to_reference_paint(),
+                ))
+                .build();
                 rows = rows.child(
-                    UiButton::new()
-                        .width(Length::Pct(100.0))
-                        .height(GROUP_ROW_HEIGHT)
-                        .gap(8.0)
-                        .style(padding.clone())
-                        .child(
-                            UiBox::new()
-                                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                                .child(label(
-                                    &theme,
-                                    group_label.clone(),
-                                    12.0,
-                                    16.0,
-                                    theme.colors.text_muted.to_reference_text_color(),
-                                ))
-                                .build(),
-                        )
-                        .child(source_asset_glyph(
-                            if is_open {
-                                AssetId::TABLER_CHEVRON_DOWN
-                            } else {
-                                AssetId::TABLER_CHEVRON_RIGHT
-                            },
-                            14.0,
-                            theme.colors.text_muted.to_reference_paint(),
-                        ))
-                        .on_activate(move || {
-                            action(ComposerAction::ToggleModelGroup {
-                                engine,
-                                name: name.clone(),
-                                open: is_open,
-                            })
+                    HitArea::new(
+                        format!("composer-model-group-toggle-{engine}-{group_label}"),
+                        Role::Button,
+                        group_label,
+                    )
+                    .child(heading)
+                    .on_activate(move || {
+                        action(ComposerAction::ToggleModelGroup {
+                            engine,
+                            name: name.clone(),
+                            open: is_open,
                         })
-                        .build()
-                        .role(Role::Button)
-                        .aria_label(group_label)
-                        .focusable(true),
+                    })
+                    .build()
+                    .style(
+                        Style::new()
+                            .height(Length::Px(GROUP_ROW_HEIGHT))
+                            .flex_shrink(0.0),
+                    )
+                    .aria_expanded(is_open),
                 );
             }
             ModelRow::Model { id, index, .. } => {
@@ -3749,66 +3231,42 @@ fn model_list_pane(
                 let action = Rc::clone(dispatch);
                 let pop = Rc::clone(hover);
                 let hover_key = format!("model-{engine}-{id}");
-                let mut row = UiButton::new()
-                    .width(Length::Pct(100.0))
-                    .height(MODEL_ROW_HEIGHT)
-                    .gap(10.0)
-                    .radius(RadiusTokens::value(RadiusStep::Xl))
-                    .style(padding.clone())
-                    .child(hover.borrow().background(
-                        &hover_key,
-                        &theme,
-                        RadiusTokens::value(RadiusStep::Xl),
-                    ))
-                    .child(source_asset_glyph(
-                        model
-                            .lab
-                            .as_deref()
-                            .and_then(lab_icon)
-                            .unwrap_or_else(|| engine_icon(&theme, engine)),
-                        16.0,
-                        theme.colors.text.to_reference_paint(),
-                    ))
-                    .child(
-                        UiBox::new()
-                            .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                            .child(medium(
-                                &theme,
-                                model.name.clone(),
-                                14.0,
-                                20.0,
-                                theme.colors.text.to_reference_text_color(),
-                            ))
-                            .build(),
-                    );
-                if chosen {
-                    row = row.child(source_asset_glyph(
-                        AssetId::TABLER_CHECK,
-                        14.0,
-                        theme.colors.text_muted.to_reference_paint(),
-                    ));
-                }
-                rows = rows.child(
-                    row.on_activate(move || {
-                        action(ComposerAction::ChooseModel {
-                            engine,
-                            id: model_id.clone(),
-                        })
+                let mut row = RowItem::new(
+                    format!("composer-model-{engine}-{id}"),
+                    theme,
+                    Row::MenuItem,
+                    Surface::Menu,
+                    model.name.clone(),
+                )
+                .nested(Radius::Panel.px(), MODEL_PANE_INSET)
+                .underlay(Some(hover.borrow().background(&hover_key, &theme, radius)))
+                .leading(IconSize::Md.glyph(
+                    model
+                        .lab
+                        .as_deref()
+                        .and_then(lab_icon)
+                        .unwrap_or_else(|| engine_icon(&theme, engine)),
+                    theme.colors.text.to_reference_paint(),
+                ))
+                .on_activate(move || {
+                    action(ComposerAction::ChooseModel {
+                        engine,
+                        id: model_id.clone(),
                     })
-                    .build()
-                    .with_key(format!("composer-model-{engine}-{id}"))
-                    .role(Role::MenuItem)
-                    .aria_label(model.name.clone())
-                    .aria_selected(chosen)
-                    .focusable(true)
-                    .on_hover_change(move |hovered| {
-                        pop.borrow().hovered(
-                            &hover_key,
-                            hovered,
-                            editor_ui::hover::HoverTone::Neutral,
-                        );
-                    }),
-                );
+                })
+                .on_hover(move |hovered| {
+                    pop.borrow().hovered(
+                        &hover_key,
+                        hovered,
+                        editor_ui::hover::HoverTone::Neutral,
+                    );
+                });
+                if chosen {
+                    row = row.trailing(
+                        IconSize::Md.glyph(AssetId::TABLER_CHECK, muted.to_reference_paint()),
+                    );
+                }
+                rows = rows.child(row.build().aria_selected(chosen));
             }
         }
     }
@@ -3836,9 +3294,15 @@ fn model_list_pane(
             MODEL_EDGE_BOTTOM,
             editor_ui::scroll_edge::Edge::Bottom,
             theme.colors.background,
-            RadiusTokens::value(RadiusStep::X2l),
+            Radius::Panel.px(),
         ))
         .build()
+}
+
+fn model_row_radius() -> f32 {
+    Radius::Panel
+        .inset(Inset::Menu)
+        .map_or(Radius::Row.px(), Radius::px)
 }
 
 fn model_axis_pane(
@@ -3849,49 +3313,29 @@ fn model_axis_pane(
     hover: &Rc<std::cell::RefCell<editor_ui::pop_in_hover::PopInHover>>,
     dispatch: &Dispatch,
 ) -> Element {
-    use editor_ui::{asset::source_asset_glyph, kit::Divider};
-    use aqua_core::{Insets, Role};
-    use aqua_ui::{
-        AlignItems,
-        element::{Button as UiButton, Scroll},
-    };
+    let radius = model_row_radius();
     let mut rows = UiBox::new()
         .layout("column")
-        .gap(2.0)
-        .padding(MODEL_BAR_INSET)
+        .padded(MODEL_PANE_PADDING)
+        .spaced(Space::S2)
         .style(Style::new().flex_shrink(0.0));
     let mut special = false;
     for (index, option) in options.iter().enumerate() {
         if option.special && !special && axis != super::picker::Axis::Special {
             special = true;
-            rows = rows.child(Divider::Rule.build(&theme, MODEL_BAR_INSET)).child(
-                UiBox::new()
-                    .style(Style::new().padding_insets(Insets {
-                        left: 10.0,
-                        right: 10.0,
-                        top: 4.0,
-                        bottom: 4.0,
-                    }))
-                    .child(label(
-                        &theme,
-                        "Special efforts".to_owned(),
-                        12.0,
-                        16.0,
-                        theme.colors.text_muted.to_reference_text_color(),
-                    ))
+            rows = rows
+                .child(Divider::Rule.build(&theme, MODEL_PANE_INSET))
+                .child(
+                    RowItem::new(
+                        format!("composer-axis-{axis:?}-special"),
+                        theme,
+                        Row::Heading,
+                        Surface::Menu,
+                        "Special efforts",
+                    )
                     .build(),
-            );
+                );
         }
-        let mut text = UiBox::new()
-            .layout("column")
-            .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-            .child(medium(
-                &theme,
-                option.label.clone(),
-                14.0,
-                20.0,
-                theme.colors.text.to_reference_text_color(),
-            ));
         let advisory = option.advisory.as_deref().filter(|advisory| {
             !option
                 .description
@@ -3903,75 +3347,55 @@ fn model_axis_pane(
             .flatten()
             .collect::<Vec<_>>()
             .join(" · ");
-        if !matches!(
-            axis,
-            super::picker::Axis::Speed
-                | super::picker::Axis::Thinking
-                | super::picker::Axis::Permission
-        ) && !detail.is_empty()
-        {
-            text = text.child(paragraph(
-                &theme,
-                detail,
-                12.0,
-                16.0,
-                theme.colors.text_muted.to_reference_text_color(),
-            ));
-        }
+        let detail = Some(detail).filter(|detail| {
+            !detail.is_empty()
+                && !matches!(
+                    axis,
+                    super::picker::Axis::Speed
+                        | super::picker::Axis::Thinking
+                        | super::picker::Axis::Permission
+                )
+        });
         let hover_key = format!("axis-{axis:?}-{index}");
-        let mut row = UiButton::new()
-            .width(Length::Pct(100.0))
-            .gap(10.0)
-            .radius(RadiusTokens::value(RadiusStep::Xl))
-            .style(
-                Style::new()
-                    .flex_shrink(0.0)
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        left: 10.0,
-                        right: 10.0,
-                        top: 6.0,
-                        bottom: 6.0,
-                    }),
-            )
-            .child(hover.borrow().background(
-                &hover_key,
-                &theme,
-                RadiusTokens::value(RadiusStep::Xl),
-            ))
-            .child(text.build());
-        if keyboard_cursor == Some(index) {
-            row = row.fill(theme.colors.selected.to_paint());
-        }
-        if option.selected {
-            row = row.child(source_asset_glyph(
-                AssetId::TABLER_CHECK,
-                14.0,
-                theme.colors.text_muted.to_reference_paint(),
-            ));
-        }
         let action = Rc::clone(dispatch);
         let pointer_action = Rc::clone(dispatch);
         let pop = Rc::clone(hover);
-        rows = rows.child(
-            row.on_activate(move || action(ComposerAction::ChooseAxis { axis, index }))
-                .build()
-                .with_key(format!("composer-axis-{axis:?}-{index}"))
-                .role(Role::MenuItem)
-                .aria_label(option.label.clone())
-                .aria_selected(option.selected)
-                .focusable(true)
-                .on_hover_change(move |hovered| {
-                    pop.borrow().hovered(
-                        &hover_key,
-                        hovered,
-                        editor_ui::hover::HoverTone::Neutral,
-                    );
-                    if hovered {
-                        pointer_action(ComposerAction::AxisPointer { axis, index });
-                    }
-                }),
-        );
+        let shape = match detail {
+            Some(_) => Row::ListItem(Density::Tall),
+            None => Row::MenuItem,
+        };
+        let mut row = RowItem::new(
+            format!("composer-axis-{axis:?}-{index}"),
+            theme,
+            shape,
+            Surface::Menu,
+            option.label.clone(),
+        )
+        .role(Role::MenuItem)
+        .nested(Radius::Panel.px(), MODEL_PANE_INSET)
+        .underlay(Some(hover.borrow().background(&hover_key, &theme, radius)))
+        .selected(keyboard_cursor == Some(index))
+        .on_activate(move || action(ComposerAction::ChooseAxis { axis, index }))
+        .on_hover(move |hovered| {
+            pop.borrow().hovered(
+                &hover_key,
+                hovered,
+                editor_ui::hover::HoverTone::Neutral,
+            );
+            if hovered {
+                pointer_action(ComposerAction::AxisPointer { axis, index });
+            }
+        });
+        if let Some(detail) = detail {
+            row = row.detail(detail);
+        }
+        if option.selected {
+            row = row.trailing(IconSize::Md.glyph(
+                AssetId::TABLER_CHECK,
+                theme.colors.text_muted.to_reference_paint(),
+            ));
+        }
+        rows = rows.child(row.build().aria_selected(option.selected));
     }
     Scroll::new()
         .height(MODEL_PANE_HEIGHT)
@@ -3992,12 +3416,6 @@ pub fn model_menu(
     tooltip_target: (editor_core::HostInstance, u64),
     dispatch: Dispatch,
 ) -> Element {
-    use editor_ui::{
-        glass::{GlassStrength, glass_card_shadows, glass_layers},
-        theme::{Elevation, Opacity},
-    };
-    use aqua_core::{Insets, Role};
-    use aqua_ui::element::Button as UiButton;
     let ModelMenuFrame {
         items,
         pane,
@@ -4006,6 +3424,8 @@ pub fn model_menu(
         tab,
         engine_light,
     } = frame;
+    let sheet = Surface::Dialog;
+    let pane_radius = Radius::Panel.px();
     let engines = super::picker::offered_engines(host, current.as_ref().map(|config| config.engine));
     let model_icon = picker.pane_config(host, current.clone()).map(|config| {
         host.engines
@@ -4020,99 +3440,50 @@ pub fn model_menu(
             .and_then(lab_icon)
             .unwrap_or_else(|| engine_icon(&theme, config.engine))
     });
-    let mut list = UiBox::new()
+    let item_height = model_item_height(items.len());
+    let mut buttons = UiBox::new()
         .layout("column")
-        .width(MODEL_SIDE_WIDTH)
+        .width(MODEL_SIDE_WIDTH - MODEL_ITEM_GUTTER)
         .style(Style::new().flex_shrink(0.0));
-    let mut buttons = UiBox::new().layout("column");
     for (position, item) in items.iter().enumerate() {
         let target = item.pane;
         let action = Rc::clone(&dispatch);
         let pop = Rc::clone(&hover);
         let hover_key = format!("pane-{position}");
-        let body = UiButton::new()
-            .width(Length::Px(MODEL_SIDE_WIDTH - MODEL_ITEM_GUTTER))
-            .height(MODEL_ITEM_HEIGHT.min(MODEL_PANE_HEIGHT / items.len().max(1) as f32))
-            .radius(RadiusTokens::value(RadiusStep::Xl))
-            .style(
-                Style::new()
-                    .column()
-                    .flex_shrink(0.0)
-                    .justify(aqua_ui::JustifyContent::CENTER)
-                    .padding_insets(Insets {
-                        left: 12.0,
-                        right: 8.0,
-                        top: 0.0,
-                        bottom: 0.0,
-                    }),
+        let mut side = RowItem::new(
+            format!("composer-pane-{position}"),
+            theme,
+            Row::ListItem(Density::Tall),
+            sheet,
+            item.value.clone(),
+        )
+        .detail(item.label)
+        .role(Role::Tab)
+        .underlay(Some(hover.borrow().background(&hover_key, &theme, pane_radius)))
+        .on_activate(move || action(ComposerAction::SelectPane(target)))
+        .on_hover(move |hovered| {
+            pop.borrow().hovered(
+                &hover_key,
+                hovered,
+                editor_ui::hover::HoverTone::Neutral,
             );
-        let aria = format!("{}: {}", item.label, item.value);
-        let mut value = UiBox::new()
-            .gap(6.0)
-            .style(Style::new().align(aqua_ui::AlignItems::CENTER));
+        });
         if let Some(icon) = model_icon.filter(|_| target.is_none()) {
-            value = value.child(editor_ui::asset::source_asset_glyph(
-                icon,
-                16.0,
-                theme.colors.text.to_reference_paint(),
-            ));
+            side = side.leading(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()));
         }
-        let value = value
-            .child(medium(
-                &theme,
-                item.value.clone(),
-                14.0,
-                20.0,
-                theme.colors.text.to_reference_text_color(),
-            ))
-            .build();
         buttons = buttons.child(
-            body.child(
-                UiBox::new()
-                    .style(Style::new().flex_shrink(0.0))
-                    .child(label(
-                        &theme,
-                        item.label.to_owned(),
-                        12.0,
-                        16.0,
-                        theme.colors.text_muted.to_reference_text_color(),
-                    ))
-                    .child(hover.borrow().fade_in(
-                        &hover_key,
-                        label(
-                            &theme,
-                            item.label.to_owned(),
-                            12.0,
-                            16.0,
-                            theme.colors.text.to_reference_text_color(),
-                        ),
-                    ))
-                    .build(),
-            )
-            .child(value)
-            .on_activate(move || action(ComposerAction::SelectPane(target)))
-            .build()
-            .with_key(format!("composer-pane-{position}"))
-            .role(Role::Tab)
-            .aria_label(aria)
-            .aria_selected(target == pane)
-            .focusable(true)
-            .on_hover_change(move |hovered| {
-                pop.borrow().hovered(
-                    &hover_key,
-                    hovered,
-                    editor_ui::hover::HoverTone::Neutral,
-                );
-            }),
+            side.build()
+                .style(Style::new().height(Length::Px(item_height)).flex_shrink(0.0))
+                .aria_label(format!("{}: {}", item.label, item.value))
+                .aria_selected(target == pane),
         );
     }
-    list = list.child(buttons.build());
     let mut pane_body = UiBox::new()
         .layout("column")
         .height(MODEL_PANE_HEIGHT)
-        .radius(RadiusTokens::value(RadiusStep::X2l))
         .clip(true)
-        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)));
+        .style(Radius::Panel.style())
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)));
     match pane {
         None => {
             pane_body = pane_body
@@ -4156,61 +3527,39 @@ pub fn model_menu(
             ));
         }
     }
-    let radius = RadiusTokens::value(RadiusStep::X3l);
-    let inner_radius = RadiusTokens::value(RadiusStep::X2l);
     let key_dispatch = Rc::clone(&dispatch);
     let resolution_note = current.as_ref().and_then(|config| {
         let model = host.engines.get(&config.engine)?.models.iter().find(|model| config.model.as_ref() == Some(&model.id))?;
         let changes = model.resolve_config(config, &picker.customizations).changes;
         (!changes.is_empty()).then(|| changes.into_iter().map(|change| format!("{}: {}", change.axis.title(), change.reason)).collect::<Vec<_>>().join(" "))
     });
-    UiBox::new()
-        .layout("column")
-        .width(528.0_f32.min(viewport.w - 32.0))
-        .padding(8.0)
-        .radius(radius)
-        .style(
-            Style::new().shadows(
-                glass_card_shadows(&theme, Elevation::Overlay)
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-            ),
-        )
-        .child(glass_layers(&theme, GlassStrength::Strong, radius))
-        .child(
+    let mut children = vec![
+        UiBox::new()
+            .height(MODEL_PANE_HEIGHT)
+            .child(model_menu_tab(
+                &theme,
+                tab,
+                pane_radius,
+                if pane.is_none() { MODEL_BAR_HEIGHT + MODEL_PANE_INSET } else { 0.0 },
+            ))
+            .child(buttons.build())
+            .child(UiBox::new().width(MODEL_ITEM_GUTTER).style(Style::new().flex_shrink(0.0)).build())
+            .child(pane_body.build())
+            .build(),
+    ];
+    if let Some(note) = resolution_note {
+        children.push(
             UiBox::new()
-                .radius(radius)
-                .fill(theme.colors.pressed.at(Opacity::Glass).to_paint())
-                .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-                .build()
-                .exclude_from_hit_testing(),
-        )
-        .child(
-            UiBox::new()
-                .height(MODEL_PANE_HEIGHT)
-                .child(model_menu_tab(
-                    &theme,
-                    tab,
-                    inner_radius,
-                    if pane.is_none() { MODEL_BAR_HEIGHT + MODEL_BAR_INSET } else { 0.0 },
-                ))
-                .child(list.build())
-                .child(pane_body.build())
+                .layout("column")
+                .padded(MODEL_PANE_PADDING)
+                .style(Style::new().min_width(Length::Pct(0.0)))
+                .child(TextRole::Caption.text(&theme, note).wrap(true).build())
                 .build(),
-        )
-        .children(resolution_note.map(|note| UiBox::new()
-            .layout("column")
-            .style(Style::new().min_width(Length::Px(0.0)).padding_insets(aqua_core::Insets { left:8.0, right:8.0, top:8.0, bottom:0.0 }))
-            .child(aqua_ui::element::Text::new(note)
-                .text_style(aqua_text::TextStyle {
-                    families: vec![aqua_text::FontFamily::Named(theme.typography.sans.family.to_owned())],
-                    size_px:12.0, line_height_px:16.0, ..aqua_text::TextStyle::default()
-                })
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .wrap(true).build())
-            .build()))
-        .build()
+        );
+    }
+    sheet
+        .build(&theme, children)
+        .style(Style::new().width(Length::Px(MODEL_MENU_WIDTH.min(viewport.w - MENU_VIEWPORT_MARGIN))))
         .with_key("composer-model-menu")
         .on_input(
             aqua_ui::input::InputKind::KeyDown,
@@ -4247,6 +3596,10 @@ pub fn model_menu(
         )
 }
 
+fn model_item_height(count: usize) -> f32 {
+    MODEL_ITEM_HEIGHT.min(MODEL_PANE_HEIGHT / count.max(1) as f32)
+}
+
 
 fn lab_icon(lab: &str) -> Option<AssetId> {
     Some(match lab {
@@ -4277,48 +3630,34 @@ pub fn project_tab(
     host: &editor_core::HostData,
     dispatch: Dispatch,
 ) -> Option<Element> {
-    use editor_ui::asset::source_asset_glyph;
-    use aqua_core::{Insets, Role};
-    use aqua_ui::{AlignItems, element::Button as UiButton};
-    let padding = Style::new()
-        .align(AlignItems::CENTER)
-        .padding_insets(Insets {
-            left: 8.0,
-            right: 8.0,
-            top: 0.0,
-            bottom: 0.0,
-        });
-    let folder = || {
-        source_asset_glyph(
-            AssetId::TABLER_FOLDER,
-            15.0,
-            theme.colors.text_muted.to_reference_paint(),
-        )
+    let fitted = |element: Element| {
+        UiBox::new()
+            .style(
+                Style::new()
+                    .min_width(Length::Pct(0.0))
+                    .max_width(Length::Px(PROJECT_TAB_WIDTH)),
+            )
+            .child(element)
+            .build()
     };
     match &controller.target {
         super::controller::ComposerTarget::Thread { thread, .. } => {
             let thread = host.threads.get(thread)?;
             let project = host.projects.get(&thread.project_id)?;
-            Some(
-                UiBox::new()
-                    .height(28.0)
-                    .gap(6.0)
-                    .style(padding)
-                    .child(folder())
-                    .child(
-                        UiBox::new()
-                            .style(Style::new().max_width(Length::Px(240.0)))
-                            .child(label(
-                                &theme,
-                                project.name.clone(),
-                                13.0,
-                                18.0,
-                                theme.colors.text_muted.to_reference_text_color(),
-                            ))
-                            .build(),
-                    )
-                    .build(),
-            )
+            Some(fitted(
+                RowItem::new(
+                    "composer-project",
+                    theme,
+                    Row::Heading,
+                    Surface::Composer,
+                    project.name.clone(),
+                )
+                .leading(IconSize::Md.glyph(
+                    AssetId::TABLER_FOLDER,
+                    theme.colors.text_muted.to_reference_paint(),
+                ))
+                .build(),
+            ))
         }
         super::controller::ComposerTarget::NewThread { .. } => {
             let name = controller
@@ -4330,46 +3669,13 @@ pub fn project_tab(
                     |project| project.name.clone(),
                 );
             let open = controller.picker.menu == Some(super::picker::Menu::Project);
-            let foreground = if open {
-                theme.colors.text.to_reference_paint()
-            } else {
-                theme.colors.text_muted.to_reference_paint()
-            };
-            Some(
-                UiButton::new()
-                    .height(28.0)
-                    .gap(6.0)
-                    .radius(editor_ui::glass::KEY_RADIUS)
-                    .style(padding)
-                    .child(source_asset_glyph(AssetId::TABLER_FOLDER, 15.0, foreground))
-                    .child(
-                        UiBox::new()
-                            .style(Style::new().max_width(Length::Px(240.0)))
-                            .child(label(
-                                &theme,
-                                name.clone(),
-                                13.0,
-                                18.0,
-                                if open {
-                                    theme.colors.text.to_reference_text_color()
-                                } else {
-                                    theme.colors.text_muted.to_reference_text_color()
-                                },
-                            ))
-                            .build(),
-                    )
-                    .child(source_asset_glyph(
-                        AssetId::TABLER_SELECTOR,
-                        14.0,
-                        foreground,
-                    ))
+            Some(fitted(
+                Trigger::new("composer-project", theme, TriggerSize::Sm, name)
+                    .lead(Lead::Glyph(AssetId::TABLER_FOLDER))
+                    .open(open)
                     .on_activate(move || dispatch(ComposerAction::ToggleProject))
-                    .build()
-                    .with_key("composer-project")
-                    .role(Role::Button)
-                    .aria_label(name)
-                    .focusable(true),
-            )
+                    .build(),
+            ))
         }
     }
 }

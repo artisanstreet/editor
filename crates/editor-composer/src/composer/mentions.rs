@@ -288,7 +288,7 @@ impl Mentions {
         theme: &editor_ui::theme::ArtisanTheme,
     ) -> editor_ui::text::editor::StyledTokenizer {
         use editor_ui::text::editor::StyledToken;
-        use aqua_text::FontWeight;
+        let strong = editor_ui::kit::TextRole::LabelStrong.spec().weight;
         let skills = artisan_mentions::MentionNames::new(
             &self
                 .catalog
@@ -328,7 +328,7 @@ impl Mentions {
                         range: mention.range,
                         glyph: Some(glyph),
                         color: Some(color),
-                        font_weight: Some(FontWeight::MEDIUM),
+                        font_weight: Some(strong),
                     });
                 }
             }
@@ -338,7 +338,7 @@ impl Mentions {
                     range: mention.range,
                     glyph: Some(editor_assets::AssetId::TABLER_MESSAGE_CIRCLE),
                     color: Some(colors.mention_connector),
-                    font_weight: Some(FontWeight::MEDIUM),
+                    font_weight: Some(strong),
                 });
             }
             if let Some(range) = artisan_mentions::special_command(text) {
@@ -346,7 +346,7 @@ impl Mentions {
                     range,
                     glyph: Some(editor_assets::AssetId::TABLER_TARGET_ARROW),
                     color: Some(colors.mention_command),
-                    font_weight: Some(FontWeight::MEDIUM),
+                    font_weight: Some(strong),
                 });
             }
             tokens.sort_by_key(|token| (token.range.start, std::cmp::Reverse(token.range.end)));
