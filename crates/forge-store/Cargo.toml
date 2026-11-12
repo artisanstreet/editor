@@ -27,6 +27,8 @@ tokio = { workspace = true, features = ["sync", "rt"] }
 tracing.workspace = true
 thiserror.workspace = true
 webp.workspace = true
+fff-grep = "=0.9.6"
+memchr = "2.8.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

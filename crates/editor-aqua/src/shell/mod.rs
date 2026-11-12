@@ -25,6 +25,7 @@ pub mod titlebar;
 pub mod view;
 pub mod wheel;
 pub mod workspace;
+pub mod browser;
 
 #[cfg(windows)]
 pub(crate) fn open_url(url: &str) -> anyhow::Result<()> {

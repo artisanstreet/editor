@@ -360,6 +360,11 @@ fn field(
     busy: bool,
     submit: Rc<dyn Fn()>,
 ) -> Element {
+    keyed_field(palette, editor, continue_key(key, busy, submit))
+}
+
+#[must_use]
+pub fn keyed_field(palette: &Palette, content: Element, key: Element) -> Element {
     let well = outlined(
         palette.ink,
         palette.bg,
@@ -387,7 +392,7 @@ fn field(
                         top: 4.0,
                         bottom: 4.0,
                     })])
-                .child(editor)
+                .child(content)
                 .build(),
         ],
     );
@@ -405,7 +410,7 @@ fn field(
                 .child(well)
                 .build(),
         )
-        .child(continue_key(key, busy, submit))
+        .child(key)
         .build()
 }
 
@@ -416,12 +421,9 @@ struct Key {
 }
 
 fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> Element {
-    let surface: Arc<str> = continue_surface().into();
     let arrow: Arc<str> = continue_arrow().into();
     let spinner: Arc<str> = continue_spinner(spin).into();
-    let surface_width = FIELD_HEIGHT * 53.0 / 45.0;
-    let surface_height = FIELD_HEIGHT * 49.0 / 45.0;
-    let glyph = FIELD_HEIGHT * 2.0 / 3.0;
+    let glyph = KEY_GLYPH;
     let icon = |source: Arc<str>, visible: f32, key: &'static str| {
         let scale = (1.0 - ICON_START).mul_add(visible, ICON_START);
         let center = glyph / 2.0;
@@ -449,6 +451,40 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
             .build()
             .with_key(key)
     };
+    field_key(
+        "artisan-sign-in-continue",
+        "Continue",
+        if busy {
+            CursorIcon::Progress
+        } else {
+            CursorIcon::Pointer
+        },
+        Aqua::Box()
+            .styles([Aqua::Style().width(px(glyph)).height(px(glyph))])
+            .child(icon(arrow, 1.0 - swap, "artisan-sign-in-arrow"))
+            .child(icon(spinner, swap, "artisan-sign-in-spinner"))
+            .build(),
+        Rc::new(move || {
+            if !busy {
+                submit();
+            }
+        }),
+    )
+}
+
+pub const KEY_GLYPH: f32 = FIELD_HEIGHT * 2.0 / 3.0;
+
+#[must_use]
+pub fn field_key(
+    key: &'static str,
+    label: &'static str,
+    cursor: CursorIcon,
+    glyph: Element,
+    activate: Rc<dyn Fn()>,
+) -> Element {
+    let surface: Arc<str> = continue_surface().into();
+    let surface_width = FIELD_HEIGHT * 53.0 / 45.0;
+    let surface_height = FIELD_HEIGHT * 49.0 / 45.0;
     Aqua::Button()
         .styles([Aqua::Style()
             .width(px(FIELD_HEIGHT))
@@ -473,27 +509,12 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
                 .build()
                 .exclude_from_hit_testing(),
         )
-        .child(
-            Aqua::Box()
-                .styles([Aqua::Style().width(px(glyph)).height(px(glyph))])
-                .child(icon(arrow, 1.0 - swap, "artisan-sign-in-arrow"))
-                .child(icon(spinner, swap, "artisan-sign-in-spinner"))
-                .build()
-                .exclude_from_hit_testing(),
-        )
-        .on_activate(move || {
-            if !busy {
-                submit();
-            }
-        })
+        .child(glyph.exclude_from_hit_testing())
+        .on_activate(move || activate())
         .build()
-        .with_key("artisan-sign-in-continue")
-        .aria_label("Continue")
-        .cursor(if busy {
-            CursorIcon::Progress
-        } else {
-            CursorIcon::Pointer
-        })
+        .with_key(key)
+        .aria_label(label)
+        .cursor(cursor)
 }
 
 fn continue_surface() -> String {

@@ -58,6 +58,9 @@ tokio-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 file-rotate = "0.8.0"
 
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
 [target.'cfg(windows)'.dev-dependencies]
 aqua-a11y-uia = { workspace = true }
 aqua-ime-tsf = { workspace = true, features = ["double"] }

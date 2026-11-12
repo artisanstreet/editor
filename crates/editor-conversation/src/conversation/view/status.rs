@@ -66,13 +66,13 @@ impl StatusShimmers {
     pub fn agent(
         &mut self,
         row: RowKey,
-        text: &'static str,
+        text: String,
         reduced_motion: bool,
         theme: ArtisanTheme,
     ) -> anyhow::Result<Element> {
         self.render(
             row,
-            StatusText::Status(text.to_owned()),
+            StatusText::Status(text),
             true,
             reduced_motion,
             theme,
@@ -114,6 +114,13 @@ pub fn run<T>(
                 run_id: run.clone(),
             })
             .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                model
+                    .run
+                    .as_ref()
+                    .filter(|_| phase == Phase::Working)
+                    .and_then(|summary| summary.doing.clone())
+            })
             .or_else(|| phase::status_copy(phase).map(str::to_owned))?,
         ),
     };
@@ -122,14 +129,12 @@ pub fn run<T>(
 }
 
 pub fn agent<T>(
-    working: bool,
+    doing: Option<&str>,
     theme: ArtisanTheme,
-    render: impl FnOnce(&'static str, ArtisanTheme) -> T,
+    render: impl FnOnce(String, ArtisanTheme) -> T,
 ) -> Option<T> {
-    let text = phase::status_copy(if working {
-        Phase::Working
-    } else {
-        Phase::Thinking
-    })?;
+    let text = doing
+        .or_else(|| phase::status_copy(Phase::Thinking))?
+        .to_owned();
     Some(render(text, theme))
 }

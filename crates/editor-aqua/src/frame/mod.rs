@@ -9,6 +9,7 @@ pub mod overview;
 pub mod popup;
 pub mod projects;
 pub mod scramble;
+pub mod search;
 pub mod seam;
 pub mod sign_in;
 pub mod sidebar;

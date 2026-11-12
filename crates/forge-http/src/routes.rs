@@ -56,6 +56,7 @@ pub fn router(app: App) -> Router {
         .route("/projects/{id}/icon", get(project_icon))
         .route("/projects/{id}/repository", get(project_repository))
         .route("/threads", post(create_thread).get(threads_page))
+        .route("/search/text", get(text_search))
         .route("/threads/{id}", patch(update_thread).get(thread))
         .route("/threads/{id}/settle", post(settle_thread))
         .route("/threads/{id}/unread", post(mark_unread))
@@ -558,6 +559,13 @@ async fn transcript(
             .transcript_rows(&ThreadId(id), query)
             .await?,
     ))
+}
+
+async fn text_search(
+    AppState(app): AppState<App>,
+    Query(query): Query<artisan_api::TextSearchQuery>,
+) -> Result<Json<Vec<artisan_api::TextHit>>> {
+    Ok(Json(app.hub.store().text_search(query).await?))
 }
 
 async fn work(

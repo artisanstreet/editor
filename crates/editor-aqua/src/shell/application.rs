@@ -35,6 +35,9 @@ pub trait SectionViews {
     fn pre_input(&mut self, _ui: &mut UiApp, _input: &InputEvent) -> Option<bool> {
         None
     }
+    fn open_composer_images(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
+        false
+    }
     fn resize_needs_rebuild(&self, _shell: &Shell, _window: &ObservedWindowState) -> bool {
         true
     }
@@ -429,6 +432,9 @@ impl<V: SectionViews> ShellApplication<V> {
             return;
         };
         let was_mounted = self.mounted;
+        self.ui
+            .ui_mut()
+            .set_selection_background(Some(crate::ui::chrome::card::polar_selection()));
         let epoch = self.ui.ui().tree().invalidation_epoch();
         let reduced =
             self.ui.ui().host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
@@ -531,7 +537,7 @@ impl<V: SectionViews> ShellApplication<V> {
                     .shell
                     .entry
                     .workspace()
-                    .and_then(|workspace| workspace.conversation.landing)
+                    .and_then(|workspace| workspace.conversation.landing_deadline())
                 {
                     let delay = deadline.saturating_duration_since(std::time::Instant::now());
                     ctx.request_animation_deadline(id, ctx.now() + delay);
@@ -734,6 +740,12 @@ impl<V: SectionViews> ShellApplication<V> {
         drop(tm_shell);
         drop(drain_span);
         domain_changed |= mark(&mut causes, "shell_updates", updates.changed);
+        domain_changed |= mark(
+            &mut causes,
+            "composer_image",
+            self.views
+                .open_composer_images(&mut self.shell, self.ui.ui_mut()),
+        );
         let live_only = updates.live_only;
         if let Some(wait) = self.shell.live.remaining(std::time::Instant::now()) {
             ctx.request_animation_deadline(id, ctx.now() + wait);

@@ -1,9 +1,9 @@
-use crate::ui::glass::{GlassStrength, glass_card_shadows, glass_layers};
-use crate::ui::theme::{ArtisanTheme, Elevation, Oklch, Opacity, RadiusStep, RadiusTokens};
-use aqua_core::Insets;
+use crate::ui::picker_motion::{DROPDOWN_CLOSE, DROPDOWN_OPEN};
+use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
 use aqua_ui::element::{Box as UiBox, Element, Text};
-use aqua_ui::style::{GpuiShadowLayer, Style};
+use aqua_ui::motion::{Easing, Motion, Presence};
+use aqua_ui::style::{Length, Style};
 
 const WIDTH: f32 = 280.0;
 
@@ -63,29 +63,23 @@ pub fn hint_card(theme: &ArtisanTheme, title: &str, body: &[Phrase]) -> Element 
         )
         .child(Text::new(sentence).spans(spans).wrap(true).build())
         .build();
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    UiBox::new()
-        .width(WIDTH)
-        .radius(radius)
-        .style(
-            Style::new()
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_shadows(
-                    glass_card_shadows(theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(glass_layers(theme, GlassStrength::Strong, radius))
-        .child(content)
-        .build()
+    hover_surface(theme, Style::new().width(Length::Px(WIDTH)), content)
+}
+
+#[must_use]
+pub fn hover_surface(theme: &ArtisanTheme, style: Style, content: Element) -> Element {
+    crate::ui::chrome::account::menu_surface(theme, vec![content]).style(style)
+}
+
+#[must_use]
+pub fn presence() -> Presence {
+    Presence::new()
+        .enter(Motion::tween(
+            DROPDOWN_OPEN.as_secs_f64(),
+            Easing::SmoothOut,
+        ))
+        .exit(Motion::tween(
+            DROPDOWN_CLOSE.as_secs_f64(),
+            Easing::SmoothOut,
+        ))
 }
