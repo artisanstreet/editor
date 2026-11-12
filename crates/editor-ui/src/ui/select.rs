@@ -3,8 +3,12 @@ use std::time::{Duration, Instant};
 use super::picker_motion::MenuMotion;
 
 pub const MENU_MOTION: Duration = super::picker_motion::DROPDOWN_OPEN;
-pub const OPTION_HEIGHT: f32 = 36.0;
+pub const OPTION_HEIGHT: f32 = match super::kit::Row::MenuItem.height() {
+    Some(height) => height,
+    None => 0.0,
+};
 pub const MENU_MIN_WIDTH: f32 = 160.0;
+const ROW_RADIUS: f32 = super::kit::Radius::Row.px();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectEntry<V> {
@@ -221,7 +225,7 @@ impl<V: Clone + Eq> SelectState<V> {
 }
 
 use aqua_core::{InputEvent, Key as InputKey, NamedKey, Role};
-use aqua_text::{FontFamily, FontWeight, TextStyle};
+
 use aqua_ui::{
     element::{Button, Element, Key, Text},
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
@@ -233,6 +237,7 @@ use std::rc::Rc;
 
 use super::{
     asset::source_asset_glyph,
+    kit::{Hover, IconSize, Radius, Row, Space, Surface, TextRole},
     theme::{ArtisanTheme, Opacity},
 };
 
@@ -300,13 +305,7 @@ impl<V: Clone + Eq + 'static> Select<V> {
             .find(|entry| self.selected.as_ref() == Some(&entry.value))
             .map_or_else(|| self.label.clone(), |entry| entry.label.clone());
         let theme = self.theme;
-        let text_style = TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: 14.0,
-            line_height_px: 20.0,
-            weight: FontWeight::NORMAL,
-            ..TextStyle::default()
-        };
+        let text_style = TextRole::Label.style(&theme);
         let label = Text::new(display.clone())
             .style(
                 Style::new()
@@ -319,7 +318,7 @@ impl<V: Clone + Eq + 'static> Select<V> {
             .build();
         let icon = source_asset_glyph(
             AssetId::TABLER_SELECTOR,
-            14.0,
+            IconSize::Sm.px(),
             theme.colors.text_muted.to_reference_paint(),
         );
         let state = self.state.clone();
@@ -327,8 +326,8 @@ impl<V: Clone + Eq + 'static> Select<V> {
         let mut button = Button::new()
             .width(Length::Pct(100.0))
             .height(theme.density.control_default)
-            .gap(8.0)
-            .radius(8.0)
+            .gap(Space::S8.px())
+            .radius(Radius::Field.px())
             .border((
                 1.0,
                 theme
@@ -355,8 +354,8 @@ impl<V: Clone + Eq + 'static> Select<V> {
             .style(
                 Style::new()
                     .padding_insets(aqua_core::Insets {
-                        left: 10.0,
-                        right: 10.0,
+                        left: Space::S12.px(),
+                        right: Space::S12.px(),
                         top: 0.0,
                         bottom: 0.0,
                     })
@@ -533,10 +532,6 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
     }
 
     pub fn build(self) -> Element {
-        use super::{
-            glass::{GlassStrength, glass_card_shadows, glass_layers},
-            theme::Elevation,
-        };
         use aqua_ui::element::{Box as UiBox, Scroll};
         let theme = self.theme;
         let (keyed, highlighted) = {
@@ -544,13 +539,9 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             (state.keyed, state.highlighted.clone())
         };
         let count = self.entries.len();
-        let text_style = TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: 14.0,
-            line_height_px: 20.0,
-            weight: FontWeight::NORMAL,
-            ..TextStyle::default()
-        };
+        let text_style = TextRole::Label.style(&theme);
+        let pad = Row::MenuItem.pad();
+        let check = IconSize::Md.px();
         let mut rows = UiBox::new().layout("column").width(Length::Pct(100.0));
         for (index, entry) in self.entries.into_iter().enumerate() {
             let chosen = self.selected.as_ref() == Some(&entry.value);
@@ -568,16 +559,16 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             let mut row = Button::new()
                 .height(OPTION_HEIGHT)
                 .width(Length::Pct(100.0))
-                .radius(14.0)
+                .radius(ROW_RADIUS)
                 .style(Style::new().padding_insets(aqua_core::Insets {
-                    left: 12.0,
-                    right: 32.0,
-                    top: 0.0,
-                    bottom: 0.0,
+                    left: pad.x.px(),
+                    right: 2.0 * pad.x.px() + check,
+                    top: pad.y.px(),
+                    bottom: pad.y.px(),
                 }))
                 .child(text);
             if highlighted {
-                row = row.fill(theme.colors.selected.to_paint());
+                row = row.style(Hover::Neutral.style(&theme));
             }
             if entry.disabled {
                 row = row.opacity(Opacity::Disabled.alpha());
@@ -585,10 +576,15 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             if chosen {
                 let icon = source_asset_glyph(
                     AssetId::TABLER_CHECK,
-                    14.0,
+                    check,
                     theme.colors.text_muted.to_reference_paint(),
                 )
-                .style(Style::new().absolute_at(None, Some(11.0), Some(8.0), None));
+                .style(Style::new().absolute_at(
+                    None,
+                    Some(pad.y.px() + (Row::MenuItem.lines() - check) / 2.0),
+                    Some(pad.x.px()),
+                    None,
+                ));
                 row = row.child(icon);
             }
             if !entry.disabled {
@@ -638,24 +634,12 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             .height(height)
             .child(rows.build())
             .build();
-        UiBox::new()
-            .layout("column")
-            .width(self.trigger_width.max(MENU_MIN_WIDTH))
-            .padding(4.0)
-            .radius(18.0)
-            .clip(true)
-            .style(
-                Style::new().gpui_shadows(
-                    glass_card_shadows(&theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
+        Surface::Menu
+            .build(
+                &theme,
+                vec![self.hover.borrow().pill(&theme, ROW_RADIUS, true), scroll],
             )
-            .child(glass_layers(&theme, GlassStrength::Strong, 18.0))
-            .child(self.hover.borrow().pill(&theme, 14.0, true))
-            .child(scroll)
-            .build()
+            .style(Style::new().width(Length::Px(self.trigger_width.max(MENU_MIN_WIDTH))))
             .role(Role::ListBox)
     }
 }

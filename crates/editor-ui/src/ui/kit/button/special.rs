@@ -36,7 +36,11 @@ pub fn sample(fraction: f32) -> [u8; 3] {
     let span = (to_at - from_at).max(f32::EPSILON);
     let t = ((fraction - from_at) / span).clamp(0.0, 1.0);
     let lerp = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
-    [lerp(from[0], to[0]), lerp(from[1], to[1]), lerp(from[2], to[2])]
+    [
+        lerp(from[0], to[0]),
+        lerp(from[1], to[1]),
+        lerp(from[2], to[2]),
+    ]
 }
 
 #[must_use]

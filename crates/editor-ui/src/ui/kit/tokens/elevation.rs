@@ -48,10 +48,15 @@ fn overlay(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
     };
     std::iter::once(rim)
         .chain(
-            [(1.0, 2.0, 0.0), (4.0, 8.0, -2.0), (12.0, 24.0, -6.0), (24.0, 48.0, -12.0)]
-                .into_iter()
-                .zip(alphas)
-                .map(|((dy, blur, spread), alpha)| drop(dy, blur, spread, ink.with_alpha(alpha))),
+            [
+                (1.0, 2.0, 0.0),
+                (4.0, 8.0, -2.0),
+                (12.0, 24.0, -6.0),
+                (24.0, 48.0, -12.0),
+            ]
+            .into_iter()
+            .zip(alphas)
+            .map(|((dy, blur, spread), alpha)| drop(dy, blur, spread, ink.with_alpha(alpha))),
         )
         .collect()
 }

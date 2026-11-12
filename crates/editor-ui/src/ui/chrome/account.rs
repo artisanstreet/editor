@@ -1,16 +1,13 @@
+use crate::ui::asset::source_asset_glyph;
 use crate::ui::chrome::card::{POLAR_HAZE, POLAR_INK, polar_face};
 use crate::ui::chrome::limits::{EngineLimits, Limit};
 use crate::ui::chrome::menu::{Event, Highlight, Menu, Spot};
-use crate::ui::kit::{Hover, Radius, Space, Surface};
 use crate::ui::engine::engine_icon;
-use crate::ui::asset::source_asset_glyph;
+use crate::ui::kit::{Hover, Radius, Space, Surface};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua::images::ImageHandle;
 use aqua::{Aqua, ShadowLayer, Style, pct, px};
-use aqua_core::{
-    CursorIcon, DisplayItem, ImageRef,
-    Insets, Role, image::ImageFit,
-};
+use aqua_core::{CursorIcon, DisplayItem, ImageRef, Insets, Role, image::ImageFit};
 use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::element::{Element, Media};
 use aqua_ui::{AlignItems, JustifyContent};
@@ -154,10 +151,7 @@ pub fn trigger(theme: &ArtisanTheme, trigger: Trigger<'_>) -> Element {
         .child(portrait(trigger.account, AVATAR, AVATAR / 2.0, 14.0))
         .child(
             Aqua::Box()
-                .styles([Aqua::Style()
-                    .flex_grow(1.0)
-                    .min_width(px(0.0))
-                    .clip(true)])
+                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0)).clip(true)])
                 .child(label(
                     theme,
                     trigger.account.identity.label(),
@@ -291,7 +285,10 @@ fn identity_lines(theme: &ArtisanTheme, palette: &Palette, identity: &Identity) 
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "one account menu item receives its presentation and event context")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one account menu item receives its presentation and event context"
+)]
 fn item(
     theme: &ArtisanTheme,
     palette: &Palette,
@@ -323,7 +320,11 @@ fn item(
                 .child(label(theme, title, palette.ink, FontWeight::NORMAL))
                 .build(),
         )
-        .child(source_asset_glyph(icon, GLYPH, palette.ink_dim.to_reference_paint()))
+        .child(source_asset_glyph(
+            icon,
+            GLYPH,
+            palette.ink_dim.to_reference_paint(),
+        ))
         .on_activate(move || pick(Event::Pick(spot)))
         .build()
         .with_key(format!("artisan-account-{spot:?}"))
@@ -391,7 +392,13 @@ fn limits(theme: &ArtisanTheme, palette: &Palette, engines: &[EngineLimits]) -> 
                     })])
                 .children(engines.iter().flat_map(|engine| {
                     engine.limits.iter().enumerate().map(move |(index, limit)| {
-                        limit_row(theme, palette, engine, (index == 0).then_some(engine.engine), limit)
+                        limit_row(
+                            theme,
+                            palette,
+                            engine,
+                            (index == 0).then_some(engine.engine),
+                            limit,
+                        )
                     })
                 }))
                 .build()
@@ -418,7 +425,11 @@ fn limit_row(
         Some(engine) => icon
             .child(source_asset_glyph(
                 engine_icon(theme, engine),
-                if engine == artisan_api::EngineId::OpenCode { 12.8 } else { GLYPH },
+                if engine == artisan_api::EngineId::OpenCode {
+                    12.8
+                } else {
+                    GLYPH
+                },
                 palette.ink.to_reference_paint(),
             ))
             .build(),
@@ -434,18 +445,28 @@ fn limit_row(
         .child(icon)
         .child(
             Aqua::Box()
-                .styles([Aqua::Style().width(px(LIMIT_LABEL)).flex_shrink(0.0).clip(true)])
+                .styles([Aqua::Style()
+                    .width(px(LIMIT_LABEL))
+                    .flex_shrink(0.0)
+                    .clip(true)])
                 .child(small_label(theme, &limit.label, palette.ink_dim))
                 .build(),
         )
         .child(
             Aqua::Box()
                 .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
-                .child(crate::ui::progress::bar(theme, limit.used_percent, crate::ui::progress::HEIGHT))
+                .child(crate::ui::progress::bar(
+                    theme,
+                    limit.used_percent,
+                    crate::ui::progress::HEIGHT,
+                ))
                 .build(),
         )
         .build()
-        .with_key(format!("artisan-account-limit-{}-{}", engine.engine, limit.label))
+        .with_key(format!(
+            "artisan-account-limit-{}-{}",
+            engine.engine, limit.label
+        ))
         .aria_label(format!(
             "{} {} limit: {percent:.0}% used",
             engine.engine.display_name(),
@@ -461,7 +482,11 @@ fn limit_row(
                 crate::ui::hint_card::hint_card(
                     &theme,
                     &crate::ui::chrome::limits::title(engine, &limit),
-                    &crate::ui::chrome::limits::explanation(&limit, outlook, crate::ui::local_time::occasion),
+                    &crate::ui::chrome::limits::explanation(
+                        &limit,
+                        outlook,
+                        crate::ui::local_time::occasion,
+                    ),
                 )
             }
         })

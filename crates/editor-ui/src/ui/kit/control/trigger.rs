@@ -140,7 +140,12 @@ impl Trigger {
         }
         let mut words = UiBox::new()
             .gap(Space::S6.px())
-            .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0).align(AlignItems::CENTER))
+            .style(
+                Style::new()
+                    .min_width(Length::Px(0.0))
+                    .flex_shrink(1.0)
+                    .align(AlignItems::CENTER),
+            )
             .child(Self::text(&theme, self.label.clone(), false));
         if let Some(detail) = self.detail {
             words = words.child(Self::text(&theme, detail, true));

@@ -265,7 +265,12 @@ impl RowItem {
                     .build(),
             );
         }
-        let title = Self::text(&self.theme, self.title.clone(), self.row.title(), self.row == Row::Heading);
+        let title = Self::text(
+            &self.theme,
+            self.title.clone(),
+            self.row.title(),
+            self.row == Row::Heading,
+        );
         let label = match self.detail.clone() {
             Some(detail) => UiBox::new()
                 .layout("column")

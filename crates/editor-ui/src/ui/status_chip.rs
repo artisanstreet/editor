@@ -1,10 +1,9 @@
 use super::{
     asset::source_asset_glyph,
-    glass::{GlassStrength, glass_card_shadows, glass_layers},
-    theme::{ArtisanTheme, BannerColors, Elevation, Oklch, Opacity, RadiusStep, RadiusTokens},
+    kit::{Surface, TextRole, Tooltip},
+    theme::{ArtisanTheme, BannerColors, Oklch, Opacity, RadiusStep, RadiusTokens},
 };
 use aqua_core::Insets;
-use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::{
     AlignItems,
     element::{Box as UiBox, Element, Text},
@@ -105,48 +104,18 @@ pub fn chips_row(theme: &ArtisanTheme, chips: &[EngineChip], row_key: &str) -> E
             .with_key(format!("marketplace-chip-{row_key}-{}", chip.key))
             .debug_selector(format!("marketplace-chip-{row_key}-{}", chip.key))
             .tooltip(0.5, move || {
-                let radius = RadiusTokens::value(RadiusStep::X2l);
-                UiBox::new()
-                    .style(
-                        Style::new()
-                            .max_width(aqua_ui::style::Length::Px(280.0))
-                            .shadows(
-                                glass_card_shadows(&t, Elevation::Overlay)
-                                    .into_iter()
-                                    .map(aqua::ShadowLayer::from)
-                                    .collect(),
-                            ),
+                Surface::Tooltip(Tooltip::Brief)
+                    .build(
+                        &t,
+                        vec![
+                            Text::new(detail.clone())
+                                .text_style(TextRole::Caption.style(&t))
+                                .gpui_source_color(t.colors.text_muted.to_reference_text_color())
+                                .wrap(true)
+                                .build(),
+                        ],
                     )
-                    .radius(radius)
-                    .border((1.0, t.colors.text.at(Opacity::GlassBorder).to_paint()))
-                    .child(glass_layers(&t, GlassStrength::Strong, radius))
-                    .child(
-                        UiBox::new()
-                            .style(Style::new().padding_insets(Insets {
-                                left: 12.0,
-                                right: 12.0,
-                                top: 8.0,
-                                bottom: 8.0,
-                            }))
-                            .child(
-                                Text::new(detail.clone())
-                                    .text_style(TextStyle {
-                                        families: vec![FontFamily::Named(
-                                            t.typography.sans.family.to_owned(),
-                                        )],
-                                        size_px: t.typography.label_text,
-                                        line_height_px: 19.0,
-                                        ..TextStyle::default()
-                                    })
-                                    .gpui_source_color(
-                                        t.colors.text_muted.to_reference_text_color(),
-                                    )
-                                    .wrap(true)
-                                    .build(),
-                            )
-                            .build(),
-                    )
-                    .build()
+                    .style(Style::new().max_width(aqua_ui::style::Length::Px(280.0)))
             });
         row = row.child(el);
     }

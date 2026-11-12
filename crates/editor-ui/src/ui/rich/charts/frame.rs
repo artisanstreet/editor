@@ -1,43 +1,32 @@
-use crate::ui::glass::{GlassStrength, glass_card_shadows, glass_layers};
+use crate::ui::kit::{Space, Surface, Tone, Tooltip};
 use crate::ui::rich::narrative::callout::{text, text_with_wrap};
-use crate::ui::theme::{ArtisanTheme, Elevation, Opacity, RadiusStep, RadiusTokens};
+use crate::ui::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens};
 use aqua_core::{GpuiHsla, Insets};
 use aqua_text::FontWeight;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 
 pub(crate) fn empty(theme: &ArtisanTheme, label: &str) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::Lg);
-    ui::Box::new()
-        .width(Length::Pct(100.0))
-        .radius(radius)
+    Surface::Callout(Tone::Neutral)
+        .build(
+            theme,
+            vec![text(
+                theme,
+                label,
+                14.0,
+                20.0,
+                FontWeight::NORMAL,
+                theme.colors.text_muted,
+            )],
+        )
         .style(
             Style::new()
+                .width(Length::Pct(100.0))
                 .min_width(Length::Px(0.0))
                 .min_height(Length::Px(72.0))
                 .align(aqua_ui::AlignItems::CENTER)
-                .justify(aqua_ui::JustifyContent::CENTER)
-                .padding_insets(Insets {
-                    left: 12.0,
-                    right: 12.0,
-                    top: 20.0,
-                    bottom: 20.0,
-                })
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme.colors.line.to_reference_paint(),
-                    false,
-                ),
+                .justify(aqua_ui::JustifyContent::CENTER),
         )
-        .child(text(
-            theme,
-            label,
-            14.0,
-            20.0,
-            FontWeight::NORMAL,
-            theme.colors.text_muted,
-        ))
-        .build()
 }
 
 pub(crate) fn navigation(content: Element, ring: GpuiHsla) -> Element {
@@ -334,7 +323,6 @@ pub(crate) fn readout_rows_at(
     rows: Vec<super::distribution::ReadoutRow>,
     low: bool,
 ) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::X2l);
     let mut rendered_rows = Vec::with_capacity(rows.len());
     for item in rows {
         let swatch = item.color;
@@ -409,32 +397,14 @@ pub(crate) fn readout_rows_at(
         content = content.child(row);
     }
     let content = content.build();
-    let card = ui::Box::new()
-        .radius(radius)
+    let card = Surface::Tooltip(Tooltip::Card)
+        .build(theme, vec![content])
         .style(
             Style::new()
                 .min_width(Length::Px(140.0))
                 .max_width(Length::Px(280.0))
-                .flex_shrink(0.0)
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_shadows(
-                    glass_card_shadows(theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(glass_layers(theme, GlassStrength::Strong, radius))
-        .child(content)
-        .build();
+                .flex_shrink(0.0),
+        );
     let x = x.clamp(0.0, 1.0);
     let mut wrapper = ui::Box::new().layout("row").style(
         Style::new()
@@ -714,16 +684,9 @@ pub(crate) fn legend(theme: &ArtisanTheme, entries: Vec<(String, GpuiHsla)>) -> 
 }
 
 pub(crate) fn stats_hint(theme: &ArtisanTheme, heading: &str, body: &str, left: f32) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::X2l);
     let content = ui::Box::new()
         .layout("column")
-        .gap(4.0)
-        .style(Style::new().padding_insets(Insets {
-            left: 14.0,
-            right: 14.0,
-            top: 12.0,
-            bottom: 12.0,
-        }))
+        .gap(Space::S4.px())
         .child(text(
             theme,
             heading,
@@ -741,30 +704,9 @@ pub(crate) fn stats_hint(theme: &ArtisanTheme, heading: &str, body: &str, left: 
             theme.colors.text_muted,
         ))
         .build();
-    let card = ui::Box::new()
-        .width(260.0)
-        .radius(radius)
-        .style(
-            Style::new()
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_shadows(
-                    glass_card_shadows(theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(glass_layers(theme, GlassStrength::Strong, radius))
-        .child(content)
-        .build();
+    let card = Surface::Tooltip(Tooltip::Card)
+        .build(theme, vec![content])
+        .style(Style::new().width(Length::Px(260.0)));
     ui::Box::new()
         .width(260.0)
         .height(0.0)

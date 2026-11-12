@@ -1,6 +1,7 @@
 use super::{
     card::Card,
-    theme::{ArtisanTheme, Oklch, Opacity, RadiusStep, RadiusTokens},
+    kit::{Surface, Tone, surface::tint},
+    theme::{ArtisanTheme, Oklch, Opacity},
 };
 use aqua_core::Insets;
 use aqua_text::{FontFamily, FontWeight, TextStyle};
@@ -102,23 +103,6 @@ pub fn preview_lines(text: &str) -> Vec<String> {
         shown.push("…".to_owned());
     }
     shown
-}
-pub fn text_preview(theme: &ArtisanTheme, text: &str) -> PageBlock {
-    let lines = preview_lines(text).into_iter().map(|line| {
-        UiBox::new()
-            .style(Style::new().min_height(Length::Px(16.0)))
-            .child(label(theme, line, 12.0, theme.colors.text_muted, false))
-            .build()
-    });
-    PageBlock::new(
-        UiBox::new()
-            .layout("column")
-            .style(Style::new().padding_insets(inset(12.0, 10.0)))
-            .radius(RadiusTokens::value(RadiusStep::Md))
-            .fill(theme.colors.raised.to_paint())
-            .children(lines)
-            .build(),
-    )
 }
 pub fn header(
     theme: &ArtisanTheme,
@@ -257,7 +241,7 @@ pub fn error_text(theme: &ArtisanTheme, text: impl Into<String>) -> PageBlock {
     message(theme, text, theme.colors.destructive_text)
 }
 pub fn notice(theme: &ArtisanTheme, text: impl Into<String>) -> Notice {
-    let tone = theme.colors.banner_error;
+    let surface = Surface::Callout(Tone::Danger);
     Notice {
         selector: None,
         content: UiBox::new()
@@ -268,10 +252,10 @@ pub fn notice(theme: &ArtisanTheme, text: impl Into<String>) -> Notice {
                         top: 24.0,
                         ..Insets::default()
                     })
-                    .padding_insets(inset(12.0, 10.0)),
+                    .padding(Length::Px(surface.padding_px())),
             )
-            .radius(RadiusTokens::value(RadiusStep::Lg))
-            .fill(tone.text.at(Opacity::ToneTint).to_paint())
-            .child(label(theme, text, 14.0, tone.text, false)),
+            .radius(surface.radius_px())
+            .fill(tint(theme, Tone::Danger).at(Opacity::ToneTint).to_paint())
+            .child(label(theme, text, 14.0, tint(theme, Tone::Danger), false)),
     }
 }

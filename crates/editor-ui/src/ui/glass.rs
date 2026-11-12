@@ -103,19 +103,6 @@ pub fn glass_control_fill(theme: &ArtisanTheme) -> Gradient {
     }
 }
 
-pub fn glass_menu_separator(theme: &ArtisanTheme) -> Element {
-    UiBox::new()
-        .height(1.0)
-        .fill(theme.colors.text.at(Opacity::Hairline).to_paint())
-        .style(Style::new().flex_shrink(0.0).margin_insets(Insets {
-            top: 4.0,
-            bottom: 4.0,
-            left: 0.0,
-            right: 0.0,
-        }))
-        .build()
-}
-
 pub fn glass_navigator_card(theme: &ArtisanTheme, content: Element) -> Element {
     let radius = 14.0;
     UiBox::new()

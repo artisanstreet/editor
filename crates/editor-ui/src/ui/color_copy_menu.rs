@@ -4,7 +4,6 @@ use std::{
 };
 
 use aqua_core::{CursorIcon, InputEvent, Key as InputKey, NamedKey, NodeId, Role};
-use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::{
     AlignItems,
     element::{Box as UiBox, Button, Element, Key, Text},
@@ -17,11 +16,14 @@ use editor_assets::AssetId;
 use super::{
     asset::source_asset_glyph,
     hover::HoverTone,
+    kit::{Divider, IconSize, Radius, Row, Space, Surface, TextRole},
     picker_motion::HoverSurface,
     popover::{AnimatedPickerHost, Popover},
     rich::actions::{CopyKind, ShowCopyMenu},
-    theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens},
+    theme::ArtisanTheme,
 };
+
+const ROW_RADIUS: f32 = Radius::Row.px();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColorCopyEffect {
@@ -62,11 +64,7 @@ impl ColorCopyMenuHost {
         let hover = Rc::new(RefCell::new(HoverSurface::new("copy-menu-hover")));
         let mut rows = UiBox::new()
             .style(Style::new().axis(Axis::Column).min_width(Length::Px(160.0)))
-            .child(
-                hover
-                    .borrow()
-                    .pill(&theme, RadiusTokens::value(RadiusStep::LgMid), true),
-            );
+            .child(hover.borrow().pill(&theme, ROW_RADIUS, true));
         let entries = menu.entries.len();
         for (index, entry) in menu.entries.iter().enumerate() {
             let primary = entry.kind == CopyKind::Primary;
@@ -75,23 +73,18 @@ impl ColorCopyMenuHost {
             }
             let id = format!("copy-value-{index}");
             let mut icon = UiBox::new()
-                .width(16.0)
-                .height(16.0)
+                .width(IconSize::Md.px())
+                .height(IconSize::Md.px())
                 .style(Style::new().flex_shrink(0.0));
             if primary {
                 icon = icon.child(source_asset_glyph(
                     AssetId::TABLER_COPY,
-                    15.0,
+                    IconSize::Md.px(),
                     theme.colors.text_muted.to_reference_paint(),
                 ));
             }
             let label = Text::new(entry.label.clone())
-                .text_style(TextStyle {
-                    families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                    size_px: 14.0,
-                    line_height_px: 20.0,
-                    ..TextStyle::default()
-                })
+                .text_style(TextRole::Label.style(&theme))
                 .gpui_source_color(theme.colors.text.to_reference_text_color())
                 .build();
             let text = entry.text.clone();
@@ -106,14 +99,14 @@ impl ColorCopyMenuHost {
                 .style(
                     Style::new()
                         .align(AlignItems::CENTER)
-                        .gap(8.0)
+                        .gap(Space::S8.px())
                         .padding_insets(aqua_core::Insets {
-                            left: 12.0,
-                            right: 12.0,
-                            top: 8.0,
-                            bottom: 8.0,
+                            left: Row::MenuItem.pad().x.px(),
+                            right: Row::MenuItem.pad().x.px(),
+                            top: Row::MenuItem.pad().y.px(),
+                            bottom: Row::MenuItem.pad().y.px(),
                         })
-                        .radius(Length::Px(RadiusTokens::value(RadiusStep::LgMid))),
+                        .radius(Length::Px(ROW_RADIUS)),
                 )
                 .child(icon.build())
                 .child(label)
@@ -157,9 +150,7 @@ impl ColorCopyMenuHost {
                     dismiss_effect(ColorCopyEffect::RequestFrame);
                 }
             },
-        )
-        .menu_padding(4.0)
-        .quiet_glass_menu();
+        );
         let (panel, mut options) = popover.into_parts();
         let closed_alive = alive.clone();
         let closed_effect = effect.clone();
@@ -296,20 +287,5 @@ impl ColorCopyMenuHost {
 }
 
 fn separator(theme: &ArtisanTheme) -> Element {
-    UiBox::new()
-        .height(1.0)
-        .style(
-            Style::new()
-                .flex_shrink(0.0)
-                .margin_insets(aqua_core::Insets {
-                    top: 4.0,
-                    bottom: 4.0,
-                    left: 0.0,
-                    right: 0.0,
-                })
-                .gpui_background(aqua_core::GpuiBackground::Solid(
-                    theme.colors.text.at(Opacity::Hairline).to_reference_paint(),
-                )),
-        )
-        .build()
+    Divider::Rule.build(theme, Surface::Menu.padding_px())
 }

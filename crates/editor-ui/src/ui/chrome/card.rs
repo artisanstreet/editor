@@ -1,10 +1,10 @@
 use crate::ui::kit::Radius;
 use crate::ui::theme::{ArtisanTheme, Oklch};
-use aqua::{Aqua, Style, px};
 use aqua::ShadowLayer;
+use aqua::{Aqua, Style, px};
 use aqua_core::{DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Rect};
-use std::sync::Arc;
 use aqua_ui::element::Element;
+use std::sync::Arc;
 
 pub const RADIUS: f32 = Radius::Shell.px();
 pub const INSET_RADIUS: f32 = Radius::Panel.px();
@@ -71,7 +71,13 @@ impl Surfaces {
 #[must_use]
 pub fn inset(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
     let surfaces = Surfaces::of(theme);
-    outlined(surfaces.ink, surfaces.inner, INSET_RADIUS, rest_shadows(), children)
+    outlined(
+        surfaces.ink,
+        surfaces.inner,
+        INSET_RADIUS,
+        rest_shadows(),
+        children,
+    )
 }
 
 #[must_use]
@@ -105,8 +111,16 @@ pub fn outlined(
                 .gpui_background(vertical(edge.rim_top, edge.rim_bottom))
                 .shadows(shadows),
         ])
-        .child(layer(1.0, radius, vertical(edge.highlight_top, edge.highlight_bottom)))
-        .child(layer(2.0, radius, GpuiBackground::Solid(surface.to_reference_paint())))
+        .child(layer(
+            1.0,
+            radius,
+            vertical(edge.highlight_top, edge.highlight_bottom),
+        ))
+        .child(layer(
+            2.0,
+            radius,
+            GpuiBackground::Solid(surface.to_reference_paint()),
+        ))
         .children(children)
         .build()
 }
@@ -256,14 +270,21 @@ pub fn key_face(surfaces: &Surfaces, radius: f32, height: f32) -> Element {
                     .clip(true)])
                 .child(
                     Aqua::Canvas()
-                        .styles([Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))])
+                        .styles([Style::new().absolute_at(
+                            Some(0.0),
+                            Some(0.0),
+                            Some(0.0),
+                            Some(0.0),
+                        )])
                         .on_paint(|bounds| vec![radial_glow(bounds, WHITE, 0.07)])
                         .build()
                         .exclude_from_hit_testing(),
                 )
                 .build()
                 .exclude_from_hit_testing(),
-            Aqua::Box().styles([Aqua::Style().height(px(height))]).build(),
+            Aqua::Box()
+                .styles([Aqua::Style().height(px(height))])
+                .build(),
         ],
     )
 }

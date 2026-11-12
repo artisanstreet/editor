@@ -92,9 +92,16 @@ impl IconButton {
         label: impl Into<String>,
         surface_radius: f32,
     ) -> Self {
-        Self::new(key, theme, AssetId::TABLER_X, label, IconButtonSize::Sm, Finish::Glass)
-            .muted()
-            .nested(surface_radius, CORNER_INSET)
+        Self::new(
+            key,
+            theme,
+            AssetId::TABLER_X,
+            label,
+            IconButtonSize::Sm,
+            Finish::Glass,
+        )
+        .muted()
+        .nested(surface_radius, CORNER_INSET)
     }
 
     #[must_use]

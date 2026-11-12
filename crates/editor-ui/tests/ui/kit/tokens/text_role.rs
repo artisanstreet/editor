@@ -6,9 +6,18 @@ fn roles_resolve_to_one_line_height_per_size() {
     let mut seen: Vec<(f32, f32)> = Vec::new();
     for role in TextRole::ALL {
         let spec = role.spec();
-        assert!(spec.line >= spec.size, "{role:?} line height shorter than its size");
-        if let Some((_, line)) = seen.iter().find(|(size, _)| *size == spec.size && spec.face == Face::Sans) {
-            assert_eq!(*line, spec.line, "{role:?} drifts from the line height of its size");
+        assert!(
+            spec.line >= spec.size,
+            "{role:?} line height shorter than its size"
+        );
+        if let Some((_, line)) = seen
+            .iter()
+            .find(|(size, _)| *size == spec.size && spec.face == Face::Sans)
+        {
+            assert_eq!(
+                *line, spec.line,
+                "{role:?} drifts from the line height of its size"
+            );
         }
         if spec.face == Face::Sans {
             seen.push((spec.size, spec.line));

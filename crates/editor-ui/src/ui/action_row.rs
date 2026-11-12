@@ -1,8 +1,9 @@
 use super::{
     text::truncated::TruncatedText,
-    theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens},
+    kit::{Density, Hover, Radius, Row, Space},
+    theme::{ArtisanTheme, Opacity},
 };
-use aqua_core::{CursorIcon, Insets, Role};
+use aqua_core::{CursorIcon, Role};
 use aqua_ui::{
     AlignItems,
     element::{Box as UiBox, Button, Element, Key},
@@ -21,10 +22,11 @@ pub struct ActionRow {
 }
 impl ActionRow {
     pub fn row_height(theme: &ArtisanTheme) -> f32 {
+        let pad = Row::ListItem(Density::Regular).pad().y.px();
         theme
             .density
             .control_sm
-            .max(theme.typography.control_text * 1.25 + 12.0)
+            .max(theme.typography.control_text * 1.25 + 2.0 * pad)
     }
     pub fn new(id: impl Into<Key>, theme: ArtisanTheme, label: impl Into<String>) -> Self {
         Self {
@@ -83,23 +85,18 @@ impl ActionRow {
         }
         let mut root = Button::new()
             .width(Length::Pct(100.0))
-            .gap(8.0)
-            .radius(RadiusTokens::value(RadiusStep::Md))
+            .gap(Space::S8.px())
+            .radius(Radius::Field.px())
             .border((1.0, aqua_core::Oklch::TRANSPARENT))
             .style(
                 Style::new()
                     .align(AlignItems::CENTER)
                     .min_height(Length::Px(Self::row_height(&t)))
-                    .padding_insets(Insets {
-                        left: 8.0,
-                        right: 8.0,
-                        top: 6.0,
-                        bottom: 6.0,
-                    }),
+                    .padding(Length::Px(Row::ListItem(Density::Regular).pad().x.px())),
             )
             .child(text.build());
         if self.selected {
-            root = root.fill(t.colors.selected.to_paint());
+            root = root.style(Hover::Neutral.style(&t));
         }
         if let Some(trailing) = self.trailing {
             root = root.child(
@@ -129,7 +126,7 @@ impl ActionRow {
             element
                 .cursor(CursorIcon::Pointer)
                 .focus_visible_style(Style::new().border_of(1.0, t.colors.ring.to_paint()))
-                .hover_style(Style::new().background(t.colors.raised.to_paint()))
+                .hover_style(Hover::Neutral.style(&t))
         }
     }
 }

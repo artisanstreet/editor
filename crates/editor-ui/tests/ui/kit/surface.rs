@@ -27,13 +27,20 @@ fn containers_hug_their_children_with_concentric_corners() {
         (Surface::Composer, Radius::Field),
     ];
     for (surface, child) in expected {
-        assert_eq!(surface.child_radius(), Some(child), "{surface:?} must nest {child:?}");
+        assert_eq!(
+            surface.child_radius(),
+            Some(child),
+            "{surface:?} must nest {child:?}"
+        );
     }
 }
 
 #[test]
 fn the_menu_reproduces_the_account_menu() {
-    assert!((Surface::Menu.radius_px() - 10.4).abs() < 1e-4, "menu radius");
+    assert!(
+        (Surface::Menu.radius_px() - 10.4).abs() < 1e-4,
+        "menu radius"
+    );
     assert_eq!(Surface::Menu.padding(), Some(Space::S6), "menu padding");
 }
 
@@ -65,5 +72,9 @@ fn text_only_surfaces_keep_text_off_the_corner_curve() {
 #[test]
 fn pills_are_fully_round_at_their_height() {
     assert_eq!(Surface::Pill(24.0).radius_px(), 12.0, "half of the height");
-    assert_eq!(Surface::Pill(24.0).child_radius(), None, "pills don't nest corners");
+    assert_eq!(
+        Surface::Pill(24.0).child_radius(),
+        None,
+        "pills don't nest corners"
+    );
 }

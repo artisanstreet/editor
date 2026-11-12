@@ -166,7 +166,9 @@ impl Surface {
             Material::Recessed => {
                 outlined(surfaces.ink, surfaces.inner, radius, shadows, children).style(sized)
             }
-            Material::Key => outlined(surfaces.ink, surfaces.bg, radius, shadows, children).style(sized),
+            Material::Key => {
+                outlined(surfaces.ink, surfaces.bg, radius, shadows, children).style(sized)
+            }
             Material::Raised => shell()
                 .style(Style::new().gpui_background(GpuiBackground::Solid(
                     theme.colors.raised.to_reference_paint(),

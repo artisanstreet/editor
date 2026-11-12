@@ -484,7 +484,7 @@ pub fn machines(
         );
     }
     rows = rows
-        .child(editor_ui::glass::glass_menu_separator(&theme))
+        .child(editor_ui::kit::Divider::Rule.build(&theme, 4.0))
         .child(action(
             theme,
             "sidebar-manage-forges",

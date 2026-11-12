@@ -431,7 +431,7 @@ pub fn mention_menu(
 ) -> Option<Element> {
     use super::mentions::Kind;
     use editor_ui::{
-        asset::source_asset_glyph, glass::glass_menu_separator, popover::PopoverPanel,
+        asset::source_asset_glyph, kit::{Divider, Surface}, popover::PopoverPanel,
     };
     use aqua_core::{Insets, Role};
     use aqua_ui::{AlignItems, element::Button as UiButton};
@@ -447,7 +447,7 @@ pub fn mention_menu(
         };
         if previous != Some(row.kind) {
             if previous.is_some() {
-                entries = entries.child(glass_menu_separator(&theme));
+                entries = entries.child(Divider::Rule.build(&theme, Surface::Menu.padding_px()));
                 content_height += 9.0;
             }
             content_height += 30.0;
@@ -563,9 +563,7 @@ pub fn mention_menu(
         .height(content_height.min(36.0_f32.mul_add(9.5, 30.0)))
         .child(entries.build())
         .build();
-    let panel = PopoverPanel::new("composer-mentions-panel", theme, list, viewport.w, viewport.h)
-        .quiet_glass_menu()
-        .build();
+    let panel = PopoverPanel::new("composer-mentions-panel", theme, list, viewport.w, viewport.h).build();
     Some(
         UiBox::new()
             .width(width)
@@ -3082,7 +3080,8 @@ pub fn project_menu(
 ) -> Element {
     use editor_ui::{
         asset::source_asset_glyph,
-        glass::{GlassStrength, glass_card_shadows, glass_layers, glass_menu_separator},
+        glass::{GlassStrength, glass_card_shadows, glass_layers},
+        kit::Divider,
         theme::Elevation,
     };
     use aqua_core::{Insets, Role};
@@ -3191,7 +3190,7 @@ pub fn project_menu(
                     ))
                     .build(),
             )
-            .child(glass_menu_separator(&theme));
+            .child(Divider::Rule.build(&theme, 8.0));
     }
     let scratch = artisan_api::ProjectId::scratch();
     let intake = |label_text: &'static str, glyph, selected: bool, action: ComposerAction| {
@@ -3842,7 +3841,7 @@ fn model_axis_pane(
     hover: &Rc<std::cell::RefCell<editor_ui::pop_in_hover::PopInHover>>,
     dispatch: &Dispatch,
 ) -> Element {
-    use editor_ui::{asset::source_asset_glyph, glass::glass_menu_separator};
+    use editor_ui::{asset::source_asset_glyph, kit::Divider};
     use aqua_core::{Insets, Role};
     use aqua_ui::{
         AlignItems,
@@ -3857,7 +3856,7 @@ fn model_axis_pane(
     for (index, option) in options.iter().enumerate() {
         if option.special && !special && axis != super::picker::Axis::Special {
             special = true;
-            rows = rows.child(glass_menu_separator(&theme)).child(
+            rows = rows.child(Divider::Rule.build(&theme, MODEL_BAR_INSET)).child(
                 UiBox::new()
                     .style(Style::new().padding_insets(Insets {
                         left: 10.0,

@@ -197,9 +197,9 @@ impl Button {
     fn face(&self) -> Option<Element> {
         let radius = self.radius;
         let paint = match self.tone {
-            ButtonTone::Primary => Canvas::new().on_paint(move |bounds| {
-                vec![polar_face(bounds, 0.0, radius)]
-            }),
+            ButtonTone::Primary => {
+                Canvas::new().on_paint(move |bounds| vec![polar_face(bounds, 0.0, radius)])
+            }
             ButtonTone::Special => Canvas::new().on_paint(move |bounds| {
                 vec![DisplayItem::GpuiSvg {
                     bounds,
@@ -261,7 +261,9 @@ impl Button {
             })
             .radius(Length::Px(self.radius));
         if self.ellipsis.is_some() {
-            style = style.min_width(Length::Px(0.0)).max_width(Length::Pct(100.0));
+            style = style
+                .min_width(Length::Px(0.0))
+                .max_width(Length::Pct(100.0));
         }
         let shadows = match self.tone {
             ButtonTone::Primary => vec![self.press()],
@@ -335,9 +337,9 @@ impl Button {
             .focus_visible_style(focus)
             .hover_style(hover);
         match self.motion {
-            MotionPolicy::Full => element.pressed_style(
-                Style::new().transform(Transform2D::translate(0.0, PRESS)),
-            ),
+            MotionPolicy::Full => {
+                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
+            }
             MotionPolicy::Reduced => element,
         }
     }

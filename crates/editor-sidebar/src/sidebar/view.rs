@@ -674,8 +674,6 @@ pub fn thread_menu(
                 })
             },
         )
-        .menu_padding(6.0)
-        .strong_glass_menu()
         .into_parts(),
     )
 }
