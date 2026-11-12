@@ -1,11 +1,10 @@
 use std::rc::Rc;
 
-use aqua_core::Insets;
-use aqua_text::{FontFamily, FontWeight, TextStyle};
+use aqua_text::overflow::OverflowMode;
 use aqua_ui::{
     AlignItems, JustifyContent,
     collection::List,
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::{Length, Style},
 };
 use artisan_api::{EngineId, SkillAction, SkillOrigin};
@@ -19,16 +18,22 @@ use super::{
 };
 use editor_core::{Core, Screen, SettingsPage};
 use editor_ui::{
-    asset::source_asset_glyph,
-    button::{Button, ButtonVariant},
-    card::CardStyle,
-    glass::{self, GlassStrength},
+    kit::{
+        Button, ButtonSize, ButtonTone, Finish, IconButton, IconButtonSize, IconSize, Label, Link,
+        LinkTone, Row, RowItem, Space, Spaced, Surface, TextRole, Tooltip, surface::band::Band,
+    },
     page,
     status_chip::{ChipTone, tone_color},
     switch::Switch,
     text::{ListKey, Mode},
-    theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens},
+    theme::{ArtisanTheme, Opacity},
 };
+
+const SEARCH_MAX_WIDTH: f32 = 720.0;
+const TOOLTIP_MAX_WIDTH: f32 = 260.0;
+const CONTROL_WIDTH: f32 = 148.0;
+const CARD_PADDING: Space = Space::S8;
+const ESTIMATED_ROW_HEIGHT: f32 = 256.0;
 
 #[derive(Clone, Debug)]
 pub enum ViewAction {
@@ -120,10 +125,10 @@ pub fn build(
     });
     let pending = page.pending.clone();
     let search = controller.search.clone();
-    List::new()
+    let list = List::new()
         .items(rows)
         .key(|(index, _)| format!("marketplace-entry-{index}"))
-        .row(move |(_, entry)| {
+        .row(move |(index, entry)| {
             let content = match entry {
                 Entry::Hero => hero(
                     &theme,
@@ -137,43 +142,31 @@ pub fn build(
                 Entry::Notices => notices_view(&theme, &notices, emit.clone()),
                 Entry::Found(summary) => found(&theme, summary, found_open, emit.clone()),
                 Entry::Group(title) => UiBox::new()
-                    .style(Style::new().padding_insets(insets(4.0, 4.0, 32.0, 10.0)))
-                    .child(label(
-                        &theme,
-                        title,
-                        12.0,
-                        theme.colors.text_muted.to_reference_text_color(),
-                        true,
-                    ))
-                    .build(),
-                Entry::Empty(text) => UiBox::new()
-                    .style(
-                        Style::new()
-                            .padding_insets(insets(0.0, 0.0, 40.0, 0.0))
-                            .justify(JustifyContent::CENTER),
+                    .padded(CARD_PADDING)
+                    .child(
+                        RowItem::new(
+                            format!("marketplace-group-{index}"),
+                            theme,
+                            Row::Heading,
+                            Surface::Card,
+                            title.clone(),
+                        )
+                        .build(),
                     )
-                    .child(label(
-                        &theme,
-                        text,
-                        14.0,
-                        theme.colors.text_muted.to_reference_text_color(),
-                        false,
-                    ))
                     .build(),
+                Entry::Empty(text) => centered(muted(&theme, TextRole::Label, text.clone())),
                 Entry::Item {
                     item,
                     first,
                     last,
                     selected,
-                } => item_band(
-                    &theme,
-                    item,
-                    *first,
-                    *last,
-                    *selected,
-                    pending.as_deref(),
-                    emit.clone(),
-                ),
+                } => Band::of(*first, *last)
+                    .build(
+                        &theme,
+                        *selected,
+                        item_row(&theme, item, *selected, pending.as_deref(), emit.clone()),
+                    )
+                    .debug_selector(item.selector()),
             };
             UiBox::new()
                 .width(Length::Pct(100.0))
@@ -182,11 +175,7 @@ pub fn build(
                     UiBox::new()
                         .layout("column")
                         .width(Length::Pct(100.0))
-                        .style(
-                            Style::new()
-                                .max_width(Length::Px(page::CONTENT_MAX_WIDTH))
-                                .padding_insets(insets(24.0, 24.0, 0.0, 0.0)),
-                        )
+                        .style(Style::new().max_width(Length::Px(page::CONTENT_MAX_WIDTH)))
                         .child(content)
                         .build(),
                 )
@@ -197,82 +186,47 @@ pub fn build(
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0)),
         )
-        .estimated_row_height(Length::Px(256.0))
+        .estimated_row_height(Length::Px(ESTIMATED_ROW_HEIGHT))
         .virtualize()
         .build()
         .with_key("marketplace-list")
-        .debug_selector("route-marketplace")
-}
-
-fn insets(left: f32, right: f32, top: f32, bottom: f32) -> Insets {
-    Insets {
-        left,
-        right,
-        top,
-        bottom,
-    }
-}
-
-fn label(
-    theme: &ArtisanTheme,
-    text: impl Into<String>,
-    size: f32,
-    color: aqua_core::GpuiTextColor,
-    medium: bool,
-) -> Element {
-    Text::new(text.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: size,
-            line_height_px: size * 1.25,
-            weight: if medium {
-                FontWeight::MEDIUM
-            } else {
-                FontWeight::NORMAL
-            },
-            ..TextStyle::default()
-        })
-        .gpui_source_color(color)
-        .wrap(false)
+        .debug_selector("route-marketplace");
+    UiBox::new()
+        .layout("column")
+        .width(Length::Pct(100.0))
+        .height(Length::Pct(100.0))
+        .padded(Space::S24)
+        .child(list)
         .build()
 }
 
-fn truncated_label(theme: &ArtisanTheme, text: impl Into<String>) -> Element {
-    Text::new(text.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: 12.0,
-            line_height_px: 15.0,
-            weight: FontWeight::NORMAL,
-            ..TextStyle::default()
-        })
+fn muted(theme: &ArtisanTheme, role: TextRole, words: String) -> Element {
+    role.text(theme, words)
         .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
         .wrap(false)
-        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-        .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
         .build()
 }
 
-fn inherited_label(
-    theme: &ArtisanTheme,
-    text: impl Into<String>,
-    size: f32,
-    medium: bool,
-) -> Element {
-    Text::new(text.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: size,
-            line_height_px: size * 1.25,
-            weight: if medium {
-                FontWeight::MEDIUM
-            } else {
-                FontWeight::NORMAL
-            },
-            ..TextStyle::default()
-        })
+fn caption(theme: &ArtisanTheme, words: String) -> Element {
+    TextRole::Caption
+        .text(theme, words)
+        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
         .wrap(false)
+        .overflow(OverflowMode::EndEllipsis)
+        .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
         .build()
+}
+
+fn centered(child: Element) -> Element {
+    UiBox::new()
+        .padded(Space::S24)
+        .style(Style::new().justify(JustifyContent::CENTER))
+        .child(child)
+        .build()
+}
+
+fn spacer(space: Space) -> Element {
+    UiBox::new().height(space.px()).build()
 }
 
 fn hero(
@@ -284,161 +238,149 @@ fn hero(
     prompt_hovered: bool,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    let mut field = UiBox::new()
-        .width(Length::Pct(100.0))
-        .height(56.0)
-        .gap(12.0)
-        .radius(radius)
+    let well = Surface::Composer;
+    let slot = IconButtonSize::Md.edge();
+    let lead = UiBox::new()
+        .width(slot)
+        .height(slot)
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
-                .shadows(
-                    glass::glass_card_shadows(theme, editor_ui::theme::Elevation::Floating)
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                )
-                .padding_insets(insets(20.0, 10.0, 0.0, 0.0)),
+                .justify(JustifyContent::CENTER)
+                .flex_shrink(0.0),
         )
-        .child(glass::glass_layers(theme, GlassStrength::Quiet, radius))
-        .child(source_asset_glyph(
+        .child(IconSize::Lg.glyph(
             AssetId::TABLER_SEARCH,
-            18.0,
             theme.colors.text_muted.to_reference_paint(),
         ))
+        .build();
+    let editor = UiBox::new()
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
         .child(
-            UiBox::new()
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                .child(
-                    search
-                        .element_with_chrome(
-                            Mode::SingleLine,
-                            theme,
-                            "Search skills and MCP servers",
-                            true,
-                            false,
-                        )
-                        .with_key("marketplace-search")
-                        .debug_selector("marketplace-search"),
+            search
+                .element_with_chrome(
+                    Mode::SingleLine,
+                    theme,
+                    "Search skills and MCP servers",
+                    true,
+                    false,
                 )
-                .build(),
-        );
-    if !query.is_empty() {
+                .with_key("marketplace-search")
+                .debug_selector("marketplace-search"),
+        )
+        .build();
+    let clear = (!query.is_empty()).then(|| {
         let emit = emit.clone();
-        field = field.child(
-            Button::icon(
-                "marketplace-search-clear",
-                *theme,
-                AssetId::TABLER_X,
-                "Clear the search",
-            )
-            .variant(ButtonVariant::Ghost)
-            .on_activate(move |_| emit(ViewAction::ClearSearch))
-            .build(),
-        );
-    }
+        IconButton::new(
+            "marketplace-search-clear",
+            *theme,
+            AssetId::TABLER_X,
+            "Clear the search",
+            IconButtonSize::Md,
+            Finish::Plain,
+        )
+        .muted()
+        .within(well)
+        .on_activate(move |_| emit(ViewAction::ClearSearch))
+        .build()
+    });
+    let line = UiBox::new()
+        .height(slot)
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(lead)
+        .child(editor)
+        .children(clear)
+        .build();
     let focus = emit.clone();
-    let field = field.build().cursor(aqua_core::CursorIcon::Text).on_input(
-        aqua_ui::input::InputKind::PointerDown,
-        aqua_ui::input::EventPhase::Capture,
-        move |_| {
-            focus(ViewAction::FocusSearch);
-            aqua_ui::input::InputResponse::default()
-        },
-    );
-    let mut tabs = UiBox::new().gap(18.0);
-    for (tab, text) in [
+    let field = well
+        .build(theme, vec![line])
+        .style(Style::new().width(Length::Pct(100.0)))
+        .cursor(aqua_core::CursorIcon::Text)
+        .on_input(
+            aqua_ui::input::InputKind::PointerDown,
+            aqua_ui::input::EventPhase::Capture,
+            move |_| {
+                focus(ViewAction::FocusSearch);
+                aqua_ui::input::InputResponse::default()
+            },
+        );
+    let tabs = [
         (Kind::All, "All".to_owned()),
         (Kind::Skills, format!("Skills {}", counts[0])),
         (Kind::Servers, format!("MCP servers {}", counts[1])),
-    ] {
+    ]
+    .into_iter()
+    .map(|(tab, text)| {
         let emit = emit.clone();
-        let color = if kind == tab {
-            theme.colors.text.to_reference_text_color()
-        } else {
-            theme.colors.text_muted.to_reference_text_color()
-        };
-        tabs = tabs.child(
-            aqua_ui::element::Button::new()
-                .style(Style::new().gpui_source_text_color(color))
-                .on_activate(move || emit(ViewAction::SetKind(tab)))
-                .child(inherited_label(theme, text, 14.0, kind == tab))
-                .build()
-                .hover_style(
-                    Style::new()
-                        .gpui_source_text_color(theme.colors.text.to_reference_text_color()),
-                )
-                .cursor(aqua_core::CursorIcon::Pointer)
-                .debug_selector(format!("marketplace-kind-{tab:?}")),
-        );
-    }
+        Link::new(format!("marketplace-kind-{tab:?}"), *theme, LinkTone::Crumb, text)
+            .current(kind == tab)
+            .on_activate(move || emit(ViewAction::SetKind(tab)))
+            .build()
+            .role(aqua_core::Role::Tab)
+            .aria_selected(kind == tab)
+            .debug_selector(format!("marketplace-kind-{tab:?}"))
+    });
+    let tabs = UiBox::new()
+        .spaced(Space::S16)
+        .children(tabs)
+        .build()
+        .role(aqua_core::Role::TabList);
     let action = emit.clone();
     let hover = emit.clone();
-    let prompt = aqua_ui::element::Button::new()
-        .gap(2.0)
-        .style(
-            Style::new().gpui_source_text_color(theme.colors.text_muted.to_reference_text_color()),
-        )
-        .on_activate(move || {
-            action(ViewAction::Navigate(Screen::Settings(
-                SettingsPage::GlobalPrompt,
-            )))
-        })
-        .child(inherited_label(theme, "Global prompt", 14.0, false))
-        .child(source_asset_glyph(
-            AssetId::TABLER_CHEVRON_RIGHT,
-            14.0,
-            if prompt_hovered {
-                theme.colors.text
-            } else {
-                theme.colors.text_muted
-            }
-            .to_reference_paint(),
-        ))
-        .build()
-        .hover_style(
-            Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color()),
-        )
-        .cursor(aqua_core::CursorIcon::Pointer)
-        .on_hover_change(move |hovered| hover(ViewAction::PromptHover(hovered)))
-        .debug_selector("marketplace-global-prompt-open");
-    UiBox::new()
-        .layout("column")
+    let prompt = Link::new(
+        "marketplace-global-prompt",
+        *theme,
+        LinkTone::Crumb,
+        "Global prompt",
+    )
+    .on_activate(move || {
+        action(ViewAction::Navigate(Screen::Settings(
+            SettingsPage::GlobalPrompt,
+        )))
+    })
+    .build()
+    .on_hover_change(move |hovered| hover(ViewAction::PromptHover(hovered)))
+    .debug_selector("marketplace-global-prompt-open");
+    let chevron = IconSize::Sm.glyph(
+        AssetId::TABLER_CHEVRON_RIGHT,
+        if prompt_hovered {
+            theme.colors.text
+        } else {
+            theme.colors.text_muted
+        }
+        .to_reference_paint(),
+    );
+    let prompt = UiBox::new()
+        .spaced(Space::S2)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(prompt)
+        .child(chevron)
+        .build();
+    let controls = UiBox::new()
+        .padded(Space::S8)
         .style(
             Style::new()
-                .align(AlignItems::CENTER)
-                .padding_insets(insets(0.0, 0.0, 72.0, 8.0)),
+                .justify(JustifyContent::SPACE_BETWEEN)
+                .align(AlignItems::CENTER),
         )
-        .child(label(
-            theme,
-            "Marketplace",
-            TypographyTokens::size(TextStep::Xl),
-            theme.colors.text.to_reference_text_color(),
-            true,
-        ))
+        .child(tabs)
+        .child(prompt)
+        .build();
+    UiBox::new()
+        .layout("column")
+        .padded(Space::S32)
+        .spaced(Space::S20)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(TextRole::Heading.text(theme, "Marketplace").wrap(false).build())
         .child(
             UiBox::new()
                 .layout("column")
                 .width(Length::Pct(100.0))
-                .style(
-                    Style::new()
-                        .max_width(Length::Px(720.0))
-                        .margin_insets(insets(0.0, 0.0, 20.0, 0.0)),
-                )
+                .spaced(Space::S12)
+                .style(Style::new().max_width(Length::Px(SEARCH_MAX_WIDTH)))
                 .child(field)
-                .child(
-                    UiBox::new()
-                        .style(
-                            Style::new()
-                                .justify(JustifyContent::SPACE_BETWEEN)
-                                .align(AlignItems::CENTER)
-                                .padding_insets(insets(8.0, 8.0, 14.0, 0.0)),
-                        )
-                        .child(tabs.build())
-                        .child(prompt)
-                        .build(),
-                )
+                .child(controls)
                 .build(),
         )
         .build()
@@ -446,32 +388,19 @@ fn hero(
 
 fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewAction)>) -> Element {
     if !state.host {
-        return UiBox::new()
-            .style(
-                Style::new()
-                    .justify(JustifyContent::CENTER)
-                    .padding_insets(insets(0.0, 0.0, 24.0, 0.0)),
-            )
-            .child(label(
-                theme,
-                "Pair a host to see its skills.",
-                14.0,
-                theme.colors.text_muted.to_reference_text_color(),
-                false,
-            ))
-            .build();
+        return centered(muted(
+            theme,
+            TextRole::Label,
+            "Pair a host to see its skills.".to_owned(),
+        ));
     }
-    let mut body = UiBox::new()
-        .layout("column")
-        .gap(8.0)
-        .style(Style::new().padding_insets(insets(0.0, 0.0, 16.0, 0.0)));
+    let mut body: Vec<Element> = Vec::new();
     if let Some(attention) = &state.attention {
         let emit = emit.clone();
-        body = body.child(
+        body.push(
             page::notice(theme, attention.clone())
                 .action(
-                    Button::text("marketplace-prompt-choose", *theme, "Open")
-                        .variant(ButtonVariant::Outline)
+                    Button::text("marketplace-prompt-choose", *theme, ButtonTone::Quiet, "Open")
                         .on_activate(move |_| {
                             emit(ViewAction::Navigate(Screen::Settings(
                                 SettingsPage::GlobalPrompt,
@@ -482,140 +411,64 @@ fn notices_view(theme: &ArtisanTheme, state: &Notices, emit: Rc<dyn Fn(ViewActio
                 .build(),
         );
     }
-    for error in &state.errors {
-        body = body.child(page::notice(theme, error.clone()).build());
-    }
+    body.extend(
+        state
+            .errors
+            .iter()
+            .map(|error| page::notice(theme, error.clone()).build()),
+    );
     if state.retry {
         let emit = emit.clone();
-        body = body.child(
-            Button::text("marketplace-retry", *theme, "Retry")
-                .variant(ButtonVariant::Outline)
+        body.push(
+            Button::text("marketplace-retry", *theme, ButtonTone::Neutral, "Retry")
                 .on_activate(move |_| emit(ViewAction::Retry))
                 .build(),
         );
     }
-    if state.loading {
-        if let Some(started) = state.loading_started {
-            body = body.child(
-                UiBox::new()
-                    .style(
-                        Style::new()
-                            .justify(JustifyContent::CENTER)
-                            .padding_insets(insets(0.0, 0.0, 24.0, 0.0)),
-                    )
-                    .child(wordmark(theme, started, state.reduced_motion))
-                    .build(),
-            );
-        }
+    if let Some(started) = state.loading_started.filter(|_| state.loading) {
+        body.push(centered(wordmark(theme, started, state.reduced_motion)));
     }
-    body.build()
+    if body.is_empty() {
+        return UiBox::new().build();
+    }
+    UiBox::new()
+        .layout("column")
+        .spaced(Space::S8)
+        .children(body)
+        .child(spacer(Space::S8))
+        .build()
 }
 
 fn found(theme: &ArtisanTheme, summary: &str, open: bool, emit: Rc<dyn Fn(ViewAction)>) -> Element {
-    let style = CardStyle::resolve(*theme);
     let content = UiBox::new()
-        .gap(12.0)
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .padding_insets(insets(0.0, 0.0, 10.0, 10.0)),
-        )
-        .child(source_asset_glyph(
+        .spaced(Space::S12)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(IconSize::Md.glyph(
             AssetId::TABLER_SHIELD_LOCK,
-            16.0,
             theme.colors.text_muted.to_reference_paint(),
         ))
         .child(
             UiBox::new()
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                .child(label(
-                    theme,
-                    summary,
-                    14.0,
-                    theme.colors.text.to_reference_text_color(),
-                    false,
-                ))
+                .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+                .child(TextRole::Label.text(theme, summary.to_owned()).wrap(false).build())
                 .build(),
         )
         .child(
             Button::text(
                 "marketplace-found-review",
                 *theme,
+                ButtonTone::Quiet,
                 if open { "Hide" } else { "Review" },
             )
-            .variant(ButtonVariant::Outline)
             .on_activate(move |_| emit(ViewAction::ToggleFound))
             .build(),
         )
         .build();
     UiBox::new()
         .layout("column")
-        .style(Style::new().padding_insets(insets(0.0, 0.0, 24.0, 0.0)))
-        .child(
-            UiBox::new()
-                .layout("column")
-                .radius(style.corner_radius)
-                .fill(style.background)
-                .border((1.0, style.ring_color))
-                .style(Style::new().padding_insets(insets(
-                    style.content_horizontal_padding,
-                    style.content_horizontal_padding,
-                    0.0,
-                    0.0,
-                )))
-                .child(content)
-                .build(),
-        )
+        .child(Band::Only.build(theme, false, content))
+        .child(spacer(Space::S24))
         .build()
-}
-
-fn item_band(
-    theme: &ArtisanTheme,
-    item: &Item,
-    first: bool,
-    last: bool,
-    selected: bool,
-    pending: Option<&str>,
-    emit: Rc<dyn Fn(ViewAction)>,
-) -> Element {
-    let style = CardStyle::resolve(*theme);
-    let radius = style.corner_radius;
-    let corners = aqua_core::CornerRadii {
-        top_left: if first { radius } else { 0.0 },
-        top_right: if first { radius } else { 0.0 },
-        bottom_left: if last { radius } else { 0.0 },
-        bottom_right: if last { radius } else { 0.0 },
-    };
-    UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0))
-        .fill(style.background)
-        .style(
-            Style::new()
-                .corners(corners)
-                .border_edges(
-                    Insets {
-                        left: 1.0,
-                        right: 1.0,
-                        top: 1.0,
-                        bottom: if last { 1.0 } else { 0.0 },
-                    },
-                    if first {
-                        style.ring_color
-                    } else {
-                        theme.colors.line.to_paint()
-                    },
-                )
-                .padding_insets(insets(
-                    style.content_horizontal_padding,
-                    style.content_horizontal_padding,
-                    0.0,
-                    0.0,
-                )),
-        )
-        .child(item_row(theme, item, selected, pending, emit))
-        .build()
-        .debug_selector(item.selector())
 }
 
 fn item_row(
@@ -652,81 +505,61 @@ fn item_row(
             None,
         ),
     };
-    let text_color = if selected {
-        theme.colors.link.to_reference_text_color()
-    } else {
-        theme.colors.text.to_reference_text_color()
-    };
-    let mut text = UiBox::new()
-        .layout("column")
-        .gap(2.0)
-        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-        .child(
-            UiBox::new()
-                .gap(8.0)
-                .style(
-                    Style::new()
-                        .align(AlignItems::BASELINE)
-                        .min_width(Length::Px(0.0)),
-                )
-                .child(
-                    UiBox::new()
-                        .style(Style::new().flex_shrink(0.0))
-                        .child(label(theme, item.name(), 14.0, text_color, true))
-                        .build(),
-                )
-                .child(truncated_label(theme, meta))
-                .build(),
-        );
-    if !description.is_empty() {
-        text = text.child(truncated_label(theme, description));
-    }
-    if let Some(attention) = attention {
-        let color = tone_color(theme, ChipTone::Warning);
-        text = text.child(
-            UiBox::new()
-                .gap(6.0)
-                .style(
-                    Style::new()
-                        .margin_insets(insets(0.0, 0.0, 2.0, 0.0))
-                        .align(AlignItems::CENTER),
-                )
-                .child(source_asset_glyph(
-                    AssetId::TABLER_ALERT_TRIANGLE,
-                    12.0,
-                    color.at(Opacity::ToneIcon).to_reference_paint(),
-                ))
-                .child(label(
-                    theme,
-                    attention,
-                    12.0,
-                    color.to_reference_text_color(),
-                    false,
-                ))
-                .build(),
-        );
-    }
-    let tile = UiBox::new()
-        .width(32.0)
-        .height(32.0)
-        .radius(RadiusTokens::value(RadiusStep::Lg))
-        .fill(theme.colors.hover.to_paint())
+    let heading = UiBox::new()
+        .spaced(Space::S8)
         .style(
             Style::new()
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::CENTER)
-                .flex_shrink(0.0),
+                .align(AlignItems::BASELINE)
+                .min_width(Length::Pct(0.0)),
         )
-        .child(source_asset_glyph(
-            icon,
-            16.0,
-            theme.colors.text_muted.to_reference_paint(),
+        .child(
+            UiBox::new()
+                .style(Style::new().flex_shrink(0.0))
+                .child(
+                    TextRole::LabelStrong
+                        .text(theme, item.name().to_owned())
+                        .wrap(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .child(caption(theme, meta))
+        .build();
+    let description = (!description.is_empty()).then(|| caption(theme, description));
+    let attention = attention.map(|attention| {
+        let color = tone_color(theme, ChipTone::Warning);
+        UiBox::new()
+            .spaced(Space::S4)
+            .style(Style::new().align(AlignItems::CENTER))
+            .child(IconSize::Sm.glyph(
+                AssetId::TABLER_ALERT_TRIANGLE,
+                color.at(Opacity::ToneIcon).to_reference_paint(),
+            ))
+            .child(
+                TextRole::Caption
+                    .text(theme, attention)
+                    .gpui_source_color(color.to_reference_text_color())
+                    .wrap(false)
+                    .build(),
+            )
+            .build()
+    });
+    let text = UiBox::new()
+        .layout("column")
+        .spaced(Space::S2)
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+        .child(heading)
+        .children(description)
+        .children(attention)
+        .build();
+    let tile = UiBox::new()
+        .style(Style::new().flex_shrink(0.0))
+        .child(Surface::Field.build(
+            theme,
+            vec![IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint())],
         ))
         .build();
-    let mut engines = UiBox::new()
-        .gap(8.0)
-        .style(Style::new().align(AlignItems::CENTER).flex_shrink(0.0));
-    for mark in marks {
+    let marks = marks.into_iter().map(|mark| {
         let icon = match mark.engine {
             EngineId::Claude => AssetId::SVGL_CLAUDE_AI,
             EngineId::Codex => AssetId::SVGL_OPENAI,
@@ -735,49 +568,62 @@ fn item_row(
         };
         let selector = format!("{}-mark-{}", item.selector(), mark.engine.as_str());
         let tip = mark.label;
-        let t = *theme;
-        engines = engines.child(
-            UiBox::new()
-                .opacity(if mark.lit { 1.0 } else { 0.3 })
-                .child(source_asset_glyph(
-                    icon,
-                    14.0,
-                    theme.colors.text.to_reference_paint(),
-                ))
-                .build()
-                .debug_selector(selector)
-                .pointer_tooltip(move || glass_tooltip(&t, &tip)),
-        );
-    }
-    let marker = selected.then(|| {
+        let tooltip_theme = *theme;
         UiBox::new()
-            .width(2.0)
-            .radius(1.0)
-            .fill(theme.colors.link.to_paint())
-            .style(Style::new().absolute_at(Some(-14.0), Some(12.0), None, Some(12.0)))
+            .opacity(if mark.lit {
+                1.0
+            } else {
+                Opacity::Unavailable.alpha()
+            })
+            .child(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()))
             .build()
+            .debug_selector(selector)
+            .pointer_tooltip(move || tooltip(&tooltip_theme, &tip))
     });
-    let mut row = UiBox::new()
-        .gap(14.0)
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .padding_insets(insets(0.0, 0.0, 12.0, 12.0)),
-        )
+    let engines = UiBox::new()
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER).flex_shrink(0.0))
+        .children(marks)
+        .build();
+    UiBox::new()
+        .spaced(Space::S12)
+        .style(Style::new().align(AlignItems::CENTER))
         .child(tile)
-        .child(text.build())
-        .child(engines.build())
+        .child(text)
+        .child(engines)
         .child(
             UiBox::new()
-                .width(148.0)
+                .width(CONTROL_WIDTH)
                 .style(Style::new().justify(JustifyContent::END).flex_shrink(0.0))
                 .child(control(theme, item, selected, pending, emit))
                 .build(),
-        );
-    if let Some(marker) = marker {
-        row = row.child(marker);
-    }
-    row.build()
+        )
+        .build()
+}
+
+fn install(
+    theme: &ArtisanTheme,
+    key: String,
+    title: &str,
+    selected: bool,
+    disabled: bool,
+    activate: impl Fn() + 'static,
+) -> Element {
+    let tone = if selected {
+        ButtonTone::Primary
+    } else {
+        ButtonTone::Neutral
+    };
+    Button::new(
+        key,
+        *theme,
+        tone,
+        ButtonSize::Md,
+        Label::IconText(AssetId::TABLER_DOWNLOAD, title.to_owned()),
+    )
+    .disabled(disabled)
+    .on_activate(move |_| activate())
+    .build()
 }
 
 fn control(
@@ -793,13 +639,15 @@ fn control(
         Item::Skill(row) if row.origin == SkillOrigin::Discovered => {
             let id = row.id.clone();
             let discard_emit = emit.clone();
-            let discard = Button::icon(
+            let discard = IconButton::new(
                 format!("{selector}-discard"),
                 *theme,
                 AssetId::TABLER_TRASH,
                 "Discard",
+                IconButtonSize::Md,
+                Finish::Plain,
             )
-            .variant(ButtonVariant::Ghost)
+            .muted()
             .disabled(disabled)
             .on_activate(move |_| {
                 discard_emit(ViewAction::Operate(Operation::Skill {
@@ -809,30 +657,24 @@ fn control(
             })
             .build();
             let id = row.id.clone();
-            let install = Button::icon_text(
+            let adopt = install(
+                theme,
                 format!("{selector}-install"),
-                *theme,
-                AssetId::TABLER_DOWNLOAD,
                 if selected { "Install ↵" } else { "Install" },
-            )
-            .variant(if selected {
-                ButtonVariant::Primary
-            } else {
-                ButtonVariant::Outline
-            })
-            .disabled(disabled)
-            .on_activate(move |_| {
-                emit(ViewAction::Operate(Operation::Skill {
-                    id: id.clone(),
-                    action: SkillAction::Adopt,
-                }))
-            })
-            .build();
+                selected,
+                disabled,
+                move || {
+                    emit(ViewAction::Operate(Operation::Skill {
+                        id: id.clone(),
+                        action: SkillAction::Adopt,
+                    }))
+                },
+            );
             UiBox::new()
-                .gap(4.0)
+                .spaced(Space::S4)
                 .style(Style::new().align(AlignItems::CENTER))
                 .child(discard)
-                .child(install)
+                .child(adopt)
                 .build()
         }
         Item::Skill(row) => {
@@ -865,27 +707,21 @@ fn control(
             } else {
                 "Install"
             };
-            Button::icon_text(
+            install(
+                theme,
                 format!("{selector}-install"),
-                *theme,
-                AssetId::TABLER_DOWNLOAD,
                 title,
+                selected,
+                disabled,
+                move || emit(ViewAction::Operate(Operation::Listing(id.clone()))),
             )
-            .variant(if selected {
-                ButtonVariant::Primary
-            } else {
-                ButtonVariant::Outline
-            })
-            .disabled(disabled)
-            .on_activate(move |_| emit(ViewAction::Operate(Operation::Listing(id.clone()))))
-            .build()
         }
         Item::Server(_) => Button::text(
             format!("{selector}-edit"),
             *theme,
+            ButtonTone::Quiet,
             if selected { "Edit ↵" } else { "Edit" },
         )
-        .variant(ButtonVariant::Outline)
         .on_activate(move |_| {
             emit(ViewAction::Navigate(Screen::Settings(
                 SettingsPage::Extensions,
@@ -895,37 +731,19 @@ fn control(
     }
 }
 
-fn glass_tooltip(theme: &ArtisanTheme, text: &str) -> Element {
-    use editor_ui::theme::Elevation;
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    let shadows = glass::glass_card_shadows(theme, Elevation::Overlay)
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    let text = Text::new(text.to_owned())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: TypographyTokens::size(TextStep::Xs),
-            line_height_px: 16.0,
-            weight: FontWeight::NORMAL,
-            ..TextStyle::default()
-        })
-        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-        .wrap(true)
-        .build();
-    UiBox::new()
-        .layout("column")
-        .radius(radius)
-        .clip(true)
-        .style(
-            Style::new()
-                .max_width(Length::Px(260.0))
-                .shadows(shadows)
-                .padding_insets(insets(12.0, 12.0, 8.0, 8.0)),
+fn tooltip(theme: &ArtisanTheme, text: &str) -> Element {
+    Surface::Tooltip(Tooltip::Brief)
+        .build(
+            theme,
+            vec![
+                TextRole::Caption
+                    .text(theme, text.to_owned())
+                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                    .wrap(true)
+                    .build(),
+            ],
         )
-        .child(glass::glass_layers(theme, GlassStrength::Strong, radius))
-        .child(text)
-        .build()
+        .style(Style::new().max_width(Length::Px(TOOLTIP_MAX_WIDTH)))
 }
 
 fn wordmark(theme: &ArtisanTheme, started: std::time::Instant, reduced_motion: bool) -> Element {
