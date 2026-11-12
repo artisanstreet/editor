@@ -1,3 +1,4 @@
+pub mod band;
 pub mod glass;
 
 use crate::ui::chrome::card::{Surfaces, outlined};
