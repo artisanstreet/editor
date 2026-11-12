@@ -980,11 +980,7 @@ async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway
         let root = data.join("engines").join(engine.to_string());
         let binary = root
             .join("versions/1.0.0")
-            .join(if engine == EngineId::Codex {
-                "vendor/x86_64-unknown-linux-musl/bin/codex"
-            } else {
-                "claude"
-            });
+            .join(forge_engines::host_entry(engine).unwrap());
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::write(&binary, "").unwrap();
         std::fs::write(root.join("current"), "1.0.0").unwrap();

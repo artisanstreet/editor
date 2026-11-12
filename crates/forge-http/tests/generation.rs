@@ -152,7 +152,9 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path();
     let store = Store::open(data).unwrap();
-    let binary = data.join("engines/claude/versions/1.0.0/claude");
+    let binary = data
+        .join("engines/claude/versions/1.0.0")
+        .join(forge_engines::host_entry(EngineId::Claude).unwrap());
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     std::fs::write(binary, "").unwrap();
     std::fs::write(data.join("engines/claude/current"), "1.0.0").unwrap();

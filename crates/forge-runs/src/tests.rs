@@ -141,7 +141,6 @@ async fn fixture_with_parts(
     }
 }
 
-/// A fake installed engine so a run gets past "not installed".
 fn install_fake(data: &std::path::Path, engine: EngineId) {
     let engine_dir = data.join("engines").join(engine.to_string());
     let version = if engine == EngineId::OpenCode {
@@ -150,34 +149,7 @@ fn install_fake(data: &std::path::Path, engine: EngineId) {
         "1.0.0"
     };
     let version_dir = engine_dir.join("versions").join(version);
-    let entry = if engine == EngineId::Codex {
-        let architecture = if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "x86_64"
-        };
-        let platform = if cfg!(target_os = "windows") {
-            "pc-windows-msvc"
-        } else if cfg!(target_os = "macos") {
-            "apple-darwin"
-        } else {
-            "unknown-linux-musl"
-        };
-        let executable = if cfg!(target_os = "windows") {
-            "codex.exe"
-        } else {
-            "codex"
-        };
-        version_dir.join(format!("vendor/{architecture}-{platform}/bin/{executable}"))
-    } else if engine == EngineId::OpenCode {
-        version_dir.join(if cfg!(windows) {
-            "bin/opencode.exe"
-        } else {
-            "bin/opencode"
-        })
-    } else {
-        version_dir.join(engine.to_string())
-    };
+    let entry = version_dir.join(forge_engines::host_entry(engine).unwrap());
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     std::fs::write(entry, "").unwrap();
     std::fs::write(engine_dir.join("current"), version).unwrap();
@@ -217,6 +189,10 @@ impl Fixture {
     }
 
     async fn items(&self) -> Vec<Item> {
+        self.items_of(&self.thread_id).await
+    }
+
+    async fn items_of(&self, thread: &ThreadId) -> Vec<Item> {
         let query = ItemsQuery {
             before: None,
             after: None,
@@ -224,10 +200,16 @@ impl Fixture {
         };
         self.hub
             .store()
-            .items_page(&self.thread_id, query)
+            .items_page(thread, query)
             .await
             .unwrap()
             .items
+    }
+
+    async fn delivered(&self, thread: &ThreadId) -> bool {
+        self.items_of(thread).await.iter().any(|item| {
+            matches!(item.kind, ItemKind::UserMessage { .. }) && item.status == Status::Done
+        })
     }
 
     async fn settled(&self) -> Vec<artisan_api::Run> {
@@ -2281,7 +2263,14 @@ async fn shutdown_leaves_unclaimed_durable_threads_for_the_next_dispatcher() {
         threads.push(thread.id);
     }
     tokio::time::timeout(Duration::from_secs(10), async {
-        while fixture.hub.lock().len() != 8 {
+        loop {
+            let mut delivered = 0;
+            for thread in &threads {
+                delivered += usize::from(fixture.delivered(thread).await);
+            }
+            if fixture.hub.lock().len() == 8 && delivered == 8 {
+                break;
+            }
             tokio::task::yield_now().await;
         }
     })
@@ -3950,11 +3939,25 @@ async fn a_stopped_turn_continues_without_a_message() {
         .send_message(&fixture.thread_id, message("refactor the parser"))
         .await
         .unwrap();
-    fixture.wait_for(|items| items.len() == 2).await;
+    fixture
+        .wait_for(|items| {
+            items.len() == 2
+                && items.iter().any(|item| {
+                    matches!(item.kind, ItemKind::UserMessage { .. }) && item.status == Status::Done
+                })
+        })
+        .await;
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     assert_eq!(fixture.settled().await[0].status, RunStatus::Cancelled);
 
     fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while asked.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the continued turn reaches the engine");
     let continued = fixture.settled().await.remove(0);
     assert_eq!(
         continued.continuation,

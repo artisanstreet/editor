@@ -64,6 +64,11 @@ fn write(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
+fn contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 fn lock(path: &Path) -> Result<Option<File>> {
     let file = OpenOptions::new()
         .create(true)
@@ -73,7 +78,7 @@ fn lock(path: &Path) -> Result<Option<File>> {
         .open(path)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(Some(file)),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) if contended(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
@@ -226,7 +231,7 @@ impl Generation {
             .open(self.registry.root.join("admission.lock"))?;
         match fs2::FileExt::try_lock_shared(&gate) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) if contended(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
         if !self.accepting() {
