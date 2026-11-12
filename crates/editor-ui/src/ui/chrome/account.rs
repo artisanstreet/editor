@@ -517,7 +517,7 @@ fn limit_row(
             engine.engine.display_name(),
             limit.label
         ))
-        .tooltip(0.5, {
+        .tooltip_with(0.5, crate::ui::hint_card::presence(), {
             let theme = *theme;
             let engine = engine.engine;
             let limit = limit.clone();

@@ -897,12 +897,6 @@ fn control(
 }
 
 fn glass_tooltip(theme: &ArtisanTheme, text: &str) -> Element {
-    use editor_ui::theme::Elevation;
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    let shadows = glass::glass_card_shadows(theme, Elevation::Overlay)
-        .into_iter()
-        .map(Into::into)
-        .collect();
     let text = Text::new(text.to_owned())
         .text_style(TextStyle {
             families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
@@ -914,19 +908,15 @@ fn glass_tooltip(theme: &ArtisanTheme, text: &str) -> Element {
         .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
         .wrap(true)
         .build();
-    UiBox::new()
-        .layout("column")
-        .radius(radius)
-        .clip(true)
-        .style(
-            Style::new()
-                .max_width(Length::Px(260.0))
-                .shadows(shadows)
-                .padding_insets(insets(12.0, 12.0, 8.0, 8.0)),
-        )
-        .child(glass::glass_layers(theme, GlassStrength::Strong, radius))
-        .child(text)
-        .build()
+    editor_ui::hint_card::hover_surface(
+        theme,
+        Style::new().max_width(Length::Px(260.0)),
+        UiBox::new()
+            .layout("column")
+            .style(Style::new().padding_insets(insets(12.0, 12.0, 8.0, 8.0)))
+            .child(text)
+            .build(),
+    )
 }
 
 fn wordmark(theme: &ArtisanTheme, started: std::time::Instant, reduced_motion: bool) -> Element {

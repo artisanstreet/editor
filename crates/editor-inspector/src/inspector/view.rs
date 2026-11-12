@@ -179,8 +179,6 @@ pub fn agent_card(
 }
 
 pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
-    use editor_ui::glass::{GlassStrength, glass_card_shadows, glass_layers};
-    use editor_ui::theme::{Elevation, Opacity};
     let icon = card.engine.map_or(AssetId::TABLER_BOT_ID, |engine| {
         editor_ui::engine::engine_icon(&theme, engine)
     });
@@ -255,23 +253,11 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
                 .build(),
         );
     }
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    UiBox::new()
-        .radius(radius)
-        .style(
-            Style::new()
-                .max_width(Length::Px(320.0))
-                .border_of(1.0, theme.colors.text.at(Opacity::GlassBorder).to_paint())
-                .shadows(
-                    glass_card_shadows(&theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                ),
-        )
-        .child(glass_layers(&theme, GlassStrength::Strong, radius))
-        .child(content.build())
-        .build()
+    editor_ui::hint_card::hover_surface(
+        &theme,
+        Style::new().max_width(Length::Px(320.0)),
+        content.build(),
+    )
 }
 
 pub fn inspector_view(
@@ -522,7 +508,7 @@ pub fn inspector_view(
                             .hover_style(row_hover(theme))
                             .aria_label(agent.label.clone())
                             .with_key(format!("inspector-agent-{}", agent.id))
-                            .tooltip(0.5, {
+                            .tooltip_with(0.5, editor_ui::hint_card::presence(), {
                                 let card = cards[index].clone();
                                 move || render_agent_card(&card, theme)
                             }),
