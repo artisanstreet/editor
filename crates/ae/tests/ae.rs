@@ -1,4 +1,4 @@
-//! The real `ae` binary, the way the Editor and users run it.
+#![cfg(target_os = "linux")]
 
 use artisan_api::PairRequest;
 use base64::Engine as _;
@@ -136,7 +136,6 @@ fn install(home: &Path, from: &Path, key: &SigningKey) -> Output {
     command.output().unwrap()
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_release_installs_through_its_own_ae_and_bad_ones_are_refused() {
     let home = tempfile::tempdir().unwrap();
@@ -223,6 +222,5 @@ fn a_local_build_installs_with_its_version() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[path = "ae/release-feed.rs"]
 mod release_feed;

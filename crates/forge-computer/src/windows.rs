@@ -323,14 +323,16 @@ impl Desktop for WindowsDesktop {
             };
             capture.memory = CreateCompatibleDC(Some(screen));
             ensure!(!capture.memory.is_invalid(), "CreateCompatibleDC failed");
-            let mut info = BITMAPINFO::default();
-            info.bmiHeader = BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: area.width as i32,
-                biHeight: -(area.height as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: area.width as i32,
+                    biHeight: -(area.height as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let mut pixels = std::ptr::null_mut();
@@ -355,8 +357,8 @@ impl Desktop for WindowsDesktop {
                 area.width as usize * area.height as usize * 4,
             );
             let mut rgb = Vec::with_capacity(area.width as usize * area.height as usize * 3);
-            for pixel in bgra.chunks_exact(4) {
-                rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+            for [blue, green, red, _] in bgra.as_chunks::<4>().0 {
+                rgb.extend_from_slice(&[*red, *green, *blue]);
             }
             Ok(Frame {
                 width: area.width,

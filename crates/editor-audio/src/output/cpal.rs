@@ -49,7 +49,10 @@ pub(super) fn run(
         ::cpal::SampleFormat::U64 => stream!(u64),
         ::cpal::SampleFormat::F32 => stream!(f32),
         ::cpal::SampleFormat::F64 => stream!(f64),
-        other => {
+        other @ (::cpal::SampleFormat::DsdU8
+        | ::cpal::SampleFormat::DsdU16
+        | ::cpal::SampleFormat::DsdU32
+        | _) => {
             return Err(format!(
                 "No audio output: unsupported PCM sample format {other:?}"
             ));
@@ -82,8 +85,8 @@ fn create_stream<T: ::cpal::SizedSample + ::cpal::FromSample<f32>>(
 ) -> Result<::cpal::Stream, String> {
     let out_channels = usize::from(config.channels);
     let step = f64::from(track_rate) / f64::from(config.sample_rate.max(1));
-    let callback_shared = shared.clone();
-    let error_shared = shared.clone();
+    let callback_shared = std::sync::Arc::clone(shared);
+    let error_shared = std::sync::Arc::clone(shared);
     let mut phase = 0.0;
     device
         .build_output_stream::<T, _, _>(
@@ -102,7 +105,7 @@ fn create_stream<T: ::cpal::SizedSample + ::cpal::FromSample<f32>>(
                 error_shared.lock().fail(
                     generation,
                     format!("Audio output stopped: {}", error_chain(&error)),
-                )
+                );
             },
             None,
         )
