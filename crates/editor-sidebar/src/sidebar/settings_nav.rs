@@ -154,7 +154,7 @@ pub fn build(
     reduced: bool,
     emit: std::rc::Rc<dyn Fn(SettingsPage)>,
 ) -> aqua_ui::element::Element {
-    use super::usage_view::engine_icon;
+    use editor_ui::engine::engine_icon;
     use editor_ui::{
         asset::source_asset_glyph,
         theme::{RadiusStep, RadiusTokens, TextStep, TypographyTokens},

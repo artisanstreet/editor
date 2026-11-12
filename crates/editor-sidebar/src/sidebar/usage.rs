@@ -1,7 +1,6 @@
 use artisan_api::{Timestamp, UsageCadence, UsageLimits, UsageWindow};
 
 pub const METER_SEGMENTS: usize = 14;
-pub const ROW_SEGMENTS: usize = 48;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Cadence {
@@ -60,20 +59,6 @@ pub fn groups(usage: &UsageLimits) -> Vec<(Cadence, Vec<Meter>)> {
     }
     groups
 }
-pub fn headline(usage: &UsageLimits) -> Option<(usize, &UsageWindow)> {
-    usage
-        .windows
-        .iter()
-        .enumerate()
-        .filter(|(_, window)| (0.0..=100.0).contains(&window.used_percent))
-        .min_by_key(|(index, window)| {
-            (
-                meter(*index, window).cadence,
-                window.scope.is_some(),
-                *index,
-            )
-        })
-}
 pub fn reset_duration(meters: &[Meter], now: Timestamp) -> Option<String> {
     let mut latest: Option<Timestamp> = None;
     for meter in meters {
@@ -127,24 +112,4 @@ pub fn lit_of(used_percent: f64, segments: usize) -> usize {
 }
 pub fn remaining_percent(used_percent: f64) -> i64 {
     (100.0 - used_percent.round()).clamp(0.0, 100.0) as i64
-}
-pub fn tooltip_text(window: &UsageWindow, now: Timestamp) -> String {
-    let limit = match window.cadence {
-        UsageCadence::Session => "session",
-        UsageCadence::Week => "weekly",
-        UsageCadence::Month => "monthly",
-        UsageCadence::Other => "usage",
-    };
-    let used = 100 - remaining_percent(window.used_percent);
-    let mut text = format!("{used}% used of your {limit} limit.");
-    if let Some(at) = window.resets_at {
-        if let Some(duration) = reset_remaining(at, now) {
-            text.push_str(" Resets in ");
-            text.push_str(&duration);
-            text.push('.');
-        } else {
-            text.push_str(" Reset time reached.");
-        }
-    }
-    text
 }

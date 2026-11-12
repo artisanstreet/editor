@@ -107,20 +107,6 @@ fn dispatch_reports_visible_changes_and_ignores_idempotent_actions() {
     let mut sidebar = Sidebar::new(true);
     sidebar.sync(&core, 0);
     assert!(!dispatch(&mut sidebar, &mut core, ViewAction::DismissError));
-    assert!(!dispatch(&mut sidebar, &mut core, ViewAction::CloseProfile));
-    assert!(dispatch(&mut sidebar, &mut core, ViewAction::ToggleProfile));
-    assert!(dispatch(
-        &mut sidebar,
-        &mut core,
-        ViewAction::OpenProfileMachines
-    ));
-    assert!(!dispatch(
-        &mut sidebar,
-        &mut core,
-        ViewAction::OpenProfileMachines
-    ));
-    assert!(dispatch(&mut sidebar, &mut core, ViewAction::CloseProfile));
-    assert!(!dispatch(&mut sidebar, &mut core, ViewAction::CloseProfile));
     assert!(!dispatch(
         &mut sidebar,
         &mut core,

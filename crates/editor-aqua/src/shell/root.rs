@@ -1571,11 +1571,9 @@ impl RootViews {
             ctx.request_frame(window, aqua::prelude::FrameReason::INPUT);
         }
         self.drag_position = position;
-        let profile = ui.find_debug_selector("artisan-desktop-profile-trigger");
         if let Err(error) = self.sidebar_overlays.sync(
             ui,
             owner,
-            profile,
             &workspace.sidebar,
             &shell.core,
             shell.preferences.theme(),
@@ -1584,14 +1582,7 @@ impl RootViews {
         ) {
             tracing::warn!(%error, "could not synchronize sidebar overlays");
         }
-        let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        match self.sidebar_overlays.advance(
-            ui,
-            &mut workspace.sidebar,
-            &shell.preferences.theme(),
-            reduced,
-            now,
-        ) {
+        match self.sidebar_overlays.advance(ui, now) {
             Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "could not advance sidebar overlays"),

@@ -36,7 +36,6 @@ pub struct Sidebar {
     pub host: Option<HostId>,
     host_instance: Option<HostInstance>,
     pub open: Option<ThreadId>,
-    last_screen: Option<Screen>,
     pub lists: Lists,
     pub history_open: bool,
     pub history_fraction: f32,
@@ -45,17 +44,10 @@ pub struct Sidebar {
     pub rail_motion: super::rail::RailMotion,
     pub settings_motion: super::settings_nav::NavMotion,
     pub threads_hover: editor_ui::pop_in_hover::PopInHover,
-    pub profile_hover: editor_ui::picker_motion::HoverSurface,
-    pub machines_hover: editor_ui::picker_motion::HoverSurface,
     pub threads_edges: editor_ui::scroll_edge::ScrollEdges,
     working_pulses: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<ThreadId, editor_ui::motion::WorkingPulse>>,
     >,
-    pub profile_open: bool,
-    pub profile_generation: u64,
-    pub profile_machines_open: bool,
-    pub machines_generation: u64,
-    pub usage_hover: Option<(artisan_api::EngineId, usize)>,
     pub thread_viewport: Option<aqua_ui::collection_runtime::CollectionViewport>,
     pub error: Option<String>,
     pub menu: Option<ThreadMenu>,
@@ -236,7 +228,6 @@ impl Sidebar {
             host: None,
             host_instance: None,
             open: None,
-            last_screen: None,
             lists: Lists::default(),
             history_open: false,
             history_fraction: 0.0,
@@ -245,15 +236,8 @@ impl Sidebar {
             rail_motion: super::rail::RailMotion::default(),
             settings_motion: super::settings_nav::NavMotion::default(),
             threads_hover: editor_ui::pop_in_hover::PopInHover::new("sidebar-threads-hover"),
-            profile_hover: editor_ui::picker_motion::HoverSurface::new("profile-hover"),
-            machines_hover: editor_ui::picker_motion::HoverSurface::new("machines-hover"),
             threads_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             working_pulses: std::rc::Rc::default(),
-            profile_open: false,
-            profile_generation: 0,
-            profile_machines_open: false,
-            machines_generation: 0,
-            usage_hover: None,
             thread_viewport: None,
             error: None,
             menu: None,
@@ -331,8 +315,6 @@ impl Sidebar {
         } else {
             core.screen()
         };
-        let screen_changed = self.last_screen.as_ref() != Some(screen);
-        self.last_screen = Some(screen.clone());
         let open = match screen {
             Screen::Thread { thread, .. } => Some(thread.clone()),
             _ => None,
@@ -352,16 +334,7 @@ impl Sidebar {
             self.menu = None;
             self.rename = None;
             self.error = None;
-            self.profile_open = false;
-            self.profile_generation = self.profile_generation.wrapping_add(1);
-            self.profile_machines_open = false;
-            self.usage_hover = None;
             self.thread_viewport = None;
-        }
-        if screen_changed || self.open != open {
-            self.profile_open = false;
-            self.profile_machines_open = false;
-            self.usage_hover = None;
         }
         let picker_alive = self
             .picker_host

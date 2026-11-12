@@ -77,27 +77,6 @@ pub enum ViewAction {
     RetryProjectIcons,
     DismissError,
     RailHover(super::rail::Glyph),
-    ToggleProfile,
-    CloseProfile,
-    CloseProfileFor {
-        generation: u64,
-    },
-    ToggleProfileMachines,
-    OpenProfileMachines,
-    CloseProfileMachinesFor {
-        generation: u64,
-        machines_generation: u64,
-    },
-    ProfileUsageHover {
-        engine: artisan_api::EngineId,
-        index: usize,
-        hovered: bool,
-    },
-    ProfileNavigate(Screen),
-    ProfileOpenHost {
-        host: HostId,
-        instance: HostInstance,
-    },
     SetDarkMode(bool),
     ThreadViewport {
         host: HostId,
@@ -115,16 +94,6 @@ pub enum ViewAction {
         hovered: bool,
     },
     ClearThreadHover,
-    ProfileHover {
-        id: String,
-        hovered: bool,
-    },
-    MachinesHover {
-        id: String,
-        hovered: bool,
-    },
-    ClearProfileHover,
-    ClearMachinesHover,
     ThreadDragStarted {
         payload: editor_core::DraggedThread,
         instance: HostInstance,
@@ -163,12 +132,7 @@ pub(super) fn visible_state(sidebar: &Sidebar, core: &Core) -> impl PartialEq + 
             sidebar.rename.as_ref().map(|_| sidebar.rename_generation),
             sidebar.error.clone(),
         ),
-        (
-            sidebar.history_open,
-            sidebar.profile_open,
-            sidebar.profile_machines_open,
-            sidebar.usage_hover,
-        ),
+        sidebar.history_open,
         (
             sidebar.host.clone(),
             sidebar.open.clone(),
@@ -222,26 +186,6 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
         }
         ViewAction::ClearThreadHover => {
             sidebar.threads_hover.clear();
-            return false;
-        }
-        ViewAction::ProfileHover { id, hovered } => {
-            sidebar
-                .profile_hover
-                .hovered(id, *hovered, editor_ui::hover::HoverTone::Neutral);
-            return false;
-        }
-        ViewAction::MachinesHover { id, hovered } => {
-            sidebar
-                .machines_hover
-                .hovered(id, *hovered, editor_ui::hover::HoverTone::Neutral);
-            return false;
-        }
-        ViewAction::ClearProfileHover => {
-            sidebar.profile_hover.clear();
-            return false;
-        }
-        ViewAction::ClearMachinesHover => {
-            sidebar.machines_hover.clear();
             return false;
         }
         ViewAction::ThreadDragStarted {
@@ -413,77 +357,6 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
         ViewAction::RailHover(glyph) => {
             animation_started = sidebar.rail_motion.play(glyph, std::time::Instant::now());
         }
-        ViewAction::ToggleProfile => {
-            sidebar.profile_open = !sidebar.profile_open;
-            if sidebar.profile_open {
-                sidebar.profile_generation = sidebar.profile_generation.wrapping_add(1);
-            } else {
-                sidebar.profile_machines_open = false;
-                sidebar.usage_hover = None;
-            }
-        }
-        ViewAction::CloseProfile => {
-            sidebar.profile_open = false;
-            sidebar.profile_machines_open = false;
-            sidebar.usage_hover = None;
-        }
-        ViewAction::CloseProfileFor { generation } => {
-            if sidebar.profile_generation == generation {
-                sidebar.profile_open = false;
-                sidebar.profile_machines_open = false;
-                sidebar.usage_hover = None;
-            }
-        }
-        ViewAction::ToggleProfileMachines => {
-            sidebar.profile_machines_open = !sidebar.profile_machines_open;
-            if sidebar.profile_machines_open {
-                sidebar.machines_generation = sidebar.machines_generation.wrapping_add(1);
-            }
-        }
-        ViewAction::OpenProfileMachines => {
-            if !sidebar.profile_machines_open {
-                sidebar.profile_machines_open = true;
-                sidebar.machines_generation = sidebar.machines_generation.wrapping_add(1);
-            }
-        }
-        ViewAction::CloseProfileMachinesFor {
-            generation,
-            machines_generation,
-        } => {
-            if sidebar.profile_generation == generation
-                && sidebar.machines_generation == machines_generation
-            {
-                sidebar.profile_machines_open = false;
-            }
-        }
-        ViewAction::ProfileUsageHover {
-            engine,
-            index,
-            hovered,
-        } => {
-            if hovered {
-                sidebar.usage_hover = Some((engine, index));
-            } else if sidebar.usage_hover == Some((engine, index)) {
-                sidebar.usage_hover = None;
-            }
-        }
-        ViewAction::ProfileNavigate(screen) => {
-            sidebar.profile_open = false;
-            sidebar.profile_machines_open = false;
-            sidebar.usage_hover = None;
-            core.navigate(screen);
-        }
-        ViewAction::ProfileOpenHost { host, instance } => {
-            if core.host_if_instance(&host, instance).is_some() {
-                sidebar.profile_open = false;
-                sidebar.profile_machines_open = false;
-                sidebar.usage_hover = None;
-                core.navigate(Screen::NewThread {
-                    host,
-                    project: None,
-                });
-            }
-        }
         ViewAction::SetDarkMode(dark) => core.set_setting("dark_mode", dark.into()),
         ViewAction::ThreadViewport {
             host,
@@ -512,11 +385,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
             );
         }
         ViewAction::ClearThreadHover => sidebar.threads_hover.clear(),
-        ViewAction::ProfileHover { .. }
-        | ViewAction::MachinesHover { .. }
-        | ViewAction::ClearProfileHover
-        | ViewAction::ClearMachinesHover
-        | ViewAction::ThreadDragStarted { .. }
+        ViewAction::ThreadDragStarted { .. }
         | ViewAction::ThreadDragEnded { .. } => {}
     }
     animation_started || before != visible_state(sidebar, core)

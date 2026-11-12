@@ -216,42 +216,6 @@ pub fn icon(glyph: Glyph, progress: Option<f32>, color: GpuiHsla) -> Element {
     .build()
 }
 
-pub fn avatar(seed: &str) -> Element {
-    use editor_ui::theme::{RadiusStep, RadiusTokens};
-    use aqua_core::DisplayItem;
-    use aqua_ui::element::Canvas;
-    let source: std::sync::Arc<str> = super::avatar::svg(seed).into();
-    UiBox::new()
-        .width(32.0)
-        .height(32.0)
-        .radius(RadiusTokens::value(RadiusStep::Md))
-        .clip(true)
-        .child(
-            Canvas::new()
-                .width(32.0)
-                .height(32.0)
-                .on_paint(move |bounds| {
-                    vec![
-                        DisplayItem::PushRoundedClip {
-                            bounds,
-                            corners: aqua_core::geometry::CornerRadii::uniform(
-                                RadiusTokens::value(RadiusStep::Md),
-                            ),
-                        },
-                        DisplayItem::GpuiSvg {
-                            bounds,
-                            source: source.clone(),
-                            tint: None,
-                            opacity: 1.0,
-                        },
-                        DisplayItem::PopClip,
-                    ]
-                })
-                .build(),
-        )
-        .build()
-}
-
 pub fn build(
     sidebar: &super::controller::Sidebar,
     core: &editor_core::Core,
@@ -331,74 +295,6 @@ pub fn build(
             });
         destinations = destinations.child(button);
     }
-    let profile = core.account().profile();
-    let host = sidebar.host_data(core);
-    let seed = profile
-        .map(|profile| profile.account_id.clone())
-        .or_else(|| {
-            host.map(|host| {
-                core.hosts()
-                    .find(|(config, _)| config.id == host.id)
-                    .map_or_else(
-                        || host.id.0.clone(),
-                        |(config, _)| config.fingerprint.clone(),
-                    )
-            })
-        })
-        .unwrap_or_else(|| "no-host".into());
-    let name = profile
-        .map(|profile| {
-            if profile.display_name.is_empty() {
-                profile.email.clone()
-            } else {
-                profile.display_name.clone()
-            }
-        })
-        .or_else(|| host.map(|host| host.name.clone()))
-        .unwrap_or_else(|| "Artisan".into());
-    let machine = host.map_or("No host", |host| host.name.as_str());
-    let mut trigger = Button::new()
-        .width(40.0)
-        .height(40.0)
-        .padding(4.0)
-        .radius(RadiusTokens::value(RadiusStep::Lg))
-        .child(avatar(&seed));
-    if sidebar.profile_open {
-        trigger = trigger.style(
-            editor_ui::hover::HoverColors::new(&theme, editor_ui::hover::HoverTone::Neutral)
-                .style(editor_ui::hover::HoverFill::Plain),
-        );
-    }
-    if host.is_some_and(|host| host.status_line().is_some()) {
-        trigger = trigger.child(
-            UiBox::new()
-                .width(10.0)
-                .height(10.0)
-                .radius(5.0)
-                .style(
-                    Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                        theme.colors.banner_warning.text.to_reference_paint(),
-                    )),
-                )
-                .style(Style::new().gpui_border(
-                    Insets::uniform(2.0),
-                    theme.colors.frame.to_reference_paint(),
-                    false,
-                ))
-                .style(Style::new().absolute_at(None, None, Some(1.0), Some(1.0)))
-                .build(),
-        );
-    }
-    let show = emit;
-    let trigger = trigger
-        .on_activate(move || show(ViewAction::ToggleProfile))
-        .build()
-        .with_key("artisan-desktop-profile-trigger")
-        .debug_selector("artisan-desktop-profile-trigger")
-        .role(Role::Button)
-        .aria_label(format!("{name} on {machine}: account and usage"))
-        .aria_expanded(sidebar.profile_open)
-        .cursor(CursorIcon::Pointer);
     UiBox::new()
         .width(48.0)
         .height(Length::Pct(100.0))
@@ -416,7 +312,6 @@ pub fn build(
                 }),
         )
         .child(destinations.build())
-        .child(trigger)
         .build()
         .with_key("artisan-desktop-rail")
 }

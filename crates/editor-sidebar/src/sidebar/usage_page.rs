@@ -1,11 +1,11 @@
 use super::{
     usage::{METER_SEGMENTS, checked_label, groups, lit_of, remaining_percent, reset_duration},
     usage_controller::UsagePage,
-    usage_view::{engine_accent, engine_icon},
 };
 use editor_core::{Core, HostId, HostInstance};
 use editor_ui::{
     asset::source_asset_glyph,
+    engine::{engine_accent, engine_icon},
     button::{Button, ButtonVariant},
     page,
     theme::{ArtisanTheme, Opacity, TextStep, TypographyTokens},
