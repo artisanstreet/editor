@@ -8,7 +8,8 @@ pub const OPTION_HEIGHT: f32 = match super::kit::Row::MenuItem.height() {
     None => 0.0,
 };
 pub const MENU_MIN_WIDTH: f32 = 160.0;
-const ROW_RADIUS: f32 = super::kit::Radius::Row.px();
+const MENU: super::kit::Surface = super::kit::Surface::Menu;
+const FIELD: super::kit::Surface = super::kit::Surface::Field;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectEntry<V> {
@@ -227,7 +228,7 @@ impl<V: Clone + Eq> SelectState<V> {
 use aqua_core::{InputEvent, Key as InputKey, NamedKey, Role};
 
 use aqua_ui::{
-    element::{Button, Element, Key, Text},
+    element::{Box as UiBox, Button, Element, Key},
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
     style::{Length, Style},
 };
@@ -236,8 +237,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{
-    asset::source_asset_glyph,
-    kit::{Hover, IconSize, Radius, Row, Space, Surface, TextRole},
+    chrome::account::MENU_GAP,
+    kit::{IconSize, Row, RowItem, Space, TextRole, control::focus_ring},
     theme::{ArtisanTheme, Opacity},
 };
 
@@ -305,60 +306,38 @@ impl<V: Clone + Eq + 'static> Select<V> {
             .find(|entry| self.selected.as_ref() == Some(&entry.value))
             .map_or_else(|| self.label.clone(), |entry| entry.label.clone());
         let theme = self.theme;
-        let text_style = TextRole::Label.style(&theme);
-        let label = Text::new(display.clone())
+        let label = TextRole::Label
+            .text(&theme, display.clone())
             .style(
                 Style::new()
                     .flex_grow(1.0)
                     .min_width(Length::Px(0.0))
-                    .text_style(text_style)
-                    .gpui_source_text_color(theme.colors.text.to_reference_text_color())
                     .text_wrap(false),
             )
             .build();
-        let icon = source_asset_glyph(
+        let icon = IconSize::Sm.glyph(
             AssetId::TABLER_SELECTOR,
-            IconSize::Sm.px(),
             theme.colors.text_muted.to_reference_paint(),
         );
         let state = self.state.clone();
         let open_change = self.open_change.clone();
+        let tone = |open_opacity, rest_opacity| {
+            theme
+                .colors
+                .text
+                .at(if open { open_opacity } else { rest_opacity })
+                .to_paint()
+        };
         let mut button = Button::new()
             .width(Length::Pct(100.0))
             .height(theme.density.control_default)
             .gap(Space::S8.px())
-            .radius(Radius::Field.px())
-            .border((
-                1.0,
-                theme
-                    .colors
-                    .text
-                    .at(if open {
-                        Opacity::HoverRing
-                    } else {
-                        Opacity::GlassBorder
-                    })
-                    .to_paint(),
-            ))
-            .fill(
-                theme
-                    .colors
-                    .text
-                    .at(if open {
-                        Opacity::HoverBottom
-                    } else {
-                        Opacity::GlassBase
-                    })
-                    .to_paint(),
-            )
+            .padding(FIELD.padding_px())
+            .radius(FIELD.radius_px())
+            .border((1.0, tone(Opacity::HoverRing, Opacity::GlassBorder)))
+            .fill(tone(Opacity::HoverBottom, Opacity::GlassBase))
             .style(
                 Style::new()
-                    .padding_insets(aqua_core::Insets {
-                        left: Space::S12.px(),
-                        right: Space::S12.px(),
-                        top: 0.0,
-                        bottom: 0.0,
-                    })
                     .align(aqua_ui::AlignItems::CENTER)
                     .justify(aqua_ui::JustifyContent::SPACE_BETWEEN),
             )
@@ -390,26 +369,7 @@ impl<V: Clone + Eq + 'static> Select<V> {
         if !disabled {
             trigger = trigger
                 .cursor(aqua_core::CursorIcon::Pointer)
-                .focus_visible_style(
-                    Style::new()
-                        .gpui_border(
-                            aqua_core::Insets::uniform(1.0),
-                            theme.colors.ring.to_reference_paint(),
-                            false,
-                        )
-                        .gpui_shadows(vec![aqua_ui::style::GpuiShadowLayer {
-                            dx: 0.0,
-                            dy: 0.0,
-                            blur: 0.0,
-                            spread: theme.interaction.focus_ring_width,
-                            inset: false,
-                            color: theme
-                                .colors
-                                .ring
-                                .at(Opacity::FocusRing)
-                                .to_reference_paint(),
-                        }]),
-                );
+                .focus_visible_style(focus_ring(&theme));
             let state = self.state;
             let entries = self.entries;
             let change = self.change;
@@ -515,7 +475,7 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
         options.kind = aqua_ui::overlay::OverlayKind::Popover;
         options.focus = aqua_ui::popup::PopupFocus::Preserve;
         options.placement.align = aqua_ui::overlay::Align::Start;
-        options.placement.gap = 6.0;
+        options.placement.gap = MENU_GAP;
         options.placement.flip = false;
         options.on_close = Some(Rc::new(move |_| {
             let mut state = state.borrow_mut();
@@ -532,100 +492,65 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
     }
 
     pub fn build(self) -> Element {
-        use aqua_ui::element::{Box as UiBox, Scroll};
+        use aqua_ui::element::Scroll;
         let theme = self.theme;
         let (keyed, highlighted) = {
             let state = self.state.borrow();
             (state.keyed, state.highlighted.clone())
         };
         let count = self.entries.len();
-        let text_style = TextRole::Label.style(&theme);
-        let pad = Row::MenuItem.pad();
-        let check = IconSize::Md.px();
+        let check = IconSize::Md;
         let mut rows = UiBox::new().layout("column").width(Length::Pct(100.0));
         for (index, entry) in self.entries.into_iter().enumerate() {
             let chosen = self.selected.as_ref() == Some(&entry.value);
             let highlighted = keyed && highlighted.as_ref() == Some(&entry.value);
-            let text = Text::new(entry.label.clone())
-                .style(
-                    Style::new()
-                        .flex_grow(1.0)
-                        .min_width(Length::Px(0.0))
-                        .text_style(text_style.clone())
-                        .gpui_source_text_color(theme.colors.text.to_reference_text_color())
-                        .text_wrap(false),
-                )
-                .build();
-            let mut row = Button::new()
-                .height(OPTION_HEIGHT)
-                .width(Length::Pct(100.0))
-                .radius(ROW_RADIUS)
-                .style(Style::new().padding_insets(aqua_core::Insets {
-                    left: pad.x.px(),
-                    right: 2.0 * pad.x.px() + check,
-                    top: pad.y.px(),
-                    bottom: pad.y.px(),
-                }))
-                .child(text);
-            if highlighted {
-                row = row.style(Hover::Neutral.style(&theme));
-            }
-            if entry.disabled {
-                row = row.opacity(Opacity::Disabled.alpha());
-            }
-            if chosen {
-                let icon = source_asset_glyph(
+            let mark = match chosen {
+                true => check.glyph(
                     AssetId::TABLER_CHECK,
-                    check,
                     theme.colors.text_muted.to_reference_paint(),
-                )
-                .style(Style::new().absolute_at(
-                    None,
-                    Some(pad.y.px() + (Row::MenuItem.lines() - check) / 2.0),
-                    Some(pad.x.px()),
-                    None,
-                ));
-                row = row.child(icon);
-            }
+                ),
+                false => UiBox::new().width(check.px()).height(check.px()).build(),
+            };
+            let mut row = RowItem::new(
+                index.to_string(),
+                theme,
+                Row::MenuItem,
+                MENU,
+                entry.label.clone(),
+            )
+            .trailing(mark)
+            .underlay(None)
+            .selected(highlighted)
+            .disabled(entry.disabled)
+            .role(Role::Option);
             if !entry.disabled {
                 let state = self.state.clone();
                 let change = self.change.clone();
                 let open_change = self.open_change.clone();
                 let value = entry.value.clone();
-                row = row.on_activate(move || {
-                    state.borrow_mut().set_open(false);
-                    if let Some(change) = &open_change {
-                        change(false);
-                    }
-                    if let Some(change) = &change {
-                        change(value.clone());
-                    }
-                });
-            }
-            let mut row = row
-                .build()
-                .with_key(index.to_string())
-                .role(Role::Option)
-                .aria_label(entry.label)
-                .aria_selected(chosen)
-                .disabled(entry.disabled)
-                .focusable(false);
-            if !entry.disabled {
                 let hover = self.hover.clone();
-                let state = self.state.clone();
+                let hover_state = self.state.clone();
                 let id = index.to_string();
                 row = row
-                    .cursor(aqua_core::CursorIcon::Pointer)
-                    .on_hover_change(move |hovered| {
+                    .on_activate(move || {
+                        state.borrow_mut().set_open(false);
+                        if let Some(change) = &open_change {
+                            change(false);
+                        }
+                        if let Some(change) = &change {
+                            change(value.clone());
+                        }
+                    })
+                    .on_hover(move |hovered| {
                         hover
                             .borrow()
                             .hovered(&id, hovered, super::hover::HoverTone::Neutral);
                         if hovered {
-                            state.borrow_mut().keyed = false;
+                            hover_state.borrow_mut().keyed = false;
                         }
                     });
             }
-            rows = rows.child(row);
+            rows = rows.child(row.build().aria_selected(chosen).focusable(false));
         }
         let height =
             (OPTION_HEIGHT * count.max(1) as f32).min(theme.density.command_list_max_height);
@@ -634,11 +559,8 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             .height(height)
             .child(rows.build())
             .build();
-        Surface::Menu
-            .build(
-                &theme,
-                vec![self.hover.borrow().pill(&theme, ROW_RADIUS), scroll],
-            )
+        let radius = Row::MenuItem.radius_in(MENU);
+        MENU.build(&theme, vec![self.hover.borrow().pill(&theme, radius), scroll])
             .style(Style::new().width(Length::Px(self.trigger_width.max(MENU_MIN_WIDTH))))
             .role(Role::ListBox)
     }
@@ -692,7 +614,7 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
         options.focus = PopupFocus::Preserve;
         options.dismiss = DismissPolicy::MANUAL;
         options.placement.align = Align::Start;
-        options.placement.gap = 6.0;
+        options.placement.gap = MENU_GAP;
         options.placement.flip = false;
         let overlay = app
             .open_popup_measured(owner, factory(), options)
