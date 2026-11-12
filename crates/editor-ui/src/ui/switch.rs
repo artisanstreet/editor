@@ -6,17 +6,11 @@ use aqua_ui::{
 
 use super::theme::{ArtisanTheme, Opacity};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SwitchSize {
-    #[default]
-    Default,
-    Small,
-}
+const THUMB: f32 = 16.0;
 
 pub struct Switch {
     id: Key,
     theme: ArtisanTheme,
-    size: SwitchSize,
     checked: bool,
     label: String,
     disabled: bool,
@@ -28,14 +22,12 @@ impl Switch {
     pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
-        size: SwitchSize,
         checked: bool,
         label: impl Into<String>,
     ) -> Self {
         Self {
             id: id.into(),
             theme,
-            size,
             checked,
             label: label.into(),
             disabled: false,
@@ -60,18 +52,8 @@ impl Switch {
     }
 
     pub fn build(self) -> Element {
-        let (width, height, thumb) = match self.size {
-            SwitchSize::Default => (
-                self.theme.density.switch_default.0,
-                self.theme.density.switch_default.1,
-                16.0,
-            ),
-            SwitchSize::Small => (
-                self.theme.density.switch_sm.0,
-                self.theme.density.switch_sm.1,
-                12.0,
-            ),
-        };
+        let (width, height) = self.theme.density.switch_default;
+        let thumb = THUMB;
         let track_color = if self.checked {
             self.theme.colors.primary
         } else {

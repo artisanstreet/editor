@@ -1061,7 +1061,6 @@ pub struct DensityTokens {
     pub command_list_max_height: Pixels,
     pub control_sm: Pixels,
     pub switch_default: (Pixels, Pixels),
-    pub switch_sm: (Pixels, Pixels),
     pub badge_height: Pixels,
     pub card_padding_compact: Pixels,
 }
@@ -1139,7 +1138,6 @@ impl ArtisanTheme {
                 command_list_max_height: px(288.0),
                 control_sm: px(32.0),
                 switch_default: (px(32.0), px(18.4)),
-                switch_sm: (px(24.0), px(14.0)),
                 badge_height: px(20.0),
                 card_padding_compact: px(16.0),
             },

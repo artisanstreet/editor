@@ -2,7 +2,7 @@ use super::{controller::SettingsController, page, ui, view::ViewAction};
 use editor_core::{Core, HostData, SettingsPage, SettingsSection};
 use editor_ui::{
     button::{Button, ButtonVariant},
-    switch::{Switch, SwitchSize},
+    switch::Switch,
     text::{
         Mode,
         mount::{EditorController, EditorEvent},
@@ -484,7 +484,6 @@ fn claude(
     let switch = Switch::new(
         "settings-switch-enhanced-claude",
         *theme,
-        SwitchSize::Default,
         on,
         "switch enhanced claude",
     )

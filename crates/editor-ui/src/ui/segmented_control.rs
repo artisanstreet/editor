@@ -1,16 +1,19 @@
 use std::rc::Rc;
 
 use aqua_core::{
-    CornerRadii, GpuiBackground, InputEvent, Insets, Key as InputKey, NamedKey, Oklch, Role,
+    InputEvent, Insets, Key as InputKey, NamedKey, Oklch, Role,
 };
-use aqua_text::{FontFamily, FontWeight, TextStyle};
+use aqua_text::{FontWeight, TextStyle};
 use aqua_ui::{
     element::{Box as UiBox, Button, Element, Key, Text},
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
     style::{Length, Style},
 };
 
+use super::kit::{Hover, Radius, Space, TextRole};
 use super::theme::{ArtisanTheme, Opacity};
+
+const SEGMENT_HEIGHT: f32 = 24.0;
 
 pub struct Segment<T> {
     value: T,
@@ -34,7 +37,6 @@ pub struct SegmentedControl<T: Clone + Eq + 'static> {
     selected: T,
     options: Vec<Segment<T>>,
     disabled: bool,
-    outline: bool,
     change: Option<Change<T>>,
     focus_change: Option<Rc<dyn Fn(usize)>>,
     focus_request: Option<Rc<std::cell::Cell<Option<(aqua_core::NodeId, usize)>>>>,
@@ -55,7 +57,6 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             selected,
             options: vec![first],
             disabled: false,
-            outline: false,
             change: None,
             focus_change: None,
             focus_request: None,
@@ -75,10 +76,6 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
     }
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-    pub const fn outline(mut self) -> Self {
-        self.outline = true;
         self
     }
     pub fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
@@ -110,27 +107,22 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .collect::<Vec<_>>(),
         );
         let mut root = UiBox::new()
-            .gap(if self.outline { 0.0 } else { 2.0 })
+            .gap(Space::S2.px())
             .style(Style::new().align(aqua_ui::AlignItems::CENTER));
         for (index, option) in self.options.into_iter().enumerate() {
             let chosen = index == selected;
-            let foreground = if self.outline || chosen {
+            let foreground = if chosen {
                 theme.colors.text
             } else {
                 theme.colors.text_muted
             };
             let font = TextStyle {
-                families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                size_px: if self.outline { 14.0 } else { 12.0 },
-                line_height_px: if self.outline { 17.5 } else { 15.0 },
-                weight: if self.outline {
-                    FontWeight::MEDIUM
-                } else if chosen {
+                weight: if chosen {
                     FontWeight(600)
                 } else {
                     FontWeight::NORMAL
                 },
-                ..TextStyle::default()
+                ..TextRole::Caption.style(&theme)
             };
             let text = Text::new(option.label.clone())
                 .style(
@@ -144,46 +136,18 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .align(aqua_ui::AlignItems::CENTER)
                 .justify(aqua_ui::JustifyContent::CENTER)
                 .padding_insets(Insets {
-                    left: if self.outline { 12.0 } else { 8.0 },
-                    right: if self.outline { 12.0 } else { 8.0 },
+                    left: Space::S8.px(),
+                    right: Space::S8.px(),
                     top: 0.0,
                     bottom: 0.0,
                 })
                 .border_of(1.0, Oklch::TRANSPARENT);
-            if self.outline {
-                let left = index == 0;
-                let right = index + 1 == count;
-                style = style
-                    .min_width(Length::Px(theme.density.control_default))
-                    .corners(CornerRadii {
-                        top_left: if left { 22.0 } else { 0.0 },
-                        bottom_left: if left { 22.0 } else { 0.0 },
-                        top_right: if right { 22.0 } else { 0.0 },
-                        bottom_right: if right { 22.0 } else { 0.0 },
-                    })
-                    .border_edges(
-                        Insets {
-                            left: if left { 1.0 } else { 0.0 },
-                            right: 1.0,
-                            top: 1.0,
-                            bottom: 1.0,
-                        },
-                        theme.colors.line_strong.to_paint(),
-                    );
-            } else {
-                style = style.radius(Length::Px(6.0));
-            }
+            style = style.radius(Length::Px(Radius::Field.px()));
             if chosen {
-                style = style.gpui_background(GpuiBackground::Solid(
-                    theme.colors.selected.to_reference_paint(),
-                ));
+                style.merge(&Hover::Neutral.style(&theme));
             }
             let mut button = Button::new()
-                .height(if self.outline {
-                    theme.density.control_default
-                } else {
-                    24.0
-                })
+                .height(SEGMENT_HEIGHT)
                 .style(style)
                 .child(text);
             if self.disabled {
@@ -206,12 +170,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 item = item
                     .cursor(aqua_core::CursorIcon::Pointer)
                     .tab_index(if chosen { 0 } else { -1 })
-                    .hover_style(
-                        super::hover::HoverColors::new(&theme, super::hover::HoverTone::Neutral)
-                            .style(super::hover::HoverFill::Edged)
-                            .clear_corners()
-                            .radius(Length::Px(6.0)),
-                    )
+                    .hover_style(Hover::Neutral.style(&theme))
                     .focus_visible_style(Style::new().border_of(1.0, theme.colors.ring.to_paint()));
                 let values = values.clone();
                 let change = self.change.clone();

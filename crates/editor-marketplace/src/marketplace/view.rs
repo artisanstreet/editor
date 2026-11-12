@@ -25,7 +25,7 @@ use editor_ui::{
     glass::{self, GlassStrength},
     page,
     status_chip::{ChipTone, tone_color},
-    switch::{Switch, SwitchSize},
+    switch::Switch,
     text::{ListKey, Mode},
     theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens},
 };
@@ -840,7 +840,6 @@ fn control(
             Switch::new(
                 format!("{selector}-switch"),
                 *theme,
-                SwitchSize::Default,
                 row.enabled,
                 format!("Enable {}", row.name),
             )

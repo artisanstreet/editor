@@ -13,7 +13,7 @@ use editor_core::{ConnectionStatus, Core, Screen, SettingsPage, SettingsSection}
 use editor_ui::{
     button::{Button, ButtonVariant},
     select::{Select, SelectEntry, SelectMenu},
-    switch::{Switch, SwitchSize},
+    switch::Switch,
     text::{
         Mode,
         mount::{EditorController, EditorEvent},
@@ -516,7 +516,6 @@ fn notifications(
     let control = Switch::new(
         "settings-switch-notify",
         *theme,
-        SwitchSize::Default,
         enabled,
         "switch notify",
     )
@@ -625,7 +624,6 @@ fn thread_section(
             let control = Switch::new(
                 id,
                 *theme,
-                SwitchSize::Default,
                 enabled,
                 id.trim_start_matches("settings-").replace('-', " "),
             )
@@ -929,7 +927,6 @@ fn performance(
     let control = Switch::new(
         "settings-lower-refresh-rate",
         *theme,
-        SwitchSize::Default,
         lowered,
         "lower refresh rate",
     )
@@ -952,7 +949,6 @@ fn performance(
     let monitor_control = Switch::new(
         "settings-monitor-refresh-rate",
         *theme,
-        SwitchSize::Default,
         monitor_sync,
         "match monitor refresh rate",
     )
@@ -1111,7 +1107,6 @@ fn appearance(
     let dark = Switch::new(
         "settings-switch-dark-mode",
         *theme,
-        SwitchSize::Default,
         theme.colors.mode.is_dark(),
         "switch dark mode",
     )
@@ -1145,7 +1140,6 @@ fn appearance(
     let hide_bad = Switch::new(
         "settings-switch-hide-bad-model-options",
         *theme,
-        SwitchSize::Default,
         core.settings
             .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
             .and_then(serde_json::Value::as_bool)
@@ -1157,7 +1151,6 @@ fn appearance(
     let all_models = Switch::new(
         "settings-switch-show-all-models",
         *theme,
-        SwitchSize::Default,
         core.settings
             .get(artisan_api::SHOW_ALL_MODELS_KEY)
             .and_then(serde_json::Value::as_bool)
@@ -1169,7 +1162,6 @@ fn appearance(
     let outline = Switch::new(
         "settings-switch-outline-text",
         *theme,
-        SwitchSize::Default,
         checked,
         "switch outline text",
     )
