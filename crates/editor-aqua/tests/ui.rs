@@ -8,6 +8,7 @@ mod code_copy;
 mod color_copy_menu;
 #[path = "ui/hover_tooltip.rs"]
 mod hover_tooltip;
+#[expect(clippy::disallowed_types, reason = "test fixture driving the raw aqua text and element APIs, not view code")]
 #[path = "../../editor-ui/tests/ui/inline_code_text.rs"]
 mod inline_code_text;
 #[path = "ui/popover.rs"]
@@ -18,10 +19,12 @@ mod tab_card;
 mod marquee;
 #[path = "ui/picker_motion.rs"]
 mod picker_motion;
+#[expect(clippy::disallowed_types, reason = "test fixture driving the raw aqua text and element APIs, not view code")]
 #[path = "ui/dialog.rs"]
 mod dialog;
 #[path = "ui/motion.rs"]
 mod motion;
+#[expect(clippy::disallowed_types, reason = "test fixture driving the raw aqua text and element APIs, not view code")]
 #[path = "ui/shimmer_text.rs"]
 mod shimmer_text;
 #[path = "ui/phrase.rs"]
@@ -30,6 +33,7 @@ mod phrase;
 #[path = "ui/chat_bubble.rs"]
 mod chat_bubble;
 
+#[expect(clippy::disallowed_types, reason = "test fixture driving the raw aqua text and element APIs, not view code")]
 #[path = "ui/media_frame.rs"]
 mod media_frame;
 

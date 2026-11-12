@@ -9,6 +9,7 @@ const ENFORCED: &[&str] = &[
     "editor-sidebar",
     "editor-conversation",
     "editor-inspector",
+    "editor-aqua",
 ];
 
 const LITERAL: &[&str] = &[
