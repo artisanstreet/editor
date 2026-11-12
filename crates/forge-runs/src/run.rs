@@ -52,6 +52,14 @@ pub async fn drive(
     // session the engine said is gone.
     let transport = claude_transport(hub, engine).await;
     let session_id = carried_session(previous.as_ref(), engine, transport);
+    let carried = session_id.as_ref().and(previous.as_ref());
+    let usage = Usage {
+        context_used: carried.and_then(|run| run.usage.context_used),
+        context_window: carried
+            .filter(|run| run.model == thread.config.model)
+            .and_then(|run| run.usage.context_window),
+        ..Usage::default()
+    };
     let mut run = Run {
         config: Some(thread.config.clone()),
         id: run_id.clone(),
@@ -59,7 +67,7 @@ pub async fn drive(
         engine,
         model: thread.config.model.clone(),
         status: RunStatus::Running,
-        usage: Usage::default(),
+        usage,
         session_id,
         error: None,
         seq: 0,
@@ -1188,7 +1196,11 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
         }
         EngineEvent::Commands(commands) => hub.engines().set_commands(run.engine, commands),
         EngineEvent::Usage(usage) => {
-            run.usage = usage;
+            run.usage = Usage {
+                context_used: usage.context_used.or(run.usage.context_used),
+                context_window: usage.context_window.or(run.usage.context_window),
+                ..usage
+            };
             *run = store.upsert_run(run.clone()).await?;
         }
         EngineEvent::InputAccepted { id } => {
