@@ -1,46 +1,25 @@
 use super::{
-    card::Card,
-    kit::{Surface, Tone, surface::tint},
-    theme::{ArtisanTheme, Oklch, Opacity},
+    kit::{Space, Spaced, Surface, TextRole, Tone, surface::tint},
+    theme::{ArtisanTheme, Oklch},
 };
 use aqua_core::Insets;
-use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::{
     AlignItems, JustifyContent,
-    element::{Box as UiBox, Element, Text},
-    style::{Length, Style},
+    element::{Box as UiBox, Element},
+    style::Style,
 };
 pub const CONTENT_MAX_WIDTH: f32 = 896.0;
-fn label(
-    theme: &ArtisanTheme,
-    text: impl Into<String>,
-    size: f32,
-    color: Oklch,
-    medium: bool,
-) -> Element {
-    Text::new(text.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: size,
-            line_height_px: size * 1.25,
-            weight: if medium {
-                FontWeight::MEDIUM
-            } else {
-                FontWeight::NORMAL
-            },
-            ..TextStyle::default()
-        })
+fn label(theme: &ArtisanTheme, text: impl Into<String>, role: TextRole, color: Oklch) -> Element {
+    role.text(theme, text.into())
         .gpui_source_color(color.to_reference_text_color())
         .wrap(true)
         .build()
 }
-fn inset(x: f32, y: f32) -> Insets {
-    Insets {
-        left: x,
-        right: x,
-        top: y,
-        bottom: y,
-    }
+fn lead(space: Space) -> Style {
+    Style::new().margin_insets(Insets {
+        top: space.px(),
+        ..Insets::default()
+    })
 }
 pub struct PageBlock {
     content: Element,
@@ -58,20 +37,14 @@ impl PageBlock {
     }
 }
 pub struct Notice {
-    content: UiBox,
+    theme: ArtisanTheme,
+    children: Vec<Element>,
     selector: Option<String>,
 }
 impl Notice {
+    const SURFACE: Surface = Surface::Callout(Tone::Danger);
     pub fn action(mut self, action: Element) -> Self {
-        self.content = self.content.child(
-            UiBox::new()
-                .style(Style::new().margin_insets(Insets {
-                    top: 8.0,
-                    ..Insets::default()
-                }))
-                .child(action)
-                .build(),
-        );
+        self.children.push(action);
         self
     }
     pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
@@ -79,11 +52,17 @@ impl Notice {
         self
     }
     pub fn build(self) -> Element {
-        let content = self.content.build();
-        if let Some(selector) = self.selector {
-            content.debug_selector(selector)
-        } else {
-            content
+        let body = UiBox::new()
+            .layout("column")
+            .spaced(Space::S8)
+            .children(self.children)
+            .build();
+        let content = Self::SURFACE
+            .build(&self.theme, vec![body])
+            .style(lead(Space::S24));
+        match self.selector {
+            Some(selector) => content.debug_selector(selector),
+            None => content,
         }
     }
 }
@@ -112,22 +91,14 @@ pub fn header(
     PageBlock::new(
         UiBox::new()
             .layout("column")
-            .child(label(theme, title, 20.0, theme.colors.text, true))
-            .child(
-                UiBox::new()
-                    .style(Style::new().margin_insets(Insets {
-                        top: 6.0,
-                        ..Insets::default()
-                    }))
-                    .child(label(
-                        theme,
-                        description,
-                        14.0,
-                        theme.colors.text_muted,
-                        false,
-                    ))
-                    .build(),
-            )
+            .spaced(Space::S6)
+            .child(label(theme, title, TextRole::Heading, theme.colors.text))
+            .child(label(
+                theme,
+                description,
+                TextRole::Label,
+                theme.colors.text_muted,
+            ))
             .build(),
     )
 }
@@ -139,100 +110,35 @@ pub fn section_shell(
     body: Element,
 ) -> PageBlock {
     let mut head = UiBox::new()
-        .gap(16.0)
+        .spaced(Space::S16)
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
                 .justify(JustifyContent::SPACE_BETWEEN),
         )
-        .child(label(theme, title, 14.0, theme.colors.text, true));
+        .child(label(theme, title, TextRole::LabelStrong, theme.colors.text));
     if let Some(action) = action {
         head = head.child(action);
     }
-    let mut section = UiBox::new()
+    let mut heading = UiBox::new()
         .layout("column")
-        .style(Style::new().margin_insets(Insets {
-            top: 40.0,
-            ..Insets::default()
-        }))
+        .spaced(Space::S4)
         .child(head.build());
     if let Some(intro) = intro {
-        section = section.child(
-            UiBox::new()
-                .style(Style::new().margin_insets(Insets {
-                    top: 4.0,
-                    ..Insets::default()
-                }))
-                .child(label(theme, intro, 14.0, theme.colors.text_muted, false))
-                .build(),
-        );
+        heading = heading.child(label(theme, intro, TextRole::Label, theme.colors.text_muted));
     }
-    PageBlock::new(
-        section
-            .child(
-                UiBox::new()
-                    .style(Style::new().margin_insets(Insets {
-                        top: 12.0,
-                        ..Insets::default()
-                    }))
-                    .child(body)
-                    .build(),
-            )
-            .build(),
-    )
-}
-pub const fn card(theme: &ArtisanTheme, blocks: Vec<Element>) -> Card {
-    Card::bands(*theme, blocks)
-}
-pub fn row(
-    theme: &ArtisanTheme,
-    title: impl Into<String>,
-    description: impl Into<String>,
-    control: Option<Element>,
-) -> PageBlock {
-    let description = description.into();
-    let mut text = UiBox::new()
-        .layout("column")
-        .gap(2.0)
-        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-        .child(label(theme, title, 14.0, theme.colors.text, false));
-    if !description.is_empty() {
-        text = text.child(label(
-            theme,
-            description,
-            12.0,
-            theme.colors.text_muted,
-            false,
-        ));
-    }
-    let mut row = UiBox::new()
-        .width(Length::Pct(100.0))
-        .gap(24.0)
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::SPACE_BETWEEN)
-                .padding_insets(inset(0.0, 14.0)),
-        )
-        .child(text.build());
-    if let Some(control) = control {
-        row = row.child(
-            UiBox::new()
-                .style(Style::new().flex_shrink(0.0))
-                .child(control)
-                .build(),
-        );
-    }
-    PageBlock::new(row.build())
-}
-fn message(theme: &ArtisanTheme, text: impl Into<String>, color: Oklch) -> PageBlock {
     PageBlock::new(
         UiBox::new()
-            .width(Length::Pct(100.0))
-            .style(Style::new().padding_insets(inset(0.0, 12.0)))
-            .child(label(theme, text, 14.0, color, false))
+            .layout("column")
+            .spaced(Space::S12)
+            .style(lead(Space::S32))
+            .child(heading.build())
+            .child(body)
             .build(),
     )
+}
+fn message(theme: &ArtisanTheme, text: impl Into<String>, color: Oklch) -> PageBlock {
+    PageBlock::new(label(theme, text, TextRole::Label, color))
 }
 pub fn note(theme: &ArtisanTheme, text: impl Into<String>) -> PageBlock {
     message(theme, text, theme.colors.text_muted)
@@ -241,21 +147,14 @@ pub fn error_text(theme: &ArtisanTheme, text: impl Into<String>) -> PageBlock {
     message(theme, text, theme.colors.destructive_text)
 }
 pub fn notice(theme: &ArtisanTheme, text: impl Into<String>) -> Notice {
-    let surface = Surface::Callout(Tone::Danger);
     Notice {
+        theme: *theme,
+        children: vec![label(
+            theme,
+            text,
+            TextRole::Label,
+            tint(theme, Tone::Danger),
+        )],
         selector: None,
-        content: UiBox::new()
-            .layout("column")
-            .style(
-                Style::new()
-                    .margin_insets(Insets {
-                        top: 24.0,
-                        ..Insets::default()
-                    })
-                    .padding(Length::Px(surface.padding_px())),
-            )
-            .radius(surface.radius_px())
-            .fill(tint(theme, Tone::Danger).at(Opacity::ToneTint).to_paint())
-            .child(label(theme, text, 14.0, tint(theme, Tone::Danger), false)),
     }
 }
