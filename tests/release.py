@@ -20,12 +20,14 @@ class Release(unittest.TestCase):
             with self.assertRaises(ValueError):
                 release.version_for(reference, sha, "20261111031700")
 
-    def test_nightly_runs_at_oslo_midnight_in_summer_and_winter_time(self):
+    def test_nightly_runs_after_oslo_midnight_however_late_the_schedule_fires(self):
         utc = lambda month, hour: datetime.datetime(2026, month, 15, hour, 20, tzinfo=datetime.timezone.utc)
-        self.assertTrue(release.midnight_in_oslo(utc(7, 22)))
-        self.assertFalse(release.midnight_in_oslo(utc(7, 23)))
-        self.assertFalse(release.midnight_in_oslo(utc(1, 22)))
-        self.assertTrue(release.midnight_in_oslo(utc(1, 23)))
+        self.assertTrue(release.night_in_oslo(utc(7, 22)))
+        self.assertFalse(release.night_in_oslo(utc(7, 21)))
+        self.assertFalse(release.night_in_oslo(utc(1, 22)))
+        self.assertTrue(release.night_in_oslo(utc(1, 23)))
+        self.assertTrue(release.night_in_oslo(utc(1, 3)))
+        self.assertFalse(release.night_in_oslo(utc(1, 5)))
 
     def test_gate_rejects_pr_runs_and_newer_failed_or_pending_runs(self):
         sha = "a" * 40
