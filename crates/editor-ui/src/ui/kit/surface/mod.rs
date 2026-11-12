@@ -199,3 +199,10 @@ pub fn tint(theme: &ArtisanTheme, tone: Tone) -> crate::ui::theme::Oklch {
         Tone::Danger => theme.colors.banner_error.text,
     }
 }
+
+#[must_use]
+pub fn backdrop(theme: &ArtisanTheme) -> Style {
+    Style::new().gpui_background(GpuiBackground::Solid(
+        theme.colors.background.at(Opacity::Backdrop).to_reference_paint(),
+    ))
+}
