@@ -24,6 +24,8 @@ enum Transport {
 }
 
 const RELAY_ORIGIN: &str = "https://relay.tunnel";
+const RELAY_BYTES: usize = 32 * 1024 * 1024;
+const RESOURCE_BYTES: usize = 128 * 1024 * 1024;
 
 impl ForgeClient {
     pub fn new(address: &str, fingerprint: &str, identity: &Identity) -> Result<Self> {
@@ -186,12 +188,13 @@ impl ForgeClient {
         .context("network task")?
     }
 
-    async fn call_bytes(&self, request: reqwest::RequestBuilder) -> Result<Vec<u8>> {
-        const LIMIT: usize = 32 * 1024 * 1024;
+    async fn call_bytes(&self, request: reqwest::RequestBuilder, limit: usize) -> Result<Vec<u8>> {
         if let Some(relay) = self.relay().cloned() {
             return AbortOnDropHandle::new(runtime().spawn(async move {
                 let (method, path, body) = relay_parts(request)?;
-                relay.raw_bytes(&method, &path, body, LIMIT).await
+                relay
+                    .raw_bytes(&method, &path, body, limit.min(RELAY_BYTES))
+                    .await
             }))
             .await
             .context("network task")?;
@@ -212,8 +215,8 @@ impl ForgeClient {
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk?;
                 anyhow::ensure!(
-                    bytes.len().saturating_add(chunk.len()) <= LIMIT,
-                    "image exceeds 32 MiB"
+                    bytes.len().saturating_add(chunk.len()) <= limit,
+                    "response exceeds {limit} bytes"
                 );
                 bytes.extend_from_slice(&chunk);
             }
@@ -285,14 +288,18 @@ impl ForgeClient {
         thread: &ThreadId,
         path: &str,
         from_home: bool,
+        item: Option<&str>,
     ) -> Result<Vec<u8>> {
+        let shown = item.map(|item| ("item", item));
         self.call_bytes(
             self.http
                 .get(self.url(&format!("/threads/{thread}/resource")))
                 .query(&[
                     ("path", path),
                     ("from_home", if from_home { "true" } else { "false" }),
-                ]),
+                ])
+                .query(&shown.into_iter().collect::<Vec<_>>()),
+            RESOURCE_BYTES,
         )
         .await
     }
@@ -724,8 +731,11 @@ impl ForgeClient {
     }
 
     pub async fn blob(&self, hash: &BlobHash) -> Result<Vec<u8>> {
-        self.call_bytes(self.http.get(self.url(&format!("/blobs/{hash}"))))
-            .await
+        self.call_bytes(
+            self.http.get(self.url(&format!("/blobs/{hash}"))),
+            RELAY_BYTES,
+        )
+        .await
     }
 
     pub async fn engines(&self) -> Result<Vec<EngineStatus>> {

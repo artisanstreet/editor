@@ -18,6 +18,7 @@ mod handoff;
 mod mcp_auth;
 mod mcp_reach;
 mod park;
+pub mod resources;
 mod retention;
 mod run;
 pub mod runtime;

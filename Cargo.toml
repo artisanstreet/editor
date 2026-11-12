@@ -46,18 +46,18 @@ rust-version = "1.98.0"
 version = "0.0.0"
 
 [workspace.dependencies]
-aqua = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-protocol = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-text = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-ui = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-reactive = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-runtime = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-media = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-gpu-d3d11 = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-gpu-ref = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
-aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "fc7fe872ea2e5d73ba122775b9f5cb5a8fbea91d" }
+aqua = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-protocol = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-text = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-ui = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-reactive = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-runtime = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-media = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-gpu-d3d11 = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-gpu-ref = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-a11y-uia = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
+aqua-ime-tsf = { git = "https://github.com/artisanstreet/aqua", rev = "1abc58178f02c592002592c24dd6ca3ca785f007" }
 ropey = "=1.6.1"
 glam = "=0.34.1"
 color = "=0.3.3"
