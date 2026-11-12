@@ -82,6 +82,10 @@ impl TextRole {
             size_px: spec.size,
             line_height_px: spec.line,
             weight: spec.weight,
+            letter_spacing_em: match self {
+                Self::Prose => Some(theme.typography.tracking_em),
+                _ => None,
+            },
             ..TextStyle::default()
         }
     }
