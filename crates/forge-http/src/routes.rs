@@ -680,7 +680,7 @@ async fn resource(
     Query(query): Query<ResourceQuery>,
 ) -> Result<Bytes> {
     use tokio::io::AsyncReadExt as _;
-    const LIMIT: usize = 32 * 1024 * 1024;
+    const LIMIT: usize = 128 * 1024 * 1024;
     let thread = app
         .hub
         .store()
@@ -719,7 +719,7 @@ async fn resource(
     })?;
     if !metadata.is_file() || metadata.len() > LIMIT as u64 {
         return Err(bad_request(anyhow::anyhow!(
-            "resource must be a regular file no larger than 32 MiB"
+            "resource must be a regular file no larger than 128 MiB"
         )));
     }
     let file = tokio::fs::File::open(&path).await.map_err(|error| {
@@ -732,7 +732,7 @@ async fn resource(
     let metadata = file.metadata().await.map_err(anyhow::Error::from)?;
     if !metadata.is_file() || metadata.len() > LIMIT as u64 {
         return Err(bad_request(anyhow::anyhow!(
-            "resource must be a regular file no larger than 32 MiB"
+            "resource must be a regular file no larger than 128 MiB"
         )));
     }
     let mut bytes = Vec::new();
@@ -741,7 +741,7 @@ async fn resource(
         .await
         .map_err(anyhow::Error::from)?;
     if bytes.len() > LIMIT {
-        return Err(bad_request(anyhow::anyhow!("resource exceeds 32 MiB")));
+        return Err(bad_request(anyhow::anyhow!("resource exceeds 128 MiB")));
     }
     Ok(Bytes::from(bytes))
 }

@@ -360,7 +360,7 @@ async fn rich_resources_use_the_paired_forge_project_and_reject_non_regular_file
     let oversized = project_dir.join("oversized.bin");
     std::fs::File::create(&oversized)
         .unwrap()
-        .set_len(33 * 1024 * 1024)
+        .set_len(129 * 1024 * 1024)
         .unwrap();
     assert_eq!(
         editor

@@ -3,7 +3,7 @@ use futures::future::BoxFuture;
 use std::{sync::Arc, time::Duration};
 use tokio_util::task::AbortOnDropHandle;
 
-const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_BODY_BYTES: usize = 128 * 1024 * 1024;
 
 pub struct MediaResponse {
     pub status: reqwest::StatusCode,
