@@ -153,17 +153,21 @@ pub fn explanation(
         (cadence, Some(scope)) => format!("{} {scope} usage", cadence_word(cadence)),
     };
     let percent = limit.used_percent.round().clamp(0.0, 100.0);
-    let outcome = match outlook {
-        Outlook::RunsOut(at) => format!(" and are on track to run out of usage {}.", when(at)),
-        Outlook::Lasts(at) => format!(" and are on track to last until it resets {}.", when(at)),
-        Outlook::Exhausted(at) => format!(". It resets {}.", when(at)),
-        Outlook::Unknown => ".".to_owned(),
+    let (lead, at) = match outlook {
+        Outlook::RunsOut(at) => (" and are on track to run out of usage ", Some(at)),
+        Outlook::Lasts(at) => (" and are on track to last until it resets ", Some(at)),
+        Outlook::Exhausted(at) => (". It resets ", Some(at)),
+        Outlook::Unknown => ("", None),
     };
-    vec![
+    [
         Phrase::Muted("You have used up ".to_owned()),
         Phrase::Strong(format!("{percent:.0}%")),
-        Phrase::Muted(format!(" of your {allowance}{outcome}")),
+        Phrase::Muted(format!(" of your {allowance}{lead}")),
     ]
+    .into_iter()
+    .chain(at.map(|at| Phrase::Strong(when(at))))
+    .chain([Phrase::Muted(".".to_owned())])
+    .collect()
 }
 
 const fn cadence_word(cadence: UsageCadence) -> &'static str {
