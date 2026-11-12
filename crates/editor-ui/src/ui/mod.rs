@@ -30,7 +30,6 @@ pub mod motion;
 pub mod page;
 pub mod phrase;
 pub mod picker_motion;
-pub mod pop_in_hover;
 pub mod popover;
 pub mod preferences;
 pub mod progress;

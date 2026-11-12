@@ -227,7 +227,7 @@ pub fn build(
     use aqua_core::Role;
     use aqua_ui::{AlignItems, JustifyContent};
     use editor_core::Screen;
-    use editor_ui::kit::{HitArea, Hover, IconButtonSize, Radius, Space, Spaced};
+    use editor_ui::kit::{HitArea, Hover, IconButtonSize, Radius, Space, Spaced, live};
 
     let screen = sidebar.screen(core);
     let items = [
@@ -278,6 +278,12 @@ pub fn build(
             ))
             .build();
         let button = HitArea::new(id, Role::Button, label)
+            .child(live::layer(
+                Hover::Neutral,
+                &theme,
+                Radius::Field.px(),
+                false,
+            ))
             .child(face)
             .on_activate(move || match glyph {
                 Glyph::Pen => action(ViewAction::NewThread(None)),
@@ -286,7 +292,6 @@ pub fn build(
             })
             .build()
             .style(Radius::Field.style())
-            .hover_style(Hover::Neutral.style(&theme))
             .aria_selected(selected)
             .on_hover_change(move |hovered| {
                 if hovered {

@@ -168,7 +168,7 @@ fn machine_row(
         machine.title(),
     )
     .nested(radius, 0.0)
-    .underlay(Some(face))
+    .face(face)
     .leading(radio(theme, selected))
     .selected(selected)
     .on_activate(move || pick(Event::Selected(index)));

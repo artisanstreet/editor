@@ -8,7 +8,7 @@ use aqua_ui::{
     style::{Length, Style},
 };
 
-use super::kit::{Density, Hover, Radius, Row, Space, Spaced, TextRole, control::focus_ring};
+use super::kit::{Density, Hover, Radius, Row, Space, Spaced, TextRole, control::focus_ring, live};
 use super::theme::{ArtisanTheme, Opacity};
 
 const SEGMENT: Row = Row::ListItem(Density::Dense);
@@ -126,18 +126,21 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .gpui_source_color(foreground.to_reference_text_color())
                 .style(Style::new().text_wrap(false))
                 .build();
-            let mut style = Style::new()
+            let style = Style::new()
                 .align(aqua_ui::AlignItems::CENTER)
                 .justify(aqua_ui::JustifyContent::CENTER)
                 .padding(Length::Px(SEGMENT.pad().x.px()))
                 .border_of(1.0, Oklch::TRANSPARENT)
                 .radius(Length::Px(Radius::Field.px()));
-            if chosen {
-                style.merge(&Hover::Neutral.style(&theme));
-            }
             let mut button = Button::new()
                 .height(SEGMENT_HEIGHT)
                 .style(style)
+                .child(live::layer(
+                    Hover::Neutral,
+                    &theme,
+                    Radius::Field.px(),
+                    chosen,
+                ))
                 .child(text);
             if self.disabled {
                 button = button.opacity(Opacity::Disabled.alpha());
@@ -156,10 +159,9 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .aria_checked(chosen)
                 .disabled(self.disabled);
             if !self.disabled {
-                item = item
+                item = live::track(item)
                     .cursor(aqua_core::CursorIcon::Pointer)
                     .tab_index(if chosen { 0 } else { -1 })
-                    .hover_style(Hover::Neutral.style(&theme))
                     .focus_visible_style(focus_ring(&theme));
                 let values = values.clone();
                 let change = self.change.clone();

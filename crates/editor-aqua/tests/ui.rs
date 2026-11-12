@@ -17,8 +17,6 @@ mod popover;
 mod tab_card;
 #[path = "ui/marquee.rs"]
 mod marquee;
-#[path = "ui/picker_motion.rs"]
-mod picker_motion;
 #[expect(clippy::disallowed_types, reason = "test fixture driving the raw aqua text and element APIs, not view code")]
 #[path = "ui/dialog.rs"]
 mod dialog;
@@ -43,5 +41,3 @@ mod solar_sample;
 #[path = "../../editor-ui/tests/ui/sky/sample.rs"]
 mod sky_sample;
 
-#[path = "ui/pop_in_hover.rs"]
-mod pop_in_hover;

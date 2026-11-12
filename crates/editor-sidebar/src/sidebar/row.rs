@@ -189,7 +189,6 @@ pub fn build(
     drag: Option<DraggedThread>,
     visuals: RowVisuals,
     layout: super::geometry::ThreadLayout,
-    hover: &editor_ui::pop_in_hover::PopInHover,
     theme: editor_ui::theme::ArtisanTheme,
     emit: std::rc::Rc<dyn Fn(super::view::ViewAction)>,
 ) -> aqua_ui::element::Element {
@@ -204,7 +203,7 @@ pub fn build(
         },
         style::{Length, Style},
     };
-    use editor_ui::kit::{Hover, RowItem, Space, Spaced};
+    use editor_ui::kit::{RowItem, Space, Spaced};
 
     let open_host = host.clone();
     let open_thread = data.id.clone();
@@ -231,21 +230,21 @@ pub fn build(
         });
     let key = format!("sidebar-thread-{}", data.id);
     let row = layout.row();
-    let mut item = RowItem::new(key.clone(), theme, row, super::geometry::LIST, data.title.clone())
-        .body(body.build())
-        .underlay(Some(hover.layer(
-            &key,
-            &theme,
-            Hover::Neutral,
-            row.radius_in(super::geometry::LIST),
-        )))
-        .on_activate(move || {
-            open(ViewAction::OpenThread {
-                host: open_host.clone(),
-                instance,
-                thread: open_thread.clone(),
-            })
-        });
+    let mut item = RowItem::new(
+        key.clone(),
+        theme,
+        row,
+        super::geometry::LIST,
+        data.title.clone(),
+    )
+    .body(body.build())
+    .on_activate(move || {
+        open(ViewAction::OpenThread {
+            host: open_host.clone(),
+            instance,
+            thread: open_thread.clone(),
+        })
+    });
     if let Some(dot) = visuals.dot {
         item = item.trailing(dot);
     }
@@ -255,10 +254,6 @@ pub fn build(
     let key_host = host.clone();
     let key_thread = data.id.clone();
     let key_emit = emit.clone();
-    let hover_thread = data.id.clone();
-    let hover_emit = emit.clone();
-    let leave_thread = data.id.clone();
-    let leave_emit = emit.clone();
     let pending = std::rc::Rc::new(std::cell::Cell::new(None::<(u64, aqua_core::Point)>));
     let down_pending = pending.clone();
     let move_pending = pending.clone();
@@ -277,22 +272,6 @@ pub fn build(
             data.subtitle,
             state_label(data.state)
         ))
-        .on_input(InputKind::PointerEnter, EventPhase::Bubble, move |event| {
-            hover_emit(ViewAction::ThreadHover {
-                thread: hover_thread.clone(),
-                bounds: event.bounds,
-                hovered: true,
-            });
-            InputResponse::default()
-        })
-        .on_input(InputKind::PointerLeave, EventPhase::Bubble, move |event| {
-            leave_emit(ViewAction::ThreadHover {
-                thread: leave_thread.clone(),
-                bounds: event.bounds,
-                hovered: false,
-            });
-            InputResponse::default()
-        })
         .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
             if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input
                 && opens_aqua_keyboard_menu(key)

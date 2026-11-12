@@ -16,7 +16,7 @@ pub use control::link::{Link, LinkTone};
 pub use control::tabs::{Tabs, TabsStyle};
 pub use control::trigger::{Lead, Trigger, TriggerSize};
 pub use divider::Divider;
-pub use hover::{Highlight, Hover};
+pub use hover::{Highlight, Hover, live};
 pub use pane::Seam;
 pub use row::{Density, Pad, Row, RowItem};
 pub use surface::{Media, Surface, Tone, Tooltip};

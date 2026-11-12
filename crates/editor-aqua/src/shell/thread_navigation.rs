@@ -12,7 +12,7 @@ use aqua_ui::{
     element::{Box as UiBox, Element},
     style::{Length, Style},
 };
-use artisan_api::{ItemId, OutlineEntry, Seq};
+use artisan_api::{OutlineEntry, Seq};
 
 use crate::{
     conversation::{
@@ -292,7 +292,6 @@ impl ThreadNavigation {
                 state.opened = None;
                 state.center = None;
                 state.epoch = state.epoch.wrapping_add(1);
-                self.navigator.borrow().clear_hover();
             }
         }
         if !conversation.host_is_current(core) {
@@ -306,7 +305,6 @@ impl ThreadNavigation {
             state.hovered = false;
             state.opened = None;
             state.center = None;
-            self.navigator.borrow().clear_hover();
             return None;
         }
         let reading = reading_position(conversation, viewport);
@@ -346,18 +344,6 @@ impl ThreadNavigation {
                     )
                 })
             };
-            let navigator = self.navigator.clone();
-            let state = Rc::downgrade(&self.interaction);
-            let invalidate_hover = invalidate.clone();
-            let row_hover: Rc<dyn Fn(ItemId)> = Rc::new(move |id| {
-                if state
-                    .upgrade()
-                    .is_some_and(|state| state.borrow().epoch == epoch && state.borrow().hovered)
-                {
-                    navigator.borrow().hovered(&id);
-                    invalidate_hover();
-                }
-            });
             let label: Rc<dyn Fn(&str, bool, ArtisanTheme) -> Element> =
                 Rc::new(|label, active, theme| {
                     let role = match active {
@@ -376,15 +362,12 @@ impl ThreadNavigation {
                 max_height,
                 theme,
                 progress,
-                &self.navigator.borrow().hover,
                 label,
-                row_hover,
                 dispatch,
             );
             region = region.child(menu);
         }
         let interaction = Rc::downgrade(&self.interaction);
-        let navigator = Rc::downgrade(&self.navigator);
         let count = markers.len();
         let region = region
             .build()
@@ -404,9 +387,6 @@ impl ThreadNavigation {
                 } else {
                     state.opened = None;
                     state.center = None;
-                    if let Some(navigator) = navigator.upgrade() {
-                        navigator.borrow().hover.hide();
-                    }
                 }
                 drop(state);
                 invalidate();
@@ -431,7 +411,6 @@ impl ThreadNavigation {
         ui: &mut aqua::UiApp,
         theme: &ArtisanTheme,
         now: Instant,
-        seconds: f64,
         reduced_motion: bool,
     ) -> Result<Frame, String> {
         let mut frame = Frame::default();
@@ -450,17 +429,6 @@ impl ThreadNavigation {
                 }
             }
         }
-        if let Some(surface) = keyed(ui, "turn-navigator-hover-surface") {
-            let hover = self.navigator.borrow_mut().advance_hover_frame(
-                ui,
-                surface,
-                theme,
-                seconds,
-                reduced_motion,
-            )?;
-            frame.changed |= hover.changed;
-            frame.animating |= hover.animating;
-        }
         frame.animating |= !reduced_motion
             && self.interaction.borrow().opened.is_some_and(|opened| {
                 now.saturating_duration_since(opened) < Duration::from_millis(150)
@@ -471,9 +439,8 @@ impl ThreadNavigation {
         Ok(frame)
     }
 
-    pub fn dispose(&mut self, ui: &mut aqua::UiApp) {
+    pub fn dispose(&mut self) {
         self.context = None;
-        self.navigator.borrow_mut().dispose(ui);
         let mut state = self.interaction.borrow_mut();
         state.scope = None;
         state.hovered = false;

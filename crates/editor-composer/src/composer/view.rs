@@ -12,7 +12,7 @@ use editor_ui::{
     kit::{
         Button, ButtonTone, Density, Divider, Finish, HitArea, Hover, IconButton, IconButtonSize,
         IconSize, Inset, Key, KeyFace, KeySize, Lead, Link, LinkTone, Radius, Row, RowItem, Space,
-        Spaced, Surface, TextRole, Tooltip, Trigger, TriggerSize,
+        Spaced, Surface, TextRole, Tooltip, Trigger, TriggerSize, live,
     },
     theme::{ArtisanTheme, Opacity},
 };
@@ -329,7 +329,6 @@ pub fn mention_menu(
             )
             .leading(IconSize::Md.glyph(icon, muted.to_reference_paint()))
             .trailing(description)
-            .underlay(None)
             .selected(index == mentions.highlighted)
             .on_activate(move || action(ComposerAction::SelectMention(index)))
             .on_hover(move |hovered| {
@@ -501,6 +500,12 @@ pub fn questionnaire(
                 Role::Button,
                 option.label.clone(),
             )
+            .child(live::layer(
+                Hover::Neutral,
+                &theme,
+                Radius::Field.px(),
+                selected && !sending,
+            ))
             .child(body);
             if !sending {
                 row = row.on_activate(move || {
@@ -513,7 +518,7 @@ pub fn questionnaire(
                     })
                 });
             }
-            let row = choice(&theme, row.build(), selected, sending);
+            let row = choice(row.build(), selected, sending);
             rows = rows.child(row);
             if let Some(artisan_api::TextContent::Stored(source)) = &option.description {
                 let source = source.clone();
@@ -631,20 +636,16 @@ pub fn questionnaire(
     )
 }
 
-fn choice(theme: &ArtisanTheme, row: Element, selected: bool, sending: bool) -> Element {
+fn choice(row: Element, selected: bool, sending: bool) -> Element {
     let row = row
         .style(Style::new().height(Length::Auto))
         .style(Radius::Field.style())
         .aria_selected(selected)
         .disabled(sending)
         .focusable(!sending);
-    let row = match selected {
-        true => row.style(Hover::Neutral.style(theme)),
-        false => row,
-    };
     match sending {
         true => row,
-        false => row.hover_style(Hover::Neutral.style(theme)),
+        false => live::track(row),
     }
 }
 
@@ -878,11 +879,9 @@ pub struct ComposerOwner {
     tab_geometry: Rc<std::cell::RefCell<editor_ui::tab_card::GeometryCache>>,
     strip_moving: std::cell::Cell<bool>,
     note_ticker: std::cell::RefCell<editor_ui::marquee::Marquee>,
-    model_hover: Rc<std::cell::RefCell<editor_ui::pop_in_hover::PopInHover>>,
     model_menu_serial: std::cell::Cell<u64>,
     model_scroll: std::cell::RefCell<super::model_list::ModelScroll>,
     model_tab: std::cell::RefCell<super::sliding_tab::SlidingTab>,
-    project_hover: Rc<std::cell::RefCell<editor_ui::picker_motion::HoverSurface>>,
     last_visible: std::cell::RefCell<ComposerVisible>,
     tooltip: std::cell::RefCell<super::picker::PickerTooltip>,
 }
@@ -1174,14 +1173,11 @@ impl ComposerOwner {
                 "composer-note-ticker",
                 "",
             )),
-            model_hover: Rc::new(std::cell::RefCell::new(
-                editor_ui::pop_in_hover::PopInHover::new("composer-model-hover"),
-            )),
             model_menu_serial: std::cell::Cell::new(0),
             model_scroll: std::cell::RefCell::default(),
-            model_tab: std::cell::RefCell::new(super::sliding_tab::SlidingTab::new(0.0, MODEL_ITEM_HEIGHT)),
-            project_hover: Rc::new(std::cell::RefCell::new(
-                editor_ui::picker_motion::HoverSurface::new("composer-project-hover"),
+            model_tab: std::cell::RefCell::new(super::sliding_tab::SlidingTab::new(
+                0.0,
+                MODEL_ITEM_HEIGHT,
             )),
             last_visible: std::cell::RefCell::new(last_visible),
             tooltip: std::cell::RefCell::new(super::picker::PickerTooltip::default()),
@@ -1228,11 +1224,6 @@ impl ComposerOwner {
     pub fn set_reduced_motion(&mut self, reduced: bool) {
         self.reduced_motion = reduced;
     }
-
-    pub fn project_hover(&self) -> Rc<std::cell::RefCell<editor_ui::picker_motion::HoverSurface>> {
-        Rc::clone(&self.project_hover)
-    }
-
 
     pub fn tooltip_target(&self) -> Option<(editor_core::HostInstance, u64)> {
         let composer = self.controller.borrow();
@@ -1310,8 +1301,6 @@ impl ComposerOwner {
 
     pub fn dispose_popups(&mut self, app: &mut aqua::UiApp) {
         self.tooltip.borrow_mut().clear();
-        self.model_hover.borrow_mut().dispose(app);
-        self.project_hover.borrow_mut().dispose(app);
         if let Some(popup) = self.mention_popup.take() {
             popup.dispose(app);
         }
@@ -1331,8 +1320,8 @@ impl ComposerOwner {
         factory: impl Fn() -> Element + 'static,
         now: f64,
     ) -> Result<(), String> {
-        use editor_ui::popover::{AnimatedPickerHost, PickerEntrance};
         use aqua_ui::popup::PopupFocus;
+        use editor_ui::popover::{AnimatedPickerHost, PickerEntrance};
         let entrance = PickerEntrance::Scale {
             origin: aqua_core::Point::new(0.0, 1.0),
         };
@@ -1380,8 +1369,8 @@ impl ComposerOwner {
         initial: Element,
         now: f64,
     ) -> Result<(), String> {
-        use editor_ui::popover::{AnimatedPickerHost, PickerEntrance};
         use aqua_ui::popup::PopupFocus;
+        use editor_ui::popover::{AnimatedPickerHost, PickerEntrance};
         if self.popup_is_open(kind, app) {
             return self.refresh_popup_content(kind, app, initial, now);
         }
@@ -1524,8 +1513,6 @@ impl ComposerOwner {
     pub fn needs_animation(&self, app: &aqua::UiApp) -> bool {
         self.strip_moving.get()
             || self.note_ticker.borrow().is_animating()
-            || self.model_hover.borrow().is_animating()
-            || self.project_hover.borrow().is_animating()
             || (self.controller.borrow().picker.menu == Some(super::picker::Menu::Model)
                 && (self.engine_light.borrow().animating()
                     || !self.model_tab.borrow().settled()
@@ -1578,40 +1565,6 @@ impl ComposerOwner {
             }
             _ => false,
         }
-    }
-
-    pub fn advance_picker_hover(
-        &self,
-        app: &mut aqua::UiApp,
-        theme: &ArtisanTheme,
-        now: f64,
-        roots: [Option<aqua_core::NodeId>; 2],
-    ) -> Result<bool, String> {
-        let mut changed = false;
-        if let Some(root) = roots[0] {
-            let frame = self.model_hover.borrow_mut().advance_frame(
-                app,
-                root,
-                std::time::Instant::now(),
-                self.reduced_motion,
-            );
-            changed |= frame.changed || frame.animating;
-        } else {
-            self.model_hover.borrow_mut().dispose(app);
-        }
-        if let Some(root) = roots[1] {
-            let frame = self.project_hover.borrow_mut().advance_frame(
-                app,
-                root,
-                theme,
-                now,
-                self.reduced_motion,
-            )?;
-            changed |= frame.changed || frame.animating;
-        } else {
-            self.project_hover.borrow_mut().dispose(app);
-        }
-        Ok(changed)
     }
 
     pub fn advance_note_ticker(&self, app: &mut aqua::UiApp, now: f64) {
@@ -2294,21 +2247,9 @@ impl ComposerOwner {
                 tab,
                 engine_light,
             },
-            Rc::clone(&self.model_hover),
             (host.instance(), controller.generation()),
             Rc::clone(&self.dispatch),
         ))
-    }
-
-    pub fn apply_model_hover(&self, app: &mut aqua::UiApp) {
-        if let Some(root) = self.popup_root(PopupKind::Model, app) {
-            self.model_hover.borrow_mut().advance_frame(
-                app,
-                root,
-                std::time::Instant::now(),
-                self.reduced_motion,
-            );
-        }
     }
 
     pub fn surface(
@@ -2726,32 +2667,22 @@ pub fn project_menu(
     picker: &super::picker::PickerState,
     selected: Option<&artisan_api::ProjectId>,
     viewport: aqua_core::Size,
-    hover_surface: Rc<std::cell::RefCell<editor_ui::picker_motion::HoverSurface>>,
     dispatch: Dispatch,
 ) -> Element {
     let surface = Surface::Menu;
     let row = Row::MenuItem;
     let muted = theme.colors.text_muted.to_reference_paint();
-    let item = |key: String, title: String, leading: Element, chosen: bool, action: ComposerAction| {
-        let dispatch = Rc::clone(&dispatch);
-        let hover = Rc::clone(&hover_surface);
-        let hover_key = key.clone();
-        let mut item = RowItem::new(key, theme, row, surface, title)
-            .leading(leading)
-            .underlay(None)
-            .on_activate(move || dispatch(action.clone()))
-            .on_hover(move |hovered| {
-                if hovered {
-                    hover
-                        .borrow()
-                        .hovered(&hover_key, true, editor_ui::hover::HoverTone::Neutral);
-                }
-            });
-        if chosen {
-            item = item.trailing(IconSize::Md.glyph(AssetId::TABLER_CHECK, muted));
-        }
-        item.build().aria_selected(chosen)
-    };
+    let item =
+        |key: String, title: String, leading: Element, chosen: bool, action: ComposerAction| {
+            let dispatch = Rc::clone(&dispatch);
+            let mut item = RowItem::new(key, theme, row, surface, title)
+                .leading(leading)
+                .on_activate(move || dispatch(action.clone()));
+            if chosen {
+                item = item.trailing(IconSize::Md.glyph(AssetId::TABLER_CHECK, muted));
+            }
+            item.build().aria_selected(chosen)
+        };
     let mut rows = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -2824,15 +2755,7 @@ pub fn project_menu(
     ));
     let width = PROJECT_MENU_WIDTH.min((viewport.w - MENU_VIEWPORT_MARGIN).max(0.0));
     surface
-        .build(
-            &theme,
-            vec![
-                hover_surface
-                    .borrow()
-                    .pill(&theme, row.radius_in(surface)),
-                list.build(),
-            ],
-        )
+        .build(&theme, vec![list.build()])
         .style(
             Style::new()
                 .width(Length::Px(width))
@@ -2841,14 +2764,6 @@ pub fn project_menu(
                 .flex_shrink(0.0),
         )
         .with_key("composer-project-menu")
-        .on_hover_change({
-            let hover = Rc::clone(&hover_surface);
-            move |hovered| {
-                if !hovered {
-                    hover.borrow().hide();
-                }
-            }
-        })
 }
 
 fn engine_icon(theme: &ArtisanTheme, engine: artisan_api::EngineId) -> AssetId {
@@ -3124,13 +3039,11 @@ fn model_list_pane(
     picker: &super::picker::PickerState,
     current: Option<&artisan_api::EngineConfig>,
     scroll: f32,
-    hover: &Rc<std::cell::RefCell<editor_ui::pop_in_hover::PopInHover>>,
     dispatch: &Dispatch,
 ) -> Element {
     use super::model_list::{GROUP_ROW_HEIGHT, ROW_GAP, SECTION_SPACER};
     use super::picker::ModelRow;
     let muted = theme.colors.text_muted;
-    let radius = model_row_radius();
     let mut rows = UiBox::new()
         .layout("column")
         .padded(MODEL_PANE_PADDING)
@@ -3228,8 +3141,6 @@ fn model_list_pane(
                 });
                 let model_id = id.clone();
                 let action = Rc::clone(dispatch);
-                let pop = Rc::clone(hover);
-                let hover_key = format!("model-{engine}-{id}");
                 let mut row = RowItem::new(
                     format!("composer-model-{engine}-{id}"),
                     theme,
@@ -3238,27 +3149,21 @@ fn model_list_pane(
                     model.name.clone(),
                 )
                 .nested(Radius::Panel.px(), MODEL_PANE_INSET)
-                .underlay(Some(hover.borrow().background(&hover_key, &theme, radius)))
-                .leading(IconSize::Md.glyph(
-                    model
-                        .lab
-                        .as_deref()
-                        .and_then(lab_icon)
-                        .unwrap_or_else(|| engine_icon(&theme, engine)),
-                    theme.colors.text.to_reference_paint(),
-                ))
+                .leading(
+                    IconSize::Md.glyph(
+                        model
+                            .lab
+                            .as_deref()
+                            .and_then(lab_icon)
+                            .unwrap_or_else(|| engine_icon(&theme, engine)),
+                        theme.colors.text.to_reference_paint(),
+                    ),
+                )
                 .on_activate(move || {
                     action(ComposerAction::ChooseModel {
                         engine,
                         id: model_id.clone(),
                     })
-                })
-                .on_hover(move |hovered| {
-                    pop.borrow().hovered(
-                        &hover_key,
-                        hovered,
-                        editor_ui::hover::HoverTone::Neutral,
-                    );
                 });
                 if chosen {
                     row = row.trailing(
@@ -3298,21 +3203,13 @@ fn model_list_pane(
         .build()
 }
 
-fn model_row_radius() -> f32 {
-    Radius::Panel
-        .inset(Inset::Menu)
-        .map_or(Radius::Row.px(), Radius::px)
-}
-
 fn model_axis_pane(
     theme: ArtisanTheme,
     axis: super::picker::Axis,
     options: &[super::picker::AxisOption],
     keyboard_cursor: Option<usize>,
-    hover: &Rc<std::cell::RefCell<editor_ui::pop_in_hover::PopInHover>>,
     dispatch: &Dispatch,
 ) -> Element {
-    let radius = model_row_radius();
     let mut rows = UiBox::new()
         .layout("column")
         .padded(MODEL_PANE_PADDING)
@@ -3355,10 +3252,8 @@ fn model_axis_pane(
                         | super::picker::Axis::Permission
                 )
         });
-        let hover_key = format!("axis-{axis:?}-{index}");
         let action = Rc::clone(dispatch);
         let pointer_action = Rc::clone(dispatch);
-        let pop = Rc::clone(hover);
         let shape = match detail {
             Some(_) => Row::ListItem(Density::Tall),
             None => Row::MenuItem,
@@ -3372,15 +3267,9 @@ fn model_axis_pane(
         )
         .role(Role::MenuItem)
         .nested(Radius::Panel.px(), MODEL_PANE_INSET)
-        .underlay(Some(hover.borrow().background(&hover_key, &theme, radius)))
         .selected(keyboard_cursor == Some(index))
         .on_activate(move || action(ComposerAction::ChooseAxis { axis, index }))
         .on_hover(move |hovered| {
-            pop.borrow().hovered(
-                &hover_key,
-                hovered,
-                editor_ui::hover::HoverTone::Neutral,
-            );
             if hovered {
                 pointer_action(ComposerAction::AxisPointer { axis, index });
             }
@@ -3411,7 +3300,6 @@ pub fn model_menu(
     current: Option<artisan_api::EngineConfig>,
     viewport: aqua_core::Size,
     frame: ModelMenuFrame,
-    hover: Rc<std::cell::RefCell<editor_ui::pop_in_hover::PopInHover>>,
     tooltip_target: (editor_core::HostInstance, u64),
     dispatch: Dispatch,
 ) -> Element {
@@ -3447,8 +3335,6 @@ pub fn model_menu(
     for (position, item) in items.iter().enumerate() {
         let target = item.pane;
         let action = Rc::clone(&dispatch);
-        let pop = Rc::clone(&hover);
-        let hover_key = format!("pane-{position}");
         let mut side = RowItem::new(
             format!("composer-pane-{position}"),
             theme,
@@ -3458,15 +3344,8 @@ pub fn model_menu(
         )
         .detail(item.label)
         .role(Role::Tab)
-        .underlay(Some(hover.borrow().background(&hover_key, &theme, pane_radius)))
-        .on_activate(move || action(ComposerAction::SelectPane(target)))
-        .on_hover(move |hovered| {
-            pop.borrow().hovered(
-                &hover_key,
-                hovered,
-                editor_ui::hover::HoverTone::Neutral,
-            );
-        });
+        .nested(pane_radius, 0.0)
+        .on_activate(move || action(ComposerAction::SelectPane(target)));
         if let Some(icon) = model_icon.filter(|_| target.is_none()) {
             side = side.leading(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()));
         }
@@ -3500,7 +3379,6 @@ pub fn model_menu(
                     picker,
                     current.as_ref(),
                     scroll,
-                    &hover,
                     &dispatch,
                 ));
         }
@@ -3521,7 +3399,6 @@ pub fn model_menu(
                 axis,
                 &options,
                 picker.keyboard_axis_cursor(),
-                &hover,
                 &dispatch,
             ));
         }

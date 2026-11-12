@@ -1,8 +1,9 @@
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::chrome::card::{POLAR_HAZE, POLAR_INK, polar_face};
 use crate::ui::chrome::limits::{EngineLimits, Limit};
-use crate::ui::chrome::menu::{Event, Highlight, Menu, Spot};
+use crate::ui::chrome::menu::{Event, Menu, Spot};
 use crate::ui::engine::engine_icon;
+use crate::ui::kit::hover::live;
 use crate::ui::kit::{Hover, Radius, Space, Surface};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua::images::ImageHandle;
@@ -30,7 +31,6 @@ const TEXT: f32 = 14.0;
 const ITEM_HEIGHT: f32 = LINE + 2.0 * ITEM_PAD_Y;
 const BADGE: f32 = 40.0;
 const BADGE_RADIUS: f32 = 10.4;
-const HEADER_HEIGHT: f32 = BADGE + 2.0 * ITEM_PAD_Y;
 const GLYPH: f32 = 16.0;
 const FALLBACK_GLYPH: f32 = 18.0;
 const CHEVRON: f32 = 12.0;
@@ -91,7 +91,6 @@ struct Palette {
     dark: bool,
     ink: Oklch,
     ink_dim: Oklch,
-    theme: ArtisanTheme,
     press: Shadow,
 }
 
@@ -102,7 +101,6 @@ impl Palette {
                 dark: true,
                 ink: WHITE,
                 ink_dim: Oklch::new(0.709, 0.0, 0.0),
-                theme: *theme,
                 press: Shadow(1.5, 1.5, 0.0, BLACK.with_alpha(0.3)),
             }
         } else {
@@ -110,7 +108,6 @@ impl Palette {
                 dark: false,
                 ink: BLACK,
                 ink_dim: Oklch::new(0.551, 0.027, 264.364),
-                theme: *theme,
                 press: Shadow(1.0, 1.5, 0.0, GRAY_900.with_alpha(0.12)),
             }
         }
@@ -129,45 +126,41 @@ pub fn trigger(theme: &ArtisanTheme, trigger: Trigger<'_>) -> Element {
     let palette = Palette::of(theme);
     let hover = Rc::clone(&trigger.emit);
     let pick = Rc::clone(&trigger.emit);
-    Aqua::Button()
-        .styles([Aqua::Style()
-            .width(pct(100.0))
-            .height(px(TRIGGER_HEIGHT))
-            .align(AlignItems::CENTER)
-            .gap(10.0)
-            .radius(px(RADIUS))
-            .padding_insets(Insets {
-                left: AVATAR_INSET,
-                right: ITEM_PAD_X,
-                ..Insets::default()
-            })])
-        .child(highlight(
-            &palette,
-            trigger.menu.highlight(Spot::Trigger),
-            trigger.now,
-            TRIGGER_HEIGHT,
-            RADIUS,
-        ))
-        .child(portrait(trigger.account, AVATAR, AVATAR / 2.0, 14.0))
-        .child(
-            Aqua::Box()
-                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0)).clip(true)])
-                .child(label(
-                    theme,
-                    trigger.account.identity.label(),
-                    palette.ink,
-                    FontWeight::NORMAL,
-                ))
-                .build(),
-        )
-        .on_activate(move || pick(Event::Pick(Spot::Trigger)))
-        .build()
-        .with_key(TRIGGER)
-        .debug_selector(TRIGGER)
-        .aria_label(trigger.account.identity.label().to_owned())
-        .aria_expanded(trigger.menu.open())
-        .cursor(CursorIcon::Pointer)
-        .on_hover_change(move |inside| hover(Event::Hover(Spot::Trigger, inside)))
+    live::track(
+        Aqua::Button()
+            .styles([Aqua::Style()
+                .width(pct(100.0))
+                .height(px(TRIGGER_HEIGHT))
+                .align(AlignItems::CENTER)
+                .gap(10.0)
+                .radius(px(RADIUS))
+                .padding_insets(Insets {
+                    left: AVATAR_INSET,
+                    right: ITEM_PAD_X,
+                    ..Insets::default()
+                })])
+            .child(live::layer(Hover::Neutral, theme, RADIUS, false))
+            .child(portrait(trigger.account, AVATAR, AVATAR / 2.0, 14.0))
+            .child(
+                Aqua::Box()
+                    .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0)).clip(true)])
+                    .child(label(
+                        theme,
+                        trigger.account.identity.label(),
+                        palette.ink,
+                        FontWeight::NORMAL,
+                    ))
+                    .build(),
+            )
+            .on_activate(move || pick(Event::Pick(Spot::Trigger)))
+            .build()
+            .with_key(TRIGGER)
+            .debug_selector(TRIGGER)
+            .aria_label(trigger.account.identity.label().to_owned())
+            .aria_expanded(trigger.menu.open())
+            .cursor(CursorIcon::Pointer)
+            .on_hover_change(move |inside| hover(Event::Hover(Spot::Trigger, inside))),
+    )
 }
 
 pub struct Sheet<'a> {
@@ -193,19 +186,7 @@ pub fn hover_style(theme: &ArtisanTheme) -> Style {
 
 pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
     let palette = Palette::of(theme);
-    let lit = |spot| sheet.menu.highlight(spot);
-    let entry = |spot, title: &str, icon| {
-        item(
-            theme,
-            &palette,
-            spot,
-            title,
-            icon,
-            lit(spot),
-            sheet.now,
-            &sheet.emit,
-        )
-    };
+    let entry = |spot, title: &str, icon| item(theme, &palette, spot, title, icon, &sheet.emit);
     let theme_icon = if palette.dark {
         AssetId::TABLER_MOON
     } else {
@@ -236,43 +217,39 @@ pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
 fn header(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Element {
     let hover = Rc::clone(&sheet.emit);
     let pick = Rc::clone(&sheet.emit);
-    Aqua::Button()
-        .styles([Aqua::Style()
-            .width(pct(100.0))
-            .align(AlignItems::CENTER)
-            .gap(12.0)
-            .padding(px(ITEM_PAD_Y))
-            .radius(px(ITEM_RADIUS))])
-        .child(highlight(
-            palette,
-            sheet.menu.highlight(Spot::Identity),
-            sheet.now,
-            HEADER_HEIGHT,
-            ITEM_RADIUS,
-        ))
-        .child(portrait(sheet.account, BADGE, BADGE_RADIUS, FALLBACK_GLYPH))
-        .child(
-            Aqua::Box()
-                .layout("column")
-                .styles([Aqua::Style()
-                    .flex_grow(1.0)
-                    .min_width(px(0.0))
-                    .clip(true)
-                    .padding_insets(Insets {
-                        right: ITEM_PAD_Y,
-                        ..Insets::default()
-                    })])
-                .children(identity_lines(theme, palette, &sheet.account.identity))
-                .build(),
-        )
-        .child(inline_glyph(CHEVRON_RIGHT, CHEVRON, palette.ink_dim))
-        .on_activate(move || pick(Event::Pick(Spot::Identity)))
-        .build()
-        .with_key("artisan-account-identity")
-        .role(Role::MenuItem)
-        .aria_label(sheet.account.identity.label().to_owned())
-        .cursor(CursorIcon::Pointer)
-        .on_hover_change(move |inside| hover(Event::Hover(Spot::Identity, inside)))
+    live::track(
+        Aqua::Button()
+            .styles([Aqua::Style()
+                .width(pct(100.0))
+                .align(AlignItems::CENTER)
+                .gap(12.0)
+                .padding(px(ITEM_PAD_Y))
+                .radius(px(ITEM_RADIUS))])
+            .child(live::layer(Hover::Neutral, theme, ITEM_RADIUS, false))
+            .child(portrait(sheet.account, BADGE, BADGE_RADIUS, FALLBACK_GLYPH))
+            .child(
+                Aqua::Box()
+                    .layout("column")
+                    .styles([Aqua::Style()
+                        .flex_grow(1.0)
+                        .min_width(px(0.0))
+                        .clip(true)
+                        .padding_insets(Insets {
+                            right: ITEM_PAD_Y,
+                            ..Insets::default()
+                        })])
+                    .children(identity_lines(theme, palette, &sheet.account.identity))
+                    .build(),
+            )
+            .child(inline_glyph(CHEVRON_RIGHT, CHEVRON, palette.ink_dim))
+            .on_activate(move || pick(Event::Pick(Spot::Identity)))
+            .build()
+            .with_key("artisan-account-identity")
+            .role(Role::MenuItem)
+            .aria_label(sheet.account.identity.label().to_owned())
+            .cursor(CursorIcon::Pointer)
+            .on_hover_change(move |inside| hover(Event::Hover(Spot::Identity, inside))),
+    )
 }
 
 fn identity_lines(theme: &ArtisanTheme, palette: &Palette, identity: &Identity) -> Vec<Element> {
@@ -285,53 +262,49 @@ fn identity_lines(theme: &ArtisanTheme, palette: &Palette, identity: &Identity) 
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one account menu item receives its presentation and event context"
-)]
 fn item(
     theme: &ArtisanTheme,
     palette: &Palette,
     spot: Spot,
     title: &str,
     icon: AssetId,
-    lit: Highlight,
-    now: Instant,
     emit: &Rc<dyn Fn(Event)>,
 ) -> Element {
     let hover = Rc::clone(emit);
     let pick = Rc::clone(emit);
-    Aqua::Button()
-        .styles([Aqua::Style()
-            .width(pct(100.0))
-            .align(AlignItems::CENTER)
-            .gap(8.0)
-            .radius(px(ITEM_RADIUS))
-            .padding_insets(Insets {
-                left: ITEM_PAD_X,
-                right: ITEM_PAD_X,
-                top: ITEM_PAD_Y,
-                bottom: ITEM_PAD_Y,
-            })])
-        .child(highlight(palette, lit, now, ITEM_HEIGHT, ITEM_RADIUS))
-        .child(
-            Aqua::Box()
-                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
-                .child(label(theme, title, palette.ink, FontWeight::NORMAL))
-                .build(),
-        )
-        .child(source_asset_glyph(
-            icon,
-            GLYPH,
-            palette.ink_dim.to_reference_paint(),
-        ))
-        .on_activate(move || pick(Event::Pick(spot)))
-        .build()
-        .with_key(format!("artisan-account-{spot:?}"))
-        .role(Role::MenuItem)
-        .aria_label(title.to_owned())
-        .cursor(CursorIcon::Pointer)
-        .on_hover_change(move |inside| hover(Event::Hover(spot, inside)))
+    live::track(
+        Aqua::Button()
+            .styles([Aqua::Style()
+                .width(pct(100.0))
+                .align(AlignItems::CENTER)
+                .gap(8.0)
+                .radius(px(ITEM_RADIUS))
+                .padding_insets(Insets {
+                    left: ITEM_PAD_X,
+                    right: ITEM_PAD_X,
+                    top: ITEM_PAD_Y,
+                    bottom: ITEM_PAD_Y,
+                })])
+            .child(live::layer(Hover::Neutral, theme, ITEM_RADIUS, false))
+            .child(
+                Aqua::Box()
+                    .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
+                    .child(label(theme, title, palette.ink, FontWeight::NORMAL))
+                    .build(),
+            )
+            .child(source_asset_glyph(
+                icon,
+                GLYPH,
+                palette.ink_dim.to_reference_paint(),
+            ))
+            .on_activate(move || pick(Event::Pick(spot)))
+            .build()
+            .with_key(format!("artisan-account-{spot:?}"))
+            .role(Role::MenuItem)
+            .aria_label(title.to_owned())
+            .cursor(CursorIcon::Pointer)
+            .on_hover_change(move |inside| hover(Event::Hover(spot, inside))),
+    )
 }
 
 fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Element {
@@ -534,10 +507,6 @@ fn portrait(account: &Account, edge: f32, radius: f32, fallback: f32) -> Element
 
 fn lease(image: &Arc<ImageHandle>) -> Arc<dyn std::any::Any + Send + Sync> {
     Arc::clone(image) as Arc<dyn std::any::Any + Send + Sync>
-}
-
-fn highlight(palette: &Palette, lit: Highlight, now: Instant, height: f32, radius: f32) -> Element {
-    Hover::Neutral.layer(&palette.theme, lit, now, height, radius)
 }
 
 fn label(theme: &ArtisanTheme, text: &str, color: Oklch, weight: FontWeight) -> Element {

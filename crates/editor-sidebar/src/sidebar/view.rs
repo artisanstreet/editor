@@ -15,7 +15,6 @@ use super::{
 };
 use editor_core::{Core, HostId, HostInstance, Screen};
 use editor_ui::{
-    hover::HoverTone,
     kit::{
         Button, ButtonTone, Density, Divider, Hover, IconSize, Row, RowItem, Space, Spaced,
         Surface, TextRole,
@@ -94,12 +93,6 @@ pub enum ViewAction {
         host: HostId,
         instance: HostInstance,
     },
-    ThreadHover {
-        thread: ThreadId,
-        bounds: aqua_core::Rect,
-        hovered: bool,
-    },
-    ClearThreadHover,
     ThreadDragStarted {
         payload: editor_core::DraggedThread,
         instance: HostInstance,
@@ -180,20 +173,6 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
             }
             return before != visible_load_state(sidebar, core);
         }
-        ViewAction::ThreadHover {
-            thread, hovered, ..
-        } => {
-            sidebar.threads_hover.hovered(
-                &format!("sidebar-thread-{thread}"),
-                *hovered,
-                editor_ui::hover::HoverTone::Neutral,
-            );
-            return false;
-        }
-        ViewAction::ClearThreadHover => {
-            sidebar.threads_hover.clear();
-            return false;
-        }
         ViewAction::ThreadDragStarted {
             payload,
             instance,
@@ -258,7 +237,6 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
                 .map(|current| (&current.id, current.instance()))
                 == Some((&host, instance))
             {
-                sidebar.menu_hover.clear();
                 sidebar.menu_generation = sidebar.menu_generation.wrapping_add(1);
                 sidebar.menu = Some(ThreadMenu { thread, position });
             }
@@ -381,18 +359,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
                 sidebar.page_at_viewport(core, true);
             }
         }
-        ViewAction::ThreadHover {
-            thread, hovered, ..
-        } => {
-            sidebar.threads_hover.hovered(
-                &format!("sidebar-thread-{thread}"),
-                hovered,
-                editor_ui::hover::HoverTone::Neutral,
-            );
-        }
-        ViewAction::ClearThreadHover => sidebar.threads_hover.clear(),
-        ViewAction::ThreadDragStarted { .. }
-        | ViewAction::ThreadDragEnded { .. } => {}
+        ViewAction::ThreadDragStarted { .. } | ViewAction::ThreadDragEnded { .. } => {}
     }
     animation_started || before != visible_state(sidebar, core)
 }
@@ -423,7 +390,6 @@ pub fn thread_menu(
     let mut content = UiBox::new()
         .layout("column")
         .style(Style::new().width(Length::Px(THREAD_MENU_WIDTH)));
-    let radius = Row::MenuItem.radius_in(Surface::Menu);
     for action in actions {
         if action == MenuAction::Archive || (action == MenuAction::Rename && row.settleable) {
             content = content.child(Divider::Rule.build(&theme, Surface::Menu.padding_px()));
@@ -463,11 +429,8 @@ pub fn thread_menu(
         let selected_instance = host.instance();
         let generation = sidebar.menu_generation;
         let selected_emit = emit.clone();
-        let hovered = sidebar.menu_hover.clone();
         let item = RowItem::new(id, theme, Row::MenuItem, Surface::Menu, label)
-            .underlay(Some(sidebar.menu_hover.layer(id, &theme, hover, radius)))
             .trailing(IconSize::Md.glyph(icon, icon_color.to_reference_paint()))
-            .on_hover(move |on| hovered.hovered(id, on, HoverTone::Neutral))
             .on_activate(move || {
                 selected_emit(ViewAction::ThreadMenuAction {
                     host: selected_host.clone(),
@@ -881,7 +844,6 @@ pub fn thread_entries_view(
     let row_entries = entries.clone();
     let row_emit = emit.clone();
     let row_host = host_id;
-    let row_hover = sidebar.threads_hover.clone();
     let renderer = Rc::new(move |index: usize, entry: &Entry, fraction: f32| {
         let content = match entry {
             Entry::Thread(data, layout) => {
@@ -898,7 +860,6 @@ pub fn thread_entries_view(
                     meta.drag,
                     row_visuals,
                     *layout,
-                    &row_hover,
                     theme,
                     row_emit.clone(),
                 )
@@ -1043,20 +1004,7 @@ pub fn build(
                     theme.colors.background,
                 ))
                 .build()
-                .with_key("sidebar-threads-hover-surface")
-                .on_input(
-                    aqua_ui::input::InputKind::PointerLeave,
-                    aqua_ui::input::EventPhase::Bubble,
-                    {
-                        let emit = emit.clone();
-                        move |event| {
-                            if event.current_target == event.target {
-                                emit(ViewAction::ClearThreadHover);
-                            }
-                            aqua_ui::input::InputResponse::default()
-                        }
-                    },
-                ),
+                .with_key("sidebar-threads-hover-surface"),
         );
         if let Some(host) = sidebar.host_data(core) {
             if host.is_live()

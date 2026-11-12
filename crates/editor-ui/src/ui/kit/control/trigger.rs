@@ -1,6 +1,6 @@
 use super::focus_ring;
 use crate::ui::asset::source_asset_glyph;
-use crate::ui::kit::hover::Hover;
+use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::tokens::{IconSize, Radius, Space, TextRole};
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::{CursorIcon, Insets, Role};
@@ -124,8 +124,13 @@ impl Trigger {
                 })
                 .radius(Length::Px(Radius::Field.px())),
         );
-        if self.open {
-            button = button.style(Hover::Neutral.style(&theme));
+        if !self.disabled {
+            button = button.child(live::layer(
+                Hover::Neutral,
+                &theme,
+                Radius::Field.px(),
+                self.open,
+            ));
         }
         match self.lead {
             Some(Lead::Glyph(icon)) => {
@@ -172,9 +177,10 @@ impl Trigger {
         if self.disabled {
             return element;
         }
-        element
-            .cursor(CursorIcon::Pointer)
-            .focus_visible_style(focus_ring(&theme))
-            .hover_style(Hover::Neutral.style(&theme))
+        live::track(
+            element
+                .cursor(CursorIcon::Pointer)
+                .focus_visible_style(focus_ring(&theme)),
+        )
     }
 }

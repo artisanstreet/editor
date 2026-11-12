@@ -1,6 +1,6 @@
 use super::focus_ring;
 use crate::ui::asset::source_asset_glyph;
-use crate::ui::kit::hover::Hover;
+use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Radius, concentric};
 use crate::ui::motion::MotionPolicy;
@@ -56,6 +56,7 @@ pub struct IconButton {
     radius: f32,
     muted: bool,
     selected: bool,
+    hover: Hover,
     disabled: bool,
     motion: MotionPolicy,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
@@ -80,6 +81,7 @@ impl IconButton {
             radius: Radius::Field.px(),
             muted: false,
             selected: false,
+            hover: Hover::Neutral,
             disabled: false,
             motion: MotionPolicy::Full,
             on_activate: None,
@@ -122,6 +124,12 @@ impl IconButton {
     #[must_use]
     pub const fn muted(mut self) -> Self {
         self.muted = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn destructive(mut self) -> Self {
+        self.hover = Hover::Destructive;
         self
     }
 
@@ -175,8 +183,8 @@ impl IconButton {
         if self.finish == Finish::Glass {
             button = button.child(Self::glass(&theme, self.radius));
         }
-        if self.selected {
-            button = button.style(Hover::Neutral.style(&theme));
+        if !self.disabled {
+            button = button.child(live::layer(self.hover, &theme, self.radius, self.selected));
         }
         button = button.child(source_asset_glyph(
             self.icon,
@@ -199,13 +207,14 @@ impl IconButton {
         if self.disabled {
             return element.aria_description("Unavailable");
         }
-        let hover = Hover::Neutral
-            .style(&theme)
-            .gpui_source_text_color(theme.colors.text.to_reference_text_color());
-        let element = element
-            .cursor(CursorIcon::Pointer)
-            .focus_visible_style(focus_ring(&theme))
-            .hover_style(hover);
+        let hover =
+            Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color());
+        let element = live::track(
+            element
+                .cursor(CursorIcon::Pointer)
+                .focus_visible_style(focus_ring(&theme))
+                .hover_style(hover),
+        );
         match self.motion {
             MotionPolicy::Full => {
                 element.pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.0)))

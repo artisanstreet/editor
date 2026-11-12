@@ -515,7 +515,7 @@ impl RootViews {
             }
             self.row_settled.borrow_mut().clear();
             self.observations.clear();
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -1505,7 +1505,7 @@ impl RootViews {
                 preview.dispose(ui);
             }
             self.drag_position = None;
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -1624,13 +1624,10 @@ impl RootViews {
     ) -> bool {
         let _tm = crate::shell::application::Tm::new("v.navigation");
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        match self.navigation.sync(
-            ui,
-            &theme,
-            std::time::Instant::now(),
-            ctx.now().as_secs_f64(),
-            reduced,
-        ) {
+        match self
+            .navigation
+            .sync(ui, &theme, std::time::Instant::now(), reduced)
+        {
             Ok(frame) => {
                 if frame.changed || frame.animating || frame.ticking {
                     ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
@@ -2524,7 +2521,7 @@ impl SectionViews for RootViews {
                 preview.dispose(ui);
             }
             self.drag_position = None;
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -2560,7 +2557,7 @@ impl SectionViews for RootViews {
                 preview.dispose(ui);
             }
             self.drag_position = None;
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -2653,7 +2650,7 @@ impl SectionViews for RootViews {
             self.replace_rows(None);
             self.stored.borrow_mut().drain_cleanup(ui);
             self.observations.clear();
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);

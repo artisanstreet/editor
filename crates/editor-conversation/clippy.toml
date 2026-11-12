@@ -74,4 +74,5 @@ disallowed-methods = [
     { path = "editor_ui::theme::Oklch::with_alpha", reason = "use the editor_ui::kit component or token instead" },
     { path = "editor_ui::theme::RadiusTokens::value", reason = "use the editor_ui::kit component or token instead" },
     { path = "editor_ui::theme::SpacingTokens::steps", reason = "use the editor_ui::kit component or token instead" },
+    { path = "aqua_ui::element::Element::hover_style", reason = "use editor_ui::kit::live::layer + live::track, or a kit component; hover style, radius and animation are shared" },
 ]

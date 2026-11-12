@@ -435,7 +435,6 @@ pub struct SelectMenu<V: Clone + Eq + 'static> {
     trigger_width: f32,
     change: Option<SelectChange<V>>,
     open_change: Option<OpenChange>,
-    hover: Rc<RefCell<super::picker_motion::HoverSurface>>,
 }
 
 impl<V: Clone + Eq + 'static> SelectMenu<V> {
@@ -454,9 +453,6 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             trigger_width,
             change: None,
             open_change: None,
-            hover: Rc::new(RefCell::new(super::picker_motion::HoverSurface::new(
-                "select-hover",
-            ))),
         }
     }
     pub fn on_change(mut self, change: impl Fn(V) + 'static) -> Self {
@@ -519,7 +515,6 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
                 entry.label.clone(),
             )
             .trailing(mark)
-            .underlay(None)
             .selected(highlighted)
             .disabled(entry.disabled)
             .role(Role::Option);
@@ -528,9 +523,7 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
                 let change = self.change.clone();
                 let open_change = self.open_change.clone();
                 let value = entry.value.clone();
-                let hover = self.hover.clone();
                 let hover_state = self.state.clone();
-                let id = index.to_string();
                 row = row
                     .on_activate(move || {
                         state.borrow_mut().set_open(false);
@@ -542,9 +535,6 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
                         }
                     })
                     .on_hover(move |hovered| {
-                        hover
-                            .borrow()
-                            .hovered(&id, hovered, super::hover::HoverTone::Neutral);
                         if hovered {
                             hover_state.borrow_mut().keyed = false;
                         }
@@ -559,8 +549,7 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
             .height(height)
             .child(rows.build())
             .build();
-        let radius = Row::MenuItem.radius_in(MENU);
-        MENU.build(&theme, vec![self.hover.borrow().pill(&theme, radius), scroll])
+        MENU.build(&theme, vec![scroll])
             .style(Style::new().width(Length::Px(self.trigger_width.max(MENU_MIN_WIDTH))))
             .role(Role::ListBox)
     }
@@ -575,9 +564,6 @@ pub struct SelectPopupHost<V: Clone + Eq + 'static> {
     scale: f32,
     from_scale: f32,
     now: f64,
-    hover: Rc<RefCell<super::picker_motion::HoverSurface>>,
-    theme: ArtisanTheme,
-    hover_changed: bool,
 }
 
 impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
@@ -594,8 +580,6 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
             state.borrow_mut().set_open(true);
         }
         let on_open_change = menu.open_change.clone();
-        let hover = menu.hover.clone();
-        let theme = menu.theme;
         let factory: Rc<dyn Fn() -> Element> = Rc::new(move || {
             SelectMenu {
                 theme: menu.theme,
@@ -605,7 +589,6 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
                 trigger_width: menu.trigger_width,
                 change: menu.change.clone(),
                 open_change: menu.open_change.clone(),
-                hover: menu.hover.clone(),
             }
             .build()
         });
@@ -629,9 +612,6 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
             scale: super::picker_motion::DROPDOWN_PRE_SCALE,
             from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
             now,
-            hover,
-            theme,
-            hover_changed: false,
         };
         host.advance(app, now)?;
         Ok(host)
@@ -649,7 +629,6 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
                 app.refresh_popup(self.overlay, (self.factory)())
                     .map_err(|error| error.to_string())?;
             }
-            self.advance_hover(app, now)?;
             return Ok(());
         };
         let closing = phase == MenuPhase::Closing;
@@ -704,29 +683,11 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
         );
         app.refresh_popup(self.overlay, element)
             .map_err(|error| error.to_string())?;
-        self.advance_hover(app, now)?;
         if settled {
             self.flight = None;
             if closing {
-                self.hover.borrow_mut().dispose(app);
                 app.close_popup(self.overlay);
             }
-        }
-        Ok(())
-    }
-
-    fn advance_hover(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), String> {
-        if let Some(root) = app.host().popup_root(self.overlay) {
-            let reduced =
-                app.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-            let frame = self.hover.borrow_mut().advance_frame(
-                app,
-                root,
-                &self.theme,
-                now,
-                reduced,
-            )?;
-            self.hover_changed |= frame.changed;
         }
         Ok(())
     }
@@ -787,18 +748,11 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
             self.advance(app, now.as_secs_f64())?;
         }
         app.drive(input);
-        let mut output = app.take_pending();
+        let output = app.take_pending();
         if self.is_open(app) {
             self.advance(app, self.now)?;
         }
-        if self.take_hover_changed() {
-            output.wake_at = Some(aqua::Instant::from_secs_f64(self.now));
-        }
         Ok(output)
-    }
-
-    pub fn take_hover_changed(&mut self) -> bool {
-        std::mem::take(&mut self.hover_changed)
     }
 
     pub fn is_open(&self, app: &aqua::UiApp) -> bool {
@@ -806,6 +760,6 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
     }
 
     pub fn is_animating(&self, _app: &aqua::UiApp) -> bool {
-        self.flight.is_some() || self.hover.borrow().is_animating()
+        self.flight.is_some()
     }
 }

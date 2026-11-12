@@ -183,7 +183,6 @@ impl<V: SectionViews> ShellApplication<V> {
     }
 
     fn advance_hover_animations(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId) {
-        let theme = self.shell.preferences.theme();
         for popup in [
             &mut self.font_popup,
             &mut self.streaming_popup,
@@ -211,81 +210,19 @@ impl<V: SectionViews> ShellApplication<V> {
                 tracing::warn!(%error, "could not advance composer popup");
             }
             owner.advance_note_ticker(self.ui.ui_mut(), ctx.now().as_secs_f64());
-            let roots = [
-                crate::composer::view::PopupKind::Model,
-                crate::composer::view::PopupKind::Project,
-            ]
-            .map(|kind| owner.popup_root(kind, self.ui.ui()));
-            match owner.advance_picker_hover(
-                self.ui.ui_mut(),
-                &theme,
-                ctx.now().as_secs_f64(),
-                roots,
-            ) {
-                Ok(true) => ctx.request_frame(id, FrameReason::ANIMATION),
-                Ok(false) => {}
-                Err(error) => tracing::warn!(%error, "could not advance composer picker hover"),
-            }
             if owner.needs_animation(self.ui.ui()) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
         }
-        let hover_surface = {
-            let ui = self.ui.ui();
-            let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
-                "sidebar-threads-hover-surface",
-            ));
-            ui.tree().sole_node_with_key(key)
-        };
-        if let (Some(surface), Some(workspace)) = (hover_surface, self.shell.entry.workspace_mut())
-        {
-            let reduced = self.ui.ui().host().motion().reduced_motion()
-                == aqua_ui::motion::ReducedMotion::Reduce;
-            match workspace.sidebar.advance_threads_hover(
-                self.ui.ui_mut(),
-                surface,
-                &theme,
-                ctx.now().as_secs_f64(),
-                reduced,
-            ) {
-                Ok(frame) if frame.changed || frame.animating => {
-                    ctx.request_frame(id, FrameReason::ANIMATION)
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "could not advance sidebar hover"),
-            }
-        }
-        let menu_surface = keyed_node(self.ui.ui(), "thread-menu-hover-surface");
-        if let (Some(surface), Some(workspace)) = (menu_surface, self.shell.entry.workspace_mut()) {
-            let reduced = self.ui.ui().host().motion().reduced_motion()
-                == aqua_ui::motion::ReducedMotion::Reduce;
-            let frame = workspace.sidebar.menu_hover.advance_frame(
-                self.ui.ui_mut(), surface, std::time::Instant::now(), reduced,
-            );
-            if frame.changed || frame.animating {
-                ctx.request_frame(id, FrameReason::ANIMATION);
-            }
-        }
-        let navigator_surface = keyed_node(self.ui.ui(), "turn-navigator-hover-surface");
-        if let (Some(surface), Some(workspace)) =
-            (navigator_surface, self.shell.entry.workspace_mut())
-        {
-            let reduced = self.ui.ui().host().motion().reduced_motion()
-                == aqua_ui::motion::ReducedMotion::Reduce;
-            match workspace.navigator.advance_hover_frame(
-                self.ui.ui_mut(),
-                surface,
-                &theme,
-                ctx.now().as_secs_f64(),
-                reduced,
-            ) {
-                Ok(frame) => {
-                    if frame.changed || frame.animating {
-                        ctx.request_frame(id, FrameReason::ANIMATION);
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "could not advance navigator hover"),
-            }
+        let reduced =
+            self.ui.ui().host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
+        let frame = editor_ui::kit::hover::live::advance(
+            self.ui.ui_mut(),
+            std::time::Instant::now(),
+            reduced,
+        );
+        if frame.changed || frame.animating {
+            ctx.request_frame(id, FrameReason::ANIMATION);
         }
     }
 
@@ -933,7 +870,6 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                             ) {
                                 tracing::warn!(%error, "could not refresh composer model popup");
                             }
-                            owner.apply_model_hover(self.ui.ui_mut());
                         }
                         Err(error) => {
                             tracing::warn!(%error, "could not build composer model popup")
@@ -1228,11 +1164,6 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     fn reactive_runtime_for(&self, id: AquaWindowId) -> Option<&aqua_reactive::Runtime> {
         self.ui.reactive_runtime_for(id)
     }
-}
-
-fn keyed_node(ui: &UiApp, key: &str) -> Option<NodeId> {
-    let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key));
-    ui.tree().sole_node_with_key(key)
 }
 
 fn close_popup(ui: &mut UiApp, slot: &mut Option<crate::ui::popover::AnimatedPickerHost>) {

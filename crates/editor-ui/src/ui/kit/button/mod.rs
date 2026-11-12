@@ -2,7 +2,7 @@ pub mod special;
 
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::chrome::card::{POLAR_INK, polar_face};
-use crate::ui::kit::hover::Hover;
+use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{Elevation, IconSize, Radius, Space, TextRole, concentric};
 use crate::ui::motion::MotionPolicy;
@@ -83,6 +83,7 @@ pub struct Button {
     radius: f32,
     ellipsis: Option<Ellipsis>,
     disabled: bool,
+    hover: Hover,
     motion: MotionPolicy,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
     debug_selector: Option<String>,
@@ -105,6 +106,7 @@ impl Button {
             radius: Radius::Field.px(),
             ellipsis: None,
             disabled: false,
+            hover: Hover::Neutral,
             motion: MotionPolicy::Full,
             on_activate: None,
             debug_selector: None,
@@ -118,6 +120,12 @@ impl Button {
         label: impl Into<String>,
     ) -> Self {
         Self::new(key, theme, tone, ButtonSize::Md, Label::Text(label.into()))
+    }
+
+    #[must_use]
+    pub const fn destructive(mut self) -> Self {
+        self.hover = Hover::Destructive;
+        self
     }
 
     #[must_use]
@@ -281,6 +289,10 @@ impl Button {
         if let Some(face) = self.face() {
             root = root.child(face);
         }
+        let fills = matches!(self.tone, ButtonTone::Neutral | ButtonTone::Quiet) && !self.disabled;
+        if fills {
+            root = root.child(live::layer(self.hover, &theme, self.radius, false));
+        }
         for child in self.content() {
             root = root.child(child);
         }
@@ -318,7 +330,7 @@ impl Button {
                 color: theme.colors.ring.at(Opacity::FocusRing).to_paint(),
             }]);
         let hover = match tone {
-            ButtonTone::Neutral | ButtonTone::Quiet => Hover::Neutral.style(&theme),
+            ButtonTone::Neutral | ButtonTone::Quiet => Style::new(),
             ButtonTone::Primary => Style::new().shadows(vec![
                 press,
                 ShadowLayer {
@@ -336,6 +348,10 @@ impl Button {
             .cursor(CursorIcon::Pointer)
             .focus_visible_style(focus)
             .hover_style(hover);
+        let element = match fills {
+            true => live::track(element),
+            false => element,
+        };
         match self.motion {
             MotionPolicy::Full => {
                 element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))

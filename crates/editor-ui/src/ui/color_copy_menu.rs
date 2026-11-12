@@ -1,12 +1,8 @@
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::Cell, rc::Rc};
 
-use aqua_core::{CursorIcon, InputEvent, Key as InputKey, NamedKey, NodeId, Role};
+use aqua_core::{InputEvent, Key as InputKey, NamedKey, NodeId, Role};
 use aqua_ui::{
-    AlignItems,
-    element::{Box as UiBox, Button, Element, Key, Text},
+    element::{Box as UiBox, Element, Key},
     overlay::OverlayId,
     style::{Axis, Length, Style},
     tree::hash_key,
@@ -15,15 +11,11 @@ use editor_assets::AssetId;
 
 use super::{
     asset::source_asset_glyph,
-    hover::HoverTone,
-    kit::{Divider, IconSize, Radius, Row, Space, Surface, TextRole},
-    picker_motion::HoverSurface,
+    kit::{Divider, IconSize, Row, RowItem, Surface},
     popover::{AnimatedPickerHost, Popover},
     rich::actions::{CopyKind, ShowCopyMenu},
     theme::ArtisanTheme,
 };
-
-const ROW_RADIUS: f32 = Radius::Row.px();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColorCopyEffect {
@@ -36,13 +28,10 @@ pub struct ColorCopyMenuHost {
     overlay: OverlayId,
     pending_close: Rc<Cell<bool>>,
     alive: Rc<Cell<bool>>,
-    hover: Rc<RefCell<HoverSurface>>,
     popup: AnimatedPickerHost,
     now: f64,
     effect: Rc<dyn Fn(ColorCopyEffect)>,
-    theme: ArtisanTheme,
     entries: usize,
-    reduced_motion: bool,
 }
 
 impl ColorCopyMenuHost {
@@ -61,10 +50,8 @@ impl ColorCopyMenuHost {
         let effect: Rc<dyn Fn(ColorCopyEffect)> = Rc::new(effect);
         let alive = Rc::new(Cell::new(true));
         let pending_close = Rc::new(Cell::new(false));
-        let hover = Rc::new(RefCell::new(HoverSurface::new("copy-menu-hover")));
-        let mut rows = UiBox::new()
-            .style(Style::new().axis(Axis::Column).min_width(Length::Px(160.0)))
-            .child(hover.borrow().pill(&theme, ROW_RADIUS));
+        let mut rows =
+            UiBox::new().style(Style::new().axis(Axis::Column).min_width(Length::Px(160.0)));
         let entries = menu.entries.len();
         for (index, entry) in menu.entries.iter().enumerate() {
             let primary = entry.kind == CopyKind::Primary;
@@ -83,33 +70,15 @@ impl ColorCopyMenuHost {
                     theme.colors.text_muted.to_reference_paint(),
                 ));
             }
-            let label = Text::new(entry.label.clone())
-                .text_style(TextRole::Label.style(&theme))
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .build();
             let text = entry.text.clone();
             let select_alive = alive.clone();
             let select_pending = pending_close.clone();
             let select_effect = effect.clone();
-            let hover_state = hover.clone();
             let hover_alive = alive.clone();
             let hover_effect = effect.clone();
-            let hover_id = id.clone();
-            let row = Button::new()
-                .style(
-                    Style::new()
-                        .align(AlignItems::CENTER)
-                        .gap(Space::S8.px())
-                        .padding_insets(aqua_core::Insets {
-                            left: Row::MenuItem.pad().x.px(),
-                            right: Row::MenuItem.pad().x.px(),
-                            top: Row::MenuItem.pad().y.px(),
-                            bottom: Row::MenuItem.pad().y.px(),
-                        })
-                        .radius(Length::Px(ROW_RADIUS)),
-                )
-                .child(icon.build())
-                .child(label)
+            let row = RowItem::new(id, theme, Row::MenuItem, Surface::Menu, entry.label.clone())
+                .leading(icon.build())
+                .role(Role::MenuItem)
                 .on_activate(move || {
                     if select_alive.get() && !select_pending.get() {
                         select_effect(ColorCopyEffect::Clipboard(text.clone()));
@@ -117,20 +86,13 @@ impl ColorCopyMenuHost {
                         select_effect(ColorCopyEffect::RequestFrame);
                     }
                 })
-                .build()
-                .with_key(id)
-                .role(Role::MenuItem)
-                .aria_label(entry.label.clone())
-                .focusable(true)
-                .cursor(CursorIcon::Pointer)
-                .on_hover_change(move |hovered| {
+                .on_hover(move |_| {
                     if hover_alive.get() {
-                        hover_state
-                            .borrow()
-                            .hovered(&hover_id, hovered, HoverTone::Neutral);
                         hover_effect(ColorCopyEffect::RequestFrame);
                     }
-                });
+                })
+                .build()
+                .focusable(true);
             rows = rows.child(row);
         }
         let rows = rows.build().with_key("copy-menu-rows");
@@ -167,13 +129,10 @@ impl ColorCopyMenuHost {
             overlay,
             pending_close,
             alive,
-            hover,
             popup,
             now,
             effect,
-            theme,
             entries,
-            reduced_motion,
         };
         host.advance(app, now)?;
         Ok(Some(host))
@@ -188,7 +147,6 @@ impl ColorCopyMenuHost {
     }
 
     pub fn dispose(self, app: &mut aqua::UiApp) {
-        self.hover.borrow_mut().dispose(app);
         self.popup.dispose(app);
         self.alive.set(false);
     }
@@ -196,9 +154,6 @@ impl ColorCopyMenuHost {
     pub fn sync(&mut self, app: &mut aqua::UiApp) {
         if self.pending_close.replace(false) && self.is_open(app) {
             let _ = self.popup.begin_close(app, self.now);
-        }
-        if !self.is_open(app) {
-            self.hover.borrow_mut().dispose(app);
         }
     }
 
@@ -260,28 +215,7 @@ impl ColorCopyMenuHost {
         if self.popup.is_open(app) {
             self.popup.advance(app, now)?;
         }
-        let Some(root) = self.root(app) else {
-            return Ok(false);
-        };
-        let animating = self.popup.is_animating(app);
-        let rows_key = hash_key(Key::from("copy-menu-rows"));
-        let mut stack = vec![root];
-        while let Some(node) = stack.pop() {
-            if let Some(record) = app.tree().get(node) {
-                stack.extend(record.children.iter().copied());
-                if record.key == Some(rows_key) {
-                    let frame = self.hover.borrow_mut().advance_frame(
-                        app,
-                        node,
-                        &self.theme,
-                        now,
-                        self.reduced_motion,
-                    )?;
-                    return Ok(animating || frame.changed || frame.animating);
-                }
-            }
-        }
-        Ok(animating)
+        Ok(self.root(app).is_some() && self.popup.is_animating(app))
     }
 }
 

@@ -29,6 +29,7 @@ const BANNED: &[&str] = &[
     "RadiusStep::",
     "ShadowLayer {",
     "GpuiShadowLayer {",
+    ".hover_style(",
 ];
 
 fn violations(source: &str) -> Vec<String> {

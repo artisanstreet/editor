@@ -1,4 +1,4 @@
-use crate::ui::kit::hover::{Highlight, Hover};
+use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Space, TextRole, concentric};
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
@@ -7,7 +7,6 @@ use aqua_text::overflow::OverflowMode;
 use aqua_ui::AlignItems;
 use aqua_ui::element::{Box as UiBox, Button, Element, Key, Text};
 use aqua_ui::style::{Length, Style};
-use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Density {
@@ -110,13 +109,12 @@ pub struct RowItem {
     row: Row,
     radius: f32,
     hover: Hover,
+    face: Option<Element>,
     leading: Option<Element>,
     title: String,
     detail: Option<String>,
     body: Option<Element>,
     trailing: Option<Element>,
-    lit: Option<(Highlight, Instant)>,
-    underlay: Option<Option<Element>>,
     selected: bool,
     disabled: bool,
     role: Role,
@@ -138,13 +136,12 @@ impl RowItem {
             row,
             radius: row.radius_in(surface),
             hover: Hover::Neutral,
+            face: None,
             leading: None,
             title: title.into(),
             detail: None,
             body: None,
             trailing: None,
-            lit: None,
-            underlay: None,
             selected: false,
             disabled: false,
             role: match row {
@@ -169,6 +166,12 @@ impl RowItem {
     }
 
     #[must_use]
+    pub fn face(mut self, face: Element) -> Self {
+        self.face = Some(face);
+        self
+    }
+
+    #[must_use]
     pub fn leading(mut self, element: Element) -> Self {
         self.leading = Some(element);
         self
@@ -189,18 +192,6 @@ impl RowItem {
     #[must_use]
     pub fn trailing(mut self, element: Element) -> Self {
         self.trailing = Some(element);
-        self
-    }
-
-    #[must_use]
-    pub const fn lit(mut self, highlight: Highlight, now: Instant) -> Self {
-        self.lit = Some((highlight, now));
-        self
-    }
-
-    #[must_use]
-    pub fn underlay(mut self, layer: Option<Element>) -> Self {
-        self.underlay = Some(layer);
         self
     }
 
@@ -340,35 +331,18 @@ impl RowItem {
         if !self.row.interactive() {
             return self.build_static();
         }
-        let height = self.row.height();
         let mut button = Button::new().gap(self.row.gap().px()).style(self.style());
-        let external = self.underlay.take();
-        let driven = external.is_some();
-        if let Some(Some(layer)) = external {
-            button = button.child(layer);
+        if let Some(face) = self.face.take() {
+            button = button.child(face);
         }
-        let lit = self.lit.filter(|_| !driven);
-        button = match (lit, self.selected) {
-            (Some((lit, now)), _) => button.child(self.hover.layer(
+        if !self.disabled {
+            button = button.child(live::layer(
+                self.hover,
                 &self.theme,
-                lit,
-                now,
-                height.unwrap_or_default(),
                 self.radius,
-            )),
-            (None, true) => button.child(
-                UiBox::new()
-                    .style(self.hover.style(&self.theme))
-                    .style(
-                        Style::new()
-                            .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                            .radius(Length::Px(self.radius)),
-                    )
-                    .build()
-                    .exclude_from_hit_testing(),
-            ),
-            (None, false) => button,
-        };
+                self.selected,
+            ));
+        }
         if let Some(leading) = self.leading.take() {
             button = button.child(Self::leading_slot(leading));
         }
@@ -390,12 +364,9 @@ impl RowItem {
             .role(self.role)
             .aria_selected(self.selected)
             .focusable(!self.disabled);
-        let element = match (self.lit.is_some() || driven, self.disabled) {
-            (_, true) => element,
-            (true, false) => element.cursor(CursorIcon::Pointer),
-            (false, false) => element
-                .cursor(CursorIcon::Pointer)
-                .hover_style(self.hover.style(&self.theme)),
+        let element = match self.disabled {
+            true => element,
+            false => live::track(element.cursor(CursorIcon::Pointer)),
         };
         match self.on_hover {
             Some(handler) => element.on_hover_change(handler),

@@ -18,7 +18,7 @@ use editor_assets::AssetId;
 
 use super::{Change, FileTree, Model, Row, RowKind};
 use crate::ui::{
-    kit::{self, Density, Hover, IconSize, Space, Spaced, Surface, TextRole},
+    kit::{self, Density, Hover, IconSize, Space, Spaced, Surface, TextRole, live},
     rich::actions::{OpenReference, ResourceScope},
     theme::{ArtisanTheme, Oklch},
 };
@@ -312,6 +312,12 @@ fn row(
                 .min_width(Length::Px(0.0))
                 .border_of(1.0, aqua_core::Oklch::TRANSPARENT),
         )
+        .child(live::layer(
+            Hover::Neutral,
+            theme,
+            ROW.radius_in(Surface::Card),
+            false,
+        ))
         .child(
             UiBox::new()
                 .width(indent)
@@ -370,8 +376,7 @@ fn row(
     let click = emit.clone();
     let accessibility = emit.clone();
     let key_emit = emit;
-    let mut element = content
-        .build()
+    let mut element = live::track(content.build())
         .with_key(node_id(id, index, row, &tree.0))
         .role(Role::TreeItem)
         .aria_label(accessible)
@@ -379,7 +384,6 @@ fn row(
         .on_accessibility_activate(move || accessibility(Action::Activate(index)))
         .focusable(true)
         .cursor(CursorIcon::Pointer)
-        .hover_style(Hover::Neutral.style(theme))
         .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
             if let RoutedInput::Native(InputEvent::PointerDown(pointer, PointerButton::Primary)) =
                 &event.input

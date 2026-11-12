@@ -1,6 +1,6 @@
 use super::{
     asset::source_asset_glyph,
-    kit::{self, Hover, Radius},
+    kit::{self, Hover, Radius, live},
     motion::MotionPolicy,
     theme::{ArtisanTheme, Opacity, RadiusTokens},
 };
@@ -232,9 +232,12 @@ impl Button {
         if icon_only {
             root = root.width(height);
         }
+        let radius = self.radius.unwrap_or(Radius::Field.px());
         if self.glass {
-            let radius = self.radius.unwrap_or(Radius::Field.px());
             root = root.child(crate::ui::kit::surface::glass::paint(&t, radius));
+        }
+        if !self.disabled {
+            root = root.child(live::layer(Hover::Neutral, &t, radius, false));
         }
         let make_text = |text: String| {
             let text = Text::new(text).text_style(TextStyle {
@@ -324,13 +327,13 @@ impl Button {
                     inset: false,
                     color: t.colors.ring.at(Opacity::FocusRing).to_paint(),
                 }]);
-            let hover_style = Hover::Neutral.style(&t);
-            let hover_style = if self.muted {
-                hover_style.gpui_source_text_color(t.colors.text.to_reference_text_color())
-            } else {
-                hover_style
+            let hover_style = match self.muted {
+                true => {
+                    Style::new().gpui_source_text_color(t.colors.text.to_reference_text_color())
+                }
+                false => Style::new(),
             };
-            let element = element
+            let element = live::track(element)
                 .cursor(CursorIcon::Pointer)
                 .focus_visible_style(focus)
                 .hover_style(hover_style);

@@ -142,16 +142,6 @@ pub fn view(
         .child(column.build().with_key("sidebar-threads-hover-surface"))
         .build()
         .with_key(view::ROOT_KEY)
-        .on_input(
-            aqua_ui::input::InputKind::PointerLeave,
-            aqua_ui::input::EventPhase::Bubble,
-            move |event| {
-                if event.current_target == event.target {
-                    emit(ViewAction::ClearThreadHover);
-                }
-                aqua_ui::input::InputResponse::default()
-            },
-        )
 }
 
 pub fn history_height(viewport: f32, inbox: f32, history: f32, fraction: f32) -> f32 {

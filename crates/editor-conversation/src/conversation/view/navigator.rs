@@ -1,14 +1,14 @@
 use super::Dispatch;
 use crate::conversation::adapter::Action;
 use crate::conversation::navigator::tick_indices;
-use editor_ui::motion::{MotionCurve, MotionDuration};
-use editor_ui::kit::{HitArea, Row, RowItem, Space, Spaced, Surface};
-use editor_ui::theme::ArtisanTheme;
 use aqua_core::Role;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use artisan_api::{ItemId, OutlineEntry, Seq};
+use editor_ui::kit::{HitArea, Row, RowItem, Space, Spaced, Surface};
+use editor_ui::motion::{MotionCurve, MotionDuration};
+use editor_ui::theme::ArtisanTheme;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
@@ -85,7 +85,6 @@ pub struct Navigator {
     built: Option<BuiltRail>,
     had_active: bool,
     ticks: HashMap<ItemId, (bool, Option<Instant>)>,
-    pub hover: editor_ui::picker_motion::HoverSurface,
 }
 
 impl Default for Navigator {
@@ -94,52 +93,11 @@ impl Default for Navigator {
             built: None,
             had_active: false,
             ticks: HashMap::new(),
-            hover: editor_ui::picker_motion::HoverSurface::new("turn-navigator-hover"),
         }
     }
 }
 
 impl Navigator {
-    pub fn hovered(&self, id: &ItemId) {
-        self.hover.hovered(
-            &format!("navigator-row-hit-{id}"),
-            true,
-            editor_ui::hover::HoverTone::Neutral,
-        );
-    }
-
-    pub fn clear_hover(&self) {
-        self.hover.clear();
-    }
-
-    pub fn advance_hover(
-        &mut self,
-        app: &mut aqua::UiApp,
-        surface: aqua_core::NodeId,
-        theme: &ArtisanTheme,
-        now: f64,
-        reduced_motion: bool,
-    ) -> Result<bool, String> {
-        let frame = self.advance_hover_frame(app, surface, theme, now, reduced_motion)?;
-        Ok(frame.changed || frame.animating)
-    }
-
-    pub fn advance_hover_frame(
-        &mut self,
-        app: &mut aqua::UiApp,
-        surface: aqua_core::NodeId,
-        theme: &ArtisanTheme,
-        now: f64,
-        reduced_motion: bool,
-    ) -> Result<editor_ui::picker_motion::HoverFrame, String> {
-        self.hover
-            .advance_frame(app, surface, theme, now, reduced_motion)
-    }
-
-    pub fn dispose(&mut self, app: &mut aqua::UiApp) {
-        self.hover.dispose(app);
-    }
-
     pub fn advance_ticks(
         &mut self,
         app: &mut aqua::UiApp,
@@ -295,14 +253,11 @@ pub fn menu(
     max_height: f32,
     theme: ArtisanTheme,
     entrance: f32,
-    hover_surface: &editor_ui::picker_motion::HoverSurface,
     label: Rc<dyn Fn(&str, bool, ArtisanTheme) -> Element>,
-    hover: Rc<dyn Fn(ItemId)>,
     dispatch: Dispatch,
 ) -> Element {
     use aqua_core::Transform2D;
     use aqua_ui::collection::List;
-    use aqua_ui::input::{EventPhase, InputKind, InputResponse};
 
     let pitch = MENU_ROW.height().unwrap_or_default();
     let height = ((markers.len() as f32) * pitch)
@@ -312,8 +267,6 @@ pub fn menu(
         .key(|marker: &OutlineEntry| format!("navigator-row-{}", marker.id))
         .row(move |marker: &OutlineEntry| {
             let selected = active == Some(marker.position);
-            let id = marker.id.clone();
-            let on_move = Rc::clone(&hover);
             let position = marker.position;
             let callback = Rc::clone(&dispatch);
             RowItem::new(
@@ -324,13 +277,8 @@ pub fn menu(
                 marker.label.clone(),
             )
             .body(label(&marker.label, selected, theme))
-            .underlay(None)
             .on_activate(move || callback(Action::Jump(position)))
             .build()
-            .on_input(InputKind::PointerMove, EventPhase::Bubble, move |_| {
-                on_move(id.clone());
-                InputResponse::default()
-            })
         })
         .virtualize()
         .estimated_row_height(Length::Px(pitch))
@@ -342,21 +290,18 @@ pub fn menu(
         .build()
         .with_key("turn-navigator-list");
     let progress = entrance.clamp(0.0, 1.0);
-    MENU.build(
-        &theme,
-        vec![
-            hover_surface.pill(&theme, MENU_ROW.radius_in(MENU)),
-            list,
-        ],
-    )
-    .style(
-        Style::new()
-            .width(Length::Px(MENU_WIDTH))
-            .min_width(Length::Pct(0.0))
-            .opacity(progress)
-            .transform(Transform2D::translate(ENTRANCE_SHIFT.px() * (1.0 - progress), 0.0)),
-    )
-    .with_key("turn-navigator-hover-surface")
+    MENU.build(&theme, vec![list])
+        .style(
+            Style::new()
+                .width(Length::Px(MENU_WIDTH))
+                .min_width(Length::Pct(0.0))
+                .opacity(progress)
+                .transform(Transform2D::translate(
+                    ENTRANCE_SHIFT.px() * (1.0 - progress),
+                    0.0,
+                )),
+        )
+        .with_key("turn-navigator-hover-surface")
 }
 
 pub fn menu_scroll_offset(active: usize, count: usize, viewport_height: f32) -> f32 {

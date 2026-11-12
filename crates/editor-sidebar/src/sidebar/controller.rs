@@ -43,7 +43,6 @@ pub struct Sidebar {
     motion_live: bool,
     pub rail_motion: super::rail::RailMotion,
     pub settings_motion: super::settings_nav::NavMotion,
-    pub threads_hover: editor_ui::pop_in_hover::PopInHover,
     pub threads_edges: editor_ui::scroll_edge::ScrollEdges,
     working_pulses: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<ThreadId, editor_ui::motion::WorkingPulse>>,
@@ -52,7 +51,6 @@ pub struct Sidebar {
     pub error: Option<String>,
     pub menu: Option<ThreadMenu>,
     pub menu_generation: u64,
-    pub menu_hover: editor_ui::pop_in_hover::PopInHover,
     pub rename: Option<ThreadId>,
     pub rename_generation: u64,
     pub(super) drag: Option<(HostId, HostInstance, ThreadId)>,
@@ -66,8 +64,6 @@ pub struct Sidebar {
     completions: Delivery<Completion>,
     workspace_background: bool,
 }
-
-pub use editor_ui::picker_motion::HoverFrame;
 
 #[derive(Clone, Debug)]
 pub enum SidebarEffect {
@@ -140,22 +136,6 @@ impl Sidebar {
                 row, image, host,
             )
         })
-    }
-
-    pub fn advance_threads_hover(
-        &mut self,
-        app: &mut aqua::UiApp,
-        surface: aqua_core::NodeId,
-        _theme: &editor_ui::theme::ArtisanTheme,
-        _now: f64,
-        reduced_motion: bool,
-    ) -> Result<HoverFrame, String> {
-        Ok(self.threads_hover.advance_frame(
-            app,
-            surface,
-            std::time::Instant::now(),
-            reduced_motion,
-        ))
     }
 
     #[cfg(feature = "test-support")]
@@ -234,14 +214,12 @@ impl Sidebar {
             motion_live: false,
             rail_motion: super::rail::RailMotion::default(),
             settings_motion: super::settings_nav::NavMotion::default(),
-            threads_hover: editor_ui::pop_in_hover::PopInHover::new("sidebar-threads-hover"),
             threads_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             working_pulses: std::rc::Rc::default(),
             thread_viewport: None,
             error: None,
             menu: None,
             menu_generation: 0,
-            menu_hover: editor_ui::pop_in_hover::PopInHover::new("thread-menu-hover"),
             rename: None,
             rename_generation: 0,
             drag: None,
@@ -328,7 +306,6 @@ impl Sidebar {
             if self.drag.take().is_some() {
                 self.effects.push(SidebarEffect::HideDragPreview);
             }
-            self.threads_hover.clear();
             self.working_pulses.borrow_mut().clear();
             self.menu = None;
             self.rename = None;

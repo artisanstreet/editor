@@ -15,7 +15,7 @@ use editor_assets::AssetId;
 use super::visual::{BodyTone, LeafError, LinkAction, interactive_leaf, raw_leaf};
 use super::{Block, CodeFence, MarkdownDocument, MarkdownEngine, MarkdownError};
 use crate::ui::kit::{
-    Button, ButtonSize, ButtonTone, Hover, Label, Radius, Space, Spaced, TextRole,
+    Button, ButtonSize, ButtonTone, Hover, Label, Radius, Space, Spaced, TextRole, live,
 };
 use crate::ui::rich::charts::{
     self,
@@ -2969,7 +2969,7 @@ fn legend_toggle(
         true => theme.colors.text_muted,
         false => theme.colors.text,
     };
-    ui::Button::new()
+    let element = ui::Button::new()
         .gap(Space::S6.px())
         .style(
             Radius::Field
@@ -2978,6 +2978,12 @@ fn legend_toggle(
                 .align(aqua_ui::AlignItems::CENTER)
                 .flex_shrink(0.0),
         )
+        .child(live::layer(
+            Hover::Neutral,
+            theme,
+            Radius::Field.px(),
+            false,
+        ))
         .child(swatch)
         .child(
             TextRole::Caption
@@ -2993,6 +2999,6 @@ fn legend_toggle(
         .aria_label(name)
         .aria_selected(!hidden)
         .focusable(true)
-        .cursor(aqua_core::CursorIcon::Pointer)
-        .hover_style(Hover::Neutral.style(theme))
+        .cursor(aqua_core::CursorIcon::Pointer);
+    live::track(element)
 }

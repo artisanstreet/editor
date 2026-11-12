@@ -301,9 +301,6 @@ impl Entry {
         if self.workspace.as_ref().map(|(account, _)| account) != ready {
             if let Some((_, workspace)) = &mut self.workspace {
                 workspace.dispose_composer_popups(ui);
-                workspace.sidebar.threads_hover.dispose(ui);
-                workspace.settings_sidebar.threads_hover.dispose(ui);
-                workspace.navigator.dispose(ui);
                 workspace.conversation_selection.clear(ui);
                 workspace.markdown.borrow_mut().rebind(ui, None);
                 workspace.dispose_terminal_dialog(ui);
