@@ -1,7 +1,7 @@
 use crate::ui::kit::hover::{Highlight, Hover};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Space, TextRole, concentric};
-use crate::ui::theme::{ArtisanTheme, Opacity};
+use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
 use aqua_core::{CursorIcon, Insets, Role};
 use aqua_text::overflow::OverflowMode;
 use aqua_ui::AlignItems;
@@ -111,6 +111,7 @@ pub struct RowItem {
     leading: Option<Element>,
     title: String,
     detail: Option<String>,
+    body: Option<Element>,
     trailing: Option<Element>,
     lit: Option<(Highlight, Instant)>,
     underlay: Option<Option<Element>>,
@@ -138,6 +139,7 @@ impl RowItem {
             leading: None,
             title: title.into(),
             detail: None,
+            body: None,
             trailing: None,
             lit: None,
             underlay: None,
@@ -173,6 +175,12 @@ impl RowItem {
     #[must_use]
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    #[must_use]
+    pub fn body(mut self, element: Element) -> Self {
+        self.body = Some(element);
         self
     }
 
@@ -224,12 +232,7 @@ impl RowItem {
         self
     }
 
-    fn text(theme: &ArtisanTheme, words: String, role: TextRole, muted: bool, wraps: bool) -> Element {
-        let color = if muted {
-            theme.colors.text_muted
-        } else {
-            theme.colors.text
-        };
+    fn text(theme: &ArtisanTheme, words: String, role: TextRole, color: Oklch, wraps: bool) -> Element {
         let text = Text::new(words)
             .text_style(role.style(theme))
             .gpui_source_color(color.to_reference_text_color());
@@ -270,22 +273,39 @@ impl RowItem {
             .build()
     }
 
-    fn label(&self) -> Element {
+    fn ink(&self) -> Oklch {
+        match (self.row, self.hover) {
+            (Row::Heading, _) => self.theme.colors.text_muted,
+            (_, Hover::Destructive) => self.theme.colors.destructive_text,
+            (_, Hover::Neutral) => self.theme.colors.text,
+        }
+    }
+
+    fn label(&mut self) -> Element {
+        let grow = Style::new().flex_grow(1.0).min_width(Length::Px(0.0));
+        if let Some(body) = self.body.take() {
+            return UiBox::new().style(grow).child(body).build();
+        }
         let wraps = self.row.wraps();
         let title = Self::text(
             &self.theme,
             self.title.clone(),
             self.row.title(),
-            self.row == Row::Heading,
+            self.ink(),
             wraps,
         );
-        let grow = Style::new().flex_grow(1.0).min_width(Length::Px(0.0));
         match self.detail.clone() {
             Some(detail) => UiBox::new()
                 .layout("column")
                 .style(grow)
                 .child(title)
-                .child(Self::text(&self.theme, detail, TextRole::Caption, true, wraps))
+                .child(Self::text(
+                    &self.theme,
+                    detail,
+                    TextRole::Caption,
+                    self.theme.colors.text_muted,
+                    wraps,
+                ))
                 .build(),
             None => UiBox::new().style(grow).child(title).build(),
         }
