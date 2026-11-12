@@ -31,6 +31,7 @@ pub use commands::normalize_command;
 pub use compaction::{COMPACTION_NUDGE, compaction_prompt, is_compaction_summary};
 #[cfg(feature = "legacy-import")]
 pub use customise::import_legacy_extensions;
+pub use engines::host_entry;
 pub use customise::{
     ARTISAN_MCP, COMPUTER_MCP, Customisation, McpServer, PromptApplied, PromptFile, adopt_skill,
     apply_prompt, discard_skill, enabled_skills, inspect_prompt, install_skill, materialize,

@@ -326,6 +326,11 @@ pub fn host_spec(engine: EngineId) -> Spec {
     spec(engine, Platform::current())
 }
 
+#[must_use]
+pub fn host_entry(engine: EngineId) -> Option<&'static str> {
+    host_spec(engine).artifact.map(|artifact| artifact.entry)
+}
+
 /// SemVer precedence, with OpenCode's `beta-N` builds ordered by number.
 pub fn compare_versions(left: &str, right: &str) -> Ordering {
     let parse = |value: &str| {

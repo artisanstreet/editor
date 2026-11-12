@@ -150,34 +150,7 @@ fn install_fake(data: &std::path::Path, engine: EngineId) {
         "1.0.0"
     };
     let version_dir = engine_dir.join("versions").join(version);
-    let entry = if engine == EngineId::Codex {
-        let architecture = if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "x86_64"
-        };
-        let platform = if cfg!(target_os = "windows") {
-            "pc-windows-msvc"
-        } else if cfg!(target_os = "macos") {
-            "apple-darwin"
-        } else {
-            "unknown-linux-musl"
-        };
-        let executable = if cfg!(target_os = "windows") {
-            "codex.exe"
-        } else {
-            "codex"
-        };
-        version_dir.join(format!("vendor/{architecture}-{platform}/bin/{executable}"))
-    } else if engine == EngineId::OpenCode {
-        version_dir.join(if cfg!(windows) {
-            "bin/opencode.exe"
-        } else {
-            "bin/opencode"
-        })
-    } else {
-        version_dir.join(engine.to_string())
-    };
+    let entry = version_dir.join(forge_engines::host_entry(engine).unwrap());
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     std::fs::write(entry, "").unwrap();
     std::fs::write(engine_dir.join("current"), version).unwrap();
