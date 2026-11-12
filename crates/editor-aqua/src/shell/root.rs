@@ -70,8 +70,13 @@ struct AppMedia {
     scale: f32,
 }
 
+enum PreviewOrigin {
+    Conversation(crate::conversation::presentation::PresentationScope),
+    Composer,
+}
+
 struct ImagePreview {
-    scope: crate::conversation::presentation::PresentationScope,
+    origin: PreviewOrigin,
     owner: Option<std::sync::Arc<[u64]>>,
     view: crate::ui::media::preview::Preview,
     focus_pending: bool,
@@ -386,6 +391,66 @@ impl RootViews {
         changed
     }
 
+    fn image_preview_stale(&self, shell: &Shell) -> bool {
+        self.image_preview
+            .as_ref()
+            .is_some_and(|preview| match &preview.origin {
+                PreviewOrigin::Conversation(scope) => {
+                    !matches!(shell.core.screen(), Screen::Thread { .. })
+                        || !shell.entry.workspace().is_some_and(|workspace| {
+                            scope.current(&workspace.conversation, &shell.core)
+                        })
+                }
+                PreviewOrigin::Composer => {
+                    !matches!(
+                        shell.core.screen(),
+                        Screen::Thread { .. } | Screen::NewThread { .. }
+                    ) || !preview.view.is_live(&shell.core)
+                }
+            })
+    }
+
+    fn open_composer_image(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
+        use crate::composer::view::ComposerEffect;
+        let Some(workspace) = shell.entry.workspace_mut() else {
+            return false;
+        };
+        let opened = workspace
+            .take_composer_effects()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                ComposerEffect::OpenImage(key) => workspace.composer_image(key),
+                ComposerEffect::EditorChanged
+                | ComposerEffect::FocusEditor
+                | ComposerEffect::NewProject
+                | ComposerEffect::OpenQuestionSource(_)
+                | ComposerEffect::RetryQuestionPage
+                | ComposerEffect::CloseNote
+                | ComposerEffect::RetryThreadSettings => None,
+            })
+            .last();
+        let Some((host, instance, image, opener_key)) = opened else {
+            return false;
+        };
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        let view = crate::ui::media::preview::Preview::from_ready(
+            self.preview_generation,
+            host,
+            instance,
+            image,
+            opener_key,
+            std::time::Instant::now(),
+        );
+        self.dispose_color_menu(ui);
+        self.image_preview = Some(ImagePreview {
+            origin: PreviewOrigin::Composer,
+            owner: None,
+            view,
+            focus_pending: true,
+        });
+        true
+    }
+
     fn close_image_preview(&mut self, ui: &mut UiApp, restore_focus: bool) {
         if let Some(preview) = self.image_preview.take() {
             if restore_focus {
@@ -442,12 +507,7 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        if self.image_preview.as_ref().is_some_and(|preview| {
-            !matches!(shell.core.screen(), Screen::Thread { .. })
-                || !shell.entry.workspace().is_some_and(|workspace| {
-                    preview.scope.current(&workspace.conversation, &shell.core)
-                })
-        }) {
+        if self.image_preview_stale(shell) {
             self.close_image_preview(ui, false);
             return true;
         }
@@ -1073,7 +1133,7 @@ impl RootViews {
                 );
                 self.dispose_color_menu(ui);
                 self.image_preview = Some(ImagePreview {
-                    scope,
+                    origin: PreviewOrigin::Conversation(scope),
                     owner: None,
                     view,
                     focus_pending: true,
@@ -1199,7 +1259,7 @@ impl RootViews {
                             ) {
                                 self.dispose_color_menu(ui);
                                 self.image_preview = Some(ImagePreview {
-                                    scope,
+                                    origin: PreviewOrigin::Conversation(scope),
                                     owner: Some(owner),
                                     view,
                                     focus_pending: true,
@@ -2399,6 +2459,10 @@ impl SectionViews for RootViews {
         self.wheel.active()
     }
 
+    fn open_composer_images(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
+        self.open_composer_image(shell, ui)
+    }
+
     fn take_events(
         &mut self,
         shell: &mut Shell,
@@ -2517,12 +2581,7 @@ impl SectionViews for RootViews {
     ) -> anyhow::Result<Element> {
         let theme = shell.preferences.theme();
         let account = self.account(shell);
-        if self.image_preview.as_ref().is_some_and(|preview| {
-            !matches!(shell.core.screen(), Screen::Thread { .. })
-                || !shell.entry.workspace().is_some_and(|workspace| {
-                    preview.scope.current(&workspace.conversation, &shell.core)
-                })
-        }) {
+        if self.image_preview_stale(shell) {
             self.close_image_preview(ui, false);
         }
         if self.color_scope.as_ref().is_some_and(|scope| {
@@ -3305,7 +3364,8 @@ impl SectionViews for RootViews {
             self.navigation_invalidated.set(true);
         }
         if let InputEvent::Scroll { at, delta } = input {
-            if (delta.x != 0.0 || delta.y != 0.0)
+            if self.image_preview.is_none()
+                && (delta.x != 0.0 || delta.y != 0.0)
                 && crate::shell::wheel::keyed_node(ui, "conversation-transcript")
                     .and_then(|node| ui.tree().visual_rect(node))
                     .is_some_and(|clip| clip.contains(*at))
