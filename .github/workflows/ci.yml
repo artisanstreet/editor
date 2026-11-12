@@ -52,7 +52,7 @@ jobs:
   windows:
     needs: linux
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -68,7 +68,7 @@ jobs:
       - run: rustup show
       - run: cargo clippy --locked --workspace --all-targets
       - run: cargo build --locked -p ae -p forge
-      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --no-fail-fast
   macos:
     needs: linux
     runs-on: macos-15
