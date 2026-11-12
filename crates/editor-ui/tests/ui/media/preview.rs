@@ -62,33 +62,131 @@ fn navigation_and_swipes_obey_boundaries_and_dismissal_rules() {
     let now = Instant::now();
     assert!(!preview.dispatch(6, Action::Navigate(true), &core, now, false));
     assert!(!preview.dispatch(7, Action::Navigate(false), &core, now, false));
-    assert!(!preview.dispatch(
-        7,
-        Action::SwipeStart(aqua_core::Point { x: 100.0, y: 20.0 }),
-        &core,
-        now,
-        false
+    let viewport = Size { w: 1000.0, h: 800.0 };
+    let point = |x: f32, y: f32| aqua_core::Point { x, y };
+    let act = |preview: &mut Preview, action| preview.dispatch(7, action, &core, now, false);
+    assert!(!act(
+        &mut preview,
+        Action::Press {
+            at: point(100.0, 20.0),
+            picture: true
+        }
     ));
-    assert!(preview.dispatch(
-        7,
-        Action::SwipeMove(aqua_core::Point { x: 40.0, y: 22.0 }),
-        &core,
-        now,
-        false
+    assert!(act(
+        &mut preview,
+        Action::Drag {
+            at: point(40.0, 22.0),
+            viewport
+        }
     ));
-    assert!(preview.dispatch(
-        7,
-        Action::SwipeEnd(aqua_core::Point { x: 40.0, y: 22.0 }),
-        &core,
-        now,
-        false
+    assert!(act(
+        &mut preview,
+        Action::Release {
+            at: point(40.0, 22.0)
+        }
     ));
     assert_eq!(preview.gallery_index(), 1);
-    assert!(!preview.dispatch(7, Action::Backdrop, &core, now, false));
+    assert!(!act(
+        &mut preview,
+        Action::Press {
+            at: point(10.0, 10.0),
+            picture: false
+        }
+    ));
+    assert!(!act(
+        &mut preview,
+        Action::Release {
+            at: point(60.0, 10.0)
+        }
+    ));
+    assert!(preview.closing.is_none());
     assert!(!preview.dispatch(7, Action::Navigate(true), &core, now, false));
     assert!(preview.dispatch(7, Action::Close, &core, now, false));
     assert!(!preview.finished(now, false));
     assert!(preview.finished(now + Duration::from_millis(250), false));
+}
+
+#[test]
+fn a_click_on_the_backdrop_closes_and_a_click_on_the_picture_does_not() {
+    let (_directory, core, _config, _assets, mut preview) = fixture();
+    let now = Instant::now();
+    let point = |x: f32, y: f32| aqua_core::Point { x, y };
+    for picture in [true, false] {
+        assert!(!preview.dispatch(
+            7,
+            Action::Press {
+                at: point(10.0, 10.0),
+                picture
+            },
+            &core,
+            now,
+            false
+        ));
+        assert_eq!(
+            preview.dispatch(
+                7,
+                Action::Release {
+                    at: point(12.0, 11.0)
+                },
+                &core,
+                now,
+                false
+            ),
+            !picture
+        );
+        assert_eq!(preview.closing.is_some(), !picture);
+    }
+}
+
+#[test]
+fn the_wheel_zooms_about_the_cursor_and_drags_pan_only_where_the_picture_overflows() {
+    let (_directory, core, _config, _assets, mut preview) = fixture();
+    let now = Instant::now();
+    let viewport = Size { w: 4.0, h: 4.0 };
+    let point = |x: f32, y: f32| aqua_core::Point { x, y };
+    let act = |preview: &mut Preview, action| preview.dispatch(7, action, &core, now, false);
+    let wheel = |delta: f32| Action::Zoom {
+        at: point(2.0, 2.0),
+        delta,
+        viewport,
+    };
+
+    assert!(!act(&mut preview, wheel(16.0)));
+    assert!(act(&mut preview, wheel(-16.0)));
+    assert!((preview.zoom - 1.2).abs() < 1e-4);
+    for _ in 0..40 {
+        act(&mut preview, wheel(-16.0));
+    }
+    assert_eq!(preview.zoom, 8.0);
+    assert_eq!(preview.pan, point(0.0, 0.0));
+
+    act(
+        &mut preview,
+        Action::Press {
+            at: point(2.0, 2.0),
+            picture: true,
+        },
+    );
+    assert!(act(
+        &mut preview,
+        Action::Drag {
+            at: point(50.0, 50.0),
+            viewport
+        }
+    ));
+    assert_eq!(preview.pan, point(2.0, 0.0));
+    assert!(!act(
+        &mut preview,
+        Action::Release {
+            at: point(50.0, 50.0)
+        }
+    ));
+    assert_eq!(preview.gallery_index(), 0);
+
+    for _ in 0..40 {
+        act(&mut preview, wheel(16.0));
+    }
+    assert_eq!((preview.zoom, preview.pan), (1.0, point(0.0, 0.0)));
 }
 
 #[test]
@@ -223,7 +321,10 @@ fn ready_only_preview_retains_image_and_ignores_gallery_navigation() {
     assert!(!preview.dispatch(11, Action::Navigate(true), &core, now, false));
     assert!(!preview.dispatch(
         11,
-        Action::SwipeStart(aqua_core::Point { x: 60.0, y: 2.0 }),
+        Action::Press {
+            at: aqua_core::Point { x: 60.0, y: 2.0 },
+            picture: true
+        },
         &core,
         now,
         false

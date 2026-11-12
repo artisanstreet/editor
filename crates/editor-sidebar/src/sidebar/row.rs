@@ -90,6 +90,119 @@ pub type WorkingPulse = std::rc::Rc<
     ) -> aqua_ui::element::Element,
 >;
 
+pub fn marked_text(
+    theme: &editor_ui::theme::ArtisanTheme,
+    text: &str,
+    matched: &[std::ops::Range<usize>],
+    size: f32,
+    color: editor_ui::theme::Oklch,
+    selector: String,
+) -> aqua_ui::element::Element {
+    use editor_ui::chrome::card::{POLAR_BLUE, POLAR_INK};
+    let style = aqua_text::TextStyle {
+        families: vec![aqua_text::FontFamily::Named(
+            theme.typography.sans.family.to_owned(),
+        )],
+        size_px: size,
+        ..aqua_text::TextStyle::default()
+    };
+    let channels = |color: editor_ui::theme::Oklch| {
+        let color = color.to_reference_text_color();
+        [
+            color.hue_degrees,
+            color.saturation,
+            color.lightness,
+            color.alpha,
+        ]
+    };
+    let mark = POLAR_BLUE.to_reference_paint();
+    let plain = |text: &str| {
+        aqua_text::StyledSpan::new(text, style.clone()).gpui_source_color(channels(color))
+    };
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for range in matched {
+        let Some(marked) = text.get(range.clone()).filter(|_| range.start >= at) else {
+            continue;
+        };
+        if range.start > at {
+            spans.push(plain(&text[at..range.start]));
+        }
+        spans.push(
+            aqua_text::StyledSpan::new(marked, style.clone())
+                .gpui_source_color(channels(POLAR_INK))
+                .gpui_background([mark.h, mark.s, mark.l, mark.a]),
+        );
+        at = range.end;
+    }
+    if at < text.len() {
+        spans.push(plain(&text[at..]));
+    }
+    aqua_ui::element::Text::new(text.to_owned())
+        .spans(spans)
+        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+        .style(
+            aqua_ui::style::Style::new()
+                .min_width(aqua_ui::style::Length::Px(0.0))
+                .flex_shrink(1.0),
+        )
+        .build()
+        .debug_selector(selector)
+}
+
+pub fn hit(
+    theme: editor_ui::theme::ArtisanTheme,
+    data: &super::list::HitRow,
+    activate: impl Fn() + 'static,
+) -> aqua_ui::element::Element {
+    use aqua_ui::element::{Box as UiBox, Button, Text};
+    use aqua_ui::style::{Axis, Length, Style};
+    let selector = format!("sidebar-hit-{}", data.item);
+    Button::new()
+        .height(super::geometry::ROW_HEIGHT)
+        .style(
+            Style::new()
+                .axis(Axis::Column)
+                .justify(aqua_ui::JustifyContent::CENTER)
+                .gap(2.0)
+                .radius(Length::Px(8.0))
+                .padding_insets(aqua_core::Insets {
+                    left: 8.0,
+                    right: 8.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                }),
+        )
+        .child(
+            UiBox::new()
+                .style(Style::new().min_width(Length::Px(0.0)))
+                .child(marked_text(
+                    &theme,
+                    &data.snippet,
+                    std::slice::from_ref(&data.matched),
+                    theme.typography.control_text,
+                    theme.colors.text,
+                    format!("{selector}-snippet"),
+                ))
+                .build(),
+        )
+        .child(
+            Text::new(data.title.clone())
+                .font_size(theme.typography.label_text)
+                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+                .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
+                .build(),
+        )
+        .on_activate(activate)
+        .build()
+        .with_key(selector)
+        .role(aqua_core::Role::Button)
+        .aria_label(format!("{} in {}", data.snippet, data.title))
+        .cursor(aqua_core::CursorIcon::Pointer)
+        .hover_style(editor_ui::chrome::account::hover_style(&theme))
+}
+
 pub fn visual_factory(
     theme: editor_ui::theme::ArtisanTheme,
     reduced_motion: bool,
@@ -104,12 +217,22 @@ pub fn visual_factory(
             theme.colors.text
         };
         let selector = format!("sidebar-thread-{}", data.id);
-        let title = truncate(
-            data.title.clone(),
-            theme.typography.control_text,
-            title_color.to_reference_text_color(),
-            format!("{selector}-title"),
-        );
+        let title = match data.matched.is_empty() {
+            true => truncate(
+                data.title.clone(),
+                theme.typography.control_text,
+                title_color.to_reference_text_color(),
+                format!("{selector}-title"),
+            ),
+            false => marked_text(
+                &theme,
+                &data.title,
+                &data.matched,
+                theme.typography.control_text,
+                title_color,
+                format!("{selector}-title"),
+            ),
+        };
         let subtitle = truncate(
             data.subtitle.clone(),
             theme.typography.label_text,

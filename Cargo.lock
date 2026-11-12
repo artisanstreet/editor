@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "aqua"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-a11y-uia",
  "aqua-core",
@@ -252,7 +252,7 @@ dependencies = [
 [[package]]
 name = "aqua-a11y-uia"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -264,7 +264,7 @@ dependencies = [
 [[package]]
 name = "aqua-avif"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "avif-parse",
  "rav1d",
@@ -273,12 +273,12 @@ dependencies = [
 [[package]]
 name = "aqua-core"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 
 [[package]]
 name = "aqua-fonts-system"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "memmap2",
  "skrifa 0.46.2",
@@ -287,7 +287,7 @@ dependencies = [
 [[package]]
 name = "aqua-gpu-d3d11"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -300,7 +300,7 @@ dependencies = [
 [[package]]
 name = "aqua-gpu-ref"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -311,7 +311,7 @@ dependencies = [
 [[package]]
 name = "aqua-graph"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
 ]
@@ -319,7 +319,7 @@ dependencies = [
 [[package]]
 name = "aqua-ime-tsf"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-protocol",
@@ -331,12 +331,12 @@ dependencies = [
 [[package]]
 name = "aqua-kernels"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 
 [[package]]
 name = "aqua-layout"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-motion",
@@ -348,7 +348,7 @@ dependencies = [
 [[package]]
 name = "aqua-media"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-avif",
  "aqua-core",
@@ -365,7 +365,7 @@ dependencies = [
 [[package]]
 name = "aqua-motion"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
 ]
@@ -373,7 +373,7 @@ dependencies = [
 [[package]]
 name = "aqua-protocol"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -384,12 +384,12 @@ dependencies = [
 [[package]]
 name = "aqua-reactive"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 
 [[package]]
 name = "aqua-runtime"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-motion",
@@ -404,7 +404,7 @@ dependencies = [
 [[package]]
 name = "aqua-scene"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
 ]
@@ -412,12 +412,12 @@ dependencies = [
 [[package]]
 name = "aqua-shaders"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 
 [[package]]
 name = "aqua-shell-win32"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-protocol",
@@ -436,7 +436,7 @@ dependencies = [
 [[package]]
 name = "aqua-style"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-motion",
@@ -447,7 +447,7 @@ dependencies = [
 [[package]]
 name = "aqua-text"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-fonts-system",
@@ -468,7 +468,7 @@ dependencies = [
 [[package]]
 name = "aqua-transport"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-graph",
@@ -481,7 +481,7 @@ dependencies = [
 [[package]]
 name = "aqua-ui"
 version = "0.1.0"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "aqua-core",
  "aqua-layout",
@@ -1573,6 +1573,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "windows-registry",
 ]
 
 [[package]]
@@ -1738,6 +1739,7 @@ dependencies = [
  "editor-core",
  "editor-ui",
  "image",
+ "neo_frizbee",
  "tokio",
  "tracing",
 ]
@@ -1864,7 +1866,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1936,6 +1938,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "fff-grep"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ac5720676a3e1cb901683073c0bcc0a8f04e1bfe6bea391e1f14b9f95dbdef2"
+dependencies = [
+ "bstr",
+ "memchr",
 ]
 
 [[package]]
@@ -2217,10 +2229,12 @@ dependencies = [
  "anyhow",
  "artisan-api",
  "artisan-markdown-index",
+ "fff-grep",
  "forge-content",
  "fs2",
  "hex",
  "image",
+ "memchr",
  "regex",
  "rusqlite",
  "serde",
@@ -2703,7 +2717,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -2977,6 +2991,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itoa"
@@ -3322,6 +3345,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "neo_frizbee"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12af02496d6e51f324af42ffbd1ed31eb275d4aedd17b18b2cb4542f103f86cb"
+dependencies = [
+ "itertools",
+ "raw-cpuid",
 ]
 
 [[package]]
@@ -3978,7 +4011,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4388,7 +4421,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5122,7 +5155,7 @@ dependencies = [
 [[package]]
 name = "taffy"
 version = "0.15.1"
-source = "git+https://github.com/artisanstreet/aqua?rev=1abc58178f02c592002592c24dd6ca3ca785f007#1abc58178f02c592002592c24dd6ca3ca785f007"
+source = "git+https://github.com/artisanstreet/aqua?rev=9c8bfda3df2c6ccb1979105d917aa0b3e07148dd#9c8bfda3df2c6ccb1979105d917aa0b3e07148dd"
 dependencies = [
  "smallvec",
 ]
@@ -5145,10 +5178,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6010,7 +6043,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

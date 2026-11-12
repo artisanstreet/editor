@@ -202,7 +202,7 @@ fn context(theme: &ArtisanTheme, surfaces: &Surfaces, reading: &ContextReading) 
         )
         .build()
         .aria_label(reading.percent_sentence())
-        .tooltip(0.5, move || {
+        .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
             hint_card(
                 &theme,
                 "Context Window",
@@ -277,7 +277,9 @@ fn subagent(
         .aria_label(agent.label.clone())
         .cursor(CursorIcon::Pointer)
         .hover_style(hover(&theme, surfaces.ink))
-        .tooltip(0.5, move || render_agent_card(&tooltip, theme))
+        .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
+            render_agent_card(&tooltip, theme)
+        })
 }
 
 fn hover(theme: &ArtisanTheme, ink: Oklch) -> Style {

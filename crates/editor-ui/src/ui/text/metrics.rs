@@ -96,7 +96,7 @@ impl EditorMetrics {
     pub fn gpui_text_appearance(theme: &ArtisanTheme) -> aqua_ui::tree::GpuiTextAppearance {
         let foreground = theme.colors.text.to_reference_paint();
         aqua_ui::tree::GpuiTextAppearance {
-            selection: theme.colors.text_selection.to_reference_paint(),
+            selection: crate::ui::chrome::card::polar_selection(),
             caret: theme.colors.text_muted.to_reference_paint(),
             caret_width: 1.0,
             ime_underline: foreground,

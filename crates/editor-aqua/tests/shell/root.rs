@@ -81,7 +81,8 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             1,
         ));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        workspace.conversation.landing = Some(deadline);
+        workspace.conversation.landing =
+            Some(editor_aqua::conversation::controller::Landing::Settling { until: deadline });
         let id = aqua::prelude::AquaWindowId::new(1).unwrap();
         let mut size = aqua::prelude::WindowOptions::default().inner_size;
         size.width = 1000.0;

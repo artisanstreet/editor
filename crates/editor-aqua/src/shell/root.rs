@@ -11,6 +11,7 @@ use std::{
 };
 
 mod open_thread;
+pub mod reveal;
 mod rail_refresh;
 mod wheel_sync;
 
@@ -70,8 +71,24 @@ struct AppMedia {
     scale: f32,
 }
 
+type BrowserLookup = std::sync::mpsc::Receiver<(
+    Option<crate::shell::browser::Browser>,
+    Option<aqua::prelude::FileIcon>,
+)>;
+
+struct ResolvedBrowser {
+    preferred: Option<String>,
+    browser: Option<crate::shell::browser::Browser>,
+    icon: Option<aqua::images::ImageHandle>,
+}
+
+enum PreviewOrigin {
+    Conversation(crate::conversation::presentation::PresentationScope),
+    Composer,
+}
+
 struct ImagePreview {
-    scope: crate::conversation::presentation::PresentationScope,
+    origin: PreviewOrigin,
     owner: Option<std::sync::Arc<[u64]>>,
     view: crate::ui::media::preview::Preview,
     focus_pending: bool,
@@ -144,6 +161,10 @@ pub struct RootViews {
     composer_height: Option<f32>,
     conversation_actions: Rc<RefCell<VecDeque<ConversationAction>>>,
     color_menu: Option<crate::ui::color_copy_menu::ColorCopyMenuHost>,
+    selection_menu: Option<(aqua_core::Point, String)>,
+    browser: Option<ResolvedBrowser>,
+    browser_task: Option<(Option<String>, BrowserLookup)>,
+    reveal: Option<reveal::Reveal>,
     color_scope: Option<crate::conversation::presentation::PresentationScope>,
     color_effects: Rc<RefCell<VecDeque<crate::ui::color_copy_menu::ColorCopyEffect>>>,
     resize_key: Option<ResizeKey>,
@@ -386,6 +407,66 @@ impl RootViews {
         changed
     }
 
+    fn image_preview_stale(&self, shell: &Shell) -> bool {
+        self.image_preview
+            .as_ref()
+            .is_some_and(|preview| match &preview.origin {
+                PreviewOrigin::Conversation(scope) => {
+                    !matches!(shell.core.screen(), Screen::Thread { .. })
+                        || !shell.entry.workspace().is_some_and(|workspace| {
+                            scope.current(&workspace.conversation, &shell.core)
+                        })
+                }
+                PreviewOrigin::Composer => {
+                    !matches!(
+                        shell.core.screen(),
+                        Screen::Thread { .. } | Screen::NewThread { .. }
+                    ) || !preview.view.is_live(&shell.core)
+                }
+            })
+    }
+
+    fn open_composer_image(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
+        use crate::composer::view::ComposerEffect;
+        let Some(workspace) = shell.entry.workspace_mut() else {
+            return false;
+        };
+        let opened = workspace
+            .take_composer_effects()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                ComposerEffect::OpenImage(key) => workspace.composer_image(key),
+                ComposerEffect::EditorChanged
+                | ComposerEffect::FocusEditor
+                | ComposerEffect::NewProject
+                | ComposerEffect::OpenQuestionSource(_)
+                | ComposerEffect::RetryQuestionPage
+                | ComposerEffect::CloseNote
+                | ComposerEffect::RetryThreadSettings => None,
+            })
+            .last();
+        let Some((host, instance, image, opener_key)) = opened else {
+            return false;
+        };
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        let view = crate::ui::media::preview::Preview::from_ready(
+            self.preview_generation,
+            host,
+            instance,
+            image,
+            opener_key,
+            std::time::Instant::now(),
+        );
+        self.dispose_color_menu(ui);
+        self.image_preview = Some(ImagePreview {
+            origin: PreviewOrigin::Composer,
+            owner: None,
+            view,
+            focus_pending: true,
+        });
+        true
+    }
+
     fn close_image_preview(&mut self, ui: &mut UiApp, restore_focus: bool) {
         if let Some(preview) = self.image_preview.take() {
             if restore_focus {
@@ -442,12 +523,7 @@ impl RootViews {
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
     ) -> bool {
-        if self.image_preview.as_ref().is_some_and(|preview| {
-            !matches!(shell.core.screen(), Screen::Thread { .. })
-                || !shell.entry.workspace().is_some_and(|workspace| {
-                    preview.scope.current(&workspace.conversation, &shell.core)
-                })
-        }) {
+        if self.image_preview_stale(shell) {
             self.close_image_preview(ui, false);
             return true;
         }
@@ -1011,6 +1087,114 @@ impl RootViews {
         )
     }
 
+    fn warm_browser(&mut self, shell: &Shell) {
+        let preferred = shell
+            .core
+            .settings
+            .get("browser")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        if self
+            .browser
+            .as_ref()
+            .is_some_and(|resolved| resolved.preferred == preferred)
+        {
+            return;
+        }
+        let pending = self
+            .browser_task
+            .as_ref()
+            .filter(|(wanted, _)| *wanted == preferred)
+            .map(|(_, found)| found.try_recv());
+        match pending {
+            Some(Ok((browser, icon))) => {
+                let icon = icon
+                    .and_then(|icon| {
+                        aqua::images::DecodedImage::from_rgba(icon.width, icon.height, icon.rgba)
+                            .ok()
+                    })
+                    .and_then(|image| shell.images().insert(image).ok());
+                self.browser_task = None;
+                self.browser = Some(ResolvedBrowser {
+                    preferred,
+                    browser,
+                    icon,
+                });
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) => {}
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.browser_task = None;
+                self.browser = Some(ResolvedBrowser {
+                    preferred,
+                    browser: None,
+                    icon: None,
+                });
+            }
+            None => {
+                let (found, receiver) = std::sync::mpsc::channel();
+                let name = preferred.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("browser-lookup".into())
+                    .spawn(move || {
+                        let browser = crate::shell::browser::resolve(name.as_deref());
+                        let icon = browser
+                            .as_ref()
+                            .and_then(|browser| crate::shell::browser::icon(&browser.program));
+                        let _ = found.send((browser, icon));
+                    });
+                match spawned {
+                    Ok(_) => self.browser_task = Some((preferred, receiver)),
+                    Err(error) => tracing::warn!(%error, "could not start the browser lookup"),
+                }
+            }
+        }
+    }
+
+    fn open_selection_menu(&mut self, shell: &Shell, ui: &mut UiApp, ctx: &AppCtx<'_>) -> bool {
+        use crate::ui::rich::actions::{CopyEntry, ShowCopyMenu};
+        let Some((position, text)) = self.selection_menu.take() else {
+            return false;
+        };
+        self.dispose_color_menu(ui);
+        let Some(owner) = ui.find_debug_selector("workspace-root") else {
+            return false;
+        };
+        self.warm_browser(shell);
+        let icon = self
+            .browser
+            .as_ref()
+            .and_then(|resolved| resolved.icon.clone());
+        let browser = self
+            .browser
+            .as_ref()
+            .and_then(|resolved| resolved.browser.as_ref());
+        let entries = std::iter::once(CopyEntry::primary("Copy", text.clone()))
+            .chain(browser.map(|browser| {
+                CopyEntry::search(format!("Search with {}", browser.name), text.clone())
+            }))
+            .collect();
+        let effects = Rc::clone(&self.color_effects);
+        match crate::ui::color_copy_menu::ColorCopyMenuHost::open(
+            ui,
+            owner,
+            ShowCopyMenu { position, entries },
+            icon,
+            shell.preferences.theme(),
+            Self::reduced(ui),
+            ctx.now().as_secs_f64(),
+            move |effect| effects.borrow_mut().push_back(effect),
+        ) {
+            Ok(menu) => {
+                self.color_menu = menu;
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not open the selection menu");
+                false
+            }
+        }
+    }
+
     fn dispose_color_menu(&mut self, ui: &mut UiApp) {
         if let Some(menu) = self.color_menu.take() {
             menu.dispose(ui);
@@ -1079,7 +1263,7 @@ impl RootViews {
                 );
                 self.dispose_color_menu(ui);
                 self.image_preview = Some(ImagePreview {
-                    scope,
+                    origin: PreviewOrigin::Conversation(scope),
                     owner: None,
                     view,
                     focus_pending: true,
@@ -1205,7 +1389,7 @@ impl RootViews {
                             ) {
                                 self.dispose_color_menu(ui);
                                 self.image_preview = Some(ImagePreview {
-                                    scope,
+                                    origin: PreviewOrigin::Conversation(scope),
                                     owner: Some(owner),
                                     view,
                                     focus_pending: true,
@@ -1266,6 +1450,7 @@ impl RootViews {
                             ui,
                             owner,
                             request,
+                            None,
                             shell.preferences.theme(),
                             reduced,
                             ctx.now().as_secs_f64(),
@@ -1285,12 +1470,30 @@ impl RootViews {
             "conv_image_preview",
             self.sync_image_preview(shell, ui, ctx, window),
         );
+        self.warm_browser(shell);
+        changed |= self.open_selection_menu(shell, ui, ctx);
         let effects = std::mem::take(&mut *self.color_effects.borrow_mut());
         for effect in effects {
             match effect {
                 ColorCopyEffect::Clipboard(text) => {
                     if let Err(error) = ctx.clipboard().set_text(text) {
                         tracing::warn!(%error, "could not copy color");
+                    }
+                }
+                ColorCopyEffect::Search(text) => {
+                    let browser = self
+                        .browser
+                        .as_ref()
+                        .and_then(|resolved| resolved.browser.as_ref());
+                    if let Some(browser) = browser
+                        && let Err(error) = browser.search(&text)
+                    {
+                        tracing::warn!(
+                            %error,
+                            browser = %browser.name,
+                            program = %browser.program.display(),
+                            "could not start a browser search"
+                        );
                     }
                 }
                 ColorCopyEffect::RequestFrame => {
@@ -1553,6 +1756,10 @@ impl RootViews {
                         preview.dispose(ui);
                         preview_changed = true;
                     }
+                }
+                crate::sidebar::controller::SidebarEffect::Reveal(hit) => {
+                    self.reveal = Some(reveal::Reveal::new(hit));
+                    ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
                 }
             }
         }
@@ -2039,6 +2246,8 @@ impl RootViews {
             match command {
                 Command::Open(thread) => workspace.sidebar.open_thread(core, thread),
                 Command::New => workspace.sidebar.new_thread(core, None),
+                Command::Project(project) => workspace.sidebar.new_thread(core, Some(project)),
+                Command::Agent(agent) => workspace.conversation.open_agent(core, agent),
                 Command::OpenUrl(url) => {
                     if let Err(error) = crate::shell::open_url(&url) {
                         tracing::warn!(%error, "could not open repository URL");
@@ -2100,14 +2309,32 @@ impl RootViews {
         }
     }
 
+    fn search_bar(
+        &self,
+        workspace: &crate::shell::workspace::Workspace,
+        theme: &crate::ui::theme::ArtisanTheme,
+    ) -> Element {
+        crate::frame::search::bar(
+            theme,
+            crate::sidebar::view::search_editor(
+                &workspace.sidebar,
+                theme,
+                workspace.sidebar_emit(false),
+            ),
+            self.sidebar.emit(),
+        )
+    }
+
     fn sidebar_model(
         &self,
         theme: &crate::ui::theme::ArtisanTheme,
+        search: Option<Element>,
         tree: Option<Element>,
         account: Option<&crate::ui::chrome::account::Account>,
         now: std::time::Instant,
     ) -> crate::frame::view::Sidebar {
         crate::frame::view::Sidebar {
+            search,
             width: self.sidebar.width(now),
             open: self.sidebar.open(),
             wordmark: self.sidebar.wordmark(now),
@@ -2306,10 +2533,13 @@ impl SectionViews for RootViews {
                     workspace.sidebar_emit(false),
                 )
             });
+        let search = tree
+            .is_some()
+            .then(|| self.search_bar(workspace, &theme));
         let account = self.account_snapshot(shell);
         let element = crate::frame::view::sidebar_view(
             &theme,
-            self.sidebar_model(&theme, tree, account.as_ref(), now),
+            self.sidebar_model(&theme, search, tree, account.as_ref(), now),
         );
         match ui.refresh_subtree(crate::frame::view::SIDEBAR, element) {
             Ok(refreshed) => refreshed,
@@ -2382,6 +2612,10 @@ impl SectionViews for RootViews {
         self.wheel.active()
     }
 
+    fn open_composer_images(&mut self, shell: &mut Shell, ui: &mut UiApp) -> bool {
+        self.open_composer_image(shell, ui)
+    }
+
     fn take_events(
         &mut self,
         shell: &mut Shell,
@@ -2418,7 +2652,16 @@ impl SectionViews for RootViews {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
         let sidebar_resizing = self.sidebar.resizing();
+        let revealing = self.advance_reveal(shell, ui);
+        if revealing != reveal::Progress::Idle {
+            ctx.request_animation_deadline(window, ctx.now() + reveal::POLL);
+        }
+        if revealing == reveal::Progress::Acted {
+            self.conversation_invalidated.set(true);
+            ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
+        }
         let causes = [
+            ("anim_reveal", revealing == reveal::Progress::Acted),
             ("anim_events", self.sidebar.take_events(now, reduced)),
             ("anim_clock", self.tick_work_clock(shell, ctx, window, now)),
             ("anim_edges", self.track_tree_edges(ui)),
@@ -2456,6 +2699,17 @@ impl SectionViews for RootViews {
     }
 
     fn pre_input(&mut self, ui: &mut UiApp, input: &InputEvent) -> Option<bool> {
+        if let InputEvent::PointerDown(pointer, aqua_core::PointerButton::Secondary) = input
+            && self.image_preview.is_none()
+            && ui
+                .selection_rects()
+                .iter()
+                .any(|rect| rect.contains(pointer.position))
+            && let Some(text) = ui.selected_text().filter(|text| !text.trim().is_empty())
+        {
+            self.selection_menu = Some((pointer.position, text));
+            return Some(true);
+        }
         match self.account_popup.dismiss(ui, input) {
             Ok(true) => {
                 (self.sidebar.emit())(crate::frame::sidebar::Event::Account(
@@ -2475,12 +2729,12 @@ impl SectionViews for RootViews {
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "could not dismiss sidebar overlay"),
         }
-        if let Some(consumed) = self
+        if self
             .color_menu
             .as_mut()
-            .map(|menu| menu.handle_input(ui, input))
+            .is_some_and(|menu| menu.intercept(ui, input))
         {
-            return Some(consumed);
+            return Some(true);
         }
         let cycled = {
             let _tm = crate::shell::application::Tm::new("pre.cycle");
@@ -2500,12 +2754,7 @@ impl SectionViews for RootViews {
     ) -> anyhow::Result<Element> {
         let theme = shell.preferences.theme();
         let account = self.account(shell);
-        if self.image_preview.as_ref().is_some_and(|preview| {
-            !matches!(shell.core.screen(), Screen::Thread { .. })
-                || !shell.entry.workspace().is_some_and(|workspace| {
-                    preview.scope.current(&workspace.conversation, &shell.core)
-                })
-        }) {
+        if self.image_preview_stale(shell) {
             self.close_image_preview(ui, false);
         }
         if self.color_scope.as_ref().is_some_and(|scope| {
@@ -2796,6 +3045,14 @@ impl SectionViews for RootViews {
                         let project = host.projects.get(&thread.project_id)?;
                         Some(crate::frame::strip::Tab {
                             id: id.clone(),
+                            project: project.id.clone(),
+                            trail: workspace
+                                .conversation
+                                .open
+                                .as_ref()
+                                .filter(|(shown, thread)| shown == &host.id && thread == id)
+                                .map(|_| workspace.conversation.agent_trail())
+                                .unwrap_or_default(),
                             title: crate::frame::projects::title_of(thread.title.as_deref()),
                             location: (!project.id.is_scratch()).then(|| host
                                 .repository(&project.id)
@@ -2831,6 +3088,9 @@ impl SectionViews for RootViews {
             Some((tree, strip)) => (Some(tree), strip),
             None => (None, Vec::new()),
         };
+        let search = tree
+            .is_some()
+            .then(|| self.search_bar(workspace, &theme));
         let overview = (matches!(shell.core.screen(), Screen::Thread { .. })
             && layout::inspector_width(card_width).is_some())
         .then(|| {
@@ -2863,7 +3123,7 @@ impl SectionViews for RootViews {
         let body = crate::frame::view::body(
             &theme,
             titlebar,
-            self.sidebar_model(&theme, tree, account.as_ref(), now),
+            self.sidebar_model(&theme, search, tree, account.as_ref(), now),
             match &screen {
                 Screen::Thread { .. } | Screen::NewThread { .. } => vec![
                     aqua::Aqua::Box()
@@ -3277,7 +3537,8 @@ impl SectionViews for RootViews {
             self.navigation_invalidated.set(true);
         }
         if let InputEvent::Scroll { at, delta } = input {
-            if (delta.x != 0.0 || delta.y != 0.0)
+            if self.image_preview.is_none()
+                && (delta.x != 0.0 || delta.y != 0.0)
                 && crate::shell::wheel::keyed_node(ui, "conversation-transcript")
                     .and_then(|node| ui.tree().visual_rect(node))
                     .is_some_and(|clip| clip.contains(*at))

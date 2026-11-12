@@ -31,6 +31,12 @@ pub enum ViewAction {
         thread: ThreadId,
     },
     NewThread(Option<ProjectId>),
+    Search,
+    OpenHit {
+        host: HostId,
+        instance: HostInstance,
+        hit: super::list::HitRow,
+    },
     Navigate(Screen),
     OpenThreadMenu {
         host: HostId,
@@ -296,6 +302,26 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
             }
         }
         ViewAction::NewThread(project) => sidebar.new_thread(core, project),
+        ViewAction::Search => {
+            sidebar.search_text(core);
+            sidebar.sync(core, artisan_api::now());
+        }
+        ViewAction::OpenHit {
+            host,
+            instance,
+            hit,
+        } => {
+            if sidebar
+                .host_data(core)
+                .map(|current| (&current.id, current.instance()))
+                == Some((&host, instance))
+            {
+                sidebar.open_thread(core, hit.thread.clone());
+                sidebar
+                    .effects
+                    .push(super::controller::SidebarEffect::Reveal(hit));
+            }
+        }
         ViewAction::Navigate(screen) => core.navigate(screen),
         ViewAction::OpenThreadMenu {
             host,
@@ -717,6 +743,31 @@ pub fn rename_editor(
     }))
 }
 
+pub fn search_editor(
+    sidebar: &Sidebar,
+    theme: &ArtisanTheme,
+    emit: Rc<dyn Fn(ViewAction)>,
+) -> Element {
+    use editor_ui::text::{
+        Mode,
+        mount::{EditorController, EditorEvent},
+    };
+
+    EditorController::from_shared(Rc::clone(&sidebar.search), move |event| {
+        if event == EditorEvent::Changed {
+            emit(ViewAction::Search);
+        }
+    })
+    .element_with_notice_keyed(
+        "sidebar-thread-search",
+        Mode::SingleLine,
+        theme,
+        "Search threads",
+        true,
+        false,
+    )
+}
+
 pub fn rename_dialog(
     sidebar: &Sidebar,
     core: &Core,
@@ -1135,6 +1186,18 @@ pub fn thread_entries_view(
                     row_hover.background(&format!("sidebar-thread-{}", data.id), &theme, 8.0),
                     row_emit.clone(),
                 )
+            }
+            Entry::Hit(data) => {
+                let emit = row_emit.clone();
+                let host = row_host.clone();
+                let hit = data.clone();
+                super::row::hit(theme, data, move || {
+                    emit(ViewAction::OpenHit {
+                        host: host.clone(),
+                        instance,
+                        hit: hit.clone(),
+                    });
+                })
             }
             Entry::Project { id, label } => UiBox::new()
                 .height(entry.height())

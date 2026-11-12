@@ -28,6 +28,7 @@ mod schema;
 mod settings;
 mod source_index;
 mod sources;
+mod text_search;
 mod threads;
 mod writer;
 
@@ -53,6 +54,7 @@ pub use resources::{MAX_RESOURCE_SNAPSHOT_BYTES, keep as keep_resource_snapshot}
 
 const EVENT_CAPACITY: usize = 8192;
 const READERS_KEPT: usize = 4;
+const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Whether runs a restart cut short carry on by themselves; default on.
@@ -400,10 +402,24 @@ impl Store {
         F: FnOnce(&Connection) -> Result<R> + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
+        let asked = std::time::Instant::now();
         let slot = Arc::clone(&inner.read_slots).acquire_owned().await?;
+        let queued = asked.elapsed();
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
-            inner.with_reader(query)
+            let started = asked.elapsed();
+            let result = inner.with_reader(query);
+            let total = asked.elapsed();
+            if total >= SLOW_READ {
+                tracing::warn!(
+                    read = std::any::type_name::<F>(),
+                    waited_for_slot_ms = queued.as_millis(),
+                    waited_for_thread_ms = started.saturating_sub(queued).as_millis(),
+                    ran_ms = total.saturating_sub(started).as_millis(),
+                    "store read was slow"
+                );
+            }
+            result
         })
         .await
         .context("store read task")?

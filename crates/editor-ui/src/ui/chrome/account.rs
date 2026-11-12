@@ -517,7 +517,7 @@ fn limit_row(
             engine.engine.display_name(),
             limit.label
         ))
-        .tooltip(0.5, {
+        .tooltip_with(0.5, crate::ui::hint_card::presence(), {
             let theme = *theme;
             let engine = engine.engine;
             let limit = limit.clone();
@@ -575,6 +575,17 @@ fn portrait(account: &Account, edge: f32, radius: f32, fallback: f32) -> Element
 
 fn lease(image: &Arc<ImageHandle>) -> Arc<dyn std::any::Any + Send + Sync> {
     Arc::clone(image) as Arc<dyn std::any::Any + Send + Sync>
+}
+
+#[must_use]
+pub fn row_highlight(
+    theme: &ArtisanTheme,
+    lit: Highlight,
+    now: Instant,
+    height: f32,
+    radius: f32,
+) -> Element {
+    highlight(&Palette::of(theme), lit, now, height, radius)
 }
 
 fn highlight(palette: &Palette, lit: Highlight, now: Instant, height: f32, radius: f32) -> Element {

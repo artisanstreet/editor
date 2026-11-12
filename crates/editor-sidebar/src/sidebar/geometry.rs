@@ -1,4 +1,4 @@
-use super::list::{Lists, RowData};
+use super::list::{HitRow, Lists, RowData};
 
 pub const RAIL_WIDTH: f32 = 48.0;
 pub const ROW_HEIGHT: f32 = 48.0;
@@ -22,6 +22,7 @@ impl ThreadLayout {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
     Thread(RowData, ThreadLayout),
+    Hit(HitRow),
     Project {
         id: artisan_api::ProjectId,
         label: String,
@@ -36,6 +37,7 @@ impl Entry {
     pub fn height(&self) -> f32 {
         match self {
             Self::Thread(_, layout) => layout.height(),
+            Self::Hit(_) => ROW_HEIGHT,
             Self::Project { .. } => 28.0,
             Self::History => 43.0,
             Self::Heading(_) => 21.0,
@@ -70,6 +72,18 @@ pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
                 entries.push(Entry::Gap(2.0));
             }
             entries.push(Entry::Thread(row.clone(), ThreadLayout::Grouped));
+        }
+    }
+    if !lists.hits.is_empty() {
+        if !entries.is_empty() {
+            entries.push(Entry::Gap(12.0));
+        }
+        entries.push(Entry::Heading("In messages"));
+        for (index, hit) in lists.hits.iter().enumerate() {
+            if index > 0 {
+                entries.push(Entry::Gap(2.0));
+            }
+            entries.push(Entry::Hit(hit.clone()));
         }
     }
     if !lists.history.is_empty() {
@@ -164,6 +178,7 @@ pub fn entry_keys(entries: &[Entry]) -> Vec<String> {
     for (index, entry) in entries.iter().enumerate().rev() {
         keys[index] = match entry {
             Entry::Thread(row, _) => format!("thread:{}", row.id),
+            Entry::Hit(hit) => format!("hit:{}", hit.item),
             Entry::Project { id, .. } => format!("project:{id}"),
             Entry::History => "history".into(),
             Entry::Spacer => "spacer".into(),
