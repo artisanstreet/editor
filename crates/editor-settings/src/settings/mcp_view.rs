@@ -1,37 +1,37 @@
 use std::{collections::BTreeMap, rc::Rc};
 
-use aqua_core::Insets;
 use aqua_ui::{
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::{Length, Style},
 };
 use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer};
 
-use super::{controller::SettingsController, extensions::MCP_SERVERS_KEY, ui, view::ViewAction};
+use super::{
+    controller::SettingsController,
+    extensions::MCP_SERVERS_KEY,
+    ui::{self, Ink},
+    view::ViewAction,
+};
 use editor_core::{Core, HostData, McpSignIn, McpSignInPhase};
 use editor_ui::{
-    button::{Button, ButtonVariant},
+    kit::{ButtonTone, Space, Spaced, TextRole},
     text::{
         Mode,
         mount::{EditorController, EditorEvent},
     },
-    theme::{ArtisanTheme, TextStep, TypographyTokens},
+    theme::ArtisanTheme,
 };
 
 fn button(
     theme: &ArtisanTheme,
     id: String,
     label: &str,
-    variant: ButtonVariant,
+    tone: ButtonTone,
     disabled: bool,
     action: ViewAction,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    Button::text(id, *theme, label)
-        .variant(variant)
-        .disabled(disabled)
-        .on_activate(move |_| emit(action.clone()))
-        .build()
+    ui::button(theme, id, label, tone, disabled, move || emit(action.clone()))
 }
 
 fn note(status: Option<McpAuthStatus>, sign_in: Option<&McpSignIn>) -> Option<String> {
@@ -59,12 +59,12 @@ fn controls(
     sign_in: Option<&McpSignIn>,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Vec<Element> {
-    let make = |kind: &str, label: &str, variant, disabled, action| {
+    let make = |kind: &str, label: &str, tone, disabled, action| {
         button(
             theme,
             format!("mcp-{kind}-{name}"),
             label,
-            variant,
+            tone,
             disabled,
             action,
             emit.clone(),
@@ -75,21 +75,21 @@ fn controls(
             make(
                 "open",
                 "Open sign-in page",
-                ButtonVariant::Outline,
+                ButtonTone::Quiet,
                 false,
                 ViewAction::OpenUrl(url.clone()),
             ),
             make(
                 "copy",
                 "Copy link",
-                ButtonVariant::Ghost,
+                ButtonTone::Quiet,
                 false,
                 ViewAction::CopyText(url),
             ),
             make(
                 "cancel-sign-in",
                 "Cancel",
-                ButtonVariant::Ghost,
+                ButtonTone::Quiet,
                 false,
                 ViewAction::McpCancelSignIn(name.into()),
             ),
@@ -97,21 +97,21 @@ fn controls(
         Some((McpSignInPhase::Starting | McpSignInPhase::Waiting, _)) => vec![make(
             "busy",
             "Opening…",
-            ButtonVariant::Outline,
+            ButtonTone::Neutral,
             true,
             ViewAction::McpEdited,
         )],
         Some((McpSignInPhase::Finishing, _)) => vec![make(
             "busy",
             "Signing in…",
-            ButtonVariant::Outline,
+            ButtonTone::Neutral,
             true,
             ViewAction::McpEdited,
         )],
         Some((McpSignInPhase::Failed(_), _)) => vec![make(
             "sign-in",
             "Try again",
-            ButtonVariant::Outline,
+            ButtonTone::Neutral,
             false,
             ViewAction::McpSignIn(name.into()),
         )],
@@ -119,14 +119,14 @@ fn controls(
             Some(McpAuthStatus::NeedsSignIn) => vec![make(
                 "sign-in",
                 "Sign in",
-                ButtonVariant::Primary,
+                ButtonTone::Primary,
                 false,
                 ViewAction::McpSignIn(name.into()),
             )],
             Some(McpAuthStatus::SignedIn) => vec![make(
                 "sign-out",
                 "Sign out",
-                ButtonVariant::Ghost,
+                ButtonTone::Quiet,
                 false,
                 ViewAction::McpSignOut(name.into()),
             )],
@@ -154,14 +154,7 @@ fn form(
             "{\"Authorization\": \"Bearer …\"}",
         ),
     ];
-    let mut body = UiBox::new()
-        .layout("column")
-        .gap(10.0)
-        .style(Style::new().padding_insets(Insets {
-            top: 14.0,
-            bottom: 14.0,
-            ..Insets::default()
-        }));
+    let mut body = ui::stack(Space::S12);
     for (index, (label, placeholder)) in fields.into_iter().enumerate() {
         let send = emit.clone();
         let editor =
@@ -173,15 +166,8 @@ fn form(
                 }
             });
         body = body.child(
-            UiBox::new()
-                .layout("column")
-                .gap(4.0)
-                .child(
-                    Text::new(label)
-                        .font_size(TypographyTokens::size(TextStep::Sm))
-                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                        .build(),
-                )
+            ui::stack(Space::S4)
+                .child(ui::text(theme, TextRole::Label, Ink::Muted, label))
                 .child(editor.element_with_notice_keyed(
                     format!("settings-mcp-field-{index}"),
                     Mode::SingleLine,
@@ -194,13 +180,12 @@ fn form(
         );
     }
     let saving = controller.extensions.saving;
-    let actions = UiBox::new()
-        .gap(6.0)
+    let actions = ui::actions()
         .child(button(
             theme,
             "mcp-save".into(),
             if saving { "Saving…" } else { "Save server" },
-            ButtonVariant::Primary,
+            ButtonTone::Primary,
             saving,
             ViewAction::McpSave,
             emit.clone(),
@@ -209,12 +194,12 @@ fn form(
             theme,
             "mcp-cancel".into(),
             "Cancel",
-            ButtonVariant::Ghost,
+            ButtonTone::Quiet,
             false,
             ViewAction::McpCancel,
             emit,
         ));
-    body.child(actions.build()).build()
+    ui::block(body.child(actions.build()).build())
 }
 
 pub fn section(
@@ -236,7 +221,7 @@ pub fn section(
         .unwrap_or_default();
     let mut rows = Vec::new();
     if let Err(error) = &servers {
-        rows.push(super::ui::error_text(theme, error));
+        rows.push(ui::block(ui::error_text(theme, error)));
     }
     for server in servers.unwrap_or_default() {
         let target = server.url.clone().unwrap_or_else(|| {
@@ -251,14 +236,14 @@ pub fn section(
         let summary =
             note(status, sign_in).map_or(target.clone(), |note| format!("{target} · {note}"));
         let mut actions = UiBox::new()
-            .gap(6.0)
+            .spaced(Space::S8)
             .style(Style::new().wrap(true))
             .children(controls(theme, &server.name, status, sign_in, emit.clone()));
         actions = actions.child(button(
             theme,
             format!("mcp-edit-{}", server.name),
             "Edit",
-            ButtonVariant::Ghost,
+            ButtonTone::Quiet,
             false,
             ViewAction::McpOpen(Some(server.clone())),
             emit.clone(),
@@ -267,7 +252,7 @@ pub fn section(
             theme,
             format!("mcp-remove-{}", server.name),
             "Remove",
-            ButtonVariant::Ghost,
+            ButtonTone::Quiet,
             controller.extensions.saving,
             ViewAction::McpRemove(server.clone()),
             emit.clone(),
@@ -285,25 +270,18 @@ pub fn section(
     if controller.extensions.editing.is_some() {
         rows.push(form(controller, theme, emit.clone()));
     }
-    let mut body = UiBox::new()
-        .layout("column")
-        .gap(8.0)
-        .child(ui::card(theme, rows));
+    let mut body = ui::stack(Space::S8).child(ui::card(theme, rows));
     if let Some(error) = &controller.extensions.error {
-        body = body.child(super::ui::error_text(theme, error));
+        body = body.child(ui::error_text(theme, error));
     }
     if controller.extensions.editing.is_none() {
         body = body.child(
             UiBox::new()
-                .style(Style::new().margin_insets(Insets {
-                    top: 8.0,
-                    ..Insets::default()
-                }))
                 .child(button(
                     theme,
                     "mcp-add".into(),
                     "Add server",
-                    ButtonVariant::Outline,
+                    ButtonTone::Neutral,
                     false,
                     ViewAction::McpOpen(None),
                     emit,
