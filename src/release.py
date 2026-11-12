@@ -54,8 +54,8 @@ def version_for(reference, sha, date):
     return reference[1:], reference
 
 
-def midnight_in_oslo(moment):
-    return moment.astimezone(ZoneInfo("Europe/Oslo")).hour == 0
+def night_in_oslo(moment):
+    return moment.astimezone(ZoneInfo("Europe/Oslo")).hour < 6
 
 
 def ci_green(runs, sha):
