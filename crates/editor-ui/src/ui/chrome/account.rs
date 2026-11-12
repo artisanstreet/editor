@@ -1,6 +1,7 @@
 use crate::ui::chrome::card::{POLAR_HAZE, POLAR_INK, polar_face};
 use crate::ui::chrome::limits::{EngineLimits, Limit};
 use crate::ui::chrome::menu::{Event, Highlight, Menu, Spot};
+use crate::ui::kit::Hover;
 use crate::ui::engine::engine_icon;
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::theme::{ArtisanTheme, Oklch};
@@ -8,7 +9,7 @@ use aqua::images::ImageHandle;
 use aqua::{Aqua, ShadowLayer, Style, pct, px};
 use aqua_core::{
     CursorIcon, DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, ImageRef,
-    Insets, Role, Transform2D, image::ImageFit,
+    Insets, Role, image::ImageFit,
 };
 use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::element::{Element, Media};
@@ -97,8 +98,7 @@ struct Palette {
     glass_near: Oklch,
     glass_far: Oklch,
     rim_shade: Oklch,
-    hover: (f32, f32),
-    hover_edge: f32,
+    theme: ArtisanTheme,
     press: Shadow,
     overlay: [Shadow; 4],
 }
@@ -113,8 +113,7 @@ impl Palette {
                 glass_near: Oklch::new(0.2801, 0.0, 0.0),
                 glass_far: Oklch::new(0.2484, 0.0, 0.0),
                 rim_shade: BLACK.with_alpha(0.22),
-                hover: (0.09, 0.03),
-                hover_edge: 0.07,
+                theme: *theme,
                 press: Shadow(1.5, 1.5, 0.0, BLACK.with_alpha(0.3)),
                 overlay: [
                     Shadow(1.0, 2.0, 0.0, BLACK.with_alpha(0.25)),
@@ -131,8 +130,7 @@ impl Palette {
                 glass_near: Oklch::new(0.872, 0.01, 258.338),
                 glass_far: Oklch::new(0.928, 0.006, 264.531),
                 rim_shade: BLACK.with_alpha(0.05),
-                hover: (0.02, 0.06),
-                hover_edge: 0.05,
+                theme: *theme,
                 press: Shadow(1.0, 1.5, 0.0, GRAY_900.with_alpha(0.12)),
                 overlay: [
                     Shadow(1.0, 2.0, 0.0, GRAY_900.with_alpha(0.03)),
@@ -235,28 +233,7 @@ pub const fn menu_radius() -> f32 {
 }
 
 pub fn hover_style(theme: &ArtisanTheme) -> Style {
-    hover_material(&Palette::of(theme))
-}
-
-fn hover_material(palette: &Palette) -> Style {
-    let (top, bottom) = palette.hover;
-    Style::new()
-        .gpui_background(GpuiBackground::LinearGradient {
-            angle: 180.0,
-            color_space: GpuiGradientColorSpace::Oklab,
-            stops: [
-                stop(0.0, palette.ink.with_alpha(top)),
-                stop(1.0, palette.ink.with_alpha(bottom)),
-            ],
-        })
-        .shadows(vec![layer(
-            0.0,
-            0.0,
-            0.0,
-            0.5,
-            true,
-            palette.ink.with_alpha(palette.hover_edge),
-        )])
+    Hover::Neutral.style(theme)
 }
 
 pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
@@ -578,19 +555,7 @@ fn lease(image: &Arc<ImageHandle>) -> Arc<dyn std::any::Any + Send + Sync> {
 }
 
 fn highlight(palette: &Palette, lit: Highlight, now: Instant, height: f32, radius: f32) -> Element {
-    let scale = lit.scale(now);
-    Aqua::Box()
-        .styles([hover_material(palette)
-            .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-            .radius(px(radius))
-            .opacity(lit.opacity(now))
-            .transform(
-                Transform2D::translate(0.0, -height)
-                    .then(Transform2D::scale(1.0, scale))
-                    .then(Transform2D::translate(0.0, height)),
-            )])
-        .build()
-        .exclude_from_hit_testing()
+    Hover::Neutral.layer(&palette.theme, lit, now, height, radius)
 }
 
 fn glass(palette: &Palette) -> Element {

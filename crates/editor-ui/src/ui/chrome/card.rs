@@ -34,7 +34,6 @@ impl Edge {
 
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
-const GRAY_900: Oklch = Oklch::new(0.21, 0.034, 264.665);
 
 pub struct Surfaces {
     pub bg: Oklch,
@@ -77,30 +76,7 @@ pub fn inset(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
 
 #[must_use]
 pub fn double_rule(theme: &ArtisanTheme, bleed: f32) -> Element {
-    let (shade, light) = match theme.colors.mode.is_dark() {
-        true => (BLACK.with_alpha(0.22), WHITE.with_alpha(0.08)),
-        false => (GRAY_900.with_alpha(0.08), WHITE.with_alpha(0.9)),
-    };
-    let line = |color: Oklch| {
-        Aqua::Box()
-            .styles([Style::new()
-                .height(px(1.0))
-                .gpui_background(GpuiBackground::Solid(color.to_reference_paint()))])
-            .build()
-    };
-    Aqua::Box()
-        .layout("column")
-        .styles([Style::new()
-            .flex_shrink(0.0)
-            .margin_insets(aqua_core::Insets {
-                left: -bleed,
-                right: -bleed,
-                top: 4.0,
-                bottom: 4.0,
-            })])
-        .child(line(shade))
-        .child(line(light))
-        .build()
+    crate::ui::kit::Divider::Rule.build(theme, bleed)
 }
 
 #[must_use]

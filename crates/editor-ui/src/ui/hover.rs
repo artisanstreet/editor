@@ -1,4 +1,5 @@
-use super::theme::{ArtisanTheme, Oklch, Opacity};
+use super::kit::hover::{Hover, Material, neutral_stops};
+use super::theme::{ArtisanTheme, Oklch};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HoverFill {
@@ -20,32 +21,17 @@ pub struct HoverColors {
 
 impl HoverColors {
     #[must_use]
-    pub const fn new(theme: &ArtisanTheme, tone: HoverTone) -> Self {
+    pub fn new(theme: &ArtisanTheme, tone: HoverTone) -> Self {
         match tone {
-            HoverTone::Neutral => {
-                let ink = theme.colors.text;
-                let (top, bottom) = hover_fill_stops(theme, ink);
-                Self {
-                    top,
-                    bottom,
-                    ring: ink.at(Opacity::HoverRing),
-                }
-            }
-            HoverTone::Destructive => {
-                let ink = theme.colors.destructive_hover;
-                let strong = ink.at(Opacity::DestructiveHoverStrong);
-                let soft = ink.at(Opacity::DestructiveHoverSoft);
-                let (top, bottom) = if theme.colors.mode.is_dark() {
-                    (strong, soft)
-                } else {
-                    (soft, strong)
-                };
-                Self {
-                    top,
-                    bottom,
-                    ring: strong,
-                }
-            }
+            HoverTone::Neutral => Self::of(Hover::Neutral.material(theme)),
+            HoverTone::Destructive => Self::of(Hover::Destructive.material(theme)),
+        }
+    }
+    const fn of(material: Material) -> Self {
+        Self {
+            top: material.top,
+            bottom: material.bottom,
+            ring: material.ring,
         }
     }
     #[must_use]
@@ -88,11 +74,6 @@ impl HoverColors {
     }
 }
 
-pub const fn hover_fill_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
-    let (strong, soft) = (ink.at(Opacity::HoverTop), ink.at(Opacity::HoverBottom));
-    if theme.colors.mode.is_dark() {
-        (strong, soft)
-    } else {
-        (soft, strong)
-    }
+pub fn hover_fill_stops(theme: &ArtisanTheme, ink: Oklch) -> (Oklch, Oklch) {
+    neutral_stops(theme, ink)
 }
