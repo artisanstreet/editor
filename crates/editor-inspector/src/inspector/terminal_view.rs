@@ -1,23 +1,24 @@
 use super::{Layout, Row, TerminalDialog, TerminalPalette, shell_prompt};
-use editor_ui::{
-    button::{Button, ButtonVariant},
-    glass::{GlassStrength, glass_card_shadows, glass_layers},
-    theme::{
-        ArtisanTheme, Elevation, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens,
-    },
-};
-use aqua_core::Insets;
-use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
+use aqua_text::StyledSpan;
 use aqua_ui::{
     collection::{
         CollectionDescriptor, CollectionError, CollectionLayout, CollectionRole, CollectionSource,
         CollectionViewport,
     },
-    element::{Box as UiBox, Element, Key, Text},
+    element::{Box as UiBox, Element, Key},
     style::{Length, Style},
 };
 use editor_assets::AssetId;
+use editor_ui::kit::{
+    Button, ButtonTone, Finish, IconButton, IconButtonSize, Surface, TextRole,
+};
+use editor_ui::theme::ArtisanTheme;
 use std::{cell::RefCell, rc::Rc};
+
+const DIALOG: Surface = Surface::Dialog;
+const WELL: Surface = Surface::Inset;
+const TYPE: TextRole = TextRole::Code;
+const CARET: &str = "█";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TerminalAction {
@@ -26,6 +27,10 @@ pub enum TerminalAction {
     JumpToLatest,
     Hover(bool),
     Viewport(CollectionViewport),
+}
+
+fn line_height() -> f32 {
+    TYPE.spec().line
 }
 
 struct Rows {
@@ -59,25 +64,13 @@ impl CollectionSource for Rows {
     fn row(&self, index: usize, _: &CollectionLayout) -> Element {
         let state = self.dialog.borrow();
         let Some(job) = &state.job else {
-            return UiBox::new().height(18.0).build();
+            return UiBox::new().height(line_height()).build();
         };
         let theme = self.theme;
-        let font = TextStyle {
-            families: vec![FontFamily::Named(theme.typography.mono.family.to_owned())],
-            size_px: TypographyTokens::size(TextStep::Terminal),
-            line_height_px: 18.0,
-            ..TextStyle::default()
-        };
-        let mut row = UiBox::new().width(Length::Pct(100.0)).style(
-            Style::new()
-                .min_height(Length::Px(18.0))
-                .padding_insets(Insets {
-                    left: 16.0,
-                    right: 16.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }),
-        );
+        let font = TYPE.style(&theme);
+        let mut row = UiBox::new()
+            .width(Length::Pct(100.0))
+            .style(Style::new().min_height(Length::Px(line_height())));
         match self.layout.row(index) {
             Some(Row::Command(index)) => {
                 let prompt = shell_prompt(job.cwd.as_deref());
@@ -97,10 +90,8 @@ impl CollectionSource for Rows {
                     0
                 };
                 if highlighted > 0 {
-                    let mut bold = font.clone();
-                    bold.weight = FontWeight::BOLD;
                     spans.push(
-                        StyledSpan::new(&prefix[..highlighted], bold)
+                        StyledSpan::new(&prefix[..highlighted], TerminalPalette::bold(&font))
                             .gpui_source_color(TerminalPalette::for_theme(&theme).base[12]),
                     );
                 }
@@ -108,22 +99,17 @@ impl CollectionSource for Rows {
                     format!("{}{command}", &prefix[highlighted..]),
                     font.clone(),
                 ));
-                row = row.child(
-                    Text::new("")
-                        .text_style(font)
-                        .spans(spans)
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
-                        .build(),
-                );
+                row = row.child(TYPE.text(&theme, "").spans(spans).build());
             }
             Some(Row::Missing) => {
                 row = row.child(
-                    Text::new(if job.unverified {
-                        "Live output only; Forge supplied no final snapshot."
-                    } else {
-                        "Earlier output is not kept; showing the newest."
-                    })
-                    .text_style(font)
+                    TYPE.text(
+                        &theme,
+                        match job.unverified {
+                            true => "Live output only; Forge supplied no final snapshot.",
+                            false => "Earlier output is not kept; showing the newest.",
+                        },
+                    )
                     .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                     .build(),
                 )
@@ -137,31 +123,18 @@ impl CollectionSource for Rows {
                         [fg.hue_degrees, fg.saturation, fg.lightness, fg.alpha],
                         [0.0, 0.0, 0.0, 0.0],
                     );
-                    row = row.child(
-                        Text::new("")
-                            .text_style(font)
-                            .spans(spans)
-                            .gpui_source_color(theme.colors.text.to_reference_text_color())
-                            .build(),
-                    );
+                    row = row.child(TYPE.text(&theme, "").spans(spans).build());
                 }
             }
             Some(Row::Status) => {
                 if job.status == artisan_api::Status::Running {
                     row = row.child(
-                        UiBox::new()
-                            .width(7.5)
-                            .height(15.0)
-                            .fill(theme.colors.text_muted.to_paint())
+                        TYPE.text(&theme, CARET)
+                            .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                             .build(),
                     );
                 } else {
-                    row = row.child(
-                        Text::new(shell_prompt(job.cwd.as_deref()).prompt)
-                            .text_style(font)
-                            .gpui_source_color(theme.colors.text.to_reference_text_color())
-                            .build(),
-                    );
+                    row = row.child(TYPE.text(&theme, shell_prompt(job.cwd.as_deref()).prompt).build());
                 }
             }
             None => {}
@@ -197,23 +170,19 @@ pub fn terminal_view(
         .min((viewport_height - 160.0).max(32.0));
     let mut content = UiBox::new()
         .layout("column")
-        .width(Length::Pct(100.0))
-        .style(Style::new().padding_insets(Insets {
-            top: 14.0,
-            bottom: 14.0,
-            left: 0.0,
-            right: 0.0,
-        }));
+        .width(Length::Pct(100.0));
     if let Some(error) = &state.error {
         let retry = Rc::clone(&action);
-        content = content.child(Text::new(error.clone()).build()).child(
-            Button::text("terminal-retry", theme, "Retry")
-                .variant(editor_ui::button::ButtonVariant::Outline)
-                .on_activate(move |_| retry(TerminalAction::Retry))
-                .build(),
-        );
+        content = content
+            .child(TextRole::Label.text(&theme, error.clone()).build())
+            .child(
+                Button::text("terminal-retry", theme, ButtonTone::Neutral, "Retry")
+                    .within(WELL)
+                    .on_activate(move |_| retry(TerminalAction::Retry))
+                    .build(),
+            );
     } else if state.loading && job.data.is_none() {
-        content = content.child(Text::new("Loading shell output…").build());
+        content = content.child(TextRole::Label.text(&theme, "Loading shell output…").build());
     }
     if let Some(source) = command_source {
         content = content.child(source);
@@ -236,21 +205,26 @@ pub fn terminal_view(
                 .width(Length::Pct(100.0)),
         ],
         true,
-        18.0,
+        line_height(),
         4,
     );
     let viewport_callback = Rc::clone(&action);
     descriptor.on_viewport = Some(Rc::new(move |viewport| {
         viewport_callback(TerminalAction::Viewport(viewport))
     }));
-    content = content.child(Element::collection(descriptor).with_key("inspector-terminal-lines"));
+    let mut well = vec![
+        content
+            .child(Element::collection(descriptor).with_key("inspector-terminal-lines"))
+            .build(),
+    ];
+    let edge = WELL.padding_px();
     let copy = Rc::clone(&action);
-    content = content.child(
+    well.push(
         UiBox::new()
             .opacity(if hovered { 1.0 } else { 0.0 })
-            .style(Style::new().absolute_at(None, Some(8.0), Some(8.0), None))
+            .style(Style::new().absolute_at(None, Some(edge), Some(edge), None))
             .child(
-                Button::icon(
+                IconButton::new(
                     "inspector-terminal-copy",
                     theme,
                     if copied {
@@ -259,8 +233,10 @@ pub fn terminal_view(
                         AssetId::TABLER_COPY
                     },
                     "Copy output",
+                    IconButtonSize::Md,
+                    Finish::Plain,
                 )
-                .variant(ButtonVariant::Ghost)
+                .within(WELL)
                 .disabled(output_stored)
                 .on_activate(move |_| copy(TerminalAction::Copy))
                 .build(),
@@ -269,42 +245,29 @@ pub fn terminal_view(
     );
     if !following {
         let latest = Rc::clone(&action);
-        content = content.child(
+        well.push(
             UiBox::new()
-                .style(Style::new().absolute_at(None, None, Some(8.0), Some(8.0)))
+                .style(Style::new().absolute_at(None, None, Some(edge), Some(edge)))
                 .child(
-                    Button::icon(
+                    IconButton::new(
                         "inspector-terminal-latest",
                         theme,
                         AssetId::TABLER_ARROW_BAR_TO_DOWN,
                         "Jump to latest",
+                        IconButtonSize::Md,
+                        Finish::Plain,
                     )
-                    .variant(ButtonVariant::Ghost)
+                    .within(WELL)
                     .on_activate(move |_| latest(TerminalAction::JumpToLatest))
                     .build(),
                 )
                 .build(),
         );
     }
-    let radius = RadiusTokens::value(RadiusStep::X2l);
     let hover = Rc::clone(&action);
-    Ok(UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0))
-        .radius(radius)
-        .clip(true)
-        .border((1.0, theme.colors.text.at(Opacity::GlassBorder).to_paint()))
-        .style(
-            Style::new().shadows(
-                glass_card_shadows(&theme, Elevation::Overlay)
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-            ),
-        )
-        .child(glass_layers(&theme, GlassStrength::Strong, radius))
-        .child(content.build())
-        .build()
+    Ok(DIALOG
+        .build(&theme, vec![WELL.build(&theme, well)])
+        .style(Style::new().width(Length::Pct(100.0)))
         .with_key("inspector-terminal-card")
         .on_hover_change(move |value| hover(TerminalAction::Hover(value))))
 }
