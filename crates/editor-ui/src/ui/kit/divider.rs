@@ -9,6 +9,7 @@ const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
 const GRAY_900: Oklch = Oklch::new(0.21, 0.034, 264.665);
 const GAP: Space = Space::S4;
+const LINE: f32 = 1.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Divider {
@@ -25,7 +26,7 @@ fn shades(theme: &ArtisanTheme) -> (Oklch, Oklch) {
 
 fn line(color: Oklch) -> Element {
     UiBox::new()
-        .height(1.0)
+        .height(LINE)
         .style(Style::new().gpui_background(GpuiBackground::Solid(color.to_reference_paint())))
         .build()
 }
@@ -39,6 +40,15 @@ fn rule(theme: &ArtisanTheme) -> UiBox {
 }
 
 impl Divider {
+    #[must_use]
+    pub fn height(&self) -> f32 {
+        let body = match self {
+            Self::Rule => 2.0 * LINE,
+            Self::Labelled(_) => TextRole::Caption.spec().line,
+        };
+        body + 2.0 * GAP.px()
+    }
+
     #[must_use]
     pub fn build(self, theme: &ArtisanTheme, bleed: f32) -> Element {
         let margin = Insets {

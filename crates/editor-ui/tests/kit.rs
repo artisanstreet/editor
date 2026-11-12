@@ -1,3 +1,5 @@
+#[path = "ui/kit/divider.rs"]
+mod divider;
 #[path = "ui/kit/hover.rs"]
 mod hover;
 #[path = "ui/kit/tokens/radius.rs"]
