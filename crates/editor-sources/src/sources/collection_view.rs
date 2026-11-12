@@ -1,12 +1,16 @@
-use super::{CollectionBrowser, CollectionPreview, page_record, view::code_card};
+use super::{
+    CollectionBrowser, CollectionPreview, page_record,
+    view::{button, code_card, source_lines, stack, viewport},
+};
 use editor_core::RangeState;
-use editor_ui::{action_row::ActionRow, button::Button, theme::ArtisanTheme};
+use editor_ui::kit::{ButtonSize, ButtonTone, Density, Row, RowItem, Surface, TextRole};
+use editor_ui::theme::ArtisanTheme;
 use aqua_ui::{
     collection::{
         CollectionDescriptor, CollectionError, CollectionLayout, CollectionRole, CollectionSource,
         CollectionViewport,
     },
-    element::{Box as UiBox, Element, Key, Text},
+    element::{Box as UiBox, Element, Key},
     style::{Length, Style},
 };
 use artisan_api::CollectionRange;
@@ -14,6 +18,13 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 type Presenter<T> = Rc<dyn Fn(&T, u64) -> CollectionPreview>;
 type Handler<T> = Rc<dyn Fn(CollectionAction<T>)>;
+
+const ENTRY: Row = Row::ListItem(Density::Regular);
+const READ: ButtonSize = ButtonSize::Sm;
+
+fn entry_height() -> f32 {
+    ENTRY.height().unwrap_or_default()
+}
 
 pub enum CollectionAction<T> {
     Request(u64),
@@ -36,6 +47,20 @@ struct Rows<T: serde::de::DeserializeOwned + Send + 'static> {
     present: Presenter<T>,
     action: Handler<T>,
     has_activation: bool,
+}
+
+impl<T: serde::de::DeserializeOwned + Send + 'static> Rows<T> {
+    fn loading(&self, index: u64) -> Element {
+        RowItem::new(
+            format!("collection-loading-{index}"),
+            self.theme,
+            ENTRY,
+            Surface::Inset,
+            "Loading entry…",
+        )
+        .disabled(true)
+        .build()
+    }
 }
 
 impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionSource for Rows<T> {
@@ -67,38 +92,26 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionSource for Rows<
         let index = index as u64;
         let page = self.browser.borrow().window().page_for(index).cloned();
         let Some(page) = page else {
-            return UiBox::new()
-                .height(ActionRow::row_height(&self.theme))
-                .child(
-                    Text::new("Loading entry…")
-                        .gpui_source_color(self.theme.colors.text.to_reference_text_color())
-                        .build(),
-                )
-                .build();
+            return self.loading(index);
         };
         let browser = self.browser.borrow();
         let Some(record) = page_record(browser.window().source(), &page, index) else {
-            return UiBox::new()
-                .height(ActionRow::row_height(&self.theme))
-                .child(
-                    Text::new("Loading entry…")
-                        .gpui_source_color(self.theme.colors.text.to_reference_text_color())
-                        .build(),
-                )
-                .build();
+            return self.loading(index);
         };
         let preview = (self.present)(record, index);
         drop(browser);
         let callback = Rc::clone(&self.action);
         let chosen = Arc::clone(&page);
-        let mut row = ActionRow::new(
+        let mut row = RowItem::new(
             format!("collection-entry-{index}"),
             self.theme,
+            ENTRY,
+            Surface::Inset,
             preview.label,
         )
         .selected(preview.selected)
         .disabled(preview.disabled)
-        .on_activate(move |_| {
+        .on_activate(move || {
             callback(CollectionAction::Choose {
                 page: Arc::clone(&chosen),
                 index,
@@ -107,20 +120,29 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionSource for Rows<
         if self.has_activation && preview.detail.is_some() {
             let callback = Rc::clone(&self.action);
             row = row.trailing(
-                Button::text(format!("collection-read-{index}"), self.theme, "Read")
-                    .variant(editor_ui::button::ButtonVariant::Ghost)
-                    .disabled(preview.disabled)
-                    .on_activate(move |_| {
+                button(
+                    &format!("collection-read-{index}"),
+                    self.theme,
+                    ButtonTone::Quiet,
+                    "Read",
+                    move || {
                         callback(CollectionAction::Read {
                             page: Arc::clone(&page),
                             index,
                         })
-                    })
-                    .build(),
+                    },
+                )
+                .size(READ)
+                .nested(
+                    ENTRY.radius_in(Surface::Inset),
+                    (entry_height() - READ.height()) / 2.0,
+                )
+                .disabled(preview.disabled)
+                .build(),
             );
         }
         UiBox::new()
-            .height(ActionRow::row_height(&self.theme))
+            .height(entry_height())
             .clip(true)
             .child(row.build())
             .build()
@@ -138,21 +160,16 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
 ) -> Element {
     let count = browser.borrow().window().source().count;
     let Ok(count_native) = usize::try_from(count) else {
-        return Text::new("This collection exceeds this device's native list capacity.")
-            .gpui_source_color(theme.colors.text.to_reference_text_color())
+        return TextRole::Label
+            .text(&theme, "This collection exceeds this device's native list capacity.")
             .build();
     };
-    let height = max_height.map_or(ActionRow::row_height(&theme) * 12.0, |height| {
-        height.max(32.0).min(ActionRow::row_height(&theme) * 12.0)
-    });
-    let mut body = UiBox::new()
-        .layout("column")
-        .gap(theme.spacing.steps(1.0))
-        .child(
-            Text::new(format!("{title} · {count} entries"))
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .build(),
-        );
+    let height = viewport(entry_height(), max_height);
+    let mut body = stack().child(
+        TextRole::Title
+            .text(&theme, format!("{title} · {count} entries"))
+            .build(),
+    );
     if count_native != 0 {
         let source = Rc::new(Rows {
             browser: Rc::clone(&browser),
@@ -170,7 +187,7 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
                     .width(Length::Pct(100.0)),
             ],
             true,
-            ActionRow::row_height(&theme),
+            entry_height(),
             0,
         );
         let watched_browser = Rc::clone(&browser);
@@ -188,20 +205,15 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
         }));
         body = body.child(Element::collection(descriptor));
     }
-    let state = browser_state(&browser);
-    if let Some(error) = state {
+    if let Some(error) = browser_state(&browser) {
         let action = Rc::clone(&action);
         body = body
+            .child(TextRole::Label.text(&theme, error).build())
             .child(
-                Text::new(error)
-                    .gpui_source_color(theme.colors.text.to_reference_text_color())
-                    .build(),
-            )
-            .child(
-                Button::text("collection-retry", theme, "Retry")
-                    .variant(editor_ui::button::ButtonVariant::Outline)
-                    .on_activate(move |_| action(CollectionAction::Retry))
-                    .build(),
+                button("collection-retry", theme, ButtonTone::Neutral, "Retry", move || {
+                    action(CollectionAction::Retry)
+                })
+                .build(),
             );
     }
     code_card(theme, body.build())
@@ -229,15 +241,16 @@ pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
         return Err("stored collection detail requires its source view");
     }
     let callback = Rc::clone(&action);
-    let mut body = UiBox::new()
-        .layout("column")
-        .gap(theme.spacing.steps(1.0))
-        .child(
-            Button::text("collection-back", theme, "Back to entries")
-                .variant(editor_ui::button::ButtonVariant::Ghost)
-                .on_activate(move |_| callback(CollectionAction::Back))
-                .build(),
-        );
+    let mut body = stack().child(
+        button(
+            "collection-back",
+            theme,
+            ButtonTone::Quiet,
+            "Back to entries",
+            move || callback(CollectionAction::Back),
+        )
+        .build(),
+    );
     let mut selection = None;
     if let Some(detail) = stored_detail {
         body = body.child(detail);
@@ -245,27 +258,15 @@ pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
         let text: Arc<str> = Arc::from(text.as_str());
         let ranges = super::raw_rows(&text);
         selection = Some(super::selection_source(source_id, 0, Arc::clone(&text)));
-        let height = max_height.map_or(ActionRow::row_height(&theme) * 12.0, |height| {
-            height.max(32.0).min(ActionRow::row_height(&theme) * 12.0)
-        });
-        let list = aqua_ui::collection::List::new()
-            .items(ranges.into_iter().enumerate())
-            .key(|(index, _)| format!("collection-detail-line-{index}"))
-            .row(move |(_, range)| {
-                Text::new(text[range.clone()].to_owned())
-                    .gpui_source_color(theme.colors.text.to_reference_text_color())
-                    .selection_source_in(document, super::source_slice(source_id, range.clone()))
-                    .build()
-            })
-            .virtualize()
-            .measured_uniform_rows()
-            .style(
-                Style::new()
-                    .height(Length::Px(height))
-                    .width(Length::Pct(100.0)),
-            )
-            .build();
-        body = body.child(list);
+        body = body.child(source_lines(
+            "collection-detail-line",
+            theme,
+            text,
+            ranges,
+            viewport(TextRole::Code.spec().line, max_height),
+            document,
+            source_id,
+        ));
     }
     Ok(super::ContentView {
         element: code_card(theme, body.build()),
