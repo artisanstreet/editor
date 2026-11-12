@@ -13,6 +13,7 @@ use super::{
     theme::ArtisanTheme,
 };
 use crate::ui::chrome::menu::Highlight;
+use crate::ui::kit::Hover;
 
 #[derive(Clone, Copy)]
 enum Layer {
@@ -76,6 +77,20 @@ impl PopInHover {
     pub fn background(&self, id: &str, theme: &ArtisanTheme, radius: f32) -> Element {
         UiBox::new()
             .style(HoverColors::new(theme, HoverTone::Neutral).style(HoverFill::Edged))
+            .style(
+                Style::new()
+                    .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                    .radius(aqua_ui::style::Length::Px(radius))
+                    .opacity(0.0),
+            )
+            .build()
+            .with_key(self.key(id))
+            .exclude_from_hit_testing()
+    }
+
+    pub fn layer(&self, id: &str, theme: &ArtisanTheme, hover: Hover, radius: f32) -> Element {
+        UiBox::new()
+            .style(hover.style(theme))
             .style(
                 Style::new()
                     .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
