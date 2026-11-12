@@ -8,6 +8,10 @@ use std::path::PathBuf;
 struct TempDir(PathBuf);
 
 impl TempDir {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "test helper; a failure fails the calling test"
+    )]
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("forge-text-search-test-{}", ItemId::new()));
         std::fs::create_dir_all(&path).unwrap();
@@ -21,6 +25,10 @@ impl Drop for TempDir {
     }
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
 async fn thread(store: &Store, title: &str, parent: Option<ThreadId>) -> ThreadId {
     let project = store
         .create_project(CreateProject {
@@ -65,13 +73,18 @@ async fn a_search_finds_the_message_the_line_and_the_exact_match() {
     let store = Store::open(&dir.0).unwrap();
     let fixed = thread(&store, "Scene bound fix", None).await;
     let child = thread(&store, "Worker", Some(fixed.clone())).await;
-    let reply = "The thread froze.\nRaising the Scene Bound to 2048 items fixed the freeze for good.";
+    let reply =
+        "The thread froze.\nRaising the Scene Bound to 2048 items fixed the freeze for good.";
     let answer = store
         .upsert_item(said(&fixed, reply, Phase::Final))
         .await
         .unwrap();
     store
-        .upsert_item(said(&fixed, "Checking the scene bound first.", Phase::Commentary))
+        .upsert_item(said(
+            &fixed,
+            "Checking the scene bound first.",
+            Phase::Commentary,
+        ))
         .await
         .unwrap();
     store
@@ -117,7 +130,11 @@ async fn a_long_line_is_cut_around_the_match() {
     let dir = TempDir::new();
     let store = Store::open(&dir.0).unwrap();
     let home = thread(&store, "Long lines", None).await;
-    let line = format!("{} the needle sits here {}", "before ".repeat(30), "after ".repeat(40));
+    let line = format!(
+        "{} the needle sits here {}",
+        "before ".repeat(30),
+        "after ".repeat(40)
+    );
     store
         .upsert_item(said(&home, &line, Phase::Final))
         .await

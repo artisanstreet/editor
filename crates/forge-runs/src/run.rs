@@ -3,8 +3,9 @@
 use crate::Hub;
 use anyhow::{Context, Result};
 use artisan_api::{
-    Answer, Decision, EngineId, ItemId, ItemKind, LiveTarget, ModelSwitch, NamedModel, Permissions,
-    Run, RunId, RunStatus, Status, ThreadId, ToolKind, UpdateThread, Usage,
+    Answer, Decision, EngineConfig, EngineId, ItemId, ItemKind, LiveTarget, ModelSwitch,
+    NamedModel, Permissions, Run, RunId, RunStatus, Status, ThreadId, ToolKind, UpdateThread,
+    Usage,
 };
 use forge_engines::{EngineEvent, Input, LiveKind, Outcome, RunIo, Turn, UserInput};
 use forge_store::NewItem;
@@ -14,6 +15,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+fn carried_usage(carried: Option<&Run>, config: &EngineConfig) -> Usage {
+    Usage {
+        context_used: carried.and_then(|run| run.usage.context_used),
+        context_window: carried
+            .filter(|run| run.model == config.model)
+            .and_then(|run| run.usage.context_window),
+        ..Usage::default()
+    }
+}
+
+fn cancel_cutoff(hub: &Hub, thread_id: &ThreadId) -> u64 {
+    hub.lock().get(thread_id).map_or(0, |live| {
+        live.cancel_through
+            .load(std::sync::atomic::Ordering::Acquire)
+    })
+}
 
 /// Runs one engine run for the thread's undelivered messages.
 pub async fn drive(
@@ -53,13 +71,7 @@ pub async fn drive(
     let transport = claude_transport(hub, engine).await;
     let session_id = carried_session(previous.as_ref(), engine, transport);
     let carried = session_id.as_ref().and(previous.as_ref());
-    let usage = Usage {
-        context_used: carried.and_then(|run| run.usage.context_used),
-        context_window: carried
-            .filter(|run| run.model == thread.config.model)
-            .and_then(|run| run.usage.context_window),
-        ..Usage::default()
-    };
+    let usage = carried_usage(carried, &thread.config);
     let mut run = Run {
         config: Some(thread.config.clone()),
         id: run_id.clone(),
@@ -108,10 +120,7 @@ pub async fn drive(
         Err(error) => Outcome::failed(format!("{error:#}")),
     };
     adapter_cancel.cancel();
-    let cancel_cutoff = hub.lock().get(thread_id).map_or(0, |live| {
-        live.cancel_through
-            .load(std::sync::atomic::Ordering::Acquire)
-    });
+    let cancel_cutoff = cancel_cutoff(hub, thread_id);
     if cancel.is_cancelled()
         && cancel_cutoff > 0
         && let Err(error) = store
@@ -1108,9 +1117,7 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             }
             let finished_text =
                 status.is_terminal() && matches!(kind, ItemKind::AssistantMessage { .. });
-            let shown = if finished_text
-                && let ItemKind::AssistantMessage { text, .. } = &kind
-            {
+            let shown = if finished_text && let ItemKind::AssistantMessage { text, .. } = &kind {
                 text.inline()
                     .map(crate::resources::written_sources)
                     .unwrap_or_default()

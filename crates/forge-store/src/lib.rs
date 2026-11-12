@@ -414,8 +414,8 @@ impl Store {
                 tracing::warn!(
                     read = std::any::type_name::<F>(),
                     waited_for_slot_ms = queued.as_millis(),
-                    waited_for_thread_ms = (started - queued).as_millis(),
-                    ran_ms = (total - started).as_millis(),
+                    waited_for_thread_ms = started.saturating_sub(queued).as_millis(),
+                    ran_ms = total.saturating_sub(started).as_millis(),
                     "store read was slow"
                 );
             }

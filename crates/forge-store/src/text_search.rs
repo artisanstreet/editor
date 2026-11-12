@@ -98,7 +98,11 @@ fn snippet(text: &str, start: usize, end: usize) -> (String, (u32, u32)) {
         .map_or(line_start, |skipped| line_start + before[skipped].0);
     let lead = if from > line_start { "…" } else { "" };
     let body: String = text[from..line_end].chars().take(SNIPPET_CHARS).collect();
-    let tail = if from + body.len() < line_end { "…" } else { "" };
+    let tail = if from + body.len() < line_end {
+        "…"
+    } else {
+        ""
+    };
     let shown_end = (end - from).min(body.len());
     let narrow = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
     (
@@ -162,13 +166,11 @@ fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>>
         if per_thread.get(&thread_id).copied().unwrap_or(0) >= HITS_PER_THREAD {
             continue;
         }
-        let known = match homes.get(&thread_id) {
-            Some(known) => known,
-            None => {
-                let found = home(conn, &thread_id)?;
-                homes.entry(thread_id.clone()).or_insert(found)
-            }
-        };
+        if !homes.contains_key(&thread_id) {
+            let found = home(conn, &thread_id)?;
+            homes.insert(thread_id.clone(), found);
+        }
+        let known = &homes[&thread_id];
         let Some(home) = known.as_ref().filter(|home| home.listed) else {
             continue;
         };
@@ -205,7 +207,8 @@ fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>>
 impl Store {
     pub async fn text_search(&self, query: TextSearchQuery) -> Result<Vec<TextHit>> {
         self.read(move |conn| {
-            text_hits(conn, &query).with_context(|| format!("search message text for {:?}", query.query))
+            text_hits(conn, &query)
+                .with_context(|| format!("search message text for {:?}", query.query))
         })
         .await
     }
