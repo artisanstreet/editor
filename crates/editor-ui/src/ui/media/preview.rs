@@ -12,7 +12,7 @@ use std::{
 use aqua::images::ImageHandle;
 use aqua_core::{InputEvent, Key, NamedKey, PointerButton, Size};
 use aqua_ui::{
-    element::{Box as UiBox, Element, Media, Text},
+    element::{Box as UiBox, Element, Media},
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
     style::{Length, Style},
 };
@@ -23,10 +23,15 @@ use super::{
 };
 use editor_core::{Core, HostId, HostInstance};
 use crate::ui::{
-    button::{Button, ButtonVariant},
+    kit::{
+        Finish, IconButton, IconButtonSize, Media as MediaKind, Space, Surface, TextRole,
+        control::icon_button::CORNER_INSET,
+    },
     motion::MotionCurve,
     theme::{ArtisanTheme, Opacity},
 };
+
+const FRAME: Surface = Surface::Media(MediaKind::Frame);
 
 static NEXT_WAITER: AtomicU64 = AtomicU64::new(1 << 62);
 
@@ -453,7 +458,7 @@ impl Preview {
                     UiBox::new()
                         .width(width)
                         .height(height)
-                        .radius(5.0)
+                        .radius(FRAME.radius_px())
                         .clip(true)
                         .child(
                             Media::new(image.clone())
@@ -475,11 +480,15 @@ impl Preview {
                         .justify(aqua_ui::JustifyContent::CENTER),
                 )
                 .child(
-                    Text::new(if self.failed {
-                        "Couldn't load image"
-                    } else {
-                        "Loading image…"
-                    })
+                    TextRole::Label
+                        .text(
+                            &theme,
+                            if self.failed {
+                                "Couldn't load image"
+                            } else {
+                                "Loading image…"
+                            },
+                        )
                     .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                     .build(),
                 )
@@ -511,7 +520,7 @@ impl Preview {
                             UiBox::new()
                                 .width(width)
                                 .height(height)
-                                .radius(5.0)
+                                .radius(FRAME.radius_px())
                                 .clip(true)
                                 .child(
                                     Media::new(image.clone())
@@ -528,9 +537,14 @@ impl Preview {
         }
         stage = stage.child(
             UiBox::new()
-                .style(Style::new().absolute_at(None, Some(2.0), Some(2.0), None))
+                .style(Style::new().absolute_at(None, Some(CORNER_INSET), Some(CORNER_INSET), None))
                 .child(
-                    Button::corner_close("image-preview-close", theme, "Close image preview", 5.0)
+                    IconButton::corner_close(
+                        "image-preview-close",
+                        theme,
+                        "Close image preview",
+                        FRAME.radius_px(),
+                    )
                         .on_activate(move |_| close(Action::Close))
                         .build(),
                 )
@@ -596,7 +610,8 @@ impl Preview {
         if self.gallery_count() > 1 {
             for forward in [false, true] {
                 let nav = Rc::clone(&emit);
-                let button = Button::icon(
+                let nav_size = IconButtonSize::Lg;
+                let button = IconButton::new(
                     if forward {
                         "image-preview-next"
                     } else {
@@ -613,10 +628,9 @@ impl Preview {
                     } else {
                         "Previous image"
                     },
+                    nav_size,
+                    Finish::Glass,
                 )
-                .variant(ButtonVariant::Ghost)
-                .glass()
-                .compact(36.0)
                 .disabled(if forward {
                     self.gallery_index() + 1 == self.gallery_count()
                 } else {
@@ -627,9 +641,9 @@ impl Preview {
                 root = root.child(
                     UiBox::new()
                         .style(Style::new().absolute_at(
-                            if forward { None } else { Some(8.0) },
-                            Some(viewport.h / 2.0 - 18.0),
-                            if forward { Some(8.0) } else { None },
+                            if forward { None } else { Some(Space::S8.px()) },
+                            Some((viewport.h - nav_size.edge()) / 2.0),
+                            if forward { Some(Space::S8.px()) } else { None },
                             None,
                         ))
                         .child(button)
@@ -641,15 +655,14 @@ impl Preview {
                     .width(Length::Pct(100.0))
                     .style(
                         Style::new()
-                            .absolute_at(Some(0.0), None, None, Some(12.0))
+                            .absolute_at(Some(0.0), None, None, Some(Space::S12.px()))
                             .justify(aqua_ui::JustifyContent::CENTER),
                     )
                     .child(
-                        Text::new(format!(
-                            "{} / {}",
-                            self.gallery_index() + 1,
-                            self.gallery_count()
-                        ))
+                        TextRole::Caption.text(
+                            &theme,
+                            format!("{} / {}", self.gallery_index() + 1, self.gallery_count()),
+                        )
                         .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                         .build(),
                     )
