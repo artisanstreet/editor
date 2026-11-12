@@ -14,7 +14,7 @@ use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 
-use crate::ui::button::{Button, ButtonVariant};
+use crate::ui::kit::{Button, ButtonTone, Finish, IconButton, IconButtonSize, Space, Spaced};
 use crate::ui::markdown::DiagramSvg;
 use crate::ui::rich::narrative::callout::text;
 use crate::ui::theme::{ArtisanTheme, ThemeMode};
@@ -273,7 +273,7 @@ pub(crate) fn view(
     ui::Box::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(8.0)
+        .spaced(Space::S8)
         .child(viewport)
         .child(toolbar(theme, id, zoom, state, invalidate))
         .build()
@@ -294,7 +294,7 @@ fn toolbar(
                 .justify(JustifyContent::CENTER),
         )
         .width(Length::Pct(100.0))
-        .gap(4.0);
+        .spaced(Space::S4);
     for (name, icon, label, factor, disabled) in [
         (
             "zoom-out",
@@ -316,13 +316,18 @@ fn toolbar(
             true
         });
         row = row.child(
-            Button::icon(format!("{id}-{name}"), *theme, icon, label)
-                .debug_selector(name)
-                .variant(ButtonVariant::Ghost)
-                .compact(28.0)
-                .disabled(disabled)
-                .on_activate(move |_| apply())
-                .build(),
+            IconButton::new(
+                format!("{id}-{name}"),
+                *theme,
+                icon,
+                label,
+                IconButtonSize::Md,
+                Finish::Plain,
+            )
+            .disabled(disabled)
+            .on_activate(move |_| apply())
+            .build()
+            .debug_selector(name),
         );
     }
     let fit = changing(state, invalidate, |state| {
@@ -330,9 +335,8 @@ fn toolbar(
         true
     });
     row.child(
-        Button::text(format!("{id}-fit"), *theme, "Fit")
+        Button::text(format!("{id}-fit"), *theme, ButtonTone::Quiet, "Fit")
             .debug_selector("mermaid-fit")
-            .variant(ButtonVariant::Ghost)
             .on_activate(move |_| fit())
             .build(),
     )

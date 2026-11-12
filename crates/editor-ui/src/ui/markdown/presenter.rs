@@ -14,7 +14,9 @@ use editor_assets::AssetId;
 
 use super::visual::{BodyTone, LeafError, LinkAction, interactive_leaf, raw_leaf};
 use super::{Block, CodeFence, MarkdownDocument, MarkdownEngine, MarkdownError};
-use crate::ui::kit::TextRole;
+use crate::ui::kit::{
+    Button, ButtonSize, ButtonTone, Hover, Label, Radius, Space, Spaced, TextRole,
+};
 use crate::ui::rich::charts::{
     self,
     chart::ChartState,
@@ -738,7 +740,7 @@ impl MarkdownPresenter {
                 ui::Box::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
-                    .gap(6.0)
+                    .spaced(Space::S6)
                     .child(card)
                     .child(crate::ui::rich::narrative::callout::text(
                         theme,
@@ -966,7 +968,7 @@ impl MarkdownPresenter {
                 ui::Box::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
-                    .gap(6.0)
+                    .spaced(Space::S6)
                     .child(card)
                     .child(crate::ui::rich::narrative::callout::text(
                         theme,
@@ -1442,11 +1444,6 @@ impl MarkdownPresenter {
             RichFence::Pending { kind } => {
                 return Ok(ui::Box::new()
                     .width(Length::Pct(100.0))
-                    .style(Style::new().padding_insets(Insets {
-                        top: 4.0,
-                        bottom: 4.0,
-                        ..Insets::default()
-                    }))
                     .child(crate::ui::rich::narrative::callout::text(
                         theme,
                         &format!("Drawing {kind}\u{2026}"),
@@ -2333,7 +2330,7 @@ impl MarkdownPresenter {
                     trail: Rc::new(move |entries, select| {
                         let mut trail = ui::Box::new()
                             .layout("row")
-                            .gap(2.0)
+                            .spaced(Space::S2)
                             .style(Style::new().wrap(true).align(aqua_ui::AlignItems::CENTER));
                         for (step, (node, name, current)) in entries.into_iter().enumerate() {
                             if step > 0 {
@@ -2346,12 +2343,13 @@ impl MarkdownPresenter {
                             }
                             let choose = select.clone();
                             trail = trail.child(
-                                crate::ui::button::Button::text(
+                                Button::text(
                                     format!("{trail_id}-trail-{node}"),
                                     current_theme,
+                                    ButtonTone::Quiet,
                                     name,
                                 )
-                                .variant(crate::ui::button::ButtonVariant::Ghost)
+                                .size(ButtonSize::Sm)
                                 .disabled(current)
                                 .on_activate(move |_| choose(node))
                                 .build(),
@@ -2573,7 +2571,7 @@ impl MarkdownPresenter {
                     legend: Rc::new(move |entries, toggle| {
                         let mut legend = ui::Box::new()
                             .layout("row")
-                            .gap(12.0)
+                            .spaced(Space::S4)
                             .style(Style::new().wrap(true).align(aqua_ui::AlignItems::CENTER));
                         for (index, (name, color, hidden)) in entries.into_iter().enumerate() {
                             let color = if hidden {
@@ -2598,27 +2596,26 @@ impl MarkdownPresenter {
                                 )
                                 .build();
                             let activate = toggle.clone();
-                            let button = crate::ui::button::Button::text(
+                            let button = legend_toggle(
                                 format!("{legend_id}-legend-{index}"),
-                                current_theme,
+                                &current_theme,
+                                swatch,
                                 name,
-                            )
-                            .variant(crate::ui::button::ButtonVariant::Ghost)
-                            .icon_slot(swatch)
-                            .on_activate(move |_| activate(index))
-                            .build();
+                                hidden,
+                                move || activate(index),
+                            );
                             legend = legend.child(button);
                         }
                         legend.build()
                     }),
                     reset: Rc::new(move |reset| {
-                        crate::ui::button::Button::icon_text(
+                        Button::new(
                             reset_id.clone(),
                             current_theme,
-                            AssetId::TABLER_ZOOM_OUT,
-                            "Reset zoom",
+                            ButtonTone::Quiet,
+                            ButtonSize::Md,
+                            Label::IconText(AssetId::TABLER_ZOOM_OUT, "Reset zoom".to_owned()),
                         )
-                        .variant(crate::ui::button::ButtonVariant::Ghost)
                         .on_activate(move |_| reset())
                         .build()
                     }),
@@ -2958,4 +2955,44 @@ impl MarkdownPresenter {
             proof: PreparationProof(self.proof.clone()),
         })
     }
+}
+
+fn legend_toggle(
+    key: String,
+    theme: &ArtisanTheme,
+    swatch: Element,
+    name: String,
+    hidden: bool,
+    activate: impl Fn() + 'static,
+) -> Element {
+    let ink = match hidden {
+        true => theme.colors.text_muted,
+        false => theme.colors.text,
+    };
+    ui::Button::new()
+        .gap(Space::S6.px())
+        .style(
+            Radius::Field
+                .style()
+                .padding(Length::Px(Space::S4.px()))
+                .align(aqua_ui::AlignItems::CENTER)
+                .flex_shrink(0.0),
+        )
+        .child(swatch)
+        .child(
+            TextRole::Caption
+                .text(theme, name.clone())
+                .gpui_source_color(ink.to_reference_text_color())
+                .wrap(false)
+                .build(),
+        )
+        .on_activate(activate)
+        .build()
+        .with_key(key)
+        .role(aqua_core::Role::Button)
+        .aria_label(name)
+        .aria_selected(!hidden)
+        .focusable(true)
+        .cursor(aqua_core::CursorIcon::Pointer)
+        .hover_style(Hover::Neutral.style(theme))
 }
