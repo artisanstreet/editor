@@ -2,6 +2,7 @@ mod view;
 pub(crate) use view::{ModelServices, ModelState};
 
 use super::SizeHint;
+use crate::ui::kit::TextRole;
 use crate::ui::media::{
     color,
     model::{Format, Up, srgb_to_linear},
@@ -135,7 +136,6 @@ pub(crate) fn services(
 ) -> ModelServices {
     use crate::ui::theme::{RadiusStep, RadiusTokens};
     use aqua_core::{GpuiBackground, Insets};
-    use aqua_text::FontWeight;
     use aqua_ui::{
         element::{Element, ui},
         style::{Length, Style},
@@ -167,9 +167,7 @@ pub(crate) fn services(
                 let hint = crate::ui::rich::narrative::callout::text_with_wrap(
                     &theme,
                     &format!("Drag to turn · Shift-drag to pan · {shortcut} to zoom"),
-                    12.0,
-                    16.0,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text_muted,
                     false,
                 )
@@ -285,9 +283,7 @@ pub(crate) fn services(
                 .child(crate::ui::rich::narrative::callout::text_with_wrap(
                     &theme,
                     facts,
-                    12.0,
-                    16.0,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text_muted,
                     false,
                 ))

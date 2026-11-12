@@ -1,23 +1,47 @@
-use crate::ui::kit::{Space, Surface, Tone, Tooltip};
+use crate::ui::kit::{Space, Surface, TextRole, Tone, Tooltip};
 use crate::ui::rich::narrative::callout::{text, text_with_wrap};
-use crate::ui::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens};
+use crate::ui::theme::{ArtisanTheme, Oklch, Opacity, RadiusStep, RadiusTokens};
 use aqua_core::{GpuiHsla, Insets};
 use aqua_text::FontWeight;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 
+pub(crate) fn mark_text(
+    theme: &ArtisanTheme,
+    value: &str,
+    size: f32,
+    line: f32,
+    weight: FontWeight,
+    color: Oklch,
+    wrap: bool,
+) -> Element {
+    let style = aqua_text::TextStyle {
+        size_px: size,
+        line_height_px: line,
+        weight,
+        ..TextRole::Caption.style(theme)
+    };
+    let paint = color.to_reference_text_color();
+    ui::Text::new(value.to_owned())
+        .text_style(style.clone())
+        .gpui_source_color(paint)
+        .spans(vec![
+            aqua_text::StyledSpan::new(value, style).gpui_source_color([
+                paint.hue_degrees,
+                paint.saturation,
+                paint.lightness,
+                paint.alpha,
+            ]),
+        ])
+        .wrap(wrap)
+        .build()
+}
+
 pub(crate) fn empty(theme: &ArtisanTheme, label: &str) -> Element {
     Surface::Callout(Tone::Neutral)
         .build(
             theme,
-            vec![text(
-                theme,
-                label,
-                14.0,
-                20.0,
-                FontWeight::NORMAL,
-                theme.colors.text_muted,
-            )],
+            vec![text(theme, label, TextRole::Label, theme.colors.text_muted)],
         )
         .style(
             Style::new()
@@ -43,9 +67,7 @@ pub(crate) fn concentration_frame(
         text_with_wrap(
             theme,
             value,
-            11.0,
-            16.0,
-            FontWeight::MEDIUM,
+            TextRole::Caption,
             theme.colors.text_muted,
             false,
         )
@@ -73,9 +95,7 @@ pub(crate) fn concentration_frame(
                 .child(text_with_wrap(
                     theme,
                     &label,
-                    11.0,
-                    16.0,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text_muted,
                     false,
                 ))
@@ -121,9 +141,7 @@ pub(crate) fn concentration_frame(
             .child(text_with_wrap(
                 theme,
                 &label,
-                11.0,
-                16.0,
-                FontWeight::NORMAL,
+                TextRole::Caption,
                 theme.colors.text_muted,
                 false,
             ))
@@ -353,9 +371,7 @@ pub(crate) fn readout_rows_at(
                     .child(text_with_wrap(
                         theme,
                         label,
-                        theme.typography.label_text,
-                        19.0,
-                        FontWeight::NORMAL,
+                        TextRole::Caption,
                         theme.colors.text_muted,
                         false,
                     ))
@@ -364,9 +380,7 @@ pub(crate) fn readout_rows_at(
             .child(text_with_wrap(
                 theme,
                 value,
-                theme.typography.label_text,
-                19.0,
-                FontWeight::NORMAL,
+                TextRole::Caption,
                 theme.colors.text,
                 false,
             ))
@@ -386,9 +400,7 @@ pub(crate) fn readout_rows_at(
         content = content.child(text_with_wrap(
             theme,
             heading,
-            theme.typography.control_text,
-            18.0,
-            FontWeight(600),
+            TextRole::Title,
             theme.colors.text_muted,
             false,
         ));
@@ -468,9 +480,7 @@ pub(crate) fn tick_strip(theme: &ArtisanTheme, ticks: Vec<super::distribution::T
             .child(text_with_wrap(
                 theme,
                 &tick.label,
-                11.0,
-                16.0,
-                FontWeight::NORMAL,
+                TextRole::Caption,
                 theme.colors.text_muted,
                 false,
             ))
@@ -562,9 +572,7 @@ pub(crate) fn numeric_frame_with_labels(
                 .child(text_with_wrap(
                     theme,
                     &tick.label,
-                    11.0,
-                    16.0,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text_muted,
                     false,
                 ))
@@ -575,9 +583,7 @@ pub(crate) fn numeric_frame_with_labels(
         text_with_wrap(
             theme,
             value,
-            11.0,
-            16.0,
-            FontWeight::MEDIUM,
+            TextRole::Caption,
             theme.colors.text_muted,
             false,
         )
@@ -671,9 +677,7 @@ pub(crate) fn legend(theme: &ArtisanTheme, entries: Vec<(String, GpuiHsla)>) -> 
                 .child(text_with_wrap(
                     theme,
                     &name,
-                    12.0,
-                    16.0,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text,
                     false,
                 ))
@@ -687,20 +691,11 @@ pub(crate) fn stats_hint(theme: &ArtisanTheme, heading: &str, body: &str, left: 
     let content = ui::Box::new()
         .layout("column")
         .gap(Space::S4.px())
-        .child(text(
-            theme,
-            heading,
-            theme.typography.control_text,
-            18.0,
-            FontWeight(600),
-            theme.colors.text,
-        ))
+        .child(text(theme, heading, TextRole::Title, theme.colors.text))
         .child(text(
             theme,
             body,
-            theme.typography.label_text,
-            19.0,
-            FontWeight::NORMAL,
+            TextRole::Caption,
             theme.colors.text_muted,
         ))
         .build();

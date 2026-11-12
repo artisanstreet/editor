@@ -1,3 +1,4 @@
+use crate::ui::kit::TextRole;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -8,7 +9,6 @@ use super::callout::text;
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::geometry::CornerRadii;
 use aqua_core::{DisplayItem, GpuiBackground, InputEvent, Insets, Key, Modifiers, NamedKey, Role};
-use aqua_text::FontWeight;
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -138,14 +138,7 @@ fn criterion(theme: &ArtisanTheme, label: &str) -> Element {
                     bottom: 7.0,
                 }),
         )
-        .child(text(
-            theme,
-            label,
-            13.0,
-            20.0,
-            FontWeight::NORMAL,
-            theme.colors.text_muted,
-        ))
+        .child(text(theme, label, TextRole::Label, theme.colors.text_muted))
         .build()
 }
 
@@ -188,16 +181,9 @@ impl Compare {
             };
             let mut content = ui::Box::new().layout("column");
             if recommended {
-                content = content.child(text(
-                    &theme,
-                    "Recommended",
-                    12.0,
-                    16.0,
-                    FontWeight::MEDIUM,
-                    color,
-                ));
+                content = content.child(text(&theme, "Recommended", TextRole::Caption, color));
             }
-            content = content.child(text(&theme, option, 14.0, 20.0, FontWeight(600), color));
+            content = content.child(text(&theme, option, TextRole::Title, color));
             header = header.child(cell(
                 content.build(),
                 format!("{id}-option-{column}"),
@@ -260,7 +246,7 @@ impl Compare {
                         (value, theme.colors.text)
                     };
                     view = view.child(cell(
-                        text(&theme, value, 13.0, 20.0, FontWeight::NORMAL, color),
+                        text(&theme, value, TextRole::Label, color),
                         format!("{row_id}-row{index}-{column}"),
                         column,
                         count,

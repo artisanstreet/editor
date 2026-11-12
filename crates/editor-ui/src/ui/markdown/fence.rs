@@ -1,3 +1,4 @@
+use crate::ui::kit::TextRole;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -229,9 +230,7 @@ impl Fence {
                     .child(crate::ui::rich::narrative::callout::text(
                         &theme,
                         &format!("{count} lines · Scroll to read more"),
-                        12.0,
-                        16.0,
-                        FontWeight::NORMAL,
+                        TextRole::Caption,
                         theme.colors.text_muted,
                     ))
                     .build(),

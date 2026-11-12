@@ -1,5 +1,5 @@
 use super::AudioBlock;
-use editor_core::runtime::runtime;
+use crate::ui::kit::TextRole;
 use crate::ui::media::{
     audio::AudioAssets,
     source::{MediaFetcher, MediaSource, Parsed},
@@ -7,12 +7,13 @@ use crate::ui::media::{
 use crate::ui::rich::narrative::callout::GlyphFactory;
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
 use aqua_core::{GpuiBackground, InputEvent, PointerButton, Rect};
-use aqua_text::{FontFamily, FontWeight, TextStyle, overflow::OverflowMode};
+use aqua_text::{FontFamily, overflow::OverflowMode};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{CaptureRequest, EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
 use editor_audio::{PlaybackState, Player, Snapshot};
+use editor_core::runtime::runtime;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -166,27 +167,11 @@ fn clock(time: Duration) -> String {
         format!("{minutes}:{seconds:02}")
     }
 }
-fn text(
-    theme: &ArtisanTheme,
-    value: &str,
-    size: f32,
-    line: f32,
-    weight: FontWeight,
-    color: Oklch,
-    mono: bool,
-) -> Element {
-    let font = if mono {
-        theme.typography.mono.family
-    } else {
-        theme.typography.sans.family
-    };
-    let style = TextStyle {
-        families: vec![FontFamily::Named(font.to_owned())],
-        size_px: size,
-        line_height_px: line,
-        weight,
-        ..TextStyle::default()
-    };
+fn text(theme: &ArtisanTheme, value: &str, role: TextRole, color: Oklch, mono: bool) -> Element {
+    let mut style = role.style(theme);
+    if mono {
+        style.families = vec![FontFamily::Named(theme.typography.mono.family.to_owned())];
+    }
     ui::Text::new(value.to_owned())
         .text_style(style)
         .gpui_color(color.to_reference_paint())
@@ -289,9 +274,7 @@ impl AudioBlock {
                                     .child(crate::ui::rich::narrative::callout::text(
                                         &theme,
                                         &name,
-                                        14.0,
-                                        22.0,
-                                        FontWeight::NORMAL,
+                                        TextRole::Label,
                                         theme.colors.text,
                                     ))
                                     .build(),
@@ -299,9 +282,7 @@ impl AudioBlock {
                             .child(text(
                                 &theme,
                                 &message,
-                                13.0,
-                                20.0,
-                                FontWeight::NORMAL,
+                                TextRole::Label,
                                 theme.colors.text_muted,
                                 false,
                             ))
@@ -373,9 +354,7 @@ impl AudioBlock {
                 .child(text(
                     &theme,
                     &name,
-                    14.0,
-                    22.0,
-                    FontWeight::MEDIUM,
+                    TextRole::LabelStrong,
                     theme.colors.text,
                     false,
                 ))
@@ -387,9 +366,7 @@ impl AudioBlock {
                     .child(text(
                         &theme,
                         message,
-                        13.0,
-                        20.0,
-                        FontWeight::NORMAL,
+                        TextRole::Label,
                         theme.colors.banner_error.text,
                         false,
                     ))
@@ -420,9 +397,7 @@ impl AudioBlock {
                         .child(text(
                             &theme,
                             &time,
-                            12.0,
-                            20.0,
-                            FontWeight::NORMAL,
+                            TextRole::Caption,
                             theme.colors.text_muted,
                             true,
                         ))

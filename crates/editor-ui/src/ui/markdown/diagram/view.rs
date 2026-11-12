@@ -1,3 +1,4 @@
+use crate::ui::kit::TextRole;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -5,7 +6,6 @@ use std::sync::Arc;
 use aqua_core::{
     CursorIcon, DisplayItem, InputEvent, Key, Modifiers, NamedKey, Point, PointerButton, Rect,
 };
-use aqua_text::FontWeight;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{
     CaptureRequest, EventPhase, FocusRequest, InputKind, InputResponse, RoutedInput,
@@ -339,9 +339,7 @@ fn toolbar(
     .child(text(
         theme,
         &format!("{:.0}% of fit", zoom * 100.0),
-        12.0,
-        16.0,
-        FontWeight::NORMAL,
+        TextRole::Caption,
         theme.colors.text,
     ))
     .build()

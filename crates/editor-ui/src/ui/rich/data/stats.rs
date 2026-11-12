@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::ui::kit::TextRole;
 use aqua_core::geometry::CornerRadii;
 use aqua_core::{DisplayItem, Insets};
-use aqua_text::FontWeight;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
@@ -171,17 +171,13 @@ impl Stats {
                 .child(text(
                     theme,
                     &tile.value.text(false),
-                    22.0,
-                    28.0,
-                    FontWeight(600),
+                    TextRole::Heading,
                     theme.colors.text,
                 ))
                 .child(text(
                     theme,
                     &tile.label,
-                    12.0,
-                    16.0,
-                    FontWeight::MEDIUM,
+                    TextRole::Caption,
                     theme.colors.text_muted,
                 ));
             if tile.delta.is_some() || tile.sparkline.len() >= 2 {
@@ -207,14 +203,7 @@ impl Stats {
                             .gap(2.0)
                             .style(Style::new().align(aqua_ui::AlignItems::CENTER))
                             .child(glyph(icon, 12.0, color.to_reference_paint()))
-                            .child(text(
-                                theme,
-                                &delta.text(true),
-                                12.0,
-                                16.0,
-                                FontWeight::MEDIUM,
-                                color,
-                            ))
+                            .child(text(theme, &delta.text(true), TextRole::Caption, color))
                             .build(),
                     );
                 }
