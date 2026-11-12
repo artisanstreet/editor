@@ -6,11 +6,11 @@ use super::{
     picker::{Menu, PickerState},
     questionnaire::QuestionnairePanel,
 };
-use editor_core::{Core, HostData, HostId, HostInstance, delivery::Delivery, runtime::runtime};
-use editor_ui::text::editor::{Editor, ListKey, Mode};
 use artisan_api::{
     BlobHash, CreateThread, EngineConfig, ItemId, ProjectId, SendMessage, SignInState, ThreadId,
 };
+use editor_core::{Core, HostData, HostId, HostInstance, delivery::Delivery, runtime::runtime};
+use editor_ui::text::editor::{Editor, ListKey, Mode};
 use serde::{Deserialize, Serialize};
 use std::{cell::RefCell, num::NonZeroUsize, path::PathBuf, rc::Rc};
 
@@ -504,7 +504,18 @@ impl Composer {
                     .is_some_and(|extension| {
                         matches!(
                             extension.to_ascii_lowercase().as_str(),
-                            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+                            "png"
+                                | "jpg"
+                                | "jpeg"
+                                | "gif"
+                                | "bmp"
+                                | "webp"
+                                | "tif"
+                                | "tiff"
+                                | "ico"
+                                | "avif"
+                                | "heic"
+                                | "heif"
                         )
                     });
             if image {
