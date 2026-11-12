@@ -577,6 +577,17 @@ fn lease(image: &Arc<ImageHandle>) -> Arc<dyn std::any::Any + Send + Sync> {
     Arc::clone(image) as Arc<dyn std::any::Any + Send + Sync>
 }
 
+#[must_use]
+pub fn row_highlight(
+    theme: &ArtisanTheme,
+    lit: Highlight,
+    now: Instant,
+    height: f32,
+    radius: f32,
+) -> Element {
+    highlight(&Palette::of(theme), lit, now, height, radius)
+}
+
 fn highlight(palette: &Palette, lit: Highlight, now: Instant, height: f32, radius: f32) -> Element {
     let scale = lit.scale(now);
     Aqua::Box()

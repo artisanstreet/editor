@@ -22,6 +22,7 @@ pub struct CopyEntry {
 pub enum CopyKind {
     Primary,
     Alternative,
+    Search,
 }
 
 impl CopyEntry {
@@ -30,6 +31,14 @@ impl CopyEntry {
             label: label.into(),
             text: text.into(),
             kind: CopyKind::Primary,
+        }
+    }
+
+    pub fn search(label: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            text: text.into(),
+            kind: CopyKind::Search,
         }
     }
 
