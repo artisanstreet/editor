@@ -1,14 +1,16 @@
 use super::{
-    asset::source_asset_glyph,
-    kit::{Surface, TextRole, Tooltip},
-    theme::{ArtisanTheme, BannerColors, Oklch, Opacity, RadiusStep, RadiusTokens},
+    kit::{Corner, IconSize, Space, Spaced, Surface, TextRole, Tooltip},
+    theme::{ArtisanTheme, BannerColors, Oklch, Opacity},
 };
-use aqua_core::Insets;
 use aqua_ui::{
     AlignItems,
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::Style,
 };
+
+const CHIP_TEXT: TextRole = TextRole::Caption;
+const CHIP_PAD: Space = Space::S4;
+const CHIP_HEIGHT: f32 = CHIP_TEXT.spec().line + 2.0 * CHIP_PAD.px();
 use editor_assets::AssetId;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ChipTone {
@@ -65,38 +67,23 @@ pub const fn tone_colors(theme: &ArtisanTheme, tone: ChipTone) -> BannerColors {
 }
 pub fn chips_row(theme: &ArtisanTheme, chips: &[EngineChip], row_key: &str) -> Element {
     let mut row = UiBox::new()
-        .gap(6.0)
-        .style(Style::new().wrap(true).padding_insets(Insets {
-            top: 2.0,
-            ..Insets::default()
-        }));
+        .spaced(Space::S6)
+        .style(Style::new().wrap(true));
     for chip in chips {
         let tone = tone_color(theme, chip.tone);
         let detail = chip.detail.clone();
         let t = *theme;
         let el = UiBox::new()
-            .height(20.0)
-            .gap(4.0)
-            .radius(RadiusTokens::value(RadiusStep::Lg))
+            .height(CHIP_HEIGHT)
+            .spaced(Space::S4)
+            .padded(CHIP_PAD)
+            .radius(Corner::Full.resolve(CHIP_HEIGHT))
             .fill(tone.at(Opacity::ToneTint).to_paint())
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        left: 7.0,
-                        right: 7.0,
-                        top: 0.0,
-                        bottom: 0.0,
-                    }),
-            )
-            .child(source_asset_glyph(
-                chip.icon,
-                11.0,
-                tone.at(Opacity::ToneIcon).to_reference_paint(),
-            ))
+            .style(Style::new().align(AlignItems::CENTER))
+            .child(IconSize::Sm.glyph(chip.icon, tone.at(Opacity::ToneIcon).to_reference_paint()))
             .child(
-                Text::new(format!("{} · {}", chip.engine, chip.label))
-                    .font_size(12.0)
+                CHIP_TEXT
+                    .text(theme, format!("{} · {}", chip.engine, chip.label))
                     .gpui_source_color(tone.to_reference_text_color())
                     .build(),
             )
@@ -108,8 +95,8 @@ pub fn chips_row(theme: &ArtisanTheme, chips: &[EngineChip], row_key: &str) -> E
                     .build(
                         &t,
                         vec![
-                            Text::new(detail.clone())
-                                .text_style(TextRole::Caption.style(&t))
+                            TextRole::Caption
+                                .text(&t, detail.clone())
                                 .gpui_source_color(t.colors.text_muted.to_reference_text_color())
                                 .wrap(true)
                                 .build(),

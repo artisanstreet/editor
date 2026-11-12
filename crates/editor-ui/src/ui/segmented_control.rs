@@ -1,19 +1,19 @@
 use std::rc::Rc;
 
-use aqua_core::{
-    InputEvent, Insets, Key as InputKey, NamedKey, Oklch, Role,
-};
-use aqua_text::{FontWeight, TextStyle};
+use aqua_core::{InputEvent, Key as InputKey, NamedKey, Oklch, Role};
+use aqua_text::FontWeight;
 use aqua_ui::{
-    element::{Box as UiBox, Button, Element, Key, Text},
+    element::{Box as UiBox, Button, Element, Key},
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
     style::{Length, Style},
 };
 
-use super::kit::{Hover, Radius, Space, TextRole};
+use super::kit::{Density, Hover, Radius, Row, Space, Spaced, TextRole, control::focus_ring};
 use super::theme::{ArtisanTheme, Opacity};
 
-const SEGMENT_HEIGHT: f32 = 24.0;
+const SEGMENT: Row = Row::ListItem(Density::Dense);
+const SEGMENT_TEXT: TextRole = TextRole::Caption;
+const SEGMENT_HEIGHT: f32 = SEGMENT_TEXT.spec().line + 2.0 * SEGMENT.pad().y.px();
 
 pub struct Segment<T> {
     value: T,
@@ -107,7 +107,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .collect::<Vec<_>>(),
         );
         let mut root = UiBox::new()
-            .gap(Space::S2.px())
+            .spaced(Space::S2)
             .style(Style::new().align(aqua_ui::AlignItems::CENTER));
         for (index, option) in self.options.into_iter().enumerate() {
             let chosen = index == selected;
@@ -116,33 +116,22 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             } else {
                 theme.colors.text_muted
             };
-            let font = TextStyle {
-                weight: if chosen {
-                    FontWeight(600)
-                } else {
-                    FontWeight::NORMAL
-                },
-                ..TextRole::Caption.style(&theme)
-            };
-            let text = Text::new(option.label.clone())
-                .style(
-                    Style::new()
-                        .text_style(font)
-                        .gpui_source_text_color(foreground.to_reference_text_color())
-                        .text_wrap(false),
-                )
+            let mut font = SEGMENT_TEXT.style(&theme);
+            if chosen {
+                font.weight = FontWeight(600);
+            }
+            let text = SEGMENT_TEXT
+                .text(&theme, option.label.clone())
+                .text_style(font)
+                .gpui_source_color(foreground.to_reference_text_color())
+                .style(Style::new().text_wrap(false))
                 .build();
             let mut style = Style::new()
                 .align(aqua_ui::AlignItems::CENTER)
                 .justify(aqua_ui::JustifyContent::CENTER)
-                .padding_insets(Insets {
-                    left: Space::S8.px(),
-                    right: Space::S8.px(),
-                    top: 0.0,
-                    bottom: 0.0,
-                })
-                .border_of(1.0, Oklch::TRANSPARENT);
-            style = style.radius(Length::Px(Radius::Field.px()));
+                .padding(Length::Px(SEGMENT.pad().x.px()))
+                .border_of(1.0, Oklch::TRANSPARENT)
+                .radius(Length::Px(Radius::Field.px()));
             if chosen {
                 style.merge(&Hover::Neutral.style(&theme));
             }
@@ -171,7 +160,7 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                     .cursor(aqua_core::CursorIcon::Pointer)
                     .tab_index(if chosen { 0 } else { -1 })
                     .hover_style(Hover::Neutral.style(&theme))
-                    .focus_visible_style(Style::new().border_of(1.0, theme.colors.ring.to_paint()));
+                    .focus_visible_style(focus_ring(&theme));
                 let values = values.clone();
                 let change = self.change.clone();
                 let focus_change = self.focus_change.clone();
