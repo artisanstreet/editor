@@ -8,3 +8,5 @@ mod hover;
 mod surface;
 #[path = "ui/kit/row.rs"]
 mod row;
+#[path = "ui/kit/button/special.rs"]
+mod special;
