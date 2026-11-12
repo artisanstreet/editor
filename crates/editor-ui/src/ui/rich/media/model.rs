@@ -134,8 +134,8 @@ pub(crate) fn services(
     hovered: std::rc::Rc<std::cell::Cell<bool>>,
     invalidate: std::rc::Rc<dyn Fn()>,
 ) -> ModelServices {
-    use crate::ui::theme::{RadiusStep, RadiusTokens};
-    use aqua_core::{GpuiBackground, Insets};
+    use crate::ui::kit::{Button, ButtonTone, IconSize, Media, Space, Spaced, Surface};
+    use aqua_core::GpuiBackground;
     use aqua_ui::{
         element::{Element, ui},
         style::{Length, Style},
@@ -144,20 +144,7 @@ pub(crate) fn services(
     let frame_invalidate = invalidate.clone();
     let frame = std::rc::Rc::new(
         move |content: Element, width: f32, aspect: f32, _name: &str, dragging: Option<bool>| {
-            let mut frame = ui::Box::new()
-                .width(width)
-                .height(width / aspect)
-                .radius(RadiusTokens::value(RadiusStep::Xl))
-                .clip(true)
-                .style(
-                    Style::new().gpui_shadows(
-                        crate::ui::glass::card_shadows(&theme)
-                            .into_iter()
-                            .map(Into::into)
-                            .collect(),
-                    ),
-                )
-                .child(content);
+            let mut layers = vec![content];
             if dragging == Some(false) && frame_hover.get() {
                 let shortcut = if cfg!(target_os = "macos") {
                     "⌘-scroll"
@@ -172,9 +159,10 @@ pub(crate) fn services(
                     false,
                 )
                 .exclude_from_hit_testing();
-                frame = frame.child(
+                let inset = Space::S8.px();
+                layers.push(
                     ui::Box::new()
-                        .style(Style::new().absolute_at(Some(10.0), None, None, Some(8.0)))
+                        .style(Style::new().absolute_at(Some(inset), None, None, Some(inset)))
                         .child(hint)
                         .build()
                         .exclude_from_hit_testing(),
@@ -182,7 +170,12 @@ pub(crate) fn services(
             }
             let hover = frame_hover.clone();
             let notify = frame_invalidate.clone();
-            frame.build().on_hover_change(move |over| {
+            let frame = Surface::Media(Media::Frame).build(&theme, layers).style(
+                Style::new()
+                    .width(Length::Px(width))
+                    .height(Length::Px(width / aspect)),
+            );
+            frame.on_hover_change(move |over| {
                 if hover.replace(over) != over {
                     notify();
                 }
@@ -193,14 +186,14 @@ pub(crate) fn services(
     let placeholder = std::rc::Rc::new(move |message: &str, failed: bool| {
         let mut content = ui::Box::new()
             .layout("column")
-            .gap(6.0)
+            .spaced(Space::S4)
+            .padded(Space::S12)
             .width(Length::Pct(100.0))
             .height(Length::Pct(100.0))
             .style(
                 Style::new()
                     .align(aqua_ui::AlignItems::CENTER)
                     .justify(aqua_ui::JustifyContent::CENTER)
-                    .padding_insets(Insets::uniform(12.0))
                     .gpui_background(GpuiBackground::Solid(
                         theme.colors.surface.to_reference_paint(),
                     )),
@@ -208,18 +201,11 @@ pub(crate) fn services(
         if failed {
             content = content.child(placeholder_glyph(
                 editor_assets::AssetId::TABLER_FILE_OFF,
-                20.0,
+                IconSize::Lg.px(),
                 theme.colors.text_muted.to_reference_paint(),
             ));
         }
-        let style = aqua_text::TextStyle {
-            families: vec![aqua_text::FontFamily::Named(
-                theme.typography.sans.family.to_owned(),
-            )],
-            size_px: theme.typography.control_text,
-            line_height_px: 20.0,
-            ..aqua_text::TextStyle::default()
-        };
+        let style = TextRole::Label.style(&theme);
         content
             .child(
                 ui::Text::new(message.to_owned())
@@ -255,17 +241,17 @@ pub(crate) fn services(
             .build();
             let mut controls = ui::Box::new()
                 .layout("row")
-                .gap(2.0)
+                .spaced(Space::S2)
                 .style(Style::new().align(aqua_ui::AlignItems::CENTER))
                 .child(selection);
             if moved {
                 controls = controls.child(
-                    crate::ui::button::Button::text(
+                    Button::text(
                         format!("{toolbar_id}-reset"),
                         theme,
+                        ButtonTone::Quiet,
                         "Reset view",
                     )
-                    .variant(crate::ui::button::ButtonVariant::Ghost)
                     .on_activate(move |_| reset())
                     .build(),
                 );
@@ -273,7 +259,7 @@ pub(crate) fn services(
             ui::Box::new()
                 .layout("row")
                 .width(Length::Pct(100.0))
-                .gap(8.0)
+                .spaced(Space::S8)
                 .style(
                     Style::new()
                         .align(aqua_ui::AlignItems::CENTER)
