@@ -401,6 +401,14 @@ impl ForgeClient {
             .await
     }
 
+    pub async fn text_search(
+        &self,
+        query: &artisan_api::TextSearchQuery,
+    ) -> Result<Vec<artisan_api::TextHit>> {
+        self.call(self.http.get(self.url("/search/text")).query(query))
+            .await
+    }
+
     pub async fn thread(&self, id: &ThreadId) -> Result<Thread> {
         self.call(self.http.get(self.url(&format!("/threads/{id}"))))
             .await

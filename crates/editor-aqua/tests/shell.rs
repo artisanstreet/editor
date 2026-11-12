@@ -8,6 +8,8 @@ mod dialogs;
 mod gating;
 #[path = "shell/refresh.rs"]
 mod refresh;
+#[path = "shell/reveal.rs"]
+mod reveal;
 #[path = "shell/host.rs"]
 mod host;
 #[path = "shell/lifetime.rs"]

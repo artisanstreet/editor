@@ -11,6 +11,9 @@ use super::list::{Lists, lists};
 use super::picker::FolderPicker;
 use super::row::rename_value;
 
+const MIN_TEXT_QUERY: usize = 3;
+const SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
+
 enum Completion {
     Action {
         host: HostId,
@@ -30,6 +33,18 @@ enum Completion {
         generation: u64,
         result: anyhow::Result<Project>,
     },
+    Search {
+        host: HostId,
+        instance: HostInstance,
+        generation: u64,
+        query: String,
+        result: anyhow::Result<Vec<artisan_api::TextHit>>,
+    },
+}
+
+struct TextHits {
+    query: String,
+    rows: Vec<super::list::HitRow>,
 }
 
 pub struct Sidebar {
@@ -72,6 +87,9 @@ pub struct Sidebar {
     picker_generation: u64,
     browse_generation: u64,
     browse_task: Option<tokio::task::JoinHandle<()>>,
+    search_generation: u64,
+    search_task: Option<tokio::task::JoinHandle<()>>,
+    text_hits: Option<TextHits>,
     completions: Delivery<Completion>,
     workspace_background: bool,
 }
@@ -85,6 +103,7 @@ pub enum SidebarEffect {
         position: aqua_core::Point,
     },
     HideDragPreview,
+    Reveal(super::list::HitRow),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -274,6 +293,9 @@ impl Sidebar {
             picker_generation: 0,
             browse_generation: 0,
             browse_task: None,
+            search_generation: 0,
+            search_task: None,
+            text_hits: None,
             completions: Delivery::new(NonZeroUsize::new(64).unwrap()),
             workspace_background,
         }
@@ -395,7 +417,15 @@ impl Sidebar {
             .as_ref()
             .and_then(|id| core.host(id))
             .map(|host| {
-                lists(host, self.open.as_ref(), now).searched(self.search.borrow().text())
+                let query = self.search.borrow().text().to_owned();
+                let mut lists = lists(host, self.open.as_ref(), now).searched(&query);
+                lists.hits = self
+                    .text_hits
+                    .as_ref()
+                    .filter(|hits| hits.query == query.trim())
+                    .map(|hits| hits.rows.clone())
+                    .unwrap_or_default();
+                lists
             })
             .unwrap_or_default();
         self.working_pulses.borrow_mut().retain(|id, _| {
@@ -450,6 +480,40 @@ impl Sidebar {
                     }
                 }
                 Completion::Browse { .. } => {}
+                Completion::Search {
+                    host,
+                    instance,
+                    generation,
+                    query,
+                    result,
+                } if generation == self.search_generation
+                    && self.host.as_ref() == Some(&host)
+                    && self.host_instance == Some(instance) =>
+                {
+                    self.search_task = None;
+                    accepted = true;
+                    match result {
+                        Ok(hits) => {
+                            self.text_hits = Some(TextHits {
+                                query,
+                                rows: hits
+                                    .iter()
+                                    .filter_map(super::list::HitRow::of)
+                                    .collect(),
+                            });
+                            self.sync(core, now);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %host,
+                                query_chars = query.chars().count(),
+                                "couldn't search message text: {error:#}"
+                            );
+                            self.text_hits = None;
+                        }
+                    }
+                }
+                Completion::Search { .. } => {}
                 Completion::Create {
                     host,
                     instance,
@@ -801,6 +865,44 @@ impl Sidebar {
                     host: host_id,
                     instance,
                     generation,
+                    result,
+                })
+                .await;
+        }));
+    }
+
+    pub fn search_text(&mut self, core: &Core) {
+        if let Some(task) = self.search_task.take() {
+            task.abort();
+        }
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let query = self.search.borrow().text().trim().to_owned();
+        if query.chars().count() < MIN_TEXT_QUERY {
+            self.text_hits = None;
+            return;
+        }
+        let Some(host) = self.host_data(core) else {
+            return;
+        };
+        let generation = self.search_generation;
+        let host_id = host.id.clone();
+        let instance = host.instance();
+        let client = host.client.clone();
+        let sender = self.completions.sender();
+        self.search_task = Some(editor_core::runtime::runtime().spawn(async move {
+            tokio::time::sleep(SEARCH_PAUSE).await;
+            let result = client
+                .text_search(&artisan_api::TextSearchQuery {
+                    query: query.clone(),
+                    limit: None,
+                })
+                .await;
+            let _ = sender
+                .send(Completion::Search {
+                    host: host_id,
+                    instance,
+                    generation,
+                    query,
                     result,
                 })
                 .await;

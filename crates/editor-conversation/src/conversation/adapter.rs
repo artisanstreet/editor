@@ -292,6 +292,7 @@ pub fn scroll_directive(
             index: conversation.jump_row(position)?,
             animate,
         }),
+        ScrollAction::Row(index) => Some(ScrollDirective::ToRow { index, animate }),
     }
 }
 

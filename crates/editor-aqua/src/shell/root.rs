@@ -11,6 +11,7 @@ use std::{
 };
 
 mod open_thread;
+pub mod reveal;
 mod rail_refresh;
 mod wheel_sync;
 
@@ -163,6 +164,7 @@ pub struct RootViews {
     selection_menu: Option<(aqua_core::Point, String)>,
     browser: Option<ResolvedBrowser>,
     browser_task: Option<(Option<String>, BrowserLookup)>,
+    reveal: Option<reveal::Reveal>,
     color_scope: Option<crate::conversation::presentation::PresentationScope>,
     color_effects: Rc<RefCell<VecDeque<crate::ui::color_copy_menu::ColorCopyEffect>>>,
     resize_key: Option<ResizeKey>,
@@ -1749,6 +1751,10 @@ impl RootViews {
                         preview_changed = true;
                     }
                 }
+                crate::sidebar::controller::SidebarEffect::Reveal(hit) => {
+                    self.reveal = Some(reveal::Reveal::new(hit));
+                    ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+                }
             }
         }
         if let Some(preview) = &mut self.sidebar_drag {
@@ -2640,7 +2646,16 @@ impl SectionViews for RootViews {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
         let sidebar_resizing = self.sidebar.resizing();
+        let revealing = self.advance_reveal(shell, ui);
+        if revealing != reveal::Progress::Idle {
+            ctx.request_animation_deadline(window, ctx.now() + reveal::POLL);
+        }
+        if revealing == reveal::Progress::Acted {
+            self.conversation_invalidated.set(true);
+            ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
+        }
         let causes = [
+            ("anim_reveal", revealing == reveal::Progress::Acted),
             ("anim_events", self.sidebar.take_events(now, reduced)),
             ("anim_clock", self.tick_work_clock(shell, ctx, window, now)),
             ("anim_edges", self.track_tree_edges(ui)),

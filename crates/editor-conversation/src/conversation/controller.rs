@@ -75,6 +75,7 @@ enum Completion {
 pub enum ScrollAction {
     End,
     To(Seq),
+    Row(usize),
 }
 
 pub struct Conversation {
@@ -346,6 +347,10 @@ impl Conversation {
             let effects = view.jump(jump);
             self.perform(core, effects);
         }
+    }
+
+    pub fn reveal_row(&mut self, index: usize) {
+        self.scroll.push(ScrollAction::Row(index));
     }
 
     pub fn jump_row(&self, position: Seq) -> Option<usize> {

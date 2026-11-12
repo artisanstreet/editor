@@ -27,6 +27,7 @@ mod schema;
 mod settings;
 mod source_index;
 mod sources;
+mod text_search;
 mod threads;
 mod writer;
 

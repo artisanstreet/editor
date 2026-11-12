@@ -81,7 +81,42 @@ pub struct HistoryGroup {
 pub struct Lists {
     pub inbox: Vec<RowData>,
     pub history: Vec<HistoryGroup>,
+    pub hits: Vec<HitRow>,
     pub next_tick: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HitRow {
+    pub thread: ThreadId,
+    pub item: artisan_api::ItemId,
+    pub position: artisan_api::Seq,
+    pub title: String,
+    pub snippet: String,
+    pub matched: std::ops::Range<usize>,
+    pub needle: String,
+    pub depth: (u32, u32),
+}
+
+impl HitRow {
+    #[must_use]
+    pub fn of(hit: &artisan_api::TextHit) -> Option<Self> {
+        let matched = hit.matched.0 as usize..hit.matched.1 as usize;
+        let needle = hit.snippet.get(matched.clone())?.to_owned();
+        Some(Self {
+            thread: hit.thread_id.clone(),
+            item: hit.item_id.clone(),
+            position: hit.position,
+            title: hit
+                .thread_title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| "New thread".to_owned()),
+            snippet: hit.snippet.clone(),
+            matched,
+            needle,
+            depth: (hit.offset.0, hit.length),
+        })
+    }
 }
 
 fn marked(title: &str, mut bytes: Vec<usize>) -> Vec<std::ops::Range<usize>> {
@@ -160,6 +195,7 @@ impl Lists {
         Self {
             inbox: ranked.into_iter().map(|(_, row)| row).collect(),
             history: Vec::new(),
+            hits: self.hits,
             next_tick: self.next_tick,
         }
     }
