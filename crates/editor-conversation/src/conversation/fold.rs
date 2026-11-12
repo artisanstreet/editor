@@ -698,18 +698,17 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
             0,
             Row::text(agent.clone(), Slot::Text(TextSection::AgentTask)),
         );
-        if view
+        let running = view
             .item(agent)
-            .is_some_and(|item| item.status == Status::Running)
-        {
+            .is_some_and(|item| item.status == Status::Running);
+        if running {
             let working = shown.iter().any(|item| {
                 item.status == Status::Running
                     && matches!(item.kind, ItemKind::Tool { .. } | ItemKind::Agent { .. })
                     && Some(&item.id) != scope
             });
             rows.push(Row::AgentStatus(agent.clone(), working));
-        }
-        if view.item(agent).and_then(agent_report).is_some() {
+        } else if view.item(agent).and_then(agent_report).is_some() {
             rows.push(Row::AgentResult(agent.clone()));
         }
     } else if view.window().gap.is_some() {

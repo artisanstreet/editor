@@ -102,3 +102,31 @@ fn empty_agent_messages_use_the_summary_without_replacing_reported_text() {
         assert_eq!(TextSection::AgentMessage.inline_text(&item), Some(expected));
     }
 }
+
+#[test]
+fn a_resumed_agent_shows_its_status_until_it_reports_again() {
+    let tail = |status: Status| {
+        let mut item = agent("general-purpose", "Task".into(), None);
+        item.status = status;
+        if let ItemKind::Agent { result, .. } = &mut item.kind {
+            *result = Some("Earlier report".into());
+        }
+        let id = item.id.clone();
+        let (mut view, _) = super::ThreadView::open(ThreadId("thread".into()));
+        view.context.insert(id.clone(), std::sync::Arc::new(item));
+        super::fold(&view, None, Some(&id))
+            .rows
+            .into_iter()
+            .skip(1)
+            .map(|(row, _)| row)
+            .collect::<Vec<_>>()
+    };
+    assert!(matches!(
+        tail(Status::Running).as_slice(),
+        [super::Row::AgentStatus(_, false)]
+    ));
+    assert!(matches!(
+        tail(Status::Done).as_slice(),
+        [super::Row::AgentResult(_)]
+    ));
+}
