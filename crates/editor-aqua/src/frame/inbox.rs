@@ -3,6 +3,7 @@ use crate::sidebar::{
     controller::Sidebar,
     view::{self, ViewAction},
 };
+use crate::ui::kit::TextRole;
 use crate::ui::theme::ArtisanTheme;
 use aqua::{Aqua, px};
 use aqua_ui::element::Element;
@@ -126,9 +127,9 @@ pub fn view(
             .and_then(|host| host.thread_page(false).error.as_ref())
     }) {
         column = column.child(
-            Aqua::Text(error.clone())
-                .font_size(theme.typography.label_text)
-                .gpui_color(theme.colors.destructive_text.to_reference_paint())
+            TextRole::Caption
+                .text(&theme, error.clone())
+                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
                 .build(),
         );
     }
