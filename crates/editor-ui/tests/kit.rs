@@ -6,3 +6,5 @@ mod text_role;
 mod hover;
 #[path = "ui/kit/surface.rs"]
 mod surface;
+#[path = "ui/kit/row.rs"]
+mod row;
