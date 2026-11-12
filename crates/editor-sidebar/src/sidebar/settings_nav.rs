@@ -2,6 +2,7 @@ use artisan_api::{EngineStatus, InstallState, SignInState};
 use editor_assets::AssetId;
 
 use editor_core::{HostData, SettingsPage};
+use editor_ui::kit::{Density, IconSize, Row, RowItem, Space, Spaced, Surface, TextRole};
 
 #[derive(Clone, Debug)]
 pub struct Group {
@@ -103,45 +104,52 @@ pub fn groups(host: Option<&HostData>, current: SettingsPage) -> Vec<Group> {
 #[derive(Default)]
 pub struct NavMotion {
     parent: Option<SettingsPage>,
-    from: Option<usize>,
-    to: Option<usize>,
-    started: Option<std::time::Instant>,
     opened: Option<std::time::Instant>,
 }
 
 impl NavMotion {
     pub fn sync(&mut self, current: SettingsPage, now: std::time::Instant) {
         let parent = current.parent();
-        let to = children(parent).iter().position(|page| *page == current);
         if self.parent != Some(parent) {
             self.parent = Some(parent);
-            self.from = None;
-            self.to = to;
-            self.started = Some(now);
             self.opened = Some(now);
-        } else if self.to != to {
-            self.from = self.to;
-            self.to = to;
-            self.started = Some(now);
         }
     }
 
     pub fn animating(&self, now: std::time::Instant) -> bool {
-        self.started
+        self.opened
             .is_some_and(|start| now.saturating_duration_since(start).as_millis() < 150)
-            || self
-                .opened
-                .is_some_and(|start| now.saturating_duration_since(start).as_millis() < 150)
     }
 
-    fn progress(start: Option<std::time::Instant>, now: std::time::Instant, reduced: bool) -> f32 {
+    fn progress(&self, now: std::time::Instant, reduced: bool) -> f32 {
         if reduced {
             return 1.0;
         }
-        let elapsed = start.map_or(150.0, |start| {
+        let elapsed = self.opened.map_or(150.0, |start| {
             now.saturating_duration_since(start).as_secs_f32() * 1000.0
         });
         editor_ui::picker_motion::smooth_out((elapsed / 150.0).min(1.0))
+    }
+}
+
+pub const ROW: Row = Row::ListItem(Density::Regular);
+const LIST: Surface = Surface::Inset;
+const ROW_GAP: Space = Space::S2;
+const GROUP_GAP: Space = Space::S12;
+
+pub fn children_height(count: usize) -> f32 {
+    let rows = count as f32;
+    let gaps = rows.max(1.0) - 1.0;
+    rows.mul_add(ROW.height().unwrap_or_default(), gaps * ROW_GAP.px())
+}
+
+fn section_id(page: SettingsPage) -> String {
+    match page {
+        SettingsPage::Engine(engine) => format!("sidebar-settings-engine-{engine}"),
+        _ => format!(
+            "sidebar-settings-{}",
+            page.label().to_lowercase().replace(' ', "-")
+        ),
     }
 }
 
@@ -154,44 +162,24 @@ pub fn build(
     reduced: bool,
     emit: std::rc::Rc<dyn Fn(SettingsPage)>,
 ) -> aqua_ui::element::Element {
-    use super::usage_view::engine_icon;
-    use editor_ui::{
-        asset::source_asset_glyph,
-        theme::{RadiusStep, RadiusTokens, TextStep, TypographyTokens},
-    };
-    use aqua_core::{CursorIcon, Insets, Role};
     use aqua_ui::{
         AlignItems,
-        element::{Box as UiBox, Button, Scroll, Text},
+        element::{Box as UiBox, Scroll},
         style::{Length, Style},
     };
+    use editor_ui::engine::engine_icon;
 
-    let mut nav = UiBox::new().layout("column").gap(2.0);
+    let mut nav = UiBox::new().layout("column").spaced(GROUP_GAP);
     for group in groups(host, current) {
-        nav = nav.child(
-            UiBox::new()
-                .height(21.0)
-                .style(
-                    Style::new()
-                        .margin_insets(Insets {
-                            top: 14.0,
-                            ..Insets::default()
-                        })
-                        .padding_insets(Insets {
-                            left: 8.0,
-                            right: 8.0,
-                            top: 0.0,
-                            bottom: 0.0,
-                        })
-                        .align(AlignItems::CENTER),
-                )
-                .child(
-                    Text::new(group.heading)
-                        .font_size(TypographyTokens::size(TextStep::Xs))
-                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                        .build(),
-                )
-                .build(),
+        let mut column = UiBox::new().layout("column").spaced(ROW_GAP).child(
+            RowItem::new(
+                format!("sidebar-settings-heading-{}", group.heading),
+                theme,
+                Row::ListHeading,
+                LIST,
+                group.heading.clone(),
+            )
+            .build(),
         );
         for entry in group.entries {
             let page = entry.page;
@@ -201,130 +189,46 @@ pub fn build(
             });
             let has_children = !children(page).is_empty();
             let emit_parent = emit.clone();
-            let mut row = Button::new()
-                .height(34.0)
-                .width(Length::Pct(100.0))
-                .gap(8.0)
-                .radius(RadiusTokens::value(RadiusStep::Md))
-                .style(
-                    Style::new()
-                        .align(AlignItems::CENTER)
-                        .padding_insets(Insets {
-                            left: 8.0,
-                            right: 8.0,
-                            top: 0.0,
-                            bottom: 0.0,
-                        }),
-                )
-                .child(
-                    UiBox::new()
-                        .width(16.0)
-                        .height(16.0)
-                        .style(Style::new().flex_shrink(0.0))
-                        .child(source_asset_glyph(
-                            icon,
-                            15.0,
-                            theme.colors.text_muted.to_reference_paint(),
-                        ))
-                        .build(),
-                )
-                .child(
-                    Text::new(page.label())
-                        .font_size(TypographyTokens::size(TextStep::Sm))
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
-                        .build(),
-                );
+            let mut row = RowItem::new(section_id(page), theme, ROW, LIST, page.label())
+                .leading(IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint()))
+                .selected(entry.expanded && !has_children)
+                .on_activate(move || emit_parent(page));
             if has_children {
-                row = row.child(UiBox::new().style(Style::new().flex_grow(1.0)).build());
+                let chevron = if entry.expanded {
+                    AssetId::TABLER_CHEVRON_DOWN
+                } else {
+                    AssetId::TABLER_CHEVRON_RIGHT
+                };
+                let mut trailing = UiBox::new()
+                    .spaced(Space::S8)
+                    .style(Style::new().align(AlignItems::CENTER).flex_shrink(0.0));
                 if let Some(need) = entry.need {
-                    row = row.child(
-                        Text::new(need)
-                            .font_size(theme.typography.label_text)
+                    trailing = trailing.child(
+                        TextRole::Caption
+                            .text(&theme, need)
                             .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                             .build(),
                     );
                 }
-                row = row.child(source_asset_glyph(
-                    if entry.expanded {
-                        AssetId::TABLER_CHEVRON_DOWN
-                    } else {
-                        AssetId::TABLER_CHEVRON_RIGHT
-                    },
-                    12.0,
-                    theme.colors.text_muted.to_reference_paint(),
-                ));
+                row = row.trailing(
+                    trailing
+                        .child(IconSize::Sm.glyph(chevron, theme.colors.text_muted.to_reference_paint()))
+                        .build(),
+                );
             }
-            let id = match page {
-                SettingsPage::Engine(engine) => format!("sidebar-settings-engine-{engine}"),
-                _ => format!(
-                    "sidebar-settings-{}",
-                    page.label().to_lowercase().replace(' ', "-")
-                ),
-            };
-            let mut row = row
-                .on_activate(move || emit_parent(page))
-                .build()
-                .with_key(id)
-                .role(Role::Button)
-                .aria_label(page.label())
-                .aria_selected(entry.expanded)
-                .cursor(CursorIcon::Pointer);
-            if has_children {
-                row = row.aria_expanded(entry.expanded);
-            }
-            nav = nav.child(row);
+            let row = row.build();
+            column = column.child(match has_children {
+                true => row.aria_expanded(entry.expanded),
+                false => row,
+            });
             if entry.expanded && !entry.children.is_empty() {
-                let progress = NavMotion::progress(motion.opened, now, reduced);
+                let progress = motion.progress(now, reduced);
+                let total_height = children_height(entry.children.len());
                 let mut children = UiBox::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
-                    .style(Style::new().margin_insets(Insets {
-                        left: 16.0,
-                        top: 4.0,
-                        bottom: 4.0,
-                        right: 0.0,
-                    }))
-                    .child(
-                        UiBox::new()
-                            .width(1.0)
-                            .style(
-                                Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                                    theme.colors.line.to_reference_paint(),
-                                )),
-                            )
-                            .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, Some(0.0)))
-                            .build(),
-                    );
-                if let Some(to) = motion.to {
-                    let target = (to as f32).mul_add(32.0, 6.0);
-                    let p = NavMotion::progress(motion.started, now, reduced);
-                    let (top, height, opacity) = match motion.from {
-                        Some(from) => (
-                            ((target - ((from as f32).mul_add(32.0, 6.0))) * p)
-                                + (from as f32).mul_add(32.0, 6.0),
-                            20.0,
-                            1.0,
-                        ),
-                        None => (10.0_f32.mul_add(1.0 - p, target), 20.0 * p, p),
-                    };
-                    children = children.child(
-                        UiBox::new()
-                            .width(2.0)
-                            .height(height)
-                            .radius(1.0)
-                            .opacity(opacity)
-                            .style(
-                                Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                                    theme.colors.text.to_reference_paint(),
-                                )),
-                            )
-                            .style(Style::new().absolute_at(Some(0.0), Some(top), None, None))
-                            .build(),
-                    );
-                }
-                let total_height = entry.children.len() as f32 * 32.0;
+                    .spaced(ROW_GAP);
                 for child in entry.children {
-                    let selected = child == current;
                     let click = emit.clone();
                     let id = format!(
                         "sidebar-settings-section-{:?}-{}",
@@ -334,41 +238,17 @@ pub fn build(
                             _ => "global-prompt",
                         }
                     );
-                    children =
-                        children.child(
-                            Button::new()
-                                .height(32.0)
-                                .width(Length::Pct(100.0))
-                                .style(Style::new().align(AlignItems::CENTER).padding_insets(
-                                    Insets {
-                                        left: 17.0,
-                                        right: 8.0,
-                                        top: 0.0,
-                                        bottom: 0.0,
-                                    },
-                                ))
-                                .child(
-                                    Text::new(child.label())
-                                        .font_size(theme.typography.control_text)
-                                        .gpui_source_color(if selected {
-                                            theme.colors.text.to_reference_text_color()
-                                        } else {
-                                            theme.colors.text_muted.to_reference_text_color()
-                                        })
-                                        .build(),
-                                )
-                                .on_activate(move || click(child))
-                                .build()
-                                .with_key(id)
-                                .role(Role::Button)
-                                .aria_label(child.label())
-                                .aria_selected(selected)
-                                .cursor(CursorIcon::Pointer),
-                        );
+                    children = children.child(
+                        RowItem::new(id, theme, ROW, LIST, child.label())
+                            .leading(UiBox::new().build())
+                            .selected(child == current)
+                            .on_activate(move || click(child))
+                            .build(),
+                    );
                 }
-                nav = nav.child(
+                column = column.child(
                     UiBox::new()
-                        .height(total_height * progress + 8.0)
+                        .height(total_height * progress)
                         .opacity(progress)
                         .clip(true)
                         .child(children.build())
@@ -376,11 +256,12 @@ pub fn build(
                 );
             }
         }
+        nav = nav.child(column.build());
     }
     Scroll::new()
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
-        .style(Style::new().padding(Length::Px(16.0)))
+        .padded(Space::S16)
         .child(nav.build())
         .build()
         .with_key("settings-dialog-nav")

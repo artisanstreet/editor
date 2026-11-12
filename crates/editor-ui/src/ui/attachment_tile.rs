@@ -1,25 +1,24 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use aqua_core::{Insets, Transform2D, image::ImageFit};
-use aqua_text::{FontFamily, FontWeight, TextStyle};
+use aqua_core::{Transform2D, image::ImageFit};
 use aqua_ui::{
     AlignItems, JustifyContent,
-    element::{Box as UiBox, Button as UiButton, Element, Key, Media, Text},
+    element::{Box as UiBox, Button as UiButton, Element, Key, Media},
     style::{Length, Style},
 };
 use editor_assets::AssetId;
 
 use super::{
-    asset::source_asset_glyph,
-    button::{Button, ButtonVariant},
-    glass::card_shadows,
+    kit::{
+        Finish, IconButton, IconButtonSize, IconSize, Space, Spaced, TextRole,
+        control::icon_button::CORNER_INSET,
+    },
+    media_frame::MediaFrame,
     motion::smooth_out,
-    theme::{ArtisanTheme, Opacity},
+    theme::ArtisanTheme,
 };
 
-pub const ACTION_INSET: f32 = 2.0;
-pub const REMOVE_SIZE: f32 = 24.0;
 const PREPARING_BLUR: f32 = 10.0;
 const SHAKE: Duration = Duration::from_millis(280);
 
@@ -103,27 +102,21 @@ impl AttachmentTile {
 
     pub fn build(self) -> Element {
         let theme = self.theme;
-        let text_style = TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: 11.0,
-            line_height_px: 13.75,
-            weight: FontWeight::NORMAL,
-            ..TextStyle::default()
-        };
         let failed = self.error.is_some();
+        let caption = |words: String, color: crate::ui::theme::Oklch| {
+            TextRole::Caption
+                .text(&theme, words)
+                .gpui_source_color(color.to_reference_text_color())
+        };
         let content = if let Some(error) = self.error {
             UiBox::new()
-                .padding(6.0)
+                .padded(Space::S6)
                 .child(
-                    Text::new(format!("{} failed: {error}", self.label))
-                        .style(
-                            Style::new()
-                                .text_style(text_style.clone())
-                                .gpui_source_text_color(
-                                    theme.colors.destructive_text.to_reference_text_color(),
-                                ),
-                        )
-                        .build(),
+                    caption(
+                        format!("{} failed: {error}", self.label),
+                        theme.colors.destructive_text,
+                    )
+                    .build(),
                 )
                 .build()
         } else if let Some(image) = self.image.clone() {
@@ -140,75 +133,36 @@ impl AttachmentTile {
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0))
                 .fit(ImageFit::Cover)
-                .radius(5.0);
+                .style(MediaFrame::thumb_content_style());
             if blur > 0.0 {
                 image = image.style(Style::new().content_blur(blur));
             }
             image.build()
         } else if let Some(glyph) = self.glyph {
-            let icon =
-                source_asset_glyph(glyph, 24.0, theme.colors.text_muted.to_reference_paint());
-            let text = Text::new(self.label.clone())
-                .style(
-                    Style::new()
-                        .text_style(text_style)
-                        .gpui_source_text_color(theme.colors.text.to_reference_text_color())
-                        .text_wrap(false),
-                )
-                .build();
             UiBox::new()
                 .layout("column")
-                .gap(4.0)
+                .spaced(Space::S4)
+                .padded(Space::S6)
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0))
                 .style(
                     Style::new()
                         .align(AlignItems::CENTER)
-                        .justify(JustifyContent::CENTER)
-                        .padding_insets(Insets {
-                            left: 6.0,
-                            right: 6.0,
-                            top: 0.0,
-                            bottom: 0.0,
-                        }),
+                        .justify(JustifyContent::CENTER),
                 )
-                .child(icon)
-                .child(text)
+                .child(IconSize::Lg.glyph(glyph, theme.colors.text_muted.to_reference_paint()))
+                .child(
+                    caption(self.label.clone(), theme.colors.text)
+                        .style(Style::new().text_wrap(false))
+                        .build(),
+                )
                 .build()
         } else {
             UiBox::new().build()
         };
-        let mut frame = UiBox::new()
-            .width(72.0)
-            .height(72.0)
-            .radius(6.0)
-            .clip(true)
-            .style(
-                Style::new()
-                    .gpui_background(aqua_core::GpuiBackground::Solid(
-                        theme.colors.surface.to_reference_paint(),
-                    ))
-                    .gpui_border(
-                        Insets::uniform(1.0),
-                        if failed {
-                            theme.colors.destructive.to_reference_paint()
-                        } else {
-                            theme
-                                .colors
-                                .text
-                                .at(Opacity::MediaEdge)
-                                .to_reference_paint()
-                        },
-                        false,
-                    )
-                    .flex_shrink(0.0)
-                    .gpui_shadows(
-                        card_shadows(&theme)
-                            .into_iter()
-                            .map(aqua_ui::style::GpuiShadowLayer::from)
-                            .collect(),
-                    ),
-            );
+        let mut layers = UiBox::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0));
         if let Some(action) = self.activate.filter(|_| self.image.is_some()) {
             let button = UiButton::new()
                 .width(Length::Pct(100.0))
@@ -217,22 +171,25 @@ impl AttachmentTile {
                 .child(content)
                 .build()
                 .aria_label(format!("Open {} preview", self.label));
-            frame = frame.child(button);
+            layers = layers.child(button);
         } else {
-            frame = frame.child(content);
+            layers = layers.child(content);
         }
+        let radius = MediaFrame::thumb_radius();
         if let Some(action) = self.retry {
-            let retry = Button::icon(
+            let retry = IconButton::new(
                 "retry",
                 theme,
                 AssetId::TABLER_REFRESH,
                 "Retry image preview",
+                IconButtonSize::Sm,
+                Finish::Plain,
             )
-            .variant(ButtonVariant::Ghost)
+            .nested(radius, CORNER_INSET)
             .on_activate(move |_| action())
             .build()
-            .style(Style::new().absolute_at(Some(2.0), None, None, Some(2.0)));
-            frame = frame.child(retry);
+            .style(Style::new().absolute_at(Some(CORNER_INSET), None, None, Some(CORNER_INSET)));
+            layers = layers.child(retry);
         }
         if let Some(action) = self.remove {
             let label = if self.glyph.is_some() {
@@ -240,25 +197,21 @@ impl AttachmentTile {
             } else {
                 "Remove image"
             };
-            let remove = Button::icon("remove", theme, AssetId::TABLER_X, label)
+            let remove = IconButton::corner_close("remove", theme, label, radius)
                 .disabled(!self.removable)
-                .variant(ButtonVariant::Ghost)
-                .hover_fill()
-                .muted()
-                .glass()
-                .compact(REMOVE_SIZE)
-                .nested_radius(3.0)
                 .on_activate(move |_| action())
                 .build()
                 .style(Style::new().absolute_at(
                     None,
-                    Some(ACTION_INSET),
-                    Some(ACTION_INSET),
+                    Some(CORNER_INSET),
+                    Some(CORNER_INSET),
                     None,
                 ));
-            frame = frame.child(remove);
+            layers = layers.child(remove);
         }
-        let mut element = frame.build().with_key(self.id);
+        let mut element = MediaFrame::attachment(self.id, theme, layers.build())
+            .error(failed)
+            .build();
         if !self.reduced_motion {
             if let Some(elapsed) = self.shake_elapsed.filter(|elapsed| *elapsed < SHAKE) {
                 element = element.style(

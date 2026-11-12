@@ -41,10 +41,11 @@ fn insets_keep_the_same_width_around_convex_and_concave_corners() {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(corners[0], (8.0 + inset, false));
-        assert_eq!(corners[1], (8.0 - inset, true));
-        assert_eq!(corners[2], (8.0 - inset, true));
-        assert_eq!(corners[3], (8.0 + inset, false));
+        let cap = editor_aqua::frame::strip::RADIUS.px();
+        assert_eq!(corners[0], (cap + inset, false));
+        assert_eq!(corners[1], (cap - inset, true));
+        assert_eq!(corners[2], (cap - inset, true));
+        assert_eq!(corners[3], (cap + inset, false));
     }
 }
 

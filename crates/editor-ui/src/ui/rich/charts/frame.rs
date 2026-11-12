@@ -1,43 +1,56 @@
-use crate::ui::glass::{GlassStrength, glass_card_shadows, glass_layers};
+use crate::ui::kit::{Space, Spaced, Surface, TextRole, Tone, Tooltip};
 use crate::ui::rich::narrative::callout::{text, text_with_wrap};
-use crate::ui::theme::{ArtisanTheme, Elevation, Opacity, RadiusStep, RadiusTokens};
+use crate::ui::theme::{ArtisanTheme, Oklch, Opacity, RadiusStep, RadiusTokens};
 use aqua_core::{GpuiHsla, Insets};
 use aqua_text::FontWeight;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 
+pub(crate) fn mark_text(
+    theme: &ArtisanTheme,
+    value: &str,
+    size: f32,
+    line: f32,
+    weight: FontWeight,
+    color: Oklch,
+    wrap: bool,
+) -> Element {
+    let style = aqua_text::TextStyle {
+        size_px: size,
+        line_height_px: line,
+        weight,
+        ..TextRole::Caption.style(theme)
+    };
+    let paint = color.to_reference_text_color();
+    ui::Text::new(value.to_owned())
+        .text_style(style.clone())
+        .gpui_source_color(paint)
+        .spans(vec![
+            aqua_text::StyledSpan::new(value, style).gpui_source_color([
+                paint.hue_degrees,
+                paint.saturation,
+                paint.lightness,
+                paint.alpha,
+            ]),
+        ])
+        .wrap(wrap)
+        .build()
+}
+
 pub(crate) fn empty(theme: &ArtisanTheme, label: &str) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::Lg);
-    ui::Box::new()
-        .width(Length::Pct(100.0))
-        .radius(radius)
+    Surface::Callout(Tone::Neutral)
+        .build(
+            theme,
+            vec![text(theme, label, TextRole::Label, theme.colors.text_muted)],
+        )
         .style(
             Style::new()
+                .width(Length::Pct(100.0))
                 .min_width(Length::Px(0.0))
                 .min_height(Length::Px(72.0))
                 .align(aqua_ui::AlignItems::CENTER)
-                .justify(aqua_ui::JustifyContent::CENTER)
-                .padding_insets(Insets {
-                    left: 12.0,
-                    right: 12.0,
-                    top: 20.0,
-                    bottom: 20.0,
-                })
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme.colors.line.to_reference_paint(),
-                    false,
-                ),
+                .justify(aqua_ui::JustifyContent::CENTER),
         )
-        .child(text(
-            theme,
-            label,
-            14.0,
-            20.0,
-            FontWeight::NORMAL,
-            theme.colors.text_muted,
-        ))
-        .build()
 }
 
 pub(crate) fn navigation(content: Element, ring: GpuiHsla) -> Element {
@@ -54,9 +67,7 @@ pub(crate) fn concentration_frame(
         text_with_wrap(
             theme,
             value,
-            11.0,
-            16.0,
-            FontWeight::MEDIUM,
+            TextRole::Caption,
             theme.colors.text_muted,
             false,
         )
@@ -84,9 +95,7 @@ pub(crate) fn concentration_frame(
                 .child(text_with_wrap(
                     theme,
                     &label,
-                    11.0,
-                    16.0,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text_muted,
                     false,
                 ))
@@ -132,9 +141,7 @@ pub(crate) fn concentration_frame(
             .child(text_with_wrap(
                 theme,
                 &label,
-                11.0,
-                16.0,
-                FontWeight::NORMAL,
+                TextRole::Caption,
                 theme.colors.text_muted,
                 false,
             ))
@@ -179,7 +186,7 @@ pub(crate) fn concentration_frame(
     ui::Box::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(4.0)
+        .spaced(Space::S4)
         .child(title(y_title))
         .child(plot_row)
         .child(tick_row)
@@ -211,15 +218,7 @@ pub(crate) fn plot_label_positioned(
     color: GpuiHsla,
     below: bool,
 ) -> Element {
-    let style = aqua_text::TextStyle {
-        families: vec![aqua_text::FontFamily::Named(
-            theme.typography.sans.family.to_owned(),
-        )],
-        size_px: 11.0,
-        line_height_px: 16.0,
-        weight: FontWeight::NORMAL,
-        ..aqua_text::TextStyle::default()
-    };
+    let style = TextRole::Caption.style(theme);
     let label = ui::Box::new()
         .radius(RadiusTokens::value(RadiusStep::Xs))
         .style(
@@ -334,7 +333,6 @@ pub(crate) fn readout_rows_at(
     rows: Vec<super::distribution::ReadoutRow>,
     low: bool,
 ) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::X2l);
     let mut rendered_rows = Vec::with_capacity(rows.len());
     for item in rows {
         let swatch = item.color;
@@ -342,7 +340,7 @@ pub(crate) fn readout_rows_at(
         let value = &item.value;
         let mut row = ui::Box::new()
             .layout("row")
-            .gap(8.0)
+            .spaced(Space::S8)
             .style(Style::new().align(aqua_ui::AlignItems::CENTER));
         if let Some(color) = swatch {
             row = row.child(
@@ -365,9 +363,7 @@ pub(crate) fn readout_rows_at(
                     .child(text_with_wrap(
                         theme,
                         label,
-                        theme.typography.label_text,
-                        19.0,
-                        FontWeight::NORMAL,
+                        TextRole::Caption,
                         theme.colors.text_muted,
                         false,
                     ))
@@ -376,31 +372,19 @@ pub(crate) fn readout_rows_at(
             .child(text_with_wrap(
                 theme,
                 value,
-                theme.typography.label_text,
-                19.0,
-                FontWeight::NORMAL,
+                TextRole::Caption,
                 theme.colors.text,
                 false,
             ))
             .build();
         rendered_rows.push(row);
     }
-    let mut content = ui::Box::new()
-        .layout("column")
-        .gap(4.0)
-        .style(Style::new().padding_insets(Insets {
-            left: 14.0,
-            right: 14.0,
-            top: 12.0,
-            bottom: 12.0,
-        }));
+    let mut content = ui::Box::new().layout("column").spaced(Space::S4);
     if !heading.is_empty() {
         content = content.child(text_with_wrap(
             theme,
             heading,
-            theme.typography.control_text,
-            18.0,
-            FontWeight(600),
+            TextRole::Title,
             theme.colors.text_muted,
             false,
         ));
@@ -409,32 +393,14 @@ pub(crate) fn readout_rows_at(
         content = content.child(row);
     }
     let content = content.build();
-    let card = ui::Box::new()
-        .radius(radius)
+    let card = Surface::Tooltip(Tooltip::Card)
+        .build(theme, vec![content])
         .style(
             Style::new()
                 .min_width(Length::Px(140.0))
                 .max_width(Length::Px(280.0))
-                .flex_shrink(0.0)
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_shadows(
-                    glass_card_shadows(theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(glass_layers(theme, GlassStrength::Strong, radius))
-        .child(content)
-        .build();
+                .flex_shrink(0.0),
+        );
     let x = x.clamp(0.0, 1.0);
     let mut wrapper = ui::Box::new().layout("row").style(
         Style::new()
@@ -498,9 +464,7 @@ pub(crate) fn tick_strip(theme: &ArtisanTheme, ticks: Vec<super::distribution::T
             .child(text_with_wrap(
                 theme,
                 &tick.label,
-                11.0,
-                16.0,
-                FontWeight::NORMAL,
+                TextRole::Caption,
                 theme.colors.text_muted,
                 false,
             ))
@@ -543,15 +507,7 @@ pub(crate) fn numeric_frame_with_labels(
         .height(frame.height)
         .style(Style::new().flex_shrink(0.0));
     for (y, value, color) in labels {
-        let style = aqua_text::TextStyle {
-            families: vec![aqua_text::FontFamily::Named(
-                theme.typography.sans.family.to_owned(),
-            )],
-            size_px: 11.0,
-            line_height_px: 16.0,
-            weight: FontWeight::NORMAL,
-            ..aqua_text::TextStyle::default()
-        };
+        let style = TextRole::Caption.style(theme);
         gutter = gutter.child(
             ui::Box::new()
                 .height(16.0)
@@ -592,9 +548,7 @@ pub(crate) fn numeric_frame_with_labels(
                 .child(text_with_wrap(
                     theme,
                     &tick.label,
-                    11.0,
-                    16.0,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text_muted,
                     false,
                 ))
@@ -605,9 +559,7 @@ pub(crate) fn numeric_frame_with_labels(
         text_with_wrap(
             theme,
             value,
-            11.0,
-            16.0,
-            FontWeight::MEDIUM,
+            TextRole::Caption,
             theme.colors.text_muted,
             false,
         )
@@ -615,7 +567,7 @@ pub(crate) fn numeric_frame_with_labels(
     let mut outer = ui::Box::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(4.0);
+        .spaced(Space::S4);
     if let Some(value) = frame.y_title {
         outer = outer.child(title(&value));
     }
@@ -679,7 +631,7 @@ pub(crate) fn numeric_frame_with_labels(
 pub(crate) fn legend(theme: &ArtisanTheme, entries: Vec<(String, GpuiHsla)>) -> Element {
     let mut legend = ui::Box::new()
         .layout("row")
-        .gap(12.0)
+        .spaced(Space::S12)
         .style(Style::new().wrap(true).align(aqua_ui::AlignItems::CENTER));
     for (name, color) in entries {
         let swatch = ui::Box::new()
@@ -695,15 +647,13 @@ pub(crate) fn legend(theme: &ArtisanTheme, entries: Vec<(String, GpuiHsla)>) -> 
         legend = legend.child(
             ui::Box::new()
                 .layout("row")
-                .gap(6.0)
+                .spaced(Space::S6)
                 .style(Style::new().align(aqua_ui::AlignItems::CENTER))
                 .child(swatch)
                 .child(text_with_wrap(
                     theme,
                     &name,
-                    12.0,
-                    16.0,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text,
                     false,
                 ))
@@ -714,57 +664,20 @@ pub(crate) fn legend(theme: &ArtisanTheme, entries: Vec<(String, GpuiHsla)>) -> 
 }
 
 pub(crate) fn stats_hint(theme: &ArtisanTheme, heading: &str, body: &str, left: f32) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::X2l);
     let content = ui::Box::new()
         .layout("column")
-        .gap(4.0)
-        .style(Style::new().padding_insets(Insets {
-            left: 14.0,
-            right: 14.0,
-            top: 12.0,
-            bottom: 12.0,
-        }))
-        .child(text(
-            theme,
-            heading,
-            theme.typography.control_text,
-            18.0,
-            FontWeight(600),
-            theme.colors.text,
-        ))
+        .spaced(Space::S4)
+        .child(text(theme, heading, TextRole::Title, theme.colors.text))
         .child(text(
             theme,
             body,
-            theme.typography.label_text,
-            19.0,
-            FontWeight::NORMAL,
+            TextRole::Caption,
             theme.colors.text_muted,
         ))
         .build();
-    let card = ui::Box::new()
-        .width(260.0)
-        .radius(radius)
-        .style(
-            Style::new()
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_shadows(
-                    glass_card_shadows(theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(glass_layers(theme, GlassStrength::Strong, radius))
-        .child(content)
-        .build();
+    let card = Surface::Tooltip(Tooltip::Card)
+        .build(theme, vec![content])
+        .style(Style::new().width(Length::Px(260.0)));
     ui::Box::new()
         .width(260.0)
         .height(0.0)

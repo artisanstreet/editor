@@ -6,7 +6,7 @@ use std::{
 };
 
 use aqua_core::{CursorIcon, InputEvent, Insets, Key as InputKey, NamedKey, PointerButton, Role};
-use aqua_text::{FontFamily, FontWeight, TextStyle, overflow::OverflowMode};
+use aqua_text::overflow::OverflowMode;
 use aqua_ui::{
     AlignItems,
     collection::List,
@@ -18,13 +18,17 @@ use editor_assets::AssetId;
 
 use super::{Change, FileTree, Model, Row, RowKind};
 use crate::ui::{
-    asset::source_asset_glyph,
-    hover::{HoverColors, HoverFill, HoverTone},
+    kit::{self, Density, Hover, IconSize, Space, Spaced, Surface, TextRole, live},
     rich::actions::{OpenReference, ResourceScope},
-    theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens},
+    theme::{ArtisanTheme, Oklch},
 };
 
-const ROW_HEIGHT: f32 = 26.0;
+const ROW: kit::Row = kit::Row::ListItem(Density::Dense);
+const DEPTH_INDENT: f32 = 16.0;
+
+fn row_height() -> f32 {
+    ROW.height().unwrap_or_default()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Navigation {
@@ -209,27 +213,14 @@ fn color(theme: &ArtisanTheme, change: Option<Change>) -> Oklch {
 fn text(
     theme: &ArtisanTheme,
     value: impl Into<String>,
-    size: f32,
-    line: f32,
-    mono: bool,
-    weight: FontWeight,
+    role: TextRole,
     ink: Oklch,
     strike: bool,
 ) -> Element {
+    let mut style = role.style(theme);
+    style.strikethrough = strike;
     Text::new(value.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(if mono {
-                theme.typography.mono.family.to_owned()
-            } else {
-                theme.typography.sans.family.to_owned()
-            })],
-            size_px: size,
-            line_height_px: line,
-            weight,
-            letter_spacing_em: if mono { Some(0.0) } else { None },
-            strikethrough: strike,
-            ..TextStyle::default()
-        })
+        .text_style(style)
         .gpui_source_color(ink.to_reference_text_color())
         .wrap(false)
         .overflow(OverflowMode::EndEllipsis)
@@ -295,39 +286,46 @@ fn row(
                 )
             }
         };
-    let indent = f32::from(u16::try_from(row.depth.min(32)).unwrap_or(32)).mul_add(16.0, 4.0);
+    let indent = f32::from(u16::try_from(row.depth.min(32)).unwrap_or(32)) * DEPTH_INDENT;
     let mut leading = UiBox::new()
-        .width(12.0)
+        .width(IconSize::Sm.px())
         .style(Style::new().flex_shrink(0.0));
     if let Some(open) = expanded {
-        leading = leading.child(source_asset_glyph(
+        leading = leading.child(IconSize::Sm.glyph(
             if open {
                 AssetId::TABLER_CHEVRON_DOWN
             } else {
                 AssetId::TABLER_CHEVRON_RIGHT
             },
-            12.0,
             theme.colors.text_muted.to_reference_paint(),
         ));
     }
     let mut content = UiBox::new()
         .width(Length::Pct(100.0))
-        .height(ROW_HEIGHT)
-        .gap(6.0)
-        .radius(RadiusTokens::value(RadiusStep::Sm))
+        .height(row_height())
+        .spaced(ROW.gap())
+        .padded(ROW.pad().x)
+        .radius(ROW.radius_in(Surface::Card))
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
                 .min_width(Length::Px(0.0))
-                .padding_insets(Insets {
-                    left: indent,
-                    right: 8.0,
-                    ..Insets::default()
-                })
                 .border_of(1.0, aqua_core::Oklch::TRANSPARENT),
         )
+        .child(live::layer(
+            Hover::Neutral,
+            theme,
+            ROW.radius_in(Surface::Card),
+            false,
+        ))
+        .child(
+            UiBox::new()
+                .width(indent)
+                .style(Style::new().flex_shrink(0.0))
+                .build(),
+        )
         .child(leading.build())
-        .child(source_asset_glyph(glyph, 14.0, tint.to_reference_paint()))
+        .child(IconSize::Md.glyph(glyph, tint.to_reference_paint()))
         .child(
             UiBox::new()
                 .style(
@@ -339,25 +337,22 @@ fn row(
                 .child(text(
                     theme,
                     row.name.clone(),
-                    13.0,
-                    18.0,
-                    expanded.is_none(),
-                    FontWeight::NORMAL,
+                    TextRole::Label,
                     label_ink,
                     deleted,
                 ))
                 .build(),
         );
     if let Some(badge) = badge {
-        let (mono, weight, ink) = if expanded.is_some() {
-            (false, FontWeight::MEDIUM, theme.colors.text_muted)
+        let ink = if expanded.is_some() {
+            theme.colors.text_muted
         } else {
-            (true, FontWeight(600), tint)
+            tint
         };
         content = content.child(
             UiBox::new()
                 .style(Style::new().flex_shrink(0.0))
-                .child(text(theme, badge, 12.0, 16.0, mono, weight, ink, false))
+                .child(text(theme, badge, TextRole::Caption, ink, false))
                 .build(),
         );
     }
@@ -368,10 +363,7 @@ fn row(
                 .child(text(
                     theme,
                     description,
-                    12.0,
-                    16.0,
-                    false,
-                    FontWeight::NORMAL,
+                    TextRole::Caption,
                     theme.colors.text_muted,
                     false,
                 ))
@@ -384,8 +376,7 @@ fn row(
     let click = emit.clone();
     let accessibility = emit.clone();
     let key_emit = emit;
-    let mut element = content
-        .build()
+    let mut element = live::track(content.build())
         .with_key(node_id(id, index, row, &tree.0))
         .role(Role::TreeItem)
         .aria_label(accessible)
@@ -393,7 +384,6 @@ fn row(
         .on_accessibility_activate(move || accessibility(Action::Activate(index)))
         .focusable(true)
         .cursor(CursorIcon::Pointer)
-        .hover_style(HoverColors::new(theme, HoverTone::Neutral).style(HoverFill::Edged))
         .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
             if let RoutedInput::Native(InputEvent::PointerDown(pointer, PointerButton::Primary)) =
                 &event.input
@@ -472,15 +462,12 @@ impl FileTree {
         let visible = state.borrow().visible(self);
         let collapsed = state.borrow().collapsed.clone();
         let mut summary = UiBox::new()
-            .gap(10.0)
+            .spaced(Space::S8)
             .style(Style::new().align(AlignItems::CENTER).wrap(true))
             .child(text(
                 theme,
                 count(self.0.entries.len(), "file"),
-                12.0,
-                16.0,
-                false,
-                FontWeight::MEDIUM,
+                TextRole::Caption,
                 theme.colors.text_muted,
                 false,
             ));
@@ -495,16 +482,13 @@ impl FileTree {
                 summary = summary.child(text(
                     theme,
                     format!("{count} {}", change.word()),
-                    12.0,
-                    16.0,
-                    false,
-                    FontWeight::MEDIUM,
+                    TextRole::Caption,
                     color(theme, Some(change)),
                     false,
                 ));
             }
         }
-        let height = f32::from(u16::try_from(visible.len().min(14)).unwrap_or(14)) * ROW_HEIGHT;
+        let height = f32::from(u16::try_from(visible.len().min(14)).unwrap_or(14)) * row_height();
         let tree = FileTree(self.0.clone());
         let row_id = id.to_owned();
         let theme = *theme;
@@ -517,14 +501,14 @@ impl FileTree {
                     .width(Length::Pct(100.0))
                     .height(Length::Px(height)),
             )
-            .estimated_row_height(Length::Px(ROW_HEIGHT))
+            .estimated_row_height(Length::Px(row_height()))
             .measured_uniform_rows()
             .virtualize()
             .build()
             .with_key(format!("{id}-rows"));
         UiBox::new()
             .layout("column")
-            .gap(6.0)
+            .spaced(Space::S8)
             .width(Length::Pct(100.0))
             .style(Style::new().min_width(Length::Px(0.0)))
             .child(summary.build())

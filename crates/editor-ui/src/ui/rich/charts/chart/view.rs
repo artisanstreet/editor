@@ -3,6 +3,7 @@ use super::{
     model::Model,
     plot::{self, EndLabel, Geometry, PlotLabel, Snapshot, Tick},
 };
+use crate::ui::kit::Space;
 use crate::ui::rich::charts::scale::{Domain, f64_of, percent, reading};
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::slider::{Slider, SliderRange, SliderState};
@@ -529,7 +530,7 @@ pub(crate) fn view(
             Style::new()
                 .width(Length::Pct(100.0))
                 .align(aqua_ui::AlignItems::CENTER)
-                .gap(12.0),
+                .gap(Space::S12.px()),
         )
         .child((services.legend)(entries, toggle))
         .child(ui::Box::new().style(Style::new().flex_grow(1.0)).build());
@@ -546,7 +547,7 @@ pub(crate) fn view(
     }
     let mut root = ui::Box::new()
         .layout("column")
-        .style(Style::new().width(Length::Pct(100.0)).gap(10.0))
+        .style(Style::new().width(Length::Pct(100.0)).gap(Space::S8.px()))
         .child(header.build())
         .child(framed);
     for (index, (label, slider)) in sliders.into_iter().enumerate() {

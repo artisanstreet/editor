@@ -1,15 +1,17 @@
 use crate::conversation::compaction::{CompactionFrame, CompactionMotion, CompactionPhase};
 use editor_ui::motion::MotionCurve;
 use editor_ui::phrase::{PhraseMotion, PhraseOverflow, retained_phrase_or_text};
-use editor_ui::theme::{ArtisanTheme, ProseTypography};
+use editor_ui::kit::TextRole;
+use editor_ui::theme::ArtisanTheme;
 use aqua_core::GpuiTextColor;
-use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::element::Element;
 use artisan_api::ItemId;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
+
+const RISE: editor_ui::kit::Space = editor_ui::kit::Space::S4;
 
 struct Chevron {
     from: f32,
@@ -113,15 +115,15 @@ impl RowMotion {
             fit: phrase.fit(),
             refit: self.refit.clone(),
         };
-        let typography = TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: ProseTypography::BODY_SIZE_PX,
-            line_height_px: 24.0,
-            weight: ProseTypography::BODY_WEIGHT,
-            letter_spacing_em: Some(theme.typography.tracking_em),
-            ..TextStyle::default()
-        };
-        retained_phrase_or_text(words.as_deref(), text, typography, color, 24.0, overflow)
+        let role = TextRole::Prose;
+        retained_phrase_or_text(
+            words.as_deref(),
+            text,
+            role.style(&theme),
+            color,
+            role.spec().line,
+            overflow,
+        )
     }
 
     pub fn chevron(
@@ -187,6 +189,10 @@ impl RowMotion {
 }
 
 impl EntranceFrame {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the entrance collapses the gap above the row while it grows; the negative margin is motion, not spacing"
+    )]
     pub fn wrap(self, element: Element, gap: f32, invalidate: Rc<dyn Fn()>) -> Element {
         use aqua_ui::element::{Box as UiBox, Canvas};
         use aqua_ui::style::{Length, Style};
@@ -213,7 +219,7 @@ impl EntranceFrame {
                     .opacity(self.reveal)
                     .transform(aqua_core::Transform2D::translate(
                         0.0,
-                        4.0 * (1.0 - self.reveal),
+                        RISE.px() * (1.0 - self.reveal),
                     )),
             )
             .child(element)

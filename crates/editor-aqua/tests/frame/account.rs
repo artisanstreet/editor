@@ -29,7 +29,7 @@ fn username_replaces_email_without_replacing_the_display_name() {
 #[test]
 fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
     use aqua::UiApp;
-    use aqua_core::{InputEvent, Insets, Point, PointerEvent, PointerKind};
+    use aqua_core::{InputEvent, Point, PointerEvent, PointerKind};
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::{element::Box as UiBox, popup::PopupFocus, style::Style, tree::NodeKind};
     use artisan_api::{EngineId, UsageCadence};
@@ -51,12 +51,7 @@ fn hovering_a_usage_row_in_the_open_menu_shows_its_hover_card() {
                 UiBox::new()
                     .width(80.0)
                     .height(30.0)
-                    .style(Style::new().margin_insets(Insets {
-                        left: 0.0,
-                        right: 0.0,
-                        top: 800.0,
-                        bottom: 0.0,
-                    }))
+                    .style(Style::new().absolute_at(Some(0.0), Some(800.0), None, None))
                     .build()
                     .with_key("owner"),
             )

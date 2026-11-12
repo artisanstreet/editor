@@ -17,15 +17,61 @@ pub mod work;
 use crate::conversation::adapter::{Action, RowModel};
 use crate::conversation::disclosure::RowDisclosure;
 use crate::conversation::fold::Row;
-use editor_ui::button::{Button, ButtonVariant};
+use editor_ui::kit::{Button, ButtonTone, Divider, IconSize, Space};
 use editor_ui::theme::ArtisanTheme;
-use aqua_core::Insets;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use std::rc::Rc;
 
 pub type Dispatch = Rc<dyn Fn(Action)>;
+
+pub const COLUMN_MAX: f32 = 768.0;
+pub const GUTTER: Space = Space::S24;
+pub const CHAIN_INDENT: Space = Space::S24;
+const CHAIN_RULE: f32 = 2.0;
+const STATUS_TAIL: Space = Space::S8;
+const EDGE_INSET: Space = Space::S2;
+const COMPOSER_LIFT: Space = Space::S24;
+const COMPOSER_LIFT_NARROW: Space = Space::S16;
+const NARROW: f32 = 640.0;
+
+pub fn reading_width(viewport: f32) -> f32 {
+    viewport.min(COLUMN_MAX) - 2.0 * GUTTER.px()
+}
+
+fn strut(width: f32) -> Element {
+    UiBox::new()
+        .width(width)
+        .style(Style::new().flex_shrink(0.0))
+        .build()
+}
+
+fn spacer(height: f32) -> Element {
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .height(height)
+        .style(Style::new().flex_shrink(0.0))
+        .build()
+}
+
+fn filling(content: Element) -> Element {
+    UiBox::new()
+        .layout("column")
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+        .child(content)
+        .build()
+}
+
+fn guttered(content: Element) -> Element {
+    UiBox::new()
+        .layout("row")
+        .width(Length::Pct(100.0))
+        .child(strut(GUTTER.px()))
+        .child(filling(content))
+        .child(strut(GUTTER.px()))
+        .build()
+}
 
 pub fn scoped_dispatch(
     conversation: &crate::conversation::controller::Conversation,
@@ -49,8 +95,7 @@ pub fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<El
         ),
         _ => return None,
     };
-    let button = Button::text(key, theme, label)
-        .variant(ButtonVariant::Secondary)
+    let button = Button::text(key, theme, ButtonTone::Neutral, label)
         .on_activate(move |_| {
             dispatch(action.clone());
         })
@@ -98,46 +143,44 @@ fn row_frame_with_body_observer(
             return content;
         }
         let rule = UiBox::new()
-            .width(2.0)
-            .fill(theme.colors.line.to_paint())
+            .width(CHAIN_RULE)
+            .style(Divider::guide(&theme))
             .style(Style::new().absolute_at(
-                Some(theme.spacing.steps(1.75)),
+                Some((IconSize::Md.px() - CHAIN_RULE) / 2.0),
                 Some(-gap),
                 None,
                 Some(0.0),
             ))
             .build();
         UiBox::new()
+            .layout("row")
             .width(Length::Pct(100.0))
-            .style(Style::new().padding_insets(Insets {
-                left: theme.spacing.steps(6.0),
-                ..Insets::default()
-            }))
             .child(rule)
-            .child(content)
+            .child(strut(CHAIN_INDENT.px()))
+            .child(filling(content))
             .build()
     });
-    let mut column_style = Style::new()
-        .max_width(Length::Px(768.0))
-        .padding_insets(Insets {
-            left: 24.0,
-            right: 24.0,
-            top: if content.is_some() && !held && !deferred {
-                gap
-            } else {
-                0.0
-            },
-            bottom: if content.is_some() && matches!(model.row, Row::Status(_)) {
-                theme.spacing.steps(2.0)
-            } else {
-                0.0
-            },
-        });
-    column_style = column_style.align_self(aqua_ui::AlignSelf::CENTER);
-    let mut column = UiBox::new().width(Length::Pct(100.0)).style(column_style);
+    let top = match content.is_some() && !held && !deferred {
+        true => gap,
+        false => 0.0,
+    };
+    let tail = match content.is_some() && matches!(model.row, Row::Status(_)) {
+        true => STATUS_TAIL.px(),
+        false => 0.0,
+    };
+    let mut column = UiBox::new()
+        .layout("column")
+        .width(Length::Pct(100.0))
+        .style(
+            Style::new()
+                .max_width(Length::Px(COLUMN_MAX))
+                .align_self(aqua_ui::AlignSelf::CENTER),
+        )
+        .child(spacer(top));
     if let Some(content) = content {
-        column = column.child(content);
+        column = column.child(guttered(content));
     }
+    column = column.child(spacer(tail));
     if let Some(observer) = body_observer {
         column = column.child(
             aqua_ui::element::Canvas::new()
@@ -163,12 +206,10 @@ fn row_frame_with_body_observer(
         body = body.height(0.0).clip(true);
     }
     UiBox::new()
+        .layout("column")
         .width(Length::Pct(100.0))
-        .style(Style::new().padding_insets(Insets {
-            bottom: model.end,
-            ..Insets::default()
-        }))
         .child(body.build())
+        .child(spacer(model.end))
         .build()
 }
 
@@ -212,7 +253,12 @@ pub fn thread_frame(
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0));
     let transcript = UiBox::new()
-        .style(Style::new().absolute_at(Some(2.0), Some(2.0), Some(2.0), Some(2.0)))
+        .style(Style::new().absolute_at(
+            Some(EDGE_INSET.px()),
+            Some(EDGE_INSET.px()),
+            Some(EDGE_INSET.px()),
+            Some(EDGE_INSET.px()),
+        ))
         .clip(true)
         .opacity(if landing { 0.0 } else { 1.0 })
         .child(transcript)
@@ -227,10 +273,14 @@ pub fn thread_frame(
         .height(Length::Pct(100.0))
         .child(body.build());
     if let Some(composer) = composer {
-        let bottom = if viewport_width >= 640.0 { 24.0 } else { 16.0 };
+        let bottom = match viewport_width >= NARROW {
+            true => COMPOSER_LIFT,
+            false => COMPOSER_LIFT_NARROW,
+        }
+        .px();
         let column = UiBox::new()
             .width(Length::Pct(100.0))
-            .style(Style::new().max_width(Length::Px(768.0)))
+            .style(Style::new().max_width(Length::Px(COLUMN_MAX)))
             .child(composer)
             .build();
         let shell = UiBox::new()
@@ -238,15 +288,12 @@ pub fn thread_frame(
             .style(
                 Style::new()
                     .absolute_at(Some(0.0), None, Some(0.0), Some(bottom))
-                    .padding_insets(Insets {
-                        left: 24.0,
-                        right: 24.0,
-                        ..Insets::default()
-                    })
                     .justify(JustifyContent::CENTER)
                     .align(AlignItems::CENTER),
             )
+            .child(strut(GUTTER.px()))
             .child(column)
+            .child(strut(GUTTER.px()))
             .build();
         root = root.child(shell);
     }

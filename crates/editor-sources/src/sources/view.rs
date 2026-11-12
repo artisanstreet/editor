@@ -1,17 +1,16 @@
 use super::{ContentText, selection_source, source_slice};
 use editor_core::RangeState;
-use editor_ui::{
-    button::Button,
-    glass::{GlassStrength, glass_card_shadows, glass_layers},
-    theme::{ArtisanTheme, Elevation, RadiusStep, RadiusTokens},
-};
+use editor_ui::kit::{Button, ButtonTone, Spaced, Space, Surface, TextRole};
+use editor_ui::theme::ArtisanTheme;
 use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
 use aqua_ui::{
     collection::List,
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::{Length, Style},
 };
 use std::{rc::Rc, sync::Arc};
+
+const VISIBLE_ROWS: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContentAction {
@@ -27,6 +26,55 @@ pub struct ContentView {
     pub selection: Option<SelectionSource>,
 }
 
+pub(crate) fn viewport(row: f32, max_height: Option<f32>) -> f32 {
+    let full = row * VISIBLE_ROWS;
+    max_height.map_or(full, |height| height.clamp(row, full))
+}
+
+pub(crate) fn stack() -> UiBox {
+    UiBox::new().layout("column").spaced(Space::S4)
+}
+
+pub(crate) fn button(
+    key: &str,
+    theme: ArtisanTheme,
+    tone: ButtonTone,
+    label: &str,
+    action: impl Fn() + 'static,
+) -> Button {
+    Button::text(key.to_owned(), theme, tone, label)
+        .within(Surface::Inset)
+        .on_activate(move |_| action())
+}
+
+pub(crate) fn source_lines(
+    key: &'static str,
+    theme: ArtisanTheme,
+    text: Arc<str>,
+    rows: Vec<std::ops::Range<usize>>,
+    height: f32,
+    document: SelectionDocumentId,
+    source_id: SelectionSourceId,
+) -> Element {
+    List::new()
+        .items(rows.into_iter().enumerate())
+        .key(move |(index, _)| format!("{key}-{index}"))
+        .row(move |(_, range)| {
+            TextRole::Code
+                .text(&theme, text[range.clone()].to_owned())
+                .selection_source_in(document, source_slice(source_id, range.clone()))
+                .build()
+        })
+        .virtualize()
+        .measured_uniform_rows()
+        .style(
+            Style::new()
+                .height(Length::Px(height))
+                .width(Length::Pct(100.0)),
+        )
+        .build()
+}
+
 pub fn content_view(
     view: &ContentText,
     theme: ArtisanTheme,
@@ -34,31 +82,21 @@ pub fn content_view(
     source_id: SelectionSourceId,
     action: Rc<dyn Fn(ContentAction)>,
 ) -> ContentView {
-    let mut body = UiBox::new()
-        .layout("column")
-        .gap(theme.spacing.steps(1.0))
-        .width(Length::Pct(100.0));
+    let mut body = stack().width(Length::Pct(100.0));
     let mut selection = None;
     match view.window().state() {
         RangeState::Loading => {
-            body = body.child(
-                Text::new("Loading source…")
-                    .gpui_source_color(theme.colors.text.to_reference_text_color())
-                    .build(),
-            )
+            body = body.child(TextRole::Label.text(&theme, "Loading source…").build())
         }
         RangeState::Failed(error) => {
             let callback = Rc::clone(&action);
             body = body
+                .child(TextRole::Label.text(&theme, error.clone()).build())
                 .child(
-                    Text::new(error.clone())
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
-                        .build(),
-                )
-                .child(
-                    Button::text("source-retry", theme, "Retry")
-                        .on_activate(move |_| callback(ContentAction::Retry))
-                        .build(),
+                    button("source-retry", theme, ButtonTone::Neutral, "Retry", move || {
+                        callback(ContentAction::Retry)
+                    })
+                    .build(),
                 );
         }
         RangeState::Ready(page) => {
@@ -66,48 +104,45 @@ pub fn content_view(
             let end = page.end;
             let total = page.total;
             body = body.child(
-                Text::new(format!(
-                    "Raw source bytes {start}–{end} of {total}. Selection copies this loaded page."
-                ))
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .build(),
+                TextRole::Caption
+                    .text(
+                        &theme,
+                        format!(
+                            "Raw source bytes {start}–{end} of {total}. Selection copies this loaded page."
+                        ),
+                    )
+                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                    .build(),
             );
             let text: Arc<str> = Arc::from(page.text.as_str());
             selection = Some(selection_source(source_id, start, Arc::clone(&text)));
-            let row_text = Arc::clone(&text);
-            let list = List::new()
-                .items(view.rows.iter().cloned().enumerate())
-                .key(|(index, _)| format!("raw-source-row-{index}"))
-                .row(move |(_, range)| {
-                    Text::new(row_text[range.clone()].to_owned())
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
-                        .selection_source_in(document, source_slice(source_id, range.clone()))
-                        .build()
-                })
-                .virtualize()
-                .measured_uniform_rows()
-                .style(
-                    Style::new()
-                        .height(Length::Px(320.0))
-                        .width(Length::Pct(100.0)),
-                )
-                .build();
+            let list = source_lines(
+                "raw-source-row",
+                theme,
+                text,
+                view.rows.clone(),
+                viewport(TextRole::Code.spec().line, None),
+                document,
+                source_id,
+            );
             let previous = Rc::clone(&action);
             let next = Rc::clone(&action);
             body = body.child(list).child(
                 UiBox::new()
-                    .gap(theme.spacing.steps(1.0))
+                    .spaced(Space::S4)
                     .child(
-                        Button::text("source-prev", theme, "Previous")
-                            .disabled(start == 0)
-                            .on_activate(move |_| previous(ContentAction::Previous))
-                            .build(),
+                        button("source-prev", theme, ButtonTone::Quiet, "Previous", move || {
+                            previous(ContentAction::Previous)
+                        })
+                        .disabled(start == 0)
+                        .build(),
                     )
                     .child(
-                        Button::text("source-next", theme, "Next")
-                            .disabled(end == total)
-                            .on_activate(move |_| next(ContentAction::Next))
-                            .build(),
+                        button("source-next", theme, ButtonTone::Quiet, "Next", move || {
+                            next(ContentAction::Next)
+                        })
+                        .disabled(end == total)
+                        .build(),
                     )
                     .build(),
             );
@@ -117,27 +152,29 @@ pub fn content_view(
     let export = Rc::clone(&action);
     body = body.child(
         UiBox::new()
-            .gap(theme.spacing.steps(1.0))
+            .spaced(Space::S4)
             .child(
-                Button::text("source-copy", theme, "Copy full raw source")
-                    .disabled(view.busy())
-                    .on_activate(move |_| copy(ContentAction::Copy))
-                    .build(),
+                button(
+                    "source-copy",
+                    theme,
+                    ButtonTone::Neutral,
+                    "Copy full raw source",
+                    move || copy(ContentAction::Copy),
+                )
+                .disabled(view.busy())
+                .build(),
             )
             .child(
-                Button::text("source-export", theme, "Export source")
-                    .disabled(view.busy())
-                    .on_activate(move |_| export(ContentAction::Export))
-                    .build(),
+                button("source-export", theme, ButtonTone::Neutral, "Export source", move || {
+                    export(ContentAction::Export)
+                })
+                .disabled(view.busy())
+                .build(),
             )
             .build(),
     );
     if let Some(error) = &view.error {
-        body = body.child(
-            Text::new(error.clone())
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .build(),
-        );
+        body = body.child(TextRole::Label.text(&theme, error.clone()).build());
     }
     ContentView {
         element: code_card(theme, body.build()),
@@ -146,26 +183,13 @@ pub fn content_view(
 }
 
 pub(crate) fn code_card(theme: ArtisanTheme, content: Element) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0))
-        .radius(radius)
-        .padding(theme.density.card_padding_compact)
+    Surface::Card
+        .build(&theme, vec![Surface::Inset.build(&theme, vec![content])])
         .style(
             Style::new()
-                .min_width(Length::Px(0.0))
-                .gpui_source_text_color(theme.colors.text.to_reference_text_color())
-                .shadows(
-                    glass_card_shadows(&theme, Elevation::Raised)
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                ),
+                .width(Length::Pct(100.0))
+                .min_width(Length::Pct(0.0)),
         )
-        .child(glass_layers(&theme, GlassStrength::Quiet, radius))
-        .child(content)
-        .build()
 }
 
 pub enum ContentEffect {

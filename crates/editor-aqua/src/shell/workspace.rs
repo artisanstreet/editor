@@ -586,7 +586,6 @@ impl Workspace {
                         &composer.picker,
                         composer.project(host).as_ref(),
                         viewport,
-                        owner.project_hover(),
                         Rc::clone(&emit),
                     ))
                 }
@@ -617,15 +616,9 @@ impl Workspace {
                 tracing::warn!(%error, "could not synchronize composer popup");
             }
         }
-        let roots = [PopupKind::Model, PopupKind::Project]
-            .map(|kind| owner.popup_root(kind, ui));
-        match owner.advance_picker_hover(ui, &theme, now, roots) {
-            Ok(changed) => changed,
-            Err(error) => {
-                tracing::warn!(%error, "could not advance composer picker hover");
-                false
-            }
-        }
+        let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
+        let frame = editor_ui::kit::hover::live::advance(ui, std::time::Instant::now(), reduced);
+        frame.changed || frame.animating
     }
 
     #[must_use]

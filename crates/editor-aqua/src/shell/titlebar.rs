@@ -1,13 +1,18 @@
-use crate::shell::layout::{CONTROL_GLYPH, CONTROL_WIDTH, TITLEBAR_HEIGHT};
-use crate::ui::theme::{ArtisanTheme, Opacity};
+use crate::shell::layout::{self, TITLEBAR_HEIGHT};
+use crate::ui::kit::pane::split;
+use crate::ui::kit::{
+    Caption, CaptionButton, IconSize, Link, LinkTone, Space, Spaced, Surface, TextRole, Tooltip,
+};
+use crate::ui::theme::ArtisanTheme;
 use aqua::prelude::{CaptionControl, CaptionRegion, DragRegions, ObservedWindowState};
-use aqua_core::{GpuiBackground, Insets};
+use aqua_text::StyledSpan;
 use aqua_ui::{
-    AlignItems, JustifyContent,
-    element::{Box as UiBox, Button, Canvas, Element, Text},
+    AlignItems,
+    element::{Box as UiBox, Canvas, Element, Text},
     style::{Length, Style},
     tree::ActivationSource,
 };
+use editor_assets::AssetId;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -21,6 +26,7 @@ const METER: &str = "artisan-titlebar-meter";
 const MIN: &str = "artisan-desktop-titlebar-minimize";
 const MAX: &str = "artisan-desktop-titlebar-maximize";
 const CLOSE: &str = "artisan-desktop-titlebar-close";
+const CARD_WIDTH: f32 = 280.0;
 
 pub struct ContextMeterTooltip {
     hovered: Rc<Cell<bool>>,
@@ -79,7 +85,7 @@ impl ContextMeterTooltip {
             options.placement = aqua_ui::overlay::Placement {
                 preferred: aqua_ui::overlay::Side::Below,
                 align: aqua_ui::overlay::Align::End,
-                gap: 8.0,
+                gap: Space::S8.px(),
                 margin: 0.0,
                 flip: false,
                 centered: false,
@@ -157,15 +163,6 @@ fn context_card(
     reading: &crate::shell::context_meter::ContextReading,
     theme: ArtisanTheme,
 ) -> Element {
-    use crate::ui::theme::{Elevation, RadiusStep, RadiusTokens};
-    use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
-    let style = |size, line, weight| TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: size,
-        line_height_px: line,
-        weight,
-        ..TextStyle::default()
-    };
     let prose = |sentence: String, facts: Vec<String>| {
         let channels = |color: aqua_core::GpuiTextColor| {
             [
@@ -174,6 +171,10 @@ fn context_card(
                 color.lightness,
                 color.alpha,
             ]
+        };
+        let span = |words: &str, ink: crate::ui::theme::Oklch| {
+            StyledSpan::new(words, TextRole::Caption.style(&theme))
+                .gpui_source_color(channels(ink.to_reference_text_color()))
         };
         let mut ranges: Vec<_> = facts
             .into_iter()
@@ -188,44 +189,22 @@ fn context_card(
                 continue;
             }
             if range.start > at {
-                spans.push(
-                    StyledSpan::new(
-                        &sentence[at..range.start],
-                        style(theme.typography.label_text, 19.0, FontWeight::NORMAL),
-                    )
-                    .gpui_source_color(channels(theme.colors.text_muted.to_reference_text_color())),
-                );
+                spans.push(span(&sentence[at..range.start], theme.colors.text_muted));
             }
-            spans.push(
-                StyledSpan::new(
-                    &sentence[range.clone()],
-                    style(theme.typography.label_text, 19.0, FontWeight::NORMAL),
-                )
-                .gpui_source_color(channels(theme.colors.text.to_reference_text_color())),
-            );
+            spans.push(span(&sentence[range.clone()], theme.colors.text));
             at = range.end;
         }
         if at < sentence.len() {
-            spans.push(
-                StyledSpan::new(
-                    &sentence[at..],
-                    style(theme.typography.label_text, 19.0, FontWeight::NORMAL),
-                )
-                .gpui_source_color(channels(theme.colors.text_muted.to_reference_text_color())),
-            );
+            spans.push(span(&sentence[at..], theme.colors.text_muted));
         }
         Text::new(sentence).spans(spans).build()
     };
     let percent = format!("{}%", reading.percent().round());
     let size = crate::shell::context_meter::compact_tokens(reading.window_tokens);
-    let title = Text::new("Context Window")
-        .text_style(style(theme.typography.control_text, 18.0, FontWeight(600)))
-        .gpui_source_color(theme.colors.text.to_reference_text_color())
-        .build();
     let lines = UiBox::new()
         .layout("column")
-        .gap(4.0)
-        .child(title)
+        .spaced(Space::S4)
+        .child(TextRole::Title.text(&theme, "Context Window").build())
         .child(prose(
             reading.percent_sentence(),
             vec![reading.model_name.clone(), percent],
@@ -235,43 +214,17 @@ fn context_card(
             vec![reading.model_name.clone(), size],
         ))
         .build();
-    let progress = crate::ui::progress::bar(&theme, reading.percent(), 8.0).aria_label("Progress");
+    let progress =
+        crate::ui::progress::bar(&theme, reading.percent(), Space::S8.px()).aria_label("Progress");
     let body = UiBox::new()
         .layout("column")
-        .gap(12.0)
-        .padding(16.0)
+        .spaced(Space::S12)
         .child(lines)
         .child(progress)
         .build();
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    UiBox::new()
-        .width(280.0)
-        .radius(radius)
-        .style(
-            Style::new()
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_shadows(
-                    crate::ui::glass::glass_card_shadows(&theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(crate::ui::glass::glass_layers(
-            &theme,
-            crate::ui::glass::GlassStrength::Strong,
-            radius,
-        ))
-        .child(body)
-        .build()
+    Surface::Tooltip(Tooltip::Card)
+        .build(&theme, vec![body])
+        .style(Style::new().width(Length::Px(CARD_WIDTH)))
         .debug_selector("artisan-native-context-meter-card")
 }
 
@@ -280,7 +233,6 @@ pub struct Titlebar {
     regions: Rc<RefCell<Option<DragRegions>>>,
     actions: Rc<RefCell<VecDeque<CaptionControl>>>,
     hovered: Rc<Cell<Option<CaptionControl>>>,
-    header_hovered: Rc<RefCell<Option<(crate::core::HostInstance, artisan_api::ThreadId, String)>>>,
     changed: Rc<Cell<bool>>,
 }
 
@@ -297,8 +249,6 @@ impl Titlebar {
             return None;
         };
         let host = core.host(host)?;
-        let instance = host.instance();
-        let thread_id = thread.clone();
         let record = host.threads.get(thread);
         let title = record
             .and_then(|thread| thread.title.clone())
@@ -308,171 +258,113 @@ impl Titlebar {
         let repository = record
             .and_then(|thread| host.repository(&thread.project_id))
             .filter(|repository| repository.web_url.is_some());
-        let text = |value: String, color: aqua_core::GpuiTextColor| {
-            Text::new(value)
-                .text_style(aqua_text::TextStyle {
-                    families: vec![aqua_text::FontFamily::Named(
-                        theme.typography.sans.family.to_owned(),
-                    )],
-                    size_px: theme.typography.control_text,
-                    line_height_px: 14.0 * 1.618_034,
-                    letter_spacing_em: Some(theme.typography.tracking_em),
-                    ..aqua_text::TextStyle::default()
-                })
-                .gpui_source_color(color)
+        let text = |value: String, ink: crate::ui::theme::Oklch| {
+            TextRole::Label
+                .text(&theme, value)
+                .gpui_source_color(ink.to_reference_text_color())
                 .style(Style::new().flex_shrink(0.0))
                 .build()
         };
-        let muted = theme.colors.text_muted.to_reference_text_color();
-        let mut cluster = UiBox::new().layout("row").gap(6.0).clip(true).style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .min_width(Length::Px(0.0)),
-        );
+        let separator = || text("/".to_owned(), theme.colors.gray.step(7));
+        let mut cluster = UiBox::new()
+            .layout("row")
+            .spaced(Space::S6)
+            .clip(true)
+            .style(
+                Style::new()
+                    .align(AlignItems::CENTER)
+                    .min_width(Length::Pct(0.0)),
+            );
         if let Some(project) = project {
             if let Some(repository) = repository {
                 let url = repository.web_url.as_ref()?.clone();
                 let asset = match repository.host.as_deref() {
-                    Some("github") => editor_assets::AssetId::SVGL_GITHUB,
-                    Some("gitlab") => editor_assets::AssetId::SVGL_GITLAB,
-                    Some("azure") => editor_assets::AssetId::SVGL_MICROSOFT_AZURE,
-                    Some("bitbucket") => editor_assets::AssetId::SIMPLE_ICONS_BITBUCKET,
-                    Some("codeberg") => editor_assets::AssetId::SIMPLE_ICONS_CODEBERG,
-                    Some("gitea") => editor_assets::AssetId::SIMPLE_ICONS_GITEA,
-                    Some("sourcehut") => editor_assets::AssetId::SIMPLE_ICONS_SOURCEHUT,
-                    _ => editor_assets::AssetId::SVGL_GIT,
+                    Some("github") => AssetId::SVGL_GITHUB,
+                    Some("gitlab") => AssetId::SVGL_GITLAB,
+                    Some("azure") => AssetId::SVGL_MICROSOFT_AZURE,
+                    Some("bitbucket") => AssetId::SIMPLE_ICONS_BITBUCKET,
+                    Some("codeberg") => AssetId::SIMPLE_ICONS_CODEBERG,
+                    Some("gitea") => AssetId::SIMPLE_ICONS_GITEA,
+                    Some("sourcehut") => AssetId::SIMPLE_ICONS_SOURCEHUT,
+                    _ => AssetId::SVGL_GIT,
                 };
                 let label = crate::sidebar::list::qualified_label(&url);
                 let activate = Rc::clone(&open_url);
                 cluster = cluster
                     .child(
-                        UiBox::new()
-                            .style(Style::new().flex_shrink(0.0))
-                            .child(crate::ui::asset::source_asset_glyph(
-                                asset,
-                                14.0,
-                                theme.colors.text.to_reference_paint(),
-                            ))
-                            .build(),
+                        IconSize::Md
+                            .glyph(asset, theme.colors.text.to_reference_paint())
+                            .style(Style::new().flex_shrink(0.0)),
                     )
                     .child(
-                        Button::new()
-                            .style(Style::new().flex_shrink(0.0))
-                            .child(text(
-                                label.clone(),
-                                theme.colors.link.to_reference_text_color(),
-                            ))
-                            .on_activate(move || activate(url.clone()))
-                            .build()
-                            .with_key("artisan-desktop-titlebar-repository-link")
-                            .role(aqua_core::Role::Button)
-                            .aria_label(format!("Open {label}"))
-                            .cursor(aqua_core::CursorIcon::Pointer)
-                            .focusable(true),
+                        Link::new(
+                            "artisan-desktop-titlebar-repository-link",
+                            theme,
+                            LinkTone::Link,
+                            label.clone(),
+                        )
+                        .on_activate(move || activate(url.clone()))
+                        .build()
+                        .style(Style::new().flex_shrink(0.0))
+                        .aria_label(format!("Open {label}")),
                     );
             } else {
                 cluster = cluster.child(
                     UiBox::new()
                         .layout("row")
-                        .gap(6.0)
+                        .spaced(Space::S6)
                         .style(Style::new().align(AlignItems::CENTER).flex_shrink(0.0))
-                        .child(crate::ui::asset::source_asset_glyph(
-                            editor_assets::AssetId::TABLER_FOLDER,
-                            14.0,
+                        .child(IconSize::Md.glyph(
+                            AssetId::TABLER_FOLDER,
                             theme.colors.text_muted.to_reference_paint(),
                         ))
-                        .child(text(
-                            project.name.clone(),
-                            theme.colors.text.to_reference_text_color(),
-                        ))
+                        .child(text(project.name.clone(), theme.colors.text))
                         .build(),
                 );
             }
-            cluster = cluster.child(text(
-                "/".to_owned(),
-                theme.colors.gray.step(7).to_reference_text_color(),
-            ));
+            cluster = cluster.child(separator());
         }
         let trail = conversation.agent_trail();
-        let title_key = "artisan-desktop-titlebar-title".to_owned();
-        let title_hover = self.header_hovered.borrow().as_ref()
-            == Some(&(instance, thread_id.clone(), title_key.clone()));
-        let title_text = Text::new(title)
-            .text_style(aqua_text::TextStyle {
-                families: vec![aqua_text::FontFamily::Named(
-                    theme.typography.sans.family.to_owned(),
-                )],
-                size_px: theme.typography.control_text,
-                line_height_px: 14.0 * 1.618_034,
-                letter_spacing_em: Some(theme.typography.tracking_em),
-                ..aqua_text::TextStyle::default()
-            })
-            .gpui_source_color(if !trail.is_empty() && title_hover {
-                theme.colors.text.to_reference_text_color()
-            } else {
-                muted
-            })
-            .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-            .style(
-                Style::new()
-                    .min_width(Length::Px(0.0))
-                    .flex_grow(if trail.is_empty() { 1.0 } else { 0.0 }),
-            )
-            .build()
-            .debug_selector("artisan-desktop-titlebar-title");
-        if trail.is_empty() {
-            cluster = cluster.child(title_text);
+        let title = if trail.is_empty() {
+            TextRole::Label
+                .text(&theme, title)
+                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+                .style(
+                    Style::new()
+                        .min_width(Length::Pct(0.0))
+                        .flex_grow(1.0)
+                        .text_wrap(false),
+                )
+                .build()
         } else {
             let activate = Rc::clone(&open_agent);
-            let hover = self.header_hover_handler(instance, thread_id.clone(), title_key);
-            cluster = cluster.child(
-                Button::new()
-                    .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
-                    .child(title_text)
-                    .on_activate(move || activate(None))
-                    .build()
-                    .with_key("artisan-desktop-titlebar-title")
-                    .role(aqua_core::Role::Button)
-                    .aria_label("Open parent thread")
-                    .cursor(aqua_core::CursorIcon::Pointer)
-                    .on_hover_change(hover)
-                    .focusable(true),
-            );
-        }
+            Link::new(
+                "artisan-desktop-titlebar-title",
+                theme,
+                LinkTone::Crumb,
+                title,
+            )
+            .on_activate(move || activate(None))
+            .build()
+            .aria_label("Open parent thread")
+        };
+        cluster = cluster.child(title.debug_selector("artisan-desktop-titlebar-title"));
         let last = trail.len().saturating_sub(1);
         for (index, (agent, name)) in trail.into_iter().enumerate() {
-            cluster = cluster.child(text(
-                "/".to_owned(),
-                theme.colors.gray.step(7).to_reference_text_color(),
-            ));
+            cluster = cluster.child(separator());
             let key = format!("artisan-desktop-titlebar-agent-{agent}");
-            let hovered = self.header_hovered.borrow().as_ref()
-                == Some(&(instance, thread_id.clone(), key.clone()));
-            let crumb = text(
-                name,
-                if index == last || hovered {
-                    theme.colors.text.to_reference_text_color()
-                } else {
-                    muted
-                },
-            );
             if index == last {
-                cluster = cluster.child(crumb.with_key(key));
+                cluster = cluster.child(text(name, theme.colors.text).with_key(key));
             } else {
                 let activate = Rc::clone(&open_agent);
-                let hover = self.header_hover_handler(instance, thread_id.clone(), key.clone());
                 cluster = cluster.child(
-                    Button::new()
-                        .style(Style::new().flex_shrink(0.0))
-                        .child(crumb)
+                    Link::new(key, theme, LinkTone::Crumb, name)
+                        .current(false)
                         .on_activate(move || activate(Some(agent.clone())))
                         .build()
-                        .with_key(key)
-                        .role(aqua_core::Role::Button)
-                        .aria_label("Open parent agent")
-                        .cursor(aqua_core::CursorIcon::Pointer)
-                        .on_hover_change(hover)
-                        .focusable(true),
+                        .style(Style::new().flex_shrink(0.0))
+                        .aria_label("Open parent agent"),
                 );
             }
         }
@@ -481,27 +373,6 @@ impl Titlebar {
                 .build()
                 .debug_selector("artisan-desktop-titlebar-header"),
         )
-    }
-
-    fn header_hover_handler(
-        &self,
-        instance: crate::core::HostInstance,
-        thread: artisan_api::ThreadId,
-        key: String,
-    ) -> impl Fn(bool) + 'static {
-        let hovered = Rc::clone(&self.header_hovered);
-        let changed = Rc::clone(&self.changed);
-        move |over| {
-            let identity = (instance, thread.clone(), key.clone());
-            let mut current = hovered.borrow_mut();
-            if over && current.as_ref() != Some(&identity) {
-                *current = Some(identity);
-                changed.set(true);
-            } else if !over && current.as_ref() == Some(&identity) {
-                *current = None;
-                changed.set(true);
-            }
-        }
     }
 
     pub fn regions(&self) -> Option<DragRegions> {
@@ -536,12 +407,8 @@ impl Titlebar {
         meter: Option<Element>,
         inspector_width: Option<f32>,
     ) -> Element {
-        let meter_right = inspector_width.unwrap_or(0.0).max(CONTROL_WIDTH * 3.0) + 12.0;
-        let inset = if meter.is_some() {
-            (meter_right + 24.0 - CONTROL_WIDTH * 3.0).max(0.0)
-        } else {
-            0.0
-        };
+        let meter_right = layout::meter_right(inspector_width);
+        let inset = layout::header_right_inset(meter_right, meter.is_some());
         let mut inner = UiBox::new()
             .layout("row")
             .height(Length::Pct(100.0))
@@ -549,17 +416,18 @@ impl Titlebar {
             .style(
                 Style::new()
                     .flex_grow(1.0)
-                    .min_width(Length::Px(0.0))
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        right: inset,
-                        ..Insets::default()
-                    }),
+                    .min_width(Length::Pct(0.0))
+                    .align(AlignItems::CENTER),
             );
         for child in header {
             inner = inner.child(child);
         }
-        inner = inner.child(drag(DRAG));
+        inner = inner.child(drag(DRAG)).child(
+            UiBox::new()
+                .width(inset)
+                .style(Style::new().flex_shrink(0.0))
+                .build(),
+        );
         let content = UiBox::new()
             .layout("row")
             .height(Length::Pct(100.0))
@@ -567,7 +435,7 @@ impl Titlebar {
             .style(
                 Style::new()
                     .flex_grow(1.0)
-                    .min_width(Length::Px(0.0))
+                    .min_width(Length::Pct(0.0))
                     .align(AlignItems::CENTER),
             )
             .child(inner.build())
@@ -595,18 +463,12 @@ impl Titlebar {
             );
         }
         if let Some(width) = inspector_width {
-            root = root.child(
-                UiBox::new()
-                    .width(1.0)
-                    .style(
-                        Style::new()
-                            .absolute_at(None, Some(0.0), Some(width - 1.0), Some(0.0))
-                            .gpui_background(GpuiBackground::Solid(
-                                theme.colors.line.to_reference_paint(),
-                            )),
-                    )
-                    .build(),
-            );
+            root = root.child(split(&theme).style(Style::new().absolute_at(
+                None,
+                Some(0.0),
+                Some(width - 1.0),
+                Some(0.0),
+            )));
         }
         self.measured(
             root.build().debug_selector("artisan-desktop-titlebar"),
@@ -688,91 +550,24 @@ impl Titlebar {
         maximized: bool,
         stroke: f32,
     ) -> Element {
-        let (selector, label, background) = match control {
-            CaptionControl::Minimize => (MIN, "Minimize window", theme.colors.surface),
-            CaptionControl::Maximize => (
-                MAX,
-                if maximized {
-                    "Restore window"
-                } else {
-                    "Maximize window"
-                },
-                theme.colors.raised,
-            ),
-            CaptionControl::Close => (CLOSE, "Close window", theme.colors.red.solid),
-        };
-        let foreground = if self.hovered.get() == Some(control) {
-            if control == CaptionControl::Close {
-                theme.colors.red.contrast
-            } else {
-                theme.colors.text
-            }
-        } else {
-            theme.colors.text_muted
-        };
-        let glyph = match control {
-            CaptionControl::Minimize => crate::ui::asset::source_asset_glyph(
-                editor_assets::AssetId::TABLER_MINUS,
-                CONTROL_GLYPH,
-                foreground.to_reference_paint(),
-            ),
-            CaptionControl::Close => crate::ui::asset::source_asset_glyph(
-                editor_assets::AssetId::TABLER_X,
-                CONTROL_GLYPH,
-                foreground.to_reference_paint(),
-            ),
-            CaptionControl::Maximize => maximize(theme, maximized, stroke),
+        let (selector, label, caption) = match (control, maximized) {
+            (CaptionControl::Minimize, _) => (MIN, "Minimize window", Caption::Minimize),
+            (CaptionControl::Maximize, true) => (MAX, "Restore window", Caption::Restore),
+            (CaptionControl::Maximize, false) => (MAX, "Maximize window", Caption::Maximize),
+            (CaptionControl::Close, _) => (CLOSE, "Close window", Caption::Close),
         };
         let actions = self.actions.clone();
         let hovered = self.hovered.clone();
         let changed = self.changed.clone();
-        Button::new()
-            .width(CONTROL_WIDTH)
-            .height(Length::Pct(100.0))
-            .style(
-                Style::new()
-                    .flex_shrink(0.0)
-                    .align(AlignItems::CENTER)
-                    .justify(JustifyContent::CENTER)
-                    .gpui_border(
-                        Insets::uniform(1.0),
-                        aqua_core::GpuiHsla {
-                            h: 0.0,
-                            s: 0.0,
-                            l: 0.0,
-                            a: 0.0,
-                        },
-                        false,
-                    ),
-            )
-            .on_activate_event(move |event| {
+        CaptionButton::new(selector, theme, caption, label)
+            .stroke(stroke)
+            .lit(self.hovered.get() == Some(control))
+            .on_activate(move |event| {
                 if matches!(event.source, Some(ActivationSource::Keyboard(_))) {
                     actions.borrow_mut().push_back(control);
                 }
             })
-            .child(glyph)
-            .build()
-            .with_key(selector)
-            .debug_selector(selector)
-            .aria_label(label)
-            .tab_index(0)
-            .gpui_keyboard_activation()
-            .hover_style(
-                Style::new()
-                    .gpui_background(GpuiBackground::Solid(background.to_reference_paint())),
-            )
-            .focus_visible_style(
-                Style::new().gpui_border(
-                    Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .ring
-                        .at(Opacity::FocusRing)
-                        .to_reference_paint(),
-                    false,
-                ),
-            )
-            .on_hover_change(move |value| {
+            .on_hover(move |value| {
                 let before = hovered.get();
                 if value {
                     hovered.set(Some(control));
@@ -781,55 +576,16 @@ impl Titlebar {
                 }
                 changed.set(changed.get() || hovered.get() != before);
             })
+            .build()
+            .debug_selector(selector)
     }
 }
 
 fn drag(selector: &'static str) -> Element {
     UiBox::new()
-        .width(Length::Px(0.0))
+        .width(Length::Pct(0.0))
         .height(Length::Pct(100.0))
         .style(Style::new().flex_grow(1.0))
         .build()
         .debug_selector(selector)
-}
-
-fn maximize(theme: ArtisanTheme, maximized: bool, stroke: f32) -> Element {
-    let color = theme.colors.text.to_reference_paint();
-    let mut glyph = UiBox::new().width(10.0).height(10.0);
-    if maximized {
-        glyph = glyph
-            .child(
-                UiBox::new()
-                    .width(7.0)
-                    .height(7.0)
-                    .style(
-                        Style::new()
-                            .absolute_at(None, Some(0.0), Some(0.0), None)
-                            .gpui_border(
-                                Insets {
-                                    top: stroke,
-                                    right: stroke,
-                                    ..Insets::default()
-                                },
-                                color,
-                                false,
-                            ),
-                    )
-                    .build(),
-            )
-            .child(
-                UiBox::new()
-                    .width(7.0)
-                    .height(7.0)
-                    .style(
-                        Style::new()
-                            .absolute_at(Some(0.0), None, None, Some(0.0))
-                            .gpui_border(Insets::uniform(stroke), color, false),
-                    )
-                    .build(),
-            );
-    } else {
-        glyph = glyph.style(Style::new().gpui_border(Insets::uniform(stroke), color, false));
-    }
-    glyph.build()
 }

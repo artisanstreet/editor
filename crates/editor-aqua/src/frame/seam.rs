@@ -1,15 +1,13 @@
 pub mod motion;
 pub mod outline;
 
-use crate::ui::chrome::card::{self, Edge};
+use crate::ui::chrome::card::{Edge, rest_shadows};
+use crate::ui::kit::Radius;
 use crate::ui::theme::ArtisanTheme;
 use aqua::{Aqua, Style};
 use aqua_core::shape::{ShapeProgram, ShapeTransition};
 use aqua_core::vector::{FillRule, GpuiPath, GpuiPathStyle};
-use aqua_core::{
-    CornerRadii, DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, GpuiHsla,
-    Rect, Transform2D,
-};
+use aqua_core::{DisplayItem, GpuiGradientColorSpace, GpuiHsla, Rect, Transform2D};
 use aqua_ui::element::Element;
 use palette::FromColor;
 use std::cell::{Cell, RefCell};
@@ -99,7 +97,7 @@ pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced
                     sheet.x - 24.0,
                     sheet.y - crate::frame::strip::HEIGHT - 24.0,
                     sheet.right() + 24.0,
-                    sheet.y + card::RADIUS + 24.0,
+                    sheet.y + Radius::Shell.px() + 24.0,
                 ),
                 program: Arc::new(ShapeProgram {
                     name: "artisan.thread-seam".into(),
@@ -123,6 +121,10 @@ pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced
         .exclude_from_hit_testing()
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "the seam sheet is a path-traced silhouette painted layer by layer; no kit surface can draw it"
+)]
 fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayItem> {
     let local = Rect {
         x: parameters[0],
@@ -141,15 +143,15 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
             a: parameters[offset + 3],
         }
     });
-    let gradient = |start, end| GpuiBackground::LinearGradient {
+    let gradient = |start, end| aqua_core::GpuiBackground::LinearGradient {
         angle: 180.0,
         color_space: GpuiGradientColorSpace::Srgb,
         stops: [
-            GpuiGradientStop {
+            aqua_core::GpuiGradientStop {
                 percentage: 0.0,
                 color: start,
             },
-            GpuiGradientStop {
+            aqua_core::GpuiGradientStop {
                 percentage: 1.0,
                 color: end,
             },
@@ -158,13 +160,13 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
     let layers = [
         gradient(colors[0], colors[1]),
         gradient(colors[2], colors[3]),
-        GpuiBackground::Solid(colors[4]),
+        aqua_core::GpuiBackground::Solid(colors[4]),
     ];
-    let mut items = card::rest_shadows()
+    let mut items = rest_shadows()
         .into_iter()
         .map(|layer| DisplayItem::Shadow {
             bounds: sheet,
-            corners: CornerRadii::uniform(card::RADIUS),
+            corners: aqua_core::CornerRadii::uniform(Radius::Shell.px()),
             layer,
         })
         .collect::<Vec<_>>();
@@ -180,13 +182,13 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
             .map_or(local.y + inset, |tab| tab.y + inset);
         let gradient_bottom = local.bottom() - inset;
         if body.w > 0.0 && body.h > 0.0 {
-            let radius = (card::RADIUS - inset)
+            let radius = (Radius::Shell.px() - inset)
                 .max(0.0)
                 .min(body.w * 0.5)
                 .min((local.h - inset * 2.0).max(0.0) * 0.5);
             items.push(DisplayItem::GpuiBackground {
                 bounds: body.translate(bounds.x, bounds.y),
-                corners: CornerRadii {
+                corners: aqua_core::CornerRadii {
                     top_left: 0.0,
                     top_right: 0.0,
                     bottom_left: radius,
@@ -228,15 +230,19 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
     items
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "slices the seam sheet's painted gradient layers to each path segment"
+)]
 fn gradient_slice(
-    background: GpuiBackground,
+    background: aqua_core::GpuiBackground,
     from: f32,
     to: f32,
     top: f32,
     bottom: f32,
-) -> GpuiBackground {
+) -> aqua_core::GpuiBackground {
     match background {
-        GpuiBackground::LinearGradient {
+        aqua_core::GpuiBackground::LinearGradient {
             angle,
             color_space,
             stops,
@@ -257,15 +263,15 @@ fn gradient_slice(
                     a: color.alpha,
                 }
             };
-            GpuiBackground::LinearGradient {
+            aqua_core::GpuiBackground::LinearGradient {
                 angle,
                 color_space,
                 stops: [
-                    GpuiGradientStop {
+                    aqua_core::GpuiGradientStop {
                         percentage: 0.0,
                         color: sample(top),
                     },
-                    GpuiGradientStop {
+                    aqua_core::GpuiGradientStop {
                         percentage: 1.0,
                         color: sample(bottom),
                     },

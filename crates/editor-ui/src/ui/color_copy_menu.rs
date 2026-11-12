@@ -1,14 +1,8 @@
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-    time::Instant,
-};
+use std::{cell::Cell, rc::Rc};
 
-use aqua_core::{CursorIcon, InputEvent, Key as InputKey, NamedKey, NodeId, Role};
-use aqua_text::{FontFamily, TextStyle};
+use aqua_core::{InputEvent, Key as InputKey, NamedKey, NodeId, Role};
 use aqua_ui::{
-    AlignItems,
-    element::{Box as UiBox, Button, Element, Key, Text},
+    element::{Box as UiBox, Element, Key},
     overlay::OverlayId,
     style::{Axis, Length, Style},
     tree::hash_key,
@@ -17,9 +11,9 @@ use editor_assets::AssetId;
 
 use super::{
     asset::source_asset_glyph,
+    kit::{Divider, IconSize, Row, RowItem, Surface},
     popover::{AnimatedPickerHost, Popover},
     rich::actions::{CopyKind, ShowCopyMenu},
-    chrome::menu::Highlight,
     theme::ArtisanTheme,
 };
 
@@ -35,115 +29,84 @@ struct Panel {
     menu: ShowCopyMenu,
     search_icon: Option<aqua::ImageHandle>,
     theme: ArtisanTheme,
-    reduced_motion: bool,
     effect: Rc<dyn Fn(ColorCopyEffect)>,
     alive: Rc<Cell<bool>>,
     pending_close: Rc<Cell<bool>>,
-    lights: Rc<RefCell<Vec<Highlight>>>,
 }
 
 impl Panel {
-    fn rows(&self, now: Instant) -> Element {
+    fn rows(&self) -> Element {
         let theme = self.theme;
-        let radius = crate::ui::chrome::account::menu_radius() - MENU_PADDING;
         let mut rows =
             UiBox::new().style(Style::new().axis(Axis::Column).min_width(Length::Px(160.0)));
         for (index, entry) in self.menu.entries.iter().enumerate() {
             let kind = entry.kind;
             if index > 0 && self.menu.entries[index - 1].kind != kind {
-                rows = rows.child(crate::ui::chrome::card::double_rule(&theme, MENU_PADDING));
+                rows = rows.child(Divider::Rule.build(&theme, Surface::Menu.padding_px()));
             }
-            let mut icon = UiBox::new()
-                .width(16.0)
-                .height(16.0)
+            let icon = UiBox::new()
+                .width(IconSize::Md.px())
+                .height(IconSize::Md.px())
                 .style(Style::new().flex_shrink(0.0));
             let glyph = |asset| {
-                source_asset_glyph(asset, 15.0, theme.colors.text_muted.to_reference_paint())
+                source_asset_glyph(
+                    asset,
+                    IconSize::Md.px(),
+                    theme.colors.text_muted.to_reference_paint(),
+                )
             };
-            icon = match (kind, &self.search_icon) {
+            let icon = match (kind, &self.search_icon) {
                 (CopyKind::Primary, _) => icon.child(glyph(AssetId::TABLER_COPY)),
                 (CopyKind::Search, Some(image)) => icon.child(
                     aqua_ui::element::Media::new(image.clone())
-                        .width(16.0)
-                        .height(16.0)
+                        .width(IconSize::Md.px())
+                        .height(IconSize::Md.px())
                         .fit(aqua_core::image::ImageFit::Contain)
                         .build(),
                 ),
                 (CopyKind::Search, None) => icon.child(glyph(AssetId::TABLER_SEARCH)),
                 (CopyKind::Alternative, _) => icon,
             };
-            let label = Text::new(entry.label.clone())
-                .text_style(TextStyle {
-                    families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                    size_px: 14.0,
-                    line_height_px: ROW_LINE,
-                    ..TextStyle::default()
-                })
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .build();
             let text = entry.text.clone();
             let select_alive = self.alive.clone();
             let select_pending = self.pending_close.clone();
             let select_effect = self.effect.clone();
             let hover_alive = self.alive.clone();
             let hover_effect = self.effect.clone();
-            let lights = self.lights.clone();
-            let reduced = self.reduced_motion;
-            let lit = self.lights.borrow()[index];
-            let row = Button::new()
-                .style(
-                    Style::new()
-                        .align(AlignItems::CENTER)
-                        .gap(8.0)
-                        .padding_insets(aqua_core::Insets {
-                            left: 12.0,
-                            right: 12.0,
-                            top: ROW_PAD,
-                            bottom: ROW_PAD,
-                        })
-                        .radius(Length::Px(radius)),
-                )
-                .child(crate::ui::chrome::account::row_highlight(
-                    &theme,
-                    lit,
-                    now,
-                    ROW_LINE + 2.0 * ROW_PAD,
-                    radius,
-                ))
-                .child(icon.build())
-                .child(label)
-                .on_activate(move || {
-                    if select_alive.get() && !select_pending.get() {
-                        select_effect(match kind {
-                            CopyKind::Primary | CopyKind::Alternative => {
-                                ColorCopyEffect::Clipboard(text.clone())
-                            }
-                            CopyKind::Search => ColorCopyEffect::Search(text.clone()),
-                        });
-                        select_pending.set(true);
-                        select_effect(ColorCopyEffect::RequestFrame);
-                    }
-                })
-                .build()
-                .with_key(format!("copy-value-{index}"))
-                .role(Role::MenuItem)
-                .aria_label(entry.label.clone())
-                .focusable(true)
-                .cursor(CursorIcon::Pointer)
-                .on_hover_change(move |hovered| {
-                    if hover_alive.get() {
-                        let mut lights = lights.borrow_mut();
-                        lights[index] = lights[index].light(hovered, Instant::now(), reduced);
-                        drop(lights);
-                        hover_effect(ColorCopyEffect::RequestFrame);
-                    }
-                });
+            let row = RowItem::new(
+                format!("copy-value-{index}"),
+                theme,
+                Row::MenuItem,
+                Surface::Menu,
+                entry.label.clone(),
+            )
+            .leading(icon.build())
+            .role(Role::MenuItem)
+            .on_activate(move || {
+                if select_alive.get() && !select_pending.get() {
+                    select_effect(match kind {
+                        CopyKind::Primary | CopyKind::Alternative => {
+                            ColorCopyEffect::Clipboard(text.clone())
+                        }
+                        CopyKind::Search => ColorCopyEffect::Search(text.clone()),
+                    });
+                    select_pending.set(true);
+                    select_effect(ColorCopyEffect::RequestFrame);
+                }
+            })
+            .on_hover(move |_| {
+                if hover_alive.get() {
+                    hover_effect(ColorCopyEffect::RequestFrame);
+                }
+            })
+            .build()
+            .focusable(true);
             rows = rows.child(row);
         }
         rows.build().with_key("copy-menu-rows")
     }
 
-    fn popover(&self, viewport: aqua_core::Size, now: Instant) -> Popover {
+    fn popover(&self, viewport: aqua_core::Size) -> Popover {
         let dismiss_pending = self.pending_close.clone();
         let dismiss_alive = self.alive.clone();
         let dismiss_effect = self.effect.clone();
@@ -152,7 +115,7 @@ impl Panel {
             "Copy value",
             self.menu.position,
             self.theme,
-            self.rows(now),
+            self.rows(),
             viewport,
             move || {
                 if dismiss_alive.get() {
@@ -161,8 +124,6 @@ impl Panel {
                 }
             },
         )
-        .menu_padding(MENU_PADDING)
-        .strong_glass_menu()
     }
 }
 
@@ -188,16 +149,14 @@ impl ColorCopyMenuHost {
             return Ok(None);
         }
         let panel = Panel {
-            lights: Rc::new(RefCell::new(vec![Highlight::default(); menu.entries.len()])),
             menu,
             search_icon,
             theme,
-            reduced_motion,
             effect: Rc::new(effect),
             alive: Rc::new(Cell::new(true)),
             pending_close: Rc::new(Cell::new(false)),
         };
-        let (element, mut options) = panel.popover(app.viewport(), Instant::now()).into_parts();
+        let (element, mut options) = panel.popover(app.viewport()).into_parts();
         let closed_alive = panel.alive.clone();
         let closed_effect = panel.effect.clone();
         options.on_close = Some(Rc::new(move |_| {
@@ -301,27 +260,6 @@ impl ColorCopyMenuHost {
         if self.popup.is_open(app) {
             self.popup.advance(app, now)?;
         }
-        if self.root(app).is_none() {
-            return Ok(false);
-        }
-        let instant = Instant::now();
-        let running = self
-            .panel
-            .lights
-            .borrow()
-            .iter()
-            .any(Highlight::running);
-        if running {
-            let (element, _) = self.panel.popover(app.viewport(), instant).into_parts();
-            self.popup.refresh_content(app, element)?;
-            for light in self.panel.lights.borrow_mut().iter_mut() {
-                *light = light.settle(instant);
-            }
-        }
-        Ok(running || self.popup.is_animating(app))
+        Ok(self.root(app).is_some() && self.popup.is_animating(app))
     }
 }
-
-const MENU_PADDING: f32 = 6.0;
-const ROW_PAD: f32 = 8.0;
-const ROW_LINE: f32 = 20.0;
