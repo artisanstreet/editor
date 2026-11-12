@@ -1,8 +1,13 @@
 use super::list::{Lists, RowData};
+use editor_ui::kit::{Density, Divider, Row, Space, Surface};
 
 pub const RAIL_WIDTH: f32 = 48.0;
-pub const ROW_HEIGHT: f32 = 48.0;
 pub const READ_AHEAD: f32 = 600.0;
+pub const LIST: Surface = Surface::Inset;
+pub const HEADING: Row = Row::ListHeading;
+pub const TOGGLE: Row = Row::ListItem(Density::Regular);
+const GROUP_GAP: Space = Space::S12;
+const ROW_GAP: Space = Space::S2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadLayout {
@@ -11,12 +16,20 @@ pub enum ThreadLayout {
 }
 
 impl ThreadLayout {
-    pub const fn height(self) -> f32 {
+    pub const fn row(self) -> Row {
         match self {
-            Self::Grouped => 32.0,
-            Self::Standalone => ROW_HEIGHT,
+            Self::Grouped => Row::ListItem(Density::Regular),
+            Self::Standalone => Row::ListItem(Density::Tall),
         }
     }
+
+    pub fn height(self) -> f32 {
+        self.row().height().unwrap_or_default()
+    }
+}
+
+pub fn history_height() -> f32 {
+    Divider::Rule.height() + TOGGLE.height().unwrap_or_default()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,9 +49,8 @@ impl Entry {
     pub fn height(&self) -> f32 {
         match self {
             Self::Thread(_, layout) => layout.height(),
-            Self::Project { .. } => 28.0,
-            Self::History => 43.0,
-            Self::Heading(_) => 21.0,
+            Self::Project { .. } | Self::Heading(_) => HEADING.height().unwrap_or_default(),
+            Self::History => history_height(),
             Self::Gap(height) => *height,
             Self::Spacer => 0.0,
         }
@@ -59,7 +71,7 @@ pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
     let mut entries = Vec::new();
     for (index, (project, rows)) in groups.into_iter().enumerate() {
         if index > 0 {
-            entries.push(Entry::Gap(12.0));
+            entries.push(Entry::Gap(GROUP_GAP.px()));
         }
         entries.push(Entry::Project {
             id: project.clone(),
@@ -67,7 +79,7 @@ pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
         });
         for (index, row) in rows.into_iter().enumerate() {
             if index > 0 {
-                entries.push(Entry::Gap(2.0));
+                entries.push(Entry::Gap(ROW_GAP.px()));
             }
             entries.push(Entry::Thread(row.clone(), ThreadLayout::Grouped));
         }
@@ -76,17 +88,17 @@ pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
         entries.push(Entry::Spacer);
         entries.push(Entry::History);
         if history_visible {
-            entries.push(Entry::Gap(2.0));
+            entries.push(Entry::Gap(ROW_GAP.px()));
             for (index, group) in lists.history.iter().enumerate() {
                 if index > 0 {
-                    entries.push(Entry::Gap(12.0));
+                    entries.push(Entry::Gap(GROUP_GAP.px()));
                 }
                 if let Some(label) = group.age.label() {
                     entries.push(Entry::Heading(label));
                 }
                 for (index, row) in group.rows.iter().enumerate() {
                     if index > 0 {
-                        entries.push(Entry::Gap(2.0));
+                        entries.push(Entry::Gap(ROW_GAP.px()));
                     }
                     entries.push(Entry::Thread(row.clone(), ThreadLayout::Standalone));
                 }

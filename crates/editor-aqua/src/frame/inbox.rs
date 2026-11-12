@@ -5,7 +5,6 @@ use crate::sidebar::{
 };
 use crate::ui::theme::ArtisanTheme;
 use aqua::{Aqua, px};
-use aqua_core::Insets;
 use aqua_ui::element::Element;
 use std::rc::Rc;
 
@@ -88,7 +87,7 @@ pub fn view(
     if !sidebar.lists.history.is_empty() {
         column = column.child(
             Aqua::Box()
-                .height(43.0)
+                .height(crate::sidebar::geometry::history_height())
                 .styles([Aqua::Style().flex_shrink(0.0)])
                 .child(view::history_toggle(
                     theme,
@@ -138,12 +137,7 @@ pub fn view(
         .styles([Aqua::Style()
             .flex_grow(1.0)
             .min_width(px(0.0))
-            .min_height(px(0.0))
-            .margin_insets(Insets {
-                left: -8.0,
-                right: -8.0,
-                ..Insets::default()
-            })])
+            .min_height(px(0.0))])
         .child(column.build().with_key("sidebar-threads-hover-surface"))
         .build()
         .with_key(view::ROOT_KEY)

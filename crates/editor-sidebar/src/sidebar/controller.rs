@@ -114,14 +114,13 @@ impl Sidebar {
     ) -> super::view::ThreadVisualFactory {
         let pulses = self.working_pulses.clone();
         let truncate: super::row::TruncatedText =
-            std::rc::Rc::new(|text, size, color, selector| {
-                aqua_ui::element::Text::new(text)
-                    .font_size(size)
+            std::rc::Rc::new(move |text, role: editor_ui::kit::TextRole, color, selector| {
+                role.text(&theme, text)
                     .gpui_source_color(color)
                     .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
                     .style(
                         aqua_ui::style::Style::new()
-                            .min_width(aqua_ui::style::Length::Px(0.0))
+                            .min_width(aqua_ui::style::Length::Pct(0.0))
                             .flex_shrink(1.0),
                     )
                     .build()

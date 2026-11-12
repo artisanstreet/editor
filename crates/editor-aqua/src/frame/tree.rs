@@ -196,7 +196,7 @@ fn project_row(theme: &ArtisanTheme, tree: &Tree<'_>, group: &Group, key: &str) 
     let mark = crate::sidebar::project_mark::project_mark(
         tree.host.project_icon(&group.project),
         forge,
-        ICON,
+        crate::ui::kit::IconSize::Md,
         theme.colors.text_muted.to_reference_paint(),
     );
     let emit = Rc::clone(&tree.emit);

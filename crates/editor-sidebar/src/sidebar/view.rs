@@ -1,10 +1,8 @@
 use std::rc::Rc;
 
-use aqua_core::{CursorIcon, Insets, Point, Role, Size};
-use aqua_text::{FontFamily, TextStyle};
+use aqua_core::{Point, Size};
 use aqua_ui::{
-    AlignItems,
-    element::{Box as UiBox, Button, Element, Text},
+    element::{Box as UiBox, Element},
     popup::PopupOptions,
     style::{Length, Style},
 };
@@ -17,11 +15,19 @@ use super::{
 };
 use editor_core::{Core, HostId, HostInstance, Screen};
 use editor_ui::{
-    asset::source_asset_glyph,
-    hover::{HoverColors, HoverFill, HoverTone},
+    hover::HoverTone,
+    kit::{
+        Button, ButtonTone, Density, Divider, Hover, IconSize, Row, RowItem, Space, Spaced,
+        Surface, TextRole,
+    },
     popover::Popover,
-    theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens},
+    theme::ArtisanTheme,
 };
+
+const THREAD_MENU_WIDTH: f32 = 198.0;
+const FOLDER_ROW: Row = Row::ListItem(Density::Regular);
+const FOLDER_LIST_HEIGHT: f32 = 320.0;
+const COLUMN_GAP: Space = Space::S12;
 
 #[derive(Clone, Debug)]
 pub enum ViewAction {
@@ -414,98 +420,54 @@ pub fn thread_menu(
         )
         .find(|row| row.id == menu.thread)?;
     let actions = menu_actions(row, thread);
-    let mut content = UiBox::new().layout("column").width(198.0);
+    let mut content = UiBox::new()
+        .layout("column")
+        .style(Style::new().width(Length::Px(THREAD_MENU_WIDTH)));
+    let radius = Row::MenuItem.radius_in(Surface::Menu);
     for action in actions {
         if action == MenuAction::Archive || (action == MenuAction::Rename && row.settleable) {
-            content = content.child(editor_ui::chrome::card::double_rule(&theme, 6.0));
+            content = content.child(Divider::Rule.build(&theme, Surface::Menu.padding_px()));
         }
-        let (id, icon, label, destructive) = match action {
+        let (id, icon, label, hover) = match action {
             MenuAction::Settle => (
                 "sidebar-menu-settle",
                 AssetId::TABLER_CIRCLE_CHECK,
                 "Settle Thread",
-                false,
+                Hover::Neutral,
             ),
             MenuAction::Rename => (
                 "sidebar-menu-rename",
                 AssetId::TABLER_PENCIL,
                 "Rename Thread",
-                false,
+                Hover::Neutral,
             ),
             MenuAction::MarkUnread => (
                 "sidebar-menu-unread",
                 AssetId::TABLER_BELL,
                 "Mark as Unread",
-                false,
+                Hover::Neutral,
             ),
             MenuAction::Archive => (
                 "sidebar-menu-archive",
                 AssetId::TABLER_ARCHIVE,
                 "Archive Thread",
-                true,
+                Hover::Destructive,
             ),
         };
-        let foreground = if destructive {
-            theme.colors.destructive_text
-        } else {
-            theme.colors.text
-        };
-        let icon_color = if destructive {
-            foreground
-        } else {
-            theme.colors.text_muted
+        let icon_color = match hover {
+            Hover::Destructive => theme.colors.destructive_text,
+            Hover::Neutral => theme.colors.text_muted,
         };
         let selected_thread = menu.thread.clone();
         let selected_host = host.id.clone();
         let selected_instance = host.instance();
         let generation = sidebar.menu_generation;
         let selected_emit = emit.clone();
-        let hover = sidebar.menu_hover.clone();
-        let hover_style = if destructive {
-            HoverColors::new(&theme, HoverTone::Destructive).style(HoverFill::Edged)
-        } else {
-            editor_ui::chrome::account::hover_style(&theme)
-        };
-        let item = Button::new()
-            .width(Length::Pct(100.0))
-            .gap(8.0)
-            .radius(editor_ui::chrome::account::menu_radius() - 6.0)
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        left: 12.0,
-                        right: 12.0,
-                        top: 8.0,
-                        bottom: 8.0,
-                    }),
-            )
-            .child(sidebar.menu_hover.background(
-                id, &theme, editor_ui::chrome::account::menu_radius() - 6.0,
-            ).style(hover_style))
-            .child(
-                UiBox::new()
-                    .width(16.0)
-                    .height(16.0)
-                    .style(Style::new().flex_shrink(0.0))
-                    .child(source_asset_glyph(
-                        icon,
-                        15.0,
-                        icon_color.to_reference_paint(),
-                    ))
-                    .build(),
-            )
-            .child(
-                Text::new(label)
-                    .text_style(TextStyle {
-                        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                        size_px: TypographyTokens::size(TextStep::Sm),
-                        line_height_px: 20.0,
-                        ..TextStyle::default()
-                    })
-                    .gpui_source_color(foreground.to_reference_text_color())
-                    .build(),
-            )
+        let hovered = sidebar.menu_hover.clone();
+        let item = RowItem::new(id, theme, Row::MenuItem, Surface::Menu, label)
+            .underlay(Some(sidebar.menu_hover.layer(id, &theme, hover, radius)))
+            .trailing(IconSize::Md.glyph(icon, icon_color.to_reference_paint()))
+            .on_hover(move |on| hovered.hovered(id, on, HoverTone::Neutral))
             .on_activate(move || {
                 selected_emit(ViewAction::ThreadMenuAction {
                     host: selected_host.clone(),
@@ -514,14 +476,11 @@ pub fn thread_menu(
                     generation,
                     action,
                 })
-            })
-            .build()
-            .with_key(id)
-            .on_hover_change(move |hovered| hover.hovered(id, hovered, HoverTone::Neutral))
-            .role(Role::MenuItem)
-            .aria_label(label)
-            .cursor(CursorIcon::Pointer);
-        content = content.child(item);
+            });
+        content = content.child(match hover {
+            Hover::Destructive => item.destructive().build(),
+            Hover::Neutral => item.build(),
+        });
     }
     let dismiss = emit.clone();
     let dismiss_host = host.id.clone();
@@ -624,7 +583,6 @@ pub fn project_picker_dialog(
     theme: ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<editor_ui::dialog::Dialog> {
-    use editor_ui::theme::Opacity;
     use aqua_ui::{JustifyContent, collection::List};
 
     let picker = sidebar.visible_picker(core)?;
@@ -653,58 +611,33 @@ pub fn project_picker_dialog(
             let selected_path = path.clone();
             let action = row_emit.clone();
             let picker_identity = row_picker.clone();
-            let mut row = Button::new()
-                .height(30.0)
-                .width(Length::Pct(100.0))
-                .gap(8.0)
-                .radius(RadiusTokens::value(RadiusStep::Sm))
-                .style(
-                    Style::new()
-                        .align(AlignItems::CENTER)
-                        .padding_insets(Insets {
-                            left: 8.0,
-                            right: 8.0,
-                            top: 0.0,
-                            bottom: 0.0,
-                        }),
-                )
-                .child(source_asset_glyph(
-                    *icon,
-                    15.0,
-                    theme.colors.text_muted.to_reference_paint(),
-                ))
-                .child(
-                    Text::new(label.clone())
-                        .font_size(theme.typography.control_text)
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
-                        .build(),
-                );
-            if !busy {
-                row = row.on_activate(move || {
-                    action(ViewAction::BrowseFolder {
-                        picker: picker_identity.clone(),
-                        path: Some(selected_path.clone()),
+            let row = RowItem::new(
+                format!("folder-row-{path}"),
+                theme,
+                FOLDER_ROW,
+                Surface::Inset,
+                label.clone(),
+            )
+            .leading(IconSize::Md.glyph(*icon, theme.colors.text_muted.to_reference_paint()))
+            .disabled(busy);
+            match busy {
+                true => row.build(),
+                false => row
+                    .on_activate(move || {
+                        action(ViewAction::BrowseFolder {
+                            picker: picker_identity.clone(),
+                            path: Some(selected_path.clone()),
+                        })
                     })
-                });
-            }
-            let element = row
-                .build()
-                .role(Role::Button)
-                .aria_label(label.clone())
-                .disabled(busy)
-                .focusable(!busy);
-            if busy {
-                element
-            } else {
-                element.cursor(CursorIcon::Pointer)
+                    .build(),
             }
         })
         .style(
             Style::new()
-                .height(Length::Px(320.0))
+                .height(Length::Px(FOLDER_LIST_HEIGHT))
                 .width(Length::Pct(100.0)),
         )
-        .estimated_row_height(Length::Px(30.0))
+        .estimated_row_height(Length::Px(FOLDER_ROW.height().unwrap_or_default()))
         .virtualize()
         .build();
     let path = picker
@@ -714,18 +647,18 @@ pub fn project_picker_dialog(
     let mut content = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(10.0)
+        .spaced(Space::S12)
         .child(
-            Text::new(path.to_owned())
-                .font_size(theme.typography.control_text)
+            TextRole::Label
+                .text(&theme, path.to_owned())
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .build(),
         )
-        .child(list);
+        .child(Surface::Inset.build(&theme, vec![list]));
     if let Some(error) = &picker.error {
         content = content.child(
-            Text::new(error.clone())
-                .font_size(theme.typography.control_text)
+            TextRole::Label
+                .text(&theme, error.clone())
                 .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
                 .build(),
         );
@@ -733,52 +666,19 @@ pub fn project_picker_dialog(
     let can_add = !busy && picker.listing.is_some();
     let add = emit.clone();
     let add_picker = identity.clone();
-    let mut add_button = Button::new()
-        .height(30.0)
-        .radius(RadiusTokens::value(RadiusStep::Md))
-        .style(
-            Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                theme.colors.primary.to_reference_paint(),
-            )),
-        )
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .padding_insets(Insets {
-                    left: 12.0,
-                    right: 12.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }),
-        )
-        .child(
-            Text::new(if picker.creating {
-                "Adding…"
-            } else {
-                "Add this folder"
-            })
-            .font_size(theme.typography.control_text)
-            .gpui_source_color(theme.colors.primary_text.to_reference_text_color())
-            .build(),
-        );
-    if can_add {
-        add_button =
-            add_button.on_activate(move || add(ViewAction::CreateProject(add_picker.clone())));
-    } else {
-        add_button = add_button.opacity(Opacity::Disabled.alpha());
-    }
-    let add_button = add_button
-        .build()
-        .with_key("sidebar-folder-add")
-        .role(Role::Button)
-        .aria_label("Add this folder")
-        .disabled(!can_add)
-        .focusable(can_add);
-    let add_button = if can_add {
-        add_button.cursor(CursorIcon::Pointer)
-    } else {
-        add_button
-    };
+    let add_button = Button::text(
+        "sidebar-folder-add",
+        theme,
+        ButtonTone::Primary,
+        if picker.creating {
+            "Adding…"
+        } else {
+            "Add this folder"
+        },
+    )
+    .disabled(!can_add)
+    .on_activate(move |_| add(ViewAction::CreateProject(add_picker.clone())))
+    .build();
     content = content.child(
         UiBox::new()
             .width(Length::Pct(100.0))
@@ -794,6 +694,7 @@ pub fn project_picker_dialog(
             "Add a project",
             content.build(),
         )
+        .glass()
         .dismissible(!picker.creating)
         .on_dismiss(move |_| dismiss(ViewAction::DismissProjectPicker(identity.clone()))),
     )
@@ -867,7 +768,7 @@ fn thread_entries(
                     .width(Length::Pct(100.0))
                     .height(Length::Pct(100.0)),
             )
-            .estimated_row_height(Length::Px(48.0))
+            .estimated_row_height(Length::Px(super::geometry::ThreadLayout::Standalone.height()))
             .initial_height(move |index| heights.get(index).copied().unwrap_or(0.0))
             .virtualize()
             .overscan_pixels(READ_AHEAD)
@@ -999,41 +900,37 @@ pub fn thread_entries_view(
                     meta.drag,
                     row_visuals,
                     *layout,
-                    row_hover.background(&format!("sidebar-thread-{}", data.id), &theme, 8.0),
+                    &row_hover,
+                    theme,
                     row_emit.clone(),
                 )
             }
-            Entry::Project { id, label } => UiBox::new()
-                .height(entry.height())
-                .gap(5.0)
-                .style(Style::new().align(AlignItems::CENTER).padding_insets(Insets { left: 8.0, right: 8.0, top: 0.0, bottom: 0.0 }))
-                .children(project_marks.get(id).map(|mark| mark.view(theme.colors.text_muted)))
-                .child(Text::new(label.clone()).font_size(TypographyTokens::size(TextStep::Xs)).gpui_source_color(theme.colors.text_muted.to_reference_text_color()).build())
-                .build(),
+            Entry::Project { id, label } => {
+                let row = RowItem::new(
+                    format!("sidebar-project-{id}"),
+                    theme,
+                    super::geometry::HEADING,
+                    super::geometry::LIST,
+                    label.clone(),
+                );
+                match project_marks.get(id) {
+                    Some(mark) => row.leading(mark.view(theme.colors.text_muted)).build(),
+                    None => row.build(),
+                }
+            }
             Entry::Gap(height) => UiBox::new().height(*height).build(),
             Entry::Spacer => UiBox::new().height(spacer).build(),
-            Entry::Heading(label) => UiBox::new()
-                .height(21.0)
-                .style(
-                    Style::new()
-                        .align(AlignItems::CENTER)
-                        .padding_insets(Insets {
-                            left: 8.0,
-                            right: 8.0,
-                            top: 0.0,
-                            bottom: 0.0,
-                        }),
-                )
-                .child(
-                    Text::new(*label)
-                        .font_size(TypographyTokens::size(TextStep::Xs))
-                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                        .build(),
-                )
-                .build(),
+            Entry::Heading(label) => RowItem::new(
+                format!("sidebar-heading-{label}"),
+                theme,
+                super::geometry::HEADING,
+                super::geometry::LIST,
+                *label,
+            )
+            .build(),
             Entry::History => history_toggle(theme, fraction, row_emit.clone()),
         };
-        let content = if history_index.is_some_and(|history| index > history) {
+        if history_index.is_some_and(|history| index > history) {
             UiBox::new()
                 .height(entry.height())
                 .clip(true)
@@ -1041,32 +938,17 @@ pub fn thread_entries_view(
                     UiBox::new()
                         .height(entry.height())
                         .opacity(fraction)
-                        .style(
-                            Style::new()
-                                .transform(Transform2D::translate(0.0, 8.0 * (1.0 - fraction))),
-                        )
+                        .style(Style::new().transform(Transform2D::translate(
+                            0.0,
+                            Space::S8.px() * (1.0 - fraction),
+                        )))
                         .child(content)
                         .build(),
                 )
                 .build()
         } else {
             content
-        };
-        let inset = if matches!(entry, Entry::History) {
-            0.0
-        } else {
-            8.0
-        };
-        UiBox::new()
-            .width(Length::Pct(100.0))
-            .style(Style::new().padding_insets(Insets {
-                left: inset,
-                right: inset,
-                top: 0.0,
-                bottom: 0.0,
-            }))
-            .child(content)
-            .build()
+        }
     });
     thread_entries(
         sidebar,
@@ -1083,82 +965,28 @@ pub fn history_toggle(theme: ArtisanTheme, fraction: f32, emit: Rc<dyn Fn(ViewAc
     let toggle = emit;
     let caret = editor_ui::icon::disclosure_chevron(
         fraction,
-        12.0,
+        IconSize::Sm.px(),
         theme.colors.text_muted.to_reference_paint(),
     );
-    let button = Button::new()
-        .height(34.0)
-        .width(Length::Pct(100.0))
-        .radius(RadiusTokens::value(RadiusStep::Md))
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .justify(aqua_ui::JustifyContent::SPACE_BETWEEN)
-                .padding_insets(Insets {
-                    left: 8.0,
-                    right: 8.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }),
-        )
-        .child(
-            UiBox::new()
-                .gap(8.0)
-                .style(Style::new().align(AlignItems::CENTER))
-                .child(
-                    UiBox::new()
-                        .width(16.0)
-                        .height(16.0)
-                        .child(source_asset_glyph(
-                            AssetId::TABLER_ARCHIVE,
-                            15.0,
-                            theme.colors.text_muted.to_reference_paint(),
-                        ))
-                        .build(),
-                )
-                .child(
-                    Text::new("History")
-                        .font_size(TypographyTokens::size(TextStep::Sm))
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
-                        .build(),
-                )
-                .build(),
-        )
-        .child(caret)
-        .on_activate(move || toggle(ViewAction::ToggleHistory))
-        .build()
-        .with_key("sidebar-history")
-        .role(Role::Button)
-        .aria_label("History")
-        .cursor(CursorIcon::Pointer);
     UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
+        .child(Divider::Rule.build(&theme, 0.0))
         .child(
-            UiBox::new()
-                .height(1.0)
-                .style(
-                    Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                        theme.colors.line.to_reference_paint(),
-                    )),
-                )
-                .style(Style::new().margin_insets(Insets {
-                    bottom: 8.0,
-                    ..Insets::default()
-                }))
-                .build(),
-        )
-        .child(
-            UiBox::new()
-                .width(Length::Pct(100.0))
-                .style(Style::new().padding_insets(Insets {
-                    left: 8.0,
-                    right: 8.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }))
-                .child(button)
-                .build(),
+            RowItem::new(
+                "sidebar-history",
+                theme,
+                super::geometry::TOGGLE,
+                super::geometry::LIST,
+                "History",
+            )
+            .leading(IconSize::Md.glyph(
+                AssetId::TABLER_ARCHIVE,
+                theme.colors.text_muted.to_reference_paint(),
+            ))
+            .trailing(caret)
+            .on_activate(move || toggle(ViewAction::ToggleHistory))
+            .build(),
         )
         .build()
 }
@@ -1174,7 +1002,6 @@ pub fn build(
     visuals: ThreadVisualFactory,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    use editor_ui::button::{Button as SharedButton, ButtonVariant};
     if let Screen::Settings(page) = sidebar.screen(core) {
         let navigate = emit.clone();
         return super::settings_nav::build(
@@ -1191,36 +1018,21 @@ pub fn build(
     let mut column = UiBox::new()
         .layout("column")
         .height(Length::Pct(100.0))
-        .gap(12.0)
+        .spaced(COLUMN_GAP)
         .style(
             Style::new()
                 .flex_grow(1.0)
-                .min_width(Length::Px(0.0))
-                .min_height(Length::Px(0.0))
-                .padding_insets(Insets {
-                    left: 8.0,
-                    right: 8.0,
-                    top: 8.0,
-                    bottom: 4.0,
-                }),
+                .min_width(Length::Pct(0.0))
+                .min_height(Length::Pct(0.0)),
         );
     if visible {
-        let list_height = (viewport.h - editor_ui::chrome::TITLEBAR_HEIGHT - 12.0).max(0.0);
+        let list_height =
+            (viewport.h - editor_ui::chrome::TITLEBAR_HEIGHT - COLUMN_GAP.px()).max(0.0);
         let list = thread_list_view(sidebar, core, theme, list_height, visuals, emit.clone())
             .unwrap_or_else(|| UiBox::new().style(Style::new().flex_grow(1.0)).build());
         column = column.child(
             UiBox::new()
-                .style(
-                    Style::new()
-                        .flex_grow(1.0)
-                        .min_height(Length::Px(0.0))
-                        .margin_insets(Insets {
-                            left: -8.0,
-                            right: -8.0,
-                            top: 0.0,
-                            bottom: 0.0,
-                        }),
-                )
+                .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0)))
                 .child(list)
                 .child(sidebar.threads_edges.band(
                     "sidebar-threads-edge-top",
@@ -1252,20 +1064,19 @@ pub fn build(
             if host.is_live()
                 && let Some(error) = &host.thread_page(false).error
             {
-                column = column.child(
-                    Text::new(error.clone())
-                        .font_size(TypographyTokens::size(TextStep::Xs))
-                        .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                        .build(),
-                );
+                column = column.child(error_text(&theme, error.clone()));
             }
             if host.project_icons_failed() {
                 let retry = emit.clone();
                 column = column.child(
-                    SharedButton::text("sidebar-metadata-retry", theme, "Retry project icons")
-                        .variant(ButtonVariant::Ghost)
-                        .on_activate(move |_| retry(ViewAction::RetryProjectIcons))
-                        .build(),
+                    Button::text(
+                        "sidebar-metadata-retry",
+                        theme,
+                        ButtonTone::Neutral,
+                        "Retry project icons",
+                    )
+                    .on_activate(move |_| retry(ViewAction::RetryProjectIcons))
+                    .build(),
                 );
             }
         }
@@ -1274,19 +1085,16 @@ pub fn build(
             column = column.child(
                 UiBox::new()
                     .layout("column")
+                    .child(error_text(&theme, error.clone()))
                     .child(
-                        Text::new(error.clone())
-                            .font_size(TypographyTokens::size(TextStep::Xs))
-                            .gpui_source_color(
-                                theme.colors.destructive_text.to_reference_text_color(),
-                            )
-                            .build(),
-                    )
-                    .child(
-                        SharedButton::text("sidebar-error-dismiss", theme, "Dismiss")
-                            .variant(ButtonVariant::Ghost)
-                            .on_activate(move |_| dismiss(ViewAction::DismissError))
-                            .build(),
+                        Button::text(
+                            "sidebar-error-dismiss",
+                            theme,
+                            ButtonTone::Quiet,
+                            "Dismiss",
+                        )
+                        .on_activate(move |_| dismiss(ViewAction::DismissError))
+                        .build(),
                     )
                     .build(),
             );
@@ -1299,4 +1107,11 @@ pub fn build(
         .child(column.build().with_key("sidebar"))
         .build()
         .with_key(ROOT_KEY)
+}
+
+fn error_text(theme: &ArtisanTheme, error: String) -> Element {
+    TextRole::Caption
+        .text(theme, error)
+        .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
+        .build()
 }

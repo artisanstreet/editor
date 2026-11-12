@@ -545,13 +545,13 @@ mod spacer {
     #[test]
     fn closed_history_fills_the_space_above_the_footer() {
         let spacer = history_spacer(&column(), 500.0, 0.0);
-        assert!((spacer - (500.0 - 10.0 - 43.0)).abs() < 1e-4);
+        assert!((spacer - (500.0 - 10.0 - Entry::History.height())).abs() < 1e-4);
     }
 
     #[test]
     fn open_history_leaves_room_for_the_rows_below() {
         let spacer = history_spacer(&column(), 500.0, 1.0);
-        assert!((spacer - (500.0 - 10.0 - 43.0 - 32.0)).abs() < 1e-4);
+        assert!((spacer - (500.0 - 10.0 - Entry::History.height() - 32.0)).abs() < 1e-4);
     }
 
     #[test]

@@ -57,6 +57,7 @@ fn picker_root(
         input::{EventPhase, InputKind, InputResponse, RoutedInput},
         style::Style,
     };
+    use editor_ui::kit::surface::backdrop;
     let pressed = Rc::new(std::cell::Cell::new(false));
     let down = pressed.clone();
     let panel = dialog.build_panel(viewport);
@@ -66,15 +67,9 @@ fn picker_root(
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
-                .justify(JustifyContent::CENTER)
-                .gpui_background(aqua_core::GpuiBackground::Solid(
-                    theme
-                        .colors
-                        .background
-                        .at(editor_ui::theme::Opacity::Backdrop)
-                        .to_reference_paint(),
-                )),
+                .justify(JustifyContent::CENTER),
         )
+        .style(backdrop(&theme))
         .child(panel)
         .build()
         .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
