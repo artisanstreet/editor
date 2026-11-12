@@ -3,15 +3,24 @@ use crate::conversation::activity;
 use crate::conversation::adapter::Action;
 use crate::conversation::fold::RunSummary;
 use crate::conversation::phase;
-use aqua_core::{CursorIcon, Insets};
-use aqua_text::{FontFamily, TextStyle};
+use aqua_core::Role;
 use aqua_ui::AlignItems;
-use aqua_ui::element::{Box as UiBox, Button as UiButton, Element, Text};
+use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use artisan_api::{Item, ItemId, ItemKind, RunId, Status, TextContent, Timestamp};
-use editor_ui::asset::source_asset_glyph;
-use editor_ui::theme::{ArtisanTheme, ProseTypography};
+use editor_ui::kit::{HitArea, IconSize, Space, Spaced, TextRole};
+use editor_ui::theme::ArtisanTheme;
 use std::collections::HashMap;
+
+const HEADER_TAIL: Space = Space::S8;
+const FAILURE_TAIL: Space = Space::S4;
+
+pub const fn line_role(mono: bool) -> TextRole {
+    match mono {
+        true => TextRole::Code,
+        false => TextRole::Prose,
+    }
+}
 
 fn label(
     text: impl Into<String>,
@@ -19,27 +28,26 @@ fn label(
     foreground: aqua_core::GpuiTextColor,
     mono: bool,
 ) -> Element {
-    Text::new(text.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(
-                if mono {
-                    theme.typography.mono.family
-                } else {
-                    theme.typography.sans.family
-                }
-                .to_owned(),
-            )],
-            size_px: if mono {
-                theme.typography.control_text
-            } else {
-                ProseTypography::BODY_SIZE_PX
-            },
-            line_height_px: 24.0,
-            weight: ProseTypography::BODY_WEIGHT,
-            ..TextStyle::default()
-        })
+    line_role(mono)
+        .text(&theme, text.into())
         .gpui_source_color(foreground)
         .build()
+}
+
+fn spacer(space: Space) -> Element {
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .height(space.px())
+        .style(Style::new().flex_shrink(0.0))
+        .build()
+}
+
+fn activator(key: String, label: impl Into<String>, child: Element, on_activate: impl Fn() + 'static) -> Element {
+    HitArea::new(key, Role::Button, label)
+        .child(child)
+        .on_activate(on_activate)
+        .build()
+        .style(Style::new().height(Length::Auto).min_width(Length::Pct(0.0)))
 }
 
 pub fn section_title(summary: &RunSummary, now: Timestamp) -> String {
@@ -56,7 +64,6 @@ pub fn header(
     segment: usize,
     has_work: bool,
     summary: Option<&RunSummary>,
-    theme: ArtisanTheme,
     animated_label: Element,
     chevron: impl FnOnce(bool) -> Element,
     dispatch: Dispatch,
@@ -68,47 +75,38 @@ pub fn header(
     let controlled = !summary.live() && run.is_some() && has_work;
     let mut near = UiBox::new()
         .layout("row")
-        .gap(theme.spacing.steps(1.0))
+        .spaced(Space::S4)
         .style(
             Style::new()
-                .min_width(Length::Px(0.0))
+                .min_width(Length::Pct(0.0))
                 .align(AlignItems::CENTER),
         )
         .child(animated_label);
     if controlled {
         near = near.child(chevron(summary.open));
     }
-    let near = near.build();
-    let style = Style::new()
-        .min_width(Length::Px(0.0))
-        .padding_insets(Insets {
-            bottom: theme.spacing.steps(2.0),
-            ..Insets::default()
-        });
-    if let Some(run) = run.filter(|_| controlled).cloned() {
-        let open = !summary.open;
-        Some(
-            UiButton::new()
-                .width(Length::Pct(100.0))
-                .style(style)
-                .child(near)
-                .on_activate(move || {
-                    dispatch(Action::ToggleWork {
-                        run: run.clone(),
-                        open,
-                    })
+    let near = UiBox::new()
+        .layout("column")
+        .width(Length::Pct(100.0))
+        .style(Style::new().min_width(Length::Pct(0.0)))
+        .child(near.build())
+        .child(spacer(HEADER_TAIL))
+        .build();
+    match run.filter(|_| controlled).cloned() {
+        Some(run) => {
+            let open = !summary.open;
+            let words = match open {
+                true => "Show work",
+                false => "Hide work",
+            };
+            Some(activator(format!("work-header-{run}"), words, near, move || {
+                dispatch(Action::ToggleWork {
+                    run: run.clone(),
+                    open,
                 })
-                .build()
-                .cursor(CursorIcon::Pointer),
-        )
-    } else {
-        Some(
-            UiBox::new()
-                .width(Length::Pct(100.0))
-                .style(style)
-                .child(near)
-                .build(),
-        )
+            }))
+        }
+        None => Some(near),
     }
 }
 
@@ -136,34 +134,22 @@ pub fn chain(
     let child = UiBox::new()
         .layout("row")
         .width(Length::Pct(100.0))
-        .gap(theme.spacing.steps(1.0))
+        .spaced(Space::S4)
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
-                .min_width(Length::Px(0.0))
-                .padding_insets(Insets {
-                    top: theme.spacing.steps(0.5),
-                    bottom: theme.spacing.steps(0.5),
-                    ..Insets::default()
-                }),
+                .min_width(Length::Pct(0.0)),
         )
-        .child(source_asset_glyph(icon, 16.0, color.to_reference_paint()))
-        .child(phrase(text, color.to_reference_text_color()))
+        .child(IconSize::Md.glyph(icon, color.to_reference_paint()))
+        .child(phrase(text.clone(), color.to_reference_text_color()))
         .child(chevron(open, color.to_reference_paint()))
         .build();
-    Some(
-        UiButton::new()
-            .width(Length::Pct(100.0))
-            .child(child)
-            .on_activate(move || {
-                dispatch(Action::ToggleChain {
-                    id: first.clone(),
-                    open: !open,
-                })
-            })
-            .build()
-            .cursor(CursorIcon::Pointer),
-    )
+    Some(activator(format!("work-chain-{first}"), text, child, move || {
+        dispatch(Action::ToggleChain {
+            id: first.clone(),
+            open: !open,
+        })
+    }))
 }
 
 pub fn agent(
@@ -183,16 +169,11 @@ pub fn agent(
     let content = UiBox::new()
         .layout("row")
         .width(Length::Pct(100.0))
-        .gap(theme.spacing.steps(2.0))
+        .spaced(Space::S8)
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
-                .min_width(Length::Px(0.0))
-                .padding_insets(Insets {
-                    top: theme.spacing.steps(0.5),
-                    bottom: theme.spacing.steps(0.5),
-                    ..Insets::default()
-                }),
+                .min_width(Length::Pct(0.0)),
         )
         .child(label(
             "Delegated",
@@ -205,14 +186,12 @@ pub fn agent(
             theme.colors.text_muted.to_reference_text_color(),
         ))
         .build();
-    Some(
-        UiButton::new()
-            .width(Length::Pct(100.0))
-            .child(content)
-            .on_activate(move || dispatch(Action::OpenAgent(id.clone())))
-            .build()
-            .cursor(CursorIcon::Pointer),
-    )
+    Some(activator(
+        format!("work-agent-{id}"),
+        "Open agent",
+        content,
+        move || dispatch(Action::OpenAgent(id.clone())),
+    ))
 }
 
 pub fn activity_row(
@@ -239,11 +218,11 @@ pub fn activity_row(
         || activity::agent_message(item).is_some_and(|message| message.text.byte_len() > 0);
     let line = UiBox::new()
         .layout("row")
-        .gap(theme.spacing.steps(2.0))
+        .spaced(Space::S8)
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
-                .min_width(Length::Px(0.0)),
+                .min_width(Length::Pct(0.0)),
         )
         .child(label(
             words.verb,
@@ -257,33 +236,21 @@ pub fn activity_row(
             words.code,
         ))
         .build();
-    let style = Style::new()
-        .min_width(Length::Px(0.0))
-        .padding_insets(Insets {
-            top: theme.spacing.steps(0.5),
-            bottom: theme.spacing.steps(0.5),
-            ..Insets::default()
-        });
-    let sentence = if has_details {
-        let id = item.id.clone();
-        UiButton::new()
-            .width(Length::Pct(100.0))
-            .style(style)
-            .child(line)
-            .on_activate(move || {
+    let sentence = match has_details {
+        true => {
+            let id = item.id.clone();
+            activator(format!("work-item-{id}"), "Toggle details", line, move || {
                 dispatch(Action::ToggleItem {
                     id: id.clone(),
                     expanded: !expanded,
                 })
             })
-            .build()
-            .cursor(CursorIcon::Pointer)
-    } else {
-        UiBox::new()
+        }
+        false => UiBox::new()
             .width(Length::Pct(100.0))
-            .style(style)
+            .style(Style::new().min_width(Length::Pct(0.0)))
             .child(line)
-            .build()
+            .build(),
     };
     Ok(match failure.filter(|_| expanded && has_details) {
         Some(error) => Some(
@@ -291,30 +258,14 @@ pub fn activity_row(
                 .layout("column")
                 .width(Length::Pct(100.0))
                 .child(sentence)
-                .child(
-                    UiBox::new()
-                        .width(Length::Pct(100.0))
-                        .style(Style::new().padding_insets(Insets {
-                            bottom: theme.spacing.steps(1.0),
-                            ..Insets::default()
-                        }))
-                        .child(match error {
-                            TextContent::Stored(_) => stored_failure()?,
-                            TextContent::Inline(error) => Text::new(error.trim().to_owned())
-                                .text_style(TextStyle {
-                                    families: vec![FontFamily::Named(
-                                        theme.typography.sans.family.to_owned(),
-                                    )],
-                                    size_px: theme.typography.control_text,
-                                    ..TextStyle::default()
-                                })
-                                .gpui_source_color(
-                                    theme.colors.destructive_text.to_reference_text_color(),
-                                )
-                                .build(),
-                        })
+                .child(match error {
+                    TextContent::Stored(_) => stored_failure()?,
+                    TextContent::Inline(error) => TextRole::Label
+                        .text(&theme, error.trim().to_owned())
+                        .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
                         .build(),
-                )
+                })
+                .child(spacer(FAILURE_TAIL))
                 .build(),
         ),
         None => Some(sentence),
@@ -334,17 +285,7 @@ pub fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
             artisan_api::Decision::DenyAlways => "You denied this from now on.",
             artisan_api::Decision::Cancelled => "Cancelled.",
         };
-        content = content.child(
-            Text::new(text)
-                .text_style(TextStyle {
-                    families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                    size_px: theme.typography.editor_text_desktop,
-                    line_height_px: theme.spacing.steps(6.0),
-                    ..TextStyle::default()
-                })
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .build(),
-        );
+        content = content.child(TextRole::Label.text(&theme, text).build());
     }
     Some(content.build())
 }

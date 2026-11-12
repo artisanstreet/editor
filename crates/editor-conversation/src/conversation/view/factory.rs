@@ -8,6 +8,7 @@ use crate::conversation::presentation::{
 use editor_ui::markdown::presenter::HeatmapServices;
 use editor_ui::markdown::visual::{BodyTone, LinkAction};
 use editor_ui::rich::actions::{ResourceScope, ShowCopyMenu};
+use editor_ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
 use editor_ui::theme::ArtisanTheme;
 use aqua_text::document::SelectionSourceId;
 use aqua_ui::collection::BatchedCollectionRow;
@@ -25,42 +26,29 @@ fn truncate(
     mono: bool,
     theme: ArtisanTheme,
 ) -> aqua_ui::element::Element {
-    use aqua_text::{FontFamily, TextStyle, overflow::OverflowMode};
+    use aqua_text::overflow::OverflowMode;
     use aqua_ui::style::{Length, Style};
-    let style = TextStyle {
-        families: vec![FontFamily::Named(
-            if mono {
-                theme.typography.mono.family
-            } else {
-                theme.typography.sans.family
-            }
-            .to_owned(),
-        )],
-        size_px: if mono {
-            theme.typography.control_text
-        } else {
-            editor_ui::theme::ProseTypography::BODY_SIZE_PX
-        },
-        line_height_px: 24.0,
-        weight: editor_ui::theme::ProseTypography::BODY_WEIGHT,
-        letter_spacing_em: Some(if mono {
-            0.0
-        } else {
-            theme.typography.tracking_em
-        }),
-        ..TextStyle::default()
-    };
-    aqua_ui::element::Text::new(text)
-        .text_style(style)
+    let role = work::line_role(mono);
+    role.text(&theme, text)
         .gpui_source_color(color)
         .overflow(OverflowMode::EndEllipsis)
         .style(
             Style::new()
-                .min_width(Length::Px(0.0))
+                .min_width(Length::Pct(0.0))
                 .flex_grow(1.0)
-                .max_height(Length::Px(24.0)),
+                .max_height(Length::Px(role.spec().line)),
         )
         .build()
+}
+
+fn media_width(reading: f32, slot: Slot, lists: usize) -> f32 {
+    use editor_ui::chat_bubble::{ChatBubbleSegment, SURFACE};
+    let width = match (slot.is_bubble(), slot.is_card()) {
+        (true, _) => reading.min(ChatBubbleSegment::MAX_WIDTH) - 2.0 * SURFACE.padding_px(),
+        (false, true) => reading - super::CHAIN_INDENT.px(),
+        (false, false) => reading,
+    };
+    width - lists as f32 * editor_ui::markdown::LIST_INDENT
 }
 
 fn user_bubble(
@@ -78,7 +66,7 @@ fn user_bubble(
     let mut root = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(8.0)
+        .spaced(Space::S8)
         .style(Style::new().align(aqua_ui::AlignItems::END));
     if let Some(attachments) = attachments {
         root = root.child(attachments);
@@ -376,14 +364,7 @@ impl RowFactory {
         let mut order = fold::selection_order(self.scope.agent.is_some(), item.position, slot);
         order.push(block as u64);
         let media = if let (Some(width), Some(factory)) = (content_width, &self.media) {
-            let mut width = width.min(768.0) - 48.0;
-            if slot.is_bubble() {
-                width = width.min(576.0) - 32.0;
-            } else if slot.is_card() {
-                width -= self.theme.spacing.steps(6.0);
-            }
-            width -= leaf.context.lists.len() as f32
-                * editor_ui::theme::ProseTypography::LIST_INDENT_PX;
+            let width = media_width(super::reading_width(width), slot, leaf.context.lists.len());
             anyhow::ensure!(width > 0.0, "measured media width is unavailable");
             factory(&key, width)
         } else {
@@ -554,29 +535,13 @@ impl RowFactory {
         let separator = if block == 0 { "\n\n" } else { "" };
         let selection = leaf.selection(id, order, separator);
         let visible = leaf.visible_text().to_owned();
-        let (size_px, line_height_px, color) = match section {
-            fold::PlainSection::ImageCaption => (
-                self.theme.typography.control_text,
-                self.theme.typography.control_text * (4.0 / 3.0),
-                self.theme.colors.text_muted.to_reference_text_color(),
-            ),
-            _ => (
-                self.theme.typography.editor_text_desktop,
-                self.theme.spacing.steps(6.0),
-                self.theme.colors.text.to_reference_text_color(),
-            ),
+        let color = match section {
+            fold::PlainSection::ImageCaption => self.theme.colors.text_muted,
+            _ => self.theme.colors.text,
         };
-        let element = Text::new(visible.clone())
-            .text_style(aqua_text::TextStyle {
-                families: vec![aqua_text::FontFamily::Named(
-                    self.theme.typography.sans.family.to_owned(),
-                )],
-                size_px,
-                line_height_px,
-                letter_spacing_em: Some(self.theme.typography.tracking_em),
-                ..Default::default()
-            })
-            .gpui_source_color(color)
+        let element = TextRole::Label
+            .text(&self.theme, visible.clone())
+            .gpui_source_color(color.to_reference_text_color())
             .selection_source_in(document, editor_sources::source_slice(id, 0..visible.len()))
             .build();
         let view = editor_sources::ContentView {
@@ -733,7 +698,7 @@ impl RowFactory {
                     .style(
                         aqua_ui::style::Style::new()
                             .width(aqua_ui::style::Length::Pct(100.0))
-                            .min_width(aqua_ui::style::Length::Px(0.0)),
+                            .min_width(aqua_ui::style::Length::Pct(0.0)),
                     )
                     .gpui_source_color(theme.colors.text.to_reference_text_color())
                     .selection_source_in(
@@ -754,33 +719,15 @@ impl RowFactory {
                 batches.borrow_mut().extend(row.batches);
                 return Ok(row.element);
             }
-            let mut element = Text::new(text.clone())
-                .text_style(aqua_text::TextStyle {
-                    families: vec![aqua_text::FontFamily::Named(
-                        if field == crate::conversation::content::SourceField::ApprovalCommand {
-                            theme.typography.mono.family
-                        } else {
-                            theme.typography.sans.family
-                        }
-                        .to_owned(),
-                    )],
-                    size_px: theme.typography.editor_text_desktop,
-                    line_height_px: theme.spacing.steps(6.0),
-                    letter_spacing_em: Some(
-                        if field == crate::conversation::content::SourceField::ApprovalCommand {
-                            0.0
-                        } else {
-                            theme.typography.tracking_em
-                        },
-                    ),
-                    ..Default::default()
-                })
-                .gpui_source_color(theme.colors.text.to_reference_text_color());
+            let mut element = super::request::field_role(
+                field == crate::conversation::content::SourceField::ApprovalCommand,
+            )
+            .text(&theme, text.clone());
             if matches!(field, crate::conversation::content::SourceField::Question(_)) {
                 element = element.wrap(true).style(
                     aqua_ui::style::Style::new()
                         .width(aqua_ui::style::Length::Pct(100.0))
-                        .min_width(aqua_ui::style::Length::Px(0.0)),
+                        .min_width(aqua_ui::style::Length::Pct(0.0)),
                 );
             }
             return Ok(element.build());
@@ -969,10 +916,10 @@ impl RowFactory {
         if images.is_empty() {
             return Ok(None);
         }
-        let mut row = UiBox::new().layout("row").gap(8.0).style(
+        let mut row = UiBox::new().layout("row").spaced(Space::S8).style(
             Style::new()
                 .wrap(true)
-                .max_width(Length::Px(576.0))
+                .max_width(Length::Px(editor_ui::chat_bubble::ChatBubbleSegment::MAX_WIDTH))
                 .justify(aqua_ui::JustifyContent::END),
         );
         for (index, hash) in images.iter().enumerate() {
@@ -989,10 +936,9 @@ impl RowFactory {
         width: f32,
     ) -> anyhow::Result<aqua_ui::element::Element> {
         use editor_core::host::BlobImage;
-        use editor_ui::button::{Button, ButtonVariant};
         use editor_ui::media_frame::MediaFrame;
-        use aqua_core::{GpuiBackground, Insets, image::ImageFit};
-        use aqua_ui::element::{Box as UiBox, Media, Text};
+        use aqua_core::image::ImageFit;
+        use aqua_ui::element::{Box as UiBox, Media};
         use aqua_ui::style::{Length, Style};
         let resources = self
             .blob_images
@@ -1011,9 +957,7 @@ impl RowFactory {
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0))
                 .fit(ImageFit::Cover)
-                .style(
-                    Style::new().radius(Length::Px(MediaFrame::sent_attachment_content_radius())),
-                )
+                .style(MediaFrame::sent_attachment_content_style())
                 .build(),
             (_, Some(image)) => MediaFrame::image_content(image.clone()),
             (Some(BlobImage::Failed(error)), _) => {
@@ -1026,8 +970,7 @@ impl RowFactory {
                     || format!("retry-image-{hash}"),
                     |index| format!("retry-sent-{}-{index}", item.id),
                 );
-                let retry = Button::text(retry_id, self.theme, "Retry")
-                    .variant(ButtonVariant::Ghost)
+                let retry = Button::text(retry_id, self.theme, ButtonTone::Neutral, "Retry")
                     .on_activate(move |_| {
                         if active.get() {
                             emit(
@@ -1046,49 +989,36 @@ impl RowFactory {
                 } else {
                     format!("Couldn't load the image: {error}")
                 };
-                let text = Text::new(message)
-                    .text_style(aqua_text::TextStyle {
-                        families: vec![aqua_text::FontFamily::Named(
-                            self.theme.typography.sans.family.to_owned(),
-                        )],
-                        size_px: if attachment.is_some() {
-                            self.theme.typography.label_text
-                        } else {
-                            self.theme.typography.control_text
-                        },
-                        ..Default::default()
-                    })
+                let role = match attachment {
+                    Some(_) => TextRole::Caption,
+                    None => TextRole::Label,
+                };
+                let text = role
+                    .text(&self.theme, message)
                     .gpui_source_color(self.theme.colors.text_muted.to_reference_text_color())
                     .build();
-                UiBox::new()
+                let mut column = UiBox::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
                     .height(Length::Pct(100.0))
                     .style(
                         Style::new()
                             .align(aqua_ui::AlignItems::CENTER)
-                            .justify(aqua_ui::JustifyContent::CENTER)
-                            .padding_insets(Insets {
-                                left: if attachment.is_some() { 8.0 } else { 0.0 },
-                                right: if attachment.is_some() { 8.0 } else { 0.0 },
-                                ..Default::default()
-                            }),
-                    )
+                            .justify(aqua_ui::JustifyContent::CENTER),
+                    );
+                if attachment.is_some() {
+                    column = column.padded(Space::S8);
+                }
+                column
                     .child(text)
                     .child(retry)
                     .build()
             }
-            _ => {
-                let mut style = Style::new()
-                    .width(Length::Pct(100.0))
-                    .height(Length::Pct(100.0));
-                if attachment.is_none() {
-                    style = style.gpui_background(GpuiBackground::Solid(
-                        self.theme.colors.raised.to_reference_paint(),
-                    ));
-                }
-                UiBox::new().style(style).build()
-            }
+            _ if attachment.is_none() => MediaFrame::placeholder(self.theme),
+            _ => UiBox::new()
+                .width(Length::Pct(100.0))
+                .height(Length::Pct(100.0))
+                .build(),
         };
         let aspect = image
             .as_ref()
@@ -1162,7 +1092,9 @@ impl RowFactory {
         } else {
             Ok(UiBox::new()
                 .width(Length::Pct(100.0))
-                .style(Style::new().max_width(Length::Px(576.0)))
+                .style(Style::new().max_width(Length::Px(
+                    editor_ui::chat_bubble::ChatBubbleSegment::MAX_WIDTH,
+                )))
                 .child(frame)
                 .build())
         }
@@ -1900,14 +1832,13 @@ impl RowFactory {
                         *segment,
                         !entries.is_empty() || !unloaded.is_empty(),
                         Some(summary),
-                        self.theme,
                         label,
                         |open| {
                             row_owner.motion.borrow_mut().chevron(
                                 &key,
                                 open,
                                 row.disclosure.fraction,
-                                16.0,
+                                editor_ui::kit::IconSize::Md.px(),
                                 self.theme.colors.text_muted.to_reference_paint(),
                                 work.now,
                                 self.reduced_motion,
@@ -1954,7 +1885,7 @@ impl RowFactory {
                             &key,
                             open,
                             row.disclosure.fraction,
-                            14.0,
+                            editor_ui::kit::IconSize::Md.px(),
                             color,
                             work.now,
                             self.reduced_motion,
@@ -2043,7 +1974,7 @@ impl RowFactory {
                 use aqua_ui::element::Box as UiBox;
                 use aqua_ui::style::{Length, Style};
                 let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
-                let mut root = UiBox::new().layout("column").width(Length::Pct(100.0)).gap(8.0).style(Style::new().align(aqua_ui::AlignItems::END));
+                let mut root = UiBox::new().layout("column").width(Length::Pct(100.0)).spaced(Space::S8).style(Style::new().align(aqua_ui::AlignItems::END));
                 if let Some(attachments) = self.user_attachments(item)? {
                     root = root.child(attachments);
                 }
@@ -2191,15 +2122,7 @@ impl RowFactory {
                         owners.projected_leaf_is_current(&self.scope, &body_key, *block, &info),
                         "stale Markdown leaf geometry"
                     );
-                    let mut width = width.min(768.0) - 48.0;
-                    if slot.is_bubble() {
-                        width = width.min(576.0) - 32.0;
-                    } else if slot.is_card() {
-                        width -= self.theme.spacing.steps(6.0);
-                    }
-                    let width = width
-                        - info.list_depth as f32
-                            * editor_ui::theme::ProseTypography::LIST_INDENT_PX;
+                    let width = media_width(super::reading_width(width), *slot, info.list_depth);
                     anyhow::ensure!(width > 0.0, "measured media width is unavailable");
                     if let Some(services) = media(&body_key, width) {
                         anyhow::ensure!(
@@ -2235,7 +2158,7 @@ impl RowFactory {
                         theme: &self.theme,
                         tone: BodyTone::Foreground,
                         order: &order,
-                        glyph: Rc::new(editor_ui::asset::source_asset_glyph),
+                        glyph: editor_ui::markdown::glyph_painter(),
                         invalidate: self.invalidate.clone(),
                         on_link: self.on_link.clone(),
                         on_color: self.on_color.clone(),
@@ -2399,16 +2322,16 @@ impl RowFactory {
                 let ItemKind::Image { blob, .. } = &item.kind else {
                     anyhow::bail!("conversation image item has changed");
                 };
-                let width = content_width
-                    .ok_or_else(|| anyhow::anyhow!("committed transcript width is unavailable"))?
-                    .min(768.0)
-                    - 48.0;
+                let width = super::reading_width(
+                    content_width
+                        .ok_or_else(|| anyhow::anyhow!("committed transcript width is unavailable"))?,
+                );
                 anyhow::ensure!(width > 0.0, "measured image width is unavailable");
                 let image = self.blob_frame(item, blob, None, width)?;
                 Some(
                     aqua_ui::element::Box::new()
                         .layout("column")
-                        .gap(6.0)
+                        .spaced(Space::S6)
                         .child(image)
                         .build(),
                 )
@@ -2662,8 +2585,8 @@ pub(crate) fn image_caption(
         .layout("column")
         .width(Length::Pct(100.0))
         .child(
-            aqua_ui::element::Text::new(text.to_owned())
-                .font_size(theme.typography.control_text)
+            TextRole::Label
+                .text(&theme, text.to_owned())
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .wrap(true)
                 .build(),

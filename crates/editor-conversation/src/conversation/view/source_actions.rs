@@ -1,4 +1,4 @@
-use editor_ui::button::{Button, ButtonVariant};
+use editor_ui::kit::{Button, ButtonTone};
 use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::{Box as UiBox, Element, Text};
 use aqua_ui::style::Length;
@@ -43,8 +43,7 @@ pub fn copy_action(
         CopySource::Text(_) => "Copy full content",
         CopySource::Live(_) => "Copy live preview",
     };
-    let button = Button::text(key, theme, label)
-        .variant(ButtonVariant::Ghost)
+    let button = Button::text(key, theme, ButtonTone::Quiet, label)
         .disabled(!admitted)
         .on_activate(move |_| {
             if admitted {

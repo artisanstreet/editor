@@ -6,7 +6,7 @@ use artisan_api::{LiveTarget, RunId};
 
 use crate::conversation::fold::RowKey;
 use editor_ui::shimmer_text::{ShimmerText, ShimmerTiming, ShimmerTone};
-use aqua_text::{FontFamily, TextStyle};
+use editor_ui::kit::TextRole;
 
 pub enum StatusText {
     Reasoning(String),
@@ -38,14 +38,7 @@ impl StatusShimmers {
             }
         };
         let key = format!("conversation-status-{:?}-{row:?}", self.scope);
-        let typography = TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: editor_ui::theme::ProseTypography::BODY_SIZE_PX,
-            line_height_px: editor_ui::theme::ProseTypography::BODY_LINE_PX,
-            weight: editor_ui::theme::ProseTypography::BODY_WEIGHT,
-            letter_spacing_em: Some(theme.typography.tracking_em),
-            ..TextStyle::default()
-        };
+        let typography = TextRole::Prose.style(&theme);
         let spans = runs.map_or_else(Vec::new, |runs| {
             runs.styled_spans(
                 &typography,

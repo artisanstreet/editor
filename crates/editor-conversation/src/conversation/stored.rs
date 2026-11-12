@@ -443,7 +443,7 @@ impl StoredConversation {
             ordinal + 1 == source.block_count(),
             theme,
             tone,
-            Rc::new(editor_ui::asset::source_asset_glyph),
+            editor_ui::markdown::glyph_painter(),
             invalidate,
             Some(link),
             Some(color),

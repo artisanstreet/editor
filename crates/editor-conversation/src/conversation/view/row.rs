@@ -183,14 +183,13 @@ pub fn render(
                     *segment,
                     !entries.is_empty() || !unloaded.is_empty(),
                     Some(summary),
-                    theme,
                     label,
                     |open| {
                         resources.chevron(
                             chevron_key,
                             open,
                             disclosure.fraction,
-                            16.0,
+                            editor_ui::kit::IconSize::Md.px(),
                             theme.colors.text_muted.to_reference_paint(),
                         )
                     },
@@ -254,7 +253,7 @@ pub fn render(
                 theme,
                 |text, color| resources.phrase(&key, text, color, theme),
                 |open, color| {
-                    resources.chevron(chevron_key, open, disclosure.fraction, 14.0, color)
+                    resources.chevron(chevron_key, open, disclosure.fraction, editor_ui::kit::IconSize::Md.px(), color)
                 },
                 Rc::clone(&dispatch),
             )
