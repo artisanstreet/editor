@@ -2,15 +2,29 @@ use super::Dispatch;
 use crate::conversation::adapter::Action;
 use crate::conversation::navigator::tick_indices;
 use editor_ui::motion::{MotionCurve, MotionDuration};
+use editor_ui::kit::{HitArea, Row, RowItem, Space, Spaced, Surface};
 use editor_ui::theme::ArtisanTheme;
-use aqua_core::{CursorIcon, Insets};
-use aqua_ui::element::{Box as UiBox, Button, Element};
+use aqua_core::Role;
+use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use artisan_api::{ItemId, OutlineEntry, Seq};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
+
+const MENU: Surface = Surface::Menu;
+const MENU_ROW: Row = Row::MenuItem;
+const MENU_WIDTH: f32 = 320.0;
+const ENTRANCE_SHIFT: Space = Space::S4;
+const RAIL_PAD: Space = Space::S8;
+const RAIL_WIDTH: f32 = 40.0;
+const TICK_PITCH: f32 = 5.0;
+const TICK_REST: f32 = 16.0;
+const TICK_GROWTH: f32 = 8.0;
+const TICK_LINE: f32 = 1.0;
+const RAIL_MIN: f32 = 32.0;
+const RAIL_SHARE: f32 = 0.7;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TickFrame {
@@ -30,9 +44,13 @@ pub fn tick_presence(current: bool, changed: Option<Instant>, now: Instant) -> (
 }
 
 fn tick_width(presence: f32) -> f32 {
-    8.0_f32.mul_add(presence, 16.0)
+    TICK_GROWTH.mul_add(presence, TICK_REST)
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "the rail tick is a painted data mark whose colour advance_ticks animates by writing its paint directly"
+)]
 fn tick_color(theme: &ArtisanTheme, presence: f32) -> aqua_core::GpuiBackground {
     aqua_core::GpuiBackground::Solid(
         theme
@@ -42,6 +60,18 @@ fn tick_color(theme: &ArtisanTheme, presence: f32) -> aqua_core::GpuiBackground 
             .animate_to(theme.colors.text, presence)
             .to_reference_paint(),
     )
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the rail tick is a painted data mark; advance_ticks animates this paint in place"
+)]
+fn tick(theme: &ArtisanTheme, presence: f32) -> Element {
+    UiBox::new()
+        .width(tick_width(presence))
+        .height(TICK_LINE)
+        .style(Style::new().gpui_background(tick_color(theme, presence)))
+        .build()
 }
 
 struct BuiltRail {
@@ -103,7 +133,7 @@ impl Navigator {
         reduced_motion: bool,
     ) -> Result<editor_ui::picker_motion::HoverFrame, String> {
         self.hover
-            .advance_frame(app, surface, theme, false, now, reduced_motion)
+            .advance_frame(app, surface, theme, now, reduced_motion)
     }
 
     pub fn dispose(&mut self, app: &mut aqua::UiApp) {
@@ -196,16 +226,13 @@ impl Navigator {
             .iter()
             .rposition(|marker| reading.is_some_and(|reading| marker.position <= reading))
             .unwrap_or(0);
-        let above = composer_height.map_or(0.0, |height| height + composer_bottom) + 8.0;
-        let room = (viewport_height - above - 8.0).max(32.0);
-        let max_height = room.min(viewport_height * 0.7);
-        let height = ((markers.len() as f32) * 5.0 + 16.0).min(max_height);
-        let indices = tick_indices(
-            markers.len(),
-            ((height - 16.0) / 5.0).floor() as usize,
-            Some(active),
-        );
-        let slots = ((height - 16.0) / 5.0).floor() as usize;
+        let pad = RAIL_PAD.px();
+        let above = composer_height.map_or(0.0, |height| height + composer_bottom) + pad;
+        let room = (viewport_height - above - pad).max(RAIL_MIN);
+        let max_height = room.min(viewport_height * RAIL_SHARE);
+        let height = (markers.len() as f32).mul_add(TICK_PITCH, 2.0 * pad).min(max_height);
+        let slots = ((height - 2.0 * pad) / TICK_PITCH).floor() as usize;
+        let indices = tick_indices(markers.len(), slots, Some(active));
         self.built = Some(BuiltRail {
             count: markers.len(),
             slots,
@@ -222,15 +249,11 @@ impl Navigator {
         let mut moving = false;
         let mut ticks = UiBox::new()
             .layout("column")
-            .width(40.0)
+            .width(RAIL_WIDTH)
             .height(height)
             .clip(true)
-            .style(Style::new().align(AlignItems::START).padding_insets(Insets {
-                top: 8.0,
-                right: 8.0,
-                bottom: 8.0,
-                left: 8.0,
-            }));
+            .padded(RAIL_PAD)
+            .style(Style::new().align(AlignItems::START));
         for index in indices {
             let marker = &markers[index];
             let current = index == active;
@@ -243,28 +266,23 @@ impl Navigator {
             }
             let (presence, in_flight) = tick_presence(current, entry.1, now);
             moving |= in_flight;
-            let tick = UiBox::new()
-                .width(tick_width(presence))
-                .height(1.0)
-                .radius(0.5)
-                .style(Style::new().gpui_background(tick_color(&theme, presence)))
-                .build();
             let position = marker.position;
             let callback = Rc::clone(&dispatch);
-            let button = Button::new()
-                .width(Length::Pct(100.0))
-                .height(5.0)
-                .style(
-                    Style::new()
-                        .flex_shrink(0.0)
-                        .align(AlignItems::CENTER)
-                        .justify(JustifyContent::START),
-                )
-                .child(tick)
-                .on_activate(move || callback(Action::Jump(position)))
-                .build()
-                .with_key(format!("navigator-tick-{}", marker.id))
-                .cursor(CursorIcon::Pointer);
+            let button = HitArea::new(
+                format!("navigator-tick-{}", marker.id),
+                Role::Button,
+                marker.label.clone(),
+            )
+            .child(tick(&theme, presence))
+            .on_activate(move || callback(Action::Jump(position)))
+            .build()
+            .style(
+                Style::new()
+                    .height(Length::Px(TICK_PITCH))
+                    .flex_shrink(0.0)
+                    .align(AlignItems::CENTER)
+                    .justify(JustifyContent::START),
+            );
             ticks = ticks.child(button);
         }
         Some((ticks.build(), max_height, moving))
@@ -282,56 +300,37 @@ pub fn menu(
     hover: Rc<dyn Fn(ItemId)>,
     dispatch: Dispatch,
 ) -> Element {
-    use editor_ui::glass::glass_navigator_card;
-    use editor_ui::theme::{RadiusStep, RadiusTokens};
     use aqua_core::Transform2D;
     use aqua_ui::collection::List;
     use aqua_ui::input::{EventPhase, InputKind, InputResponse};
 
-    let pitch = 36.0;
-    let height = ((markers.len() as f32) * pitch).min((max_height - 12.0).max(pitch));
+    let pitch = MENU_ROW.height().unwrap_or_default();
+    let height = ((markers.len() as f32) * pitch)
+        .min((max_height - 2.0 * MENU.padding_px()).max(pitch));
     let list = List::new()
         .items(markers.iter().cloned())
         .key(|marker: &OutlineEntry| format!("navigator-row-{}", marker.id))
         .row(move |marker: &OutlineEntry| {
             let selected = active == Some(marker.position);
-            let text = label(&marker.label, selected, theme);
             let id = marker.id.clone();
             let on_move = Rc::clone(&hover);
             let position = marker.position;
             let callback = Rc::clone(&dispatch);
-            let row = Button::new()
-                .width(Length::Pct(100.0))
-                .height(32.0)
-                .radius(RadiusTokens::value(RadiusStep::Lg))
-                .style(
-                    Style::new()
-                        .align(AlignItems::CENTER)
-                        .padding_insets(Insets {
-                            left: 12.0,
-                            right: 12.0,
-                            ..Insets::default()
-                        }),
-                )
-                .child(text)
-                .on_activate(move || callback(Action::Jump(position)))
-                .build()
-                .with_key(format!("navigator-row-hit-{}", marker.id))
-                .cursor(CursorIcon::Pointer)
-                .on_input(InputKind::PointerMove, EventPhase::Bubble, move |_| {
-                    on_move(id.clone());
-                    InputResponse::default()
-                });
-            UiBox::new()
-                .width(Length::Pct(100.0))
-                .height(pitch)
-                .style(Style::new().padding_insets(Insets {
-                    top: 2.0,
-                    bottom: 2.0,
-                    ..Insets::default()
-                }))
-                .child(row)
-                .build()
+            RowItem::new(
+                format!("navigator-row-hit-{}", marker.id),
+                theme,
+                MENU_ROW,
+                MENU,
+                marker.label.clone(),
+            )
+            .body(label(&marker.label, selected, theme))
+            .underlay(None)
+            .on_activate(move || callback(Action::Jump(position)))
+            .build()
+            .on_input(InputKind::PointerMove, EventPhase::Bubble, move |_| {
+                on_move(id.clone());
+                InputResponse::default()
+            })
         })
         .virtualize()
         .estimated_row_height(Length::Px(pitch))
@@ -342,31 +341,27 @@ pub fn menu(
         )
         .build()
         .with_key("turn-navigator-list");
-    let content = UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0))
-        .style(Style::new().min_width(Length::Px(0.0)).padding_insets(Insets {
-            left: 8.0,
-            right: 8.0,
-            top: 6.0,
-            bottom: 6.0,
-        }))
-        .child(hover_surface.pill(&theme, 14.0, false))
-        .child(list)
-        .build()
-        .with_key("turn-navigator-hover-surface");
     let progress = entrance.clamp(0.0, 1.0);
-    UiBox::new()
-        .width(320.0)
-        .layout("column")
-        .opacity(progress)
-        .style(Style::new().transform(Transform2D::translate(4.0 * (1.0 - progress), 0.0)))
-        .child(glass_navigator_card(&theme, content))
-        .build()
+    MENU.build(
+        &theme,
+        vec![
+            hover_surface.pill(&theme, MENU_ROW.radius_in(MENU)),
+            list,
+        ],
+    )
+    .style(
+        Style::new()
+            .width(Length::Px(MENU_WIDTH))
+            .min_width(Length::Pct(0.0))
+            .opacity(progress)
+            .transform(Transform2D::translate(ENTRANCE_SHIFT.px() * (1.0 - progress), 0.0)),
+    )
+    .with_key("turn-navigator-hover-surface")
 }
 
 pub fn menu_scroll_offset(active: usize, count: usize, viewport_height: f32) -> f32 {
-    let full = count as f32 * 36.0;
-    ((active as f32 * 36.0 + 18.0) - viewport_height / 2.0)
+    let pitch = MENU_ROW.height().unwrap_or_default();
+    let full = count as f32 * pitch;
+    ((active as f32 + 0.5) * pitch - viewport_height / 2.0)
         .clamp(0.0, (full - viewport_height).max(0.0))
 }
