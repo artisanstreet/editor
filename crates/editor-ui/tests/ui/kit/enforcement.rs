@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const ENFORCED: &[&str] = &[];
+const ENFORCED: &[&str] = &["editor-sources"];
 
 const LITERAL: &[&str] = &[
     "px(",
