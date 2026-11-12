@@ -216,6 +216,11 @@ pub const POLAR_HIGHLIGHT: Oklch = Oklch::new(0.9369, 0.031, 252.69);
 pub const POLAR_INK: Oklch = Oklch::new(1.0, 0.0, 0.0);
 
 #[must_use]
+pub fn polar_selection() -> GpuiBackground {
+    vertical(POLAR_NAVY, POLAR_SKY.animate_to(POLAR_HAZE, 0.28))
+}
+
+#[must_use]
 pub fn polar_face(bounds: Rect, lift: f32, radius: f32) -> DisplayItem {
     let (w, h) = (bounds.w.max(2.0), bounds.h.max(2.0));
     let (face_w, face_h) = (w - 2.0, h - 2.0);
