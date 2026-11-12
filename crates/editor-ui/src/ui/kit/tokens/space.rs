@@ -1,4 +1,4 @@
-use aqua_ui::element::Box as UiBox;
+use aqua_ui::element::{Box as UiBox, Scroll};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Space {
@@ -60,10 +60,27 @@ impl From<super::radius::Inset> for Space {
 pub trait Spaced {
     #[must_use]
     fn spaced(self, space: Space) -> Self;
+
+    #[must_use]
+    fn padded(self, space: Space) -> Self;
 }
 
 impl Spaced for UiBox {
     fn spaced(self, space: Space) -> Self {
         self.gap(space.px())
+    }
+
+    fn padded(self, space: Space) -> Self {
+        self.padding(space.px())
+    }
+}
+
+impl Spaced for Scroll {
+    fn spaced(self, space: Space) -> Self {
+        self.gap(space.px())
+    }
+
+    fn padded(self, space: Space) -> Self {
+        self.padding(space.px())
     }
 }
