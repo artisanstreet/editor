@@ -1604,7 +1604,6 @@ impl ComposerOwner {
                 app,
                 root,
                 theme,
-                false,
                 now,
                 self.reduced_motion,
             )?;
@@ -2830,7 +2829,7 @@ pub fn project_menu(
             vec![
                 hover_surface
                     .borrow()
-                    .pill(&theme, row.radius_in(surface), true),
+                    .pill(&theme, row.radius_in(surface)),
                 list.build(),
             ],
         )

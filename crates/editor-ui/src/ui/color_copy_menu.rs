@@ -64,7 +64,7 @@ impl ColorCopyMenuHost {
         let hover = Rc::new(RefCell::new(HoverSurface::new("copy-menu-hover")));
         let mut rows = UiBox::new()
             .style(Style::new().axis(Axis::Column).min_width(Length::Px(160.0)))
-            .child(hover.borrow().pill(&theme, ROW_RADIUS, true));
+            .child(hover.borrow().pill(&theme, ROW_RADIUS));
         let entries = menu.entries.len();
         for (index, entry) in menu.entries.iter().enumerate() {
             let primary = entry.kind == CopyKind::Primary;
@@ -274,7 +274,6 @@ impl ColorCopyMenuHost {
                         app,
                         node,
                         &self.theme,
-                        true,
                         now,
                         self.reduced_motion,
                     )?;

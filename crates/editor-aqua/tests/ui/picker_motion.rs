@@ -10,7 +10,7 @@ use editor_aqua::ui::{hover::HoverTone, picker_motion::HoverSurface, theme::Arti
 fn hover_pill_tracks_measured_rows_and_cancels_motion_on_dispose() {
     let theme = ArtisanTheme::resolved();
     let mut surface = HoverSurface::new("hover-pill");
-    let pill = surface.pill(&theme, 14.0, true);
+    let pill = surface.pill(&theme, 14.0);
     let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         UiBox::new()
@@ -51,12 +51,12 @@ fn hover_pill_tracks_measured_rows_and_cancels_motion_on_dispose() {
         .unwrap();
     surface.hovered("first", true, HoverTone::Neutral);
     let initial = surface
-        .advance_frame(&mut app, root, &theme, true, 0.0, false)
+        .advance_frame(&mut app, root, &theme, 0.0, false)
         .unwrap();
     assert!(initial.changed);
     assert!(!initial.animating);
     let unchanged = surface
-        .advance_frame(&mut app, root, &theme, true, 0.0, false)
+        .advance_frame(&mut app, root, &theme, 0.0, false)
         .unwrap();
     assert!(!unchanged.changed);
     assert!(!unchanged.animating);
@@ -65,19 +65,19 @@ fn hover_pill_tracks_measured_rows_and_cancels_motion_on_dispose() {
     surface.hovered("second", true, HoverTone::Neutral);
     assert!(
         surface
-            .advance(&mut app, root, &theme, true, 0.01, false)
+            .advance(&mut app, root, &theme, 0.01, false)
             .unwrap()
     );
     assert!(
         surface
-            .advance(&mut app, root, &theme, true, 0.1, false)
+            .advance(&mut app, root, &theme, 0.1, false)
             .unwrap()
     );
     app.build_frame().unwrap();
     let midway = app.tree().visual_rect(pill).unwrap().y;
     assert!(midway > start && midway < start + 20.0);
     let settled = surface
-        .advance_frame(&mut app, root, &theme, true, 0.3, false)
+        .advance_frame(&mut app, root, &theme, 0.3, false)
         .unwrap();
     assert!(settled.changed);
     assert!(!settled.animating);
@@ -86,7 +86,7 @@ fn hover_pill_tracks_measured_rows_and_cancels_motion_on_dispose() {
     surface.hovered("first", true, HoverTone::Neutral);
     assert!(
         surface
-            .advance(&mut app, root, &theme, true, 0.4, false)
+            .advance(&mut app, root, &theme, 0.4, false)
             .unwrap()
     );
     surface.dispose(&mut app);
@@ -97,7 +97,7 @@ fn hover_pill_tracks_measured_rows_and_cancels_motion_on_dispose() {
 fn reduced_motion_reports_immediate_geometry_change() {
     let theme = ArtisanTheme::resolved();
     let mut surface = HoverSurface::new("reduced-pill");
-    let pill = surface.pill(&theme, 14.0, true);
+    let pill = surface.pill(&theme, 14.0);
     let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         UiBox::new()
@@ -127,17 +127,17 @@ fn reduced_motion_reports_immediate_geometry_change() {
     let root = app.tree().root().unwrap();
     surface.hovered("first", true, HoverTone::Neutral);
     surface
-        .advance_frame(&mut app, root, &theme, true, 0.0, true)
+        .advance_frame(&mut app, root, &theme, 0.0, true)
         .unwrap();
     app.build_frame().unwrap();
     surface.hovered("second", true, HoverTone::Neutral);
     let frame = surface
-        .advance_frame(&mut app, root, &theme, true, 0.1, true)
+        .advance_frame(&mut app, root, &theme, 0.1, true)
         .unwrap();
     assert!(frame.changed);
     assert!(!frame.animating);
     let next = surface
-        .advance_frame(&mut app, root, &theme, true, 0.1, true)
+        .advance_frame(&mut app, root, &theme, 0.1, true)
         .unwrap();
     assert!(!next.changed);
     assert!(!next.animating);

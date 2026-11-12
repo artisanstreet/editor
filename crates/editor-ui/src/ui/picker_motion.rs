@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::hover::HoverTone;
+use super::kit::Hover;
 
 pub const DROPDOWN_OPEN: Duration = Duration::from_millis(250);
 pub const DROPDOWN_CLOSE: Duration = Duration::from_millis(150);
@@ -219,15 +220,9 @@ impl HoverSurface {
         &self,
         theme: &super::theme::ArtisanTheme,
         radius: f32,
-        edged: bool,
     ) -> aqua_ui::element::Element {
-        let fill = if edged {
-            super::hover::HoverFill::Edged
-        } else {
-            super::hover::HoverFill::Plain
-        };
         aqua_ui::element::Box::new()
-            .style(super::hover::HoverColors::new(theme, HoverTone::Neutral).style(fill))
+            .style(Hover::Neutral.style(theme))
             .style(
                 aqua_ui::style::Style::new()
                     .absolute_at(Some(0.0), Some(0.0), None, None)
@@ -245,11 +240,10 @@ impl HoverSurface {
         app: &mut aqua::UiApp,
         surface: aqua_core::NodeId,
         theme: &super::theme::ArtisanTheme,
-        edged: bool,
         now: f64,
         reduced_motion: bool,
     ) -> Result<bool, String> {
-        let frame = self.advance_frame(app, surface, theme, edged, now, reduced_motion)?;
+        let frame = self.advance_frame(app, surface, theme, now, reduced_motion)?;
         Ok(frame.changed || frame.animating)
     }
 
@@ -258,7 +252,6 @@ impl HoverSurface {
         app: &mut aqua::UiApp,
         surface: aqua_core::NodeId,
         theme: &super::theme::ArtisanTheme,
-        edged: bool,
         now: f64,
         reduced_motion: bool,
     ) -> Result<HoverFrame, String> {
@@ -365,13 +358,13 @@ impl HoverSurface {
         }
         let state = self.state.borrow();
         let rect = state.visual_rect();
-        let mut colors = super::hover::HoverColors::new(theme, state.tone());
-        if let Some(transition) = transition {
-            colors = super::hover::HoverColors::new(theme, transition.from_tone).animate_to(
-                super::hover::HoverColors::new(theme, transition.to_tone),
-                progress,
-            );
-        }
+        let material = |tone: HoverTone| Hover::from(tone).material(theme);
+        let colors = match transition {
+            Some(transition) => {
+                material(transition.from_tone).animate_to(material(transition.to_tone), progress)
+            }
+            None => material(state.tone()),
+        };
         let mut layout = app
             .tree()
             .get(pill)
@@ -390,13 +383,8 @@ impl HoverSurface {
         });
         layout.width = Length::Px(rect.width);
         layout.height = Length::Px(rect.height);
-        let fill = if edged {
-            super::hover::HoverFill::Edged
-        } else {
-            super::hover::HoverFill::Plain
-        };
         colors
-            .style(fill)
+            .style()
             .opacity(if state.visible() { 1.0 } else { 0.0 })
             .apply_to(&mut layout, &mut paint);
         paint.transform = Some(aqua_core::Transform2D::translate(rect.left, rect.top));

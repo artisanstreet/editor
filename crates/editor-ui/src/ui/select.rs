@@ -637,7 +637,7 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
         Surface::Menu
             .build(
                 &theme,
-                vec![self.hover.borrow().pill(&theme, ROW_RADIUS, true), scroll],
+                vec![self.hover.borrow().pill(&theme, ROW_RADIUS), scroll],
             )
             .style(Style::new().width(Length::Px(self.trigger_width.max(MENU_MIN_WIDTH))))
             .role(Role::ListBox)
@@ -801,7 +801,6 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
                 app,
                 root,
                 &self.theme,
-                true,
                 now,
                 reduced,
             )?;

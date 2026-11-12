@@ -8,7 +8,7 @@ use aqua_ui::{
 };
 
 use super::{
-    hover::{HoverColors, HoverFill, HoverTone},
+    hover::HoverTone,
     picker_motion::HoverFrame,
     theme::ArtisanTheme,
 };
@@ -75,17 +75,7 @@ impl PopInHover {
     }
 
     pub fn background(&self, id: &str, theme: &ArtisanTheme, radius: f32) -> Element {
-        UiBox::new()
-            .style(HoverColors::new(theme, HoverTone::Neutral).style(HoverFill::Edged))
-            .style(
-                Style::new()
-                    .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                    .radius(aqua_ui::style::Length::Px(radius))
-                    .opacity(0.0),
-            )
-            .build()
-            .with_key(self.key(id))
-            .exclude_from_hit_testing()
+        self.layer(id, theme, Hover::Neutral, radius)
     }
 
     pub fn layer(&self, id: &str, theme: &ArtisanTheme, hover: Hover, radius: f32) -> Element {
