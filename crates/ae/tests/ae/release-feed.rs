@@ -1,7 +1,6 @@
 use super::*;
 use std::io::{BufRead as _, Write as _};
 
-#[cfg(target_os = "linux")]
 #[test]
 fn installing_a_remote_feed_keeps_it_for_later_updates() {
     let home = tempfile::tempdir().unwrap();
