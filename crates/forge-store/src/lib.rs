@@ -14,6 +14,7 @@ mod collection;
 mod content;
 pub mod coordination;
 pub mod discovery;
+mod hot;
 #[cfg(any(feature = "legacy-import", test))]
 mod import_writes;
 mod items;
@@ -156,6 +157,7 @@ struct Inner {
     live_revision: AtomicU64,
     readers: Mutex<Vec<Connection>>,
     read_slots: Arc<Semaphore>,
+    hot: Arc<hot::HotPages>,
     /// One source index build at a time; see [`Store::source_index`].
     index_build: Arc<Semaphore>,
     devices: Mutex<Devices>,
@@ -237,7 +239,13 @@ impl Store {
 
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let head = Arc::new(AtomicU64::new(0));
-        let mut writer = Writer::new(conn, Arc::clone(&head), recover.then(|| events.clone()))?;
+        let hot = Arc::new(hot::HotPages::default());
+        let mut writer = Writer::new(
+            conn,
+            Arc::clone(&head),
+            recover.then(|| events.clone()),
+            Arc::clone(&hot),
+        )?;
         if recover {
             writer
                 .transact(|tx| tx.recover_threads(None))
@@ -266,6 +274,7 @@ impl Store {
                 live_revision: AtomicU64::new(0),
                 readers: Mutex::new(vec![first_reader]),
                 read_slots: Arc::new(Semaphore::new(READERS_KEPT)),
+                hot,
                 index_build: Arc::new(Semaphore::new(1)),
                 devices: Mutex::new(Devices::open(open_database(&database)?)?),
                 database,
@@ -350,6 +359,7 @@ impl Store {
 
     pub async fn synchronize(&self, cursor: &mut Seq) -> Result<()> {
         if let Some(changes) = self.changes_since(*cursor, 20_000).await? {
+            self.inner.hot.committed(&changes);
             for envelope in changes {
                 if let Some(seq) = envelope.seq {
                     *cursor = (*cursor).max(seq);
@@ -358,6 +368,7 @@ impl Store {
             }
         } else {
             *cursor = self.read(read::max_seq).await?;
+            self.inner.hot.reset();
             self.relay_live(Event::Reset);
         }
         self.inner.head.fetch_max(*cursor, Ordering::AcqRel);
@@ -394,6 +405,28 @@ impl Store {
             .await
             .map_err(|_unsent_job| anyhow!("the store writer stopped"))?;
         result.await.context("the store writer dropped a write")?
+    }
+
+    async fn tail_page<F>(
+        &self,
+        thread: &ThreadId,
+        tail: Option<hot::Tail>,
+        query: F,
+    ) -> Result<artisan_api::ItemsPage>
+    where
+        F: FnOnce(&Connection) -> Result<artisan_api::ItemsPage> + Send + 'static,
+    {
+        let Some(tail) = tail else {
+            return self.read(query).await;
+        };
+        match self.inner.hot.lookup(thread, &tail) {
+            hot::Lookup::Hit(page) => Ok(artisan_api::ItemsPage::clone(&page)),
+            hot::Lookup::Miss(read_at) => {
+                let page = self.read(query).await?;
+                self.inner.hot.hold(thread, tail, read_at, &page);
+                Ok(page)
+            }
+        }
     }
 
     async fn read<R, F>(&self, query: F) -> Result<R>
