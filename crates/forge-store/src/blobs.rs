@@ -137,8 +137,10 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     };
     let target = path(dir, &blob_ref.hash).context("hash a blob")?;
     if target.exists() {
-        // Reusing a previously unreferenced blob starts its upload grace period again.
-        fs::File::open(&target)?.set_modified(SystemTime::now())?;
+        fs::File::options()
+            .write(true)
+            .open(&target)?
+            .set_modified(SystemTime::now())?;
         return Ok(blob_ref);
     }
     let shard = target.parent().context("blob shard directory")?;
