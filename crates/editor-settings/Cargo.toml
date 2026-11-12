@@ -10,7 +10,6 @@ test-support = ["editor-core/test-support", "editor-ui/test-support"]
 [dependencies]
 aqua = { workspace = true }
 aqua-core = { workspace = true }
-aqua-text = { workspace = true }
 aqua-ui = { workspace = true }
 artisan-api = { path = "../artisan-api", features = ["tls"] }
 anyhow.workspace = true
