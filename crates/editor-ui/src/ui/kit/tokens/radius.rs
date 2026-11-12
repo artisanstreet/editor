@@ -1,3 +1,4 @@
+use aqua_core::CornerRadii;
 use aqua_ui::style::{Length, Style};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -93,4 +94,39 @@ impl Corner {
 #[must_use]
 pub fn concentric(outer: f32, inset: f32) -> f32 {
     (outer - inset).max(0.0)
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Corners {
+    Top,
+    Bottom,
+    TopLeft,
+}
+
+impl Corners {
+    #[must_use]
+    pub fn radii(self, px: f32) -> CornerRadii {
+        let none = CornerRadii::default();
+        match self {
+            Self::Top => CornerRadii {
+                top_left: px,
+                top_right: px,
+                ..none
+            },
+            Self::Bottom => CornerRadii {
+                bottom_left: px,
+                bottom_right: px,
+                ..none
+            },
+            Self::TopLeft => CornerRadii {
+                top_left: px,
+                ..none
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn style(self, px: f32) -> Style {
+        Style::new().corners(self.radii(px))
+    }
 }

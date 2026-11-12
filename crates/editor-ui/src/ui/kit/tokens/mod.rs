@@ -6,6 +6,6 @@ pub mod text_role;
 
 pub use elevation::Elevation;
 pub use icon_size::IconSize;
-pub use radius::{Corner, Inset, Radius, concentric};
+pub use radius::{Corner, Corners, Inset, Radius, concentric};
 pub use space::{Space, Spaced};
 pub use text_role::{Face, TextRole, TextSpec};

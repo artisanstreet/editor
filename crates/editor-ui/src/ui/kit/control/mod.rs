@@ -1,3 +1,4 @@
+pub mod caption;
 pub mod hit_area;
 pub mod icon_button;
 pub mod key;
