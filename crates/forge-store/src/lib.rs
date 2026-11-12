@@ -54,7 +54,9 @@ pub use recall::{GrepMatch, GrepPage, GrepQuery, RecallScope, SearchHit, SearchP
 pub use resources::{MAX_RESOURCE_SNAPSHOT_BYTES, keep as keep_resource_snapshot};
 
 const EVENT_CAPACITY: usize = 8192;
-const READERS_KEPT: usize = 4;
+const READ_SLOTS: usize = 4;
+const SCAN_SLOTS: usize = 2;
+const READERS_KEPT: usize = READ_SLOTS + SCAN_SLOTS;
 const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -157,6 +159,7 @@ struct Inner {
     live_revision: AtomicU64,
     readers: Mutex<Vec<Connection>>,
     read_slots: Arc<Semaphore>,
+    scan_slots: Arc<Semaphore>,
     hot: Arc<hot::HotPages>,
     /// One source index build at a time; see [`Store::source_index`].
     index_build: Arc<Semaphore>,
@@ -273,7 +276,8 @@ impl Store {
                 head,
                 live_revision: AtomicU64::new(0),
                 readers: Mutex::new(vec![first_reader]),
-                read_slots: Arc::new(Semaphore::new(READERS_KEPT)),
+                read_slots: Arc::new(Semaphore::new(READ_SLOTS)),
+                scan_slots: Arc::new(Semaphore::new(SCAN_SLOTS)),
                 hot,
                 index_build: Arc::new(Semaphore::new(1)),
                 devices: Mutex::new(Devices::open(open_database(&database)?)?),
@@ -434,9 +438,25 @@ impl Store {
         R: Send + 'static,
         F: FnOnce(&Connection) -> Result<R> + Send + 'static,
     {
+        self.read_in(&self.inner.read_slots, query).await
+    }
+
+    async fn scan<R, F>(&self, query: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+    {
+        self.read_in(&self.inner.scan_slots, query).await
+    }
+
+    async fn read_in<R, F>(&self, slots: &Arc<Semaphore>, query: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+    {
         let inner = Arc::clone(&self.inner);
         let asked = std::time::Instant::now();
-        let slot = Arc::clone(&inner.read_slots).acquire_owned().await?;
+        let slot = Arc::clone(slots).acquire_owned().await?;
         let queued = asked.elapsed();
         tokio::task::spawn_blocking(move || {
             let _slot = slot;

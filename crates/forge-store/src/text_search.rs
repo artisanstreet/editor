@@ -206,7 +206,7 @@ fn text_hits(conn: &Connection, query: &TextSearchQuery) -> Result<Vec<TextHit>>
 
 impl Store {
     pub async fn text_search(&self, query: TextSearchQuery) -> Result<Vec<TextHit>> {
-        self.read(move |conn| {
+        self.scan(move |conn| {
             text_hits(conn, &query)
                 .with_context(|| format!("search message text for {:?}", query.query))
         })
