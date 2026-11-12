@@ -3007,8 +3007,10 @@ async fn live_previews_report_missing_bytes_without_unbounded_sse_frames() {
         let started = Arc::clone(&script_started);
         Box::pin(async move {
             started.notify_one();
-            let _ = io.inbox.recv().await;
-            Outcome::done()
+            tokio::select! {
+                _ = io.inbox.recv() => Outcome::done(),
+                () = io.cancel.cancelled() => Outcome::cancelled(),
+            }
         })
     }))
     .await;
