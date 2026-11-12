@@ -147,6 +147,7 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
                             ended_at: None,
                             open: true,
                             worked: true,
+                            doing: None,
                         }),
                         author: None,
                         gap: 8.0,

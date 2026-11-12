@@ -123,10 +123,59 @@ fn a_resumed_agent_shows_its_status_until_it_reports_again() {
     };
     assert!(matches!(
         tail(Status::Running).as_slice(),
-        [super::Row::AgentStatus(_, false)]
+        [super::Row::AgentStatus(_, None)]
     ));
     assert!(matches!(
         tail(Status::Done).as_slice(),
         [super::Row::AgentResult(_)]
     ));
+}
+
+#[test]
+fn the_status_line_names_what_runs_in_the_foreground() {
+    use artisan_api::ToolKind;
+    use std::collections::HashMap;
+
+    let shell = |id: &str, title: Option<&str>, background: bool, status: Status| {
+        let mut item = agent("general-purpose", "Task".into(), None);
+        item.id = ItemId(id.into());
+        item.status = status;
+        item.kind = ItemKind::Tool {
+            tool: ToolKind::Shell {
+                command: "make".into(),
+                cwd: None,
+                background,
+                watch: false,
+            },
+            title: title.map(str::to_owned),
+            output: None,
+            exit_code: None,
+            approval: None,
+        };
+        item
+    };
+    let titled = shell("a", Some("Relaunch Unreal Editor"), false, Status::Running);
+    let plain = shell("b", None, false, Status::Running);
+    let detached = shell("c", Some("Serve"), true, Status::Running);
+    let finished = shell("d", Some("Build"), false, Status::Done);
+    let mut delegate = agent("general-purpose", "Task".into(), None);
+    if let ItemKind::Agent { label, .. } = &mut delegate.kind {
+        *label = Some("Sunniva".into());
+    }
+    let doing = |items: &[&Item]| super::activity::doing(items, &HashMap::new());
+    assert_eq!(
+        doing(&[&titled, &detached, &finished]).as_deref(),
+        Some("Relaunch Unreal Editor")
+    );
+    assert_eq!(doing(&[&plain]).as_deref(), Some("Running a command"));
+    assert_eq!(
+        doing(&[&titled, &plain]).as_deref(),
+        Some("Running 2 commands")
+    );
+    assert_eq!(doing(&[&delegate]).as_deref(), Some("Waiting on Sunniva"));
+    assert_eq!(
+        doing(&[&delegate, &plain]).as_deref(),
+        Some("Using 2 tools")
+    );
+    assert_eq!(doing(&[&detached, &finished]), None);
 }

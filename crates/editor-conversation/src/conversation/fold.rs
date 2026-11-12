@@ -45,7 +45,7 @@ pub enum Row {
     Gap,
     Status(RunId),
     AgentResult(ItemId),
-    AgentStatus(ItemId, bool),
+    AgentStatus(ItemId, Option<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -472,13 +472,27 @@ impl Row {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunSummary {
     pub phase: Phase,
     pub started_at: Option<Timestamp>,
     pub ended_at: Option<Timestamp>,
     pub open: bool,
     pub worked: bool,
+    pub doing: Option<String>,
+}
+
+impl Hash for RunSummary {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (
+            self.phase,
+            self.started_at,
+            self.ended_at,
+            self.open,
+            self.worked,
+        )
+            .hash(state);
+    }
 }
 
 impl RunSummary {
@@ -702,12 +716,15 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
             .item(agent)
             .is_some_and(|item| item.status == Status::Running);
         if running {
-            let working = shown.iter().any(|item| {
-                item.status == Status::Running
-                    && matches!(item.kind, ItemKind::Tool { .. } | ItemKind::Agent { .. })
-                    && Some(&item.id) != scope
-            });
-            rows.push(Row::AgentStatus(agent.clone(), working));
+            let steps: Vec<&Item> = shown
+                .iter()
+                .copied()
+                .filter(|item| item.parent_id.as_ref() == Some(agent))
+                .collect();
+            rows.push(Row::AgentStatus(
+                agent.clone(),
+                activity::doing(&steps, &agent_names(&shown)),
+            ));
         } else if view.item(agent).and_then(agent_report).is_some() {
             rows.push(Row::AgentResult(agent.clone()));
         }
@@ -1067,6 +1084,13 @@ fn descends_from(view: &ThreadView, item: &Item, agent: &ItemId) -> bool {
     false
 }
 
+fn agent_names(items: &[&Item]) -> HashMap<ItemId, String> {
+    items
+        .iter()
+        .filter_map(|item| Some((item.id.clone(), item.agent_label()?)))
+        .collect()
+}
+
 pub fn children<'a>(items: &[&'a Item]) -> HashMap<ItemId, Vec<&'a Item>> {
     let mut children: HashMap<ItemId, Vec<&Item>> = HashMap::new();
     for item in items {
@@ -1131,6 +1155,16 @@ fn summaries(
                     started_at,
                     ended_at: if live { None } else { ended_at },
                     open,
+                    doing: live
+                        .then(|| {
+                            let steps: Vec<&Item> = items
+                                .iter()
+                                .copied()
+                                .filter(|item| item.parent_id.is_none())
+                                .collect();
+                            activity::doing(&steps, &agent_names(shown))
+                        })
+                        .flatten(),
                     worked: unloaded_work.contains(run_id)
                         || items.iter().any(|item| {
                             matches!(
@@ -1175,6 +1209,7 @@ fn summaries(
             ended_at: last.ended_at,
             open,
             worked: members.iter().any(|run| summaries[run].worked),
+            doing: last.doing.clone(),
         };
         summaries.insert(root, merged.clone());
         for run in members {
@@ -1326,6 +1361,9 @@ fn version(
         Row::Work { .. } => Vec::new(),
         Row::Chain { ids, .. } => ids.iter().collect(),
         Row::Status(run) => {
+            runs.get(run)
+                .and_then(|summary| summary.doing.as_ref())
+                .hash(&mut hasher);
             view.live
                 .get(&LiveTarget::Reasoning {
                     run_id: run.clone(),
