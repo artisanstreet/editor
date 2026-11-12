@@ -4,7 +4,7 @@ use crate::frame::wordmark::LINE_HEIGHTS;
 use crate::shell::layout::{CONTROL_INK_INSET, CONTROL_INSET_X, TITLEBAR_HEIGHT};
 use crate::shell::titlebar::{LEAD, WORDMARK};
 use crate::ui::chrome::account::{AVATAR_INSET, TRIGGER_HEIGHT};
-use crate::ui::kit::{HitArea, Space, TextRole};
+use crate::ui::kit::{HitArea, Space, Spaced, TextRole};
 use crate::ui::theme::ArtisanTheme;
 use aqua_core::Role;
 use aqua_ui::element::{Box as UiBox, Element, Text};
@@ -36,6 +36,7 @@ pub struct Sidebar {
     pub wordmark: Rows,
     pub emit: Rc<dyn Fn(Event)>,
     pub footer: Option<Element>,
+    pub search: Option<Element>,
     pub tree: Option<Element>,
 }
 
@@ -130,7 +131,7 @@ pub fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
                 )
                 .build(),
         )
-        .child(tree_view(sidebar.width, sidebar.tree))
+        .child(tree_view(sidebar.width, sidebar.search, sidebar.tree))
         .child(
             UiBox::new()
                 .height(footer_height)
@@ -146,13 +147,27 @@ pub fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
         .with_key(SIDEBAR)
 }
 
-fn tree_view(width: f32, tree: Option<Element>) -> Element {
+fn tree_view(width: f32, search: Option<Element>, tree: Option<Element>) -> Element {
     let reveal = ((width - COLLAPSED_WIDTH) / (OPEN_WIDTH - COLLAPSED_WIDTH)).clamp(0.0, 1.0);
     let row = crate::sidebar::geometry::TOGGLE.pad().x.px();
     let column = UiBox::new()
         .layout("column")
         .style(grow().opacity(reveal))
-        .children(tree.map(|tree| placed(tree, INK_X - row, TREE_GAP, SHEET_PADDING, TREE_GAP)))
+        .children((search.is_some() || tree.is_some()).then(|| {
+            placed(
+                UiBox::new()
+                    .layout("column")
+                    .spaced(Space::S16)
+                    .style(grow())
+                    .children(search)
+                    .children(tree)
+                    .build(),
+                INK_X - row,
+                TREE_GAP,
+                SHEET_PADDING,
+                TREE_GAP,
+            )
+        }))
         .build();
     match reveal > 0.0 {
         true => column,

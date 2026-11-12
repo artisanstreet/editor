@@ -1,4 +1,5 @@
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
+use aqua_media::decode::StillFormat;
 use image::{
     AnimationDecoder as _, DynamicImage, GenericImageView as _, ImageDecoder as _, ImageFormat,
     imageops::FilterType,
@@ -11,18 +12,16 @@ const MAX_PIXELS: u64 = 16_000_000;
 const MAX_FRAMES: usize = 120;
 const MAX_ANIMATION_BYTES: usize = 64 * 1024 * 1024;
 
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "image::ImageFormat is non-exhaustive; every other format is refused"
-)]
 pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>> {
     anyhow::ensure!(
         bytes.len() <= MAX_INPUT_BYTES,
         "Images must be at most 32 MiB"
     );
-    let format = image::guess_format(bytes).context("recognise the image format")?;
-    match format {
-        ImageFormat::Gif => {
+    let format = aqua_media::decode::still::sniff(bytes).context(
+        "This image format isn't supported; use PNG, JPEG, WebP, GIF, BMP, TIFF, ICO, AVIF or HEIC",
+    )?;
+    match (format, container(format)) {
+        (StillFormat::Gif, _) => {
             let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
                 .context("decode the GIF")?;
             check_dimensions(decoder.dimensions())?;
@@ -49,22 +48,74 @@ pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>> {
             }
             encode_animation(frames)
         }
-        ImageFormat::WebP | ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Bmp => {
-            let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+        (_, Some(container)) => {
+            let mut reader =
+                image::ImageReader::with_format(std::io::Cursor::new(bytes), container);
             reader.limits(decode_limits());
-            let decoder = reader.into_decoder().context("read image dimensions")?;
+            let mut decoder = reader.into_decoder().context("read image dimensions")?;
             check_dimensions(decoder.dimensions())?;
-            let image = DynamicImage::from_decoder(decoder).context("decode the image")?;
-            if format == ImageFormat::WebP && fits(&image) {
+            let orientation = decoder
+                .orientation()
+                .unwrap_or(image::metadata::Orientation::NoTransforms);
+            let mut image = DynamicImage::from_decoder(decoder).context("decode the image")?;
+            image.apply_orientation(orientation);
+            if format == StillFormat::WebP && fits(&image) {
                 return Ok(bytes.to_vec());
             }
             encode(&resize(image))
         }
-        other => bail!("{other:?} images aren't supported; use PNG, JPEG, GIF, BMP or WebP"),
+        (_, None) => encode(&resize(transcoded(bytes, LONG_EDGE)?)),
     }
 }
 
+fn container(format: StillFormat) -> Option<ImageFormat> {
+    match format {
+        StillFormat::WebP => Some(ImageFormat::WebP),
+        StillFormat::Png => Some(ImageFormat::Png),
+        StillFormat::Jpeg => Some(ImageFormat::Jpeg),
+        StillFormat::Bmp => Some(ImageFormat::Bmp),
+        StillFormat::Tiff => Some(ImageFormat::Tiff),
+        StillFormat::Ico => Some(ImageFormat::Ico),
+        StillFormat::Gif | StillFormat::Avif | StillFormat::Heic => None,
+    }
+}
+
+fn transcoded(bytes: &[u8], long_edge: u32) -> Result<DynamicImage> {
+    check_dimensions(aqua_media::decode::still::dimensions(bytes)?)?;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "edges are far below f32's exact integer range"
+    )]
+    let detail = aqua_media::decode::Detail::covering(long_edge as f32);
+    let still = aqua_media::decode::decode_still(bytes, detail, MAX_PIXELS * 4)?;
+    let (width, height) = (still.image.width(), still.image.height());
+    let opaque = still
+        .image
+        .pixels()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|pixel| pixel[3] == u8::MAX);
+    let image = image::RgbaImage::from_raw(width, height, still.image.pixels().to_vec())
+        .map(DynamicImage::ImageRgba8)
+        .context("decode the image")?;
+    Ok(if opaque {
+        DynamicImage::ImageRgb8(image.into_rgb8())
+    } else {
+        image
+    })
+}
+
 pub fn placeholder(bytes: &[u8]) -> Option<image::RgbaImage> {
+    let format = aqua_media::decode::still::sniff(bytes)?;
+    if matches!(format, StillFormat::Avif | StillFormat::Heic) {
+        return Some(
+            transcoded(bytes, 256)
+                .ok()?
+                .thumbnail(144, 144)
+                .into_rgba8(),
+        );
+    }
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;

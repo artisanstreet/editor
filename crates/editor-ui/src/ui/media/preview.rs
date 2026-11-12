@@ -1,5 +1,4 @@
 use std::{
-    cell::Cell,
     num::NonZeroUsize,
     rc::Rc,
     sync::{
@@ -55,13 +54,23 @@ pub enum Effect {
 pub enum Action {
     Close,
     Navigate(bool),
-    SwipeStart(aqua_core::Point),
-    SwipeMove(aqua_core::Point),
-    SwipeEnd(aqua_core::Point),
-    Backdrop,
-    BackdropDown,
+    Press { at: aqua_core::Point, picture: bool },
+    Drag { at: aqua_core::Point, viewport: Size },
+    Release { at: aqua_core::Point },
+    Zoom { at: aqua_core::Point, delta: f32, viewport: Size },
     CycleFocus(bool),
 }
+
+#[derive(Clone, Copy)]
+enum Press {
+    Backdrop { at: aqua_core::Point },
+    Picture { at: aqua_core::Point, pan: aqua_core::Point },
+}
+
+const MAX_ZOOM: f32 = 8.0;
+const ZOOM_PER_NOTCH: f32 = 1.2;
+const NOTCH: f32 = 16.0;
+const CLICK_SLOP: f32 = 8.0;
 
 enum Content {
     ReadyOnly,
@@ -86,9 +95,10 @@ pub struct Preview {
     slide_started: Option<Instant>,
     closing: Option<Instant>,
     forward: bool,
-    swipe_start: Option<aqua_core::Point>,
+    press: Option<Press>,
     swipe_offset: f32,
-    suppress_click: bool,
+    zoom: f32,
+    pan: aqua_core::Point,
     waiter: u64,
     wake: aqua::mailbox::Mailbox<()>,
 }
@@ -123,9 +133,10 @@ impl Preview {
             slide_started: None,
             closing: None,
             forward: true,
-            swipe_start: None,
+            press: None,
             swipe_offset: 0.0,
-            suppress_click: false,
+            zoom: 1.0,
+            pan: aqua_core::Point { x: 0.0, y: 0.0 },
             waiter: NEXT_WAITER.fetch_add(1, Ordering::Relaxed),
             wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN),
         })
@@ -152,9 +163,10 @@ impl Preview {
             slide_started: None,
             closing: None,
             forward: true,
-            swipe_start: None,
+            press: None,
             swipe_offset: 0.0,
-            suppress_click: false,
+            zoom: 1.0,
+            pan: aqua_core::Point { x: 0.0, y: 0.0 },
             waiter: NEXT_WAITER.fetch_add(1, Ordering::Relaxed),
             wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN),
         }
@@ -267,53 +279,89 @@ impl Preview {
                 self.closing = Some(now);
                 true
             }
-            Action::BackdropDown => {
-                self.suppress_click = false;
-                false
-            }
-            Action::Backdrop => {
-                if std::mem::take(&mut self.suppress_click) {
-                    false
-                } else {
-                    self.closing = Some(now);
-                    true
-                }
-            }
             Action::Navigate(forward) => self.navigate(forward, now, reduced_motion),
-            Action::SwipeStart(point) if self.gallery_count() > 1 => {
-                self.swipe_start = Some(point);
+            Action::Press { at, picture } => {
+                self.press = Some(if picture {
+                    Press::Picture { at, pan: self.pan }
+                } else {
+                    Press::Backdrop { at }
+                });
                 self.swipe_offset = 0.0;
-                self.suppress_click = false;
                 false
             }
-            Action::SwipeMove(point) => {
-                let Some(start) = self.swipe_start else {
-                    return false;
-                };
-                let offset = point.x - start.x;
-                if self.swipe_offset == offset {
-                    false
-                } else {
-                    self.swipe_offset = offset;
-                    true
+            Action::Drag { at, viewport } => match self.press {
+                Some(Press::Picture { at: start, pan }) if self.zoom > 1.0 => {
+                    let next = self.clamped(
+                        aqua_core::Point {
+                            x: pan.x + at.x - start.x,
+                            y: pan.y + at.y - start.y,
+                        },
+                        viewport,
+                    );
+                    std::mem::replace(&mut self.pan, next) != next
                 }
-            }
-            Action::SwipeEnd(point) => {
-                let Some(start) = self.swipe_start.take() else {
-                    return false;
-                };
-                let dx = point.x - start.x;
-                let dy = point.y - start.y;
-                let moved = self.swipe_offset != 0.0;
-                self.swipe_offset = 0.0;
-                self.suppress_click = dx.abs() > 8.0 || dy.abs() > 8.0;
-                if dx.abs() >= 48.0 && dx.abs() > dy.abs() * 1.25 {
-                    self.navigate(dx < 0.0, now, reduced_motion) || moved
-                } else {
-                    moved
+                Some(Press::Picture { at: start, .. }) if self.gallery_count() > 1 => {
+                    let offset = at.x - start.x;
+                    std::mem::replace(&mut self.swipe_offset, offset) != offset
                 }
+                Some(Press::Picture { .. } | Press::Backdrop { .. }) | None => false,
+            },
+            Action::Release { at } => match self.press.take() {
+                Some(Press::Backdrop { at: start }) => {
+                    let still = (at.x - start.x).abs() <= CLICK_SLOP
+                        && (at.y - start.y).abs() <= CLICK_SLOP;
+                    if still {
+                        self.closing = Some(now);
+                    }
+                    still
+                }
+                Some(Press::Picture { at: start, .. }) => {
+                    let dx = at.x - start.x;
+                    let dy = at.y - start.y;
+                    let moved = std::mem::replace(&mut self.swipe_offset, 0.0) != 0.0;
+                    if self.zoom == 1.0 && dx.abs() >= 48.0 && dx.abs() > dy.abs() * 1.25 {
+                        self.navigate(dx < 0.0, now, reduced_motion) || moved
+                    } else {
+                        moved
+                    }
+                }
+                None => false,
+            },
+            Action::Zoom {
+                at,
+                delta,
+                viewport,
+            } => {
+                let zoom = (self.zoom * ZOOM_PER_NOTCH.powf(-delta / NOTCH)).clamp(1.0, MAX_ZOOM);
+                if zoom == self.zoom {
+                    return false;
+                }
+                let ratio = zoom / self.zoom;
+                let centre = aqua_core::Point {
+                    x: viewport.w / 2.0 + self.pan.x,
+                    y: viewport.h / 2.0 + self.pan.y,
+                };
+                self.zoom = zoom;
+                self.pan = self.clamped(
+                    aqua_core::Point {
+                        x: self.pan.x + (at.x - centre.x) * (1.0 - ratio),
+                        y: self.pan.y + (at.y - centre.y) * (1.0 - ratio),
+                    },
+                    viewport,
+                );
+                true
             }
-            Action::SwipeStart(_) | Action::CycleFocus(_) => false,
+            Action::CycleFocus(_) => false,
+        }
+    }
+
+    fn clamped(&self, pan: aqua_core::Point, viewport: Size) -> aqua_core::Point {
+        let (width, height) = self.picture_size(viewport);
+        let reach = |picture: f32, room: f32| ((picture * self.zoom - room) / 2.0).max(0.0);
+        let (x, y) = (reach(width, viewport.w), reach(height, viewport.h));
+        aqua_core::Point {
+            x: pan.x.clamp(-x, x),
+            y: pan.y.clamp(-y, y),
         }
     }
 
@@ -331,6 +379,8 @@ impl Preview {
         }
         *index = next;
         self.forward = forward;
+        self.zoom = 1.0;
+        self.pan = aqua_core::Point { x: 0.0, y: 0.0 };
         self.outgoing = if reduced_motion {
             self.image.take();
             None
@@ -400,7 +450,10 @@ impl Preview {
     ) -> Element {
         let generation = self.generation;
         let emit: Rc<dyn Fn(Action)> = Rc::new(move |action| emit(generation, action));
-        let (width, height) = self.picture_size(viewport);
+        let (fitted_width, fitted_height) = self.picture_size(viewport);
+        let (width, height) = (fitted_width * self.zoom, fitted_height * self.zoom);
+        let left = (viewport.w - width) / 2.0 + self.pan.x + self.swipe_offset;
+        let top = (viewport.h - height) / 2.0 + self.pan.y;
         let duration = 0.25;
         let progress = |since: Instant| {
             MotionCurve::SmoothOut.sample(f64::from(
@@ -431,12 +484,7 @@ impl Preview {
             .unwrap_or(1.0);
         let mut stage = UiBox::new().width(width).height(height).style(
             Style::new()
-                .absolute_at(
-                    Some((viewport.w - width) / 2.0 + self.swipe_offset),
-                    Some((viewport.h - height) / 2.0),
-                    None,
-                    None,
-                )
+                .absolute_at(Some(left), Some(top), None, None)
                 .transform(transform),
         );
         stage = stage.child(if let Some(image) = &self.image {
@@ -535,60 +583,57 @@ impl Preview {
                 );
             }
         }
-        stage = stage.child(
-            UiBox::new()
-                .style(Style::new().absolute_at(None, Some(CORNER_INSET), Some(CORNER_INSET), None))
-                .child(
-                    IconButton::corner_close(
-                        "image-preview-close",
-                        theme,
-                        "Close image preview",
-                        FRAME.radius_px(),
-                    )
-                        .on_activate(move |_| close(Action::Close))
-                        .build(),
-                )
-                .build(),
-        );
-        let down = Rc::clone(&emit);
-        let stage_release = Rc::clone(&emit);
-        let stage = stage
-            .build()
-            .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
-                if let RoutedInput::Native(InputEvent::PointerDown(
-                    pointer,
-                    PointerButton::Primary,
-                )) = &event.input
-                {
-                    down(Action::SwipeStart(pointer.position));
-                    return InputResponse {
-                        stop_propagation: true,
-                        ..InputResponse::capture()
+        let pressing = Rc::clone(&emit);
+        let stage = track(
+            stage
+                .build()
+                .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
+                    let primary = if let RoutedInput::Native(InputEvent::PointerDown(
+                        pointer,
+                        PointerButton::Primary,
+                    )) = &event.input
+                    {
+                        pressing(Action::Press {
+                            at: pointer.position,
+                            picture: true,
+                        });
+                        true
+                    } else {
+                        false
                     };
-                }
-                InputResponse {
-                    stop_propagation: true,
-                    ..InputResponse::default()
-                }
-            })
-            .on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
-                if let RoutedInput::Native(InputEvent::PointerUp(pointer, PointerButton::Primary)) =
-                    &event.input
-                {
-                    stage_release(Action::SwipeEnd(pointer.position));
-                }
-                InputResponse {
-                    stop_propagation: true,
-                    pointer_capture: aqua_ui::input::CaptureRequest::Release,
-                    ..InputResponse::default()
-                }
-            });
-        let backdrop_pressed = Rc::new(Cell::new(None));
-        let backdrop_press = Rc::clone(&backdrop_pressed);
-        let backdrop_down = Rc::clone(&emit);
+                    InputResponse {
+                        stop_propagation: true,
+                        pointer_capture: if primary {
+                            aqua_ui::input::CaptureRequest::Capture
+                        } else {
+                            aqua_ui::input::CaptureRequest::None
+                        },
+                        ..InputResponse::default()
+                    }
+                }),
+            &emit,
+            viewport,
+        );
+        let close_button = UiBox::new()
+            .style(Style::new().absolute_at(
+                None,
+                Some(top.max(0.0) + CORNER_INSET),
+                Some((viewport.w - (left + width)).max(0.0) + CORNER_INSET),
+                None,
+            ))
+            .child(
+                IconButton::corner_close(
+                    "image-preview-close",
+                    theme,
+                    "Close image preview",
+                    FRAME.radius_px(),
+                )
+                .on_activate(move |_| close(Action::Close))
+                .build(),
+            )
+            .build();
         let backdrop = Rc::clone(&emit);
-        let moving = Rc::clone(&emit);
-        let releasing = Rc::clone(&emit);
+        let zooming = Rc::clone(&emit);
         let keys = Rc::clone(&emit);
         let mut root = UiBox::new()
             .width(viewport.w)
@@ -606,7 +651,8 @@ impl Preview {
                             .to_reference_paint(),
                     )),
             )
-            .child(stage);
+            .child(stage)
+            .child(close_button);
         if self.gallery_count() > 1 {
             for forward in [false, true] {
                 let nav = Rc::clone(&emit);
@@ -669,42 +715,47 @@ impl Preview {
                     .build(),
             );
         }
-        root.build()
-            .with_key("image-preview")
-            .role(aqua_core::Role::Dialog)
-            .aria_label("Image preview")
-            .focusable(true)
-            .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
-                if let RoutedInput::Native(InputEvent::PointerDown(
-                    pointer,
-                    PointerButton::Primary,
-                )) = &event.input
-                {
-                    backdrop_press.set(Some(pointer.contact));
-                    backdrop_down(Action::BackdropDown);
-                }
-                InputResponse::default()
-            })
-            .on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
-                if let RoutedInput::Native(InputEvent::PointerUp(pointer, PointerButton::Primary)) =
-                    &event.input
-                {
-                    releasing(Action::SwipeEnd(pointer.position));
-                    if backdrop_pressed.take() == Some(pointer.contact)
-                        && event.bounds.contains(pointer.position)
+        track(
+            root.build()
+                .with_key("image-preview")
+                .role(aqua_core::Role::Dialog)
+                .aria_label("Image preview")
+                .focusable(true)
+                .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
+                    if let RoutedInput::Native(InputEvent::PointerDown(
+                        pointer,
+                        PointerButton::Primary,
+                    )) = &event.input
+                        && event.target == event.current_target
                     {
-                        backdrop(Action::Backdrop);
+                        backdrop(Action::Press {
+                            at: pointer.position,
+                            picture: false,
+                        });
+                        return InputResponse {
+                            pointer_capture: aqua_ui::input::CaptureRequest::Capture,
+                            ..InputResponse::default()
+                        };
                     }
-                }
-                InputResponse::default()
-            })
-            .on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
-                if let RoutedInput::Native(InputEvent::PointerMove(pointer)) = &event.input {
-                    moving(Action::SwipeMove(pointer.position));
-                }
-                InputResponse::default()
-            })
-            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
+                    InputResponse::default()
+                })
+                .on_input(InputKind::Scroll, EventPhase::Bubble, move |event| {
+                    if let RoutedInput::Native(InputEvent::Scroll { at, delta }) = &event.input {
+                        zooming(Action::Zoom {
+                            at: *at,
+                            delta: delta.y,
+                            viewport,
+                        });
+                    }
+                    InputResponse {
+                        stop_propagation: true,
+                        ..InputResponse::handled()
+                    }
+                }),
+            &emit,
+            viewport,
+        )
+        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
                 if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input {
                     let action = match key.key {
                         Key::Named(NamedKey::Escape) => Some(Action::Close),
@@ -726,6 +777,38 @@ impl Preview {
                 InputResponse::default()
             })
     }
+}
+
+fn track(element: Element, emit: &Rc<dyn Fn(Action)>, viewport: Size) -> Element {
+    let dragging = Rc::clone(emit);
+    let releasing = Rc::clone(emit);
+    element
+        .on_input(InputKind::PointerMove, EventPhase::Bubble, move |event| {
+            if let RoutedInput::Native(InputEvent::PointerMove(pointer)) = &event.input {
+                dragging(Action::Drag {
+                    at: pointer.position,
+                    viewport,
+                });
+            }
+            InputResponse {
+                stop_propagation: true,
+                ..InputResponse::default()
+            }
+        })
+        .on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
+            if let RoutedInput::Native(InputEvent::PointerUp(pointer, PointerButton::Primary)) =
+                &event.input
+            {
+                releasing(Action::Release {
+                    at: pointer.position,
+                });
+            }
+            InputResponse {
+                stop_propagation: true,
+                pointer_capture: aqua_ui::input::CaptureRequest::Release,
+                ..InputResponse::default()
+            }
+        })
 }
 
 #[cfg(all(test, feature = "test-support"))]

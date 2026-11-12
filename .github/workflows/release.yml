@@ -302,7 +302,12 @@ jobs:
               if [[ ! -e "immutable-release/$stale" ]]; then gh release delete-asset nightly "$stale" --repo "$GITHUB_REPOSITORY" --yes; fi
             done
             gh release upload nightly "${rolling[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-            gh release edit nightly --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false --title "Artisan nightly $RELEASE_VERSION"
+            stable="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --exclude-drafts --json tagName --jq '[.[] | select(.tagName != "nightly")] | length')"
+            if [[ "$stable" == 0 ]]; then
+              gh release edit nightly --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest --title "Artisan nightly $RELEASE_VERSION"
+            else
+              gh release edit nightly --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false --title "Artisan nightly $RELEASE_VERSION"
+            fi
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" -f sha="$RELEASE_SHA" -F force=true
           else
             actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"

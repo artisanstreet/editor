@@ -1,4 +1,4 @@
-use super::list::{Lists, RowData};
+use super::list::{HitRow, Lists, RowData};
 use editor_ui::kit::{Density, Divider, Row, Space, Surface};
 
 pub const RAIL_WIDTH: f32 = 48.0;
@@ -35,6 +35,7 @@ pub fn history_height() -> f32 {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
     Thread(RowData, ThreadLayout),
+    Hit(HitRow),
     Project {
         id: artisan_api::ProjectId,
         label: String,
@@ -49,6 +50,7 @@ impl Entry {
     pub fn height(&self) -> f32 {
         match self {
             Self::Thread(_, layout) => layout.height(),
+            Self::Hit(_) => ThreadLayout::Standalone.height(),
             Self::Project { .. } | Self::Heading(_) => HEADING.height().unwrap_or_default(),
             Self::History => history_height(),
             Self::Gap(height) => *height,
@@ -82,6 +84,18 @@ pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
                 entries.push(Entry::Gap(ROW_GAP.px()));
             }
             entries.push(Entry::Thread(row.clone(), ThreadLayout::Grouped));
+        }
+    }
+    if !lists.hits.is_empty() {
+        if !entries.is_empty() {
+            entries.push(Entry::Gap(GROUP_GAP.px()));
+        }
+        entries.push(Entry::Heading("In messages"));
+        for (index, hit) in lists.hits.iter().enumerate() {
+            if index > 0 {
+                entries.push(Entry::Gap(ROW_GAP.px()));
+            }
+            entries.push(Entry::Hit(hit.clone()));
         }
     }
     if !lists.history.is_empty() {
@@ -176,6 +190,7 @@ pub fn entry_keys(entries: &[Entry]) -> Vec<String> {
     for (index, entry) in entries.iter().enumerate().rev() {
         keys[index] = match entry {
             Entry::Thread(row, _) => format!("thread:{}", row.id),
+            Entry::Hit(hit) => format!("hit:{}", hit.item),
             Entry::Project { id, .. } => format!("project:{id}"),
             Entry::History => "history".into(),
             Entry::Spacer => "spacer".into(),

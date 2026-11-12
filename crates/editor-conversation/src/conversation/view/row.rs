@@ -69,7 +69,7 @@ pub trait RowResources {
         theme: ArtisanTheme,
     ) -> Element;
     fn run_status(&self, text: status::StatusText, live: bool, theme: ArtisanTheme) -> Element;
-    fn agent_status(&self, text: &'static str, theme: ArtisanTheme) -> Element;
+    fn agent_status(&self, text: String, theme: ArtisanTheme) -> Element;
     fn compaction_frame(&self, item: &Item) -> CompactionFrame;
     fn compaction_label(
         &self,
@@ -275,7 +275,7 @@ pub fn render(
             resources.run_status(text, live, theme)
         }),
         Row::AgentResult(_) => None,
-        Row::AgentStatus(_, working) => status::agent(*working, theme, |text, theme| {
+        Row::AgentStatus(_, doing) => status::agent(doing.as_deref(), theme, |text, theme| {
             resources.agent_status(text, theme)
         }),
     };

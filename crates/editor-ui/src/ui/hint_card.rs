@@ -1,7 +1,9 @@
 use crate::ui::kit::{Space, Surface, TextRole, Tooltip};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_text::StyledSpan;
+use crate::ui::picker_motion::{DROPDOWN_CLOSE, DROPDOWN_OPEN};
 use aqua_ui::element::{Box as UiBox, Element, Text};
+use aqua_ui::motion::{Easing, Motion, Presence};
 use aqua_ui::style::{Length, Style};
 
 const WIDTH: f32 = 280.0;
@@ -54,4 +56,17 @@ pub fn hint_card(theme: &ArtisanTheme, title: &str, body: &[Phrase]) -> Element 
     Surface::Tooltip(Tooltip::Card)
         .build(theme, vec![content])
         .style(Style::new().width(Length::Px(WIDTH)))
+}
+
+#[must_use]
+pub fn presence() -> Presence {
+    Presence::new()
+        .enter(Motion::tween(
+            DROPDOWN_OPEN.as_secs_f64(),
+            Easing::SmoothOut,
+        ))
+        .exit(Motion::tween(
+            DROPDOWN_CLOSE.as_secs_f64(),
+            Easing::SmoothOut,
+        ))
 }

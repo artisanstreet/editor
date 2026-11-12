@@ -2364,7 +2364,7 @@ impl RowFactory {
                     .render(key.clone(), text, live, self.reduced_motion, theme)
             })
             .transpose()?,
-            Row::AgentStatus(_, working) => status::agent(*working, self.theme, |text, theme| {
+            Row::AgentStatus(_, doing) => status::agent(doing.as_deref(), self.theme, |text, theme| {
                 self.statuses
                     .borrow_mut()
                     .agent(key.clone(), text, self.reduced_motion, theme)

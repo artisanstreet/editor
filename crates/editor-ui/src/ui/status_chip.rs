@@ -90,7 +90,7 @@ pub fn chips_row(theme: &ArtisanTheme, chips: &[EngineChip], row_key: &str) -> E
             .build()
             .with_key(format!("marketplace-chip-{row_key}-{}", chip.key))
             .debug_selector(format!("marketplace-chip-{row_key}-{}", chip.key))
-            .tooltip(0.5, move || {
+            .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
                 Surface::Tooltip(Tooltip::Brief)
                     .build(
                         &t,

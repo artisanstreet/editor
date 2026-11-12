@@ -1,11 +1,15 @@
 #![cfg(test)]
 
+#[path = "shell/browser.rs"]
+mod browser;
 #[path = "shell/dialogs.rs"]
 mod dialogs;
 #[path = "shell/gating.rs"]
 mod gating;
 #[path = "shell/refresh.rs"]
 mod refresh;
+#[path = "shell/reveal.rs"]
+mod reveal;
 #[path = "shell/host.rs"]
 mod host;
 #[path = "shell/lifetime.rs"]

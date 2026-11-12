@@ -216,6 +216,17 @@ pub const SETTINGS: &[SettingDecl] = &[
         needs_approval: false,
     },
     SettingDecl {
+        key: "browser",
+        owner: SettingOwner::Editor,
+        kind: SettingKind::Text {
+            hint: "the name of an installed browser, such as \"Helium\" or \"Google Chrome\"; empty for the system default",
+        },
+        default: "\"\"",
+        label: "Browser",
+        description: "The browser \"Search with\" opens for selected text; empty uses the system default browser.",
+        needs_approval: false,
+    },
+    SettingDecl {
         key: "font_set",
         owner: SettingOwner::Editor,
         kind: SettingKind::Text {

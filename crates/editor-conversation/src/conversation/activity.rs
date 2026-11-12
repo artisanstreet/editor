@@ -367,6 +367,74 @@ pub fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
     Line { verb, object, code }
 }
 
+fn in_foreground(item: &Item) -> bool {
+    item.status == Status::Running
+        && match &item.kind {
+            ItemKind::Tool {
+                tool: ToolKind::Shell { background, .. },
+                ..
+            }
+            | ItemKind::Agent { background, .. } => !background,
+            ItemKind::Tool { .. } => true,
+            ItemKind::UserMessage { .. }
+            | ItemKind::AssistantMessage { .. }
+            | ItemKind::Question { .. }
+            | ItemKind::Plan { .. }
+            | ItemKind::Image { .. }
+            | ItemKind::Compaction { .. }
+            | ItemKind::Notice { .. }
+            | ItemKind::Error { .. } => false,
+        }
+}
+
+fn doing_one(item: &Item, agents: &HashMap<ItemId, String>) -> String {
+    match &item.kind {
+        ItemKind::Agent { .. } => format!(
+            "Waiting on {}",
+            item.agent_label().unwrap_or_else(|| "an agent".to_owned())
+        ),
+        ItemKind::Tool {
+            tool: ToolKind::Shell { .. },
+            title,
+            ..
+        } => title
+            .as_deref()
+            .map(first_line)
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Running a command".to_owned()),
+        ItemKind::UserMessage { .. }
+        | ItemKind::AssistantMessage { .. }
+        | ItemKind::Tool { .. }
+        | ItemKind::Question { .. }
+        | ItemKind::Plan { .. }
+        | ItemKind::Image { .. }
+        | ItemKind::Compaction { .. }
+        | ItemKind::Notice { .. }
+        | ItemKind::Error { .. } => {
+            let line = line(item, agents);
+            format!("{} {}", line.verb, line.object).trim().to_owned()
+        }
+    }
+}
+
+pub fn doing(items: &[&Item], agents: &HashMap<ItemId, String>) -> Option<String> {
+    let running: Vec<&Item> = items
+        .iter()
+        .copied()
+        .filter(|item| in_foreground(item))
+        .collect();
+    let all = |wanted: ActivityCategory| running.iter().all(|item| category(item) == Some(wanted));
+    match running.as_slice() {
+        [] => None,
+        [one] => Some(doing_one(one, agents)),
+        many if all(ActivityCategory::Command) => Some(format!("Running {} commands", many.len())),
+        many if all(ActivityCategory::Subagent) => {
+            Some(format!("Waiting on {} agents", many.len()))
+        }
+        many => Some(format!("Using {} tools", many.len())),
+    }
+}
+
 const ARTISAN: &str = "artisan";
 const THREAD_SEARCH: [&str; 4] = [
     "threads_search",

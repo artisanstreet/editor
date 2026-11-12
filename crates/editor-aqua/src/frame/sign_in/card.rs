@@ -366,6 +366,11 @@ fn field(
     busy: bool,
     submit: Rc<dyn Fn()>,
 ) -> Element {
+    keyed_field(theme, editor, continue_key(key, busy, submit))
+}
+
+#[must_use]
+pub fn keyed_field(theme: &ArtisanTheme, content: Element, key: Element) -> Element {
     let content = UiBox::new()
         .layout("column")
         .style(
@@ -373,7 +378,7 @@ fn field(
                 .min_height(Length::Px(KEY.edge() - 2.0 * FIELD.padding_px()))
                 .justify(JustifyContent::CENTER),
         )
-        .child(editor)
+        .child(content)
         .build();
     UiBox::new()
         .layout("row")
@@ -391,7 +396,7 @@ fn field(
                 .child(FIELD.build(theme, vec![content]))
                 .build(),
         )
-        .child(continue_key(key, busy, submit))
+        .child(key)
         .build()
 }
 
@@ -402,13 +407,9 @@ struct Key {
 }
 
 fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> Element {
-    let surface: Arc<str> = continue_surface().into();
     let arrow: Arc<str> = continue_arrow().into();
     let spinner: Arc<str> = continue_spinner(spin).into();
-    let edge = KEY.edge();
-    let surface_width = edge * 53.0 / 45.0;
-    let surface_height = edge * 49.0 / 45.0;
-    let glyph = edge * 2.0 / 3.0;
+    let glyph = KEY.edge() * 2.0 / 3.0;
     let icon = |source: Arc<str>, visible: f32, key: &'static str| {
         let scale = (1.0 - ICON_START).mul_add(visible, ICON_START);
         let center = glyph / 2.0;
@@ -440,6 +441,40 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
             .build()
             .with_key(key)
     };
+    let glyphs = UiBox::new()
+        .width(glyph)
+        .height(glyph)
+        .child(icon(arrow, 1.0 - swap, "artisan-sign-in-arrow"))
+        .child(icon(spinner, swap, "artisan-sign-in-spinner"))
+        .build();
+    field_key(
+        "artisan-sign-in-continue",
+        "Continue",
+        match busy {
+            true => CursorIcon::Progress,
+            false => CursorIcon::Pointer,
+        },
+        glyphs,
+        Rc::new(move || {
+            if !busy {
+                submit();
+            }
+        }),
+    )
+}
+
+#[must_use]
+pub fn field_key(
+    key: &'static str,
+    label: &'static str,
+    cursor: CursorIcon,
+    glyph: Element,
+    activate: Rc<dyn Fn()>,
+) -> Element {
+    let surface: Arc<str> = continue_surface().into();
+    let edge = KEY.edge();
+    let surface_width = edge * 53.0 / 45.0;
+    let surface_height = edge * 49.0 / 45.0;
     let face = Canvas::new()
         .style(
             Style::new()
@@ -457,14 +492,7 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
         })
         .build()
         .exclude_from_hit_testing();
-    let glyphs = UiBox::new()
-        .width(glyph)
-        .height(glyph)
-        .child(icon(arrow, 1.0 - swap, "artisan-sign-in-arrow"))
-        .child(icon(spinner, swap, "artisan-sign-in-spinner"))
-        .build()
-        .exclude_from_hit_testing();
-    let area = HitArea::new("artisan-sign-in-continue", Role::Button, "Continue")
+    let area = HitArea::new(key, Role::Button, label)
         .child(
             UiBox::new()
                 .style(
@@ -474,23 +502,17 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
                         .justify(JustifyContent::CENTER),
                 )
                 .child(face)
-                .child(glyphs)
+                .child(glyph.exclude_from_hit_testing())
                 .build(),
         )
-        .on_activate(move || {
-            if !busy {
-                submit();
-            }
-        })
-        .build();
+        .on_activate(move || activate())
+        .build()
+        .cursor(cursor);
     UiBox::new()
         .width(edge)
         .height(edge)
         .style(Style::new().flex_shrink(0.0))
-        .child(match busy {
-            true => area.cursor(CursorIcon::Progress),
-            false => area,
-        })
+        .child(area)
         .build()
 }
 

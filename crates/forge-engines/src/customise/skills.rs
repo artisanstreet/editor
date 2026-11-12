@@ -198,7 +198,14 @@ fn repository_root() -> Option<PathBuf> {
         .join("../../skills")
         .canonicalize()
         .ok()
+        .map(|root| without_verbatim_prefix(&root))
         .filter(|root| root.is_dir())
+}
+
+fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    path.to_str()
+        .and_then(|text| text.strip_prefix(r"\\?\"))
+        .map_or_else(|| path.to_path_buf(), PathBuf::from)
 }
 
 /// Every folder Forge links engines' skills to: links into them are Forge's.

@@ -8,7 +8,7 @@ use aqua_text::overflow::OverflowMode;
 use aqua_ui::element::{Box as UiBox, Element, Text};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
-use artisan_api::ThreadId;
+use artisan_api::{ItemId, ProjectId, ThreadId};
 use std::rc::Rc;
 
 pub const ROW: Row = Row::Heading;
@@ -26,6 +26,8 @@ pub use crate::sidebar::project_mark::Mark;
 
 pub struct Tab {
     pub id: ThreadId,
+    pub project: ProjectId,
+    pub trail: Vec<(ItemId, String)>,
     pub title: String,
     pub location: Option<String>,
     pub url: Option<String>,
@@ -53,10 +55,14 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
         false => theme.colors.text_muted,
     };
     let id = tab.id.clone();
-    let label = tab.location.as_ref().map_or_else(
-        || tab.title.clone(),
-        |location| format!("{location} / {}", tab.title),
-    );
+    let label = tab
+        .location
+        .iter()
+        .map(String::as_str)
+        .chain([tab.title.as_str()])
+        .chain(tab.trail.iter().map(|(_, name)| name.as_str()))
+        .collect::<Vec<_>>()
+        .join(" / ");
     let content = UiBox::new()
         .layout("row")
         .spaced(Space::S6)
@@ -73,12 +79,9 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
                 .as_ref()
                 .map(|location_label| location(theme, tab, location_label, Rc::clone(&emit))),
         )
-        .children(
-            tab.location
-                .as_ref()
-                .map(|_| words(TextRole::Label.text(theme, "/"), theme.colors.text_muted, false)),
-        )
-        .child(title(&tab.title, tab.state == RowState::Working && !reduced))
+        .children(tab.location.as_ref().map(|_| separator(theme)))
+        .child(thread(theme, tab, reduced, Rc::clone(&emit)))
+        .children(agents(theme, tab, &emit))
         .build();
     let row = RowItem::new(
         format!("artisan-tab-row-{}", tab.id),
@@ -137,11 +140,18 @@ fn location(
             .build()
             .aria_label(format!("Open {location_label}"))
         }
-        None => words(
-            TextRole::Label.text(theme, location_label.to_owned()),
-            theme.colors.text_muted,
-            false,
-        ),
+        None => {
+            let project = tab.project.clone();
+            Link::new(
+                "artisan-thread-project-link",
+                *theme,
+                LinkTone::Crumb,
+                location_label,
+            )
+            .on_activate(move || emit(Event::Navigate(Command::Project(project.clone()))))
+            .build()
+            .aria_label(format!("New thread in {location_label}"))
+        }
     };
     UiBox::new()
         .layout("row")
@@ -177,8 +187,48 @@ fn frame(text: Text, fill: bool) -> Element {
         .build()
 }
 
-fn title(words: &str, pulsing: bool) -> Element {
-    let label = frame(Text::new(words.to_owned()), true);
+fn separator(theme: &ArtisanTheme) -> Element {
+    words(TextRole::Label.text(theme, "/"), theme.colors.text_muted, false)
+}
+
+fn thread(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)>) -> Element {
+    let pulsing = tab.state == RowState::Working && !reduced;
+    match tab.trail.is_empty() {
+        true => title(frame(Text::new(tab.title.clone()), true), pulsing),
+        false => title(
+            Link::new("artisan-thread-crumb", *theme, LinkTone::Crumb, tab.title.clone())
+                .on_activate(move || emit(Event::Navigate(Command::Agent(None))))
+                .build()
+                .aria_label(format!("Open {}", tab.title)),
+            pulsing,
+        ),
+    }
+}
+
+fn agents(theme: &ArtisanTheme, tab: &Tab, emit: &Rc<dyn Fn(Event)>) -> Vec<Element> {
+    let last = tab.trail.len().saturating_sub(1);
+    tab.trail
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (agent, name))| {
+            let emit = Rc::clone(emit);
+            let target = agent.clone();
+            let crumb = Link::new(
+                format!("artisan-agent-crumb-{agent}"),
+                *theme,
+                LinkTone::Crumb,
+                name.clone(),
+            )
+            .current(index == last)
+            .on_activate(move || emit(Event::Navigate(Command::Agent(Some(target.clone())))))
+            .build()
+            .aria_label(format!("Open {name}"));
+            [separator(theme), crumb]
+        })
+        .collect()
+}
+
+fn title(label: Element, pulsing: bool) -> Element {
     match pulsing {
         true => UiBox::new()
             .layout("row")

@@ -30,6 +30,7 @@ pub struct RowData {
     pub state: RowState,
     pub selected: bool,
     pub settleable: bool,
+    pub matched: Vec<std::ops::Range<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +81,124 @@ pub struct HistoryGroup {
 pub struct Lists {
     pub inbox: Vec<RowData>,
     pub history: Vec<HistoryGroup>,
+    pub hits: Vec<HitRow>,
     pub next_tick: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HitRow {
+    pub thread: ThreadId,
+    pub item: artisan_api::ItemId,
+    pub position: artisan_api::Seq,
+    pub title: String,
+    pub snippet: String,
+    pub matched: std::ops::Range<usize>,
+    pub needle: String,
+    pub depth: (u32, u32),
+}
+
+impl HitRow {
+    #[must_use]
+    pub fn of(hit: &artisan_api::TextHit) -> Option<Self> {
+        let matched = hit.matched.0 as usize..hit.matched.1 as usize;
+        let needle = hit.snippet.get(matched.clone())?.to_owned();
+        Some(Self {
+            thread: hit.thread_id.clone(),
+            item: hit.item_id.clone(),
+            position: hit.position,
+            title: hit
+                .thread_title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| "New thread".to_owned()),
+            snippet: hit.snippet.clone(),
+            matched,
+            needle,
+            depth: (hit.offset.0, hit.length),
+        })
+    }
+}
+
+fn marked(title: &str, mut bytes: Vec<usize>) -> Vec<std::ops::Range<usize>> {
+    bytes.sort_unstable();
+    bytes.dedup();
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for byte in bytes {
+        let start = (0..=byte)
+            .rev()
+            .find(|at| title.is_char_boundary(*at))
+            .unwrap_or(0);
+        let end = (byte + 1..=title.len())
+            .find(|at| title.is_char_boundary(*at))
+            .unwrap_or(title.len());
+        match ranges.last_mut() {
+            Some(last) if start <= last.end => last.end = last.end.max(end),
+            _ => ranges.push(start..end),
+        }
+    }
+    ranges
+}
+
+impl Lists {
+    #[must_use]
+    pub fn searched(self, query: &str) -> Self {
+        use neo_frizbee::{Config, match_list_indices};
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if words.is_empty() {
+            return self;
+        }
+        let rows: Vec<RowData> = self
+            .inbox
+            .into_iter()
+            .chain(self.history.into_iter().flat_map(|group| group.rows))
+            .collect();
+        let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+        let labels: Vec<&str> = rows.iter().map(|row| row.subtitle.as_str()).collect();
+        let config = Config {
+            max_typos: Some(0),
+            sort: false,
+            ..Config::default()
+        };
+        let mut hits = vec![0_usize; rows.len()];
+        let mut scores = vec![0_u32; rows.len()];
+        let mut bytes: Vec<Vec<usize>> = vec![Vec::new(); rows.len()];
+        for word in &words {
+            let mut found = vec![false; rows.len()];
+            for hit in match_list_indices(word, &titles, &config) {
+                let row = hit.index as usize;
+                found[row] = true;
+                scores[row] += u32::from(hit.score);
+                bytes[row].extend(hit.indices);
+            }
+            for hit in match_list_indices(word, &labels, &config) {
+                let row = hit.index as usize;
+                if !std::mem::replace(&mut found[row], true) {
+                    scores[row] += u32::from(hit.score) / 2;
+                }
+            }
+            for (row, found) in found.into_iter().enumerate() {
+                hits[row] += usize::from(found);
+            }
+        }
+        let mut ranked: Vec<(u32, RowData)> = rows
+            .into_iter()
+            .zip(hits)
+            .zip(scores)
+            .zip(bytes)
+            .filter(|(((_, hits), _), _)| *hits == words.len())
+            .map(|(((row, _), score), bytes)| {
+                let matched = marked(&row.title, bytes);
+                (score, RowData { matched, ..row })
+            })
+            .collect();
+        ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        Self {
+            inbox: ranked.into_iter().map(|(_, row)| row).collect(),
+            history: Vec::new(),
+            hits: self.hits,
+            next_tick: self.next_tick,
+        }
+    }
 }
 
 pub const fn listed(thread: &Thread) -> bool {
@@ -141,6 +259,7 @@ pub fn lists(host: &impl HostSnapshot, open: Option<&ThreadId>, now: Timestamp) 
             state,
             selected: open == Some(&thread.id),
             settleable: inbox && !live,
+            matched: Vec::new(),
         };
         let group = AgeGroup::of(elapsed);
         if let Some(bound) = group.upper_bound() {

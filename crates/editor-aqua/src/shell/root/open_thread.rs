@@ -34,7 +34,7 @@ impl RootViews {
         if let Some(landing) = shell
             .entry
             .workspace()
-            .and_then(|workspace| workspace.conversation.landing)
+            .and_then(|workspace| workspace.conversation.landing_deadline())
             .filter(|landing| *landing > now)
         {
             ctx.request_animation_deadline(

@@ -30,6 +30,7 @@ fn production_thread_visuals_ellipsize_and_scope_working_pulse() {
         state: RowState::Working,
         selected: false,
         settleable: false,
+        matched: Vec::new(),
     };
     let factory = sidebar.thread_visual_factory(ArtisanTheme::resolved(), false);
     let visuals = factory(&row, None, None);

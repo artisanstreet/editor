@@ -877,6 +877,33 @@ impl Workspace {
         }
     }
 
+    pub fn composer_image(
+        &self,
+        key: u64,
+    ) -> Option<(
+        crate::core::HostId,
+        crate::core::HostInstance,
+        aqua::images::ImageHandle,
+        String,
+    )> {
+        let (target, instance) = self.composer_target.as_ref()?;
+        let composer = self.composer.as_ref()?.controller.borrow();
+        let image = composer
+            .attachments
+            .as_ref()?
+            .items
+            .iter()
+            .find(|image| image.key == key)?
+            .preview
+            .clone()?;
+        Some((
+            target.host().clone(),
+            (*instance)?,
+            image,
+            format!("composer-attachment-{key}"),
+        ))
+    }
+
     pub fn take_composer_effects(&mut self) -> Vec<crate::composer::view::ComposerEffect> {
         std::mem::take(&mut self.composer_effects)
     }

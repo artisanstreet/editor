@@ -183,7 +183,7 @@ fn context(theme: &ArtisanTheme, reading: &ContextReading) -> Element {
         crate::ui::progress::HEIGHT,
     ))
     .build()
-    .tooltip(0.5, move || {
+    .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
         hint_card(
             &theme,
             "Context Window",
@@ -250,7 +250,9 @@ fn subagent(
     )
     .on_activate(move || emit(open.clone()))
     .build()
-    .tooltip(0.5, move || render_agent_card(&tooltip, theme))
+    .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
+        render_agent_card(&tooltip, theme)
+    })
 }
 
 fn body() -> Style {

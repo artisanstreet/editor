@@ -110,6 +110,101 @@ fn state_dot(color: editor_ui::theme::Oklch) -> aqua_ui::element::Element {
         .build()
 }
 
+pub fn marked_text(
+    theme: &editor_ui::theme::ArtisanTheme,
+    text: &str,
+    matched: &[std::ops::Range<usize>],
+    role: TextRole,
+    color: editor_ui::theme::Oklch,
+    selector: String,
+) -> aqua_ui::element::Element {
+    use editor_ui::chrome::card::{POLAR_BLUE, POLAR_INK};
+    let style = role.style(theme);
+    let channels = |color: editor_ui::theme::Oklch| {
+        let color = color.to_reference_text_color();
+        [
+            color.hue_degrees,
+            color.saturation,
+            color.lightness,
+            color.alpha,
+        ]
+    };
+    let mark = POLAR_BLUE.to_reference_paint();
+    let plain = |text: &str| {
+        aqua_text::StyledSpan::new(text, style.clone()).gpui_source_color(channels(color))
+    };
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for range in matched {
+        let Some(marked) = text.get(range.clone()).filter(|_| range.start >= at) else {
+            continue;
+        };
+        if range.start > at {
+            spans.push(plain(&text[at..range.start]));
+        }
+        spans.push(
+            aqua_text::StyledSpan::new(marked, style.clone())
+                .gpui_source_color(channels(POLAR_INK))
+                .gpui_background([mark.h, mark.s, mark.l, mark.a]),
+        );
+        at = range.end;
+    }
+    if at < text.len() {
+        spans.push(plain(&text[at..]));
+    }
+    role.text(theme, text.to_owned())
+        .spans(spans)
+        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+        .style(
+            aqua_ui::style::Style::new()
+                .min_width(aqua_ui::style::Length::Px(0.0))
+                .flex_shrink(1.0),
+        )
+        .build()
+        .debug_selector(selector)
+}
+
+pub fn hit(
+    theme: editor_ui::theme::ArtisanTheme,
+    data: &super::list::HitRow,
+    activate: impl Fn() + 'static,
+) -> aqua_ui::element::Element {
+    use aqua_ui::element::Box as UiBox;
+    use aqua_ui::style::{Length, Style};
+    use editor_ui::kit::RowItem;
+    let selector = format!("sidebar-hit-{}", data.item);
+    let body = UiBox::new()
+        .layout("column")
+        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+        .child(marked_text(
+            &theme,
+            &data.snippet,
+            std::slice::from_ref(&data.matched),
+            TextRole::Label,
+            theme.colors.text,
+            format!("{selector}-snippet"),
+        ))
+        .child(
+            TextRole::Caption
+                .text(&theme, data.title.clone())
+                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+                .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
+                .build(),
+        )
+        .build();
+    RowItem::new(
+        selector,
+        theme,
+        super::geometry::ThreadLayout::Standalone.row(),
+        super::geometry::LIST,
+        format!("{} in {}", data.snippet, data.title),
+    )
+    .body(body)
+    .on_activate(activate)
+    .build()
+}
+
 pub fn visual_factory(
     theme: editor_ui::theme::ArtisanTheme,
     reduced_motion: bool,
@@ -124,12 +219,22 @@ pub fn visual_factory(
             theme.colors.text
         };
         let selector = format!("sidebar-thread-{}", data.id);
-        let title = truncate(
-            data.title.clone(),
-            TextRole::Label,
-            title_color.to_reference_text_color(),
-            format!("{selector}-title"),
-        );
+        let title = match data.matched.is_empty() {
+            true => truncate(
+                data.title.clone(),
+                TextRole::Label,
+                title_color.to_reference_text_color(),
+                format!("{selector}-title"),
+            ),
+            false => marked_text(
+                &theme,
+                &data.title,
+                &data.matched,
+                TextRole::Label,
+                title_color,
+                format!("{selector}-title"),
+            ),
+        };
         let subtitle = truncate(
             data.subtitle.clone(),
             TextRole::Caption,

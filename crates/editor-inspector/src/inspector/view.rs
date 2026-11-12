@@ -365,7 +365,9 @@ fn agent_row(
         })
     })
     .build()
-    .tooltip(0.5, move || render_agent_card(&card, theme))
+    .tooltip_with(0.5, editor_ui::hint_card::presence(), move || {
+        render_agent_card(&card, theme)
+    })
 }
 
 fn plan_row(

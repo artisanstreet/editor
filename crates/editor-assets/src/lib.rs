@@ -546,6 +546,7 @@ catalog! {
     (TABLER_MOON, "tabler.moon", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/moon.svg"),
     (TABLER_PALETTE, "tabler.palette", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/palette.svg"),
     (TABLER_PENCIL, "tabler.pencil", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/pencil.svg"),
+    (TABLER_PENCIL_PLUS, "tabler.pencil-plus", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/pencil-plus.svg"),
     (TABLER_PLAYER_PAUSE_FILLED, "tabler.player-pause-filled", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/player-pause-filled.svg"),
     (TABLER_PLAYER_PLAY, "tabler.player-play", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/player-play.svg"),
     (TABLER_PLAYER_PLAY_FILLED, "tabler.player-play-filled", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/player-play-filled.svg"),
