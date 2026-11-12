@@ -203,6 +203,7 @@ pub const POLAR_SKY: Oklch = Oklch::new(0.6765, 0.0862, 251.28);
 pub const POLAR_BLUE: Oklch = Oklch::new(0.4695, 0.1143, 260.44);
 pub const POLAR_NAVY: Oklch = Oklch::new(0.339, 0.1106, 266.41);
 pub const POLAR_EDGE: Oklch = Oklch::new(0.2214, 0.0814, 267.91);
+pub const POLAR_SHADE: Oklch = Oklch::new(0.1727, 0.0635, 267.91);
 pub const POLAR_HIGHLIGHT: Oklch = Oklch::new(0.9369, 0.031, 252.69);
 pub const POLAR_INK: Oklch = Oklch::new(1.0, 0.0, 0.0);
 
