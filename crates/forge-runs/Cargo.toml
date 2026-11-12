@@ -22,6 +22,8 @@ tokio-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 tracing.workspace = true
+dirs.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 futures.workspace = true

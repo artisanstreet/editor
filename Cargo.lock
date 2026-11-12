@@ -2189,6 +2189,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "artisan-api",
+ "dirs",
  "forge-content",
  "forge-engines",
  "forge-store",
@@ -2201,6 +2202,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",

@@ -673,77 +673,31 @@ struct ResourceQuery {
     from_home: bool,
 }
 
-/// Relative agent resources resolve on their Forge, never on the paired client.
 async fn resource(
     AppState(app): AppState<App>,
     Path(id): Path<String>,
     Query(query): Query<ResourceQuery>,
 ) -> Result<Bytes> {
-    use tokio::io::AsyncReadExt as _;
-    const LIMIT: usize = 128 * 1024 * 1024;
+    use forge_runs::resources::{ResourceError, Written};
     let thread = app
         .hub
         .store()
         .thread(&ThreadId(id.clone()))
         .await?
         .ok_or_else(|| not_found(format!("thread {id}")))?;
-    let path = if query
-        .path
-        .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
-    {
-        url::Url::parse(&query.path)
-            .map_err(|error| bad_request(error.into()))?
-            .to_file_path()
-            .map_err(|()| bad_request(anyhow::anyhow!("Invalid file URI for this Forge host.")))?
-    } else {
-        std::path::PathBuf::from(&query.path)
+    let written = Written {
+        path: query.path,
+        from_home: query.from_home,
     };
-    let path = if query.from_home {
-        dirs::home_dir()
-            .ok_or_else(|| bad_request(anyhow::anyhow!("Forge has no home directory")))?
-            .join(path)
-    } else if path.is_absolute() {
-        path
-    } else {
-        app.hub.thread_folder(&thread).await?.join(path)
-    };
-    // Reject directories, devices and FIFOs before open. Opening a FIFO can
-    // otherwise wait indefinitely for a writer before the byte limit applies.
-    let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            not_found(query.path.clone())
-        } else {
-            Failure::from(anyhow::Error::from(error))
-        }
-    })?;
-    if !metadata.is_file() || metadata.len() > LIMIT as u64 {
-        return Err(bad_request(anyhow::anyhow!(
-            "resource must be a regular file no larger than 128 MiB"
-        )));
-    }
-    let file = tokio::fs::File::open(&path).await.map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            not_found(query.path)
-        } else {
-            Failure::from(anyhow::Error::from(error))
-        }
-    })?;
-    let metadata = file.metadata().await.map_err(anyhow::Error::from)?;
-    if !metadata.is_file() || metadata.len() > LIMIT as u64 {
-        return Err(bad_request(anyhow::anyhow!(
-            "resource must be a regular file no larger than 128 MiB"
-        )));
-    }
-    let mut bytes = Vec::new();
-    file.take((LIMIT + 1) as u64)
-        .read_to_end(&mut bytes)
+    app.hub
+        .read_resource(&thread, &written)
         .await
-        .map_err(anyhow::Error::from)?;
-    if bytes.len() > LIMIT {
-        return Err(bad_request(anyhow::anyhow!("resource exceeds 128 MiB")));
-    }
-    Ok(Bytes::from(bytes))
+        .map(Bytes::from)
+        .map_err(|error| match error {
+            ResourceError::Missing => not_found(written.path),
+            ResourceError::Refused(reason) => bad_request(anyhow::anyhow!(reason)),
+            ResourceError::Failed(error) => Failure::from(error),
+        })
 }
 
 async fn send_message(
@@ -791,7 +745,12 @@ async fn editor_reply(
     Path(id): Path<String>,
     Json(reply): Json<artisan_api::EditorReply>,
 ) -> StatusCode {
-    if app.hub.answer_distributed_editor_call(&id, reply).await.unwrap_or(false) {
+    if app
+        .hub
+        .answer_distributed_editor_call(&id, reply)
+        .await
+        .unwrap_or(false)
+    {
         StatusCode::NO_CONTENT
     } else {
         // Another Editor answered first, or the call gave up waiting.
