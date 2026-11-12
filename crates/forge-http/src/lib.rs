@@ -464,6 +464,9 @@ async fn remove_inactive_threads(hub: Hub, store: Store, shutdown: CancellationT
         if let Err(error) = store.gc_blobs().await {
             tracing::warn!("collect unreferenced blobs: {error:#}");
         }
+        if let Err(error) = store.gc_resource_snapshots().await {
+            tracing::warn!("collect resource snapshots of removed threads: {error:#}");
+        }
         tokio::select! {
             () = shutdown.cancelled() => return,
             () = tokio::time::sleep(std::time::Duration::from_hours(1)) => {}

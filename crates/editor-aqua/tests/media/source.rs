@@ -43,7 +43,8 @@ async fn media_paths_fetch_through_captured_thread_scope() {
     let fetcher = MediaFetcher::new("thread-a", move |request| {
         captured.lock().unwrap().push(request);
         Box::pin(async { Ok(Arc::<[u8]>::from([1, 2, 3])) })
-    });
+    })
+    .showing("item-7");
     let source = MediaSource::from("~/asset.png".to_owned());
     let bytes = load_image_bytes(
         &source,
@@ -53,13 +54,29 @@ async fn media_paths_fetch_through_captured_thread_scope() {
     .await
     .unwrap();
     assert_eq!(bytes.bytes.as_ref(), &[1, 2, 3]);
+    let through_provider = fetcher.provider().fetch(MediaRequest {
+        scope: "thread-a".into(),
+        path: "model.glb".into(),
+        from_home: false,
+        item: None,
+    });
+    through_provider.await.unwrap();
     assert_eq!(
         *requests.lock().unwrap(),
-        vec![MediaRequest {
-            scope: "thread-a".into(),
-            path: "asset.png".into(),
-            from_home: true
-        }]
+        vec![
+            MediaRequest {
+                scope: "thread-a".into(),
+                path: "asset.png".into(),
+                from_home: true,
+                item: Some("item-7".into()),
+            },
+            MediaRequest {
+                scope: "thread-a".into(),
+                path: "model.glb".into(),
+                from_home: false,
+                item: Some("item-7".into()),
+            },
+        ]
     );
 }
 

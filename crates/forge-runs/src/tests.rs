@@ -9,12 +9,16 @@ mod activity;
 mod cancellation;
 #[path = "../tests/coordination/notifications.rs"]
 mod coordination;
-#[path = "../tests/runtime/registry.rs"]
-mod runtime_registry;
 #[path = "../tests/disk/guard.rs"]
 mod disk_guard;
 #[path = "../tests/run/mcp_reach.rs"]
 mod mcp_reach_tests;
+#[path = "../tests/resources/paths.rs"]
+mod resource_paths;
+#[path = "../tests/resources/snapshot.rs"]
+mod resource_snapshots;
+#[path = "../tests/runtime/registry.rs"]
+mod runtime_registry;
 use artisan_api::{
     ApprovalRequest, CreateProject, CreateThread, Decision, EngineConfig, ItemsQuery, Permissions,
     Phase, ProjectId, RunStatus, ToolKind,

@@ -79,7 +79,7 @@ impl ResourcePreview {
             Some(tokio_util::task::AbortOnDropHandle::new(
                 crate::core::runtime::runtime().spawn(async move {
                     let result = client
-                        .resource(&thread, &fetch_path, false)
+                        .resource(&thread, &fetch_path, false, None)
                         .await
                         .map_err(|error| format!("Couldn't read this resource: {error:#}"))
                         .and_then(|bytes| {

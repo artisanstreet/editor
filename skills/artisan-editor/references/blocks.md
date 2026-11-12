@@ -224,7 +224,19 @@ draw labelled rules (a deadline, "today", an incident).
 ## Images, models, and audio
 
 Every `src` is a path relative to the project, an absolute path, a
-`file://` URI, or an `http(s)` URL (images only).
+`file://` URI, or an `http(s)` URL (images only). Paths are read on the
+machine Forge runs on. When Forge runs inside WSL, Windows paths such as
+`D:/shots/a.png` and `\\wsl.localhost\Ubuntu\tmp\a.png` are found too.
+
+Local files are copied when the reply finishes (up to 32 MiB each), so the
+reply keeps showing them after the file is deleted or overwritten. The file
+must exist by then: write it before you end the reply.
+
+Images can be PNG, JPEG, WebP, GIF, BMP, TIFF, ICO, AVIF, HEIC, or SVG, in
+any of these as written to disk: never convert one to another just to show
+it. The format is read from the file's content, not its extension. A file
+may be up to 128 MiB, 65,535 px on a side, and 128 megapixels; larger images
+are scaled to the size they are shown at, up to 8192 px.
 
 ### image
 

@@ -11,6 +11,7 @@ pub struct MediaRequest {
     pub scope: String,
     pub path: String,
     pub from_home: bool,
+    pub item: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -48,6 +49,7 @@ impl MediaBytes {
 #[derive(Clone)]
 pub struct MediaFetcher {
     scope: String,
+    item: Option<Arc<str>>,
     owner: Arc<[u64]>,
     revision: u64,
     fetch: Arc<dyn Fn(MediaRequest) -> MediaFetch + Send + Sync>,
@@ -61,6 +63,7 @@ impl MediaFetcher {
     ) -> Self {
         Self {
             scope: scope.into(),
+            item: None,
             owner: Arc::from([]),
             revision: 0,
             fetch: Arc::new(fetch),
@@ -75,6 +78,11 @@ impl MediaFetcher {
     pub fn owned_by(mut self, owner: &[u64], revision: u64) -> Self {
         self.owner = Arc::from(owner);
         self.revision = revision;
+        self
+    }
+
+    pub fn showing(mut self, item: &str) -> Self {
+        self.item = Some(Arc::from(item));
         self
     }
 
@@ -114,10 +122,16 @@ impl MediaFetcher {
     }
 
     pub fn provider(&self) -> MediaProvider {
+        let (item, fetch) = (self.item.clone(), Arc::clone(&self.fetch));
         MediaProvider {
             scope: self.scope.clone(),
             owner: self.resources.id(),
-            fetch: Arc::clone(&self.fetch),
+            fetch: Arc::new(move |request| {
+                fetch(MediaRequest {
+                    item: request.item.or_else(|| item.clone()),
+                    ..request
+                })
+            }),
         }
     }
 }
@@ -340,6 +354,7 @@ pub async fn load_image_bytes(
                     scope: fetcher.scope.clone(),
                     path: path.clone(),
                     from_home: *from_home,
+                    item: fetcher.item.clone(),
                 })
                 .await
                 .map_err(MediaLoadError::Fetch)
