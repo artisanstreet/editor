@@ -57,6 +57,10 @@ const EVENT_CAPACITY: usize = 8192;
 const READ_SLOTS: usize = 4;
 const SCAN_SLOTS: usize = 2;
 const READERS_KEPT: usize = READ_SLOTS + SCAN_SLOTS;
+const WRITER_CACHE_KIB: i64 = 32 * 1024;
+const WAL_BACKSTOP_PAGES: i64 = 16 * 1024;
+const CHECKPOINT_AFTER_COMMITS: u64 = 512;
+const CHECKPOINT_AFTER: Duration = Duration::from_secs(15);
 const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -151,6 +155,13 @@ pub struct Store {
 struct Inner {
     #[cfg(feature = "qualification")]
     writer: std::thread::JoinHandle<()>,
+    #[cfg(feature = "qualification")]
+    checkpointer: std::thread::JoinHandle<()>,
+    #[cfg_attr(
+        not(feature = "qualification"),
+        expect(dead_code, reason = "dropping it stops the checkpointer")
+    )]
+    checkpoints: std::sync::mpsc::Sender<()>,
     jobs: mpsc::Sender<Job>,
     events: broadcast::Sender<Envelope>,
     local_live: broadcast::Sender<Envelope>,
@@ -236,6 +247,8 @@ impl Store {
             );
         }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)?;
+        conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)?;
         if recover {
             schema::migrate(&mut conn)?;
         }
@@ -243,11 +256,13 @@ impl Store {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let head = Arc::new(AtomicU64::new(0));
         let hot = Arc::new(hot::HotPages::default());
+        let commits = Arc::new(AtomicU64::new(0));
         let mut writer = Writer::new(
             conn,
             Arc::clone(&head),
             recover.then(|| events.clone()),
             Arc::clone(&hot),
+            Arc::clone(&commits),
         )?;
         if recover {
             writer
@@ -263,12 +278,23 @@ impl Store {
         #[cfg(not(feature = "qualification"))]
         drop(writer_thread);
 
-        // Warm the bounded read pool.
+        let (checkpoints, stopped) = std::sync::mpsc::channel();
+        let checkpoint_conn = open_database(&database)?;
+        let checkpointer_thread = std::thread::Builder::new()
+            .name("forge-store-checkpoint".into())
+            .spawn(move || checkpoint_when_due(&checkpoint_conn, &commits, &stopped))
+            .context("spawn the store checkpointer")?;
+        #[cfg(not(feature = "qualification"))]
+        drop(checkpointer_thread);
+
         let first_reader = open_database(&database)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 #[cfg(feature = "qualification")]
                 writer: writer_thread,
+                #[cfg(feature = "qualification")]
+                checkpointer: checkpointer_thread,
+                checkpoints,
                 jobs,
                 events,
                 local_live: broadcast::channel(EVENT_CAPACITY).0,
@@ -301,6 +327,8 @@ impl Store {
         let Inner {
             jobs,
             writer,
+            checkpoints,
+            checkpointer,
             readers,
             devices,
             ..
@@ -311,6 +339,10 @@ impl Store {
         writer
             .join()
             .map_err(|_panic| anyhow!("Forge store writer panicked"))?;
+        drop(checkpoints);
+        checkpointer
+            .join()
+            .map_err(|_panic| anyhow!("Forge store checkpointer panicked"))?;
         Ok(())
     }
 
@@ -496,6 +528,34 @@ impl Inner {
             readers.push(conn);
         }
         result
+    }
+}
+
+fn checkpoint_when_due(
+    conn: &Connection,
+    commits: &AtomicU64,
+    stopped: &std::sync::mpsc::Receiver<()>,
+) {
+    let mut checkpointed = commits.load(Ordering::Acquire);
+    let mut waiting_since = None;
+    while matches!(
+        stopped.recv_timeout(Duration::from_secs(1)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ) {
+        let committed = commits.load(Ordering::Acquire);
+        let pending = committed.saturating_sub(checkpointed);
+        if pending == 0 {
+            continue;
+        }
+        let since = *waiting_since.get_or_insert_with(std::time::Instant::now);
+        if pending < CHECKPOINT_AFTER_COMMITS && since.elapsed() < CHECKPOINT_AFTER {
+            continue;
+        }
+        if let Err(error) = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_row| Ok(())) {
+            tracing::warn!("checkpoint the store: {error:#}");
+        }
+        checkpointed = committed;
+        waiting_since = None;
     }
 }
 
