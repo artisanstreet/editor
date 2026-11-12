@@ -1,30 +1,33 @@
-use crate::ui::chrome::card::{
-    self, POLAR_BLUE, POLAR_EDGE, POLAR_HAZE, POLAR_HIGHLIGHT, POLAR_INK, POLAR_NAVY, POLAR_SKY, Surfaces as Palette, hex,
-    outlined, radial_glow, rest_shadows,
-};
 use crate::frame::sign_in::model::{Feedback, Link, Provider, View, page_of};
 use crate::frame::sign_in::{
     CODE_PAGE, EMAIL_PAGE, Event, PAGE, REVEAL, SWAP, SignIn, Slot, pattern,
 };
-use crate::ui::theme::{ArtisanTheme, Oklch};
-use aqua::{Aqua, ShadowLayer, Style, pct, px};
-use aqua_core::{
-    CursorIcon, DisplayItem, GpuiBackground, ImageRef, Insets, Role, Transform2D, image::ImageFit,
+use crate::ui::chrome::card::{
+    POLAR_BLUE, POLAR_EDGE, POLAR_HAZE, POLAR_HIGHLIGHT, POLAR_INK, POLAR_NAVY, POLAR_SHADE, POLAR_SKY,
+    hex,
 };
-use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
-use aqua_ui::element::{Element, Media};
+use crate::ui::kit::surface::{self, Tone, tint};
+use crate::ui::kit::{
+    Divider, HitArea, IconSize, Inset, Key as KitKey, KeyFace, KeySize, Radius, Space, Spaced, Surface,
+    TextRole,
+};
+use crate::ui::theme::{ArtisanTheme, Oklch};
+use aqua_core::{CursorIcon, DisplayItem, ImageRef, Role, Transform2D, image::ImageFit};
+use aqua_text::StyledSpan;
+use aqua_ui::element::{Box as UiBox, Canvas, Element, Media};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
-use aqua_ui::{AlignItems, AlignSelf, JustifyContent};
+use aqua_ui::style::{Length, Style};
+use aqua_ui::{AlignItems, JustifyContent};
 use editor_assets::AssetId;
 use std::{rc::Rc, sync::Arc, time::Instant};
 
 pub const WIDTH: f32 = 400.0;
-const INSET: f32 = 8.0;
-const OUTER_RADIUS: f32 = card::RADIUS;
-const FIELD_INSET: f32 = 16.0;
-const FIELD_RADIUS: f32 = 0.4 * 16.0;
-const FIELD_HEIGHT: f32 = 36.0;
-const HEADER_PADDING: f32 = 24.0;
+const CARD: Surface = Surface::Card;
+const INNER: Surface = Surface::Inset;
+const FIELD: Surface = Surface::Field;
+const KEY: KeySize = KeySize::Lg;
+const CARD_GAP: Inset = Inset::Frame;
+const PAGE_PAD: Space = Space::S12;
 const WORDMARK_HEIGHT: f32 = 72.0;
 const WORDMARK_WIDTH: f32 = WORDMARK_HEIGHT * 136.675 / 225.15;
 const SLIDE: f32 = 8.0;
@@ -33,12 +36,7 @@ const ICON_BLUR: f32 = 2.0;
 const ICON_START: f32 = 0.25;
 const FEEDBACK_SHIFT: f32 = 4.0;
 const FEEDBACK_BLUR: f32 = 2.0;
-
-const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
-const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
-const LINK: Oklch = Oklch::new(0.676, 0.075, 250.22);
-const ERROR: Oklch = Oklch::new(0.66, 0.2, 22.0);
-const SUCCESS: Oklch = Oklch::new(0.74, 0.17, 152.0);
+const PATTERN_ALPHA: f32 = 0.02;
 
 const GOOGLE: &str = include_str!("providers/google.svg");
 const GITHUB: &str = include_str!("providers/github.svg");
@@ -56,52 +54,61 @@ pub struct Props<'a> {
 
 #[must_use]
 pub fn card(theme: &ArtisanTheme, props: Props<'_>) -> Element {
-    let palette = Palette::of(theme);
-    let art = props.sign_in.art();
-    let header = Aqua::Box()
-        .layout("row")
-        .styles([Aqua::Style()
-            .padding(px(HEADER_PADDING))
-            .gap(HEADER_PADDING)
-            .align(AlignItems::START)
-            .justify(JustifyContent::SPACE_BETWEEN)])
-        .child(wordmark(palette.ink))
-        .child(artwork(art))
-        .build();
-    let inner = card::inset(theme, vec![pattern_layer(&palette), pages(theme, &palette, props)]);
-    let stack = Aqua::Box()
+    let header = header(AlignItems::START, vec![wordmark(theme), artwork(props.sign_in.art())]);
+    let inner = vec![pattern_layer(theme), pages(theme, props)];
+    UiBox::new()
         .layout("column")
-        .styles([Aqua::Style().flex_grow(1.0)])
-        .child(header)
-        .child(
-            Aqua::Box()
-                .layout("column")
-                .styles([Aqua::Style().margin_insets(Insets {
-                    left: INSET,
-                    right: INSET,
-                    bottom: INSET,
-                    ..Insets::default()
-                })])
-                .child(inner)
-                .build(),
-        )
-        .build();
-    Aqua::Box()
-        .layout("column")
-        .styles([Aqua::Style().width(px(WIDTH))])
-        .child(outlined(palette.ink, palette.bg, OUTER_RADIUS, rest_shadows(), vec![stack]))
+        .width(WIDTH)
+        .child(framed(theme, header, inner))
         .build()
         .with_key("artisan-sign-in-card")
 }
 
-fn wordmark(ink: Oklch) -> Element {
+#[must_use]
+pub fn header(align: AlignItems, children: Vec<Element>) -> Element {
+    UiBox::new()
+        .layout("row")
+        .padded(Space::S16)
+        .spaced(Space::S24)
+        .style(
+            Style::new()
+                .align(align)
+                .justify(JustifyContent::SPACE_BETWEEN),
+        )
+        .children(children)
+        .build()
+}
+
+#[must_use]
+pub fn framed(theme: &ArtisanTheme, header: Element, inner: Vec<Element>) -> Element {
+    let stack = UiBox::new()
+        .layout("column")
+        .spaced(Space::from(CARD_GAP))
+        .child(header)
+        .child(INNER.build(theme, inner))
+        .build();
+    CARD.build(theme, vec![stack])
+}
+
+#[must_use]
+pub fn body(content: Vec<Element>) -> UiBox {
+    UiBox::new()
+        .layout("column")
+        .padded(PAGE_PAD)
+        .children(content)
+}
+
+#[must_use]
+pub fn wordmark(theme: &ArtisanTheme) -> Element {
     let source: Arc<str> = editor_assets::get(AssetId::ARTISAN_WORDMARK_STACKED).source.into();
-    let tint = ink.to_reference_paint();
-    Aqua::Canvas()
-        .styles([Aqua::Style()
-            .width(px(WORDMARK_WIDTH))
-            .height(px(WORDMARK_HEIGHT))
-            .flex_shrink(0.0)])
+    let tint = theme.colors.text.to_reference_paint();
+    Canvas::new()
+        .style(
+            Style::new()
+                .width(Length::Px(WORDMARK_WIDTH))
+                .height(Length::Px(WORDMARK_HEIGHT))
+                .flex_shrink(0.0),
+        )
         .on_paint(move |bounds| {
             vec![DisplayItem::GpuiSvg {
                 bounds,
@@ -116,24 +123,21 @@ fn wordmark(ink: Oklch) -> Element {
 }
 
 fn artwork(art: Option<Arc<aqua::images::ImageHandle>>) -> Element {
-    let frame = Aqua::Box().styles([Aqua::Style()
-        .width(px(crate::frame::sign_in::ART_BOX.0))
-        .height(px(crate::frame::sign_in::ART_BOX.1))
-        .flex_shrink(0.0)
-        .align_self(AlignSelf::END)
-        .margin_insets(Insets {
-            right: -HEADER_PADDING,
-            bottom: -HEADER_PADDING,
-            ..Insets::default()
-        })]);
+    let (width, height) = crate::frame::sign_in::ART_BOX;
+    let frame = UiBox::new().width(width).height(height).style(Style::new().absolute_at(
+        None,
+        None,
+        Some(-CARD.padding_px()),
+        Some(-CARD_GAP.px()),
+    ));
     match art {
         Some(image) => {
             let lease: Arc<dyn std::any::Any + Send + Sync> = image.clone();
             frame
                 .child(
                     Media::new(ImageRef::with_lease(image.id(), lease))
-                        .width(crate::frame::sign_in::ART_BOX.0)
-                        .height(crate::frame::sign_in::ART_BOX.1)
+                        .width(width)
+                        .height(height)
                         .fit(ImageFit::Fill)
                         .build(),
                 )
@@ -144,26 +148,33 @@ fn artwork(art: Option<Arc<aqua::images::ImageHandle>>) -> Element {
     .exclude_from_hit_testing()
 }
 
-fn pattern_layer(palette: &Palette) -> Element {
-    let tint = palette.ink.with_alpha(0.02);
-    Aqua::Canvas()
-        .styles([Style::new()
-            .absolute_at(Some(0.0), None, Some(0.0), Some(0.0))
-            .height(pct(pattern::COVERAGE * 100.0))])
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the sign-in pattern is a painted texture whose cells fade by strength"
+)]
+fn pattern_layer(theme: &ArtisanTheme) -> Element {
+    let ink = theme.colors.text;
+    Canvas::new()
+        .style(
+            Style::new()
+                .absolute_at(Some(0.0), None, Some(0.0), Some(0.0))
+                .height(Length::Pct(pattern::COVERAGE * 100.0)),
+        )
         .on_paint(move |bounds| {
             pattern::cells(bounds.w, bounds.h)
                 .into_iter()
-                .map(|cell| DisplayItem::GpuiBackground {
+                .map(|cell| DisplayItem::Rect {
                     bounds: aqua_core::Rect::from_edges(
                         bounds.x + cell.x,
                         bounds.y + cell.y,
                         (bounds.x + cell.x + pattern::CELL.0).min(bounds.x + bounds.w),
                         bounds.y + cell.y + pattern::CELL.1,
                     ),
-                    corners: aqua_core::geometry::CornerRadii::uniform(0.0),
-                    background: GpuiBackground::Solid(
-                        tint.with_alpha(tint.alpha() * cell.strength).to_reference_paint(),
-                    ),
+                    radius: 0.0,
+                    fill: ink.with_alpha(PATTERN_ALPHA * cell.strength).to_paint(),
+                    border_width: 0.0,
+                    border_color: aqua_core::Oklch::TRANSPARENT,
+                    shadow: None,
                 })
                 .collect()
         })
@@ -171,7 +182,7 @@ fn pattern_layer(palette: &Palette) -> Element {
         .exclude_from_hit_testing()
 }
 
-fn pages(theme: &ArtisanTheme, palette: &Palette, props: Props<'_>) -> Element {
+fn pages(theme: &ArtisanTheme, props: Props<'_>) -> Element {
     let now = props.now;
     let progress = props.sign_in.motion.page.value(now, PAGE);
     let code_shown = matches!(page_of(props.view), crate::frame::sign_in::model::Page::Code);
@@ -193,7 +204,6 @@ fn pages(theme: &ArtisanTheme, palette: &Palette, props: Props<'_>) -> Element {
         -SLIDE * progress,
         email_page(
             theme,
-            palette,
             props.email,
             busy_swap,
             props.busy,
@@ -209,7 +219,6 @@ fn pages(theme: &ArtisanTheme, palette: &Palette, props: Props<'_>) -> Element {
         SLIDE * (1.0 - progress),
         code_page(
             theme,
-            palette,
             props.code,
             busy_swap,
             props.busy,
@@ -217,13 +226,13 @@ fn pages(theme: &ArtisanTheme, palette: &Palette, props: Props<'_>) -> Element {
             &props.emit,
         ),
     );
-    let mut container = Aqua::Style().clip(true);
+    let mut container = Style::new().clip(true);
     if let Some(height) = props.sign_in.height(now) {
-        container = container.height(px(height));
+        container = container.height(Length::Px(height));
     }
-    Aqua::Box()
+    UiBox::new()
         .layout("column")
-        .styles([container])
+        .style(container)
         .child(email)
         .child(code)
         .build()
@@ -241,10 +250,9 @@ fn page(key: &'static str, active: bool, opacity: f32, shift: f32, content: Elem
     if blur > 0.01 {
         style = style.content_blur(blur);
     }
-    let element = Aqua::Box()
-        .layout("column")
-        .styles([Aqua::Style().flex_shrink(0.0).padding(px(FIELD_INSET)), style])
-        .child(content)
+    let element = body(vec![content])
+        .style(Style::new().flex_shrink(0.0))
+        .style(style)
         .build()
         .with_key(key)
         .debug_selector(key);
@@ -272,7 +280,6 @@ fn slot<'a>(sign_in: &'a SignIn, slot: Slot, reveal: f32, current: &'a Feedback)
 
 fn email_page(
     theme: &ArtisanTheme,
-    palette: &Palette,
     editor: Element,
     key: Key,
     busy: bool,
@@ -282,37 +289,42 @@ fn email_page(
 ) -> Element {
     let submit = Rc::clone(emit);
     let note = match cancellable {
-        true => cancel_text(theme, palette, emit),
-        false => legal(theme, palette, emit),
+        true => cancel_text(theme, emit),
+        false => legal(theme, emit),
     };
-    let mut column = Aqua::Box()
+    let entry = UiBox::new()
         .layout("column")
-        .child(field(palette, editor, key, busy, Rc::new(move || submit(Event::SubmitEmail))))
-        .child(feedback_line(theme, palette, "email", feedback))
-        .child(divider(theme, palette))
+        .spaced(Space::S12)
         .child(
-            Aqua::Box()
-                .layout("row")
-                .styles([Aqua::Style().gap(12.0)])
-                .children(Provider::ALL.map(|provider| provider_key(palette, provider, busy, emit)))
+            UiBox::new()
+                .layout("column")
+                .child(field(theme, editor, key, busy, Rc::new(move || submit(Event::SubmitEmail))))
+                .child(feedback_line(theme, "email", feedback))
                 .build(),
-        );
-    column = column.child(
-        Aqua::Box()
-            .layout("column")
-            .styles([Aqua::Style().margin_insets(Insets {
-                top: 48.0,
-                ..Insets::default()
-            })])
-            .child(well(palette, note))
-            .build(),
-    );
-    column.build()
+        )
+        .child(
+            Divider::Labelled("or".to_owned())
+                .build(theme, 0.0)
+                .role(Role::Separator),
+        )
+        .child(
+            UiBox::new()
+                .layout("row")
+                .spaced(Space::S12)
+                .children(Provider::ALL.map(|provider| provider_key(theme, provider, busy, emit)))
+                .build(),
+        )
+        .build();
+    UiBox::new()
+        .layout("column")
+        .spaced(Space::S32)
+        .child(entry)
+        .child(well(theme, note))
+        .build()
 }
 
 fn code_page(
     theme: &ArtisanTheme,
-    palette: &Palette,
     editor: Element,
     key: Key,
     busy: bool,
@@ -320,89 +332,63 @@ fn code_page(
     emit: &Rc<dyn Fn(Event)>,
 ) -> Element {
     let submit = Rc::clone(emit);
-    let heading = Aqua::Box()
+    let heading = UiBox::new()
         .layout("column")
-        .styles([Aqua::Style().gap(2.0).margin_insets(Insets {
-            bottom: 16.0,
-            ..Insets::default()
-        })])
-        .child(text(theme, "Two-step verification", 15.0, 20.0, palette.ink, FontWeight(600)))
-        .child(text(
-            theme,
-            "Enter the 6-digit code from your authenticator app.",
-            12.0,
-            18.0,
-            palette.ink_dim,
-            FontWeight::NORMAL,
-        ))
+        .spaced(Space::S2)
+        .child(TextRole::Title.text(theme, "Two-step verification").wrap(true).build())
+        .child(
+            TextRole::Caption
+                .text(theme, "Enter the 6-digit code from your authenticator app.")
+                .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                .wrap(true)
+                .build(),
+        )
         .build();
-    let cancel = Aqua::Box()
+    UiBox::new()
         .layout("column")
-        .styles([Aqua::Style().margin_insets(Insets {
-            top: 16.0,
-            ..Insets::default()
-        })])
-        .child(well(palette, cancel_text(theme, palette, emit)))
-        .build();
-    Aqua::Box()
-        .layout("column")
+        .spaced(Space::S16)
         .child(heading)
-        .child(field(palette, editor, key, busy, Rc::new(move || submit(Event::SubmitCode))))
-        .child(feedback_line(theme, palette, "code", feedback))
-        .child(cancel)
+        .child(
+            UiBox::new()
+                .layout("column")
+                .child(field(theme, editor, key, busy, Rc::new(move || submit(Event::SubmitCode))))
+                .child(feedback_line(theme, "code", feedback))
+                .build(),
+        )
+        .child(well(theme, cancel_text(theme, emit)))
         .build()
 }
 
 fn field(
-    palette: &Palette,
+    theme: &ArtisanTheme,
     editor: Element,
     key: Key,
     busy: bool,
     submit: Rc<dyn Fn()>,
 ) -> Element {
-    let well = outlined(
-        palette.ink,
-        palette.bg,
-        FIELD_RADIUS,
-        Vec::new(),
-        vec![
-            Aqua::Box()
-                .styles([Aqua::Style()
-                    .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                    .radius(px(FIELD_RADIUS))
-                    .shadows(vec![
-                        layer(7.0, 0.0, 9.0, -5.0, true, WHITE.with_alpha(0.1)),
-                        layer(-7.0, 0.0, 9.0, -5.0, true, WHITE.with_alpha(0.1)),
-                    ])])
-                .build()
-                .exclude_from_hit_testing(),
-            Aqua::Box()
-                .layout("column")
-                .styles([Aqua::Style()
-                    .min_height(px(FIELD_HEIGHT))
-                    .justify(JustifyContent::CENTER)
-                    .padding_insets(Insets {
-                        left: 12.0,
-                        right: 12.0 + FIELD_HEIGHT * 53.0 / 45.0 - FIELD_HEIGHT,
-                        top: 4.0,
-                        bottom: 4.0,
-                    })])
-                .child(editor)
-                .build(),
-        ],
-    );
-    Aqua::Box()
+    let content = UiBox::new()
+        .layout("column")
+        .style(
+            Style::new()
+                .min_height(Length::Px(KEY.edge() - 2.0 * FIELD.padding_px()))
+                .justify(JustifyContent::CENTER),
+        )
+        .child(editor)
+        .build();
+    UiBox::new()
         .layout("row")
-        .styles([Aqua::Style().align(AlignItems::STRETCH)])
+        .style(Style::new().align(AlignItems::STRETCH))
         .child(
-            Aqua::Box()
+            UiBox::new()
                 .layout("column")
-                .styles([Aqua::Style()
-                    .flex_grow(1.0)
-                    .min_width(px(0.0))
-                    .clip(true)
-                    .radius(px(FIELD_RADIUS))])
-                .child(well)
+                .style(
+                    Radius::Field
+                        .style()
+                        .flex_grow(1.0)
+                        .min_width(Length::Pct(0.0))
+                        .clip(true),
+                )
+                .child(FIELD.build(theme, vec![content]))
                 .build(),
         )
         .child(continue_key(key, busy, submit))
@@ -419,9 +405,10 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
     let surface: Arc<str> = continue_surface().into();
     let arrow: Arc<str> = continue_arrow().into();
     let spinner: Arc<str> = continue_spinner(spin).into();
-    let surface_width = FIELD_HEIGHT * 53.0 / 45.0;
-    let surface_height = FIELD_HEIGHT * 49.0 / 45.0;
-    let glyph = FIELD_HEIGHT * 2.0 / 3.0;
+    let edge = KEY.edge();
+    let surface_width = edge * 53.0 / 45.0;
+    let surface_height = edge * 49.0 / 45.0;
+    let glyph = edge * 2.0 / 3.0;
     let icon = |source: Arc<str>, visible: f32, key: &'static str| {
         let scale = (1.0 - ICON_START).mul_add(visible, ICON_START);
         let center = glyph / 2.0;
@@ -436,8 +423,12 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
         if visible < 0.99 {
             style = style.content_blur(ICON_BLUR * (1.0 - visible));
         }
-        Aqua::Canvas()
-            .styles([Aqua::Style().width(px(glyph)).height(px(glyph)), style])
+        Canvas::new()
+            .style(
+                style
+                    .width(Length::Px(glyph))
+                    .height(Length::Px(glyph)),
+            )
             .on_paint(move |bounds| {
                 vec![DisplayItem::GpuiSvg {
                     bounds,
@@ -449,62 +440,68 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
             .build()
             .with_key(key)
     };
-    Aqua::Button()
-        .styles([Aqua::Style()
-            .width(px(FIELD_HEIGHT))
-            .height(px(FIELD_HEIGHT))
-            .flex_shrink(0.0)
-            .align(AlignItems::CENTER)
-            .justify(JustifyContent::CENTER)])
-        .child(
-            Aqua::Canvas()
-                .styles([Style::new()
-                    .absolute_at(None, Some(0.0), Some(0.0), None)
-                    .width(px(surface_width))
-                    .height(px(surface_height))])
-                .on_paint(move |bounds| {
-                    vec![DisplayItem::GpuiSvg {
-                        bounds,
-                        source: Arc::clone(&surface),
-                        tint: None,
-                        opacity: 1.0,
-                    }]
-                })
-                .build()
-                .exclude_from_hit_testing(),
+    let face = Canvas::new()
+        .style(
+            Style::new()
+                .absolute_at(None, Some(0.0), Some(0.0), None)
+                .width(Length::Px(surface_width))
+                .height(Length::Px(surface_height)),
         )
+        .on_paint(move |bounds| {
+            vec![DisplayItem::GpuiSvg {
+                bounds,
+                source: Arc::clone(&surface),
+                tint: None,
+                opacity: 1.0,
+            }]
+        })
+        .build()
+        .exclude_from_hit_testing();
+    let glyphs = UiBox::new()
+        .width(glyph)
+        .height(glyph)
+        .child(icon(arrow, 1.0 - swap, "artisan-sign-in-arrow"))
+        .child(icon(spinner, swap, "artisan-sign-in-spinner"))
+        .build()
+        .exclude_from_hit_testing();
+    let area = HitArea::new("artisan-sign-in-continue", Role::Button, "Continue")
         .child(
-            Aqua::Box()
-                .styles([Aqua::Style().width(px(glyph)).height(px(glyph))])
-                .child(icon(arrow, 1.0 - swap, "artisan-sign-in-arrow"))
-                .child(icon(spinner, swap, "artisan-sign-in-spinner"))
-                .build()
-                .exclude_from_hit_testing(),
+            UiBox::new()
+                .style(
+                    Style::new()
+                        .width(Length::Pct(100.0))
+                        .align(AlignItems::CENTER)
+                        .justify(JustifyContent::CENTER),
+                )
+                .child(face)
+                .child(glyphs)
+                .build(),
         )
         .on_activate(move || {
             if !busy {
                 submit();
             }
         })
-        .build()
-        .with_key("artisan-sign-in-continue")
-        .aria_label("Continue")
-        .cursor(if busy {
-            CursorIcon::Progress
-        } else {
-            CursorIcon::Pointer
+        .build();
+    UiBox::new()
+        .width(edge)
+        .height(edge)
+        .style(Style::new().flex_shrink(0.0))
+        .child(match busy {
+            true => area.cursor(CursorIcon::Progress),
+            false => area,
         })
+        .build()
 }
 
 fn continue_surface() -> String {
     let highlight = POLAR_NAVY.animate_to(POLAR_HIGHLIGHT, 0.28);
-    let shade = POLAR_EDGE.animate_to(BLACK, 0.22);
     let shape = "M0 0H45A8 8 0 0 1 53 8V37A8 8 0 0 1 45 45H0A8 8 0 0 0 8 37V8A8 8 0 0 0 0 0Z";
     let face = "M0 2H45A6 6 0 0 1 51 8V37A6 6 0 0 1 45 43H0Z";
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 53 49"><defs><clipPath id="c"><path d="{shape}"/></clipPath><linearGradient id="r" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="45"><stop offset="0" stop-color="{edge}"/><stop offset="1" stop-color="{shade}"/></linearGradient><linearGradient id="h" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="45"><stop offset="0" stop-color="{hl}"/><stop offset="1" stop-color="{navy}"/></linearGradient><radialGradient id="f" gradientUnits="userSpaceOnUse" cx="25.5" cy="53.25" r="66.3" gradientTransform="translate(25.5 53.25) scale(1 0.866) translate(-25.5 -53.25)"><stop offset="0" stop-color="{haze}"/><stop offset="0.25" stop-color="{sky}"/><stop offset="0.58" stop-color="{blue}"/><stop offset="0.92" stop-color="{navy}"/></radialGradient><filter id="d" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="1.875" stdDeviation="0.9375" flood-color="#000" flood-opacity="0.3"/></filter></defs><g filter="url(#d)"><path d="{shape}" fill="url(#r)"/><g clip-path="url(#c)"><path d="M0 1H45A7 7 0 0 1 52 8V37A7 7 0 0 1 45 44H0Z" fill="url(#h)"/><path d="{face}" fill="url(#f)"/></g></g></svg>"##,
         edge = hex(POLAR_EDGE),
-        shade = hex(shade),
+        shade = hex(POLAR_SHADE),
         hl = hex(highlight),
         haze = hex(POLAR_HAZE),
         sky = hex(POLAR_SKY),
@@ -528,160 +525,105 @@ fn continue_spinner(spin: u32) -> String {
     )
 }
 
-fn provider_key(palette: &Palette, provider: Provider, busy: bool, emit: &Rc<dyn Fn(Event)>) -> Element {
+fn provider_key(theme: &ArtisanTheme, provider: Provider, busy: bool, emit: &Rc<dyn Fn(Event)>) -> Element {
     let pick = Rc::clone(emit);
     let source = match provider {
         Provider::Google => GOOGLE,
         Provider::GitHub => GITHUB,
     };
     let icon: Arc<str> = source.into();
-    let tint = palette.ink_dim.to_reference_paint();
-    let face = card::key_face(palette, FIELD_RADIUS, FIELD_HEIGHT);
-    let mark = Aqua::Box()
-        .layout("row")
-        .styles([Style::new()
-            .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-            .align(AlignItems::CENTER)
-            .justify(JustifyContent::CENTER)])
+    let tint = theme.colors.text_muted.to_reference_paint();
+    let edge = IconSize::Md.px();
+    let mark = Canvas::new()
+        .style(
+            Style::new()
+                .width(Length::Px(edge))
+                .height(Length::Px(edge))
+                .flex_shrink(0.0),
+        )
+        .on_paint(move |bounds| {
+            vec![DisplayItem::GpuiSvg {
+                bounds,
+                source: Arc::clone(&icon),
+                tint: Some(tint),
+                opacity: 1.0,
+            }]
+        })
+        .build();
+    UiBox::new()
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
         .child(
-            Aqua::Canvas()
-                .styles([Aqua::Style().width(px(18.0)).height(px(18.0)).flex_shrink(0.0)])
-                .on_paint(move |bounds| {
-                    vec![DisplayItem::GpuiSvg {
-                        bounds,
-                        source: Arc::clone(&icon),
-                        tint: Some(tint),
-                        opacity: 1.0,
-                    }]
-                })
-                .build(),
+            KitKey::new(
+                format!("artisan-sign-in-{}", provider.name()),
+                *theme,
+                format!("Continue with {}", provider.name()),
+                KEY,
+                KeyFace::Content(mark),
+            )
+            .wide()
+            .on_activate(move |_| {
+                if !busy {
+                    pick(Event::Provider(provider));
+                }
+            })
+            .build(),
         )
         .build()
-        .exclude_from_hit_testing();
-    Aqua::Button()
-        .styles([Aqua::Style()
-            .flex_grow(1.0)
-            .min_width(px(0.0))
-            .radius(px(FIELD_RADIUS))])
-        .child(face)
-        .child(mark)
-        .on_activate(move || {
-            if !busy {
-                pick(Event::Provider(provider));
-            }
-        })
-        .build()
-        .pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.5)))
-        .with_key(format!("artisan-sign-in-{}", provider.name()))
-        .aria_label(format!("Continue with {}", provider.name()))
-        .cursor(CursorIcon::Pointer)
 }
 
-fn glow_layer(color: Oklch, alpha: f32) -> Element {
-    Aqua::Canvas()
-        .styles([Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))])
-        .on_paint(move |bounds| vec![radial_glow(bounds, color, alpha)])
-        .build()
-        .exclude_from_hit_testing()
-}
-
-fn divider(theme: &ArtisanTheme, palette: &Palette) -> Element {
-    let line = |grow: f32| {
-        Aqua::Box()
-            .styles([Aqua::Style()
-                .flex_grow(grow)
-                .height(px(1.0))
-                .gpui_background(GpuiBackground::Solid(
-                    palette.ink.with_alpha(0.18).to_reference_paint(),
-                ))])
-            .build()
-    };
-    Aqua::Box()
-        .layout("row")
-        .styles([Aqua::Style()
-            .align(AlignItems::CENTER)
-            .gap(12.0)
-            .margin_insets(Insets {
-                top: 16.0,
-                bottom: 16.0,
-                ..Insets::default()
-            })])
-        .child(line(1.0))
-        .child(text(theme, "or", 12.0, 16.0, palette.ink_dim, FontWeight::NORMAL))
-        .child(line(3.0))
-        .build()
-        .role(Role::Separator)
-}
-
-fn feedback_line(
-    theme: &ArtisanTheme,
-    palette: &Palette,
-    key: &'static str,
-    feedback: FeedbackSlot<'_>,
-) -> Element {
+fn feedback_line(theme: &ArtisanTheme, key: &'static str, feedback: FeedbackSlot<'_>) -> Element {
     let reveal = feedback.reveal;
     let shown = match feedback.current {
         Feedback::None => feedback.last,
         current => current,
     };
-    let (message, tone) = match shown {
-        Feedback::None => (String::new(), palette.ink),
-        Feedback::Error(message) => (message.clone(), ERROR),
-        Feedback::Success(message) => (message.clone(), SUCCESS),
+    let (message, color) = match shown {
+        Feedback::None => (String::new(), theme.colors.text),
+        Feedback::Error(message) => (message.clone(), tint(theme, Tone::Danger)),
+        Feedback::Success(message) => (message.clone(), tint(theme, Tone::Success)),
     };
-    let color = tone.animate_to(palette.ink, 0.15);
     let mut words = Style::new()
+        .flex_shrink(0.0)
         .opacity(reveal)
         .transform(Transform2D::translate(0.0, -FEEDBACK_SHIFT * (1.0 - reveal)));
     if reveal < 0.99 {
         words = words.content_blur(FEEDBACK_BLUR * (1.0 - reveal));
     }
-    let content = Aqua::Box()
+    let content = UiBox::new()
         .layout("column")
-        .styles([
-            Aqua::Style().flex_shrink(0.0).padding_insets(Insets {
-                top: 8.0,
-                ..Insets::default()
-            }),
-            words,
-        ])
-        .child(text(theme, &message, 12.0, 18.0, color, FontWeight::NORMAL))
+        .padded(FIELD.padding().unwrap_or(Space::S8))
+        .style(words)
+        .child(
+            TextRole::Caption
+                .text(theme, message)
+                .gpui_source_color(color.to_reference_text_color())
+                .wrap(true)
+                .build(),
+        )
         .build()
         .with_key(format!("artisan-sign-in-feedback-{key}"))
         .debug_selector(match key {
             "email" => crate::frame::sign_in::EMAIL_FEEDBACK,
             _ => crate::frame::sign_in::CODE_FEEDBACK,
         });
-    Aqua::Box()
+    UiBox::new()
         .layout("column")
-        .styles([Aqua::Style().clip(true).height(px(reveal * feedback.height))])
+        .style(
+            Style::new()
+                .clip(true)
+                .height(Length::Px(reveal * feedback.height)),
+        )
         .child(content)
         .build()
 }
 
-fn well(palette: &Palette, content: Element) -> Element {
-    let ink = palette.ink;
-    Aqua::Box()
-        .layout("column")
-        .styles([Aqua::Style()
-            .padding(px(16.0))
-            .radius(px(FIELD_RADIUS))
-            .gpui_background(GpuiBackground::Solid(palette.bg.to_reference_paint()))
-            .shadows(vec![
-                layer(0.0, 1.0, 1.0, -0.5, true, BLACK.with_alpha(0.06)),
-                layer(0.0, 3.0, 3.0, -1.5, true, BLACK.with_alpha(0.06)),
-                layer(0.0, 6.0, 6.0, -3.0, true, BLACK.with_alpha(0.06)),
-                layer(0.0, -0.5, 0.0, 0.0, true, WHITE.with_alpha(0.08)),
-                layer(0.0, 0.0, 0.0, 0.5, true, ink.with_alpha(0.08)),
-            ])])
-        .child(content)
-        .build()
+fn well(theme: &ArtisanTheme, content: Element) -> Element {
+    FIELD.build(theme, vec![content])
 }
 
-fn legal(theme: &ArtisanTheme, palette: &Palette, emit: &Rc<dyn Fn(Event)>) -> Element {
+fn legal(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
     linked(
         theme,
-        palette,
         &[
             ("By using Artisan Street services, you agree to our ", None),
             ("Terms of Service", Some(Event::Open(Link::Terms))),
@@ -695,10 +637,9 @@ fn legal(theme: &ArtisanTheme, palette: &Palette, emit: &Rc<dyn Fn(Event)>) -> E
     )
 }
 
-fn cancel_text(theme: &ArtisanTheme, palette: &Palette, emit: &Rc<dyn Fn(Event)>) -> Element {
+fn cancel_text(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
     linked(
         theme,
-        palette,
         &[
             ("Click ", None),
             ("here", Some(Event::Cancel)),
@@ -708,17 +649,10 @@ fn cancel_text(theme: &ArtisanTheme, palette: &Palette, emit: &Rc<dyn Fn(Event)>
     )
 }
 
-fn linked(
-    theme: &ArtisanTheme,
-    palette: &Palette,
-    parts: &[(&str, Option<Event>)],
-    emit: Rc<dyn Fn(Event)>,
-) -> Element {
-    let base = style(theme, 12.0, 18.0, FontWeight::NORMAL);
-    let link_style = TextStyle {
-        underline: true,
-        ..base.clone()
-    };
+fn linked(theme: &ArtisanTheme, parts: &[(&str, Option<Event>)], emit: Rc<dyn Fn(Event)>) -> Element {
+    let base = TextRole::Caption.style(theme);
+    let mut underlined = base.clone();
+    underlined.underline = true;
     let hsla = |color: Oklch| {
         let paint = color.to_reference_paint();
         [paint.h, paint.s, paint.l, paint.a]
@@ -730,15 +664,15 @@ fn linked(
         .map(|(words, event)| match event {
             Some(_) => {
                 index += 1;
-                StyledSpan::new(*words, link_style.clone())
-                    .gpui_color(hsla(LINK))
+                StyledSpan::new(*words, underlined.clone())
+                    .gpui_color(hsla(theme.colors.link))
                     .link(index - 1)
             }
-            None => StyledSpan::new(*words, base.clone()).gpui_color(hsla(palette.ink_dim)),
+            None => StyledSpan::new(*words, base.clone()).gpui_color(hsla(theme.colors.text_muted)),
         })
         .collect();
-    Aqua::Text(String::new())
-        .text_style(base)
+    TextRole::Caption
+        .text(theme, String::new())
         .spans(spans)
         .wrap(true)
         .build()
@@ -752,65 +686,29 @@ fn linked(
         })
 }
 
-fn style(theme: &ArtisanTheme, size: f32, line: f32, weight: FontWeight) -> TextStyle {
-    TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: size,
-        line_height_px: line,
-        weight,
-        ..TextStyle::default()
-    }
-}
-
-fn text(
-    theme: &ArtisanTheme,
-    words: &str,
-    size: f32,
-    line: f32,
-    color: Oklch,
-    weight: FontWeight,
-) -> Element {
-    Aqua::Text(words.to_owned())
-        .text_style(style(theme, size, line, weight))
-        .gpui_color(color.to_reference_paint())
-        .wrap(true)
-        .build()
-}
-
-fn layer(dx: f32, dy: f32, blur: f32, spread: f32, inset: bool, color: Oklch) -> ShadowLayer {
-    ShadowLayer {
-        dx,
-        dy,
-        blur,
-        spread,
-        inset,
-        color: color.to_paint(),
-    }
-}
-
 #[must_use]
 pub fn screen(theme: &ArtisanTheme, titlebar: Element, card: Element) -> Element {
-    Aqua::Box()
+    UiBox::new()
         .layout("column")
-        .styles([Aqua::Style()
-            .width(pct(100.0))
-            .height(pct(100.0))
-            .gpui_background(GpuiBackground::Solid(theme.colors.frame.to_reference_paint()))
-            .text_style(style(theme, 14.0, 16.8, FontWeight::NORMAL))])
+        .style(
+            surface::frame(theme)
+                .width(Length::Pct(100.0))
+                .height(Length::Pct(100.0)),
+        )
+        .style(TextRole::Label.inherit(theme))
         .child(titlebar)
         .child(
-            Aqua::Box()
+            UiBox::new()
                 .layout("column")
-                .styles([Aqua::Style()
-                    .flex_grow(1.0)
-                    .min_height(px(0.0))
-                    .align(AlignItems::CENTER)
-                    .justify(JustifyContent::CENTER)
-                    .padding_insets(Insets {
-                        bottom: crate::ui::chrome::TITLEBAR_HEIGHT,
-                        ..Insets::default()
-                    })])
+                .style(
+                    Style::new()
+                        .flex_grow(1.0)
+                        .min_height(Length::Pct(0.0))
+                        .align(AlignItems::CENTER)
+                        .justify(JustifyContent::CENTER),
+                )
                 .child(card)
+                .child(UiBox::new().height(crate::ui::chrome::TITLEBAR_HEIGHT).build())
                 .build(),
         )
         .build()
