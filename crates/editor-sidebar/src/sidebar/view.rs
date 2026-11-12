@@ -565,7 +565,6 @@ pub fn rename_dialog(
     );
     Some(
         editor_ui::dialog::Dialog::new("sidebar-rename", theme, "Rename Thread", content)
-            .glass()
             .on_dismiss(move |_| {
                 emit(ViewAction::DismissRenameFor {
                     host: host_id.clone(),
@@ -694,7 +693,6 @@ pub fn project_picker_dialog(
             "Add a project",
             content.build(),
         )
-        .glass()
         .dismissible(!picker.creating)
         .on_dismiss(move |_| dismiss(ViewAction::DismissProjectPicker(identity.clone()))),
     )
