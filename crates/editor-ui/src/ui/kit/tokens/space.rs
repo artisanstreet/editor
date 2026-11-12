@@ -1,3 +1,5 @@
+use aqua_ui::element::Box as UiBox;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Space {
     S2,
@@ -52,5 +54,16 @@ impl From<super::radius::Inset> for Space {
             super::radius::Inset::Menu => Self::S6,
             super::radius::Inset::Frame => Self::S8,
         }
+    }
+}
+
+pub trait Spaced {
+    #[must_use]
+    fn spaced(self, space: Space) -> Self;
+}
+
+impl Spaced for UiBox {
+    fn spaced(self, space: Space) -> Self {
+        self.gap(space.px())
     }
 }

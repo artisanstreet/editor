@@ -1,5 +1,6 @@
 use crate::ui::theme::{ArtisanTheme, ProseTypography};
 use aqua_text::{FontFamily, FontWeight, TextStyle};
+use aqua_ui::element::{Text, TextSource};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Face {
@@ -82,5 +83,12 @@ impl TextRole {
             weight: spec.weight,
             ..TextStyle::default()
         }
+    }
+
+    #[must_use]
+    pub fn text(self, theme: &ArtisanTheme, words: impl TextSource) -> Text {
+        Text::new(words)
+            .text_style(self.style(theme))
+            .gpui_source_color(theme.colors.text.to_reference_text_color())
     }
 }
