@@ -31,6 +31,8 @@ pub use source_index::{
 };
 
 use table::TableBuilder;
+
+pub const LIST_INDENT: f32 = crate::ui::theme::ProseTypography::LIST_INDENT_PX;
 pub use table::{Table, TableAlignment, TableCell};
 
 #[derive(Debug, Error)]
