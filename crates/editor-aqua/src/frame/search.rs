@@ -29,7 +29,7 @@ pub fn bar(theme: &ArtisanTheme, editor: Element, emit: Rc<dyn Fn(Event)>) -> El
         .child(
             UiBox::new()
                 .layout("column")
-                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+                .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
                 .child(editor)
                 .build(),
         )

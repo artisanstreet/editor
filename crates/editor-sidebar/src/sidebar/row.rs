@@ -157,7 +157,7 @@ pub fn marked_text(
         .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
         .style(
             aqua_ui::style::Style::new()
-                .min_width(aqua_ui::style::Length::Px(0.0))
+                .min_width(aqua_ui::style::Length::Pct(0.0))
                 .flex_shrink(1.0),
         )
         .build()
@@ -175,7 +175,7 @@ pub fn hit(
     let selector = format!("sidebar-hit-{}", data.item);
     let body = UiBox::new()
         .layout("column")
-        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
         .child(marked_text(
             &theme,
             &data.snippet,
@@ -189,7 +189,7 @@ pub fn hit(
                 .text(&theme, data.title.clone())
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
+                .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
                 .build(),
         )
         .build();
