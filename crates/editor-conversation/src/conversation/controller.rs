@@ -37,10 +37,20 @@ pub fn completion_is_current<I: Copy + Eq>(
         && current.as_ref() == Some(&instance)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Landing {
+    Loading,
+    Settling { until: Instant },
+}
+
+const LANDING_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+const SLOW_PAGE: std::time::Duration = std::time::Duration::from_secs(1);
+
 enum Completion {
     Page {
         origin: Origin,
         fetch: Fetch,
+        asked: Instant,
         result: anyhow::Result<ItemsPage>,
     },
     Work {
@@ -90,7 +100,7 @@ pub struct Conversation {
     mounted_for: Option<(u64, usize, usize)>,
     pub row_heights: HashMap<RowKey, f32>,
     pub load_error: Option<String>,
-    pub landing: Option<Instant>,
+    pub landing: Option<Landing>,
     pub scroll_frame: Option<Instant>,
     generation: u64,
     work_reading: Option<Seq>,
@@ -206,7 +216,7 @@ impl Conversation {
         self.host_instance = Some(instance);
         self.view = Some(view);
         self.load_error = None;
-        self.landing = Some(Instant::now() + std::time::Duration::from_millis(1500));
+        self.landing = Some(Landing::Loading);
         super::open_timing::begin();
         self.rebuild(core);
         self.perform(core, effects);
@@ -288,8 +298,18 @@ impl Conversation {
         self.landing = None;
     }
 
+    pub const fn landing_deadline(&self) -> Option<Instant> {
+        match self.landing {
+            Some(Landing::Settling { until }) => Some(until),
+            Some(Landing::Loading) | None => None,
+        }
+    }
+
     pub fn expire_landing(&mut self, now: Instant) -> bool {
-        if self.landing.is_some_and(|deadline| now >= deadline) {
+        if self
+            .landing_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
             self.landing = None;
             return true;
         }
@@ -300,9 +320,11 @@ impl Conversation {
         self.agent.is_none()
             && self.load_error.is_none()
             && self.view.is_some()
-            && self
-                .landing
-                .is_some_and(|deadline| Instant::now() < deadline)
+            && match self.landing {
+                Some(Landing::Loading) => true,
+                Some(Landing::Settling { until }) => Instant::now() < until,
+                None => false,
+            }
     }
 
     pub fn events(&mut self) -> Vec<ConversationEvent> {
@@ -651,6 +673,7 @@ impl Conversation {
             generation: self.generation,
         };
         let sender = self.delivery.sender();
+        let asked = Instant::now();
         self.page_task = Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = match agent {
                 Some(agent) => {
@@ -668,6 +691,7 @@ impl Conversation {
                 .send(Completion::Page {
                     origin,
                     fetch,
+                    asked,
                     result,
                 })
                 .await;
@@ -1037,6 +1061,7 @@ impl Conversation {
                 self.agent_task = None;
                 self.answer_tasks.clear();
                 self.work_reading = None;
+                self.landing = self.landing.map(|_| Landing::Loading);
                 let effects = view.reset();
                 view.set_live(host.live_targets(&thread));
                 self.perform(core, effects);
@@ -1089,6 +1114,7 @@ impl Conversation {
                 Completion::Page {
                     origin,
                     fetch,
+                    asked,
                     result,
                 } if self.accepts(core, &origin) => {
                     let Some(view) = &mut self.view else { continue };
@@ -1097,10 +1123,25 @@ impl Conversation {
                     }
                     self.page_task = None;
                     changed = true;
+                    let waited = asked.elapsed();
+                    if waited >= SLOW_PAGE {
+                        tracing::warn!(
+                            thread = %view.thread,
+                            ?fetch,
+                            waited_ms = waited.as_millis(),
+                            failed = result.is_err(),
+                            "Forge took long to answer a transcript page"
+                        );
+                    }
                     let mut applied = None;
                     let effects = match result {
                         Ok(page) => {
                             self.load_error = None;
+                            if self.landing == Some(Landing::Loading) {
+                                self.landing = Some(Landing::Settling {
+                                    until: Instant::now() + LANDING_SETTLE,
+                                });
+                            }
                             let (items, spans) = (page.items.len(), page.work.len());
                             let apply_started = Instant::now();
                             let effects = view.apply_page(fetch, page);

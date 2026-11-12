@@ -76,6 +76,7 @@ fn finish_tail(conversation: &mut Conversation, core: &Core) {
         Completion::Page {
             origin: origin(conversation),
             fetch: Fetch::Tail,
+            asked: Instant::now(),
             result: Ok(page("current")),
         },
     );
@@ -104,6 +105,7 @@ fn reset_rejects_queued_pages_and_preserves_the_new_tail_until_it_loads() {
             Completion::Page {
                 origin: previous.clone(),
                 fetch,
+                asked: Instant::now(),
                 result: Ok(page("stale")),
             },
         );
@@ -131,6 +133,7 @@ fn mismatched_fetch_in_current_generation_does_not_cancel_the_active_tail() {
         Completion::Page {
             origin: origin(&conversation),
             fetch: Fetch::Older { before: 10 },
+            asked: Instant::now(),
             result: Ok(page("stale")),
         },
     );
@@ -208,4 +211,28 @@ fn reset_restarts_pending_agent_context_without_accepting_its_old_completion() {
     assert!(!conversation.drain(&core));
     assert!(conversation.agent_task.is_some());
     assert!(conversation.load_error.is_none());
+}
+
+#[test]
+fn the_landing_lock_holds_until_the_first_page_arrives() {
+    let (_directory, _listener, core, mut conversation) = fixture();
+    let much_later = Instant::now() + std::time::Duration::from_secs(3600);
+
+    assert_eq!(conversation.landing, Some(Landing::Loading));
+    assert!(!conversation.expire_landing(much_later));
+    assert!(conversation.is_landing());
+
+    finish_tail(&mut conversation, &core);
+
+    assert!(matches!(
+        conversation.landing,
+        Some(Landing::Settling { .. })
+    ));
+    conversation.host_event(&core, &HostEvent::Reset, false);
+    assert_eq!(conversation.landing, Some(Landing::Loading));
+    assert!(!conversation.expire_landing(much_later));
+
+    finish_tail(&mut conversation, &core);
+    assert!(conversation.expire_landing(much_later));
+    assert!(!conversation.is_landing());
 }

@@ -531,7 +531,7 @@ impl<V: SectionViews> ShellApplication<V> {
                     .shell
                     .entry
                     .workspace()
-                    .and_then(|workspace| workspace.conversation.landing)
+                    .and_then(|workspace| workspace.conversation.landing_deadline())
                 {
                     let delay = deadline.saturating_duration_since(std::time::Instant::now());
                     ctx.request_animation_deadline(id, ctx.now() + delay);
