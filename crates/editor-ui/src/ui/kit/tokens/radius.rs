@@ -1,3 +1,5 @@
+use aqua_ui::style::{Length, Style};
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Inset {
     Edge,
@@ -54,6 +56,11 @@ impl Radius {
             Some((outer, inset)) => outer.px() - inset.px(),
             None => SHELL_PX,
         }
+    }
+
+    #[must_use]
+    pub fn style(self) -> Style {
+        Style::new().radius(Length::Px(self.px()))
     }
 
     #[must_use]
