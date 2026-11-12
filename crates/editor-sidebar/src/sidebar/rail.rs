@@ -12,7 +12,7 @@ use editor_assets::AssetId;
 
 use editor_ui::picker_motion::smooth_out;
 
-pub const ICON_SIZE: f32 = 18.0;
+pub const ICON_SIZE: f32 = editor_ui::kit::IconSize::Lg.px();
 const UNIT: f32 = ICON_SIZE / 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,10 +224,10 @@ pub fn build(
     emit: std::rc::Rc<dyn Fn(super::view::ViewAction)>,
 ) -> Element {
     use super::view::ViewAction;
+    use aqua_core::Role;
+    use aqua_ui::{AlignItems, JustifyContent};
     use editor_core::Screen;
-    use editor_ui::theme::{RadiusStep, RadiusTokens};
-    use aqua_core::{CursorIcon, Insets, Role};
-    use aqua_ui::{AlignItems, JustifyContent, element::Button};
+    use editor_ui::kit::{HitArea, Hover, IconButtonSize, Radius, Space, Spaced};
 
     let screen = sidebar.screen(core);
     let items = [
@@ -250,9 +250,10 @@ pub fn build(
             matches!(screen, Screen::Usage),
         ),
     ];
+    let edge = IconButtonSize::Md.edge();
     let mut destinations = UiBox::new()
         .layout("column")
-        .gap(4.0)
+        .spaced(Space::S4)
         .style(Style::new().align(AlignItems::CENTER));
     for (glyph, id, label, selected) in items {
         let action = emit.clone();
@@ -262,54 +263,54 @@ pub fn build(
         } else {
             theme.colors.text_muted
         };
-        let button = Button::new()
-            .width(32.0)
-            .height(32.0)
-            .radius(RadiusTokens::value(RadiusStep::Lg))
+        let face = UiBox::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0))
             .style(
                 Style::new()
                     .align(AlignItems::CENTER)
-                    .justify(JustifyContent::CENTER)
-                    .flex_shrink(0.0),
+                    .justify(JustifyContent::CENTER),
             )
             .child(icon(
                 glyph,
                 sidebar.rail_motion.progress(glyph, now),
                 color.to_reference_paint(),
             ))
+            .build();
+        let button = HitArea::new(id, Role::Button, label)
+            .child(face)
             .on_activate(move || match glyph {
                 Glyph::Pen => action(ViewAction::NewThread(None)),
                 Glyph::Bag => action(ViewAction::Navigate(Screen::Marketplace)),
                 Glyph::Bars => action(ViewAction::Navigate(Screen::Usage)),
             })
             .build()
-            .with_key(id)
-            .role(Role::Button)
-            .aria_label(label)
+            .style(Radius::Field.style())
+            .hover_style(Hover::Neutral.style(&theme))
             .aria_selected(selected)
-            .cursor(CursorIcon::Pointer)
             .on_hover_change(move |hovered| {
                 if hovered {
                     hover(ViewAction::RailHover(glyph));
                 }
             });
-        destinations = destinations.child(button);
+        destinations = destinations.child(
+            UiBox::new()
+                .width(edge)
+                .height(edge)
+                .style(Style::new().flex_shrink(0.0))
+                .child(button)
+                .build(),
+        );
     }
     UiBox::new()
-        .width(48.0)
+        .width(super::geometry::RAIL_WIDTH)
         .height(Length::Pct(100.0))
         .layout("column")
+        .padded(Space::S4)
         .style(
             Style::new()
                 .flex_shrink(0.0)
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::SPACE_BETWEEN)
-                .padding_insets(Insets {
-                    top: 4.0,
-                    bottom: 4.0,
-                    left: 0.0,
-                    right: 0.0,
-                }),
+                .align(AlignItems::CENTER),
         )
         .child(destinations.build())
         .build()
