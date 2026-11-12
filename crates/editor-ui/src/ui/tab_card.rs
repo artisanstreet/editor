@@ -71,7 +71,7 @@ impl TabCard {
                 Style::new()
                     .axis(Axis::Row)
                     .align(aqua_ui::AlignItems::CENTER)
-                    .padding_insets(aqua_core::Insets::hv(4.0, 0.0)),
+                    .padding_insets(aqua_core::Insets::hv(TAB_CARD_PADDING_PX, 0.0)),
             )
             .child(self.tab)
             .build()
@@ -123,7 +123,7 @@ impl TabCard {
 pub const TAB_CARD_PADDING_PX: f32 = Inset::Edge.px();
 pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
 const TAB_RADIUS: f32 = Radius::Panel.px();
-const FILLET_RADIUS: f32 = 8.0;
+const FILLET_RADIUS: f32 = Inset::Frame.px();
 const SHELL_RADIUS: f32 = Radius::Shell.px();
 
 #[derive(Clone, Copy, Debug, PartialEq)]

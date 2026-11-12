@@ -4,7 +4,7 @@ use aqua_ui::{
     style::Style,
 };
 
-use super::kit::{Inset, Radius};
+use super::kit::{Corner, Inset, Radius};
 use super::theme::{ArtisanTheme, Elevation, Oklch, Opacity, ShadowLayer, ThemeMode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,42 +104,13 @@ pub fn glass_control_fill(theme: &ArtisanTheme) -> Gradient {
     }
 }
 
-pub fn glass_navigator_card(theme: &ArtisanTheme, content: Element) -> Element {
-    let radius = 14.0;
-    UiBox::new()
-        .layout("column")
-        .width(aqua_ui::style::Length::Pct(100.0))
-        .radius(radius)
-        .style(
-            Style::new()
-                .min_width(aqua_ui::style::Length::Px(0.0))
-                .gpui_border(
-                    aqua_core::Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_source_text_color(theme.colors.text_muted.to_reference_text_color())
-                .gpui_shadows(
-                    glass_card_shadows(theme, Elevation::Overlay)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
-        )
-        .child(glass_layers(theme, GlassStrength::Strong, radius))
-        .child(content)
-        .build()
-}
+const HANDLE: f32 = 32.0;
 
 pub fn glass_handle(theme: &ArtisanTheme, content: Element) -> Element {
-    let radius = 16.0;
+    let radius = Corner::Full.resolve(HANDLE);
     UiBox::new()
-        .width(32.0)
-        .height(32.0)
+        .width(HANDLE)
+        .height(HANDLE)
         .radius(radius)
         .style(
             Style::new()
@@ -187,36 +158,6 @@ pub fn card_shadows(theme: &ArtisanTheme) -> Vec<GlassShadow> {
         .chain(theme.elevation.drops(Elevation::Raised).iter().copied())
         .map(elevation_shadow)
         .collect()
-}
-
-pub fn tinted_card_shadows(theme: &ArtisanTheme, tone: Oklch) -> Vec<GlassShadow> {
-    let mut shadows = vec![
-        GlassShadow {
-            color: tone.with_alpha(0.35),
-            offset_x: 0.0,
-            offset_y: 0.0,
-            css_blur: 0.0,
-            spread: 0.5,
-            inset: false,
-        },
-        GlassShadow {
-            color: tone.with_alpha(0.18),
-            offset_x: 0.0,
-            offset_y: 1.0,
-            css_blur: 6.0,
-            spread: 0.0,
-            inset: false,
-        },
-    ];
-    shadows.extend(
-        theme
-            .elevation
-            .drops(Elevation::Raised)
-            .iter()
-            .copied()
-            .map(elevation_shadow),
-    );
-    shadows
 }
 
 pub fn glass_rims(theme: &ArtisanTheme) -> Vec<GlassShadow> {
