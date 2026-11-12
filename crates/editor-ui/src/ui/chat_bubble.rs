@@ -1,5 +1,4 @@
 use aqua_core::{CornerRadii, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Insets};
-use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::{
     element::{Box as UiBox, Element},
     style::{Length, Style},
@@ -7,8 +6,11 @@ use aqua_ui::{
 
 use super::{
     glass::card_shadows,
-    theme::{ArtisanTheme, Oklch, Opacity, ProseTypography, RadiusStep, RadiusTokens},
+    kit::{Surface, TextRole},
+    theme::{ArtisanTheme, Oklch, Opacity},
 };
+
+pub const SURFACE: Surface = Surface::Bubble;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegmentPosition {
@@ -89,7 +91,8 @@ impl ChatBubbleSegment {
             .gray
             .step(if first { foot + 1 } else { foot });
         let bottom = self.theme.colors.gray.step(foot);
-        let radius = RadiusTokens::value(RadiusStep::X2l);
+        let radius = SURFACE.radius_px();
+        let pad = SURFACE.padding_px();
         let corners = CornerRadii {
             top_left: if first { radius } else { 0.0 },
             top_right: if first { radius } else { 0.0 },
@@ -100,10 +103,10 @@ impl ChatBubbleSegment {
             .max_width(Length::Px(Self::MAX_WIDTH))
             .corners(corners)
             .padding_insets(Insets {
-                left: 16.0,
-                right: 16.0,
-                top: if first { 12.0 } else { 0.0 },
-                bottom: if last { 12.0 } else { 0.0 },
+                left: pad,
+                right: pad,
+                top: if first { pad } else { 0.0 },
+                bottom: if last { pad } else { 0.0 },
             })
             .gpui_background(GpuiBackground::LinearGradient {
                 angle: 180.0,
@@ -119,16 +122,7 @@ impl ChatBubbleSegment {
                     },
                 ],
             })
-            .text_style(TextStyle {
-                families: vec![FontFamily::Named(
-                    self.theme.typography.sans.family.to_owned(),
-                )],
-                size_px: ProseTypography::BODY_SIZE_PX,
-                line_height_px: ProseTypography::BODY_LINE_PX,
-                weight: ProseTypography::BODY_WEIGHT,
-                letter_spacing_em: Some(self.theme.typography.tracking_em),
-                ..TextStyle::default()
-            })
+            .text_style(TextRole::Prose.style(&self.theme))
             .gpui_source_text_color(self.theme.colors.text.to_reference_text_color())
             .text_wrap(true);
         if self.position == SegmentPosition::Single {
