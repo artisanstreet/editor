@@ -4,3 +4,5 @@ mod radius;
 mod text_role;
 #[path = "ui/kit/hover.rs"]
 mod hover;
+#[path = "ui/kit/surface.rs"]
+mod surface;

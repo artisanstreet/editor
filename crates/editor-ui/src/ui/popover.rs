@@ -113,7 +113,8 @@ impl PopoverPanel {
             .child(self.content)
             .build();
         if self.glass == Some(GlassStrength::Strong) {
-            return crate::ui::chrome::account::menu_surface(&self.theme, vec![scroll])
+            return crate::ui::kit::Surface::Menu.build(&self.theme, vec![scroll])
+                .style(Style::new().padding(Length::Px(0.0)))
                 .style(
                     Style::new()
                         .max_width(Length::Px((self.viewport_width - 16.0).max(1.0)))

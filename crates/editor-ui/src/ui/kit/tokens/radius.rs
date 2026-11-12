@@ -9,6 +9,11 @@ impl Inset {
     pub const ALL: [Self; 3] = [Self::Edge, Self::Menu, Self::Frame];
 
     #[must_use]
+    pub fn of(px: f32) -> Option<Self> {
+        Self::ALL.into_iter().find(|inset| inset.px() == px)
+    }
+
+    #[must_use]
     pub const fn px(self) -> f32 {
         match self {
             Self::Edge => 4.0,
@@ -53,9 +58,10 @@ impl Radius {
 
     #[must_use]
     pub fn inset(self, inset: Inset) -> Option<Self> {
+        let target = self.px() - inset.px();
         Self::ALL
             .into_iter()
-            .find(|radius| radius.parent() == Some((self, inset)))
+            .find(|radius| (radius.px() - target).abs() < 1e-3)
     }
 }
 

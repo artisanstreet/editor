@@ -1,14 +1,14 @@
 use crate::ui::chrome::card::{POLAR_HAZE, POLAR_INK, polar_face};
 use crate::ui::chrome::limits::{EngineLimits, Limit};
 use crate::ui::chrome::menu::{Event, Highlight, Menu, Spot};
-use crate::ui::kit::Hover;
+use crate::ui::kit::{Hover, Radius, Space, Surface};
 use crate::ui::engine::engine_icon;
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua::images::ImageHandle;
 use aqua::{Aqua, ShadowLayer, Style, pct, px};
 use aqua_core::{
-    CursorIcon, DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, ImageRef,
+    CursorIcon, DisplayItem, ImageRef,
     Insets, Role, image::ImageFit,
 };
 use aqua_text::{FontFamily, FontWeight, TextStyle};
@@ -23,9 +23,9 @@ pub const AVATAR: f32 = 20.0;
 pub const AVATAR_INSET: f32 = (TRIGGER_HEIGHT - AVATAR) / 2.0;
 pub const MENU_GAP: f32 = 8.0;
 
-const RADIUS: f32 = 0.65 * 16.0;
-const MENU_PADDING: f32 = 6.0;
-const ITEM_RADIUS: f32 = RADIUS - MENU_PADDING;
+const RADIUS: f32 = Radius::Panel.px();
+const MENU_PADDING: f32 = Space::S6.px();
+const ITEM_RADIUS: f32 = Radius::Row.px();
 const ITEM_PAD_X: f32 = 12.0;
 const ITEM_PAD_Y: f32 = 8.0;
 const LINE: f32 = 20.0;
@@ -42,7 +42,6 @@ const LIMIT_TEXT: f32 = 12.0;
 const LIMIT_LINE: f32 = 16.0;
 const LIMIT_ROW: f32 = 24.0;
 const LIMIT_LABEL: f32 = 52.0;
-const BLUR: f32 = 20.0;
 const HOVER_LIFT: f32 = 0.06;
 
 const CHEVRON_RIGHT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 3 7.5 6l-3 3"/></svg>"#;
@@ -95,12 +94,8 @@ struct Palette {
     dark: bool,
     ink: Oklch,
     ink_dim: Oklch,
-    glass_near: Oklch,
-    glass_far: Oklch,
-    rim_shade: Oklch,
     theme: ArtisanTheme,
     press: Shadow,
-    overlay: [Shadow; 4],
 }
 
 impl Palette {
@@ -110,34 +105,16 @@ impl Palette {
                 dark: true,
                 ink: WHITE,
                 ink_dim: Oklch::new(0.709, 0.0, 0.0),
-                glass_near: Oklch::new(0.2801, 0.0, 0.0),
-                glass_far: Oklch::new(0.2484, 0.0, 0.0),
-                rim_shade: BLACK.with_alpha(0.22),
                 theme: *theme,
                 press: Shadow(1.5, 1.5, 0.0, BLACK.with_alpha(0.3)),
-                overlay: [
-                    Shadow(1.0, 2.0, 0.0, BLACK.with_alpha(0.25)),
-                    Shadow(4.0, 8.0, -2.0, BLACK.with_alpha(0.3)),
-                    Shadow(12.0, 24.0, -6.0, BLACK.with_alpha(0.35)),
-                    Shadow(24.0, 48.0, -12.0, BLACK.with_alpha(0.35)),
-                ],
             }
         } else {
             Self {
                 dark: false,
                 ink: BLACK,
                 ink_dim: Oklch::new(0.551, 0.027, 264.364),
-                glass_near: Oklch::new(0.872, 0.01, 258.338),
-                glass_far: Oklch::new(0.928, 0.006, 264.531),
-                rim_shade: BLACK.with_alpha(0.05),
                 theme: *theme,
                 press: Shadow(1.0, 1.5, 0.0, GRAY_900.with_alpha(0.12)),
-                overlay: [
-                    Shadow(1.0, 2.0, 0.0, GRAY_900.with_alpha(0.03)),
-                    Shadow(4.0, 8.0, -2.0, GRAY_900.with_alpha(0.04)),
-                    Shadow(12.0, 24.0, -6.0, GRAY_900.with_alpha(0.04)),
-                    Shadow(24.0, 48.0, -12.0, GRAY_900.with_alpha(0.05)),
-                ],
             }
         }
     }
@@ -209,27 +186,11 @@ pub struct Sheet<'a> {
 
 #[must_use]
 pub fn menu_surface(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
-    let palette = Palette::of(theme);
-    let mut shadows = vec![layer(0.0, -1.0, 0.0, 0.0, false, WHITE.with_alpha(0.14))];
-    shadows.extend(
-        palette
-            .overlay
-            .iter()
-            .map(|Shadow(dy, blur, spread, color)| layer(0.0, *dy, *blur, *spread, false, *color)),
-    );
-    Aqua::Box()
-        .layout("column")
-        .styles([
-            Aqua::Style().radius(px(RADIUS)).clip(true),
-            Style::new().shadows(shadows),
-        ])
-        .child(glass(&palette))
-        .children(children)
-        .build()
+    Surface::Menu.build(theme, children)
 }
 
-pub const fn menu_radius() -> f32 {
-    RADIUS
+pub fn menu_radius() -> f32 {
+    Surface::Menu.radius_px()
 }
 
 pub fn hover_style(theme: &ArtisanTheme) -> Style {
@@ -273,11 +234,7 @@ pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
         .child(entry(Spot::SignOut, "Sign out", AssetId::TABLER_LOGOUT))
         .build();
     menu_surface(theme, vec![content])
-        .style(
-            Style::new()
-                .width(px(sheet.width))
-                .padding(px(MENU_PADDING)),
-        )
+        .style(Style::new().width(px(sheet.width)))
         .with_key("artisan-account-menu")
         .role(Role::Menu)
 }
@@ -558,68 +515,6 @@ fn highlight(palette: &Palette, lit: Highlight, now: Instant, height: f32, radiu
     Hover::Neutral.layer(&palette.theme, lit, now, height, radius)
 }
 
-fn glass(palette: &Palette) -> Element {
-    let rim_shade = palette.rim_shade.to_reference_paint();
-    let base = palette.ink.with_alpha(0.05).to_reference_paint();
-    let near = palette.glass_near.with_alpha(0.22);
-    let far = palette.glass_far.with_alpha(0.16);
-    let sheen = (WHITE.with_alpha(0.08), WHITE.with_alpha(0.0));
-    Aqua::Canvas()
-        .styles([Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))])
-        .on_paint(move |bounds| {
-            let corners = aqua_core::geometry::CornerRadii::uniform(RADIUS);
-            let gradient = |angle, from: Oklch, to: Oklch, end| DisplayItem::GpuiBackground {
-                bounds,
-                corners,
-                background: GpuiBackground::LinearGradient {
-                    angle,
-                    color_space: GpuiGradientColorSpace::Oklab,
-                    stops: [stop(0.0, from), stop(end, to)],
-                },
-            };
-            vec![
-                DisplayItem::BackdropBlurRounded {
-                    bounds,
-                    radius: BLUR,
-                    corners,
-                },
-                DisplayItem::GpuiBackground {
-                    bounds,
-                    corners,
-                    background: GpuiBackground::Solid(base),
-                },
-                gradient(145.0, near, far, 1.0),
-                gradient(180.0, sheen.0, sheen.1, 0.44),
-                DisplayItem::GpuiShadow {
-                    bounds,
-                    corners,
-                    layer: aqua_core::scene::GpuiShadowLayer {
-                        dx: 0.0,
-                        dy: 1.0,
-                        blur: 0.0,
-                        spread: 0.0,
-                        inset: true,
-                        color: WHITE.with_alpha(0.1).to_reference_paint(),
-                    },
-                },
-                DisplayItem::GpuiShadow {
-                    bounds,
-                    corners,
-                    layer: aqua_core::scene::GpuiShadowLayer {
-                        dx: 0.0,
-                        dy: -1.0,
-                        blur: 0.0,
-                        spread: 0.0,
-                        inset: true,
-                        color: rim_shade,
-                    },
-                },
-            ]
-        })
-        .build()
-        .exclude_from_hit_testing()
-}
-
 fn label(theme: &ArtisanTheme, text: &str, color: Oklch, weight: FontWeight) -> Element {
     Aqua::Text(text.to_owned())
         .text_style(TextStyle {
@@ -667,13 +562,6 @@ fn inline_glyph(source: &'static str, edge: f32, tint: Oklch) -> Element {
             }]
         })
         .build()
-}
-
-fn stop(percentage: f32, color: Oklch) -> GpuiGradientStop {
-    GpuiGradientStop {
-        percentage,
-        color: color.to_reference_paint(),
-    }
 }
 
 fn layer(dx: f32, dy: f32, blur: f32, spread: f32, inset: bool, color: Oklch) -> ShadowLayer {
