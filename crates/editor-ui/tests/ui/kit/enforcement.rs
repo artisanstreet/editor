@@ -1,7 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const ENFORCED: &[&str] = &["editor-sources", "editor-marketplace", "editor-settings", "editor-composer"];
+const ENFORCED: &[&str] = &[
+    "editor-sources",
+    "editor-marketplace",
+    "editor-settings",
+    "editor-composer",
+    "editor-sidebar",
+];
 
 const LITERAL: &[&str] = &[
     "px(",
