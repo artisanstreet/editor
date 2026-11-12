@@ -113,6 +113,7 @@ pub struct RowItem {
     detail: Option<String>,
     trailing: Option<Element>,
     lit: Option<(Highlight, Instant)>,
+    underlay: Option<Option<Element>>,
     selected: bool,
     disabled: bool,
     role: Role,
@@ -139,6 +140,7 @@ impl RowItem {
             detail: None,
             trailing: None,
             lit: None,
+            underlay: None,
             selected: false,
             disabled: false,
             role: match row {
@@ -183,6 +185,12 @@ impl RowItem {
     #[must_use]
     pub const fn lit(mut self, highlight: Highlight, now: Instant) -> Self {
         self.lit = Some((highlight, now));
+        self
+    }
+
+    #[must_use]
+    pub fn underlay(mut self, layer: Option<Element>) -> Self {
+        self.underlay = Some(layer);
         self
     }
 
@@ -312,7 +320,13 @@ impl RowItem {
         }
         let height = self.row.height();
         let mut button = Button::new().gap(self.row.gap().px()).style(self.style());
-        button = match (self.lit, self.selected) {
+        let external = self.underlay.take();
+        let driven = external.is_some();
+        if let Some(Some(layer)) = external {
+            button = button.child(layer);
+        }
+        let lit = self.lit.filter(|_| !driven);
+        button = match (lit, self.selected) {
             (Some((lit, now)), _) => button.child(self.hover.layer(
                 &self.theme,
                 lit,
@@ -354,7 +368,7 @@ impl RowItem {
             .role(self.role)
             .aria_selected(self.selected)
             .focusable(!self.disabled);
-        let element = match (self.lit.is_some(), self.disabled) {
+        let element = match (self.lit.is_some() || driven, self.disabled) {
             (_, true) => element,
             (true, false) => element.cursor(CursorIcon::Pointer),
             (false, false) => element
