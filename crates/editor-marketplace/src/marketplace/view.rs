@@ -816,7 +816,7 @@ fn control(
                 if selected { "Install ↵" } else { "Install" },
             )
             .variant(if selected {
-                ButtonVariant::Default
+                ButtonVariant::Primary
             } else {
                 ButtonVariant::Outline
             })
@@ -873,7 +873,7 @@ fn control(
                 title,
             )
             .variant(if selected {
-                ButtonVariant::Default
+                ButtonVariant::Primary
             } else {
                 ButtonVariant::Outline
             })

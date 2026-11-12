@@ -108,6 +108,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionSource for Rows<
             let callback = Rc::clone(&self.action);
             row = row.trailing(
                 Button::text(format!("collection-read-{index}"), self.theme, "Read")
+                    .variant(editor_ui::button::ButtonVariant::Ghost)
                     .disabled(preview.disabled)
                     .on_activate(move |_| {
                         callback(CollectionAction::Read {
@@ -198,6 +199,7 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
             )
             .child(
                 Button::text("collection-retry", theme, "Retry")
+                    .variant(editor_ui::button::ButtonVariant::Outline)
                     .on_activate(move |_| action(CollectionAction::Retry))
                     .build(),
             );
@@ -232,6 +234,7 @@ pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
         .gap(theme.spacing.steps(1.0))
         .child(
             Button::text("collection-back", theme, "Back to entries")
+                .variant(editor_ui::button::ButtonVariant::Ghost)
                 .on_activate(move |_| callback(CollectionAction::Back))
                 .build(),
         );

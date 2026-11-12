@@ -137,7 +137,7 @@ pub fn approval<E>(
             let id = item.id.clone();
             let dispatch = Rc::clone(&dispatch);
             let variant = if index == 0 {
-                ButtonVariant::Default
+                ButtonVariant::Primary
             } else {
                 ButtonVariant::Outline
             };

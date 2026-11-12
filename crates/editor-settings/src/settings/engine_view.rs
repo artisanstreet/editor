@@ -127,7 +127,7 @@ fn installation(
                 } else {
                     "Try again"
                 },
-                ButtonVariant::Default,
+                ButtonVariant::Primary,
                 busy,
                 ViewAction::EngineAction(engine, EngineCommand::Install {}),
                 emit.clone(),
@@ -313,7 +313,7 @@ fn account(
                     theme,
                     format!("settings-engine-login-{engine}"),
                     "Sign in",
-                    ButtonVariant::Default,
+                    ButtonVariant::Primary,
                     busy,
                     ViewAction::EngineAction(engine, EngineCommand::Login {}),
                     emit.clone(),
@@ -438,7 +438,7 @@ fn account(
                                 theme,
                                 format!("settings-engine-code-{engine}"),
                                 "Submit code",
-                                ButtonVariant::Default,
+                                ButtonVariant::Primary,
                                 busy,
                                 ViewAction::EngineCode(engine),
                                 emit.clone(),
@@ -525,7 +525,7 @@ fn claude(
             } else {
                 "Sign in again"
             },
-            ButtonVariant::Default,
+            ButtonVariant::Primary,
             busy,
             ViewAction::ClaudeSignIn,
             emit,

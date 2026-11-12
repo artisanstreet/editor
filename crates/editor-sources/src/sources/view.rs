@@ -57,6 +57,7 @@ pub fn content_view(
                 )
                 .child(
                     Button::text("source-retry", theme, "Retry")
+                        .variant(editor_ui::button::ButtonVariant::Outline)
                         .on_activate(move |_| callback(ContentAction::Retry))
                         .build(),
                 );
@@ -99,12 +100,14 @@ pub fn content_view(
                     .gap(theme.spacing.steps(1.0))
                     .child(
                         Button::text("source-prev", theme, "Previous")
+                            .variant(editor_ui::button::ButtonVariant::Ghost)
                             .disabled(start == 0)
                             .on_activate(move |_| previous(ContentAction::Previous))
                             .build(),
                     )
                     .child(
                         Button::text("source-next", theme, "Next")
+                            .variant(editor_ui::button::ButtonVariant::Ghost)
                             .disabled(end == total)
                             .on_activate(move |_| next(ContentAction::Next))
                             .build(),
@@ -120,12 +123,14 @@ pub fn content_view(
             .gap(theme.spacing.steps(1.0))
             .child(
                 Button::text("source-copy", theme, "Copy full raw source")
+                    .variant(editor_ui::button::ButtonVariant::Outline)
                     .disabled(view.busy())
                     .on_activate(move |_| copy(ContentAction::Copy))
                     .build(),
             )
             .child(
                 Button::text("source-export", theme, "Export source")
+                    .variant(editor_ui::button::ButtonVariant::Outline)
                     .disabled(view.busy())
                     .on_activate(move |_| export(ContentAction::Export))
                     .build(),

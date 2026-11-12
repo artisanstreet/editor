@@ -50,7 +50,6 @@ pub fn settings_panel(
     )
     .debug_selector("settings-close")
     .variant(crate::ui::button::ButtonVariant::Ghost)
-    .hover_fill()
     .muted()
     .on_activate(move |_| close())
     .build();

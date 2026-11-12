@@ -130,7 +130,7 @@ pub fn sign_in(
                             } else {
                                 "Email me a sign-in link"
                             },
-                            ButtonVariant::Default,
+                            ButtonVariant::Primary,
                             busy,
                             ViewAction::AccountRequestLink,
                         ))
@@ -155,7 +155,7 @@ pub fn sign_in(
         }
         AccountPhase::Restoring => {
             body = body.child(text(theme, "This device's sign-in was saved by an earlier Editor. Checking it with the account service…", true))
-                .child(actions().child(action("sign-in-retry", "Retry", ButtonVariant::Default, false, ViewAction::AccountRefresh)).child(action("sign-in-use-another", "Use another account", ButtonVariant::Ghost, false, ViewAction::AccountSignOut)).build());
+                .child(actions().child(action("sign-in-retry", "Retry", ButtonVariant::Outline, false, ViewAction::AccountRefresh)).child(action("sign-in-use-another", "Use another account", ButtonVariant::Ghost, false, ViewAction::AccountSignOut)).build());
         }
         AccountPhase::Pending { email, .. } => {
             body = body
@@ -196,7 +196,7 @@ pub fn sign_in(
                     .child(action(
                         "sign-in-finish",
                         "Finish sign-in",
-                        ButtonVariant::Default,
+                        ButtonVariant::Primary,
                         false,
                         ViewAction::AccountFinish,
                     ))
@@ -253,7 +253,7 @@ pub fn forges(
             (
                 "connect",
                 "Connect",
-                ButtonVariant::Default,
+                ButtonVariant::Primary,
                 ViewAction::ForgeConnect(id.clone()),
             )
         };
@@ -329,7 +329,7 @@ pub fn forges(
             theme,
             id,
             label,
-            ButtonVariant::Default,
+            ButtonVariant::Primary,
             false,
             action,
             emit.clone(),
@@ -366,7 +366,7 @@ pub fn forges(
                     theme,
                     "forges-claim",
                     "Claim",
-                    ButtonVariant::Default,
+                    ButtonVariant::Primary,
                     false,
                     ViewAction::ForgeClaim,
                     emit.clone(),

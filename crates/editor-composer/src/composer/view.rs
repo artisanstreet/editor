@@ -598,6 +598,7 @@ pub fn questionnaire(
             let action = Rc::clone(&dispatch);
             loading = loading.child(
                 Button::text("question-page-retry", theme, "Retry")
+                    .variant(editor_ui::button::ButtonVariant::Outline)
                     .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
                     .build(),
             );
@@ -656,6 +657,7 @@ pub fn questionnaire(
             let source = source.clone();
             let action = Rc::clone(&dispatch);
             Button::text("question-source", theme, "Read full question")
+                .variant(editor_ui::button::ButtonVariant::Ghost)
                 .on_activate(move |_| action(ComposerAction::OpenQuestionSource(source.clone())))
                 .build()
         }
@@ -782,6 +784,7 @@ pub fn questionnaire(
                         theme,
                         "Read description",
                     )
+                    .variant(editor_ui::button::ButtonVariant::Ghost)
                     .on_activate(move |_| {
                         action(ComposerAction::OpenQuestionSource(source.clone()))
                     })
@@ -802,6 +805,7 @@ pub fn questionnaire(
         let action = Rc::clone(&dispatch);
         rows = rows.child(
             Button::text("composer-question-continue", theme, text)
+                .variant(editor_ui::button::ButtonVariant::Ghost)
                 .on_activate(move |_| action(ComposerAction::ContinueQuestionnaire))
                 .build(),
         );
@@ -827,6 +831,7 @@ pub fn questionnaire(
             ))
             .child(
                 Button::text("composer-question-retry", theme, "Retry answer")
+                    .variant(editor_ui::button::ButtonVariant::Outline)
                     .on_activate(move |_| action(ComposerAction::RetryQuestionnaire))
                     .build(),
             );
@@ -985,11 +990,13 @@ pub fn draft_error(
                 .gap(8.0)
                 .child(
                     Button::text("draft-keep-local", theme, "Keep my draft")
+                        .variant(editor_ui::button::ButtonVariant::Outline)
                         .on_activate(move |_| local(ComposerAction::KeepDraft))
                         .build(),
                 )
                 .child(
                     Button::text("draft-use-remote", theme, "Load other draft")
+                        .variant(editor_ui::button::ButtonVariant::Outline)
                         .on_activate(move |_| remote(ComposerAction::LoadOtherDraft))
                         .build(),
                 )
@@ -998,6 +1005,7 @@ pub fn draft_error(
     } else {
         root = root.child(
             Button::text("draft-retry", theme, "Retry")
+                .variant(editor_ui::button::ButtonVariant::Outline)
                 .on_activate(move |_| dispatch(ComposerAction::RetryDraft))
                 .build(),
         );

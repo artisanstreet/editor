@@ -243,7 +243,6 @@ impl AttachmentTile {
             let remove = Button::icon("remove", theme, AssetId::TABLER_X, label)
                 .disabled(!self.removable)
                 .variant(ButtonVariant::Ghost)
-                .hover_fill()
                 .muted()
                 .glass()
                 .compact(REMOVE_SIZE)

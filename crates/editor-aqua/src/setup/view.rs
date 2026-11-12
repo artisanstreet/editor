@@ -198,6 +198,7 @@ fn choosing(theme: &ArtisanTheme, palette: &Surfaces, props: &Props<'_>) -> Vec<
         .styles([Aqua::Style().justify(JustifyContent::END)])
         .child(
             Button::text("artisan-setup-install", *theme, "Install")
+                .variant(crate::ui::button::ButtonVariant::Primary)
                 .on_activate(move |_| begin(Event::Started))
                 .build(),
         )
@@ -406,6 +407,7 @@ fn failed(
             .styles([Aqua::Style().justify(JustifyContent::END)])
             .child(
                 Button::text("artisan-setup-retry", *theme, "Try again")
+                    .variant(crate::ui::button::ButtonVariant::Outline)
                     .on_activate(move |_| retry(Event::Started))
                     .build(),
             )

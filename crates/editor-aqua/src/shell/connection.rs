@@ -246,6 +246,7 @@ impl ConnectionPresenter {
                 };
                 let starts = Rc::clone(&self.starts);
                 let action = crate::ui::button::Button::text("start-wsl-forge", theme, label)
+                    .variant(crate::ui::button::ButtonVariant::Primary)
                     .disabled(wsl.starting)
                     .debug_selector("start-wsl-forge")
                     .on_activate(move |_| starts.borrow_mut().push(identity.clone()))

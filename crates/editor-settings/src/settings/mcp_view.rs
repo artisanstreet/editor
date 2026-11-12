@@ -111,7 +111,7 @@ fn controls(
         Some((McpSignInPhase::Failed(_), _)) => vec![make(
             "sign-in",
             "Try again",
-            ButtonVariant::Default,
+            ButtonVariant::Outline,
             false,
             ViewAction::McpSignIn(name.into()),
         )],
@@ -119,7 +119,7 @@ fn controls(
             Some(McpAuthStatus::NeedsSignIn) => vec![make(
                 "sign-in",
                 "Sign in",
-                ButtonVariant::Default,
+                ButtonVariant::Primary,
                 false,
                 ViewAction::McpSignIn(name.into()),
             )],
@@ -200,7 +200,7 @@ fn form(
             theme,
             "mcp-save".into(),
             if saving { "Saving…" } else { "Save server" },
-            ButtonVariant::Default,
+            ButtonVariant::Primary,
             saving,
             ViewAction::McpSave,
             emit.clone(),

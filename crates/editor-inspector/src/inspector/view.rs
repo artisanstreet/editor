@@ -347,6 +347,7 @@ pub fn inspector_view(
             )
             .child(
                 Button::text("inspector-retry", theme, "Retry")
+                    .variant(editor_ui::button::ButtonVariant::Outline)
                     .on_activate(move |_| retry(InspectorAction::Retry))
                     .build(),
             );
@@ -536,6 +537,7 @@ pub fn inspector_view(
                             theme,
                             format!("Read {} steps", summary.plan.len()),
                         )
+                        .variant(editor_ui::button::ButtonVariant::Ghost)
                         .on_activate(move |_| callback(InspectorAction::OpenPlan))
                         .build(),
                     );
@@ -590,6 +592,7 @@ pub fn inspector_view(
                                             theme,
                                             format!("{status} Read step"),
                                         )
+                                        .variant(editor_ui::button::ButtonVariant::Ghost)
                                         .on_activate(move |_| {
                                             callback(InspectorAction::OpenStep(source.clone()))
                                         })

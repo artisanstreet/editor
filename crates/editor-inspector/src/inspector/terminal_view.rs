@@ -208,6 +208,7 @@ pub fn terminal_view(
         let retry = Rc::clone(&action);
         content = content.child(Text::new(error.clone()).build()).child(
             Button::text("terminal-retry", theme, "Retry")
+                .variant(editor_ui::button::ButtonVariant::Outline)
                 .on_activate(move |_| retry(TerminalAction::Retry))
                 .build(),
         );

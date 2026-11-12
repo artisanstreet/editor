@@ -11,7 +11,7 @@ use aqua_ui::{
 use super::{about::BuildInfo, controller::SettingsController, page, ui};
 use editor_core::{ConnectionStatus, Core, Screen, SettingsPage, SettingsSection};
 use editor_ui::{
-    button::{Button, ButtonShape, ButtonVariant},
+    button::{Button, ButtonVariant},
     select::{Select, SelectEntry, SelectMenu},
     switch::{Switch, SwitchSize},
     text::{
@@ -779,8 +779,7 @@ fn prompt(
     let dirty = controller.prompt_editor.borrow().text() != form.saved;
     actions = actions.child(
         Button::text("settings-global-prompt-save", *theme, "Save")
-            .variant(ButtonVariant::Accent)
-            .shape(ButtonShape::Rounded)
+            .variant(ButtonVariant::Primary)
             .disabled(!form.loaded || !dirty || form.pending || form.newer)
             .on_activate(move |_| emit(ViewAction::SavePrompt))
             .build(),
@@ -827,6 +826,7 @@ fn prompt_reconciliation(
                         *theme,
                         "Use this prompt",
                     )
+                    .variant(editor_ui::button::ButtonVariant::Primary)
                     .disabled(disabled)
                     .on_activate(move |_| {
                         send(ViewAction::ResolvePrompt(
@@ -869,6 +869,7 @@ fn prompt_reconciliation(
                                     *theme,
                                     "Use engine's version",
                                 )
+                                .variant(editor_ui::button::ButtonVariant::Outline)
                                 .disabled(disabled)
                                 .on_activate(move |_| {
                                     use_send(ViewAction::ResolvePrompt(
@@ -883,6 +884,7 @@ fn prompt_reconciliation(
                                     *theme,
                                     "Restore Artisan's version",
                                 )
+                                .variant(editor_ui::button::ButtonVariant::Outline)
                                 .disabled(disabled)
                                 .on_activate(move |_| {
                                     restore_send(ViewAction::ResolvePrompt(
