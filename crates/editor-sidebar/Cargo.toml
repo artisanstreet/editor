@@ -21,6 +21,7 @@ tracing.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 editor-core = { path = "../editor-core" }
 editor-ui = { path = "../editor-ui" }
+neo_frizbee = "=0.10.4"
 
 [lints.rust]
 unsafe_code = "forbid"

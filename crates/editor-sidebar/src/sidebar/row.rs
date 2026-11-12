@@ -90,6 +90,61 @@ pub type WorkingPulse = std::rc::Rc<
     ) -> aqua_ui::element::Element,
 >;
 
+fn marked_title(
+    theme: &editor_ui::theme::ArtisanTheme,
+    data: &RowData,
+    color: editor_ui::theme::Oklch,
+    selector: String,
+) -> aqua_ui::element::Element {
+    use editor_ui::chrome::card::{POLAR_BLUE, POLAR_INK};
+    let style = aqua_text::TextStyle {
+        families: vec![aqua_text::FontFamily::Named(
+            theme.typography.sans.family.to_owned(),
+        )],
+        size_px: theme.typography.control_text,
+        ..aqua_text::TextStyle::default()
+    };
+    let channels = |color: editor_ui::theme::Oklch| {
+        let color = color.to_reference_text_color();
+        [
+            color.hue_degrees,
+            color.saturation,
+            color.lightness,
+            color.alpha,
+        ]
+    };
+    let mark = POLAR_BLUE.to_reference_paint();
+    let plain = |text: &str| {
+        aqua_text::StyledSpan::new(text, style.clone()).gpui_source_color(channels(color))
+    };
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for range in &data.matched {
+        if range.start > at {
+            spans.push(plain(&data.title[at..range.start]));
+        }
+        spans.push(
+            aqua_text::StyledSpan::new(&data.title[range.clone()], style.clone())
+                .gpui_source_color(channels(POLAR_INK))
+                .gpui_background([mark.h, mark.s, mark.l, mark.a]),
+        );
+        at = range.end;
+    }
+    if at < data.title.len() {
+        spans.push(plain(&data.title[at..]));
+    }
+    aqua_ui::element::Text::new(data.title.clone())
+        .spans(spans)
+        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+        .style(
+            aqua_ui::style::Style::new()
+                .min_width(aqua_ui::style::Length::Px(0.0))
+                .flex_shrink(1.0),
+        )
+        .build()
+        .debug_selector(selector)
+}
+
 pub fn visual_factory(
     theme: editor_ui::theme::ArtisanTheme,
     reduced_motion: bool,
@@ -104,12 +159,15 @@ pub fn visual_factory(
             theme.colors.text
         };
         let selector = format!("sidebar-thread-{}", data.id);
-        let title = truncate(
-            data.title.clone(),
-            theme.typography.control_text,
-            title_color.to_reference_text_color(),
-            format!("{selector}-title"),
-        );
+        let title = match data.matched.is_empty() {
+            true => truncate(
+                data.title.clone(),
+                theme.typography.control_text,
+                title_color.to_reference_text_color(),
+                format!("{selector}-title"),
+            ),
+            false => marked_title(&theme, data, title_color, format!("{selector}-title")),
+        };
         let subtitle = truncate(
             data.subtitle.clone(),
             theme.typography.label_text,

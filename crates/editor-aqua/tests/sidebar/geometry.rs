@@ -13,6 +13,7 @@ fn row(project: &ProjectId, title: &str) -> RowData {
         state: RowState::Idle,
         selected: false,
         settleable: true,
+        matched: Vec::new(),
     }
 }
 
@@ -76,11 +77,11 @@ fn inbox_groups_by_project_identity_preserving_activity_order_and_history() {
 }
 
 #[test]
-fn a_search_lists_every_match_from_inbox_and_history_in_one_list() {
+fn a_search_ranks_fuzzy_matches_from_inbox_and_history_and_marks_what_matched() {
     let project = ProjectId::from("editor");
     let lists = || Lists {
         inbox: vec![
-            row(&project, "Subagent status bugs"),
+            row(&project, "Subagent status and breadcrumb title bugs"),
             row(&project, "Installer binary"),
         ],
         history: vec![HistoryGroup {
@@ -92,22 +93,47 @@ fn a_search_lists_every_match_from_inbox_and_history_in_one_list() {
         }],
         next_tick: Some(7),
     };
-    let titles = |query: &str| {
+    let found = |query: &str| {
         let found = lists().searched(query);
         assert!(found.history.is_empty());
         found
             .inbox
             .into_iter()
-            .map(|row| row.title)
+            .map(|row| {
+                let marks: Vec<String> = row
+                    .matched
+                    .iter()
+                    .map(|range| row.title[range.clone()].to_owned())
+                    .collect();
+                (row.title, marks)
+            })
             .collect::<Vec<_>>()
     };
+    let titles = |query: &str| found(query).into_iter().map(|row| row.0).collect::<Vec<_>>();
 
     let unfiltered = lists().searched("  ");
     assert_eq!((unfiltered.inbox.len(), unfiltered.history.len()), (2, 1));
     assert_eq!(
-        titles("status"),
-        ["Subagent status bugs", "Status line wording"]
+        found("status"),
+        [
+            ("Status line wording".to_owned(), vec!["Status".to_owned()]),
+            (
+                "Subagent status and breadcrumb title bugs".to_owned(),
+                vec!["status".to_owned()]
+            ),
+        ]
     );
-    assert_eq!(titles("button grad"), ["Gradient BUTTON variants"]);
+    assert_eq!(
+        found("button grad"),
+        [(
+            "Gradient BUTTON variants".to_owned(),
+            vec!["Grad".to_owned(), "BUTTON".to_owned()]
+        )]
+    );
+    assert_eq!(
+        titles("sbgt brd"),
+        ["Subagent status and breadcrumb title bugs"]
+    );
+    assert_eq!(titles("shared label").len(), 4);
     assert_eq!(titles("nothing here"), Vec::<String>::new());
 }
