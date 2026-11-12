@@ -7,7 +7,7 @@ use aqua_core::{
     vector::{FillRule, GpuiPath, GpuiPathStyle, LineCap, LineJoin, PathCommand},
 };
 
-use super::glass::{COMPOSER_RADIUS, KEY_RADIUS};
+use super::kit::{Inset, Radius};
 use super::theme::{ArtisanTheme, Elevation, Oklch, ShadowLayer};
 
 pub struct TabCardStrip {
@@ -120,11 +120,11 @@ impl TabCard {
     }
 }
 
-pub const TAB_CARD_PADDING_PX: f32 = 4.0;
+pub const TAB_CARD_PADDING_PX: f32 = Inset::Edge.px();
 pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
-const TAB_RADIUS: f32 = KEY_RADIUS + TAB_CARD_PADDING_PX;
+const TAB_RADIUS: f32 = Radius::Panel.px();
 const FILLET_RADIUS: f32 = 8.0;
-const SHELL_RADIUS: f32 = COMPOSER_RADIUS + TAB_CARD_PADDING_PX;
+const SHELL_RADIUS: f32 = Radius::Shell.px();
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryKey {

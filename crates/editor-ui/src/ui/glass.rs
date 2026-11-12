@@ -4,6 +4,7 @@ use aqua_ui::{
     style::Style,
 };
 
+use super::kit::{Inset, Radius};
 use super::theme::{ArtisanTheme, Elevation, Oklch, Opacity, ShadowLayer, ThemeMode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,9 +311,9 @@ pub fn glass_layers(theme: &ArtisanTheme, strength: GlassStrength, radius: f32) 
         .build()
 }
 
-pub const KEY_RADIUS: f32 = 6.0;
-pub const COMPOSER_PADDING: f32 = 8.0;
-pub const COMPOSER_RADIUS: f32 = KEY_RADIUS + COMPOSER_PADDING;
+pub const KEY_RADIUS: f32 = Radius::Field.px();
+pub const COMPOSER_PADDING: f32 = Inset::Frame.px();
+pub const COMPOSER_RADIUS: f32 = Radius::Well.px();
 
 pub struct ComposerFrame {
     theme: ArtisanTheme,
