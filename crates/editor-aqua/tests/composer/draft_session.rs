@@ -682,3 +682,88 @@ fn a_submitted_draft_conflict_unlocks_and_resumes_only_after_resolution() {
     save_next(&mut session);
     assert_original_submission(&mut session);
 }
+
+#[test]
+fn a_save_forge_answered_too_late_is_not_shown_as_another_clients_change() {
+    let mut session = DraftSession::new("thread:one".into());
+    session.next();
+    session.loaded(Ok(DraftSnapshot {
+        revision: 7,
+        body: json!({"text": "old"}),
+    }));
+    session.queue(json!({"text": "typed while Forge was slow"}));
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected a draft write");
+    };
+    session.written(&request, edited, Err("operation timed out".into()));
+    session.queue(json!({"text": "typed while Forge was slow, then more"}));
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected the next draft write");
+    };
+    assert_eq!(
+        request.expected_revision, 7,
+        "the next save still builds on the last revision Forge confirmed"
+    );
+    session.written(
+        &request,
+        edited,
+        Ok(DraftWriteResult {
+            saved: false,
+            current: DraftSnapshot {
+                revision: 8,
+                body: json!({"text": "typed while Forge was slow"}),
+            },
+        }),
+    );
+    assert!(
+        !session.conflict,
+        "the timed-out save landing late is this client's own draft"
+    );
+    assert!(session.error.is_none(), "no error is shown for it");
+    let Some(Operation::Write { request, .. }) = session.next() else {
+        panic!("expected the newest text to be saved on top");
+    };
+    assert_eq!(
+        request.expected_revision, 8,
+        "it saves on top of its own write"
+    );
+    assert_eq!(
+        request.body,
+        json!({"text": "typed while Forge was slow, then more"}),
+        "the newest text is what gets saved"
+    );
+}
+
+#[test]
+fn another_clients_change_after_a_timed_out_save_still_asks_which_to_keep() {
+    let mut session = DraftSession::new("thread:one".into());
+    session.next();
+    session.loaded(Ok(DraftSnapshot {
+        revision: 7,
+        body: json!({"text": "old"}),
+    }));
+    session.queue(json!({"text": "mine"}));
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected a draft write");
+    };
+    session.written(&request, edited, Err("operation timed out".into()));
+    session.queue(json!({"text": "mine, edited"}));
+    let Some(Operation::Write { request, edited }) = session.next() else {
+        panic!("expected the next draft write");
+    };
+    session.written(
+        &request,
+        edited,
+        Ok(DraftWriteResult {
+            saved: false,
+            current: DraftSnapshot {
+                revision: 8,
+                body: json!({"text": "written on the other machine"}),
+            },
+        }),
+    );
+    assert!(
+        session.conflict,
+        "a draft this client never sent is another client's change"
+    );
+}

@@ -368,17 +368,8 @@ impl DraftHandle {
                     .set_draft(&scope, &request)
                     .await
                     .map_err(|error| format!("{error:#}"));
-                match &result {
-                    Err(error) => tracing::warn!(%scope, %error, "draft save failed"),
-                    Ok(written) if !written.saved && written.current.body != request.body => {
-                        tracing::warn!(
-                            %scope,
-                            expected_revision = request.expected_revision,
-                            current_revision = written.current.revision,
-                            "draft save conflicted with another client"
-                        );
-                    }
-                    Ok(_) => {}
+                if let Err(error) = &result {
+                    tracing::warn!(%scope, %error, "draft save failed");
                 }
                 session.mutate(|shared| shared.state.written(&request, edited, result));
             }

@@ -38,6 +38,7 @@ pub struct DraftSession {
     pub error: Option<String>,
     pub conflict: bool,
     snapshot: DraftSnapshot,
+    unconfirmed: Vec<Value>,
     edited: u64,
     dirty: bool,
     busy: bool,
@@ -54,6 +55,7 @@ impl DraftSession {
             error: None,
             conflict: false,
             snapshot: DraftSnapshot::default(),
+            unconfirmed: Vec::new(),
             edited: 0,
             dirty: false,
             busy: false,
@@ -200,6 +202,7 @@ impl DraftSession {
                     self.body = snapshot.body.clone();
                 }
                 self.snapshot = snapshot;
+                self.unconfirmed.clear();
                 self.loaded = true;
             }
             Err(error) => self.fail(format!("Couldn't load the draft: {error}")),
@@ -219,11 +222,21 @@ impl DraftSession {
         match result {
             Ok(result) => {
                 let matched = result.saved || result.current.body == request.body;
+                let landed_late = !matched
+                    && result.current.revision == request.expected_revision.saturating_add(1)
+                    && self.unconfirmed.contains(&result.current.body);
                 self.snapshot = result.current;
+                self.unconfirmed.clear();
                 if matched {
                     if self.edited == edited {
                         self.dirty = false;
                     }
+                } else if landed_late {
+                    tracing::info!(
+                        scope = %self.scope,
+                        revision = self.snapshot.revision,
+                        "an unanswered draft save had landed; saving again on top of it"
+                    );
                 } else {
                     self.conflict = true;
                     self.fail(
@@ -232,7 +245,10 @@ impl DraftSession {
                     );
                 }
             }
-            Err(error) => self.fail(format!("Couldn't save the draft: {error}")),
+            Err(error) => {
+                self.unconfirmed.push(request.body.clone());
+                self.fail(format!("Couldn't save the draft: {error}"));
+            }
         }
     }
 
@@ -253,6 +269,7 @@ impl DraftSession {
             Ok(()) => {
                 self.snapshot.revision = self.snapshot.revision.saturating_add(1);
                 self.snapshot.body = Value::Null;
+                self.unconfirmed.clear();
                 self.body = Value::Null;
                 self.dirty = false;
                 self.outgoing = None;
