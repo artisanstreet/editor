@@ -205,5 +205,10 @@ pub fn apply_directive(
                 )
             }
         }
+        ScrollDirective::Offset(offset) => {
+            smooth.cancel();
+            let left = leave_tail(ui);
+            Some(ui.scroll_collection_to(TRANSCRIPT, aqua_core::Point::new(x, *offset)) || left)
+        }
     }
 }

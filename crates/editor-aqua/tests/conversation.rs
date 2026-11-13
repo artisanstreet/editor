@@ -6,6 +6,8 @@ mod compaction_view;
 mod host_lifetime;
 #[path = "conversation/motion.rs"]
 mod motion;
+#[path = "conversation/parked.rs"]
+mod parked;
 #[path = "conversation/presentation.rs"]
 mod presentation;
 #[path = "conversation/projection.rs"]
@@ -24,6 +26,8 @@ mod source_owners;
 mod stored_paging;
 #[path = "conversation/stored_rows.rs"]
 mod stored_rows;
+#[path = "conversation/thread.rs"]
+mod thread;
 #[path = "conversation/tool_rows.rs"]
 mod tool_rows;
 #[path = "conversation/viewport.rs"]

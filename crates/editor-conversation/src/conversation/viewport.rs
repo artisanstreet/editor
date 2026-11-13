@@ -3,6 +3,7 @@ use artisan_api::Seq;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fetch {
     Tail,
+    Refresh,
     Older { before: Seq },
     Newer { after: Seq },
     At { position: Seq },
@@ -24,6 +25,7 @@ pub enum Effect {
 #[derive(Clone, Debug)]
 pub enum Input {
     Open,
+    Resume,
     TopReached,
     BottomReached,
     ScrolledAway {
@@ -72,6 +74,13 @@ impl Viewport {
             Fetch::Tail => {
                 self.oldest = first;
                 self.exhausted = !more;
+                self.gap = None;
+            }
+            Fetch::Refresh => {
+                if self.oldest.is_none() {
+                    self.oldest = first;
+                    self.exhausted = !more;
+                }
                 self.gap = None;
             }
             Fetch::Older { .. } => {
@@ -143,7 +152,8 @@ impl Viewport {
             (
                 State::Following {},
                 Input::Loaded {
-                    fetch: Fetch::Tail, ..
+                    fetch: Fetch::Tail | Fetch::Refresh,
+                    ..
                 },
             ) => {
                 effects.push(Effect::ScrollToEnd);
@@ -218,6 +228,27 @@ impl Viewport {
             Input::Open => {
                 *self = Self::default();
                 self.fetch(Fetch::Tail, effects);
+            }
+            Input::Resume => {
+                self.in_flight = false;
+                self.requested = None;
+                let jumping = matches!(self.state, State::Jumping { .. });
+                match self.gap {
+                    Some(_) if jumping => {
+                        let anchor = self.oldest.unwrap_or_default();
+                        self.state = State::Reading {
+                            anchor,
+                            through: anchor,
+                        };
+                    }
+                    Some(_) => {}
+                    None => {
+                        if jumping {
+                            self.state = State::Following {};
+                        }
+                        self.fetch(Fetch::Refresh, effects);
+                    }
+                }
             }
             Input::TopReached => self.load_older(effects),
             Input::Loaded {

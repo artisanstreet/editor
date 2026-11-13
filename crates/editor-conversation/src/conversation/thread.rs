@@ -84,6 +84,14 @@ impl ThreadView {
         self.handle(&Input::Open)
     }
 
+    pub(crate) fn resume(&mut self) -> Vec<Effect> {
+        self.handle(&Input::Resume)
+    }
+
+    pub const fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
     pub(crate) fn remember_run(&mut self, run: Run) {
         if run.thread_id == self.thread
             && self.runs.get(&run.id).is_none_or(|old| old.seq <= run.seq)
@@ -208,6 +216,25 @@ impl ThreadView {
             .into_iter()
             .chain(page.work.last().map(|span| span.last))
             .max();
+        let newest = self
+            .items
+            .last_key_value()
+            .map(|(position, _)| *position)
+            .into_iter()
+            .chain(self.work.last_key_value().map(|(_, span)| span.last))
+            .max();
+        let fetch = match fetch {
+            Fetch::Refresh if !refreshes(first, newest, page.more) => Fetch::Tail,
+            fetch => fetch,
+        };
+        if fetch == Fetch::Refresh {
+            let kept = |position: Seq| first.is_none_or(|first| position < first);
+            self.items.retain(|position, _| kept(*position));
+            self.work
+                .retain(|_, span| kept(span.first) && kept(span.last));
+            self.positions.retain(|_, position| kept(*position));
+            self.resident_bytes = self.items.values().map(|item| item.resident_bytes()).sum();
+        }
         if matches!(fetch, Fetch::Tail | Fetch::At { .. }) {
             let kept = |position: Seq| {
                 matches!(fetch, Fetch::Tail) && last.is_some_and(|last| position > last)
@@ -236,7 +263,7 @@ impl ThreadView {
         self.trim_window(match fetch {
             Fetch::Older { .. } => Some(false),
             Fetch::Newer { .. } => Some(true),
-            Fetch::Tail | Fetch::At { .. } => None,
+            Fetch::Tail | Fetch::Refresh | Fetch::At { .. } => None,
         });
         if let State::Jumping {
             target: Jump::To(position),
@@ -418,6 +445,11 @@ impl ThreadView {
     }
 }
 
+#[must_use]
+pub fn refreshes(first: Option<Seq>, newest: Option<Seq>, more: bool) -> bool {
+    !more || matches!((first, newest), (Some(first), Some(newest)) if first <= newest)
+}
+
 pub const fn work_query(span: &WorkSpan) -> ItemsQuery {
     ItemsQuery {
         before: Some(span.last.saturating_add(1)),
@@ -428,7 +460,7 @@ pub const fn work_query(span: &WorkSpan) -> ItemsQuery {
 
 pub const fn query(fetch: Fetch, limit: u32) -> ItemsQuery {
     let (before, after) = match fetch {
-        Fetch::Tail => (None, None),
+        Fetch::Tail | Fetch::Refresh => (None, None),
         Fetch::Older { before } => (Some(before), None),
         Fetch::Newer { after } => (None, Some(after)),
         Fetch::At { position } => (None, Some(position.saturating_sub(1))),

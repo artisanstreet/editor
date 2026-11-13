@@ -277,6 +277,7 @@ pub enum ScrollDirective {
     FollowEnd,
     EaseToEnd,
     ToRow { index: usize, animate: bool },
+    Offset(f32),
 }
 
 pub fn scroll_directive(
@@ -287,7 +288,8 @@ pub fn scroll_directive(
     let animate = !reduce_motion && !conversation.is_landing();
     match action {
         ScrollAction::End if animate => Some(ScrollDirective::EaseToEnd),
-        ScrollAction::End => Some(ScrollDirective::FollowEnd),
+        ScrollAction::End | ScrollAction::Tail => Some(ScrollDirective::FollowEnd),
+        ScrollAction::Offset(offset) => Some(ScrollDirective::Offset(offset)),
         ScrollAction::To(position) => Some(ScrollDirective::ToRow {
             index: conversation.jump_row(position)?,
             animate,
