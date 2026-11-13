@@ -14,6 +14,7 @@ mod collection;
 mod content;
 pub mod coordination;
 pub mod discovery;
+mod hot;
 #[cfg(any(feature = "legacy-import", test))]
 mod import_writes;
 mod items;
@@ -53,7 +54,13 @@ pub use recall::{GrepMatch, GrepPage, GrepQuery, RecallScope, SearchHit, SearchP
 pub use resources::{MAX_RESOURCE_SNAPSHOT_BYTES, keep as keep_resource_snapshot};
 
 const EVENT_CAPACITY: usize = 8192;
-const READERS_KEPT: usize = 4;
+const READ_SLOTS: usize = 4;
+const SCAN_SLOTS: usize = 2;
+const READERS_KEPT: usize = READ_SLOTS + SCAN_SLOTS;
+const WRITER_CACHE_KIB: i64 = 32 * 1024;
+const WAL_BACKSTOP_PAGES: i64 = 16 * 1024;
+const CHECKPOINT_AFTER_COMMITS: u64 = 512;
+const CHECKPOINT_AFTER: Duration = Duration::from_secs(15);
 const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -148,6 +155,13 @@ pub struct Store {
 struct Inner {
     #[cfg(feature = "qualification")]
     writer: std::thread::JoinHandle<()>,
+    #[cfg(feature = "qualification")]
+    checkpointer: std::thread::JoinHandle<()>,
+    #[cfg_attr(
+        not(feature = "qualification"),
+        expect(dead_code, reason = "dropping it stops the checkpointer")
+    )]
+    checkpoints: std::sync::mpsc::Sender<()>,
     jobs: mpsc::Sender<Job>,
     events: broadcast::Sender<Envelope>,
     local_live: broadcast::Sender<Envelope>,
@@ -156,6 +170,8 @@ struct Inner {
     live_revision: AtomicU64,
     readers: Mutex<Vec<Connection>>,
     read_slots: Arc<Semaphore>,
+    scan_slots: Arc<Semaphore>,
+    hot: Arc<hot::HotPages>,
     /// One source index build at a time; see [`Store::source_index`].
     index_build: Arc<Semaphore>,
     devices: Mutex<Devices>,
@@ -231,13 +247,23 @@ impl Store {
             );
         }
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)?;
+        conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)?;
         if recover {
             schema::migrate(&mut conn)?;
         }
 
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let head = Arc::new(AtomicU64::new(0));
-        let mut writer = Writer::new(conn, Arc::clone(&head), recover.then(|| events.clone()))?;
+        let hot = Arc::new(hot::HotPages::default());
+        let commits = Arc::new(AtomicU64::new(0));
+        let mut writer = Writer::new(
+            conn,
+            Arc::clone(&head),
+            recover.then(|| events.clone()),
+            Arc::clone(&hot),
+            Arc::clone(&commits),
+        )?;
         if recover {
             writer
                 .transact(|tx| tx.recover_threads(None))
@@ -252,12 +278,23 @@ impl Store {
         #[cfg(not(feature = "qualification"))]
         drop(writer_thread);
 
-        // Warm the bounded read pool.
+        let (checkpoints, stopped) = std::sync::mpsc::channel();
+        let checkpoint_conn = open_database(&database)?;
+        let checkpointer_thread = std::thread::Builder::new()
+            .name("forge-store-checkpoint".into())
+            .spawn(move || checkpoint_when_due(&checkpoint_conn, &commits, &stopped))
+            .context("spawn the store checkpointer")?;
+        #[cfg(not(feature = "qualification"))]
+        drop(checkpointer_thread);
+
         let first_reader = open_database(&database)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 #[cfg(feature = "qualification")]
                 writer: writer_thread,
+                #[cfg(feature = "qualification")]
+                checkpointer: checkpointer_thread,
+                checkpoints,
                 jobs,
                 events,
                 local_live: broadcast::channel(EVENT_CAPACITY).0,
@@ -265,7 +302,9 @@ impl Store {
                 head,
                 live_revision: AtomicU64::new(0),
                 readers: Mutex::new(vec![first_reader]),
-                read_slots: Arc::new(Semaphore::new(READERS_KEPT)),
+                read_slots: Arc::new(Semaphore::new(READ_SLOTS)),
+                scan_slots: Arc::new(Semaphore::new(SCAN_SLOTS)),
+                hot,
                 index_build: Arc::new(Semaphore::new(1)),
                 devices: Mutex::new(Devices::open(open_database(&database)?)?),
                 database,
@@ -288,6 +327,8 @@ impl Store {
         let Inner {
             jobs,
             writer,
+            checkpoints,
+            checkpointer,
             readers,
             devices,
             ..
@@ -298,6 +339,10 @@ impl Store {
         writer
             .join()
             .map_err(|_panic| anyhow!("Forge store writer panicked"))?;
+        drop(checkpoints);
+        checkpointer
+            .join()
+            .map_err(|_panic| anyhow!("Forge store checkpointer panicked"))?;
         Ok(())
     }
 
@@ -350,6 +395,7 @@ impl Store {
 
     pub async fn synchronize(&self, cursor: &mut Seq) -> Result<()> {
         if let Some(changes) = self.changes_since(*cursor, 20_000).await? {
+            self.inner.hot.committed(&changes);
             for envelope in changes {
                 if let Some(seq) = envelope.seq {
                     *cursor = (*cursor).max(seq);
@@ -358,6 +404,7 @@ impl Store {
             }
         } else {
             *cursor = self.read(read::max_seq).await?;
+            self.inner.hot.reset();
             self.relay_live(Event::Reset);
         }
         self.inner.head.fetch_max(*cursor, Ordering::AcqRel);
@@ -396,14 +443,52 @@ impl Store {
         result.await.context("the store writer dropped a write")?
     }
 
+    async fn tail_page<F>(
+        &self,
+        thread: &ThreadId,
+        tail: Option<hot::Tail>,
+        query: F,
+    ) -> Result<artisan_api::ItemsPage>
+    where
+        F: FnOnce(&Connection) -> Result<artisan_api::ItemsPage> + Send + 'static,
+    {
+        let Some(tail) = tail else {
+            return self.read(query).await;
+        };
+        match self.inner.hot.lookup(thread, &tail) {
+            hot::Lookup::Hit(page) => Ok(artisan_api::ItemsPage::clone(&page)),
+            hot::Lookup::Miss(read_at) => {
+                let page = self.read(query).await?;
+                self.inner.hot.hold(thread, tail, read_at, &page);
+                Ok(page)
+            }
+        }
+    }
+
     async fn read<R, F>(&self, query: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+    {
+        self.read_in(&self.inner.read_slots, query).await
+    }
+
+    async fn scan<R, F>(&self, query: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&Connection) -> Result<R> + Send + 'static,
+    {
+        self.read_in(&self.inner.scan_slots, query).await
+    }
+
+    async fn read_in<R, F>(&self, slots: &Arc<Semaphore>, query: F) -> Result<R>
     where
         R: Send + 'static,
         F: FnOnce(&Connection) -> Result<R> + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
         let asked = std::time::Instant::now();
-        let slot = Arc::clone(&inner.read_slots).acquire_owned().await?;
+        let slot = Arc::clone(slots).acquire_owned().await?;
         let queued = asked.elapsed();
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
@@ -443,6 +528,34 @@ impl Inner {
             readers.push(conn);
         }
         result
+    }
+}
+
+fn checkpoint_when_due(
+    conn: &Connection,
+    commits: &AtomicU64,
+    stopped: &std::sync::mpsc::Receiver<()>,
+) {
+    let mut checkpointed = commits.load(Ordering::Acquire);
+    let mut waiting_since = None;
+    while matches!(
+        stopped.recv_timeout(Duration::from_secs(1)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ) {
+        let committed = commits.load(Ordering::Acquire);
+        let pending = committed.saturating_sub(checkpointed);
+        if pending == 0 {
+            continue;
+        }
+        let since = *waiting_since.get_or_insert_with(std::time::Instant::now);
+        if pending < CHECKPOINT_AFTER_COMMITS && since.elapsed() < CHECKPOINT_AFTER {
+            continue;
+        }
+        if let Err(error) = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_row| Ok(())) {
+            tracing::warn!("checkpoint the store: {error:#}");
+        }
+        checkpointed = committed;
+        waiting_since = None;
     }
 }
 

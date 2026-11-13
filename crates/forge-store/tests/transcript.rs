@@ -305,3 +305,161 @@ async fn row_pages_cover_the_thread_once() {
     );
     assert_eq!(rows + counted as usize, stored.len());
 }
+
+const TAIL: ItemsQuery = ItemsQuery {
+    before: None,
+    after: None,
+    limit: None,
+};
+
+#[tokio::test]
+async fn a_reopened_thread_shows_what_changed_since_it_was_last_opened() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let thread = thread(&store).await;
+    let turn = RunId::from("turn");
+    run(&store, &thread, &turn, RunStatus::Running).await;
+    let asked = put(&store, &thread, &turn, Status::Done, user("Rig it", false)).await;
+
+    let first = store.transcript_rows(&thread, TAIL).await.unwrap();
+    assert_eq!(
+        first.items.iter().map(|item| &item.id).collect::<Vec<_>>(),
+        [&asked.id],
+        "the first open shows the message"
+    );
+    assert!(
+        first
+            .runs
+            .iter()
+            .all(|run| run.status == RunStatus::Running),
+        "the first open shows the turn working"
+    );
+
+    let answered = put(
+        &store,
+        &thread,
+        &turn,
+        Status::Done,
+        text("Rigged.", Phase::Final),
+    )
+    .await;
+    run(&store, &thread, &turn, RunStatus::Done).await;
+
+    let reopened = store.transcript_rows(&thread, TAIL).await.unwrap();
+    assert_eq!(
+        reopened
+            .items
+            .iter()
+            .map(|item| &item.id)
+            .collect::<Vec<_>>(),
+        [&asked.id, &answered.id],
+        "the reopened thread shows the reply written after the first open"
+    );
+    assert!(
+        reopened
+            .runs
+            .iter()
+            .all(|run| run.status == RunStatus::Done),
+        "the reopened thread shows the turn finished"
+    );
+    assert_eq!(
+        store.transcript_rows(&thread, TAIL).await.unwrap(),
+        reopened,
+        "opening again without changes shows the same page"
+    );
+}
+
+#[tokio::test]
+async fn a_reopened_agent_shows_the_work_it_did_since() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let thread = thread(&store).await;
+    let turn = RunId::from("turn");
+    run(&store, &thread, &turn, RunStatus::Running).await;
+    let agent = put(
+        &store,
+        &thread,
+        &turn,
+        Status::Running,
+        text("Delegating.", Phase::Commentary),
+    )
+    .await;
+    let child = |kind| NewItem {
+        id: ItemId::new(),
+        thread_id: thread.clone(),
+        run_id: Some(turn.clone()),
+        parent_id: Some(agent.id.clone()),
+        native_id: None,
+        status: Status::Done,
+        kind,
+    };
+    let first_step = store.upsert_item(child(shell("ls"))).await.unwrap();
+    let opened = store
+        .transcript_page(&thread, Some(&agent.id), TAIL)
+        .await
+        .unwrap();
+    assert_eq!(
+        opened.items.iter().map(|item| &item.id).collect::<Vec<_>>(),
+        [&first_step.id],
+        "the agent opens on its first step"
+    );
+
+    let second_step = store
+        .upsert_item(child(shell("cargo check")))
+        .await
+        .unwrap();
+    let reopened = store
+        .transcript_page(&thread, Some(&agent.id), TAIL)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .items
+            .iter()
+            .map(|item| &item.id)
+            .collect::<Vec<_>>(),
+        [&first_step.id, &second_step.id],
+        "the reopened agent shows the step it took after the first open"
+    );
+}
+
+#[tokio::test]
+async fn a_thread_reopened_through_another_forge_generation_shows_its_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let serving = Store::open(directory.path()).unwrap();
+    let thread = thread(&serving).await;
+    let turn = RunId::from("turn");
+    run(&serving, &thread, &turn, RunStatus::Running).await;
+    let asked = put(
+        &serving,
+        &thread,
+        &turn,
+        Status::Done,
+        user("Rig it", false),
+    )
+    .await;
+    let mut cursor = serving.head();
+    serving.transcript_rows(&thread, TAIL).await.unwrap();
+
+    let working = Store::join(directory.path()).unwrap();
+    let answered = put(
+        &working,
+        &thread,
+        &turn,
+        Status::Done,
+        text("Rigged.", Phase::Final),
+    )
+    .await;
+    serving.synchronize(&mut cursor).await.unwrap();
+
+    let reopened = serving.transcript_rows(&thread, TAIL).await.unwrap();
+    assert_eq!(
+        reopened
+            .items
+            .iter()
+            .map(|item| &item.id)
+            .collect::<Vec<_>>(),
+        [&asked.id, &answered.id],
+        "the serving Forge shows the reply another generation wrote"
+    );
+}

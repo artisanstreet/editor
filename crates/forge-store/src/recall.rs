@@ -721,13 +721,13 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<SearchPage> {
-        self.read(move |conn| search_rows(conn, &scope, &query, output, limit, offset))
+        self.scan(move |conn| search_rows(conn, &scope, &query, output, limit, offset))
             .await
     }
 
     /// Lines matching a regex, newest items first.
     pub async fn recall_grep(&self, scope: RecallScope, query: GrepQuery) -> Result<GrepPage> {
-        self.read(move |conn| grep_rows(conn, &scope, &query)).await
+        self.scan(move |conn| grep_rows(conn, &scope, &query)).await
     }
 
     /// The items that read or changed a path containing `path`, newest first.
@@ -737,7 +737,7 @@ impl Store {
         path: String,
         limit: u32,
     ) -> Result<Vec<Touch>> {
-        self.read(move |conn| touching_rows(conn, &scope, &path, limit))
+        self.scan(move |conn| touching_rows(conn, &scope, &path, limit))
             .await
     }
 }

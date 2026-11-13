@@ -236,7 +236,7 @@ impl Store {
 
     pub async fn inspector(&self, thread: &ThreadId) -> Result<artisan_api::InspectorSummary> {
         let thread = thread.clone();
-        self.read(move |conn| read::inspector(conn, &thread)).await
+        self.scan(move |conn| read::inspector(conn, &thread)).await
     }
 
     /// Every titled thread's id and title, the most recently active first:

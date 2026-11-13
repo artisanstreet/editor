@@ -620,9 +620,12 @@ impl Store {
         query: ItemsQuery,
     ) -> Result<ItemsPage> {
         let thread = thread_id.clone();
+        let tail = crate::hot::Tail::items(parent, &query);
         let parent = parent.cloned();
-        self.read(move |conn| read::scoped_items_page(conn, &thread, &query, Some(parent.as_ref())))
-            .await
+        self.tail_page(thread_id, tail, move |conn| {
+            read::scoped_items_page(conn, &thread, &query, Some(parent.as_ref()))
+        })
+        .await
     }
 
     /// A page of the root transcript in rows, the work between them as
@@ -632,10 +635,11 @@ impl Store {
         thread_id: &ThreadId,
         query: ItemsQuery,
     ) -> Result<ItemsPage> {
-        let thread_id = thread_id.clone();
-        self.read(move |conn| {
-            read::transcript_page(conn, &thread_id, &query)
-                .with_context(|| format!("page the transcript of thread {thread_id}"))
+        let thread = thread_id.clone();
+        let tail = crate::hot::Tail::rows(&query);
+        self.tail_page(thread_id, tail, move |conn| {
+            read::transcript_page(conn, &thread, &query)
+                .with_context(|| format!("page the transcript of thread {thread}"))
         })
         .await
     }

@@ -21,6 +21,8 @@ pub struct Writer {
     conn: Connection,
     head: Arc<AtomicU64>,
     events: Option<broadcast::Sender<Envelope>>,
+    hot: Arc<crate::hot::HotPages>,
+    commits: Arc<AtomicU64>,
 }
 
 impl Writer {
@@ -28,10 +30,18 @@ impl Writer {
         conn: Connection,
         head: Arc<AtomicU64>,
         events: Option<broadcast::Sender<Envelope>>,
+        hot: Arc<crate::hot::HotPages>,
+        commits: Arc<AtomicU64>,
     ) -> Result<Self> {
         let seq = read::max_seq(&conn)?;
         head.store(seq, Ordering::Release);
-        Ok(Self { conn, head, events })
+        Ok(Self {
+            conn,
+            head,
+            events,
+            hot,
+            commits,
+        })
     }
 
     pub(crate) fn run(mut self, mut jobs: mpsc::Receiver<Job>) {
@@ -58,6 +68,8 @@ impl Writer {
             sql, seq, events, ..
         } = tx;
         sql.commit().context("commit write transaction")?;
+        self.commits.fetch_add(1, Ordering::AcqRel);
+        self.hot.committed(&events);
         self.head.fetch_max(seq, Ordering::AcqRel);
         if let Some(sender) = &self.events {
             for envelope in events {
