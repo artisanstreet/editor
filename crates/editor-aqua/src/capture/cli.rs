@@ -73,6 +73,11 @@ fn capture(script: &str) -> Result<bool> {
         focused: variable("ARTISAN_AQUA_FOCUSED").is_some_and(|value| value == "1"),
         out_dir: variable("ARTISAN_AQUA_CAPTURE_DIR")
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
+        latency: variable("ARTISAN_AQUA_CAPTURE_LATENCY_MS")
+            .map(|value| value.parse().map(std::time::Duration::from_millis))
+            .transpose()
+            .context("ARTISAN_AQUA_CAPTURE_LATENCY_MS is a whole number of milliseconds")?
+            .filter(|delay| !delay.is_zero()),
     };
     let text = std::fs::read_to_string(&script).with_context(|| format!("read {script}"))?;
     let records = run_script(options, &text)?;

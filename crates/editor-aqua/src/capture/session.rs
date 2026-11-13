@@ -31,6 +31,7 @@ pub struct Options {
     pub scale: f64,
     pub focused: bool,
     pub out_dir: PathBuf,
+    pub latency: Option<std::time::Duration>,
 }
 
 pub struct Session {
@@ -73,7 +74,7 @@ impl Session {
         };
         config.window.title = "Artisan Editor".to_owned();
         let mut aqua = Aqua::new(config).map_err(anyhow::Error::msg)?;
-        let (scenario, mut core) = Scenario::start(&options.fixture)?;
+        let (scenario, mut core) = Scenario::start(&options.fixture, options.latency)?;
         core.navigate(scenario.screen(&options.route)?);
         let resources = ShellResources::for_runtime(&aqua, options.scale as f32)
             .context("could not configure Editor layout")?
