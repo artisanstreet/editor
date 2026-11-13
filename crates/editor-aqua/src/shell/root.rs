@@ -591,7 +591,7 @@ impl RootViews {
             }
             self.row_settled.borrow_mut().clear();
             self.observations.clear();
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -897,15 +897,18 @@ impl RootViews {
             {
                 let actions = Rc::clone(&self.conversation_actions);
                 let scope = scope.clone();
-                let retry =
-                    crate::ui::button::Button::text("retry-thread-controls", theme, "Retry")
-                        .variant(crate::ui::button::ButtonVariant::Ghost)
-                        .on_activate(move |_| {
-                            actions
-                                .borrow_mut()
-                                .push_back(ConversationAction::RetryControls(scope.clone()))
-                        })
-                        .build();
+                let retry = crate::ui::kit::Button::text(
+                    "retry-thread-controls",
+                    theme,
+                    crate::ui::kit::ButtonTone::Neutral,
+                    "Retry",
+                )
+                .on_activate(move |_| {
+                    actions
+                        .borrow_mut()
+                        .push_back(ConversationAction::RetryControls(scope.clone()))
+                })
+                .build();
                 controls.push(
                     crate::ui::page::notice(
                         &theme,
@@ -919,10 +922,12 @@ impl RootViews {
         let above_composer = if controls.is_empty() {
             None
         } else {
-            let mut column = aqua_ui::element::Box::new()
-                .layout("column")
-                .width(aqua_ui::style::Length::Pct(100.0))
-                .gap(8.0);
+            let mut column = crate::ui::kit::Spaced::spaced(
+                aqua_ui::element::Box::new()
+                    .layout("column")
+                    .width(aqua_ui::style::Length::Pct(100.0)),
+                crate::ui::kit::Space::S8,
+            );
             for control in controls {
                 column = column.child(control);
             }
@@ -1709,7 +1714,7 @@ impl RootViews {
                 preview.dispose(ui);
             }
             self.drag_position = None;
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -1784,11 +1789,9 @@ impl RootViews {
             ctx.request_frame(window, aqua::prelude::FrameReason::INPUT);
         }
         self.drag_position = position;
-        let profile = ui.find_debug_selector("artisan-desktop-profile-trigger");
         if let Err(error) = self.sidebar_overlays.sync(
             ui,
             owner,
-            profile,
             &workspace.sidebar,
             &shell.core,
             shell.preferences.theme(),
@@ -1797,14 +1800,7 @@ impl RootViews {
         ) {
             tracing::warn!(%error, "could not synchronize sidebar overlays");
         }
-        let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        match self.sidebar_overlays.advance(
-            ui,
-            &mut workspace.sidebar,
-            &shell.preferences.theme(),
-            reduced,
-            now,
-        ) {
+        match self.sidebar_overlays.advance(ui, now) {
             Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
             Ok(false) => {}
             Err(error) => tracing::warn!(%error, "could not advance sidebar overlays"),
@@ -1841,13 +1837,10 @@ impl RootViews {
     ) -> bool {
         let _tm = crate::shell::application::Tm::new("v.navigation");
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        match self.navigation.sync(
-            ui,
-            &theme,
-            std::time::Instant::now(),
-            ctx.now().as_secs_f64(),
-            reduced,
-        ) {
+        match self
+            .navigation
+            .sync(ui, &theme, std::time::Instant::now(), reduced)
+        {
             Ok(frame) => {
                 if frame.changed || frame.animating || frame.ticking {
                     ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
@@ -2783,7 +2776,7 @@ impl SectionViews for RootViews {
                 preview.dispose(ui);
             }
             self.drag_position = None;
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -2819,7 +2812,7 @@ impl SectionViews for RootViews {
                 preview.dispose(ui);
             }
             self.drag_position = None;
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -2912,7 +2905,7 @@ impl SectionViews for RootViews {
             self.replace_rows(None);
             self.stored.borrow_mut().drain_cleanup(ui);
             self.observations.clear();
-            self.navigation.dispose(ui);
+            self.navigation.dispose();
             self.transcript_viewport = None;
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
@@ -3130,14 +3123,14 @@ impl SectionViews for RootViews {
                         .layout("row")
                         .styles([aqua::Aqua::Style()
                             .flex_grow(1.0)
-                            .min_width(aqua::px(0.0))
-                            .min_height(aqua::px(0.0))])
+                            .min_width(aqua::pct(0.0))
+                            .min_height(aqua::pct(0.0))])
                         .child(
                             aqua::Aqua::Box()
                                 .layout("column")
                                 .styles([aqua::Aqua::Style()
                                     .flex_grow(1.0)
-                                    .min_width(aqua::px(0.0))])
+                                    .min_width(aqua::pct(0.0))])
                                 .child(center)
                                 .build(),
                         )

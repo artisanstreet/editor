@@ -2,7 +2,7 @@ use editor_ui::{
     markdown::terminal::{TerminalColor, TerminalLine},
     theme::{ArtisanTheme, Opacity},
 };
-use aqua_text::{FontSlant, FontWeight, StyledSpan, TextStyle};
+use aqua_text::{FontSlant, StyledSpan};
 use palette::{Hsla, IntoColor, Srgba};
 
 #[derive(Clone, Copy)]
@@ -53,7 +53,23 @@ fn luminance(color: [f32; 4]) -> f32 {
     )
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "ANSI SGR attributes restyle terminal output per run; they are data, not chrome"
+)]
+type Font = aqua_text::TextStyle;
+
 impl TerminalPalette {
+    #[expect(
+        clippy::disallowed_types,
+        reason = "ANSI bold is a terminal data attribute, not chrome"
+    )]
+    pub fn bold(base: &Font) -> Font {
+        let mut font = base.clone();
+        font.weight = aqua_text::FontWeight::BOLD;
+        font
+    }
+
     pub fn for_theme(theme: &ArtisanTheme) -> Self {
         Self {
             base: theme.colors.ansi.0.map(theme_color),
@@ -80,7 +96,7 @@ impl TerminalPalette {
     pub fn spans(
         &self,
         line: &TerminalLine,
-        base: &TextStyle,
+        base: &Font,
         foreground: [f32; 4],
         background: [f32; 4],
     ) -> Vec<StyledSpan> {
@@ -118,10 +134,10 @@ impl TerminalPalette {
                     color
                 }));
             }
-            let mut font = base.clone();
-            if style.bold {
-                font.weight = FontWeight::BOLD;
-            }
+            let mut font = match style.bold {
+                true => Self::bold(base),
+                false => base.clone(),
+            };
             if style.italic {
                 font.slant = FontSlant::Italic;
             }

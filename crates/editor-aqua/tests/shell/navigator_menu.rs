@@ -17,13 +17,11 @@ fn outline(count: usize) -> Vec<OutlineEntry> {
 }
 
 fn mounted_menu(count: usize, jumps: Rc<RefCell<Vec<Seq>>>) -> aqua::UiApp {
-    use editor_aqua::conversation::adapter::Action;
     use aqua_text::{SharedFonts, SharedRuns};
-    let hover = editor_aqua::ui::picker_motion::HoverSurface::new("test-navigator-hover");
+    use editor_aqua::conversation::adapter::Action;
     let markers = outline(count);
     let label: Rc<dyn Fn(&str, bool, ArtisanTheme) -> Element> =
         Rc::new(|label, _, _| Text::new(label.to_owned()).build());
-    let row_hover: Rc<dyn Fn(ItemId)> = Rc::new(|_| {});
     let sink = jumps.clone();
     let dispatch: Dispatch = Rc::new(move |action| {
         if let Action::Jump(position) = action {
@@ -36,9 +34,7 @@ fn mounted_menu(count: usize, jumps: Rc<RefCell<Vec<Seq>>>) -> aqua::UiApp {
         400.0,
         ArtisanTheme::resolved(),
         1.0,
-        &hover,
         label,
-        row_hover,
         dispatch,
     );
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());

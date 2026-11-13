@@ -5,14 +5,14 @@ use std::{
 };
 
 use aqua_core::Point;
-use aqua_text::{FontFamily, FontWeight, TextStyle, overflow::OverflowMode};
+use aqua_text::overflow::OverflowMode;
 use aqua_ui::{
     AlignItems, JustifyContent,
     collection_runtime::CollectionViewport,
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::{Length, Style},
 };
-use artisan_api::{ItemId, OutlineEntry, Seq};
+use artisan_api::{OutlineEntry, Seq};
 
 use crate::{
     conversation::{
@@ -23,7 +23,10 @@ use crate::{
         },
     },
     core::{Core, HostInstance},
-    ui::theme::ArtisanTheme,
+    ui::{
+        kit::{Finish, IconButton, IconButtonSize, Space, Spaced, Surface, TextRole},
+        theme::ArtisanTheme,
+    },
 };
 
 pub fn viewport_moves_navigation(
@@ -101,20 +104,23 @@ pub fn jump_to_latest(
     if !latest_visible(conversation, core, composer_present) {
         return None;
     }
-    let button = crate::ui::button::Button::icon(
+    let size = IconButtonSize::Md;
+    let button = IconButton::new(
         "jump-latest",
         theme,
         editor_assets::AssetId::TABLER_CHEVRON_DOWN,
         "Jump to latest",
+        size,
+        Finish::Glass,
     )
-    .variant(crate::ui::button::ButtonVariant::Ghost)
+    .nested(Surface::Pill(size.edge()).radius_px(), 0.0)
     .on_activate(move |_| dispatch(crate::conversation::adapter::Action::JumpLatest))
     .build();
     Some(
         UiBox::new()
             .width(Length::Pct(100.0))
             .style(Style::new().justify(JustifyContent::CENTER))
-            .child(crate::ui::glass::glass_handle(&theme, button))
+            .child(button)
             .build(),
     )
 }
@@ -286,7 +292,6 @@ impl ThreadNavigation {
                 state.opened = None;
                 state.center = None;
                 state.epoch = state.epoch.wrapping_add(1);
-                self.navigator.borrow().clear_hover();
             }
         }
         if !conversation.host_is_current(core) {
@@ -300,7 +305,6 @@ impl ThreadNavigation {
             state.hovered = false;
             state.opened = None;
             state.center = None;
-            self.navigator.borrow().clear_hover();
             return None;
         }
         let reading = reading_position(conversation, viewport);
@@ -327,6 +331,7 @@ impl ThreadNavigation {
             (state.hovered, state.opened, state.epoch)
         };
         let mut region = UiBox::new()
+            .spaced(Space::S4)
             .style(Style::new().align(AlignItems::CENTER))
             .child(rail);
         if hovered {
@@ -339,37 +344,16 @@ impl ThreadNavigation {
                     )
                 })
             };
-            let navigator = self.navigator.clone();
-            let state = Rc::downgrade(&self.interaction);
-            let invalidate_hover = invalidate.clone();
-            let row_hover: Rc<dyn Fn(ItemId)> = Rc::new(move |id| {
-                if state
-                    .upgrade()
-                    .is_some_and(|state| state.borrow().epoch == epoch && state.borrow().hovered)
-                {
-                    navigator.borrow().hovered(&id);
-                    invalidate_hover();
-                }
-            });
             let label: Rc<dyn Fn(&str, bool, ArtisanTheme) -> Element> =
                 Rc::new(|label, active, theme| {
-                    Text::new(label.to_owned())
-                        .text_style(TextStyle {
-                            families: vec![FontFamily::Named(
-                                theme.typography.sans.family.to_owned(),
-                            )],
-                            size_px: theme.typography.control_text,
-                            weight: if active {
-                                FontWeight::MEDIUM
-                            } else {
-                                FontWeight::NORMAL
-                            },
-                            ..TextStyle::default()
-                        })
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
+                    let role = match active {
+                        true => TextRole::LabelStrong,
+                        false => TextRole::Label,
+                    };
+                    role.text(&theme, label.to_owned())
                         .overflow(OverflowMode::EndEllipsis)
                         .wrap(false)
-                        .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
+                        .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
                         .build()
                 });
             let menu = navigator::menu(
@@ -378,23 +362,12 @@ impl ThreadNavigation {
                 max_height,
                 theme,
                 progress,
-                &self.navigator.borrow().hover,
                 label,
-                row_hover,
                 dispatch,
             );
-            region = region.child(
-                UiBox::new()
-                    .style(Style::new().padding_insets(aqua_core::Insets {
-                        left: 4.0,
-                        ..aqua_core::Insets::default()
-                    }))
-                    .child(menu)
-                    .build(),
-            );
+            region = region.child(menu);
         }
         let interaction = Rc::downgrade(&self.interaction);
-        let navigator = Rc::downgrade(&self.navigator);
         let count = markers.len();
         let region = region
             .build()
@@ -414,9 +387,6 @@ impl ThreadNavigation {
                 } else {
                     state.opened = None;
                     state.center = None;
-                    if let Some(navigator) = navigator.upgrade() {
-                        navigator.borrow().hover.hide();
-                    }
                 }
                 drop(state);
                 invalidate();
@@ -441,7 +411,6 @@ impl ThreadNavigation {
         ui: &mut aqua::UiApp,
         theme: &ArtisanTheme,
         now: Instant,
-        seconds: f64,
         reduced_motion: bool,
     ) -> Result<Frame, String> {
         let mut frame = Frame::default();
@@ -460,17 +429,6 @@ impl ThreadNavigation {
                 }
             }
         }
-        if let Some(surface) = keyed(ui, "turn-navigator-hover-surface") {
-            let hover = self.navigator.borrow_mut().advance_hover_frame(
-                ui,
-                surface,
-                theme,
-                seconds,
-                reduced_motion,
-            )?;
-            frame.changed |= hover.changed;
-            frame.animating |= hover.animating;
-        }
         frame.animating |= !reduced_motion
             && self.interaction.borrow().opened.is_some_and(|opened| {
                 now.saturating_duration_since(opened) < Duration::from_millis(150)
@@ -481,9 +439,8 @@ impl ThreadNavigation {
         Ok(frame)
     }
 
-    pub fn dispose(&mut self, ui: &mut aqua::UiApp) {
+    pub fn dispose(&mut self) {
         self.context = None;
-        self.navigator.borrow_mut().dispose(ui);
         let mut state = self.interaction.borrow_mut();
         state.scope = None;
         state.hovered = false;

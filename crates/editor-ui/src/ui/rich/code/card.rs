@@ -1,10 +1,7 @@
-use crate::ui::glass::{GlassStrength, glass_card_shadows, glass_highlight, glass_material};
+use crate::ui::kit::{IconButtonSize, Space, Spaced, Surface, TextRole};
 use crate::ui::rich::narrative::callout::text;
-use crate::ui::theme::{ArtisanTheme, Elevation, Opacity, RadiusStep, RadiusTokens};
-use aqua_core::{
-    CornerRadii, DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Insets,
-};
-use aqua_text::FontWeight;
+use crate::ui::theme::ArtisanTheme;
+use aqua_ui::AlignItems;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 
@@ -24,26 +21,17 @@ pub(crate) fn envelope(
     let mut body = ui::Box::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(12.0);
+        .spaced(Space::S12);
     if title.is_some() || subtitle.is_some() {
-        let mut heading = ui::Box::new().layout("column").gap(2.0);
+        let mut heading = ui::Box::new().layout("column").spaced(Space::S2);
         if let Some(title) = title {
-            heading = heading.child(text(
-                theme,
-                title,
-                15.0,
-                22.0,
-                FontWeight(600),
-                theme.colors.text,
-            ));
+            heading = heading.child(text(theme, title, TextRole::Title, theme.colors.text));
         }
         if let Some(subtitle) = subtitle {
             heading = heading.child(text(
                 theme,
                 subtitle,
-                13.0,
-                20.0,
-                FontWeight::NORMAL,
+                TextRole::Label,
                 theme.colors.text_muted,
             ));
         }
@@ -54,13 +42,23 @@ pub(crate) fn envelope(
         body = body.child(text(
             theme,
             caption,
-            13.0,
-            20.0,
-            FontWeight::NORMAL,
+            TextRole::Caption,
             theme.colors.text_muted,
         ));
     }
     body.build()
+}
+
+fn copy_slot(action: Element, placement: CopyPlacement) -> Element {
+    let align = match placement {
+        CopyPlacement::TopRight => AlignItems::START,
+        CopyPlacement::CenterRight => AlignItems::CENTER,
+    };
+    ui::Box::new()
+        .layout("row")
+        .style(Style::new().flex_shrink(0.0).align(align))
+        .child(action)
+        .build()
 }
 
 pub(crate) fn render(
@@ -69,91 +67,39 @@ pub(crate) fn render(
     copy: Option<(Element, CopyPlacement)>,
     balanced: bool,
 ) -> Element {
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    let inset = theme.spacing.steps(2.0);
-    let gutter = inset * 2.0 + theme.density.control_sm;
-    let pad = theme.density.card_padding_compact;
-    let has_copy = copy.is_some();
-    let material = glass_material(theme, GlassStrength::Quiet);
-    let highlight = glass_highlight(theme, GlassStrength::Quiet);
-    let layers = ui::Canvas::new()
-        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-        .scroll_stable()
-        .on_paint(move |bounds| {
-            [material, highlight]
-                .into_iter()
-                .map(|gradient| DisplayItem::GpuiBackground {
-                    bounds,
-                    corners: CornerRadii::uniform(radius),
-                    background: GpuiBackground::LinearGradient {
-                        angle: gradient.angle_degrees,
-                        color_space: GpuiGradientColorSpace::Oklab,
-                        stops: [
-                            GpuiGradientStop {
-                                percentage: 0.0,
-                                color: gradient.start.to_reference_paint(),
-                            },
-                            GpuiGradientStop {
-                                percentage: gradient.end_position,
-                                color: gradient.end.to_reference_paint(),
-                            },
-                        ],
-                    },
-                })
-                .collect()
-        })
-        .build();
-    let mut card = ui::Box::new()
-        .width(Length::Pct(100.0))
-        .radius(radius)
+    let body = ui::Box::new()
         .style(
             Style::new()
+                .flex_grow(1.0)
+                .flex_shrink(1.0)
                 .min_width(Length::Px(0.0))
-                .padding_insets(Insets {
-                    left: if has_copy && balanced { gutter } else { pad },
-                    right: if has_copy { gutter } else { pad },
-                    top: pad,
-                    bottom: pad,
-                })
-                .gpui_source_text_color(theme.colors.text.to_reference_text_color())
-                .gpui_background(GpuiBackground::Solid(
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBase)
-                        .to_reference_paint(),
-                ))
-                .gpui_shadows(
-                    glass_card_shadows(theme, Elevation::Raised)
-                        .into_iter()
-                        .map(aqua_ui::style::GpuiShadowLayer::from)
-                        .collect(),
-                ),
+                .gpui_source_text_color(theme.colors.text.to_reference_text_color()),
         )
-        .child(layers);
-    if let Some((action, placement)) = copy {
-        let absolute = match placement {
-            CopyPlacement::TopRight => {
-                Style::new().absolute_at(None, Some(inset), Some(inset), None)
+        .child(content)
+        .build();
+    let mut row = ui::Box::new()
+        .layout("row")
+        .spaced(Space::S8)
+        .width(Length::Pct(100.0))
+        .style(Style::new().min_width(Length::Px(0.0)));
+    match copy {
+        Some((action, placement)) => {
+            let slot = copy_slot(action, placement);
+            if balanced {
+                row = row.child(
+                    ui::Box::new()
+                        .width(IconButtonSize::Md.edge())
+                        .style(Style::new().flex_shrink(0.0))
+                        .build(),
+                );
             }
-            CopyPlacement::CenterRight => {
-                Style::new().absolute_at(None, Some(0.0), Some(inset), Some(0.0))
-            }
-        };
-        card = card.child(
-            ui::Box::new()
-                .layout("row")
-                .style(absolute.align(aqua_ui::AlignItems::CENTER))
-                .child(action)
-                .build(),
-        );
+            row = row.child(body).child(slot);
+        }
+        None => row = row.child(body),
     }
-    card.child(
-        ui::Box::new()
+    Surface::Card.build(theme, vec![row.build()]).style(
+        Style::new()
             .width(Length::Pct(100.0))
-            .style(Style::new().min_width(Length::Px(0.0)))
-            .child(content)
-            .build(),
+            .min_width(Length::Px(0.0)),
     )
-    .build()
 }

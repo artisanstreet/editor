@@ -1,4 +1,5 @@
 use super::*;
+use artisan_api::ItemId;
 
 #[test]
 fn latest_is_offered_only_for_a_current_reading_thread_with_composer() {

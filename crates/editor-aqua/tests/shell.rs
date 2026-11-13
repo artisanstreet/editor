@@ -35,6 +35,7 @@ mod scroll_edge;
 #[cfg(windows)]
 #[path = "shell/uia.rs"]
 mod uia;
+#[expect(clippy::disallowed_methods, reason = "test fixture driving the raw aqua text and element APIs, not view code")]
 #[path = "shell/wheel.rs"]
 mod wheel;
 #[path = "shell/workspace.rs"]

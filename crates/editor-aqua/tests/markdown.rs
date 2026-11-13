@@ -2,6 +2,7 @@
 mod presenter;
 #[path = "markdown/reveal.rs"]
 mod reveal;
+#[expect(clippy::disallowed_types, reason = "test fixture driving the raw aqua text and element APIs, not view code")]
 #[path = "markdown/visual.rs"]
 mod visual;
 #[cfg(feature = "qualification")]

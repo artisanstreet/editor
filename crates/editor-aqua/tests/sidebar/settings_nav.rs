@@ -62,12 +62,13 @@ fn late_first_frame_finishes_settings_expansion_without_pointer_input() {
         .unwrap();
     resources.ui.build_frame().unwrap();
     let (expanded, expanded_access) = about(&resources.ui);
+    let children = settings_nav::children_height(4);
     assert!(
-        (expanded.y - collapsed.y - 128.0).abs() < 0.01,
-        "the completion frame must expose all four 32px General children without pointer input"
+        (expanded.y - collapsed.y - children).abs() < 1.0 / 1.25,
+        "the completion frame must expose all four General children without pointer input"
     );
     assert!(
-        (expanded_access.y - collapsed_access.y - 160.0).abs() < 0.01,
+        (expanded_access.y - collapsed_access.y - children * 1.25).abs() < 1.0,
         "accessibility must follow the completed layout in physical pixels at 1.25 DPI"
     );
     assert_eq!(

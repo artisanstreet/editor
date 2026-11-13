@@ -14,13 +14,16 @@ use editor_assets::AssetId;
 
 use super::visual::{BodyTone, LeafError, LinkAction, interactive_leaf, raw_leaf};
 use super::{Block, CodeFence, MarkdownDocument, MarkdownEngine, MarkdownError};
+use crate::ui::kit::{
+    Button, ButtonSize, ButtonTone, Hover, Label, Radius, Space, Spaced, TextRole, live,
+};
 use crate::ui::rich::charts::{
     self,
     chart::ChartState,
     concentration::ConcentrationState,
     distribution::DistributionState,
     funnel::{FunnelState, TextRole as FunnelTextRole},
-    heatmap::{HeatmapState, TextRole},
+    heatmap::{HeatmapState, TextRole as HeatmapTextRole},
     hierarchy::HierarchyState,
     sankey::SankeyState,
     spans::SpansState,
@@ -407,7 +410,8 @@ impl MarkdownPresenter {
             self.document = None;
             self.projected = None;
             let document = engine.parse_document(source)?;
-            let mut projected = super::projected::ProjectedDocument::new(engine, source, command.as_deref())?;
+            let mut projected =
+                super::projected::ProjectedDocument::new(engine, source, command.as_deref())?;
             let mut previous = std::mem::take(&mut self.rich);
             let mut next: Vec<Option<RetainedRich>> =
                 (0..document.blocks().len()).map(|_| None).collect();
@@ -736,14 +740,12 @@ impl MarkdownPresenter {
                 ui::Box::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
-                    .gap(6.0)
+                    .spaced(Space::S6)
                     .child(card)
                     .child(crate::ui::rich::narrative::callout::text(
                         theme,
                         note,
-                        13.0,
-                        20.0,
-                        aqua_text::FontWeight::NORMAL,
+                        TextRole::Label,
                         theme.colors.text_muted,
                     ))
                     .build()
@@ -875,7 +877,9 @@ impl MarkdownPresenter {
             selection_batch,
             geometry,
             source_range,
-            proof: self.leaf_proof(row).ok_or(PresenterError::Unavailable("projected row"))?,
+            proof: self
+                .leaf_proof(row)
+                .ok_or(PresenterError::Unavailable("projected row"))?,
         })
     }
 
@@ -964,14 +968,12 @@ impl MarkdownPresenter {
                 ui::Box::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
-                    .gap(6.0)
+                    .spaced(Space::S6)
                     .child(card)
                     .child(crate::ui::rich::narrative::callout::text(
                         theme,
                         note,
-                        13.0,
-                        20.0,
-                        aqua_text::FontWeight::NORMAL,
+                        TextRole::Label,
                         theme.colors.text_muted,
                     ))
                     .build()
@@ -1008,7 +1010,9 @@ impl MarkdownPresenter {
             selection_batch,
             geometry,
             source_range,
-            proof: self.leaf_proof(row).ok_or(PresenterError::Unavailable("projected row"))?,
+            proof: self
+                .leaf_proof(row)
+                .ok_or(PresenterError::Unavailable("projected row"))?,
         })
     }
 
@@ -1440,17 +1444,10 @@ impl MarkdownPresenter {
             RichFence::Pending { kind } => {
                 return Ok(ui::Box::new()
                     .width(Length::Pct(100.0))
-                    .style(Style::new().padding_insets(Insets {
-                        top: 4.0,
-                        bottom: 4.0,
-                        ..Insets::default()
-                    }))
                     .child(crate::ui::rich::narrative::callout::text(
                         theme,
                         &format!("Drawing {kind}\u{2026}"),
-                        14.0,
-                        22.0,
-                        aqua_text::FontWeight::NORMAL,
+                        TextRole::Label,
                         theme.colors.text_muted,
                     ))
                     .build());
@@ -1461,7 +1458,10 @@ impl MarkdownPresenter {
         };
         if matches!(
             &envelope.block,
-            Prepared::Model(_) | Prepared::Image(_) | Prepared::Audio(_) | Prepared::ImageCompare(_)
+            Prepared::Model(_)
+                | Prepared::Image(_)
+                | Prepared::Audio(_)
+                | Prepared::ImageCompare(_)
         ) {
             self.media_invalidations
                 .borrow_mut()
@@ -1509,15 +1509,8 @@ impl MarkdownPresenter {
                     &services,
                 );
                 let current_theme = *theme;
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -1626,15 +1619,8 @@ impl MarkdownPresenter {
                     .view(model, *theme, &block_id, services.width, emit)
                     .map_err(PresenterError::Unavailable)?;
                 let current_theme = *theme;
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -1687,15 +1673,8 @@ impl MarkdownPresenter {
                     invalidate.clone(),
                 );
                 let current_theme = *theme;
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -1763,15 +1742,8 @@ impl MarkdownPresenter {
                     .view(model, *theme, &block_id, services.width, emit)
                     .map_err(PresenterError::Unavailable)?;
                 let current_theme = *theme;
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -1881,15 +1853,8 @@ impl MarkdownPresenter {
                 });
                 let content = tree.render(theme, &block_id, state, emit);
                 let current_theme = *theme;
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -1948,15 +1913,8 @@ impl MarkdownPresenter {
                     invalidate.clone(),
                 );
                 let current_theme = *theme;
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -1983,15 +1941,8 @@ impl MarkdownPresenter {
                     invalidate.clone(),
                 );
                 let current_theme = *theme;
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -2025,20 +1976,21 @@ impl MarkdownPresenter {
                 let services = heatmap.ok_or(PresenterError::Unavailable("heatmap services"))?;
                 let current_theme = *theme;
                 let text = Rc::new(
-                    move |role: TextRole,
+                    move |role: HeatmapTextRole,
                           value: &str,
                           size,
                           line,
                           weight,
                           color: crate::ui::theme::Oklch| {
-                        if role == TextRole::Ramp {
-                            return crate::ui::rich::narrative::callout::text(
+                        if role == HeatmapTextRole::Ramp {
+                            return crate::ui::rich::charts::frame::mark_text(
                                 &current_theme,
                                 value,
                                 size,
                                 line,
                                 weight,
                                 color,
+                                true,
                             );
                         }
                         let style = aqua_text::TextStyle {
@@ -2054,7 +2006,7 @@ impl MarkdownPresenter {
                             .text_style(style)
                             .gpui_source_color(color.to_reference_text_color())
                             .wrap(false);
-                        if role == TextRole::RowLabel {
+                        if role == HeatmapTextRole::RowLabel {
                             text = text.overflow(aqua_text::overflow::OverflowMode::EndEllipsis);
                         } else {
                             text = text.clip(true);
@@ -2078,15 +2030,8 @@ impl MarkdownPresenter {
                     services.navigation_frame.clone(),
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -2102,7 +2047,7 @@ impl MarkdownPresenter {
                 let current_theme = *theme;
                 let text = Rc::new(
                     move |role: FunnelTextRole, value: &str, size, line, weight, color| {
-                        let text = crate::ui::rich::narrative::callout::text_with_wrap(
+                        let text = crate::ui::rich::charts::frame::mark_text(
                             &current_theme,
                             value,
                             size,
@@ -2133,15 +2078,8 @@ impl MarkdownPresenter {
                     services.navigation_frame.clone(),
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -2270,15 +2208,8 @@ impl MarkdownPresenter {
                     &services,
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -2399,27 +2330,26 @@ impl MarkdownPresenter {
                     trail: Rc::new(move |entries, select| {
                         let mut trail = ui::Box::new()
                             .layout("row")
-                            .gap(2.0)
+                            .spaced(Space::S2)
                             .style(Style::new().wrap(true).align(aqua_ui::AlignItems::CENTER));
                         for (step, (node, name, current)) in entries.into_iter().enumerate() {
                             if step > 0 {
                                 trail = trail.child(crate::ui::rich::narrative::callout::text(
                                     &current_theme,
                                     "/",
-                                    12.0,
-                                    16.0,
-                                    aqua_text::FontWeight::NORMAL,
+                                    TextRole::Caption,
                                     current_theme.colors.text_muted,
                                 ));
                             }
                             let choose = select.clone();
                             trail = trail.child(
-                                crate::ui::button::Button::text(
+                                Button::text(
                                     format!("{trail_id}-trail-{node}"),
                                     current_theme,
+                                    ButtonTone::Quiet,
                                     name,
                                 )
-                                .variant(crate::ui::button::ButtonVariant::Ghost)
+                                .size(ButtonSize::Sm)
                                 .disabled(current)
                                 .on_activate(move |_| choose(node))
                                 .build(),
@@ -2458,15 +2388,8 @@ impl MarkdownPresenter {
                     &services,
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -2566,15 +2489,8 @@ impl MarkdownPresenter {
                     shared.navigation_frame.clone(),
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -2655,7 +2571,7 @@ impl MarkdownPresenter {
                     legend: Rc::new(move |entries, toggle| {
                         let mut legend = ui::Box::new()
                             .layout("row")
-                            .gap(12.0)
+                            .spaced(Space::S4)
                             .style(Style::new().wrap(true).align(aqua_ui::AlignItems::CENTER));
                         for (index, (name, color, hidden)) in entries.into_iter().enumerate() {
                             let color = if hidden {
@@ -2680,27 +2596,26 @@ impl MarkdownPresenter {
                                 )
                                 .build();
                             let activate = toggle.clone();
-                            let button = crate::ui::button::Button::text(
+                            let button = legend_toggle(
                                 format!("{legend_id}-legend-{index}"),
-                                current_theme,
+                                &current_theme,
+                                swatch,
                                 name,
-                            )
-                            .variant(crate::ui::button::ButtonVariant::Ghost)
-                            .icon_slot(swatch)
-                            .on_activate(move |_| activate(index))
-                            .build();
+                                hidden,
+                                move || activate(index),
+                            );
                             legend = legend.child(button);
                         }
                         legend.build()
                     }),
                     reset: Rc::new(move |reset| {
-                        crate::ui::button::Button::icon_text(
+                        Button::new(
                             reset_id.clone(),
                             current_theme,
-                            AssetId::TABLER_ZOOM_OUT,
-                            "Reset zoom",
+                            ButtonTone::Quiet,
+                            ButtonSize::Md,
+                            Label::IconText(AssetId::TABLER_ZOOM_OUT, "Reset zoom".to_owned()),
                         )
-                        .variant(crate::ui::button::ButtonVariant::Ghost)
                         .on_activate(move |_| reset())
                         .build()
                     }),
@@ -2716,15 +2631,8 @@ impl MarkdownPresenter {
                     &services,
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -2810,15 +2718,8 @@ impl MarkdownPresenter {
                     &services,
                     invalidate.clone(),
                 );
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -2849,15 +2750,8 @@ impl MarkdownPresenter {
                     invalidate.clone(),
                 );
                 let current_theme = *theme;
-                let text = Rc::new(move |value: &str, size, line, weight, color| {
-                    crate::ui::rich::narrative::callout::text(
-                        &current_theme,
-                        value,
-                        size,
-                        line,
-                        weight,
-                        color,
-                    )
+                let text = Rc::new(move |value: &str, role, color| {
+                    crate::ui::rich::narrative::callout::text(&current_theme, value, role, color)
                 });
                 charts::heatmap::envelope(
                     theme,
@@ -3061,4 +2955,50 @@ impl MarkdownPresenter {
             proof: PreparationProof(self.proof.clone()),
         })
     }
+}
+
+fn legend_toggle(
+    key: String,
+    theme: &ArtisanTheme,
+    swatch: Element,
+    name: String,
+    hidden: bool,
+    activate: impl Fn() + 'static,
+) -> Element {
+    let ink = match hidden {
+        true => theme.colors.text_muted,
+        false => theme.colors.text,
+    };
+    let element = ui::Button::new()
+        .gap(Space::S6.px())
+        .style(
+            Radius::Field
+                .style()
+                .padding(Length::Px(Space::S4.px()))
+                .align(aqua_ui::AlignItems::CENTER)
+                .flex_shrink(0.0),
+        )
+        .child(live::layer(
+            Hover::Neutral,
+            theme,
+            Radius::Field.px(),
+            false,
+        ))
+        .child(swatch)
+        .child(
+            TextRole::Caption
+                .text(theme, name.clone())
+                .gpui_source_color(ink.to_reference_text_color())
+                .wrap(false)
+                .build(),
+        )
+        .on_activate(activate)
+        .build()
+        .with_key(key)
+        .role(aqua_core::Role::Button)
+        .aria_label(name)
+        .aria_selected(!hidden)
+        .focusable(true)
+        .cursor(aqua_core::CursorIcon::Pointer);
+    live::track(element)
 }

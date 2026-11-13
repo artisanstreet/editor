@@ -94,7 +94,11 @@ fn native_paths_resolve_against_the_thread_folder_and_home() {
     }
     assert_eq!(
         resolved("D:/game/front.png", &plain()),
-        PathBuf::from("/work/project/D:/game/front.png")
+        if cfg!(windows) {
+            PathBuf::from("D:/game/front.png")
+        } else {
+            PathBuf::from("/work/project/D:/game/front.png")
+        }
     );
     let homeless = Host::default();
     let home = Written {

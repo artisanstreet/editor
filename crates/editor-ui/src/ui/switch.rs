@@ -1,22 +1,18 @@
 use aqua_core::{CornerRadii, DisplayItem, GpuiBackground, Insets, Rect, Role};
 use aqua_ui::{
     element::{Button, Canvas, Element, Key},
-    style::Style,
+    style::{Length, Style},
 };
 
+use super::kit::{Corner, Space};
 use super::theme::{ArtisanTheme, Opacity};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SwitchSize {
-    #[default]
-    Default,
-    Small,
-}
+const THUMB: f32 = 16.0;
+const REACH: Space = Space::S8;
 
 pub struct Switch {
     id: Key,
     theme: ArtisanTheme,
-    size: SwitchSize,
     checked: bool,
     label: String,
     disabled: bool,
@@ -28,14 +24,12 @@ impl Switch {
     pub fn new(
         id: impl Into<Key>,
         theme: ArtisanTheme,
-        size: SwitchSize,
         checked: bool,
         label: impl Into<String>,
     ) -> Self {
         Self {
             id: id.into(),
             theme,
-            size,
             checked,
             label: label.into(),
             disabled: false,
@@ -60,18 +54,8 @@ impl Switch {
     }
 
     pub fn build(self) -> Element {
-        let (width, height, thumb) = match self.size {
-            SwitchSize::Default => (
-                self.theme.density.switch_default.0,
-                self.theme.density.switch_default.1,
-                16.0,
-            ),
-            SwitchSize::Small => (
-                self.theme.density.switch_sm.0,
-                self.theme.density.switch_sm.1,
-                12.0,
-            ),
-        };
+        let (width, height) = self.theme.density.switch_default;
+        let thumb = THUMB;
         let track_color = if self.checked {
             self.theme.colors.primary
         } else {
@@ -91,7 +75,7 @@ impl Switch {
             .on_paint(move |bounds| {
                 let track = DisplayItem::GpuiBackground {
                     bounds,
-                    corners: CornerRadii::uniform(height / 2.0),
+                    corners: CornerRadii::uniform(Corner::Full.resolve(height)),
                     background: GpuiBackground::Solid(track_color),
                 };
                 let thumb_bounds = Rect {
@@ -102,26 +86,17 @@ impl Switch {
                 };
                 let knob = DisplayItem::GpuiBackground {
                     bounds: thumb_bounds,
-                    corners: CornerRadii::uniform(thumb / 2.0),
+                    corners: CornerRadii::uniform(Corner::Full.resolve(thumb)),
                     background: GpuiBackground::Solid(thumb_color),
                 };
                 vec![track, knob]
             })
             .build();
-        let style = Style::new()
+        let reach = REACH.px();
+        let mut style = Style::new()
             .flex_shrink(0.0)
-            .padding_insets(Insets {
-                left: 12.0,
-                right: 12.0,
-                top: 8.0,
-                bottom: 8.0,
-            })
-            .margin_insets(Insets {
-                left: -12.0,
-                right: -12.0,
-                top: -8.0,
-                bottom: -8.0,
-            });
+            .padding(Length::Px(reach))
+            .margin_insets(Insets::uniform(-reach));
         let focus_style = Style::new().gpui_shadows(vec![aqua_ui::style::GpuiShadowLayer {
             dx: 0.0,
             dy: 0.0,
@@ -135,29 +110,14 @@ impl Switch {
                 .at(Opacity::FocusRing)
                 .to_reference_paint(),
         }]);
-        let style = if self.focus_visible && !self.disabled {
-            style
-                .clone()
-                .gpui_shadows(vec![aqua_ui::style::GpuiShadowLayer {
-                    dx: 0.0,
-                    dy: 0.0,
-                    blur: 0.0,
-                    spread: self.theme.interaction.focus_ring_width,
-                    inset: false,
-                    color: self
-                        .theme
-                        .colors
-                        .ring
-                        .at(Opacity::FocusRing)
-                        .to_reference_paint(),
-                }])
-        } else {
-            style
-        };
+        if self.focus_visible && !self.disabled {
+            style.merge(&focus_style);
+        }
+        let outer = height + 2.0 * reach;
         let mut root = Button::new()
-            .width(width + 24.0)
-            .height(height + 16.0)
-            .radius((height + 16.0) / 2.0)
+            .width(width + 2.0 * reach)
+            .height(outer)
+            .radius(Corner::Full.resolve(outer))
             .style(style)
             .child(track);
         if self.disabled {

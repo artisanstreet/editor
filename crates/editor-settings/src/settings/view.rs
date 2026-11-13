@@ -1,19 +1,22 @@
 use std::rc::Rc;
 
-use aqua_core::Insets;
-use aqua_text::{FontFamily, TextStyle};
 use aqua_ui::{
-    AlignItems, JustifyContent,
-    element::{Box as UiBox, Element, Scroll, Text},
+    JustifyContent,
+    element::{Box as UiBox, Element, Scroll},
     style::{Length, Style},
 };
 
-use super::{about::BuildInfo, controller::SettingsController, page, ui};
+use super::{
+    about::BuildInfo,
+    controller::SettingsController,
+    page,
+    ui::{self, Ink},
+};
 use editor_core::{ConnectionStatus, Core, Screen, SettingsPage, SettingsSection};
 use editor_ui::{
-    button::{Button, ButtonShape, ButtonVariant},
+    kit::{ButtonTone, Space, Spaced, TextRole, Tone},
     select::{Select, SelectEntry, SelectMenu},
-    switch::{Switch, SwitchSize},
+    switch::Switch,
     text::{
         Mode,
         mount::{EditorController, EditorEvent},
@@ -87,6 +90,9 @@ pub enum ViewAction {
         bool,
     ),
 }
+
+const PAGE_WIDTH: f32 = 680.0;
+const STATUS_WIDTH: f32 = 240.0;
 
 pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: ViewAction) -> bool {
     match &action {
@@ -250,8 +256,7 @@ pub fn build(
         return prompt(controller, core, &theme, emit);
     }
     let content = match page.parent() {
-        SettingsPage::General if page == SettingsPage::General => UiBox::new()
-            .layout("column")
+        SettingsPage::General if page == SettingsPage::General => ui::column()
             .child(ui::header(&theme, page.label(), page::description(page)))
             .child(appearance(controller, &theme, core, emit.clone(), false))
             .child(streaming(controller, &theme, core, emit.clone(), false))
@@ -276,7 +281,7 @@ pub fn build(
                     || page == SettingsPage::Section(SettingsSection::Archive)) =>
         {
             let host = core.active_host().unwrap();
-            let mut content = UiBox::new().layout("column").child(ui::header(
+            let mut content = ui::column().child(ui::header(
                 &theme,
                 page.label(),
                 page::description(page),
@@ -323,8 +328,7 @@ pub fn build(
                     || page == SettingsPage::Section(SettingsSection::McpServers)) =>
         {
             let host = core.active_host().unwrap();
-            let mut content = UiBox::new()
-                .layout("column")
+            let mut content = ui::column()
                 .child(ui::header(&theme, page.label(), page::description(page)))
                 .child(super::mcp_view::section(
                     controller,
@@ -356,18 +360,14 @@ pub fn build(
         SettingsPage::Account => super::account_view::page(controller, core, &theme, emit),
         SettingsPage::About => about(&theme, build_info),
         SettingsPage::Hosts => hosts(&theme, core),
-        _ => UiBox::new()
-            .layout("column")
+        _ => ui::column()
             .child(ui::header(&theme, page.label(), page::description(page)))
-            .child(
-                UiBox::new()
-                    .style(Style::new().margin_insets(Insets {
-                        top: 32.0,
-                        ..Insets::default()
-                    }))
-                    .child(ui::note(&theme, "Pair a host on the Hosts page first."))
-                    .build(),
-            )
+            .child(ui::text(
+                &theme,
+                TextRole::Label,
+                Ink::Muted,
+                "Pair a host on the Hosts page first.",
+            ))
             .build(),
     };
     Scroll::new()
@@ -387,16 +387,8 @@ pub fn build(
                     UiBox::new()
                         .layout("column")
                         .width(Length::Pct(100.0))
-                        .style(
-                            Style::new()
-                                .max_width(Length::Px(680.0))
-                                .padding_insets(Insets {
-                                    left: 40.0,
-                                    right: 40.0,
-                                    top: 64.0,
-                                    bottom: 120.0,
-                                }),
-                        )
+                        .padded(Space::S32)
+                        .style(Style::new().max_width(Length::Px(PAGE_WIDTH)))
                         .child(content)
                         .build(),
                 )
@@ -412,8 +404,7 @@ fn about(theme: &ArtisanTheme, build: &BuildInfo) -> Element {
         .into_iter()
         .map(|(title, value)| ui::row(theme, title, value, None))
         .collect();
-    UiBox::new()
-        .layout("column")
+    ui::column()
         .child(ui::header(
             theme,
             SettingsPage::About.label(),
@@ -433,11 +424,11 @@ fn hosts(theme: &ArtisanTheme, core: &Core) -> Element {
     let mut rows: Vec<Element> = core
         .hosts()
         .map(|(config, host)| {
-            let (state, colour) = match &host.status {
-                ConnectionStatus::Live => ("Connected".to_owned(), theme.colors.green.solid),
-                ConnectionStatus::Connecting => ("Connecting…".to_owned(), theme.colors.text_muted),
+            let (state, ink) = match &host.status {
+                ConnectionStatus::Live => ("Connected".to_owned(), Ink::Success),
+                ConnectionStatus::Connecting => ("Connecting…".to_owned(), Ink::Muted),
                 ConnectionStatus::Offline { reason, .. } => {
-                    (format!("Offline: {reason}"), theme.colors.red.solid)
+                    (format!("Offline: {reason}"), Ink::Danger)
                 }
             };
             let detail = host
@@ -445,34 +436,8 @@ fn hosts(theme: &ArtisanTheme, core: &Core) -> Element {
                 .as_ref()
                 .map_or_else(String::new, |version| format!("Forge {version}"));
             let status = UiBox::new()
-                .gap(6.0)
-                .style(
-                    Style::new()
-                        .align(AlignItems::CENTER)
-                        .max_width(Length::Px(240.0)),
-                )
-                .child(
-                    UiBox::new()
-                        .width(6.0)
-                        .height(6.0)
-                        .radius(3.0)
-                        .fill(colour.to_paint())
-                        .style(Style::new().flex_shrink(0.0))
-                        .build(),
-                )
-                .child(
-                    Text::new(state)
-                        .text_style(TextStyle {
-                            families: vec![FontFamily::Named(
-                                theme.typography.sans.family.to_owned(),
-                            )],
-                            size_px: theme.typography.label_text,
-                            ..TextStyle::default()
-                        })
-                        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                        .wrap(false)
-                        .build(),
-                )
+                .style(Style::new().max_width(Length::Px(STATUS_WIDTH)))
+                .child(ui::line(theme, TextRole::Label, ink, state))
                 .build();
             ui::row(theme, config.name.clone(), detail, Some(status))
         })
@@ -485,8 +450,7 @@ fn hosts(theme: &ArtisanTheme, core: &Core) -> Element {
             None,
         ));
     }
-    UiBox::new()
-        .layout("column")
+    ui::column()
         .child(ui::header(
             theme,
             SettingsPage::Hosts.label(),
@@ -516,7 +480,6 @@ fn notifications(
     let control = Switch::new(
         "settings-switch-notify",
         *theme,
-        SwitchSize::Default,
         enabled,
         "switch notify",
     )
@@ -625,7 +588,6 @@ fn thread_section(
             let control = Switch::new(
                 id,
                 *theme,
-                SwitchSize::Default,
                 enabled,
                 id.trim_start_matches("settings-").replace('-', " "),
             )
@@ -651,22 +613,23 @@ fn thread_section(
 
 fn skills(theme: &ArtisanTheme, emit: Rc<dyn Fn(ViewAction)>) -> Element {
     let page = SettingsPage::Section(SettingsSection::Skills);
-    UiBox::new()
-        .layout("column")
+    ui::column()
         .child(ui::header(theme, page.label(), page::description(page)))
         .child(skills_section(theme, emit))
         .build()
 }
 
 fn skills_section(theme: &ArtisanTheme, emit: Rc<dyn Fn(ViewAction)>) -> Element {
-    let action = Button::text(
-        "settings-manage-skills",
-        *theme,
-        "Manage skills in Marketplace",
-    )
-    .variant(ButtonVariant::Outline)
-    .on_activate(move |_| emit(ViewAction::Navigate(Screen::Marketplace)))
-    .build();
+    let action = UiBox::new()
+        .child(ui::button(
+            theme,
+            "settings-manage-skills",
+            "Manage skills in Marketplace",
+            ButtonTone::Quiet,
+            false,
+            move || emit(ViewAction::Navigate(Screen::Marketplace)),
+        ))
+        .build();
     ui::section(
         theme,
         "Skills",
@@ -696,17 +659,9 @@ fn prompt(
         .layout("column")
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
-        .gap(20.0)
-        .style(
-            Style::new()
-                .min_height(Length::Px(0.0))
-                .padding_insets(Insets {
-                    left: 24.0,
-                    right: 24.0,
-                    top: 24.0,
-                    bottom: 24.0,
-                }),
-        )
+        .spaced(Space::S20)
+        .padded(Space::S24)
+        .style(Style::new().min_height(Length::Pct(0.0)))
         .child(ui::header(
             theme,
             SettingsPage::GlobalPrompt.label(),
@@ -715,12 +670,12 @@ fn prompt(
         .child(
             Scroll::new()
                 .width(Length::Pct(100.0))
+                .spaced(Space::S20)
                 .style(
                     Style::new()
                         .axis(aqua_ui::style::Axis::Column)
-                        .gap(20.0)
                         .flex_grow(1.0)
-                        .min_height(Length::Px(0.0)),
+                        .min_height(Length::Pct(0.0)),
                 )
                 .child(prompt_reconciliation(controller, core, theme, emit.clone()))
                 .child(editor.element_with_notice_keyed(
@@ -742,49 +697,48 @@ fn prompt(
         core.active_host()
             .and_then(|host| host.prompt_load().error.as_deref())
     }) {
-        page = page.child(editor_ui::page::notice(theme, error).build());
+        page = page.child(ui::callout(theme, Tone::Danger, error));
     }
-    page = page.child(
-        editor_ui::page::notice(
-            theme,
-            &form.status(&controller.prompt_editor.borrow().text()),
-        )
-        .build(),
-    );
-    let mut actions = UiBox::new()
-        .gap(8.0)
-        .style(Style::new().justify(JustifyContent::END).flex_shrink(0.0));
+    page = page.child(ui::callout(
+        theme,
+        Tone::Neutral,
+        form.status(&controller.prompt_editor.borrow().text()),
+    ));
+    let mut actions = ui::actions().style(Style::new().flex_shrink(0.0));
     if core
         .active_host()
         .is_some_and(|host| host.prompt_load().error.is_some())
     {
         let send = emit.clone();
-        actions = actions.child(
-            Button::text("settings-global-prompt-retry", *theme, "Retry")
-                .variant(ButtonVariant::Outline)
-                .on_activate(move |_| send(ViewAction::RetryPrompt))
-                .build(),
-        );
+        actions = actions.child(ui::button(
+            theme,
+            "settings-global-prompt-retry",
+            "Retry",
+            ButtonTone::Neutral,
+            false,
+            move || send(ViewAction::RetryPrompt),
+        ));
     }
     if form.newer {
         let send = emit.clone();
-        actions = actions.child(
-            Button::text("settings-global-prompt-load-latest", *theme, "Load latest")
-                .variant(ButtonVariant::Outline)
-                .disabled(form.pending)
-                .on_activate(move |_| send(ViewAction::LoadLatestPrompt))
-                .build(),
-        );
+        actions = actions.child(ui::button(
+            theme,
+            "settings-global-prompt-load-latest",
+            "Load latest",
+            ButtonTone::Neutral,
+            form.pending,
+            move || send(ViewAction::LoadLatestPrompt),
+        ));
     }
     let dirty = controller.prompt_editor.borrow().text() != form.saved;
-    actions = actions.child(
-        Button::text("settings-global-prompt-save", *theme, "Save")
-            .variant(ButtonVariant::Accent)
-            .shape(ButtonShape::Rounded)
-            .disabled(!form.loaded || !dirty || form.pending || form.newer)
-            .on_activate(move |_| emit(ViewAction::SavePrompt))
-            .build(),
-    );
+    actions = actions.child(ui::button(
+        theme,
+        "settings-global-prompt-save",
+        "Save",
+        ButtonTone::Primary,
+        !form.loaded || !dirty || form.pending || form.newer,
+        move || emit(ViewAction::SavePrompt),
+    ));
     page.child(actions.build()).build()
 }
 
@@ -794,7 +748,7 @@ fn prompt_reconciliation(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let mut controls = UiBox::new().layout("column").gap(12.0);
+    let mut controls = ui::stack(Space::S12);
     let Some(prompt) = core
         .active_host()
         .and_then(|host| host.global_prompt.as_ref())
@@ -814,28 +768,30 @@ fn prompt_reconciliation(
         let send = emit.clone();
         let candidate_id = candidate.id.clone();
         controls = controls.child(
-            UiBox::new()
-                .layout("column")
-                .gap(8.0)
+            ui::stack(Space::S8)
+                .child(ui::callout(
+                    theme,
+                    Tone::Info,
+                    format!("Prompt found in {engines}"),
+                ))
+                .child(ui::callout(theme, Tone::Neutral, candidate.text.clone()))
                 .child(
-                    editor_ui::page::notice(theme, &format!("Prompt found in {engines}")).build(),
-                )
-                .child(editor_ui::page::notice(theme, &candidate.text).build())
-                .child(
-                    Button::text(
-                        format!("settings-prompt-candidate-{}", candidate.id),
-                        *theme,
-                        "Use this prompt",
-                    )
-                    .disabled(disabled)
-                    .on_activate(move |_| {
-                        send(ViewAction::ResolvePrompt(
-                            artisan_api::ResolvePrompt::Choose {
-                                candidate_id: candidate_id.clone(),
+                    UiBox::new()
+                        .child(ui::button(
+                            theme,
+                            format!("settings-prompt-candidate-{}", candidate.id),
+                            "Use this prompt",
+                            ButtonTone::Primary,
+                            disabled,
+                            move || {
+                                send(ViewAction::ResolvePrompt(
+                                    artisan_api::ResolvePrompt::Choose {
+                                        candidate_id: candidate_id.clone(),
+                                    },
+                                ))
                             },
                         ))
-                    })
-                    .build(),
+                        .build(),
                 )
                 .build(),
         );
@@ -846,51 +802,45 @@ fn prompt_reconciliation(
                 let use_send = emit.clone();
                 let restore_send = emit.clone();
                 let id = engine.engine;
-                let mut row = UiBox::new().layout("column").gap(8.0).child(
-                    editor_ui::page::notice(
-                        theme,
-                        &format!(
-                            "{} instructions were edited outside Artisan.",
-                            id.display_name()
-                        ),
-                    )
-                    .build(),
-                );
+                let mut row = ui::stack(Space::S8).child(ui::callout(
+                    theme,
+                    Tone::Warning,
+                    format!(
+                        "{} instructions were edited outside Artisan.",
+                        id.display_name()
+                    ),
+                ));
                 if let Some(text) = &engine.external_text {
-                    row = row.child(editor_ui::page::notice(theme, text).build());
+                    row = row.child(ui::callout(theme, Tone::Neutral, text.clone()));
                 }
                 controls = controls.child(
                     row.child(
                         UiBox::new()
-                            .gap(8.0)
-                            .child(
-                                Button::text(
-                                    format!("settings-prompt-import-{id}"),
-                                    *theme,
-                                    "Use engine's version",
-                                )
-                                .disabled(disabled)
-                                .on_activate(move |_| {
+                            .spaced(Space::S8)
+                            .child(ui::button(
+                                theme,
+                                format!("settings-prompt-import-{id}"),
+                                "Use engine's version",
+                                ButtonTone::Neutral,
+                                disabled,
+                                move || {
                                     use_send(ViewAction::ResolvePrompt(
                                         artisan_api::ResolvePrompt::UseEngine { engine: id },
                                     ))
-                                })
-                                .build(),
-                            )
-                            .child(
-                                Button::text(
-                                    format!("settings-prompt-restore-{id}"),
-                                    *theme,
-                                    "Restore Artisan's version",
-                                )
-                                .disabled(disabled)
-                                .on_activate(move |_| {
+                                },
+                            ))
+                            .child(ui::button(
+                                theme,
+                                format!("settings-prompt-restore-{id}"),
+                                "Restore Artisan's version",
+                                ButtonTone::Neutral,
+                                disabled,
+                                move || {
                                     restore_send(ViewAction::ResolvePrompt(
                                         artisan_api::ResolvePrompt::RestoreEngine { engine: id },
                                     ))
-                                })
-                                .build(),
-                            )
+                                },
+                            ))
                             .build(),
                     )
                     .build(),
@@ -898,13 +848,11 @@ fn prompt_reconciliation(
             }
             artisan_api::PromptEngineStatus::Failed => {
                 if let Some(reason) = &engine.reason {
-                    controls = controls.child(
-                        editor_ui::page::notice(
-                            theme,
-                            &format!("{}: {reason}", engine.engine.display_name()),
-                        )
-                        .build(),
-                    );
+                    controls = controls.child(ui::callout(
+                        theme,
+                        Tone::Danger,
+                        format!("{}: {reason}", engine.engine.display_name()),
+                    ));
                 }
             }
             _ => {}
@@ -927,7 +875,6 @@ fn performance(
     let control = Switch::new(
         "settings-lower-refresh-rate",
         *theme,
-        SwitchSize::Default,
         lowered,
         "lower refresh rate",
     )
@@ -950,7 +897,6 @@ fn performance(
     let monitor_control = Switch::new(
         "settings-monitor-refresh-rate",
         *theme,
-        SwitchSize::Default,
         monitor_sync,
         "match monitor refresh rate",
     )
@@ -1009,7 +955,7 @@ pub fn streaming_menu(
         Some(streaming_value(core)),
         streaming_entries(),
         controller.streaming_select.clone(),
-        144.0,
+        ui::CONTROL_WIDTH,
     )
     .on_change(move |mode| change(ViewAction::SetStreaming(mode)))
     .on_open_change(move |open| emit(ViewAction::StreamingMenu(open)))
@@ -1034,11 +980,7 @@ fn streaming(
     .on_change(move |mode| change(ViewAction::SetStreaming(mode)))
     .on_open_change(move |open| emit(ViewAction::StreamingMenu(open)))
     .build();
-    let control = UiBox::new()
-        .width(144.0)
-        .style(Style::new().flex_shrink(0.0))
-        .child(select)
-        .build();
+    let control = ui::fixed(select);
     let row = ui::row(
         theme,
         "Text Streaming",
@@ -1092,7 +1034,7 @@ pub fn font_menu(
         Some(font_value(core)),
         font_entries(),
         controller.font_select.clone(),
-        144.0,
+        ui::CONTROL_WIDTH,
     )
     .on_change(move |font| change(ViewAction::SetFont(font)))
     .on_open_change(move |open| emit(ViewAction::FontMenu(open)))
@@ -1109,7 +1051,6 @@ fn appearance(
     let dark = Switch::new(
         "settings-switch-dark-mode",
         *theme,
-        SwitchSize::Default,
         theme.colors.mode.is_dark(),
         "switch dark mode",
     )
@@ -1128,11 +1069,7 @@ fn appearance(
     .on_change(move |font| send(ViewAction::SetFont(font)))
     .on_open_change(move |open_state| open(ViewAction::FontMenu(open_state)))
     .build();
-    let fonts = UiBox::new()
-        .width(144.0)
-        .style(Style::new().flex_shrink(0.0))
-        .child(fonts)
-        .build();
+    let fonts = ui::fixed(fonts);
     let checked = core
         .settings
         .get("outline_text")
@@ -1143,7 +1080,6 @@ fn appearance(
     let hide_bad = Switch::new(
         "settings-switch-hide-bad-model-options",
         *theme,
-        SwitchSize::Default,
         core.settings
             .get(artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY)
             .and_then(serde_json::Value::as_bool)
@@ -1155,7 +1091,6 @@ fn appearance(
     let all_models = Switch::new(
         "settings-switch-show-all-models",
         *theme,
-        SwitchSize::Default,
         core.settings
             .get(artisan_api::SHOW_ALL_MODELS_KEY)
             .and_then(serde_json::Value::as_bool)
@@ -1167,7 +1102,6 @@ fn appearance(
     let outline = Switch::new(
         "settings-switch-outline-text",
         *theme,
-        SwitchSize::Default,
         checked,
         "switch outline text",
     )
@@ -1223,8 +1157,7 @@ fn section_page(
     if !include_header {
         return section;
     }
-    UiBox::new()
-        .layout("column")
+    ui::column()
         .child(ui::header(theme, page.label(), page::description(page)))
         .child(section)
         .build()

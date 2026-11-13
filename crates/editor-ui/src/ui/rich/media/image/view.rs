@@ -1,3 +1,4 @@
+use crate::ui::kit::{IconSize, Media as Framing, Space, Spaced, Surface, TextRole};
 use std::{
     cell::Cell,
     num::NonZeroUsize,
@@ -142,13 +143,13 @@ impl ImageState {
         let mut root = UiBox::new()
             .layout("column")
             .width(Length::Pct(100.0))
-            .gap(8.0);
+            .spaced(Space::S8);
         let mut index = 0;
         for columns in gallery_rows(block.images.len()) {
             let count = usize::from(columns);
             let tile_width =
-                (width - 8.0 * (f32::from(columns) - 1.0)).max(0.0) / f32::from(columns);
-            let mut row = UiBox::new().width(width).gap(8.0);
+                (width - Space::S8.px() * (f32::from(columns) - 1.0)).max(0.0) / f32::from(columns);
+            let mut row = UiBox::new().width(width).spaced(Space::S8);
             for _ in 0..count {
                 let picture = &block.images[index];
                 let loaded = &self.loaded[index];
@@ -169,23 +170,16 @@ impl ImageState {
                     .filter(|alt| !alt.trim().is_empty())
                     .unwrap_or(&picture.src.raw);
                 let path = picture.src.raw.clone();
-                let mut frame = UiBox::new()
-                    .width(shown_width)
-                    .height(height)
-                    .radius(crate::ui::theme::RadiusTokens::value(
-                        crate::ui::theme::RadiusStep::Xl,
-                    ))
-                    .clip(true)
-                    .style(
-                        Style::new().gpui_shadows(
-                            crate::ui::glass::card_shadows(&theme)
-                                .into_iter()
-                                .map(Into::into)
-                                .collect(),
-                        ),
+                let mut frame = Surface::Media(Framing::Frame)
+                    .build(
+                        &theme,
+                        vec![content(loaded, &theme, &path, shown_width, height)],
                     )
-                    .child(content(loaded, &theme, &path, shown_width, height))
-                    .build()
+                    .style(
+                        Style::new()
+                            .width(Length::Px(shown_width))
+                            .height(Length::Px(height)),
+                    )
                     .with_key(format!("{id}-image-{index}"))
                     .role(aqua_core::Role::Image)
                     .aria_label(alt.to_owned());
@@ -285,7 +279,7 @@ impl ImageState {
                 let mut column = UiBox::new()
                     .layout("column")
                     .width(shown_width)
-                    .gap(6.0)
+                    .spaced(Space::S8)
                     .child(frame);
                 if let Some(caption) = picture
                     .caption
@@ -294,8 +288,8 @@ impl ImageState {
                     .filter(|caption| !caption.is_empty())
                 {
                     column = column.child(
-                        Text::new(caption.to_owned())
-                            .font_size(13.0)
+                        TextRole::Caption
+                            .text(&theme, caption.to_owned())
                             .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                             .build(),
                     );
@@ -368,23 +362,19 @@ fn content(
                 .layout("column")
                 .width(width)
                 .height(height)
-                .gap(if matches!(image, Loaded::Loading) {
-                    6.0
-                } else {
-                    4.0
-                })
+                .spaced(Space::S4)
+                .padded(Space::S12)
                 .style(
                     Style::new()
                         .align(aqua_ui::AlignItems::CENTER)
                         .justify(aqua_ui::JustifyContent::CENTER)
-                        .padding(Length::Px(12.0))
                         .gpui_background(aqua_core::GpuiBackground::Solid(
                             theme.colors.surface.to_reference_paint(),
                         )),
                 );
             let text = |value: String, color: crate::ui::theme::Oklch| {
                 Text::new(value)
-                    .font_size(13.0)
+                    .text_style(TextRole::Label.style(theme))
                     .gpui_source_color(color.to_reference_text_color())
                     .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
                     .build()
@@ -404,23 +394,14 @@ fn content(
                     ImageError::Decode => "Not a supported image",
                 };
                 panel = panel
-                    .child(crate::ui::asset::source_asset_glyph(
+                    .child(IconSize::Lg.glyph(
                         editor_assets::AssetId::TABLER_FILE_OFF,
-                        20.0,
                         theme.colors.text_muted.to_reference_paint(),
                     ))
                     .child(text(title.to_owned(), theme.colors.text))
                     .child(text(source.trim().to_owned(), theme.colors.text_muted));
                 if *error != ImageError::Load(MediaLoadError::Invalid) {
-                    panel = panel.child(
-                        UiBox::new()
-                            .style(Style::new().padding_insets(aqua_core::Insets {
-                                top: 4.0,
-                                ..Default::default()
-                            }))
-                            .child(text("Click to retry".to_owned(), theme.colors.text_muted))
-                            .build(),
-                    );
+                    panel = panel.child(text("Click to retry".to_owned(), theme.colors.text_muted));
                 }
             } else {
                 panel = panel.child(text("Loading image…".to_owned(), theme.colors.text_muted));

@@ -1,65 +1,37 @@
-use super::{controller::SettingsController, ui, view::ViewAction};
+use super::{
+    controller::SettingsController,
+    ui::{self, Ink},
+    view::ViewAction,
+};
 use editor_core::{AccountPhase, Core, LocalForge};
 use editor_ui::{
-    button::{Button, ButtonVariant},
+    kit::{ButtonTone, Space, TextRole},
     text::{
         Mode,
         mount::{EditorController, EditorEvent},
     },
     theme::ArtisanTheme,
 };
-use aqua_core::Insets;
-use aqua_text::{FontFamily, TextStyle};
-use aqua_ui::{
-    JustifyContent,
-    element::{Box as UiBox, Element, Text},
-    style::{Length, Style},
-};
+use aqua_ui::element::{Box as UiBox, Element};
 use std::rc::Rc;
 
 fn text(theme: &ArtisanTheme, value: impl Into<String>, muted: bool) -> Element {
-    Text::new(value.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            ..TextStyle::default()
-        })
-        .gpui_source_color(if muted {
-            theme.colors.text_muted.to_reference_text_color()
-        } else {
-            theme.colors.text.to_reference_text_color()
-        })
-        .wrap(true)
-        .build()
+    let ink = if muted { Ink::Muted } else { Ink::Plain };
+    ui::text(theme, TextRole::Label, ink, value)
 }
 fn button(
     theme: &ArtisanTheme,
     id: impl Into<String>,
     label: &str,
-    variant: ButtonVariant,
+    tone: ButtonTone,
     disabled: bool,
     action: ViewAction,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    Button::text(id.into(), *theme, label)
-        .variant(variant)
-        .disabled(disabled)
-        .on_activate(move |_| emit(action.clone()))
-        .build()
-}
-fn actions() -> UiBox {
-    UiBox::new()
-        .gap(8.0)
-        .style(Style::new().justify(JustifyContent::END))
+    ui::button(theme, id, label, tone, disabled, move || emit(action.clone()))
 }
 fn line(theme: &ArtisanTheme, title: impl Into<String>, detail: impl Into<String>) -> UiBox {
-    UiBox::new()
-        .layout("column")
-        .gap(4.0)
-        .style(Style::new().padding_insets(Insets {
-            top: 8.0,
-            bottom: 8.0,
-            ..Insets::default()
-        }))
+    ui::stack(Space::S4)
         .child(text(theme, title, false))
         .child(text(theme, detail, true))
 }
@@ -86,22 +58,19 @@ pub fn sign_in(
     theme: &ArtisanTheme,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    let action = |id, label, variant, disabled, action| {
-        button(theme, id, label, variant, disabled, action, emit.clone())
+    let action = |id, label, tone, disabled, action| {
+        button(theme, id, label, tone, disabled, action, emit.clone())
     };
     let start = || {
         action(
             "sign-in-start-over",
             "Start over",
-            ButtonVariant::Ghost,
+            ButtonTone::Neutral,
             false,
             ViewAction::AccountDismiss,
         )
     };
-    let mut body = UiBox::new()
-        .layout("column")
-        .gap(8.0)
-        .style(Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color()));
+    let mut body = ui::stack(Space::S8);
     match core.account().phase() {
         AccountPhase::SignedOut
         | AccountPhase::Requesting
@@ -122,7 +91,7 @@ pub fn sign_in(
                     emit.clone(),
                 ))
                 .child(
-                    actions()
+                    ui::actions()
                         .child(action(
                             "sign-in-submit",
                             if busy {
@@ -130,7 +99,7 @@ pub fn sign_in(
                             } else {
                                 "Email me a sign-in link"
                             },
-                            ButtonVariant::Default,
+                            ButtonTone::Primary,
                             busy,
                             ViewAction::AccountRequestLink,
                         ))
@@ -138,24 +107,16 @@ pub fn sign_in(
                 );
             if let AccountPhase::Error { message } = core.account().phase() {
                 body = body.child(
-                    UiBox::new()
-                        .layout("column")
-                        .gap(8.0)
-                        .child(
-                            Text::new(message.clone())
-                                .gpui_source_color(
-                                    theme.colors.destructive_text.to_reference_text_color(),
-                                )
-                                .build(),
-                        )
-                        .child(actions().child(start()).build())
+                    ui::stack(Space::S8)
+                        .child(ui::error_text(theme, message.clone()))
+                        .child(ui::actions().child(start()).build())
                         .build(),
                 );
             }
         }
         AccountPhase::Restoring => {
             body = body.child(text(theme, "This device's sign-in was saved by an earlier Editor. Checking it with the account service…", true))
-                .child(actions().child(action("sign-in-retry", "Retry", ButtonVariant::Default, false, ViewAction::AccountRefresh)).child(action("sign-in-use-another", "Use another account", ButtonVariant::Ghost, false, ViewAction::AccountSignOut)).build());
+                .child(ui::actions().child(action("sign-in-retry", "Retry", ButtonTone::Neutral, false, ViewAction::AccountRefresh)).child(action("sign-in-use-another", "Use another account", ButtonTone::Neutral, false, ViewAction::AccountSignOut)).build());
         }
         AccountPhase::Pending { email, .. } => {
             body = body
@@ -165,7 +126,7 @@ pub fn sign_in(
                     false,
                 ))
                 .child(text(theme, "Waiting for the email approval…", true))
-                .child(actions().child(start()).build());
+                .child(ui::actions().child(start()).build());
         }
         AccountPhase::EmailApproved { approval, .. } => {
             let (email, totp_required) = (&approval.email, &approval.totp_required);
@@ -191,12 +152,12 @@ pub fn sign_in(
                 ));
             }
             body = body.child(
-                actions()
+                ui::actions()
                     .child(start())
                     .child(action(
                         "sign-in-finish",
                         "Finish sign-in",
-                        ButtonVariant::Default,
+                        ButtonTone::Primary,
                         false,
                         ViewAction::AccountFinish,
                     ))
@@ -223,37 +184,25 @@ pub fn forges(
         .map(|profile| profile.email.as_str())
         .unwrap_or_default();
     let machines = account.machines();
-    let mut rows = UiBox::new()
-        .layout("column")
-        .gap(8.0)
-        .style(Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color()));
+    let mut rows = ui::stack(Space::S16);
     if machines.is_empty() {
-        rows = rows.child(
-            UiBox::new()
-                .style(Style::new().padding_insets(Insets {
-                    top: 8.0,
-                    bottom: 8.0,
-                    ..Insets::default()
-                }))
-                .child(text(theme, "No Forges on this account yet.", true))
-                .build(),
-        );
+        rows = rows.child(text(theme, "No Forges on this account yet.", true));
     }
     for machine in machines {
         let id = machine.id.clone();
         let live = core.machine_live(&id);
-        let (kind, label, variant, action) = if live {
+        let (kind, label, tone, action) = if live {
             (
                 "open",
                 "Open",
-                ButtonVariant::Outline,
+                ButtonTone::Quiet,
                 ViewAction::ForgeOpen(id.clone()),
             )
         } else {
             (
                 "connect",
                 "Connect",
-                ButtonVariant::Default,
+                ButtonTone::Primary,
                 ViewAction::ForgeConnect(id.clone()),
             )
         };
@@ -264,12 +213,12 @@ pub fn forges(
         rows = rows.child(
             line(theme, machine.label, seen)
                 .child(
-                    actions()
+                    ui::actions()
                         .child(button(
                             theme,
                             format!("forges-{kind}-{id}"),
                             label,
-                            variant,
+                            tone,
                             false,
                             action,
                             emit.clone(),
@@ -278,7 +227,7 @@ pub fn forges(
                             theme,
                             format!("forges-remove-{id}"),
                             "Remove",
-                            ButtonVariant::Ghost,
+                            ButtonTone::Quiet,
                             false,
                             ViewAction::ForgeRemove(id),
                             emit.clone(),
@@ -315,11 +264,11 @@ pub fn forges(
         ),
         LocalForge::OtherAccount => ("Its Forge belongs to another account.".to_owned(), None),
     };
-    let mut local_actions = actions().child(button(
+    let mut local_actions = ui::actions().child(button(
         theme,
         "forges-check",
         "Check again",
-        ButtonVariant::Ghost,
+        ButtonTone::Neutral,
         false,
         ViewAction::ForgeRefresh,
         emit.clone(),
@@ -329,7 +278,7 @@ pub fn forges(
             theme,
             id,
             label,
-            ButtonVariant::Default,
+            ButtonTone::Primary,
             false,
             action,
             emit.clone(),
@@ -347,26 +296,20 @@ pub fn forges(
             "Claim the code its `ae account enroll` printed.",
         )
         .child(
-            UiBox::new()
-                .gap(8.0)
-                .child(
-                    UiBox::new()
-                        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                        .child(editor(
-                            controller.forge_code.clone(),
-                            "forges-code",
-                            "Code from another machine",
-                            ViewAction::ForgeClaim,
-                            theme,
-                            emit.clone(),
-                        ))
-                        .build(),
-                )
+            ui::actions()
+                .child(ui::grow(editor(
+                    controller.forge_code.clone(),
+                    "forges-code",
+                    "Code from another machine",
+                    ViewAction::ForgeClaim,
+                    theme,
+                    emit.clone(),
+                )))
                 .child(button(
                     theme,
                     "forges-claim",
                     "Claim",
-                    ButtonVariant::Default,
+                    ButtonTone::Primary,
                     false,
                     ViewAction::ForgeClaim,
                     emit.clone(),
@@ -380,11 +323,7 @@ pub fn forges(
         .as_deref()
         .or_else(|| account.last_error())
     {
-        rows = rows.child(
-            Text::new(error)
-                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                .build(),
-        );
+        rows = rows.child(ui::error_text(theme, error));
     }
     rows.build()
 }
@@ -396,26 +335,25 @@ pub fn page(
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let page = editor_core::SettingsPage::Account;
-    let mut content = UiBox::new().layout("column").child(ui::header(
+    let mut content = ui::column().child(ui::header(
         theme,
         page.label(),
         super::page::description(page),
     ));
     let Some(profile) = core.account().profile() else {
-        return content.child(ui::section(theme, "Sign in", Some("We email you a one-time link. Open it to approve this device, then finish here."), None, ui::card(theme, vec![sign_in(controller, core, theme, emit)]))).build();
+        return content.child(ui::section(theme, "Sign in", Some("We email you a one-time link. Open it to approve this device, then finish here."), None, ui::card(theme, vec![ui::block(sign_in(controller, core, theme, emit))]))).build();
     };
     let who = if profile.display_name.is_empty() {
         profile.email.clone()
     } else {
         format!("{} ({})", profile.display_name, profile.email)
     };
-    let controls = UiBox::new()
-        .gap(8.0)
+    let controls = ui::actions()
         .child(button(
             theme,
             "account-refresh",
             "Refresh",
-            ButtonVariant::Ghost,
+            ButtonTone::Neutral,
             false,
             ViewAction::AccountRefresh,
             emit.clone(),
@@ -424,7 +362,7 @@ pub fn page(
             theme,
             "account-sign-out",
             "Sign out",
-            ButtonVariant::Ghost,
+            ButtonTone::Quiet,
             false,
             ViewAction::AccountSignOut,
             emit.clone(),
@@ -433,7 +371,7 @@ pub fn page(
             theme,
             "account-sign-out-everywhere",
             "Sign out everywhere",
-            ButtonVariant::Outline,
+            ButtonTone::Neutral,
             false,
             ViewAction::AccountSignOutEverywhere,
             emit.clone(),
@@ -460,7 +398,7 @@ pub fn page(
             "Forges",
             Some("A connected Forge can run anything on its machine."),
             None,
-            ui::card(theme, vec![forges(controller, core, theme, emit)]),
+            ui::card(theme, vec![ui::block(forges(controller, core, theme, emit))]),
         ))
         .build()
 }

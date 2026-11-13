@@ -1713,7 +1713,6 @@ dependencies = [
  "anyhow",
  "aqua",
  "aqua-core",
- "aqua-text",
  "aqua-ui",
  "artisan-api",
  "claude-ai-browser",

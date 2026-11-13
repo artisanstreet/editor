@@ -1,4 +1,5 @@
 use super::{Distribution, Mode, Summary, share_at_or_below};
+use crate::ui::kit::Space;
 use crate::ui::rich::charts::scale::{
     Domain, f32_of_count, f64_of, index_of, nice_ticks, percent, reading, ticks_within,
 };
@@ -509,7 +510,7 @@ pub(crate) fn view(
     );
     let mut root = ui::Box::new()
         .layout("column")
-        .style(Style::new().width(Length::Pct(100.0)).gap(10.0));
+        .style(Style::new().width(Length::Pct(100.0)).gap(Space::S8.px()));
     if data.samples.len() > 1 {
         root = root.child((services.legend)(
             data.samples

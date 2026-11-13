@@ -12,6 +12,7 @@ use aqua_core::{InputEvent, Key, NamedKey, PointerButton};
 use aqua_ui::input::{CaptureRequest, FocusRequest, InputKind, InputResponse, RoutedInput};
 
 use super::{ImageCompare, Mode};
+use crate::ui::kit::{IconSize, Media, Space, Spaced, Surface, TextRole};
 use crate::ui::media::{
     image::{ImageError, Images},
     source::{MediaFailure, MediaFetcher, MediaLoadError, MediaSource},
@@ -270,7 +271,7 @@ impl CompareState {
             let half = ((width - 8.0) / 2.0).max(0.0);
             UiBox::new()
                 .width(width)
-                .gap(8.0)
+                .spaced(Space::S8)
                 .child(frame(
                     &theme,
                     half,
@@ -418,7 +419,7 @@ impl CompareState {
         Ok(UiBox::new()
             .layout("column")
             .width(Length::Pct(100.0))
-            .gap(8.0)
+            .spaced(Space::S8)
             .style(Style::new().align(AlignItems::CENTER))
             .child(view)
             .child(control)
@@ -487,20 +488,20 @@ fn image_layer(
         .layout("column")
         .width(width)
         .height(height)
-        .gap(if status.is_some() { 4.0 } else { 6.0 })
+        .spaced(Space::S4)
+        .padded(Space::S12)
         .style(
             Style::new()
                 .absolute_at(Some(0.0), Some(0.0), None, None)
                 .align(AlignItems::CENTER)
                 .justify(JustifyContent::CENTER)
-                .padding(Length::Px(12.0))
                 .gpui_background(aqua_core::GpuiBackground::Solid(
                     theme.colors.surface.to_reference_paint(),
                 )),
         );
     let text = |value: String, color: crate::ui::theme::Oklch| {
         Text::new(value)
-            .font_size(13.0)
+            .text_style(TextRole::Label.style(theme))
             .gpui_source_color(color.to_reference_text_color())
             .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
             .style(
@@ -512,23 +513,14 @@ fn image_layer(
     };
     if let Some(error) = status {
         panel = panel
-            .child(crate::ui::asset::source_asset_glyph(
+            .child(IconSize::Lg.glyph(
                 editor_assets::AssetId::TABLER_FILE_OFF,
-                20.0,
                 theme.colors.text_muted.to_reference_paint(),
             ))
             .child(text(error.title().to_owned(), theme.colors.text))
             .child(text(source.trim().to_owned(), theme.colors.text_muted));
         if error != Failure::Invalid {
-            panel = panel.child(
-                UiBox::new()
-                    .style(Style::new().padding_insets(aqua_core::Insets {
-                        top: 4.0,
-                        ..Default::default()
-                    }))
-                    .child(text("Click to retry".to_owned(), theme.colors.text_muted))
-                    .build(),
-            );
+            panel = panel.child(text("Click to retry".to_owned(), theme.colors.text_muted));
         }
     } else {
         panel = panel.child(text("Loading image…".to_owned(), theme.colors.text_muted));
@@ -537,57 +529,11 @@ fn image_layer(
 }
 
 fn pill(theme: &crate::ui::theme::ArtisanTheme, text: String) -> aqua_ui::element::Element {
-    use aqua_text::{FontFamily, FontWeight, TextStyle};
-    use aqua_ui::{
-        AlignItems,
-        element::{Box as UiBox, Text},
-        style::Style,
-    };
-    let radius = 11.0;
-    let border = theme
-        .colors
-        .text
-        .at(crate::ui::theme::Opacity::GlassBorder)
-        .to_reference_paint();
-    let shadows = crate::ui::glass::glass_card_shadows(theme, crate::ui::theme::Elevation::Overlay)
-        .into_iter()
-        .map(Into::into)
-        .collect();
-    UiBox::new()
-        .height(22.0)
-        .radius(radius)
-        .clip(true)
-        .style(
-            Style::new()
-                .gpui_border(aqua_core::Insets::uniform(1.0), border, false)
-                .gpui_shadows(shadows)
-                .align(AlignItems::CENTER)
-                .padding_insets(aqua_core::Insets {
-                    left: 9.0,
-                    right: 9.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }),
-        )
-        .child(crate::ui::glass::glass_layers(
-            theme,
-            crate::ui::glass::GlassStrength::Quiet,
-            radius,
-        ))
-        .child(
-            Text::new(text)
-                .text_style(TextStyle {
-                    families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                    size_px: 12.0,
-                    line_height_px: 16.0,
-                    weight: FontWeight::MEDIUM,
-                    ..TextStyle::default()
-                })
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .wrap(false)
-                .build(),
-        )
-        .build()
+    let height = TextRole::Caption.spec().line + 2.0 * Surface::Pill(0.0).padding_px();
+    Surface::Pill(height).build(
+        theme,
+        vec![TextRole::Caption.text(theme, text).wrap(false).build()],
+    )
 }
 
 fn corner(
@@ -601,9 +547,9 @@ fn corner(
     UiBox::new()
         .opacity(if hidden { 0.0 } else { 1.0 })
         .style(Style::new().absolute_at(
-            if left { Some(8.0) } else { None },
-            Some(8.0),
-            if left { None } else { Some(8.0) },
+            if left { Some(Space::S8.px()) } else { None },
+            Some(Space::S8.px()),
+            if left { None } else { Some(Space::S8.px()) },
             None,
         ))
         .child(pill(theme, text))
@@ -616,7 +562,7 @@ fn divider(
     width: f32,
     height: f32,
 ) -> Vec<aqua_ui::element::Element> {
-    use crate::ui::{asset::source_asset_glyph, theme::Opacity};
+    use crate::ui::theme::Opacity;
     use aqua_ui::{AlignItems, JustifyContent, element::Box as UiBox, style::Style};
     let x = split * width;
     let line = UiBox::new()
@@ -634,51 +580,39 @@ fn divider(
                 )),
         )
         .build();
-    let handle = UiBox::new()
-        .width(32.0)
-        .height(32.0)
-        .radius(16.0)
-        .clip(true)
+    let edge = 2.0 * (IconSize::Sm.px() + Surface::Pill(0.0).padding_px());
+    let handle = Surface::Pill(edge)
+        .build(
+            theme,
+            vec![
+                UiBox::new()
+                    .layout("row")
+                    .style(
+                        Style::new()
+                            .align(AlignItems::CENTER)
+                            .justify(JustifyContent::CENTER),
+                    )
+                    .child(IconSize::Sm.glyph(
+                        editor_assets::AssetId::TABLER_CHEVRON_LEFT,
+                        theme.colors.text.to_reference_paint(),
+                    ))
+                    .child(IconSize::Sm.glyph(
+                        editor_assets::AssetId::TABLER_CHEVRON_RIGHT,
+                        theme.colors.text.to_reference_paint(),
+                    ))
+                    .build(),
+            ],
+        )
         .style(
             Style::new()
-                .absolute_at(Some(x - 16.0), Some(height / 2.0 - 16.0), None, None)
-                .gpui_border(
-                    aqua_core::Insets::uniform(1.0),
-                    theme
-                        .colors
-                        .text
-                        .at(Opacity::GlassBorder)
-                        .to_reference_paint(),
-                    false,
-                )
-                .gpui_shadows(
-                    crate::ui::glass::glass_card_shadows(
-                        theme,
-                        crate::ui::theme::Elevation::Overlay,
-                    )
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                )
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::CENTER),
-        )
-        .child(crate::ui::glass::glass_layers(
-            theme,
-            crate::ui::glass::GlassStrength::Quiet,
-            16.0,
-        ))
-        .child(source_asset_glyph(
-            editor_assets::AssetId::TABLER_CHEVRON_LEFT,
-            12.0,
-            theme.colors.text.to_reference_paint(),
-        ))
-        .child(source_asset_glyph(
-            editor_assets::AssetId::TABLER_CHEVRON_RIGHT,
-            12.0,
-            theme.colors.text.to_reference_paint(),
-        ))
-        .build();
+                .width(aqua_ui::style::Length::Px(edge))
+                .absolute_at(
+                    Some(x - edge / 2.0),
+                    Some(height / 2.0 - edge / 2.0),
+                    None,
+                    None,
+                ),
+        );
     vec![line, handle]
 }
 
@@ -690,18 +624,14 @@ fn frame(
     layers: Vec<aqua_ui::element::Element>,
     interactive: Option<(Mode, f32, Rc<dyn Fn(Action)>)>,
 ) -> aqua_ui::element::Element {
-    use crate::ui::{glass::card_shadows, theme::RadiusStep, theme::RadiusTokens};
-    use aqua_ui::{element::Box as UiBox, input::EventPhase, style::Style};
-    let radius = RadiusTokens::value(RadiusStep::Xl);
-    let root = UiBox::new()
-        .width(width)
-        .height(width / aspect)
-        .radius(radius)
-        .clip(true)
-        .style(Style::new().gpui_shadows(card_shadows(theme).into_iter().map(Into::into).collect()))
-        .child(base)
-        .children(layers)
-        .build();
+    use aqua_ui::{input::EventPhase, style::Style};
+    let mut children = vec![base];
+    children.extend(layers);
+    let root = Surface::Media(Media::Frame).build(theme, children).style(
+        Style::new()
+            .width(aqua_ui::style::Length::Px(width))
+            .height(aqua_ui::style::Length::Px(width / aspect)),
+    );
     let Some((mode, split, emit)) = interactive else {
         return root;
     };

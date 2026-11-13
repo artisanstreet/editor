@@ -1,31 +1,29 @@
 use std::rc::Rc;
 
 use aqua_core::{Role, Size};
-use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::{
-    element::{Box as UiBox, Element, Key, Scroll, Text},
+    AlignItems, JustifyContent,
+    element::{Box as UiBox, Element, Key, Scroll},
     style::{Axis, Length, Style},
 };
 use editor_assets::AssetId;
 
 use super::{
-    button::{Button, ButtonVariant},
-    glass::{GlassStrength, glass_card_shadows, glass_layers},
+    kit::{
+        Finish, IconButton, IconButtonSize, Space, Spaced, Surface, TextRole, surface::backdrop,
+    },
     page,
-    theme::{ArtisanTheme, Elevation},
+    theme::ArtisanTheme,
 };
+
+const SURFACE: Surface = Surface::Dialog;
+const MARGIN: Space = Space::S16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DialogDismissReason {
     Escape,
     Backdrop,
     CloseButton,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DialogSurface {
-    Raised,
-    Glass,
 }
 
 pub struct Dialog {
@@ -40,7 +38,6 @@ pub struct Dialog {
     dismissible: bool,
     bare: bool,
     soft_backdrop: bool,
-    surface: DialogSurface,
 }
 
 impl Dialog {
@@ -62,7 +59,6 @@ impl Dialog {
             dismissible: true,
             bare: false,
             soft_backdrop: false,
-            surface: DialogSurface::Raised,
         }
     }
     pub const fn dismissible(mut self, value: bool) -> Self {
@@ -75,10 +71,6 @@ impl Dialog {
     }
     pub const fn soft_backdrop(mut self) -> Self {
         self.soft_backdrop = true;
-        self
-    }
-    pub const fn glass(mut self) -> Self {
-        self.surface = DialogSurface::Glass;
         self
     }
     pub const fn max_width(mut self, width: f32) -> Self {
@@ -99,94 +91,68 @@ impl Dialog {
         self
     }
 
+    fn heading(&self) -> Element {
+        let theme = self.theme;
+        let title = TextRole::Heading
+            .text(&theme, self.title.clone())
+            .style(Style::new().min_width(Length::Px(0.0)).flex_grow(1.0))
+            .build();
+        let mut close = IconButton::new(
+            "dialog-close",
+            theme,
+            AssetId::TABLER_X,
+            "Close",
+            IconButtonSize::Md,
+            Finish::Plain,
+        )
+        .disabled(!self.dismissible);
+        if let Some(dismiss) = self.dismiss.clone() {
+            close = close.on_activate(move |_| dismiss(DialogDismissReason::CloseButton));
+        }
+        UiBox::new()
+            .spaced(Space::S12)
+            .padded(Space::S4)
+            .style(
+                Style::new()
+                    .align(AlignItems::CENTER)
+                    .justify(JustifyContent::SPACE_BETWEEN),
+            )
+            .child(title)
+            .child(close.build())
+            .build()
+    }
+
     pub fn build_panel(self, viewport: Size) -> Element {
         let theme = self.theme;
+        let margin = 2.0 * MARGIN.px();
         let requested = self
             .viewport_width
             .map_or(self.max_width, |(inset, maximum)| {
                 (viewport.w - inset).max(1.0).min(maximum)
             });
-        let width = requested.min((viewport.w - 32.0).max(1.0));
-        let mut frame = UiBox::new().layout("column").gap(16.0);
-        if !self.bare {
-            let text_style = TextStyle {
-                families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                size_px: if self.surface == DialogSurface::Glass {
-                    16.0
-                } else {
-                    18.0
-                },
-                line_height_px: if self.surface == DialogSurface::Glass {
-                    20.0
-                } else {
-                    22.5
-                },
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::default()
-            };
-            let title = Text::new(self.title.clone())
-                .style(
-                    Style::new()
-                        .min_width(Length::Px(0.0))
-                        .flex_grow(1.0)
-                        .text_style(text_style)
-                        .gpui_source_text_color(theme.colors.text.to_reference_text_color()),
-                )
-                .build();
-            let mut close = Button::icon("dialog-close", theme, AssetId::TABLER_X, "Close")
-                .variant(ButtonVariant::Ghost)
-                .disabled(!self.dismissible);
-            if let Some(dismiss) = self.dismiss.clone() {
-                close = close.on_activate(move |_| dismiss(DialogDismissReason::CloseButton));
-            }
-            let heading = UiBox::new()
-                .gap(12.0)
-                .style(
-                    Style::new()
-                        .align(aqua_ui::AlignItems::CENTER)
-                        .justify(aqua_ui::JustifyContent::SPACE_BETWEEN),
-                )
-                .child(title)
-                .child(close.build())
-                .build();
-            frame = frame.padding(20.0).radius(16.0);
-            if self.surface == DialogSurface::Raised {
-                frame = frame
-                    .fill(theme.colors.raised.to_paint())
-                    .border((1.0, theme.colors.line.to_paint()));
-            } else {
-                frame = frame
-                    .clip(true)
-                    .style(
-                        Style::new().gpui_shadows(
-                            glass_card_shadows(&theme, Elevation::Overlay)
-                                .into_iter()
-                                .map(aqua_ui::style::GpuiShadowLayer::from)
-                                .collect(),
-                        ),
-                    )
-                    .child(glass_layers(&theme, GlassStrength::Strong, 16.0));
-            }
-            frame = frame.child(heading);
-        }
+        let width = requested.min((viewport.w - margin).max(1.0));
+        let heading = (!self.bare).then(|| self.heading());
+        let mut frame = UiBox::new()
+            .layout("column")
+            .spaced(Space::S16)
+            .children(heading);
         if let Some(description) = self.description {
             frame = frame.child(page::note(&theme, description).build());
         }
-        frame = frame.child(self.content);
+        let frame = frame.child(self.content).build();
+        let panel = match self.bare {
+            true => frame,
+            false => SURFACE.build(&theme, vec![frame]),
+        };
         Scroll::new()
             .width(width)
             .style(
                 Style::new()
                     .axis(Axis::Column)
-                    .max_height(Length::Px((viewport.h - 32.0).max(1.0)))
-                    .text_style(TextStyle {
-                        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-                        size_px: 14.0,
-                        line_height_px: 16.8,
-                        ..TextStyle::default()
-                    }),
+                    .max_height(Length::Px((viewport.h - margin).max(1.0))),
             )
-            .child(frame.build())
+            .style(TextRole::Label.inherit(&theme))
+            .child(panel)
             .build()
             .with_key(self.id)
             .role(Role::Dialog)
@@ -239,7 +205,6 @@ impl DialogHost {
         let description = dialog.description.clone();
         let max_width = dialog.max_width;
         let viewport_width = dialog.viewport_width;
-        let surface = dialog.surface;
         let render_pending = pending.clone();
         let render_theme = Rc::clone(&theme);
         let rebuild: DialogRebuild = Rc::new(move |content, viewport| {
@@ -256,7 +221,6 @@ impl DialogHost {
                 dismissible,
                 bare,
                 soft_backdrop: soft,
-                surface,
             };
             dialog_root(dialog, viewport, render_pending.clone())
         });
@@ -334,32 +298,26 @@ fn dialog_root(
     pending: Rc<std::cell::Cell<Option<DialogDismissReason>>>,
 ) -> Element {
     use aqua_core::DisplayItem;
-    use aqua_ui::{AlignItems, JustifyContent, element::Canvas};
+    use aqua_ui::element::Canvas;
     let theme = dialog.theme;
     let bare = dialog.bare;
     let soft = dialog.soft_backdrop;
     let dismissible = dialog.dismissible;
     let panel = dialog.build_panel(viewport);
-    let backdrop_color = if bare {
+    let shade = Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
         theme
             .colors
             .black
             .at(super::theme::Opacity::Shade)
-            .to_paint()
-    } else {
-        theme
-            .colors
-            .background
-            .at(super::theme::Opacity::Backdrop)
-            .to_paint()
-    };
+            .to_reference_paint(),
+    ));
     let mut root = UiBox::new().width(viewport.w).height(viewport.h).style(
         Style::new()
             .align(AlignItems::CENTER)
             .justify(JustifyContent::CENTER),
     );
     if !soft {
-        root = root.fill(backdrop_color);
+        root = root.style(if bare { shade } else { backdrop(&theme) });
     }
     if soft {
         let shade = theme

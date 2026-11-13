@@ -1,6 +1,6 @@
 use super::{
     asset::source_asset_glyph,
-    hover::hover_fill_stops,
+    kit::{self, Hover, Radius, live},
     motion::MotionPolicy,
     theme::{ArtisanTheme, Opacity, RadiusTokens},
 };
@@ -8,35 +8,17 @@ use aqua_core::{CursorIcon, Insets, Oklch, Role};
 use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::{
     AlignItems, JustifyContent,
-    element::{Box as UiBox, Button as UiButton, Canvas, Element, Key, Text},
+    element::{Box as UiBox, Button as UiButton, Element, Key, Text},
     style::{Length, Style},
     tree::ActionEvent,
 };
 use editor_assets::AssetId;
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ButtonVariant {
-    #[default]
-    Default,
+    Primary,
     Outline,
     Secondary,
     Ghost,
-    Accent,
-}
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ButtonShape {
-    #[default]
-    Pill,
-    Rounded,
-    Square,
-}
-impl ButtonShape {
-    pub const fn radius(self) -> f32 {
-        match self {
-            Self::Pill => 16.0,
-            Self::Rounded => 10.0,
-            Self::Square => 4.0,
-        }
-    }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LabelOverflow {
@@ -55,38 +37,12 @@ impl Content {
         }
     }
 }
-pub fn accent_background(theme: &ArtisanTheme, hovered: bool) -> aqua::GpuiBackground {
-    let (top, bottom) = if hovered {
-        (
-            theme.colors.action_hover_top,
-            theme.colors.action_hover_bottom,
-        )
-    } else {
-        (theme.colors.action_top, theme.colors.action_bottom)
-    };
-    aqua::GpuiBackground::LinearGradient {
-        angle: 180.0,
-        color_space: aqua::GpuiGradientColorSpace::Oklab,
-        stops: [
-            aqua::GpuiGradientStop {
-                percentage: 0.0,
-                color: top.to_reference_paint(),
-            },
-            aqua::GpuiGradientStop {
-                percentage: 1.0,
-                color: bottom.to_reference_paint(),
-            },
-        ],
-    }
-}
 pub struct Button {
     id: Key,
     theme: ArtisanTheme,
     content: Content,
     variant: ButtonVariant,
-    shape: ButtonShape,
     disabled: bool,
-    hover_fill: bool,
     muted: bool,
     radius: Option<f32>,
     glass: bool,
@@ -103,10 +59,8 @@ impl Button {
             id: id.into(),
             theme,
             content,
-            variant: ButtonVariant::Default,
-            shape: ButtonShape::Pill,
+            variant: ButtonVariant::Ghost,
             disabled: false,
-            hover_fill: false,
             muted: false,
             radius: None,
             glass: false,
@@ -146,7 +100,6 @@ impl Button {
     ) -> Self {
         Self::icon(id, theme, AssetId::TABLER_X, label)
             .variant(ButtonVariant::Ghost)
-            .hover_fill()
             .muted()
             .glass()
             .compact(24.0)
@@ -156,20 +109,12 @@ impl Button {
         self.variant = value;
         self
     }
-    pub const fn shape(mut self, value: ButtonShape) -> Self {
-        self.shape = value;
-        self
-    }
     pub const fn label_overflow(mut self, value: LabelOverflow) -> Self {
         self.label_overflow = Some(value);
         self
     }
     pub const fn disabled(mut self, value: bool) -> Self {
         self.disabled = value;
-        self
-    }
-    pub const fn hover_fill(mut self) -> Self {
-        self.hover_fill = true;
         self
     }
     pub const fn muted(mut self) -> Self {
@@ -204,54 +149,56 @@ impl Button {
         self.motion_policy = policy;
         self
     }
+    fn primary(self) -> Element {
+        let label = match self.content {
+            Content::Text(text) | Content::Icon(_, text) => kit::Label::Text(text),
+            Content::IconText(icon, text) => kit::Label::IconText(icon, text),
+        };
+        let mut button = kit::Button::new(
+            self.id,
+            self.theme,
+            kit::ButtonTone::Primary,
+            kit::ButtonSize::Md,
+            label,
+        )
+        .disabled(self.disabled)
+        .motion_policy(self.motion_policy);
+        if let Some(radius) = self.radius {
+            button = button.nested(radius, 0.0);
+        }
+        if let Some(overflow) = self.label_overflow {
+            button = button.ellipsis(match overflow {
+                LabelOverflow::Start => kit::Ellipsis::Start,
+                LabelOverflow::End => kit::Ellipsis::End,
+            });
+        }
+        if let Some(handler) = self.on_activate {
+            button = button.on_activate(handler);
+        }
+        if let Some(selector) = self.debug_selector {
+            button = button.debug_selector(selector);
+        }
+        button.build()
+    }
     pub fn build(self) -> Element {
         let t = self.theme;
-        let (background, _foreground, border) = match self.variant {
-            ButtonVariant::Default => (
-                t.colors.primary.to_paint(),
-                t.colors.primary_text.to_paint(),
-                Oklch::TRANSPARENT,
-            ),
-            ButtonVariant::Outline => (
-                t.colors.surface.to_paint(),
-                t.colors.text.to_paint(),
-                t.colors.line.to_paint(),
-            ),
-            ButtonVariant::Secondary => (
-                t.colors.raised.to_paint(),
-                t.colors.text.to_paint(),
-                Oklch::TRANSPARENT,
-            ),
-            ButtonVariant::Ghost => (
-                Oklch::TRANSPARENT,
-                t.colors.text.to_paint(),
-                Oklch::TRANSPARENT,
-            ),
-            ButtonVariant::Accent => (
-                Oklch::TRANSPARENT,
-                t.colors.action_text.to_paint(),
-                Oklch::TRANSPARENT,
-            ),
+        let (background, border) = match self.variant {
+            ButtonVariant::Primary => return self.primary(),
+            ButtonVariant::Outline => (t.colors.surface.to_paint(), t.colors.line.to_paint()),
+            ButtonVariant::Secondary => (t.colors.raised.to_paint(), Oklch::TRANSPARENT),
+            ButtonVariant::Ghost => (Oklch::TRANSPARENT, Oklch::TRANSPARENT),
         };
         let icon_foreground = if self.muted {
             t.colors.text_muted
         } else {
-            match self.variant {
-                ButtonVariant::Default => t.colors.primary_text,
-                ButtonVariant::Accent => t.colors.action_text,
-                _ => t.colors.text,
-            }
+            t.colors.text
         };
         let background = if self.glass {
             Oklch::TRANSPARENT
         } else {
             background
         };
-        let border = if self.glass {
-            t.colors.text.at(Opacity::GlassBorder).to_paint()
-        } else {
-            border
-        };
+        let edge = if self.glass { 0.0 } else { 1.0 };
         let height = self.size.unwrap_or(t.density.control_sm);
         let icon_only = matches!(self.content, Content::Icon(..));
         let label = self.content.label().to_owned();
@@ -270,9 +217,6 @@ impl Button {
                 top: 0.0,
                 bottom: 0.0,
             });
-        if self.variant == ButtonVariant::Accent && !self.glass {
-            style = style.gpui_background(accent_background(&t, false));
-        }
         if self.label_overflow.is_some() && !icon_only {
             style = style
                 .min_width(Length::Px(0.0))
@@ -281,39 +225,19 @@ impl Button {
         let mut root = UiButton::new()
             .height(height)
             .gap(4.0)
-            .radius(self.radius.unwrap_or(self.shape.radius()))
-            .border((1.0, border))
+            .radius(self.radius.unwrap_or(Radius::Field.px()))
+            .border((edge, border))
             .fill(background)
             .style(style);
         if icon_only {
             root = root.width(height);
         }
+        let radius = self.radius.unwrap_or(Radius::Field.px());
         if self.glass {
-            let radius = self.radius.unwrap_or(self.shape.radius());
-            let base = t.colors.text.at(Opacity::GlassBase).to_paint();
-            root = root.child(
-                Canvas::new()
-                    .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-                    .scroll_stable()
-                    .on_paint(move |bounds| {
-                        vec![
-                            aqua_core::DisplayItem::BackdropBlurRounded {
-                                bounds,
-                                radius: 12.0,
-                                corners: aqua_core::CornerRadii::uniform(radius),
-                            },
-                            aqua_core::DisplayItem::Rect {
-                                bounds,
-                                radius,
-                                fill: base,
-                                border_width: 0.0,
-                                border_color: Oklch::TRANSPARENT,
-                                shadow: None,
-                            },
-                        ]
-                    })
-                    .build(),
-            );
+            root = root.child(crate::ui::kit::surface::glass::paint(&t, radius));
+        }
+        if !self.disabled {
+            root = root.child(live::layer(Hover::Neutral, &t, radius, false));
         }
         let make_text = |text: String| {
             let text = Text::new(text).text_style(TextStyle {
@@ -377,13 +301,6 @@ impl Button {
         } else if let Some(handler) = self.on_activate {
             root = root.on_activate_event(handler);
         }
-        let hover = match self.variant {
-            ButtonVariant::Default => t.colors.primary_hover.to_paint(),
-            ButtonVariant::Outline | ButtonVariant::Secondary | ButtonVariant::Ghost => {
-                t.colors.hover.to_paint()
-            }
-            ButtonVariant::Accent => Oklch::TRANSPARENT,
-        };
         let element = root
             .build()
             .with_key(self.id)
@@ -410,37 +327,13 @@ impl Button {
                     inset: false,
                     color: t.colors.ring.at(Opacity::FocusRing).to_paint(),
                 }]);
-            let hover_style = if self.hover_fill {
-                let (top, bottom) = hover_fill_stops(&t, t.colors.text);
-                Style::new().gpui_background(aqua::GpuiBackground::LinearGradient {
-                    angle: 180.0,
-                    color_space: aqua::GpuiGradientColorSpace::Oklab,
-                    stops: [
-                        aqua::GpuiGradientStop {
-                            percentage: 0.0,
-                            color: top.to_reference_paint(),
-                        },
-                        aqua::GpuiGradientStop {
-                            percentage: 1.0,
-                            color: bottom.to_reference_paint(),
-                        },
-                    ],
-                })
-            } else if self.variant == ButtonVariant::Accent {
-                Style::new().gpui_background(accent_background(&t, true))
-            } else {
-                Style::new().background(hover)
+            let hover_style = match self.muted {
+                true => {
+                    Style::new().gpui_source_text_color(t.colors.text.to_reference_text_color())
+                }
+                false => Style::new(),
             };
-            let hover_style = if self.muted {
-                hover_style.gpui_source_text_color(match self.variant {
-                    ButtonVariant::Default => t.colors.primary_text.to_reference_text_color(),
-                    ButtonVariant::Accent => t.colors.action_text.to_reference_text_color(),
-                    _ => t.colors.text.to_reference_text_color(),
-                })
-            } else {
-                hover_style
-            };
-            let element = element
+            let element = live::track(element)
                 .cursor(CursorIcon::Pointer)
                 .focus_visible_style(focus)
                 .hover_style(hover_style);

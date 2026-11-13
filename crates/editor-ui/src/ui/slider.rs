@@ -78,14 +78,14 @@ use aqua_core::{
     CornerRadii, DisplayItem, GpuiBackground, InputEvent, Insets, Key as InputKey, NamedKey,
     Oklch as PaintColor, PointerButton, Rect, Role,
 };
-use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::{
-    element::{Box as UiBox, Canvas, Element, Key, Text},
+    element::{Box as UiBox, Canvas, Element, Key},
     input::{CaptureRequest, EventPhase, FocusRequest, InputKind, InputResponse, RoutedInput},
     style::{LayoutStyle, Length, Style},
     tree::UiCommand,
 };
 
+use super::kit::{Space, Spaced, TextRole};
 use super::theme::{ArtisanTheme, Opacity};
 
 pub struct SliderState {
@@ -190,7 +190,7 @@ impl Slider {
         };
         let mut track = Canvas::new()
             .style(layout.clone())
-            .radius(6.0)
+            .radius(super::kit::Radius::Field.px())
             .border((1.0, PaintColor::TRANSPARENT))
             .on_paint(move |bounds| {
                 let fraction = state.borrow().fraction();
@@ -353,37 +353,24 @@ impl Slider {
                 }
             });
         }
-        let text_style = TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: 12.0,
-            line_height_px: 16.0,
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::default()
+        let caption = |words: String, color: super::theme::Oklch| {
+            TextRole::Caption
+                .text(&theme, words)
+                .gpui_source_color(color.to_reference_text_color())
         };
-        let label = Text::new(self.label)
+        let label = caption(self.label, theme.colors.text_muted)
             .style(
                 Style::new()
                     .max_width(Length::Px(160.0))
                     .flex_shrink(0.0)
-                    .text_style(text_style.clone())
-                    .gpui_source_text_color(theme.colors.text_muted.to_reference_text_color())
                     .text_wrap(false),
             )
             .build();
-        let readout = Text::new(self.readout)
-            .style(
-                Style::new()
-                    .flex_shrink(0.0)
-                    .text_style(TextStyle {
-                        weight: FontWeight::NORMAL,
-                        ..text_style
-                    })
-                    .gpui_source_text_color(theme.colors.text.to_reference_text_color())
-                    .text_wrap(false),
-            )
+        let readout = caption(self.readout, theme.colors.text)
+            .style(Style::new().flex_shrink(0.0).text_wrap(false))
             .build();
         UiBox::new()
-            .gap(12.0)
+            .spaced(Space::S12)
             .style(Style::new().align(aqua_ui::AlignItems::CENTER))
             .width(Length::Pct(100.0))
             .child(label)

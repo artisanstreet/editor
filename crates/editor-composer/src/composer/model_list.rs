@@ -2,15 +2,25 @@ use artisan_api::EngineId;
 use std::time::{Duration, Instant};
 
 use super::picker::ModelRow;
+use editor_ui::kit::{Row, Space};
 
-pub const ENGINE_ROW_HEIGHT: f32 = 24.0;
+const fn height(row: Row) -> f32 {
+    match row.height() {
+        Some(height) => height,
+        None => 0.0,
+    }
+}
+
+pub const ENGINE_ROW_HEIGHT: f32 = height(Row::Heading);
 pub const GATE_ROW_HEIGHT: f32 = 84.0;
-pub const GROUP_ROW_HEIGHT: f32 = 28.0;
-pub const MODEL_ROW_HEIGHT: f32 = 32.0;
-pub const ROW_GAP: f32 = 2.0;
-pub const SECTION_SPACER: f32 = 6.0;
-pub const PADDING_TOP: f32 = 4.0;
-pub const PADDING_BOTTOM: f32 = 10.0;
+pub const GROUP_ROW_HEIGHT: f32 = height(Row::Heading);
+pub const MODEL_ROW_HEIGHT: f32 = height(Row::MenuItem);
+pub const ROW_GAP: Space = Space::S2;
+pub const SECTION_SPACER: f32 = Space::S6.px();
+pub const PADDING: Space = Space::S6;
+const GAP: f32 = ROW_GAP.px();
+const PADDING_TOP: f32 = PADDING.px();
+const PADDING_BOTTOM: f32 = PADDING.px();
 const SPY_LINE: f32 = 28.0;
 const JUMP_DURATION: Duration = Duration::from_millis(300);
 
@@ -38,13 +48,13 @@ impl ListLayout {
         for row in rows {
             let engine = row.engine();
             if section.is_some_and(|previous| previous != engine) {
-                y += SECTION_SPACER + ROW_GAP;
+                y += SECTION_SPACER + GAP;
             }
             section = Some(engine);
             tops.push(y);
-            y += row_height(row) + ROW_GAP;
+            y += row_height(row) + GAP;
         }
-        let content = if rows.is_empty() { y } else { y - ROW_GAP };
+        let content = if rows.is_empty() { y } else { y - GAP };
         Self {
             tops,
             height: content + PADDING_BOTTOM,

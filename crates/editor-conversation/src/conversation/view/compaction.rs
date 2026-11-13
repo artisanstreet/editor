@@ -1,12 +1,11 @@
 use crate::conversation::compaction::{CompactionFrame, CompactionPhase, eased};
 use editor_ui::{
-    asset::source_asset_glyph,
+    kit::{IconSize, Space, Spaced, TextRole},
     motion::MotionCurve,
     shimmer_text::{ShimmerTiming, sweep},
-    theme::{ArtisanTheme, ProseTypography},
+    theme::ArtisanTheme,
 };
-use aqua_core::{CornerRadii, DisplayItem, GpuiBackground, Rect, scene::TextShimmer};
-use aqua_text::{FontFamily, TextStyle};
+use aqua_core::{DisplayItem, Rect, scene::TextShimmer};
 use aqua_ui::{
     AlignItems, JustifyContent,
     element::{Box as UiBox, Canvas, Element, Text},
@@ -15,21 +14,28 @@ use aqua_ui::{
 use artisan_api::{Item, ItemKind, ModelSwitch, NamedModel, Status};
 
 const SHIMMER_KEY: &str = "compaction-shimmer";
+const RULE_LINE: f32 = 1.0;
+const PULSE_LENGTH: f32 = 56.0;
+const ROLE: TextRole = TextRole::Prose;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "the compaction rule is an animated painted guide: it draws in and carries a travelling pulse"
+)]
 fn rule(frame: CompactionFrame, left: bool, theme: ArtisanTheme) -> Element {
     Canvas::new()
-        .height(1.0)
-        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+        .height(RULE_LINE)
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
         .on_paint(move |bounds| {
             let line = |x, width, color| DisplayItem::GpuiBackground {
                 bounds: Rect {
                     x,
                     y: bounds.y,
                     w: width,
-                    h: 1.0,
+                    h: RULE_LINE,
                 },
-                corners: CornerRadii::uniform(0.0),
-                background: GpuiBackground::Solid(color),
+                corners: aqua_core::CornerRadii::uniform(0.0),
+                background: aqua_core::GpuiBackground::Solid(color),
             };
             let length = bounds.w * frame.draw;
             let start = if left {
@@ -41,7 +47,7 @@ fn rule(frame: CompactionFrame, left: bool, theme: ArtisanTheme) -> Element {
             if let Some(pulse) = frame.pulse {
                 let travel = eased(MotionCurve::SmoothOut, pulse);
                 let alpha = 0.55 * (std::f32::consts::PI * pulse).sin();
-                let lane = (bounds.w - 56.0).max(0.0);
+                let lane = (bounds.w - PULSE_LENGTH).max(0.0);
                 let x = if left {
                     bounds.x + lane * (1.0 - travel)
                 } else {
@@ -49,7 +55,7 @@ fn rule(frame: CompactionFrame, left: bool, theme: ArtisanTheme) -> Element {
                 };
                 result.push(line(
                     x,
-                    56.0,
+                    PULSE_LENGTH,
                     theme.colors.text.fade(alpha).to_reference_paint(),
                 ));
             }
@@ -79,11 +85,10 @@ fn switch_line(
 ) -> Element {
     let model = |model: &NamedModel| {
         UiBox::new()
-            .gap(4.0)
+            .spaced(Space::S4)
             .style(Style::new().align(AlignItems::CENTER))
-            .child(source_asset_glyph(
+            .child(IconSize::Md.glyph(
                 editor_ui::engine::engine_icon(&theme, model.engine),
-                14.0,
                 theme.colors.text.to_reference_paint(),
             ))
             .child(
@@ -95,7 +100,7 @@ fn switch_line(
             .build()
     };
     UiBox::new()
-        .gap(6.0)
+        .spaced(Space::S6)
         .style(shimmering(
             Style::new()
                 .align(AlignItems::CENTER)
@@ -201,26 +206,18 @@ pub fn row(
             CompactionPhase::Stopped
         }
     };
-    let typography = TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: ProseTypography::BODY_SIZE_PX,
-        line_height_px: 24.0,
-        weight: ProseTypography::BODY_WEIGHT,
-        letter_spacing_em: Some(theme.typography.tracking_em),
-        ..TextStyle::default()
-    };
     Some(
         UiBox::new()
             .layout("row")
             .width(Length::Pct(100.0))
-            .height(24.0 * frame.open)
+            .height(ROLE.spec().line * frame.open)
             .clip(true)
-            .gap(12.0)
+            .spaced(Space::S12)
+            .style(ROLE.inherit(&theme))
             .style(
                 Style::new()
-                    .min_width(Length::Px(0.0))
+                    .min_width(Length::Pct(0.0))
                     .align(AlignItems::CENTER)
-                    .text_style(typography)
                     .gpui_source_text_color(theme.colors.text_muted.to_reference_text_color()),
             )
             .child(rule(frame, true, theme))

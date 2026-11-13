@@ -1,12 +1,13 @@
+use crate::ui::kit::Radius;
 use crate::ui::theme::{ArtisanTheme, Oklch};
-use aqua::{Aqua, Style, px};
 use aqua::ShadowLayer;
+use aqua::{Aqua, Style, px};
 use aqua_core::{DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Rect};
-use std::sync::Arc;
 use aqua_ui::element::Element;
+use std::sync::Arc;
 
-pub const RADIUS: f32 = 18.4;
-pub const INSET_RADIUS: f32 = 0.65 * 16.0;
+pub const RADIUS: f32 = Radius::Shell.px();
+pub const INSET_RADIUS: f32 = Radius::Panel.px();
 
 const RIM_LIGHT: f32 = 0.04;
 const RIM_SHADE: f32 = 0.25;
@@ -33,7 +34,6 @@ impl Edge {
 
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
-const GRAY_900: Oklch = Oklch::new(0.21, 0.034, 264.665);
 
 pub struct Surfaces {
     pub bg: Oklch,
@@ -71,35 +71,18 @@ impl Surfaces {
 #[must_use]
 pub fn inset(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
     let surfaces = Surfaces::of(theme);
-    outlined(surfaces.ink, surfaces.inner, INSET_RADIUS, rest_shadows(), children)
+    outlined(
+        surfaces.ink,
+        surfaces.inner,
+        INSET_RADIUS,
+        rest_shadows(),
+        children,
+    )
 }
 
 #[must_use]
 pub fn double_rule(theme: &ArtisanTheme, bleed: f32) -> Element {
-    let (shade, light) = match theme.colors.mode.is_dark() {
-        true => (BLACK.with_alpha(0.22), WHITE.with_alpha(0.08)),
-        false => (GRAY_900.with_alpha(0.08), WHITE.with_alpha(0.9)),
-    };
-    let line = |color: Oklch| {
-        Aqua::Box()
-            .styles([Style::new()
-                .height(px(1.0))
-                .gpui_background(GpuiBackground::Solid(color.to_reference_paint()))])
-            .build()
-    };
-    Aqua::Box()
-        .layout("column")
-        .styles([Style::new()
-            .flex_shrink(0.0)
-            .margin_insets(aqua_core::Insets {
-                left: -bleed,
-                right: -bleed,
-                top: 4.0,
-                bottom: 4.0,
-            })])
-        .child(line(shade))
-        .child(line(light))
-        .build()
+    crate::ui::kit::Divider::Rule.build(theme, bleed)
 }
 
 #[must_use]
@@ -128,8 +111,16 @@ pub fn outlined(
                 .gpui_background(vertical(edge.rim_top, edge.rim_bottom))
                 .shadows(shadows),
         ])
-        .child(layer(1.0, radius, vertical(edge.highlight_top, edge.highlight_bottom)))
-        .child(layer(2.0, radius, GpuiBackground::Solid(surface.to_reference_paint())))
+        .child(layer(
+            1.0,
+            radius,
+            vertical(edge.highlight_top, edge.highlight_bottom),
+        ))
+        .child(layer(
+            2.0,
+            radius,
+            GpuiBackground::Solid(surface.to_reference_paint()),
+        ))
         .children(children)
         .build()
 }
@@ -212,6 +203,7 @@ pub const POLAR_SKY: Oklch = Oklch::new(0.6765, 0.0862, 251.28);
 pub const POLAR_BLUE: Oklch = Oklch::new(0.4695, 0.1143, 260.44);
 pub const POLAR_NAVY: Oklch = Oklch::new(0.339, 0.1106, 266.41);
 pub const POLAR_EDGE: Oklch = Oklch::new(0.2214, 0.0814, 267.91);
+pub const POLAR_SHADE: Oklch = Oklch::new(0.1727, 0.0635, 267.91);
 pub const POLAR_HIGHLIGHT: Oklch = Oklch::new(0.9369, 0.031, 252.69);
 pub const POLAR_INK: Oklch = Oklch::new(1.0, 0.0, 0.0);
 
@@ -284,14 +276,21 @@ pub fn key_face(surfaces: &Surfaces, radius: f32, height: f32) -> Element {
                     .clip(true)])
                 .child(
                     Aqua::Canvas()
-                        .styles([Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))])
+                        .styles([Style::new().absolute_at(
+                            Some(0.0),
+                            Some(0.0),
+                            Some(0.0),
+                            Some(0.0),
+                        )])
                         .on_paint(|bounds| vec![radial_glow(bounds, WHITE, 0.07)])
                         .build()
                         .exclude_from_hit_testing(),
                 )
                 .build()
                 .exclude_from_hit_testing(),
-            Aqua::Box().styles([Aqua::Style().height(px(height))]).build(),
+            Aqua::Box()
+                .styles([Aqua::Style().height(px(height))])
+                .build(),
         ],
     )
 }

@@ -1,21 +1,20 @@
-use super::{controller::SettingsController, page, ui, view::ViewAction};
+use super::{
+    controller::SettingsController,
+    page,
+    ui::{self, Ink},
+    view::ViewAction,
+};
 use editor_core::{Core, HostData, SettingsPage, SettingsSection};
 use editor_ui::{
-    button::{Button, ButtonVariant},
-    switch::{Switch, SwitchSize},
+    kit::{ButtonTone, Space, Spaced, TextRole},
+    switch::Switch,
     text::{
         Mode,
         mount::{EditorController, EditorEvent},
     },
     theme::ArtisanTheme,
 };
-use aqua_core::Insets;
-use aqua_text::{FontFamily, FontWeight, TextStyle};
-use aqua_ui::{
-    AlignItems, JustifyContent,
-    element::{Box as UiBox, Element, Text},
-    style::{Length, Style},
-};
+use aqua_ui::element::{Box as UiBox, Element};
 use artisan_api::{
     ClaudeAiState, EngineCommand, EngineId, EngineStatus, InstallState, Integrity, SignInState,
 };
@@ -25,33 +24,15 @@ fn button(
     theme: &ArtisanTheme,
     id: impl Into<String>,
     label: impl Into<String>,
-    variant: ButtonVariant,
+    tone: ButtonTone,
     disabled: bool,
     action: ViewAction,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
-    Button::text(id.into(), *theme, label)
-        .variant(variant)
-        .disabled(disabled)
-        .on_activate(move |_| emit(action.clone()))
-        .build()
+    ui::button(theme, id, label, tone, disabled, move || emit(action.clone()))
 }
 fn band(theme: &ArtisanTheme, value: String) -> Element {
-    UiBox::new()
-        .width(Length::Pct(100.0))
-        .style(Style::new().padding_insets(Insets {
-            top: 20.0,
-            bottom: 20.0,
-            ..Insets::default()
-        }))
-        .child(
-            Text::new(value)
-                .font_size(14.0)
-                .gpui_source_color(theme.colors.text.to_reference_text_color())
-                .wrap(true)
-                .build(),
-        )
-        .build()
+    ui::block(ui::text(theme, TextRole::Label, Ink::Plain, value))
 }
 fn refresh(
     theme: &ArtisanTheme,
@@ -64,7 +45,7 @@ fn refresh(
         theme,
         id,
         if busy { "Checking…" } else { "Refresh" },
-        ButtonVariant::Ghost,
+        ButtonTone::Neutral,
         busy,
         ViewAction::EngineAction(engine, EngineCommand::Refresh {}),
         emit,
@@ -127,7 +108,11 @@ fn installation(
                 } else {
                     "Try again"
                 },
-                ButtonVariant::Default,
+                if matches!(status.install, InstallState::Absent) {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
                 busy,
                 ViewAction::EngineAction(engine, EngineCommand::Install {}),
                 emit.clone(),
@@ -143,13 +128,13 @@ fn installation(
             ));
         }
         InstallState::Installed { version, update } => {
-            let mut controls = UiBox::new().gap(8.0);
+            let mut controls = ui::actions();
             if let Some(update) = update {
                 controls = controls.child(button(
                     theme,
                     "settings-engine-update",
                     format!("Update to {update}"),
-                    ButtonVariant::Ghost,
+                    ButtonTone::Primary,
                     busy,
                     ViewAction::EngineAction(engine, EngineCommand::Update {}),
                     emit.clone(),
@@ -160,7 +145,7 @@ fn installation(
                     theme,
                     "settings-engine-rollback",
                     "Roll back",
-                    ButtonVariant::Ghost,
+                    ButtonTone::Neutral,
                     busy,
                     ViewAction::EngineAction(engine, EngineCommand::Rollback {}),
                     emit.clone(),
@@ -169,7 +154,7 @@ fn installation(
                     theme,
                     "settings-engine-versions",
                     "Choose version",
-                    ButtonVariant::Ghost,
+                    ButtonTone::Neutral,
                     busy,
                     ViewAction::EngineVersions(engine),
                     emit.clone(),
@@ -198,15 +183,7 @@ fn installation(
                 },
             ));
         } else {
-            let mut list =
-                UiBox::new()
-                    .layout("column")
-                    .gap(2.0)
-                    .style(Style::new().padding_insets(Insets {
-                        top: 12.0,
-                        bottom: 12.0,
-                        ..Insets::default()
-                    }));
+            let mut list = ui::stack(Space::S4);
             for version in status.versions.iter() {
                 let mut marks = Vec::new();
                 if version.current {
@@ -222,29 +199,23 @@ fn installation(
                 } else {
                     format!("{} · {}", version.version, marks.join(" · "))
                 };
-                let mut row = UiBox::new()
-                    .width(Length::Pct(100.0))
-                    .style(
-                        Style::new()
-                            .align(AlignItems::CENTER)
-                            .justify(JustifyContent::SPACE_BETWEEN),
-                    )
-                    .child(
-                        Text::new(label)
-                            .font_size(14.0)
-                            .gpui_source_color(if version.unsupported {
-                                theme.colors.text_muted.to_reference_text_color()
-                            } else {
-                                theme.colors.text.to_reference_text_color()
-                            })
-                            .build(),
-                    );
+                let ink = if version.unsupported {
+                    Ink::Muted
+                } else {
+                    Ink::Plain
+                };
+                let mut row = ui::actions().child(ui::grow(ui::text(
+                    theme,
+                    TextRole::Label,
+                    ink,
+                    label,
+                )));
                 if !version.current && !version.unsupported {
                     row = row.child(button(
                         theme,
                         format!("settings-engine-use-{}", version.version),
                         format!("Use {}", version.version),
-                        ButtonVariant::Ghost,
+                        ButtonTone::Neutral,
                         busy,
                         ViewAction::EngineUse(engine, version.version.clone()),
                         emit.clone(),
@@ -252,7 +223,7 @@ fn installation(
                 }
                 list = list.child(row.build());
             }
-            blocks.push(list.build());
+            blocks.push(ui::block(list.build()));
         }
     }
     ui::section(
@@ -313,7 +284,7 @@ fn account(
                     theme,
                     format!("settings-engine-login-{engine}"),
                     "Sign in",
-                    ButtonVariant::Default,
+                    ButtonTone::Primary,
                     busy,
                     ViewAction::EngineAction(engine, EngineCommand::Login {}),
                     emit.clone(),
@@ -328,7 +299,7 @@ fn account(
                 theme,
                 format!("settings-engine-logout-{engine}"),
                 "Sign out",
-                ButtonVariant::Outline,
+                ButtonTone::Neutral,
                 busy,
                 ViewAction::EngineAction(engine, EngineCommand::Logout {}),
                 emit.clone(),
@@ -339,39 +310,21 @@ fn account(
             code,
             accepts_code,
         } => {
-            let mut content =
-                UiBox::new()
-                    .layout("column")
-                    .gap(8.0)
-                    .style(Style::new().padding_insets(Insets {
-                        top: 14.0,
-                        bottom: 14.0,
-                        ..Insets::default()
-                    }));
+            let mut content = ui::stack(Space::S8);
             if let Some(url) = url {
                 content = content.child(
-                    UiBox::new()
-                        .gap(8.0)
-                        .style(Style::new().align(AlignItems::CENTER))
-                        .child(
-                            UiBox::new()
-                                .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                                .child(
-                                    Text::new(format!("Open {url}"))
-                                        .font_size(12.0)
-                                        .gpui_source_color(
-                                            theme.colors.text_muted.to_reference_text_color(),
-                                        )
-                                        .wrap(false)
-                                        .build(),
-                                )
-                                .build(),
-                        )
+                    ui::actions()
+                        .child(ui::grow(ui::line(
+                            theme,
+                            TextRole::Caption,
+                            Ink::Muted,
+                            format!("Open {url}"),
+                        )))
                         .child(button(
                             theme,
                             format!("settings-engine-open-{engine}"),
                             "Open link",
-                            ButtonVariant::Outline,
+                            ButtonTone::Quiet,
                             false,
                             ViewAction::OpenUrl(url.clone()),
                             emit.clone(),
@@ -382,27 +335,9 @@ fn account(
             if let Some(code) = code {
                 content = content.child(
                     UiBox::new()
-                        .gap(6.0)
-                        .child(
-                            Text::new("and enter")
-                                .gpui_source_color(
-                                    theme.colors.text_muted.to_reference_text_color(),
-                                )
-                                .build(),
-                        )
-                        .child(
-                            Text::new(code.clone())
-                                .text_style(TextStyle {
-                                    families: vec![FontFamily::Named(
-                                        theme.typography.sans.family.to_owned(),
-                                    )],
-                                    size_px: 14.0,
-                                    line_height_px: 20.0,
-                                    weight: FontWeight(600),
-                                    ..TextStyle::default()
-                                })
-                                .build(),
-                        )
+                        .spaced(Space::S6)
+                        .child(ui::line(theme, TextRole::Label, Ink::Muted, "and enter"))
+                        .child(ui::line(theme, TextRole::Title, Ink::Plain, code.clone()))
                         .build(),
                 );
             }
@@ -418,27 +353,20 @@ fn account(
                             _ => {}
                         });
                     content = content.child(
-                        UiBox::new()
-                            .gap(8.0)
-                            .style(Style::new().align(AlignItems::CENTER))
-                            .child(
-                                UiBox::new()
-                                    .style(Style::new().flex_grow(1.0))
-                                    .child(editor.element_with_notice_keyed(
-                                        format!("settings-engine-login-code-{engine}"),
-                                        Mode::SingleLine,
-                                        theme,
-                                        "Paste the code",
-                                        false,
-                                        false,
-                                    ))
-                                    .build(),
-                            )
+                        ui::actions()
+                            .child(ui::grow(editor.element_with_notice_keyed(
+                                format!("settings-engine-login-code-{engine}"),
+                                Mode::SingleLine,
+                                theme,
+                                "Paste the code",
+                                false,
+                                false,
+                            )))
                             .child(button(
                                 theme,
                                 format!("settings-engine-code-{engine}"),
                                 "Submit code",
-                                ButtonVariant::Default,
+                                ButtonTone::Primary,
                                 busy,
                                 ViewAction::EngineCode(engine),
                                 emit.clone(),
@@ -451,12 +379,12 @@ fn account(
                 theme,
                 format!("settings-engine-cancel-login-{engine}"),
                 "Cancel",
-                ButtonVariant::Ghost,
+                ButtonTone::Quiet,
                 false,
                 ViewAction::EngineAction(engine, EngineCommand::CancelLogin {}),
                 emit.clone(),
             ));
-            blocks.push(content.build());
+            blocks.push(ui::block(content.build()));
         }
         _ => {}
     }
@@ -484,7 +412,6 @@ fn claude(
     let switch = Switch::new(
         "settings-switch-enhanced-claude",
         *theme,
-        SwitchSize::Default,
         on,
         "switch enhanced claude",
     )
@@ -511,7 +438,7 @@ fn claude(
             theme,
             "settings-claude-ai-sign-out",
             "Sign out",
-            ButtonVariant::Outline,
+            ButtonTone::Neutral,
             busy,
             ViewAction::EngineAction(EngineId::Claude, EngineCommand::ClaudeAiSignOut {}),
             emit,
@@ -525,7 +452,7 @@ fn claude(
             } else {
                 "Sign in again"
             },
-            ButtonVariant::Default,
+            ButtonTone::Primary,
             busy,
             ViewAction::ClaudeSignIn,
             emit,
@@ -571,9 +498,7 @@ pub fn page(
     } else {
         page::description(selected).to_owned()
     };
-    let mut content = UiBox::new()
-        .layout("column")
-        .child(ui::header(theme, &title, &description));
+    let mut content = ui::column().child(ui::header(theme, &title, &description));
     let Some(status) = host.engines.get(&engine) else {
         let note = if host.is_live() {
             format!("This host reported no {label} engine.")
@@ -581,20 +506,7 @@ pub fn page(
             "Waiting for the host to connect…".into()
         };
         return content
-            .child(
-                UiBox::new()
-                    .style(Style::new().margin_insets(Insets {
-                        top: 32.0,
-                        ..Insets::default()
-                    }))
-                    .child(
-                        Text::new(note)
-                            .font_size(14.0)
-                            .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-                            .build(),
-                    )
-                    .build(),
-            )
+            .child(ui::text(theme, TextRole::Label, Ink::Muted, note))
             .build();
     };
     if selected.shows(SettingsSection::Installation(engine)) {
@@ -607,15 +519,7 @@ pub fn page(
         content = content.child(claude(controller, host, status, theme, emit));
     }
     if let Some(error) = controller.engines.errors.get(&engine) {
-        content = content.child(
-            UiBox::new()
-                .style(Style::new().margin_insets(Insets {
-                    top: 12.0,
-                    ..Insets::default()
-                }))
-                .child(ui::error_text(theme, error))
-                .build(),
-        );
+        content = content.child(ui::error_text(theme, error));
     }
     let _ = core;
     content.build()

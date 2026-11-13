@@ -1,4 +1,5 @@
 use super::*;
+use aqua_ui::element::Text;
 use artisan_api::{ContentId, ContentRef, Output, ThreadId, ToolKind};
 use editor_ui::theme::ThemeMode;
 use std::cell::Cell;
