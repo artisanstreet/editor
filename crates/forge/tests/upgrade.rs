@@ -16,20 +16,44 @@ struct Running {
 }
 impl Drop for Running {
     fn drop(&mut self) {
-        if let Ok(Some(gateway)) = upgrade::gateway(&self.data) {
-            Command::new("kill")
-                .args(["-TERM", &gateway.pid.to_string()])
-                .status()
-                .ok();
+        let gateway = upgrade::gateway(&self.data).ok().flatten().map(|gateway| gateway.pid);
+        let backends = forge_runs::runtime::Registry::open(&self.data)
+            .and_then(|registry| registry.peers())
+            .map(|peers| peers.into_iter().map(|member| member.pid).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let pids: Vec<u32> = gateway
+            .into_iter()
+            .chain(backends)
+            .chain([self.child.id()])
+            .collect();
+        signal("-TERM", &pids);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while pids.iter().any(|pid| alive(*pid)) && std::time::Instant::now() < deadline {
+            self.child.try_wait().ok();
+            std::thread::sleep(Duration::from_millis(50));
         }
-        if self.child.try_wait().ok().flatten().is_none() {
-            Command::new("kill")
-                .args(["-TERM", &self.child.id().to_string()])
-                .status()
-                .ok();
-        }
+        signal("-KILL", &pids);
         self.child.wait().ok();
     }
+}
+
+fn signal(name: &str, pids: &[u32]) {
+    let live: Vec<String> = pids
+        .iter()
+        .filter(|pid| alive(**pid))
+        .map(ToString::to_string)
+        .collect();
+    if !live.is_empty() {
+        Command::new("kill").arg(name).args(&live).status().ok();
+    }
+}
+
+fn alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 async fn start() -> (tempfile::TempDir, Running, upgrade::Gateway) {
