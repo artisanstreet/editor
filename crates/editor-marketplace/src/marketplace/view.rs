@@ -738,7 +738,7 @@ fn tooltip(theme: &ArtisanTheme, text: &str) -> Element {
             vec![
                 TextRole::Caption
                     .text(theme, text.to_owned())
-                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                    .gpui_source_color(theme.colors.text_muted_glass.to_reference_text_color())
                     .wrap(true)
                     .build(),
             ],

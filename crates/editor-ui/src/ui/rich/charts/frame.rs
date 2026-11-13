@@ -364,7 +364,7 @@ pub(crate) fn readout_rows_at(
                         theme,
                         label,
                         TextRole::Caption,
-                        theme.colors.text_muted,
+                        theme.colors.text_muted_glass,
                         false,
                     ))
                     .build(),
@@ -385,7 +385,7 @@ pub(crate) fn readout_rows_at(
             theme,
             heading,
             TextRole::Title,
-            theme.colors.text_muted,
+            theme.colors.text_muted_glass,
             false,
         ));
     }
@@ -672,7 +672,7 @@ pub(crate) fn stats_hint(theme: &ArtisanTheme, heading: &str, body: &str, left: 
             theme,
             body,
             TextRole::Caption,
-            theme.colors.text_muted,
+            theme.colors.text_muted_glass,
         ))
         .build();
     let card = Surface::Tooltip(Tooltip::Card)

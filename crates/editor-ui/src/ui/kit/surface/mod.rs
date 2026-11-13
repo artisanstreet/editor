@@ -7,11 +7,18 @@ use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::GpuiBackground;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
+use glass::Shade;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Tooltip {
     Brief,
     Card,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Picker {
+    List,
+    Sheet,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -31,7 +38,7 @@ pub enum Tone {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Material {
-    Glass,
+    Glass(Shade),
     Recessed,
     Key,
     Raised,
@@ -42,6 +49,7 @@ pub enum Material {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Surface {
     Menu,
+    Picker(Picker),
     Tooltip(Tooltip),
     Dialog,
     Card,
@@ -58,11 +66,15 @@ impl Surface {
     #[must_use]
     pub const fn corner(self) -> Corner {
         match self {
-            Self::Menu | Self::Tooltip(_) | Self::Inset | Self::Callout(_) => {
-                Corner::Fixed(Radius::Panel)
-            }
+            Self::Menu
+            | Self::Picker(Picker::List)
+            | Self::Tooltip(_)
+            | Self::Inset
+            | Self::Callout(_) => Corner::Fixed(Radius::Panel),
             Self::Media(Media::Frame) => Corner::Fixed(Radius::Panel),
-            Self::Dialog | Self::Card | Self::Bubble => Corner::Fixed(Radius::Shell),
+            Self::Dialog | Self::Picker(Picker::Sheet) | Self::Card | Self::Bubble => {
+                Corner::Fixed(Radius::Shell)
+            }
             Self::Composer => Corner::Fixed(Radius::Well),
             Self::Field | Self::Media(Media::Thumb) => Corner::Fixed(Radius::Field),
             Self::Pill(_) => Corner::Full,
@@ -72,10 +84,14 @@ impl Surface {
     #[must_use]
     pub const fn padding(self) -> Option<Space> {
         match self {
-            Self::Menu | Self::Inset | Self::Pill(_) => Some(Space::S6),
-            Self::Tooltip(Tooltip::Brief) | Self::Dialog | Self::Card | Self::Composer => {
-                Some(Space::S8)
+            Self::Menu | Self::Picker(Picker::List) | Self::Inset | Self::Pill(_) => {
+                Some(Space::S6)
             }
+            Self::Tooltip(Tooltip::Brief)
+            | Self::Dialog
+            | Self::Picker(Picker::Sheet)
+            | Self::Card
+            | Self::Composer => Some(Space::S8),
             Self::Field => Some(Space::S8),
             Self::Callout(_) | Self::Bubble => Some(Space::S12),
             Self::Tooltip(Tooltip::Card) => Some(Space::S16),
@@ -91,7 +107,8 @@ impl Surface {
             | Self::Dialog
             | Self::Pill(_)
             | Self::Composer
-            | Self::Card => Material::Glass,
+            | Self::Card => Material::Glass(Shade::Clear),
+            Self::Picker(_) => Material::Glass(Shade::Dark),
             Self::Inset => Material::Recessed,
             Self::Field => Material::Key,
             Self::Bubble => Material::Raised,
@@ -104,6 +121,7 @@ impl Surface {
     pub const fn elevation(self) -> Elevation {
         match self {
             Self::Menu
+            | Self::Picker(_)
             | Self::Tooltip(_)
             | Self::Dialog
             | Self::Pill(_)
@@ -153,8 +171,8 @@ impl Surface {
                 .style(Style::new().shadows(shadows.clone()))
         };
         match self.material() {
-            Material::Glass => shell()
-                .child(glass::paint(theme, radius))
+            Material::Glass(shade) => shell()
+                .child(glass::paint(theme, shade, radius))
                 .children(children)
                 .build()
                 .style(sized),

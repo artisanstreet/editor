@@ -11,8 +11,8 @@ use editor_assets::AssetId;
 use editor_ui::{
     kit::{
         Button, ButtonTone, Density, Divider, Finish, HitArea, Hover, IconButton, IconButtonSize,
-        IconSize, Inset, Key, KeyFace, KeySize, Lead, Link, LinkTone, Radius, Row, RowItem, Space,
-        Spaced, Surface, TextRole, Tooltip, Trigger, TriggerSize, live,
+        IconSize, Inset, Key, KeyFace, KeySize, Lead, Link, LinkTone, Picker, Radius, Row, RowItem,
+        Space, Spaced, Surface, TextRole, Tooltip, Trigger, TriggerSize, live,
     },
     theme::{ArtisanTheme, Opacity},
 };
@@ -166,7 +166,7 @@ pub fn model_trigger(
     let mut trigger = Trigger::new("composer-model", theme, TriggerSize::Sm, name)
         .on_activate(move || dispatch(ComposerAction::ToggleModel));
     if !details.is_empty() {
-        trigger = trigger.detail(details.join(" · "));
+        trigger = trigger.detail(details.join(" "));
     }
     if let Some(config) = config {
         trigger = trigger.lead(Lead::Glyph(engine_icon(&theme, config.engine)));
@@ -964,7 +964,7 @@ fn picker_tooltip_surface(
             vec![
                 TextRole::Caption
                     .text(theme, "")
-                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                    .gpui_source_color(theme.colors.text_muted_glass.to_reference_text_color())
                     .spans(spans)
                     .wrap(true)
                     .build(),
@@ -2669,7 +2669,7 @@ pub fn project_menu(
     viewport: aqua_core::Size,
     dispatch: Dispatch,
 ) -> Element {
-    let surface = Surface::Menu;
+    let surface = Surface::Picker(Picker::List);
     let row = Row::MenuItem;
     let muted = theme.colors.text_muted.to_reference_paint();
     let item =
@@ -2951,7 +2951,7 @@ fn model_engine_bar(
                 "Discovering models…" | "Discovery failed" => status.discovery.description(artisan_api::now()),
                 _ => unreachable!(),
             }
-        }).or_else(|| Some(status.discovery.description(artisan_api::now())));
+        });
         let tab = IconButton::new(
             format!("composer-engine-{engine}"),
             theme,
@@ -3311,7 +3311,7 @@ pub fn model_menu(
         tab,
         engine_light,
     } = frame;
-    let sheet = Surface::Dialog;
+    let sheet = Surface::Picker(Picker::Sheet);
     let pane_radius = Radius::Panel.px();
     let engines = super::picker::offered_engines(host, current.as_ref().map(|config| config.engine));
     let model_icon = picker.pane_config(host, current.clone()).map(|config| {

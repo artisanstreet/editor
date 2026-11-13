@@ -19,5 +19,5 @@ pub use divider::Divider;
 pub use hover::{Highlight, Hover, live};
 pub use pane::Seam;
 pub use row::{Density, Pad, Row, RowItem};
-pub use surface::{Media, Surface, Tone, Tooltip};
+pub use surface::{Media, Picker, Surface, Tone, Tooltip};
 pub use tokens::*;

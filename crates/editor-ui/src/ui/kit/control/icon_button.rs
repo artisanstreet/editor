@@ -158,7 +158,11 @@ impl IconButton {
     }
 
     fn glass(theme: &ArtisanTheme, radius: f32) -> Element {
-        crate::ui::kit::surface::glass::paint(theme, radius)
+        crate::ui::kit::surface::glass::paint(
+            theme,
+            crate::ui::kit::surface::glass::Shade::Clear,
+            radius,
+        )
     }
 
     #[must_use]

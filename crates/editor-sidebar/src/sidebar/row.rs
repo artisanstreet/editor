@@ -487,7 +487,7 @@ pub fn drag_preview(title: &str, theme: editor_ui::theme::ArtisanTheme) -> aqua_
                 .style(Style::new().flex_shrink(0.0))
                 .child(IconSize::Md.glyph(
                     AssetId::TABLER_MESSAGE_CIRCLE,
-                    theme.colors.text_muted.to_reference_paint(),
+                    theme.colors.text_muted_glass.to_reference_paint(),
                 ))
                 .build(),
         )

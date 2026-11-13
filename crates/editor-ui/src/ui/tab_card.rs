@@ -511,7 +511,10 @@ impl PreparedTabCard {
             });
         }
         let colors = &theme.colors;
-        let fills = crate::ui::kit::surface::glass::fills(theme);
+        let fills = crate::ui::kit::surface::glass::fills(
+            theme,
+            crate::ui::kit::surface::glass::Shade::Clear,
+        );
         let mut push = |commands: &[PathCommand],
                         background: GpuiBackground,
                         stroke: bool,
@@ -562,7 +565,10 @@ impl PreparedTabCard {
         }
         let height = bounds.h.max(1.0);
         let reach = |span: f32| (span / height).clamp(0.0, 1.0);
-        let [(_, light), (_, shade)] = crate::ui::kit::surface::glass::rims(theme);
+        let [(_, light), (_, shade)] = crate::ui::kit::surface::glass::rims(
+            theme,
+            crate::ui::kit::surface::glass::Shade::Clear,
+        );
         push(
             &geometry.edge,
             background(

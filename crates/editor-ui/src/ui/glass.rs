@@ -156,7 +156,11 @@ impl ComposerFrame {
             .padding(COMPOSER_PADDING)
             .radius(radius)
             .style(Style::new().axis(Axis::Column).shadows(shadows))
-            .child(kit_glass::paint(&self.theme, radius))
+            .child(kit_glass::paint(
+                &self.theme,
+                kit_glass::Shade::Clear,
+                radius,
+            ))
             .child(self.content)
             .build()
     }
