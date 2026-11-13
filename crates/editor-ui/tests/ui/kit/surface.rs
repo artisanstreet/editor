@@ -1,7 +1,9 @@
-use editor_ui::kit::{Media, Radius, Space, Surface, Tone, Tooltip};
+use editor_ui::kit::{Media, Picker, Radius, Space, Surface, Tone, Tooltip};
 
-const ALL: [Surface; 14] = [
+const ALL: [Surface; 16] = [
     Surface::Menu,
+    Surface::Picker(Picker::List),
+    Surface::Picker(Picker::Sheet),
     Surface::Tooltip(Tooltip::Brief),
     Surface::Tooltip(Tooltip::Card),
     Surface::Dialog,

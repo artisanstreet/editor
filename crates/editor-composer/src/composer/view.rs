@@ -11,8 +11,8 @@ use editor_assets::AssetId;
 use editor_ui::{
     kit::{
         Button, ButtonTone, Density, Divider, Finish, HitArea, Hover, IconButton, IconButtonSize,
-        IconSize, Inset, Key, KeyFace, KeySize, Lead, Link, LinkTone, Radius, Row, RowItem, Space,
-        Spaced, Surface, TextRole, Tooltip, Trigger, TriggerSize, live,
+        IconSize, Inset, Key, KeyFace, KeySize, Lead, Link, LinkTone, Picker, Radius, Row, RowItem,
+        Space, Spaced, Surface, TextRole, Tooltip, Trigger, TriggerSize, live,
     },
     theme::{ArtisanTheme, Opacity},
 };
@@ -2669,7 +2669,7 @@ pub fn project_menu(
     viewport: aqua_core::Size,
     dispatch: Dispatch,
 ) -> Element {
-    let surface = Surface::Menu;
+    let surface = Surface::Picker(Picker::List);
     let row = Row::MenuItem;
     let muted = theme.colors.text_muted.to_reference_paint();
     let item =
@@ -3311,7 +3311,7 @@ pub fn model_menu(
         tab,
         engine_light,
     } = frame;
-    let sheet = Surface::Dialog;
+    let sheet = Surface::Picker(Picker::Sheet);
     let pane_radius = Radius::Panel.px();
     let engines = super::picker::offered_engines(host, current.as_ref().map(|config| config.engine));
     let model_icon = picker.pane_config(host, current.clone()).map(|config| {

@@ -234,7 +234,11 @@ impl Button {
         }
         let radius = self.radius.unwrap_or(Radius::Field.px());
         if self.glass {
-            root = root.child(crate::ui::kit::surface::glass::paint(&t, radius));
+            root = root.child(crate::ui::kit::surface::glass::paint(
+                &t,
+                crate::ui::kit::surface::glass::Shade::Clear,
+                radius,
+            ));
         }
         if !self.disabled {
             root = root.child(live::layer(Hover::Neutral, &t, radius, false));
