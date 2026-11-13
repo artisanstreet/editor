@@ -2951,7 +2951,7 @@ fn model_engine_bar(
                 "Discovering models…" | "Discovery failed" => status.discovery.description(artisan_api::now()),
                 _ => unreachable!(),
             }
-        }).or_else(|| Some(status.discovery.description(artisan_api::now())));
+        });
         let tab = IconButton::new(
             format!("composer-engine-{engine}"),
             theme,
