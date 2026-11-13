@@ -166,7 +166,7 @@ pub fn model_trigger(
     let mut trigger = Trigger::new("composer-model", theme, TriggerSize::Sm, name)
         .on_activate(move || dispatch(ComposerAction::ToggleModel));
     if !details.is_empty() {
-        trigger = trigger.detail(details.join(" · "));
+        trigger = trigger.detail(details.join(" "));
     }
     if let Some(config) = config {
         trigger = trigger.lead(Lead::Glyph(engine_icon(&theme, config.engine)));
