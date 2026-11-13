@@ -12,7 +12,7 @@ use editor_assets::AssetId;
 
 use editor_ui::picker_motion::smooth_out;
 
-pub const ICON_SIZE: f32 = 18.0;
+pub const ICON_SIZE: f32 = editor_ui::kit::IconSize::Lg.px();
 const UNIT: f32 = ICON_SIZE / 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,42 +216,6 @@ pub fn icon(glyph: Glyph, progress: Option<f32>, color: GpuiHsla) -> Element {
     .build()
 }
 
-pub fn avatar(seed: &str) -> Element {
-    use editor_ui::theme::{RadiusStep, RadiusTokens};
-    use aqua_core::DisplayItem;
-    use aqua_ui::element::Canvas;
-    let source: std::sync::Arc<str> = super::avatar::svg(seed).into();
-    UiBox::new()
-        .width(32.0)
-        .height(32.0)
-        .radius(RadiusTokens::value(RadiusStep::Md))
-        .clip(true)
-        .child(
-            Canvas::new()
-                .width(32.0)
-                .height(32.0)
-                .on_paint(move |bounds| {
-                    vec![
-                        DisplayItem::PushRoundedClip {
-                            bounds,
-                            corners: aqua_core::geometry::CornerRadii::uniform(
-                                RadiusTokens::value(RadiusStep::Md),
-                            ),
-                        },
-                        DisplayItem::GpuiSvg {
-                            bounds,
-                            source: source.clone(),
-                            tint: None,
-                            opacity: 1.0,
-                        },
-                        DisplayItem::PopClip,
-                    ]
-                })
-                .build(),
-        )
-        .build()
-}
-
 pub fn build(
     sidebar: &super::controller::Sidebar,
     core: &editor_core::Core,
@@ -260,10 +224,10 @@ pub fn build(
     emit: std::rc::Rc<dyn Fn(super::view::ViewAction)>,
 ) -> Element {
     use super::view::ViewAction;
+    use aqua_core::Role;
+    use aqua_ui::{AlignItems, JustifyContent};
     use editor_core::Screen;
-    use editor_ui::theme::{RadiusStep, RadiusTokens};
-    use aqua_core::{CursorIcon, Insets, Role};
-    use aqua_ui::{AlignItems, JustifyContent, element::Button};
+    use editor_ui::kit::{HitArea, Hover, IconButtonSize, Radius, Space, Spaced, live};
 
     let screen = sidebar.screen(core);
     let items = [
@@ -286,9 +250,10 @@ pub fn build(
             matches!(screen, Screen::Usage),
         ),
     ];
+    let edge = IconButtonSize::Md.edge();
     let mut destinations = UiBox::new()
         .layout("column")
-        .gap(4.0)
+        .spaced(Space::S4)
         .style(Style::new().align(AlignItems::CENTER));
     for (glyph, id, label, selected) in items {
         let action = emit.clone();
@@ -298,125 +263,61 @@ pub fn build(
         } else {
             theme.colors.text_muted
         };
-        let button = Button::new()
-            .width(32.0)
-            .height(32.0)
-            .radius(RadiusTokens::value(RadiusStep::Lg))
+        let face = UiBox::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0))
             .style(
                 Style::new()
                     .align(AlignItems::CENTER)
-                    .justify(JustifyContent::CENTER)
-                    .flex_shrink(0.0),
+                    .justify(JustifyContent::CENTER),
             )
             .child(icon(
                 glyph,
                 sidebar.rail_motion.progress(glyph, now),
                 color.to_reference_paint(),
             ))
+            .build();
+        let button = HitArea::new(id, Role::Button, label)
+            .child(live::layer(
+                Hover::Neutral,
+                &theme,
+                Radius::Field.px(),
+                false,
+            ))
+            .child(face)
             .on_activate(move || match glyph {
                 Glyph::Pen => action(ViewAction::NewThread(None)),
                 Glyph::Bag => action(ViewAction::Navigate(Screen::Marketplace)),
                 Glyph::Bars => action(ViewAction::Navigate(Screen::Usage)),
             })
             .build()
-            .with_key(id)
-            .role(Role::Button)
-            .aria_label(label)
+            .style(Radius::Field.style())
             .aria_selected(selected)
-            .cursor(CursorIcon::Pointer)
             .on_hover_change(move |hovered| {
                 if hovered {
                     hover(ViewAction::RailHover(glyph));
                 }
             });
-        destinations = destinations.child(button);
-    }
-    let profile = core.account().profile();
-    let host = sidebar.host_data(core);
-    let seed = profile
-        .map(|profile| profile.account_id.clone())
-        .or_else(|| {
-            host.map(|host| {
-                core.hosts()
-                    .find(|(config, _)| config.id == host.id)
-                    .map_or_else(
-                        || host.id.0.clone(),
-                        |(config, _)| config.fingerprint.clone(),
-                    )
-            })
-        })
-        .unwrap_or_else(|| "no-host".into());
-    let name = profile
-        .map(|profile| {
-            if profile.display_name.is_empty() {
-                profile.email.clone()
-            } else {
-                profile.display_name.clone()
-            }
-        })
-        .or_else(|| host.map(|host| host.name.clone()))
-        .unwrap_or_else(|| "Artisan".into());
-    let machine = host.map_or("No host", |host| host.name.as_str());
-    let mut trigger = Button::new()
-        .width(40.0)
-        .height(40.0)
-        .padding(4.0)
-        .radius(RadiusTokens::value(RadiusStep::Lg))
-        .child(avatar(&seed));
-    if sidebar.profile_open {
-        trigger = trigger.style(
-            editor_ui::hover::HoverColors::new(&theme, editor_ui::hover::HoverTone::Neutral)
-                .style(editor_ui::hover::HoverFill::Plain),
-        );
-    }
-    if host.is_some_and(|host| host.status_line().is_some()) {
-        trigger = trigger.child(
+        destinations = destinations.child(
             UiBox::new()
-                .width(10.0)
-                .height(10.0)
-                .radius(5.0)
-                .style(
-                    Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-                        theme.colors.banner_warning.text.to_reference_paint(),
-                    )),
-                )
-                .style(Style::new().gpui_border(
-                    Insets::uniform(2.0),
-                    theme.colors.frame.to_reference_paint(),
-                    false,
-                ))
-                .style(Style::new().absolute_at(None, None, Some(1.0), Some(1.0)))
+                .width(edge)
+                .height(edge)
+                .style(Style::new().flex_shrink(0.0))
+                .child(button)
                 .build(),
         );
     }
-    let show = emit;
-    let trigger = trigger
-        .on_activate(move || show(ViewAction::ToggleProfile))
-        .build()
-        .with_key("artisan-desktop-profile-trigger")
-        .debug_selector("artisan-desktop-profile-trigger")
-        .role(Role::Button)
-        .aria_label(format!("{name} on {machine}: account and usage"))
-        .aria_expanded(sidebar.profile_open)
-        .cursor(CursorIcon::Pointer);
     UiBox::new()
-        .width(48.0)
+        .width(super::geometry::RAIL_WIDTH)
         .height(Length::Pct(100.0))
         .layout("column")
+        .padded(Space::S4)
         .style(
             Style::new()
                 .flex_shrink(0.0)
-                .align(AlignItems::CENTER)
-                .justify(JustifyContent::SPACE_BETWEEN)
-                .padding_insets(Insets {
-                    top: 4.0,
-                    bottom: 4.0,
-                    left: 0.0,
-                    right: 0.0,
-                }),
+                .align(AlignItems::CENTER),
         )
         .child(destinations.build())
-        .child(trigger)
         .build()
         .with_key("artisan-desktop-rail")
 }

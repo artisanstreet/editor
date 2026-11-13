@@ -15,6 +15,5 @@ pub mod sign_in;
 pub mod sidebar;
 pub mod strip;
 pub mod tabs;
-pub mod tree;
 pub mod view;
 pub mod wordmark;

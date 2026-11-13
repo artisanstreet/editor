@@ -4,8 +4,10 @@ use editor_core::hosts::HostId;
 use editor_core::screen::DraggedThread;
 
 use super::list::{RowData, RowState};
+use editor_ui::kit::{IconSize, TextRole};
 
 pub const STATE_DOT: f32 = 6.0;
+const DRAG_PREVIEW_WIDTH: f32 = 260.0;
 pub const WORKING_PULSE_MILLIS: u64 = 1_600;
 pub const WORKING_PULSE_FLOOR: f32 = 0.4;
 
@@ -79,8 +81,9 @@ pub struct RowVisuals {
     pub dot: Option<aqua_ui::element::Element>,
 }
 
-pub type TruncatedText =
-    std::rc::Rc<dyn Fn(String, f32, aqua::GpuiTextColor, String) -> aqua_ui::element::Element>;
+pub type TruncatedText = std::rc::Rc<
+    dyn Fn(String, TextRole, aqua::GpuiTextColor, String) -> aqua_ui::element::Element,
+>;
 pub type WorkingPulse = std::rc::Rc<
     dyn Fn(
         aqua_ui::element::Element,
@@ -90,22 +93,33 @@ pub type WorkingPulse = std::rc::Rc<
     ) -> aqua_ui::element::Element,
 >;
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the thread state dot is a painted status mark, not chrome"
+)]
+fn state_dot(color: editor_ui::theme::Oklch) -> aqua_ui::element::Element {
+    aqua_ui::element::Box::new()
+        .width(STATE_DOT)
+        .height(STATE_DOT)
+        .radius(STATE_DOT / 2.0)
+        .style(
+            aqua_ui::style::Style::new()
+                .flex_shrink(0.0)
+                .gpui_background(aqua_core::GpuiBackground::Solid(color.to_reference_paint())),
+        )
+        .build()
+}
+
 pub fn marked_text(
     theme: &editor_ui::theme::ArtisanTheme,
     text: &str,
     matched: &[std::ops::Range<usize>],
-    size: f32,
+    role: TextRole,
     color: editor_ui::theme::Oklch,
     selector: String,
 ) -> aqua_ui::element::Element {
     use editor_ui::chrome::card::{POLAR_BLUE, POLAR_INK};
-    let style = aqua_text::TextStyle {
-        families: vec![aqua_text::FontFamily::Named(
-            theme.typography.sans.family.to_owned(),
-        )],
-        size_px: size,
-        ..aqua_text::TextStyle::default()
-    };
+    let style = role.style(theme);
     let channels = |color: editor_ui::theme::Oklch| {
         let color = color.to_reference_text_color();
         [
@@ -138,12 +152,12 @@ pub fn marked_text(
     if at < text.len() {
         spans.push(plain(&text[at..]));
     }
-    aqua_ui::element::Text::new(text.to_owned())
+    role.text(theme, text.to_owned())
         .spans(spans)
         .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
         .style(
             aqua_ui::style::Style::new()
-                .min_width(aqua_ui::style::Length::Px(0.0))
+                .min_width(aqua_ui::style::Length::Pct(0.0))
                 .flex_shrink(1.0),
         )
         .build()
@@ -155,52 +169,40 @@ pub fn hit(
     data: &super::list::HitRow,
     activate: impl Fn() + 'static,
 ) -> aqua_ui::element::Element {
-    use aqua_ui::element::{Box as UiBox, Button, Text};
-    use aqua_ui::style::{Axis, Length, Style};
+    use aqua_ui::element::Box as UiBox;
+    use aqua_ui::style::{Length, Style};
+    use editor_ui::kit::RowItem;
     let selector = format!("sidebar-hit-{}", data.item);
-    Button::new()
-        .height(super::geometry::ROW_HEIGHT)
-        .style(
-            Style::new()
-                .axis(Axis::Column)
-                .justify(aqua_ui::JustifyContent::CENTER)
-                .gap(2.0)
-                .radius(Length::Px(8.0))
-                .padding_insets(aqua_core::Insets {
-                    left: 8.0,
-                    right: 8.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }),
-        )
+    let body = UiBox::new()
+        .layout("column")
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
+        .child(marked_text(
+            &theme,
+            &data.snippet,
+            std::slice::from_ref(&data.matched),
+            TextRole::Label,
+            theme.colors.text,
+            format!("{selector}-snippet"),
+        ))
         .child(
-            UiBox::new()
-                .style(Style::new().min_width(Length::Px(0.0)))
-                .child(marked_text(
-                    &theme,
-                    &data.snippet,
-                    std::slice::from_ref(&data.matched),
-                    theme.typography.control_text,
-                    theme.colors.text,
-                    format!("{selector}-snippet"),
-                ))
-                .build(),
-        )
-        .child(
-            Text::new(data.title.clone())
-                .font_size(theme.typography.label_text)
+            TextRole::Caption
+                .text(&theme, data.title.clone())
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
+                .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
                 .build(),
         )
-        .on_activate(activate)
-        .build()
-        .with_key(selector)
-        .role(aqua_core::Role::Button)
-        .aria_label(format!("{} in {}", data.snippet, data.title))
-        .cursor(aqua_core::CursorIcon::Pointer)
-        .hover_style(editor_ui::chrome::account::hover_style(&theme))
+        .build();
+    RowItem::new(
+        selector,
+        theme,
+        super::geometry::ThreadLayout::Standalone.row(),
+        super::geometry::LIST,
+        format!("{} in {}", data.snippet, data.title),
+    )
+    .body(body)
+    .on_activate(activate)
+    .build()
 }
 
 pub fn visual_factory(
@@ -220,7 +222,7 @@ pub fn visual_factory(
         let title = match data.matched.is_empty() {
             true => truncate(
                 data.title.clone(),
-                theme.typography.control_text,
+                TextRole::Label,
                 title_color.to_reference_text_color(),
                 format!("{selector}-title"),
             ),
@@ -228,21 +230,21 @@ pub fn visual_factory(
                 &theme,
                 &data.title,
                 &data.matched,
-                theme.typography.control_text,
+                TextRole::Label,
                 title_color,
                 format!("{selector}-title"),
             ),
         };
         let subtitle = truncate(
             data.subtitle.clone(),
-            theme.typography.label_text,
+            TextRole::Caption,
             theme.colors.text_muted.to_reference_text_color(),
             format!("{selector}-subtitle"),
         );
         let project_mark = super::project_mark::project_mark(
             image,
             repository_host.as_ref().map(|host| host.as_deref()),
-            14.0,
+            IconSize::Sm,
             theme.colors.text_muted.to_reference_paint(),
         );
         let tone = match data.state {
@@ -254,18 +256,7 @@ pub fn visual_factory(
             RowState::Parked => Some(theme.colors.amber.solid),
         };
         let dot = tone.map(|color| {
-            let dot = UiBox::new()
-                .width(STATE_DOT)
-                .height(STATE_DOT)
-                .radius(STATE_DOT / 2.0)
-                .style(
-                    aqua_ui::style::Style::new()
-                        .flex_shrink(0.0)
-                        .gpui_background(aqua_core::GpuiBackground::Solid(
-                            color.to_reference_paint(),
-                        )),
-                )
-                .build();
+            let dot = state_dot(color);
             if data.state == RowState::Working && !reduced_motion {
                 pulse(
                     dot,
@@ -286,7 +277,7 @@ pub fn visual_factory(
                 .style(
                     aqua_ui::style::Style::new()
                         .flex_grow(1.0)
-                        .min_width(aqua_ui::style::Length::Px(0.0)),
+                        .min_width(aqua_ui::style::Length::Pct(0.0)),
                 )
                 .child(subtitle)
                 .build(),
@@ -303,67 +294,64 @@ pub fn build(
     drag: Option<DraggedThread>,
     visuals: RowVisuals,
     layout: super::geometry::ThreadLayout,
-    hover: aqua_ui::element::Element,
+    theme: editor_ui::theme::ArtisanTheme,
     emit: std::rc::Rc<dyn Fn(super::view::ViewAction)>,
 ) -> aqua_ui::element::Element {
     use super::view::ViewAction;
-    use editor_ui::theme::{RadiusStep, RadiusTokens};
-    use aqua_core::{CursorIcon, InputEvent, Insets, PointerButton, Role};
+    use aqua_core::{InputEvent, PointerButton};
     use aqua_ui::{
         AlignItems,
-        element::{Box as UiBox, Button},
+        element::Box as UiBox,
         input::{
             CaptureRequest, DragPayload, DragRequest, EventPhase, InputKind, InputResponse,
             RoutedInput,
         },
         style::{Length, Style},
     };
+    use editor_ui::kit::{RowItem, Space, Spaced};
 
     let open_host = host.clone();
     let open_thread = data.id.clone();
     let open = emit.clone();
-    let content = UiBox::new()
+    let body = UiBox::new()
         .layout("column")
-        .gap(2.0)
-        .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
+        .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
         .child(visuals.title)
         .children(match layout {
             super::geometry::ThreadLayout::Grouped => None,
             super::geometry::ThreadLayout::Standalone => Some(
                 UiBox::new()
                     .width(Length::Pct(100.0))
-                    .gap(5.0)
+                    .spaced(Space::S4)
                     .style(
                         Style::new()
                             .align(AlignItems::CENTER)
-                            .min_width(Length::Px(0.0)),
+                            .min_width(Length::Pct(0.0)),
                     )
                     .child(visuals.project_mark)
                     .child(visuals.subtitle)
                     .build(),
             ),
         });
-    let mut root = Button::new()
-        .width(Length::Pct(100.0))
-        .height(layout.height())
-        .gap(8.0)
-        .radius(RadiusTokens::value(RadiusStep::Md))
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .flex_shrink(0.0)
-                .min_width(Length::Px(0.0))
-                .padding_insets(Insets {
-                    left: 8.0,
-                    right: 8.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }),
-        )
-        .child(hover)
-        .child(content.build());
+    let key = format!("sidebar-thread-{}", data.id);
+    let row = layout.row();
+    let mut item = RowItem::new(
+        key.clone(),
+        theme,
+        row,
+        super::geometry::LIST,
+        data.title.clone(),
+    )
+    .body(body.build())
+    .on_activate(move || {
+        open(ViewAction::OpenThread {
+            host: open_host.clone(),
+            instance,
+            thread: open_thread.clone(),
+        })
+    });
     if let Some(dot) = visuals.dot {
-        root = root.child(dot);
+        item = item.trailing(dot);
     }
     let pointer_host = host.clone();
     let pointer_thread = data.id.clone();
@@ -371,10 +359,6 @@ pub fn build(
     let key_host = host.clone();
     let key_thread = data.id.clone();
     let key_emit = emit.clone();
-    let hover_thread = data.id.clone();
-    let hover_emit = emit.clone();
-    let leave_thread = data.id.clone();
-    let leave_emit = emit.clone();
     let pending = std::rc::Rc::new(std::cell::Cell::new(None::<(u64, aqua_core::Point)>));
     let down_pending = pending.clone();
     let move_pending = pending.clone();
@@ -385,41 +369,14 @@ pub fn build(
     let drag_end = emit.clone();
     let drag_end_host = host.clone();
     let drag_end_thread = data.id.clone();
-    let mut element = root
-        .on_activate(move || {
-            open(ViewAction::OpenThread {
-                host: open_host.clone(),
-                instance,
-                thread: open_thread.clone(),
-            })
-        })
+    let mut element = item
         .build()
-        .with_key(format!("sidebar-thread-{}", data.id))
-        .role(Role::Button)
-        .aria_label(data.title.clone())
         .aria_selected(data.selected)
         .aria_description(format!(
             "{}; {}; Thread actions: Shift+F10",
             data.subtitle,
             state_label(data.state)
         ))
-        .cursor(CursorIcon::Pointer)
-        .on_input(InputKind::PointerEnter, EventPhase::Bubble, move |event| {
-            hover_emit(ViewAction::ThreadHover {
-                thread: hover_thread.clone(),
-                bounds: event.bounds,
-                hovered: true,
-            });
-            InputResponse::default()
-        })
-        .on_input(InputKind::PointerLeave, EventPhase::Bubble, move |event| {
-            leave_emit(ViewAction::ThreadHover {
-                thread: leave_thread.clone(),
-                bounds: event.bounds,
-                hovered: false,
-            });
-            InputResponse::default()
-        })
         .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
             if let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input
                 && opens_aqua_keyboard_menu(key)
@@ -514,82 +471,36 @@ pub fn build(
     element
 }
 
-pub fn drag_preview(
-    title: &str,
-    theme: editor_ui::theme::ArtisanTheme,
-    _viewport: aqua_core::Size,
-) -> aqua_ui::element::Element {
-    use editor_ui::{
-        asset::source_asset_glyph,
-        glass::{GlassStrength, glass_card_shadows, glass_layers},
-        theme::{Elevation, RadiusStep, RadiusTokens},
-    };
-    use aqua_core::Insets;
+pub fn drag_preview(title: &str, theme: editor_ui::theme::ArtisanTheme) -> aqua_ui::element::Element {
     use aqua_ui::{
         AlignItems,
-        element::{Box as UiBox, Text},
+        element::Box as UiBox,
         style::{Length, Style},
     };
     use editor_assets::AssetId;
+    use editor_ui::kit::{Space, Spaced, Surface, TextRole, Tooltip};
     let content = UiBox::new()
-        .height(32.0)
-        .gap(8.0)
-        .style(
-            Style::new()
-                .max_width(Length::Px(260.0))
-                .align(AlignItems::CENTER)
-                .padding_insets(Insets {
-                    left: 10.0,
-                    right: 10.0,
-                    top: 0.0,
-                    bottom: 0.0,
-                }),
-        )
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER).min_width(Length::Pct(0.0)))
         .child(
             UiBox::new()
                 .style(Style::new().flex_shrink(0.0))
-                .child(source_asset_glyph(
+                .child(IconSize::Md.glyph(
                     AssetId::TABLER_MESSAGE_CIRCLE,
-                    14.0,
                     theme.colors.text_muted.to_reference_paint(),
                 ))
                 .build(),
         )
         .child(
-            UiBox::new()
-                .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
-                .child(
-                    Text::new(title.to_owned())
-                        .text_style(aqua_text::TextStyle {
-                            families: vec![aqua_text::FontFamily::Named(
-                                theme.typography.sans.family.to_owned(),
-                            )],
-                            size_px: 14.0,
-                            line_height_px: 16.8,
-                            ..aqua_text::TextStyle::default()
-                        })
-                        .gpui_source_color(theme.colors.text.to_reference_text_color())
-                        .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
-                        .style(Style::new().min_width(Length::Px(0.0)).flex_shrink(1.0))
-                        .build(),
-                )
+            TextRole::Label
+                .text(&theme, title.to_owned())
+                .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
+                .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
                 .build(),
         )
         .build();
-    let radius = RadiusTokens::value(RadiusStep::LgMid);
-    UiBox::new()
-        .radius(radius)
-        .clip(true)
-        .style(
-            Style::new().shadows(
-                glass_card_shadows(&theme, Elevation::Overlay)
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-            ),
-        )
-        .child(glass_layers(&theme, GlassStrength::Strong, radius))
-        .child(content)
-        .build()
+    Surface::Tooltip(Tooltip::Brief)
+        .build(&theme, vec![content])
+        .style(Style::new().max_width(Length::Px(DRAG_PREVIEW_WIDTH)))
         .with_key("sidebar-thread-drag")
 }

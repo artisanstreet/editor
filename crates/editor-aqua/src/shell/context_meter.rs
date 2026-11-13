@@ -85,6 +85,10 @@ pub fn reading(
     ContextReading::new(name, used, window)
 }
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "the context ring is a painted data mark, not chrome"
+)]
 pub fn ring(
     reading: &ContextReading,
     theme: crate::ui::theme::ArtisanTheme,

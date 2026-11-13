@@ -1,4 +1,6 @@
 use aqua_core::vector::PathCommand;
+use crate::frame::strip::RADIUS as TAB;
+use crate::ui::kit::Radius;
 use aqua_core::{Point, Rect};
 
 fn arc(radius: f32, sweep: bool, x: f32, y: f32) -> PathCommand {
@@ -19,7 +21,7 @@ pub fn trace(body: Rect, tab: Option<Rect>, inset: f32) -> Vec<PathCommand> {
     let y0 = body.y + inset;
     let x1 = (body.right() - inset).max(x0);
     let y1 = (body.bottom() - inset).max(y0);
-    let radius = (super::super::card::RADIUS - inset)
+    let radius = (Radius::Shell.px() - inset)
         .max(0.0)
         .min((x1 - x0) * 0.5)
         .min((y1 - y0) * 0.5);
@@ -31,12 +33,12 @@ pub fn trace(body: Rect, tab: Option<Rect>, inset: f32) -> Vec<PathCommand> {
             let left = (tab.x + inset).clamp(x0, x1);
             let right = (tab.right() - inset).clamp(left, x1);
             let top = tab.y + inset;
-            let cap = (8.0 - inset)
+            let cap = (TAB.px() - inset)
                 .max(0.0)
                 .min((right - left) * 0.5)
                 .min((y0 - top) * 0.5);
-            let left_fillet = (8.0 + inset).min((left - x0) * 0.5).min((y0 - top) * 0.5);
-            let right_fillet = (8.0 + inset).min((x1 - right) * 0.5).min((y0 - top) * 0.5);
+            let left_fillet = (TAB.px() + inset).min((left - x0) * 0.5).min((y0 - top) * 0.5);
+            let right_fillet = (TAB.px() + inset).min((x1 - right) * 0.5).min((y0 - top) * 0.5);
             let left_corner = radius.min((left - x0 - left_fillet).max(0.0));
             let right_corner = radius.min((x1 - right - right_fillet).max(0.0));
             path.extend([
@@ -77,7 +79,7 @@ pub fn split(body: Rect, tab: Option<Rect>, inset: f32) -> (Vec<PathCommand>, Re
     let x1 = (body.right() - inset).max(x0);
     let y0 = body.y + inset;
     let y1 = (body.bottom() - inset).max(y0);
-    let radius = (super::super::card::RADIUS - inset)
+    let radius = (Radius::Shell.px() - inset)
         .max(0.0)
         .min((x1 - x0) * 0.5)
         .min((y1 - y0) * 0.5);

@@ -1,12 +1,20 @@
-use crate::shell::layout::{self, CARD_RADIUS, Size};
-use crate::ui::theme::{ArtisanTheme, Elevation};
-use aqua_core::{CornerRadii, Insets};
-use aqua_text::{FontFamily, TextStyle};
+use crate::shell::layout::{self, Size};
+use crate::ui::kit::pane::sheet;
+use crate::ui::kit::surface::frame;
+use crate::ui::kit::{
+    Corners, Finish, IconButton, IconButtonSize, Radius, Seam, Space, Spaced, TextRole, concentric,
+};
+use crate::ui::theme::ArtisanTheme;
 use aqua_ui::{
     AlignItems, JustifyContent,
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::{Length, Style},
 };
+
+const EDGE_INSET: f32 = 2.0;
+const STRIP_PAD: Space = Space::S8;
+const CONVERSATION_WIDTH: f32 = 768.0;
+const FORGES_WIDTH: f32 = 560.0;
 
 pub struct WorkspaceElements {
     pub body: Element,
@@ -42,65 +50,39 @@ pub fn settings_panel(
 ) -> Element {
     let dimensions = layout::settings_layout(viewport);
     let close = std::rc::Rc::clone(&dismiss);
-    let close = crate::ui::button::Button::icon(
+    let close = IconButton::new(
         "settings-close",
         theme,
         editor_assets::AssetId::TABLER_X,
         "Close settings",
+        IconButtonSize::Md,
+        Finish::Plain,
     )
-    .debug_selector("settings-close")
-    .variant(crate::ui::button::ButtonVariant::Ghost)
-    .hover_fill()
     .muted()
     .on_activate(move |_| close())
-    .build();
+    .build()
+    .debug_selector("settings-close");
     let page = UiBox::new()
         .style(
             Style::new()
                 .flex_grow(1.0)
-                .min_width(Length::Px(0.0))
-                .min_height(Length::Px(0.0))
-                .corners(CornerRadii {
-                    top_left: CARD_RADIUS,
-                    ..CornerRadii::default()
-                })
-                .gpui_border(
-                    Insets {
-                        top: 1.0,
-                        left: 1.0,
-                        ..Insets::default()
-                    },
-                    theme.colors.line.to_reference_paint(),
-                    false,
-                )
-                .gpui_background(aqua_core::GpuiBackground::Solid(
-                    theme.colors.background.to_reference_paint(),
-                ))
-                .gpui_shadows(
-                    theme
-                        .elevation
-                        .drops(Elevation::Raised)
-                        .iter()
-                        .copied()
-                        .map(Into::into)
-                        .collect(),
-                ),
+                .min_width(Length::Pct(0.0))
+                .min_height(Length::Pct(0.0)),
         )
+        .style(Corners::TopLeft.style(Radius::Panel.px()))
+        .style(Seam::TopLeft.style(&theme))
+        .style(sheet(&theme))
         .clip(true)
         .child(page)
         .build();
-    let inset = (layout::TITLEBAR_HEIGHT - theme.density.control_sm) / 2.0;
     let strip = UiBox::new()
         .height(layout::TITLEBAR_HEIGHT)
+        .padded(STRIP_PAD)
         .style(
             Style::new()
                 .flex_shrink(0.0)
                 .align(AlignItems::CENTER)
-                .justify(JustifyContent::END)
-                .padding_insets(Insets {
-                    right: inset,
-                    ..Insets::default()
-                }),
+                .justify(JustifyContent::END),
         )
         .child(close)
         .build();
@@ -108,19 +90,10 @@ pub fn settings_panel(
         .layout("row")
         .width(Length::Pct(100.0))
         .height(dimensions.size.height)
-        .radius(CARD_RADIUS)
         .clip(true)
-        .style(
-            Style::new()
-                .gpui_background(aqua_core::GpuiBackground::Solid(
-                    theme.colors.frame.to_reference_paint(),
-                ))
-                .gpui_border(
-                    Insets::uniform(1.0),
-                    theme.colors.line.to_reference_paint(),
-                    false,
-                ),
-        )
+        .style(Radius::Shell.style())
+        .style(frame(&theme))
+        .style(Seam::Around.style(&theme))
         .child(
             UiBox::new()
                 .width(dimensions.navigation_width)
@@ -136,8 +109,8 @@ pub fn settings_panel(
                 .style(
                     Style::new()
                         .flex_grow(1.0)
-                        .min_width(Length::Px(0.0))
-                        .min_height(Length::Px(0.0)),
+                        .min_width(Length::Pct(0.0))
+                        .min_height(Length::Pct(0.0)),
                 )
                 .child(strip)
                 .child(page)
@@ -146,67 +119,13 @@ pub fn settings_panel(
         .build()
 }
 
-fn base_text(theme: &ArtisanTheme, size: f32) -> TextStyle {
-    TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: size,
-        ..TextStyle::default()
-    }
-}
-
-pub fn failure_notice(theme: &ArtisanTheme, text: String, dismiss: impl Fn() + 'static) -> Element {
-    let button = crate::ui::button::Button::text("dismiss-failure", *theme, "Dismiss")
-        .variant(crate::ui::button::ButtonVariant::Ghost)
-        .on_activate(move |_| dismiss())
-        .build();
-    UiBox::new()
-        .layout("row")
-        .width(Length::Pct(100.0))
-        .gap(8.0)
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .padding_insets(Insets {
-                    left: 14.0,
-                    right: 14.0,
-                    top: 8.0,
-                    bottom: 8.0,
-                })
-                .gpui_background(aqua_core::GpuiBackground::Solid(
-                    theme.colors.surface.to_reference_paint(),
-                ))
-                .gpui_border(
-                    Insets {
-                        bottom: 1.0,
-                        ..Insets::default()
-                    },
-                    theme.colors.line.to_reference_paint(),
-                    false,
-                )
-                .gpui_text_color(theme.colors.text.to_reference_paint())
-                .text_style(base_text(theme, 14.0)),
-        )
-        .child(
-            UiBox::new()
-                .style(Style::new().flex_grow(1.0))
-                .child(Text::new(text).build())
-                .build(),
-        )
-        .child(button)
-        .build()
-}
-
 pub fn workspace(workspace_key: u64, theme: &ArtisanTheme, elements: WorkspaceElements) -> Element {
     let mut root = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
-        .fill(theme.colors.frame.to_paint())
-        .style(
-            Style::new()
-                .text_style(base_text(theme, 14.0))
-                .gpui_text_color(theme.colors.text.to_reference_paint()),
-        )
+        .style(frame(theme))
+        .style(TextRole::Label.inherit(theme))
         .child(elements.body);
     for overlay in [
         elements.settings_dialog,
@@ -223,37 +142,6 @@ pub fn workspace(workspace_key: u64, theme: &ArtisanTheme, elements: WorkspaceEl
     root.build()
         .with_key(workspace_key)
         .debug_selector("workspace-root")
-}
-
-pub fn palette_dialog(
-    theme: &ArtisanTheme,
-    palette: &crate::shell::palette::Palette,
-    query: Element,
-    on_select: std::rc::Rc<dyn Fn(crate::core::Screen)>,
-    on_dismiss: impl Fn(crate::ui::dialog::DialogDismissReason) + 'static,
-) -> crate::ui::dialog::Dialog {
-    let mut content = UiBox::new().layout("column").gap(4.0).child(query);
-    if let Some(error) = &palette.search_error {
-        content = content.child(Text::new(error.clone()).font_size(12.0).build());
-    }
-    for (index, entry) in palette.entries.iter().enumerate() {
-        let screen = entry.screen.clone();
-        let select = std::rc::Rc::clone(&on_select);
-        content = content.child(
-            crate::ui::action_row::ActionRow::new(index, *theme, entry.label.clone())
-                .secondary(entry.detail.clone())
-                .selected(index == palette.highlighted)
-                .on_activate(move |_| select(screen.clone()))
-                .build(),
-        );
-    }
-    crate::ui::dialog::Dialog::new(
-        "command-palette",
-        *theme,
-        "Search threads and commands",
-        content.build(),
-    )
-    .on_dismiss(on_dismiss)
 }
 
 pub struct ComposerParts {
@@ -429,7 +317,7 @@ fn measured_composer(
     let mut column = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(8.0);
+        .spaced(Space::S8);
     if let Some(above) = above_composer {
         column = column.child(above);
     }
@@ -483,31 +371,15 @@ pub fn centered_body(content: Element) -> Element {
 }
 
 pub fn conversation_edge_style(edge: crate::ui::scroll_edge::Edge) -> Style {
-    let radius = crate::ui::chrome::card::RADIUS - 2.0;
+    let radius = concentric(Radius::Shell.px(), EDGE_INSET);
     let (top, bottom, corners) = match edge {
-        crate::ui::scroll_edge::Edge::Top => (
-            Some(2.0),
-            None,
-            CornerRadii {
-                top_left: radius,
-                top_right: radius,
-                ..CornerRadii::default()
-            },
-        ),
-        crate::ui::scroll_edge::Edge::Bottom => (
-            None,
-            Some(2.0),
-            CornerRadii {
-                bottom_left: radius,
-                bottom_right: radius,
-                ..CornerRadii::default()
-            },
-        ),
+        crate::ui::scroll_edge::Edge::Top => (Some(EDGE_INSET), None, Corners::Top),
+        crate::ui::scroll_edge::Edge::Bottom => (None, Some(EDGE_INSET), Corners::Bottom),
     };
     Style::new()
         .width(Length::Auto)
-        .absolute_at(Some(2.0), top, Some(2.0), bottom)
-        .corners(corners)
+        .absolute_at(Some(EDGE_INSET), top, Some(EDGE_INSET), bottom)
+        .with(&corners.style(radius))
 }
 
 pub fn conversation_load_error(theme: &ArtisanTheme, text: String) -> Element {
@@ -515,12 +387,12 @@ pub fn conversation_load_error(theme: &ArtisanTheme, text: String) -> Element {
         .width(Length::Pct(100.0))
         .style(
             Style::new()
-                .absolute_at(Some(0.0), Some(8.0), Some(0.0), None)
+                .absolute_at(Some(0.0), Some(Space::S8.px()), Some(0.0), None)
                 .justify(JustifyContent::CENTER),
         )
         .child(
-            Text::new(text)
-                .text_style(base_text(theme, theme.typography.control_text))
+            TextRole::Label
+                .text(theme, text)
                 .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
                 .build(),
         )
@@ -534,9 +406,9 @@ pub fn conversation_notice(theme: &ArtisanTheme, text: String, error: bool) -> E
         theme.colors.text_muted
     };
     centered_body(
-        Text::new(text)
-            .text_style(base_text(theme, theme.typography.control_text))
-            .gpui_color(color.to_reference_paint())
+        TextRole::Label
+            .text(theme, text)
+            .gpui_source_color(color.to_reference_text_color())
             .build(),
     )
 }
@@ -565,20 +437,16 @@ pub fn centered_conversation(content: Element) -> Element {
         .layout("column")
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
+        .padded(Space::S24)
         .style(
             Style::new()
                 .align(AlignItems::CENTER)
-                .justify(JustifyContent::CENTER)
-                .padding_insets(Insets {
-                    left: 24.0,
-                    right: 24.0,
-                    ..Insets::default()
-                }),
+                .justify(JustifyContent::CENTER),
         )
         .child(
             UiBox::new()
                 .width(Length::Pct(100.0))
-                .style(Style::new().max_width(Length::Px(768.0)))
+                .style(Style::new().max_width(Length::Px(CONVERSATION_WIDTH)))
                 .child(content)
                 .build(),
         )
@@ -586,32 +454,15 @@ pub fn centered_conversation(content: Element) -> Element {
 }
 
 pub fn home(theme: &ArtisanTheme, forges: Element) -> Element {
-    let title = Text::new("Choose a Forge")
-        .text_style(base_text(theme, 28.0))
-        .gpui_color(theme.colors.text.to_reference_paint())
-        .build();
     let content = UiBox::new()
         .layout("column")
-        .style(
-            Style::new()
-                .align(AlignItems::CENTER)
-                .padding_insets(Insets {
-                    bottom: 32.0,
-                    ..Insets::default()
-                }),
-        )
-        .child(title)
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER))
+        .child(TextRole::Heading.text(theme, "Choose a Forge").build())
         .child(
             UiBox::new()
                 .width(Length::Pct(100.0))
-                .style(
-                    Style::new()
-                        .max_width(Length::Px(560.0))
-                        .margin_insets(Insets {
-                            top: 8.0,
-                            ..Insets::default()
-                        }),
-                )
+                .style(Style::new().max_width(Length::Px(FORGES_WIDTH)))
                 .child(forges)
                 .build(),
         )

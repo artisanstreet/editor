@@ -1,3 +1,4 @@
+use crate::ui::kit::{Hover, Space, Spaced, TextRole};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -7,8 +8,7 @@ use std::sync::Arc;
 use super::callout::text;
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::geometry::CornerRadii;
-use aqua_core::{DisplayItem, GpuiBackground, InputEvent, Insets, Key, Modifiers, NamedKey, Role};
-use aqua_text::FontWeight;
+use aqua_core::{DisplayItem, InputEvent, Insets, Key, Modifiers, NamedKey, Role};
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -88,27 +88,15 @@ fn cell(
         reason = "comparison is limited to sixteen options"
     )]
     let width = 76.0 / count as f32;
-    let mut style = Style::new()
-        .width(Length::Pct(width))
-        .min_width(Length::Px(0.0))
-        .padding_insets(Insets {
-            left: 10.0,
-            right: 10.0,
-            top: 7.0,
-            bottom: 7.0,
-        });
+    let mut cell = ui::Box::new().padded(Space::S8).style(
+        Style::new()
+            .width(Length::Pct(width))
+            .min_width(Length::Px(0.0)),
+    );
     if selected == Some(column) {
-        style = style.gpui_background(GpuiBackground::Solid(
-            theme
-                .colors
-                .text
-                .at(Opacity::HoverBottom)
-                .to_reference_paint(),
-        ));
+        cell = cell.style(Hover::Neutral.style(&theme));
     }
-    ui::Box::new()
-        .style(style)
-        .child(content)
+    cell.child(content)
         .build()
         .with_key(id)
         .on_hover_change(move |hovered| {
@@ -127,25 +115,9 @@ fn cell(
 
 fn criterion(theme: &ArtisanTheme, label: &str) -> Element {
     ui::Box::new()
-        .style(
-            Style::new()
-                .width(Length::Pct(24.0))
-                .flex_shrink(0.0)
-                .padding_insets(Insets {
-                    left: 10.0,
-                    right: 10.0,
-                    top: 7.0,
-                    bottom: 7.0,
-                }),
-        )
-        .child(text(
-            theme,
-            label,
-            13.0,
-            20.0,
-            FontWeight::NORMAL,
-            theme.colors.text_muted,
-        ))
+        .padded(Space::S8)
+        .style(Style::new().width(Length::Pct(24.0)).flex_shrink(0.0))
+        .child(text(theme, label, TextRole::Label, theme.colors.text_muted))
         .build()
 }
 
@@ -188,16 +160,9 @@ impl Compare {
             };
             let mut content = ui::Box::new().layout("column");
             if recommended {
-                content = content.child(text(
-                    &theme,
-                    "Recommended",
-                    12.0,
-                    16.0,
-                    FontWeight::MEDIUM,
-                    color,
-                ));
+                content = content.child(text(&theme, "Recommended", TextRole::Caption, color));
             }
-            content = content.child(text(&theme, option, 14.0, 20.0, FontWeight(600), color));
+            content = content.child(text(&theme, option, TextRole::Title, color));
             header = header.child(cell(
                 content.build(),
                 format!("{id}-option-{column}"),
@@ -260,7 +225,7 @@ impl Compare {
                         (value, theme.colors.text)
                     };
                     view = view.child(cell(
-                        text(&theme, value, 13.0, 20.0, FontWeight::NORMAL, color),
+                        text(&theme, value, TextRole::Label, color),
                         format!("{row_id}-row{index}-{column}"),
                         column,
                         count,

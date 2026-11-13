@@ -1,4 +1,5 @@
 use super::{Funnel, Step};
+use crate::ui::kit::Space;
 use crate::ui::rich::charts::scale::{f32_of_count, percent};
 use crate::ui::rich::kit::format_number;
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity, RadiusStep, RadiusTokens};
@@ -260,7 +261,7 @@ impl Funnel {
                             .flex_shrink(0.0)
                             .min_width(Length::Px(0.0))
                             .justify(aqua_ui::JustifyContent::END)
-                            .gap(6.0),
+                            .gap(Space::S6.px()),
                     )
                     .clip(true)
                     .child(value)
@@ -273,7 +274,7 @@ impl Funnel {
                             .width(Length::Pct(100.0))
                             .height(Length::Px(height))
                             .align(aqua_ui::AlignItems::CENTER)
-                            .gap(12.0),
+                            .gap(Space::S12.px()),
                     )
                     .child(name)
                     .child(center)
@@ -313,7 +314,7 @@ impl Funnel {
             .build();
         let content = ui::Box::new()
             .layout("column")
-            .style(Style::new().width(Length::Pct(100.0)).gap(6.0))
+            .style(Style::new().width(Length::Pct(100.0)).gap(Space::S6.px()))
             .child(rows)
             .child(summary)
             .build();

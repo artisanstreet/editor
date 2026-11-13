@@ -1,52 +1,40 @@
 use crate::frame::sidebar::{Command, Event};
 use crate::frame::sign_in::card::{field_key, keyed_field};
-use crate::frame::tree::ROW_PAD;
-use crate::ui::chrome::card::{POLAR_INK, Surfaces};
+use crate::ui::chrome::card::POLAR_INK;
+use crate::ui::kit::{IconSize, Space, Spaced};
 use crate::ui::theme::ArtisanTheme;
-use aqua::{Aqua, px};
-use aqua_core::{CursorIcon, Insets};
+use aqua_core::CursorIcon;
 use aqua_ui::AlignItems;
-use aqua_ui::element::Element;
+use aqua_ui::element::{Box as UiBox, Element};
+use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
 use std::rc::Rc;
 
-const BELOW: f32 = 16.0;
-const KEY_ICON: f32 = 16.0;
-
 #[must_use]
 pub fn bar(theme: &ArtisanTheme, editor: Element, emit: Rc<dyn Fn(Event)>) -> Element {
-    let surfaces = Surfaces::of(theme);
-    let content = Aqua::Box()
+    let content = UiBox::new()
         .layout("row")
-        .styles([Aqua::Style().align(AlignItems::CENTER).gap(8.0)])
+        .spaced(Space::S8)
+        .style(Style::new().align(AlignItems::CENTER))
         .child(
-            Aqua::Box()
-                .styles([Aqua::Style().flex_shrink(0.0)])
-                .child(crate::ui::asset::source_asset_glyph(
+            UiBox::new()
+                .style(Style::new().flex_shrink(0.0))
+                .child(IconSize::Md.glyph(
                     AssetId::TABLER_SEARCH,
-                    16.0,
-                    surfaces.ink_dim.to_reference_paint(),
+                    theme.colors.text_muted.to_reference_paint(),
                 ))
                 .build()
                 .exclude_from_hit_testing(),
         )
         .child(
-            Aqua::Box()
+            UiBox::new()
                 .layout("column")
-                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
+                .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
                 .child(editor)
                 .build(),
         )
         .build();
-    Aqua::Box()
-        .layout("column")
-        .styles([Aqua::Style().flex_shrink(0.0).margin_insets(Insets {
-            left: ROW_PAD,
-            bottom: BELOW,
-            ..Insets::default()
-        })])
-        .child(keyed_field(&surfaces, content, new_thread_key(emit)))
-        .build()
+    keyed_field(theme, content, new_thread_key(emit))
 }
 
 fn new_thread_key(emit: Rc<dyn Fn(Event)>) -> Element {
@@ -54,11 +42,7 @@ fn new_thread_key(emit: Rc<dyn Fn(Event)>) -> Element {
         "artisan-sidebar-new-thread",
         "New thread",
         CursorIcon::Pointer,
-        crate::ui::asset::source_asset_glyph(
-            AssetId::TABLER_PENCIL_PLUS,
-            KEY_ICON,
-            POLAR_INK.to_reference_paint(),
-        ),
+        IconSize::Md.glyph(AssetId::TABLER_PENCIL_PLUS, POLAR_INK.to_reference_paint()),
         Rc::new(move || emit(Event::Navigate(Command::New))),
     )
 }

@@ -31,6 +31,17 @@ pub use source_index::{
 };
 
 use table::TableBuilder;
+
+pub const LIST_INDENT: f32 = crate::ui::theme::ProseTypography::LIST_INDENT_PX;
+
+pub type GlyphPainter = std::rc::Rc<
+    dyn Fn(editor_assets::AssetId, f32, aqua_core::GpuiHsla) -> aqua_ui::element::Element,
+>;
+
+#[must_use]
+pub fn glyph_painter() -> GlyphPainter {
+    std::rc::Rc::new(crate::ui::asset::source_asset_glyph)
+}
 pub use table::{Table, TableAlignment, TableCell};
 
 #[derive(Debug, Error)]

@@ -8,9 +8,13 @@ use aqua_ui::{
 use std::rc::Rc;
 
 use super::{
-    glass::card_shadows,
-    theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens},
+    kit::{Media as MediaKind, Surface, concentric},
+    theme::{ArtisanTheme, Opacity},
 };
+
+const FRAME: Surface = Surface::Media(MediaKind::Frame);
+const THUMB: Surface = Surface::Media(MediaKind::Thumb);
+const EDGE: f32 = 1.0;
 
 enum FrameSize {
     Aspect { aspect: f32, width: f32 },
@@ -137,82 +141,54 @@ impl MediaFrame {
         self
     }
 
-    pub fn attachment_content_radius() -> f32 {
-        RadiusTokens::nested(RadiusTokens::value(RadiusStep::Sm), 1.0)
+    pub fn thumb_radius() -> f32 {
+        THUMB.radius_px()
     }
 
-    pub fn sent_attachment_content_radius() -> f32 {
-        RadiusTokens::nested(RadiusTokens::value(RadiusStep::Md), 1.0)
+    pub fn thumb_content_style() -> Style {
+        Style::new().radius(Length::Px(concentric(THUMB.radius_px(), EDGE)))
+    }
+
+    pub fn sent_attachment_content_style() -> Style {
+        Self::thumb_content_style()
+    }
+
+    pub fn placeholder(theme: ArtisanTheme) -> Element {
+        UiBox::new()
+            .width(Length::Pct(100.0))
+            .height(Length::Pct(100.0))
+            .style(Style::new().gpui_background(GpuiBackground::Solid(
+                theme.colors.raised.to_reference_paint(),
+            )))
+            .build()
     }
 
     pub fn build(self) -> Element {
-        let (width, height, radius, border, surface, shadow, fixed) = match self.size {
-            FrameSize::Aspect { aspect, width } => (
-                width,
-                width / aspect,
-                RadiusStep::Xl,
-                None,
-                false,
-                true,
-                false,
-            ),
-            FrameSize::Attachment => (
-                72.0,
-                72.0,
-                RadiusStep::Sm,
-                Some(if self.error {
-                    self.theme.colors.destructive
-                } else {
-                    self.theme.colors.text.at(Opacity::MediaEdge)
-                }),
-                true,
-                true,
-                true,
-            ),
-            FrameSize::SentAttachment => (
-                96.0,
-                96.0,
-                RadiusStep::Md,
-                Some(self.theme.colors.line),
-                true,
-                false,
-                true,
-            ),
+        let edge = match self.error {
+            true => self.theme.colors.destructive,
+            false => self.theme.colors.text.at(Opacity::MediaEdge),
+        };
+        let (width, height, surface, border) = match self.size {
+            FrameSize::Aspect { aspect, width } => (width, width / aspect, FRAME, None),
+            FrameSize::Attachment => (72.0, 72.0, THUMB, Some(edge)),
+            FrameSize::SentAttachment => (96.0, 96.0, THUMB, Some(self.theme.colors.line)),
             FrameSize::Transcript { aspect, width } => {
                 let width = width.min(576.0);
-                (
-                    width,
-                    (width / aspect).min(480.0),
-                    RadiusStep::Lg,
-                    None,
-                    false,
-                    true,
-                    false,
-                )
+                (width, (width / aspect).min(480.0), FRAME, None)
             }
         };
         let mut style = Style::new()
             .width(Length::Px(width))
             .height(Length::Px(height))
-            .radius(Length::Px(RadiusTokens::value(radius)));
-        if fixed {
-            style = style.flex_shrink(0.0);
-        }
+            .radius(Length::Px(surface.radius_px()))
+            .shadows(surface.elevation().shadows(&self.theme));
         if let Some(color) = border {
-            style = style.gpui_border(Insets::uniform(1.0), color.to_reference_paint(), false);
-        }
-        if surface {
-            style = style.gpui_background(GpuiBackground::Solid(
-                self.theme.colors.surface.to_reference_paint(),
-            ));
-        }
-        if shadow {
-            style = style.gpui_shadows(
-                card_shadows(&self.theme)
-                    .into_iter()
-                    .map(aqua_ui::style::GpuiShadowLayer::from)
-                    .collect(),
-            );
+            style = style
+                .flex_shrink(0.0)
+                .gpui_border(Insets::uniform(EDGE), color.to_reference_paint(), false)
+                .gpui_background(GpuiBackground::Solid(
+                    self.theme.colors.surface.to_reference_paint(),
+                ));
         }
         let mut children = vec![self.content];
         if let Some(visible) = self.visible {
@@ -233,7 +209,7 @@ impl MediaFrame {
         }
         let mut element = if let Some((label, action)) = self.activation {
             let focus = Style::new().gpui_border(
-                Insets::uniform(if border.is_some() { 1.0 } else { 0.0 }),
+                Insets::uniform(if border.is_some() { EDGE } else { 0.0 }),
                 self.theme.colors.ring.to_reference_paint(),
                 false,
             );

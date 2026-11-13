@@ -51,7 +51,6 @@ pub struct Sidebar {
     pub host: Option<HostId>,
     host_instance: Option<HostInstance>,
     pub open: Option<ThreadId>,
-    last_screen: Option<Screen>,
     pub lists: Lists,
     pub search: std::rc::Rc<std::cell::RefCell<editor_ui::text::Editor>>,
     pub history_open: bool,
@@ -60,23 +59,14 @@ pub struct Sidebar {
     motion_live: bool,
     pub rail_motion: super::rail::RailMotion,
     pub settings_motion: super::settings_nav::NavMotion,
-    pub threads_hover: editor_ui::pop_in_hover::PopInHover,
-    pub profile_hover: editor_ui::picker_motion::HoverSurface,
-    pub machines_hover: editor_ui::picker_motion::HoverSurface,
     pub threads_edges: editor_ui::scroll_edge::ScrollEdges,
     working_pulses: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<ThreadId, editor_ui::motion::WorkingPulse>>,
     >,
-    pub profile_open: bool,
-    pub profile_generation: u64,
-    pub profile_machines_open: bool,
-    pub machines_generation: u64,
-    pub usage_hover: Option<(artisan_api::EngineId, usize)>,
     pub thread_viewport: Option<aqua_ui::collection_runtime::CollectionViewport>,
     pub error: Option<String>,
     pub menu: Option<ThreadMenu>,
     pub menu_generation: u64,
-    pub menu_hover: editor_ui::pop_in_hover::PopInHover,
     pub rename: Option<ThreadId>,
     pub rename_generation: u64,
     pub(super) drag: Option<(HostId, HostInstance, ThreadId)>,
@@ -93,8 +83,6 @@ pub struct Sidebar {
     completions: Delivery<Completion>,
     workspace_background: bool,
 }
-
-pub use editor_ui::picker_motion::HoverFrame;
 
 #[derive(Clone, Debug)]
 pub enum SidebarEffect {
@@ -142,14 +130,13 @@ impl Sidebar {
     ) -> super::view::ThreadVisualFactory {
         let pulses = self.working_pulses.clone();
         let truncate: super::row::TruncatedText =
-            std::rc::Rc::new(|text, size, color, selector| {
-                aqua_ui::element::Text::new(text)
-                    .font_size(size)
+            std::rc::Rc::new(move |text, role: editor_ui::kit::TextRole, color, selector| {
+                role.text(&theme, text)
                     .gpui_source_color(color)
                     .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
                     .style(
                         aqua_ui::style::Style::new()
-                            .min_width(aqua_ui::style::Length::Px(0.0))
+                            .min_width(aqua_ui::style::Length::Pct(0.0))
                             .flex_shrink(1.0),
                     )
                     .build()
@@ -169,22 +156,6 @@ impl Sidebar {
                 row, image, host,
             )
         })
-    }
-
-    pub fn advance_threads_hover(
-        &mut self,
-        app: &mut aqua::UiApp,
-        surface: aqua_core::NodeId,
-        _theme: &editor_ui::theme::ArtisanTheme,
-        _now: f64,
-        reduced_motion: bool,
-    ) -> Result<HoverFrame, String> {
-        Ok(self.threads_hover.advance_frame(
-            app,
-            surface,
-            std::time::Instant::now(),
-            reduced_motion,
-        ))
     }
 
     #[cfg(feature = "test-support")]
@@ -256,7 +227,6 @@ impl Sidebar {
             host: None,
             host_instance: None,
             open: None,
-            last_screen: None,
             lists: Lists::default(),
             search: std::rc::Rc::new(std::cell::RefCell::new(editor_ui::text::Editor::new(
                 "",
@@ -268,21 +238,12 @@ impl Sidebar {
             motion_live: false,
             rail_motion: super::rail::RailMotion::default(),
             settings_motion: super::settings_nav::NavMotion::default(),
-            threads_hover: editor_ui::pop_in_hover::PopInHover::new("sidebar-threads-hover"),
-            profile_hover: editor_ui::picker_motion::HoverSurface::new("profile-hover"),
-            machines_hover: editor_ui::picker_motion::HoverSurface::new("machines-hover"),
             threads_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             working_pulses: std::rc::Rc::default(),
-            profile_open: false,
-            profile_generation: 0,
-            profile_machines_open: false,
-            machines_generation: 0,
-            usage_hover: None,
             thread_viewport: None,
             error: None,
             menu: None,
             menu_generation: 0,
-            menu_hover: editor_ui::pop_in_hover::PopInHover::new("thread-menu-hover"),
             rename: None,
             rename_generation: 0,
             drag: None,
@@ -358,8 +319,6 @@ impl Sidebar {
         } else {
             core.screen()
         };
-        let screen_changed = self.last_screen.as_ref() != Some(screen);
-        self.last_screen = Some(screen.clone());
         let open = match screen {
             Screen::Thread { thread, .. } => Some(thread.clone()),
             _ => None,
@@ -374,21 +333,11 @@ impl Sidebar {
             if self.drag.take().is_some() {
                 self.effects.push(SidebarEffect::HideDragPreview);
             }
-            self.threads_hover.clear();
             self.working_pulses.borrow_mut().clear();
             self.menu = None;
             self.rename = None;
             self.error = None;
-            self.profile_open = false;
-            self.profile_generation = self.profile_generation.wrapping_add(1);
-            self.profile_machines_open = false;
-            self.usage_hover = None;
             self.thread_viewport = None;
-        }
-        if screen_changed || self.open != open {
-            self.profile_open = false;
-            self.profile_machines_open = false;
-            self.usage_hover = None;
         }
         let picker_alive = self
             .picker_host

@@ -3,9 +3,9 @@ use crate::sidebar::{
     controller::Sidebar,
     view::{self, ViewAction},
 };
+use crate::ui::kit::TextRole;
 use crate::ui::theme::ArtisanTheme;
-use aqua::{Aqua, px};
-use aqua_core::Insets;
+use aqua::{Aqua, pct, px};
 use aqua_ui::element::Element;
 use std::rc::Rc;
 
@@ -64,8 +64,8 @@ pub fn view(
         .layout("column")
         .styles([Aqua::Style()
             .flex_grow(1.0)
-            .min_width(px(0.0))
-            .min_height(px(0.0))])
+            .min_width(pct(0.0))
+            .min_height(pct(0.0))])
         .children(list)
         .child(sidebar.threads_edges.band(
             "sidebar-threads-edge-top",
@@ -82,13 +82,13 @@ pub fn view(
         .layout("column")
         .styles([Aqua::Style()
             .flex_grow(1.0)
-            .min_width(px(0.0))
-            .min_height(px(0.0))])
+            .min_width(pct(0.0))
+            .min_height(pct(0.0))])
         .child(inbox);
     if !sidebar.lists.history.is_empty() {
         column = column.child(
             Aqua::Box()
-                .height(43.0)
+                .height(crate::sidebar::geometry::history_height())
                 .styles([Aqua::Style().flex_shrink(0.0)])
                 .child(view::history_toggle(
                     theme,
@@ -114,7 +114,7 @@ pub fn view(
                 .layout("column")
                 .styles([Aqua::Style()
                     .height(px(history_height))
-                    .min_height(px(0.0))
+                    .min_height(pct(0.0))
                     .flex_shrink(0.0)
                     .clip(true)])
                 .children(history)
@@ -127,9 +127,9 @@ pub fn view(
             .and_then(|host| host.thread_page(false).error.as_ref())
     }) {
         column = column.child(
-            Aqua::Text(error.clone())
-                .font_size(theme.typography.label_text)
-                .gpui_color(theme.colors.destructive_text.to_reference_paint())
+            TextRole::Caption
+                .text(&theme, error.clone())
+                .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
                 .build(),
         );
     }
@@ -137,26 +137,11 @@ pub fn view(
         .layout("column")
         .styles([Aqua::Style()
             .flex_grow(1.0)
-            .min_width(px(0.0))
-            .min_height(px(0.0))
-            .margin_insets(Insets {
-                left: -8.0,
-                right: -8.0,
-                ..Insets::default()
-            })])
+            .min_width(pct(0.0))
+            .min_height(pct(0.0))])
         .child(column.build().with_key("sidebar-threads-hover-surface"))
         .build()
         .with_key(view::ROOT_KEY)
-        .on_input(
-            aqua_ui::input::InputKind::PointerLeave,
-            aqua_ui::input::EventPhase::Bubble,
-            move |event| {
-                if event.current_target == event.target {
-                    emit(ViewAction::ClearThreadHover);
-                }
-                aqua_ui::input::InputResponse::default()
-            },
-        )
 }
 
 pub fn history_height(viewport: f32, inbox: f32, history: f32, fraction: f32) -> f32 {

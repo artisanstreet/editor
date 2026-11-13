@@ -7,6 +7,10 @@ use aqua_ui::{
 use artisan_api::EngineId;
 use std::time::{Duration, Instant};
 
+const LIGHT_WIDTH: f32 = 32.0;
+const LIGHT_HEIGHT: f32 = 24.0;
+const LIGHT_LIFT: f32 = -2.0;
+
 #[derive(Debug, Default)]
 pub struct EngineLight {
     lit: Option<EngineId>,
@@ -58,7 +62,7 @@ impl EngineLight {
 }
 
 fn light_left(left: f32, width: f32) -> f32 {
-    left + ((width - 32.0) / 2.0).max(0.0)
+    left + ((width - LIGHT_WIDTH) / 2.0).max(0.0)
 }
 
 #[derive(Default)]
@@ -87,13 +91,13 @@ impl EngineLightImage {
             .1
             .clone();
         Ok(Media::new(image)
-            .width(32.0)
-            .height(24.0)
+            .width(LIGHT_WIDTH)
+            .height(LIGHT_HEIGHT)
             .style(
                 Style::new()
-                    .absolute_at(Some(left), Some(-2.0), None, None)
-                    .width(Length::Px(32.0))
-                    .height(Length::Px(24.0)),
+                    .absolute_at(Some(left), Some(LIGHT_LIFT), None, None)
+                    .width(Length::Px(LIGHT_WIDTH))
+                    .height(Length::Px(LIGHT_HEIGHT)),
             )
             .build())
     }

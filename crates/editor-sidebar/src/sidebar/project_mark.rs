@@ -1,31 +1,28 @@
 use editor_core::HostData;
 use editor_ui::theme::Oklch;
-use aqua::{Aqua, px};
+use aqua_ui::style::Style;
 use artisan_api::ProjectId;
 
 use std::sync::Arc;
 
 use aqua::images::ImageHandle;
 use aqua_core::{GpuiHsla, ImageRef, image::ImageFit};
-use aqua_ui::element::{Element, Media};
+use aqua_ui::element::{Box as UiBox, Element, Media};
 use editor_assets::AssetId;
 
-use editor_ui::{
-    asset::source_asset_glyph,
-    theme::{RadiusStep, RadiusTokens},
-};
+use editor_ui::kit::{IconSize, Radius};
 
 pub fn project_mark(
     image: Option<Arc<ImageHandle>>,
     host: Option<Option<&str>>,
-    size: f32,
+    size: IconSize,
     tint: GpuiHsla,
 ) -> Element {
     if let Some(image) = image {
         return Media::new(ImageRef::with_lease(image.id(), image))
-            .width(size)
-            .height(size)
-            .radius(RadiusTokens::value(RadiusStep::X2sMid))
+            .width(size.px())
+            .height(size.px())
+            .style(Radius::Row.style())
             .fit(ImageFit::Contain)
             .build();
     }
@@ -40,10 +37,10 @@ pub fn project_mark(
         Some(Some("sourcehut")) => AssetId::SIMPLE_ICONS_SOURCEHUT,
         Some(_) => AssetId::SVGL_GIT,
     };
-    source_asset_glyph(asset, size, tint)
+    size.glyph(asset, tint)
 }
 
-const ICON: f32 = 16.0;
+const ICON: IconSize = IconSize::Md;
 
 pub struct Mark {
     icon: Option<Arc<ImageHandle>>,
@@ -62,11 +59,10 @@ impl Mark {
     }
 
     pub fn view(&self, tint: Oklch) -> Element {
-        Aqua::Box()
-            .styles([Aqua::Style()
-                .width(px(ICON))
-                .height(px(ICON))
-                .flex_shrink(0.0)])
+        UiBox::new()
+            .width(ICON.px())
+            .height(ICON.px())
+            .style(Style::new().flex_shrink(0.0))
             .child(project_mark(
                 self.icon.clone(),
                 self.forge.as_ref().map(Option::as_deref),

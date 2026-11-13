@@ -1,5 +1,8 @@
 use super::AudioBlock;
-use editor_core::runtime::runtime;
+use crate::ui::kit::Space;
+use crate::ui::kit::{Corner, IconSize, TextRole};
+
+const PLAY: f32 = 28.0;
 use crate::ui::media::{
     audio::AudioAssets,
     source::{MediaFetcher, MediaSource, Parsed},
@@ -7,12 +10,13 @@ use crate::ui::media::{
 use crate::ui::rich::narrative::callout::GlyphFactory;
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
 use aqua_core::{GpuiBackground, InputEvent, PointerButton, Rect};
-use aqua_text::{FontFamily, FontWeight, TextStyle, overflow::OverflowMode};
+use aqua_text::{FontFamily, overflow::OverflowMode};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{CaptureRequest, EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
 use editor_audio::{PlaybackState, Player, Snapshot};
+use editor_core::runtime::runtime;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -166,27 +170,11 @@ fn clock(time: Duration) -> String {
         format!("{minutes}:{seconds:02}")
     }
 }
-fn text(
-    theme: &ArtisanTheme,
-    value: &str,
-    size: f32,
-    line: f32,
-    weight: FontWeight,
-    color: Oklch,
-    mono: bool,
-) -> Element {
-    let font = if mono {
-        theme.typography.mono.family
-    } else {
-        theme.typography.sans.family
-    };
-    let style = TextStyle {
-        families: vec![FontFamily::Named(font.to_owned())],
-        size_px: size,
-        line_height_px: line,
-        weight,
-        ..TextStyle::default()
-    };
+fn text(theme: &ArtisanTheme, value: &str, role: TextRole, color: Oklch, mono: bool) -> Element {
+    let mut style = role.style(theme);
+    if mono {
+        style.families = vec![FontFamily::Named(theme.typography.mono.family.to_owned())];
+    }
     ui::Text::new(value.to_owned())
         .text_style(style)
         .gpui_color(color.to_reference_paint())
@@ -201,7 +189,7 @@ fn row() -> ui::Box {
             .min_width(Length::Px(0.0))
             .min_height(Length::Px(32.0))
             .align(aqua_ui::AlignItems::CENTER)
-            .gap(10.0),
+            .gap(Space::S8.px()),
     )
 }
 fn track_path(source: &MediaSource, fetcher: Option<&MediaFetcher>, id: &str) -> Option<PathBuf> {
@@ -248,7 +236,7 @@ impl AudioBlock {
             Style::new()
                 .width(Length::Pct(100.0))
                 .min_width(Length::Px(0.0))
-                .gap(4.0),
+                .gap(Space::S4.px()),
         );
         for (index, track) in self.tracks.iter().enumerate() {
             let row_id = format!("{id}-track-{index}");
@@ -289,9 +277,7 @@ impl AudioBlock {
                                     .child(crate::ui::rich::narrative::callout::text(
                                         &theme,
                                         &name,
-                                        14.0,
-                                        22.0,
-                                        FontWeight::NORMAL,
+                                        TextRole::Label,
                                         theme.colors.text,
                                     ))
                                     .build(),
@@ -299,9 +285,7 @@ impl AudioBlock {
                             .child(text(
                                 &theme,
                                 &message,
-                                13.0,
-                                20.0,
-                                FontWeight::NORMAL,
+                                TextRole::Label,
                                 theme.colors.text_muted,
                                 false,
                             ))
@@ -331,15 +315,19 @@ impl AudioBlock {
             let button = ui::Box::new()
                 .style(
                     Style::new()
-                        .width(Length::Px(28.0))
-                        .height(Length::Px(28.0))
+                        .width(Length::Px(PLAY))
+                        .height(Length::Px(PLAY))
                         .flex_shrink(0.0)
                         .align(aqua_ui::AlignItems::CENTER)
                         .justify(aqua_ui::JustifyContent::CENTER)
                         .gpui_background(GpuiBackground::Solid(button_color.to_reference_paint())),
                 )
-                .radius(14.0)
-                .child(glyph(icon, 12.0, theme.colors.text.to_reference_paint()))
+                .radius(Corner::Full.resolve(PLAY))
+                .child(glyph(
+                    icon,
+                    IconSize::Sm.px(),
+                    theme.colors.text.to_reference_paint(),
+                ))
                 .build()
                 .with_key(format!("{row_id}-button"))
                 .cursor(aqua_core::CursorIcon::Pointer)
@@ -373,9 +361,7 @@ impl AudioBlock {
                 .child(text(
                     &theme,
                     &name,
-                    14.0,
-                    22.0,
-                    FontWeight::MEDIUM,
+                    TextRole::LabelStrong,
                     theme.colors.text,
                     false,
                 ))
@@ -387,9 +373,7 @@ impl AudioBlock {
                     .child(text(
                         &theme,
                         message,
-                        13.0,
-                        20.0,
-                        FontWeight::NORMAL,
+                        TextRole::Label,
                         theme.colors.banner_error.text,
                         false,
                     ))
@@ -420,9 +404,7 @@ impl AudioBlock {
                         .child(text(
                             &theme,
                             &time,
-                            12.0,
-                            20.0,
-                            FontWeight::NORMAL,
+                            TextRole::Caption,
                             theme.colors.text_muted,
                             true,
                         ))

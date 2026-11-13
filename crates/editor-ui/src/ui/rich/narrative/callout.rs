@@ -4,14 +4,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use aqua_core::geometry::CornerRadii;
-use aqua_core::{DisplayItem, GpuiBackground, InputEvent, Insets, PointerButton};
-use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
+use aqua_core::{DisplayItem, InputEvent, Insets, PointerButton};
+use aqua_text::StyledSpan;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
 use aqua_ui::style::{Length, Style};
 use editor_assets::AssetId;
 
-use crate::ui::theme::{ArtisanTheme, Oklch, Opacity, RadiusStep, RadiusTokens};
+use crate::ui::kit::{IconSize, Space, Spaced, Surface, TextRole, Tone};
+use crate::ui::theme::{ArtisanTheme, Oklch};
+
+const STRIPE: f32 = 2.0;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -55,65 +58,60 @@ impl CalloutState {
 pub(crate) type GlyphFactory = Rc<dyn Fn(AssetId, f32, aqua_core::GpuiHsla) -> Element>;
 
 impl Kind {
-    fn presentation(self, theme: &ArtisanTheme) -> (&'static str, AssetId, Oklch) {
+    fn presentation(self, theme: &ArtisanTheme) -> (&'static str, AssetId, Oklch, Tone) {
         match self {
             Self::Note => (
                 "Note",
                 AssetId::TABLER_MESSAGE_CIRCLE,
                 theme.colors.banner_info.text,
+                Tone::Info,
             ),
             Self::Tip => (
                 "Tip",
                 AssetId::TABLER_SPARKLES,
                 theme.colors.banner_success.text,
+                Tone::Success,
             ),
             Self::Warning => (
                 "Warning",
                 AssetId::TABLER_ALERT_TRIANGLE,
                 theme.colors.banner_warning.text,
+                Tone::Warning,
             ),
             Self::Risk => (
                 "Risk",
                 AssetId::TABLER_ALERT_TRIANGLE,
                 theme.colors.banner_error.text,
+                Tone::Danger,
             ),
-            Self::Decision => ("Decision", AssetId::TABLER_TARGET_ARROW, theme.colors.link),
+            Self::Decision => (
+                "Decision",
+                AssetId::TABLER_TARGET_ARROW,
+                theme.colors.link,
+                Tone::Info,
+            ),
             Self::Assumption => (
                 "Assumption",
                 AssetId::TABLER_QUESTION_MARK,
                 theme.colors.text_muted,
+                Tone::Neutral,
             ),
         }
     }
 }
 
-pub(crate) fn text(
-    theme: &ArtisanTheme,
-    value: &str,
-    size: f32,
-    line: f32,
-    weight: FontWeight,
-    color: Oklch,
-) -> Element {
-    text_with_wrap(theme, value, size, line, weight, color, true)
+pub(crate) fn text(theme: &ArtisanTheme, value: &str, role: TextRole, color: Oklch) -> Element {
+    text_with_wrap(theme, value, role, color, true)
 }
 
 pub(crate) fn text_with_wrap(
     theme: &ArtisanTheme,
     value: &str,
-    size: f32,
-    line: f32,
-    weight: FontWeight,
+    role: TextRole,
     color: Oklch,
     wrap: bool,
 ) -> Element {
-    let style = TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: size,
-        line_height_px: line,
-        weight,
-        ..TextStyle::default()
-    };
+    let style = role.style(theme);
     let paint = color.to_reference_text_color();
     ui::Text::new(value.to_owned())
         .text_style(style.clone())
@@ -142,22 +140,15 @@ impl Callout {
             .borrow_mut()
             .entry(id.clone())
             .or_insert(!self.collapsed);
-        let (label, icon, color) = self.kind.presentation(theme);
+        let (label, icon, color, tone) = self.kind.presentation(theme);
         let mut header = ui::Box::new()
             .layout("row")
-            .gap(8.0)
+            .spaced(Space::S8)
             .style(Style::new().align(aqua_ui::AlignItems::CENTER))
-            .child(glyph(icon, 16.0, color.to_reference_paint()))
-            .child(text(theme, label, 14.0, 20.0, FontWeight(600), color));
+            .child(glyph(icon, IconSize::Md.px(), color.to_reference_paint()))
+            .child(text(theme, label, TextRole::Title, color));
         if let Some(title) = &self.title {
-            header = header.child(text(
-                theme,
-                title,
-                14.0,
-                20.0,
-                FontWeight(600),
-                theme.colors.text,
-            ));
+            header = header.child(text(theme, title, TextRole::Title, theme.colors.text));
         }
         if self.collapsed {
             header = header
@@ -168,7 +159,7 @@ impl Callout {
                     } else {
                         AssetId::TABLER_CHEVRON_DOWN
                     },
-                    14.0,
+                    IconSize::Md.px(),
                     theme.colors.text_muted.to_reference_paint(),
                 ));
         }
@@ -202,64 +193,48 @@ impl Callout {
                 InputResponse { pointer_capture: aqua_ui::input::CaptureRequest::Release, ..InputResponse::default() }
             });
         }
+        let surface = Surface::Callout(tone);
+        let radius = surface.radius_px();
         let edge = color.to_reference_paint();
-        let background = color.at(Opacity::CalloutTint).to_reference_paint();
-        let radius = RadiusTokens::value(RadiusStep::Lg);
-        let mut container = ui::Canvas::new()
-            .layout("column")
-            .gap(6.0)
-            .style(
-                Style::new()
-                    .width(Length::Pct(100.0))
-                    .padding_insets(Insets {
-                        left: 14.0,
-                        right: 12.0,
-                        top: 10.0,
-                        bottom: 10.0,
-                    }),
-            )
+        let stripe = ui::Canvas::new()
+            .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .scroll_stable()
             .on_paint(move |bounds| {
-                vec![
-                    DisplayItem::GpuiBackground {
-                        bounds,
-                        corners: CornerRadii::uniform(radius),
-                        background: GpuiBackground::Solid(background),
+                vec![DisplayItem::GpuiBorder {
+                    bounds,
+                    corners: CornerRadii::uniform(radius),
+                    widths: Insets {
+                        left: STRIPE,
+                        right: 0.0,
+                        top: 0.0,
+                        bottom: 0.0,
                     },
-                    DisplayItem::GpuiBorder {
-                        bounds,
-                        corners: CornerRadii::uniform(radius),
-                        widths: Insets {
-                            left: 2.0,
-                            right: 0.0,
-                            top: 0.0,
-                            bottom: 0.0,
-                        },
-                        color: edge,
-                        dashed: false,
-                    },
-                ]
+                    color: edge,
+                    dashed: false,
+                }]
             })
+            .build()
+            .exclude_from_hit_testing();
+        let mut content = ui::Box::new()
+            .layout("column")
+            .spaced(Space::S8)
             .child(header);
         if open {
-            let mut paragraphs = ui::Box::new().layout("column").gap(8.0);
+            let mut paragraphs = ui::Box::new().layout("column").spaced(Space::S8);
             for paragraph in self
                 .body
                 .split("\n\n")
                 .map(str::trim)
                 .filter(|paragraph| !paragraph.is_empty())
             {
-                paragraphs = paragraphs.child(text(
-                    theme,
-                    paragraph,
-                    14.0,
-                    22.0,
-                    FontWeight::NORMAL,
-                    theme.colors.text,
-                ));
+                paragraphs =
+                    paragraphs.child(text(theme, paragraph, TextRole::Label, theme.colors.text));
             }
-            container = container.child(paragraphs.build());
+            content = content.child(paragraphs.build());
         }
-        container.build().with_key(id)
+        surface
+            .build(theme, vec![stripe, content.build()])
+            .style(Style::new().width(Length::Pct(100.0)))
+            .with_key(id)
     }
 }

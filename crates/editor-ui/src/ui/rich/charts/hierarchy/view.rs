@@ -1,4 +1,5 @@
 use super::{GROUP_HEADER, Layout, Tree, partition, treemap};
+use crate::ui::kit::Space;
 use crate::ui::rich::charts::scale::{f32_of_count, percent};
 use crate::ui::rich::charts::scene::{self, Probe};
 use crate::ui::rich::kit::{format_number, with_unit};
@@ -642,7 +643,7 @@ pub(crate) fn view(
     );
     ui::Box::new()
         .layout("column")
-        .style(Style::new().width(Length::Pct(100.0)).gap(8.0))
+        .style(Style::new().width(Length::Pct(100.0)).gap(Space::S8.px()))
         .child(trail)
         .child(
             ui::Box::new()

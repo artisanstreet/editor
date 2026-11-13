@@ -1,4 +1,5 @@
 use super::{Heatmap, HeatmapData, Scale};
+use crate::ui::kit::Space;
 use crate::ui::rich::charts::scale::{f32_of, f32_of_count, f64_of, reading};
 use crate::ui::rich::charts::scene::{self, Probe, Shape};
 use crate::ui::rich::kit::{diverging_color, sequential_color};
@@ -24,7 +25,7 @@ pub(crate) type TextFactory = Rc<dyn Fn(TextRole, &str, f32, f32, FontWeight, Ok
 pub(crate) type EmptyFactory = Rc<dyn Fn(&str) -> Element>;
 pub(crate) type ReadoutFactory = Rc<dyn Fn(f32, &str, &str) -> Element>;
 pub(crate) type NavigationFrame = Rc<dyn Fn(Element, aqua_core::GpuiHsla) -> Element>;
-pub(crate) type EnvelopeTextFactory = Rc<dyn Fn(&str, f32, f32, FontWeight, Oklch) -> Element>;
+pub(crate) type EnvelopeTextFactory = Rc<dyn Fn(&str, crate::ui::kit::TextRole, Oklch) -> Element>;
 
 pub(crate) fn envelope(
     theme: &ArtisanTheme,
@@ -34,51 +35,27 @@ pub(crate) fn envelope(
     content: Element,
     text: EnvelopeTextFactory,
 ) -> Element {
-    let mut body = ui::Box::new().layout("column").style(
+    use crate::ui::kit::{Spaced, TextRole as Type};
+    let mut body = ui::Box::new().layout("column").spaced(Space::S12).style(
         Style::new()
             .width(Length::Pct(100.0))
-            .min_width(Length::Px(0.0))
-            .gap(12.0),
+            .min_width(Length::Px(0.0)),
     );
     if title.is_some() || subtitle.is_some() {
-        let mut heading = ui::Box::new().layout("column").style(Style::new().gap(2.0));
+        let mut heading = ui::Box::new().layout("column").spaced(Space::S2);
         if let Some(title) = title {
-            heading = heading.child(text(title, 15.0, 22.0, FontWeight(600), theme.colors.text));
+            heading = heading.child(text(title, Type::Title, theme.colors.text));
         }
         if let Some(subtitle) = subtitle {
-            heading = heading.child(text(
-                subtitle,
-                13.0,
-                20.0,
-                FontWeight::NORMAL,
-                theme.colors.text_muted,
-            ));
+            heading = heading.child(text(subtitle, Type::Label, theme.colors.text_muted));
         }
         body = body.child(heading.build());
     }
     body = body.child(content);
     if let Some(caption) = caption {
-        body = body.child(text(
-            caption,
-            13.0,
-            20.0,
-            FontWeight::NORMAL,
-            theme.colors.text_muted,
-        ));
+        body = body.child(text(caption, Type::Caption, theme.colors.text_muted));
     }
-    ui::Box::new()
-        .style(
-            Style::new()
-                .width(Length::Pct(100.0))
-                .min_width(Length::Px(0.0))
-                .padding_insets(Insets {
-                    top: 4.0,
-                    bottom: 4.0,
-                    ..Insets::default()
-                }),
-        )
-        .child(body.build())
-        .build()
+    body.build()
 }
 
 struct Entry {
@@ -399,7 +376,9 @@ impl Heatmap {
                 reading(self.reach, self.unit.as_deref()),
             ),
         };
-        let mut stops = ui::Box::new().layout("row").style(Style::new().gap(2.0));
+        let mut stops = ui::Box::new()
+            .layout("row")
+            .style(Style::new().gap(Space::S2.px()));
         for step in 0..count {
             let t = f32_of(f64_of(step) / f64_of(count - 1));
             let color = match self.scale {
@@ -422,7 +401,7 @@ impl Heatmap {
             .layout("row")
             .style(
                 Style::new()
-                    .gap(8.0)
+                    .gap(Space::S8.px())
                     .align(aqua_ui::AlignItems::CENTER)
                     .padding_insets(Insets {
                         left: 96.0,
@@ -449,7 +428,7 @@ impl Heatmap {
             .build();
         ui::Box::new()
             .layout("column")
-            .style(Style::new().width(Length::Pct(100.0)).gap(10.0))
+            .style(Style::new().width(Length::Pct(100.0)).gap(Space::S8.px()))
             .child(navigation)
             .child(ramp)
             .build()

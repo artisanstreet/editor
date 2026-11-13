@@ -1,7 +1,8 @@
 use crate::core::{ConnectionStatus, Core, HostData, HostId, HostInstance};
+use crate::ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
 use crate::ui::theme::ArtisanTheme;
 use aqua_core::{DisplayItem, Rect, Role};
-use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
+use aqua_text::StyledSpan;
 use aqua_ui::{
     AlignItems,
     element::{Box as UiBox, Canvas, Element, Text},
@@ -17,6 +18,7 @@ const MARK_DELAY: Duration = Duration::from_millis(500);
 const MARK_FADE: Duration = Duration::from_millis(200);
 const REASSURANCE_DELAY: Duration = Duration::from_secs(5);
 const REASSURANCE_FADE: Duration = Duration::from_millis(500);
+const TEXT_WIDTH: f32 = 440.0;
 
 #[derive(Default)]
 pub struct WordmarkLoader {
@@ -179,26 +181,12 @@ impl ConnectionPresenter {
             let content = UiBox::new()
                 .layout("column")
                 .style(Style::new().align(AlignItems::CENTER))
-                .child(label(
-                    &theme,
-                    title,
-                    28.0,
-                    theme.colors.text.to_reference_text_color(),
-                ))
+                .spaced(Space::S8)
+                .child(TextRole::Heading.text(&theme, title).build())
                 .child(
                     UiBox::new()
-                        .style(Style::new().max_width(Length::Px(440.0)).margin_insets(
-                            aqua_core::Insets {
-                                top: 8.0,
-                                ..Default::default()
-                            },
-                        ))
-                        .child(label(
-                            &theme,
-                            detail,
-                            15.0,
-                            theme.colors.text_muted.to_reference_text_color(),
-                        ))
+                        .style(Style::new().max_width(Length::Px(TEXT_WIDTH)))
+                        .child(label(&theme, detail, theme.colors.text_muted))
                         .build(),
                 )
                 .build();
@@ -217,7 +205,7 @@ impl ConnectionPresenter {
             .build(theme, now, reduced_motion, "forge-connecting");
         let mut section = UiBox::new()
             .layout("column")
-            .gap(40.0)
+            .spaced(Space::S32)
             .style(Style::new().align(AlignItems::CENTER))
             .child(mark);
         if now.saturating_duration_since(since) >= REASSURANCE_DELAY {
@@ -245,7 +233,7 @@ impl ConnectionPresenter {
                     )
                 };
                 let starts = Rc::clone(&self.starts);
-                let action = crate::ui::button::Button::text("start-wsl-forge", theme, label)
+                let action = Button::text("start-wsl-forge", theme, ButtonTone::Primary, label)
                     .disabled(wsl.starting)
                     .debug_selector("start-wsl-forge")
                     .on_activate(move |_| starts.borrow_mut().push(identity.clone()))
@@ -257,7 +245,7 @@ impl ConnectionPresenter {
                 ("Connecting to Artisan Forge…".to_owned(), None)
             };
             let first = "This is taking more time than expected…";
-            let typography = text_style(&theme, 14.0, FontWeight::NORMAL);
+            let typography = TextRole::Label.style(&theme);
             let color = theme.colors.text_muted.to_reference_text_color();
             let color = [
                 color.hue_degrees,
@@ -266,25 +254,24 @@ impl ConnectionPresenter {
                 color.alpha,
             ];
             let spans = vec![
-                StyledSpan::new(first, text_style(&theme, 14.0, FontWeight::MEDIUM))
+                StyledSpan::new(first, TextRole::LabelStrong.style(&theme))
                     .gpui_source_color(color),
                 StyledSpan::new(format!(" {detail}"), typography).gpui_source_color(color),
             ];
             let mut line = UiBox::new()
                 .layout("column")
-                .gap(12.0)
+                .spaced(Space::S12)
                 .style(
                     Style::new()
                         .align(AlignItems::CENTER)
-                        .max_width(Length::Px(440.0)),
+                        .max_width(Length::Px(TEXT_WIDTH)),
                 )
                 .child(Text::new(format!("{first} {detail}")).spans(spans).build());
             if let Some(error) = host.wsl.as_ref().and_then(|wsl| wsl.error.as_ref()) {
                 line = line.child(label(
                     &theme,
                     &format!("Couldn't start it: {error}"),
-                    14.0,
-                    theme.colors.destructive_text.to_reference_text_color(),
+                    theme.colors.destructive_text,
                 ));
             }
             if let Some(action) = action {
@@ -328,18 +315,9 @@ impl ConnectionPresenter {
     }
 }
 
-fn text_style(theme: &ArtisanTheme, size: f32, weight: FontWeight) -> TextStyle {
-    TextStyle {
-        families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-        size_px: size,
-        weight,
-        ..TextStyle::default()
-    }
-}
-
-fn label(theme: &ArtisanTheme, value: &str, size: f32, color: aqua_core::GpuiTextColor) -> Element {
-    Text::new(value.to_owned())
-        .text_style(text_style(theme, size, FontWeight::NORMAL))
-        .gpui_source_color(color)
+fn label(theme: &ArtisanTheme, value: &str, ink: crate::ui::theme::Oklch) -> Element {
+    TextRole::Label
+        .text(theme, value.to_owned())
+        .gpui_source_color(ink.to_reference_text_color())
         .build()
 }

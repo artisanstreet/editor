@@ -1,22 +1,41 @@
 use std::rc::Rc;
 
-use aqua_core::Insets;
-use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::{
     AlignItems, JustifyContent,
     collection::List,
-    element::{Box as UiBox, Element, Text},
+    element::{Box as UiBox, Element},
     style::{Length, Style},
 };
 use artisan_api::{THREAD_RETENTION_DAYS_KEY, ThreadId};
 
-use super::{controller::SettingsController, ui, view::ViewAction};
+use super::{
+    controller::SettingsController,
+    ui::{self, Ink},
+    view::ViewAction,
+};
 use editor_core::HostData;
 use editor_ui::{
-    button::{Button, ButtonVariant},
+    kit::{ButtonTone, Density, Row as KitRow, Space, Spaced, TextRole},
     select::{Select, SelectEntry, SelectMenu},
     theme::ArtisanTheme,
 };
+
+const AGE_WIDTH: f32 = 112.0;
+const ACTION_WIDTH: f32 = 96.0;
+const VISIBLE_ROWS: usize = 8;
+
+fn row_height() -> f32 {
+    KitRow::ListItem(Density::Tall).lines() + Space::S2.px() + 2.0 * KitRow::FormRow.pad().y.px()
+}
+
+fn column(width: f32, child: Element) -> Element {
+    UiBox::new()
+        .width(width)
+        .style(Style::new().flex_shrink(0.0).justify(JustifyContent::END))
+        .child(child)
+        .build()
+}
+
 
 fn entries() -> Vec<SelectEntry<Option<u32>>> {
     let choices = artisan_api::setting_decl(THREAD_RETENTION_DAYS_KEY)
@@ -64,7 +83,7 @@ pub fn retention_menu(
         Some(selected(host)),
         entries(),
         controller.retention_select.clone(),
-        144.0,
+        ui::CONTROL_WIDTH,
     )
     .on_change(move |days| change(ViewAction::SetRetention(host_id.clone(), instance, days)))
     .on_open_change(move |open| emit(ViewAction::RetentionMenu(open)))
@@ -90,11 +109,7 @@ pub fn cleanup(
     .on_change(move |days| change(ViewAction::SetRetention(host_id.clone(), instance, days)))
     .on_open_change(move |open| emit(ViewAction::RetentionMenu(open)))
     .build();
-    let control = UiBox::new()
-        .width(144.0)
-        .style(Style::new().flex_shrink(0.0))
-        .child(select)
-        .build();
+    let control = ui::fixed(select);
     let row = ui::row(
         theme,
         "Delete inactive threads",
@@ -102,35 +117,6 @@ pub fn cleanup(
         Some(control),
     );
     ui::section(theme, "Cleanup", None, None, ui::card(theme, vec![row]))
-}
-
-fn label(theme: &ArtisanTheme, text: impl Into<String>, size: f32, muted: bool) -> Element {
-    Text::new(text.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: size,
-            ..TextStyle::default()
-        })
-        .gpui_source_color(if muted {
-            theme.colors.text_muted.to_reference_text_color()
-        } else {
-            theme.colors.text.to_reference_text_color()
-        })
-        .wrap(false)
-        .build()
-}
-
-fn heading(theme: &ArtisanTheme, text: &str) -> Element {
-    Text::new(text)
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: 12.0,
-            line_height_px: 16.0,
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::default()
-        })
-        .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
-        .build()
 }
 
 fn span(millis: i64) -> String {
@@ -196,31 +182,17 @@ pub fn archived(
         )
     } else {
         let header = UiBox::new()
-            .gap(16.0)
-            .style(
-                Style::new()
-                    .align(AlignItems::CENTER)
-                    .padding_insets(Insets {
-                        top: 8.0,
-                        bottom: 8.0,
-                        ..Insets::default()
-                    }),
-            )
-            .child(
-                UiBox::new()
-                    .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                    .child(heading(theme, "Thread"))
-                    .build(),
-            )
-            .child(
-                UiBox::new()
-                    .width(112.0)
-                    .child(heading(theme, "Archived"))
-                    .build(),
-            )
-            .child(UiBox::new().width(96.0).build())
+            .spaced(Space::S16)
+            .padded(KitRow::FormRow.pad().y)
+            .style(Style::new().align(AlignItems::CENTER))
+            .child(ui::grow(ui::line(theme, TextRole::Caption, Ink::Muted, "Thread")))
+            .child(column(
+                AGE_WIDTH,
+                ui::grow(ui::line(theme, TextRole::Caption, Ink::Muted, "Archived")),
+            ))
+            .child(UiBox::new().width(ACTION_WIDTH).build())
             .build();
-        let height = (rows.len().min(8) * 68) as f32;
+        let height = rows.len().min(VISIBLE_ROWS) as f32 * row_height();
         let theme = *theme;
         let row_emit = emit.clone();
         let list = List::new()
@@ -229,54 +201,44 @@ pub fn archived(
             .row(move |row| {
                 let id = row.id.clone();
                 let send = row_emit.clone();
-                let button = Button::text(
+                let button = ui::button(
+                    &theme,
                     format!("settings-archived-{}-unarchive", row.id),
-                    theme,
                     if row.restoring {
                         "Restoring"
                     } else {
                         "Unarchive"
                     },
-                )
-                .variant(ButtonVariant::Outline)
-                .disabled(row.restoring)
-                .on_activate(move |_| send(ViewAction::Unarchive(id.clone())))
-                .build();
+                    ButtonTone::Neutral,
+                    row.restoring,
+                    move || send(ViewAction::Unarchive(id.clone())),
+                );
                 UiBox::new()
                     .width(Length::Pct(100.0))
-                    .gap(16.0)
-                    .style(
-                        Style::new()
-                            .align(AlignItems::CENTER)
-                            .padding_insets(Insets {
-                                top: 10.0,
-                                bottom: 10.0,
-                                ..Insets::default()
-                            }),
-                    )
-                    .child(
-                        UiBox::new()
-                            .layout("column")
-                            .gap(2.0)
-                            .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
-                            .child(label(&theme, row.title.clone(), 14.0, false))
-                            .child(label(&theme, row.project.clone(), 12.0, true))
+                    .spaced(Space::S16)
+                    .padded(KitRow::FormRow.pad().y)
+                    .style(Style::new().align(AlignItems::CENTER))
+                    .child(ui::grow(
+                        ui::stack(Space::S2)
+                            .child(ui::line(&theme, TextRole::Label, Ink::Plain, row.title.clone()))
+                            .child(ui::line(
+                                &theme,
+                                TextRole::Caption,
+                                Ink::Muted,
+                                row.project.clone(),
+                            ))
                             .build(),
-                    )
-                    .child(
-                        UiBox::new()
-                            .width(112.0)
-                            .style(Style::new().flex_shrink(0.0))
-                            .child(label(&theme, format!("{} ago", span(row.age)), 14.0, true))
-                            .build(),
-                    )
-                    .child(
-                        UiBox::new()
-                            .width(96.0)
-                            .style(Style::new().flex_shrink(0.0).justify(JustifyContent::END))
-                            .child(button)
-                            .build(),
-                    )
+                    ))
+                    .child(column(
+                        AGE_WIDTH,
+                        ui::grow(ui::line(
+                            &theme,
+                            TextRole::Label,
+                            Ink::Muted,
+                            format!("{} ago", span(row.age)),
+                        )),
+                    ))
+                    .child(column(ACTION_WIDTH, button))
                     .build()
             })
             .style(
@@ -284,42 +246,40 @@ pub fn archived(
                     .width(Length::Pct(100.0))
                     .height(Length::Px(height)),
             )
-            .estimated_row_height(Length::Px(68.0))
+            .estimated_row_height(Length::Px(row_height()))
             .build()
             .with_key("archived-threads");
         ui::card(&theme, vec![header, list])
     };
-    let mut body = UiBox::new().layout("column").child(card);
+    let mut body = ui::stack(Space::S8).child(card);
     if let Some(error) = &page.error {
         body = body.child(ui::error_text(theme, error));
     }
     if !page.at_latest || page.error.is_some() {
         let send = emit.clone();
-        body = body.child(
-            Button::text("archived-latest", *theme, "Latest archived threads")
-                .disabled(page.loading)
-                .variant(ButtonVariant::Ghost)
-                .on_activate(move |_| send(ViewAction::ArchiveLatest))
-                .build(),
-        );
+        body = body.child(ui::button(
+            theme,
+            "archived-latest",
+            "Latest archived threads",
+            ButtonTone::Quiet,
+            page.loading,
+            move || send(ViewAction::ArchiveLatest),
+        ));
     }
     if page.next.is_some() {
         let send = emit.clone();
-        body = body.child(
-            Button::text(
-                "archived-older",
-                *theme,
-                if page.loading {
-                    "Loading…"
-                } else {
-                    "Older archived threads"
-                },
-            )
-            .disabled(page.loading)
-            .variant(ButtonVariant::Ghost)
-            .on_activate(move |_| send(ViewAction::ArchiveOlder))
-            .build(),
-        );
+        body = body.child(ui::button(
+            theme,
+            "archived-older",
+            if page.loading {
+                "Loading…"
+            } else {
+                "Older archived threads"
+            },
+            ButtonTone::Quiet,
+            page.loading,
+            move || send(ViewAction::ArchiveOlder),
+        ));
     }
     if let Some(error) = &controller.archive.error {
         body = body.child(ui::error_text(theme, error));

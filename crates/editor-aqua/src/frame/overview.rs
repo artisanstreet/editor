@@ -1,30 +1,21 @@
 use crate::core::Core;
-use crate::ui::chrome::card::{self, INSET_RADIUS, Surfaces};
 use crate::inspector::{AgentCard, Inspector, InspectorAction, agent_card, render_agent_card};
 use crate::shell::context_meter::ContextReading;
 use crate::ui::hint_card::{Phrase, hint_card};
-use crate::ui::asset::source_asset_glyph;
+use crate::ui::kit::{Divider, IconSize, Inset, Row, RowItem, Space, Spaced, Surface, TextRole};
 use crate::ui::theme::{ArtisanTheme, Oklch};
-use aqua::{Aqua, Style, pct, px};
+use aqua_core::Role;
 use aqua_core::scene::GpuiQuadPulse;
-use aqua_core::{CursorIcon, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Insets, Role};
 use aqua_text::overflow::OverflowMode;
-use aqua_text::{FontFamily, FontWeight, TextStyle};
+use aqua_ui::element::{Box as UiBox, Element};
+use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
-use aqua_ui::element::Element;
 use artisan_api::{EngineId, ItemId, Status, TextContent, ThreadId};
 use editor_assets::AssetId;
 use std::rc::Rc;
 
-pub const MARGIN: f32 = card::RADIUS - INSET_RADIUS;
-const PADDING: f32 = 16.0;
+const SURFACE: Surface = Surface::Inset;
 const WIDTH: f32 = 320.0;
-const FACT_GAP: f32 = 12.0;
-const TEXT: f32 = 14.0;
-const LINE: f32 = 20.0;
-const GLYPH: f32 = 16.0;
-const ROW_PAD: f32 = 8.0;
-const ROW_RADIUS: f32 = INSET_RADIUS - (PADDING - ROW_PAD);
 const DOT: f32 = 6.0;
 const PULSE_MS: u32 = 1_600;
 
@@ -101,123 +92,112 @@ pub fn card(
     if !overview.has_facts() && overview.agents.is_empty() {
         return None;
     }
-    let surfaces = Surfaces::of(theme);
     let facts = [
         overview
             .project
             .as_deref()
-            .map(|project| fact(theme, &surfaces, AssetId::TABLER_FOLDER, "Project", project)),
+            .map(|project| fact(theme, AssetId::TABLER_FOLDER, "Project", project)),
         overview
             .machine
             .as_deref()
-            .map(|machine| fact(theme, &surfaces, AssetId::TABLER_DEVICE_LAPTOP, "Machine", machine)),
+            .map(|machine| fact(theme, AssetId::TABLER_DEVICE_LAPTOP, "Machine", machine)),
         overview
             .branch
             .as_deref()
-            .map(|branch| fact(theme, &surfaces, AssetId::TABLER_GIT_BRANCH, "Branch", branch)),
+            .map(|branch| fact(theme, AssetId::TABLER_GIT_BRANCH, "Branch", branch)),
         overview
             .context
             .as_ref()
-            .map(|reading| context(theme, &surfaces, reading)),
+            .map(|reading| context(theme, reading)),
     ]
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
     let rule = (!facts.is_empty() && !overview.agents.is_empty())
-        .then(|| card::double_rule(theme, PADDING));
+        .then(|| Divider::Rule.build(theme, SURFACE.padding_px()));
     let agents = overview
         .agents
         .iter()
-        .map(|agent| subagent(theme, &surfaces, agent, reduced, Rc::clone(&emit)));
-    let content = Aqua::Box()
+        .map(|agent| subagent(theme, agent, reduced, Rc::clone(&emit)));
+    let content = UiBox::new()
         .layout("column")
-        .styles([Aqua::Style().padding(px(PADDING)).gap(8.0)])
-        .children((!facts.is_empty()).then(|| {
-            Aqua::Box()
-                .layout("column")
-                .styles([Aqua::Style().gap(FACT_GAP)])
-                .children(facts)
-                .build()
-        }))
+        .children(facts)
         .children(rule)
-        .child(
-            Aqua::Box()
-                .layout("column")
-                .styles([Aqua::Style().margin_insets(Insets {
-                    left: -ROW_PAD,
-                    right: -ROW_PAD,
-                    ..Insets::default()
-                })])
-                .children(agents)
-                .build(),
-        )
+        .children(agents)
         .build();
     Some(
-        Aqua::Box()
+        UiBox::new()
             .layout("row")
-            .styles([Aqua::Style()
-                .width(px(WIDTH))
-                .flex_shrink(0.0)
-                .align(AlignItems::START)
-                .margin_insets(Insets {
-                    top: MARGIN,
-                    right: MARGIN,
-                    bottom: MARGIN,
-                    ..Insets::default()
-                })])
-            .child(card::inset(theme, vec![content]))
+            .padded(Space::from(Inset::Frame))
+            .style(
+                Style::new()
+                    .width(Length::Px(WIDTH + 2.0 * Inset::Frame.px()))
+                    .flex_shrink(0.0)
+                    .align(AlignItems::START),
+            )
+            .child(SURFACE.build(theme, vec![content]).style(Style::new().flex_grow(1.0)))
             .build()
             .with_key("artisan-thread-overview")
             .debug_selector("artisan-thread-overview"),
     )
 }
 
-fn fact(theme: &ArtisanTheme, surfaces: &Surfaces, icon: AssetId, title: &str, value: &str) -> Element {
-    Aqua::Box()
-        .layout("row")
-        .styles([Aqua::Style().align(AlignItems::CENTER).gap(8.0)])
-        .child(source_asset_glyph(icon, GLYPH, surfaces.ink_dim.to_reference_paint()))
-        .child(label(theme, title, surfaces.ink_dim, Span::Fit))
-        .child(label(theme, value, surfaces.ink, Span::Trail))
-        .build()
-        .aria_label(format!("{title}: {value}"))
+fn fact(theme: &ArtisanTheme, icon: AssetId, title: &str, value: &str) -> Element {
+    RowItem::new(
+        format!("artisan-overview-fact-{title}"),
+        *theme,
+        Row::Heading,
+        SURFACE,
+        format!("{title}: {value}"),
+    )
+    .leading(IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint()))
+    .body(
+        UiBox::new()
+            .layout("row")
+            .spaced(Row::Heading.gap())
+            .style(body())
+            .child(label(theme, title, theme.colors.text_muted, Span::Fit))
+            .child(label(theme, value, theme.colors.text, Span::Trail))
+            .build(),
+    )
+    .build()
 }
 
-fn context(theme: &ArtisanTheme, surfaces: &Surfaces, reading: &ContextReading) -> Element {
+fn context(theme: &ArtisanTheme, reading: &ContextReading) -> Element {
     let percent = reading.percent().round();
     let theme = *theme;
-    Aqua::Box()
-        .layout("row")
-        .styles([Aqua::Style().align(AlignItems::CENTER).gap(8.0)])
-        .child(source_asset_glyph(
-            AssetId::TABLER_ARROWS_HORIZONTAL,
-            GLYPH,
-            surfaces.ink_dim.to_reference_paint(),
-        ))
-        .child(
-            Aqua::Box()
-                .styles([Aqua::Style().flex_grow(1.0).min_width(px(0.0))])
-                .child(crate::ui::progress::bar(&theme, reading.percent(), crate::ui::progress::HEIGHT))
-                .build(),
+    RowItem::new(
+        "artisan-overview-context",
+        theme,
+        Row::Heading,
+        SURFACE,
+        reading.percent_sentence(),
+    )
+    .leading(IconSize::Md.glyph(
+        AssetId::TABLER_ARROWS_HORIZONTAL,
+        theme.colors.text_muted.to_reference_paint(),
+    ))
+    .body(crate::ui::progress::bar(
+        &theme,
+        reading.percent(),
+        crate::ui::progress::HEIGHT,
+    ))
+    .build()
+    .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
+        hint_card(
+            &theme,
+            "Context Window",
+            &[
+                Phrase::Muted("The context window is ".to_owned()),
+                Phrase::Strong(format!("{percent:.0}%")),
+                Phrase::Muted(" full.".to_owned()),
+            ],
         )
-        .build()
-        .aria_label(reading.percent_sentence())
-        .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
-            hint_card(
-                &theme,
-                "Context Window",
-                &[
-                    Phrase::Muted("The context window is ".to_owned()),
-                    Phrase::Strong(format!("{percent:.0}%")),
-                    Phrase::Muted(" full.".to_owned()),
-                ],
-            )
-        })
+    })
 }
 
 fn subagent(
     theme: &ArtisanTheme,
-    surfaces: &Surfaces,
     agent: &Subagent,
     reduced: bool,
     emit: Rc<dyn Fn(InspectorAction)>,
@@ -226,78 +206,83 @@ fn subagent(
         crate::ui::engine::engine_icon(theme, engine)
     });
     let color = match agent.status {
-        Status::Running | Status::AwaitingUser => surfaces.ink,
+        Status::Running | Status::AwaitingUser => theme.colors.text,
         Status::Done => theme.colors.unread,
         Status::Failed => theme.colors.red.solid,
-        Status::Declined | Status::Cancelled => surfaces.ink_dim,
+        Status::Declined | Status::Cancelled => theme.colors.text_muted,
     };
-    let mut dot = Style::new()
-        .width(px(DOT))
-        .height(px(DOT))
-        .radius(px(DOT / 2.0))
-        .gpui_background(GpuiBackground::Solid(color.to_reference_paint()));
-    if agent.status == Status::Running && !reduced {
-        dot = dot.gpui_quad_pulse(GpuiQuadPulse {
-            start_ms: 0,
-            period_ms: PULSE_MS,
-            min_opacity: 0.4,
-        });
-    }
     let open = InspectorAction::OpenAgent {
         id: agent.id.clone(),
         thread: agent.thread.clone(),
     };
     let tooltip = agent.card.clone();
     let theme = *theme;
-    Aqua::Button()
-        .styles([Aqua::Style()
-            .width(pct(100.0))
-            .align(AlignItems::CENTER)
-            .gap(8.0)
-            .padding(px(ROW_PAD))
-            .radius(px(ROW_RADIUS))])
-        .child(source_asset_glyph(icon, GLYPH, surfaces.ink_dim.to_reference_paint()))
-        .child(label(&theme, &agent.label, surfaces.ink, Span::Fit))
-        .child(label(&theme, &agent.task, surfaces.ink_dim, Span::Fill))
-        .child(
-            Aqua::Box()
-                .styles([Aqua::Style()
-                    .width(px(GLYPH))
-                    .height(px(GLYPH))
+    RowItem::new(
+        format!("artisan-overview-agent-{}", agent.id),
+        theme,
+        Row::MenuItem,
+        SURFACE,
+        agent.label.clone(),
+    )
+    .role(Role::Button)
+    .leading(IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint()))
+    .body(
+        UiBox::new()
+            .layout("row")
+            .spaced(Row::MenuItem.gap())
+            .style(body())
+            .child(label(&theme, &agent.label, theme.colors.text, Span::Fit))
+            .child(label(&theme, &agent.task, theme.colors.text_muted, Span::Fill))
+            .build(),
+    )
+    .trailing(
+        UiBox::new()
+            .width(IconSize::Md.px())
+            .height(IconSize::Md.px())
+            .style(
+                Style::new()
                     .flex_shrink(0.0)
                     .align(AlignItems::CENTER)
-                    .justify(JustifyContent::CENTER)])
-                .child(Aqua::Box().styles([dot]).build())
-                .build(),
-        )
-        .on_activate(move || emit(open.clone()))
-        .build()
-        .with_key(format!("artisan-overview-agent-{}", agent.id))
-        .role(Role::Button)
-        .aria_label(agent.label.clone())
-        .cursor(CursorIcon::Pointer)
-        .hover_style(hover(&theme, surfaces.ink))
-        .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
-            render_agent_card(&tooltip, theme)
-        })
+                    .justify(JustifyContent::CENTER),
+            )
+            .child(dot(color, agent.status == Status::Running && !reduced))
+            .build(),
+    )
+    .on_activate(move || emit(open.clone()))
+    .build()
+    .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
+        render_agent_card(&tooltip, theme)
+    })
 }
 
-fn hover(theme: &ArtisanTheme, ink: Oklch) -> Style {
-    let (top, bottom) = crate::ui::hover::hover_fill_stops(theme, ink);
-    Style::new().gpui_background(GpuiBackground::LinearGradient {
-        angle: 180.0,
-        color_space: GpuiGradientColorSpace::Oklab,
-        stops: [
-            GpuiGradientStop {
-                percentage: 0.0,
-                color: top.to_reference_paint(),
-            },
-            GpuiGradientStop {
-                percentage: 1.0,
-                color: bottom.to_reference_paint(),
-            },
-        ],
-    })
+fn body() -> Style {
+    Style::new()
+        .align(AlignItems::CENTER)
+        .flex_grow(1.0)
+        .min_width(Length::Pct(0.0))
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the agent status dot is a painted status mark, not chrome"
+)]
+fn dot(color: Oklch, pulsing: bool) -> Element {
+    let mut style = Style::new()
+        .flex_shrink(0.0)
+        .gpui_background(aqua_core::GpuiBackground::Solid(color.to_reference_paint()));
+    if pulsing {
+        style = style.gpui_quad_pulse(GpuiQuadPulse {
+            start_ms: 0,
+            period_ms: PULSE_MS,
+            min_opacity: 0.4,
+        });
+    }
+    UiBox::new()
+        .width(DOT)
+        .height(DOT)
+        .radius(DOT / 2.0)
+        .style(style)
+        .build()
 }
 
 #[derive(Clone, Copy)]
@@ -308,31 +293,27 @@ enum Span {
 }
 
 fn label(theme: &ArtisanTheme, words: &str, color: Oklch, span: Span) -> Element {
-    let text = Aqua::Text(words.to_owned())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: TEXT,
-            line_height_px: LINE,
-            weight: FontWeight::NORMAL,
-            ..TextStyle::default()
-        })
+    let text = TextRole::Label
+        .text(theme, words.to_owned())
+        .gpui_source_color(color.to_reference_text_color())
         .wrap(false)
         .overflow(OverflowMode::EndEllipsis)
-        .gpui_color(color.to_reference_paint())
         .build();
     let (grow, justify) = match span {
         Span::Fit => (0.0, JustifyContent::START),
         Span::Fill => (1.0, JustifyContent::START),
         Span::Trail => (1.0, JustifyContent::END),
     };
-    Aqua::Box()
+    UiBox::new()
         .layout("row")
-        .styles([Aqua::Style()
-            .justify(justify)
-            .flex_grow(grow)
-            .flex_shrink(1.0)
-            .min_width(px(0.0))
-            .clip(true)])
+        .style(
+            Style::new()
+                .justify(justify)
+                .flex_grow(grow)
+                .flex_shrink(1.0)
+                .min_width(Length::Pct(0.0))
+                .clip(true),
+        )
         .child(text)
         .build()
 }

@@ -1,12 +1,12 @@
+use crate::ui::kit::{Space, Spaced, TextRole};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use aqua_core::Insets;
 use aqua_text::document::{
     CopySubstitution, SelectionDocumentId, SelectionSource, SelectionSourceId, SourceSlice,
 };
-use aqua_text::{FontFamily, FontWeight, StyledSpan, TextStyle};
+use aqua_text::{StyledSpan, TextStyle};
 use aqua_ui::collection::List;
 use aqua_ui::element::{Element, ui};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -217,25 +217,16 @@ impl Fence {
             .with_key(format!("{id}-lines"));
         let mut content = ui::Box::new()
             .layout("column")
+            .spaced(Space::S8)
             .width(Length::Pct(100.0))
             .child(body);
         if count > 24 {
-            content = content.child(
-                ui::Box::new()
-                    .style(Style::new().padding_insets(Insets {
-                        top: 8.0,
-                        ..Insets::default()
-                    }))
-                    .child(crate::ui::rich::narrative::callout::text(
-                        &theme,
-                        &format!("{count} lines · Scroll to read more"),
-                        12.0,
-                        16.0,
-                        FontWeight::NORMAL,
-                        theme.colors.text_muted,
-                    ))
-                    .build(),
-            );
+            content = content.child(crate::ui::rich::narrative::callout::text(
+                &theme,
+                &format!("{count} lines · Scroll to read more"),
+                TextRole::Caption,
+                theme.colors.text_muted,
+            ));
         }
         let placement = if self.source.contains('\n') {
             CopyPlacement::TopRight
@@ -271,12 +262,8 @@ fn line_view(
     on_color: Option<Rc<dyn Fn(ShowCopyMenu)>>,
 ) -> Element {
     let style = TextStyle {
-        families: vec![FontFamily::Named(theme.typography.mono.family.to_owned())],
-        size_px: ProseTypography::CODE_SIZE_PX,
-        line_height_px: ProseTypography::CODE_LINE_PX,
-        weight: FontWeight::NORMAL,
         letter_spacing_em: Some(0.0),
-        ..TextStyle::default()
+        ..TextRole::Code.style(theme)
     };
     let mut spans = Vec::new();
     let mut cursor = 0;

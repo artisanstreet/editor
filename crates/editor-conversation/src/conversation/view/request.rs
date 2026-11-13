@@ -1,10 +1,8 @@
 use crate::conversation::adapter::Action;
 use crate::conversation::content::SourceField;
-use editor_ui::button::{Button, ButtonVariant};
-use editor_ui::card::{CardStyle, compact_card, compact_card_content};
+use editor_ui::kit::{Button, ButtonTone, Row, Space, Spaced, Surface, TextRole};
 use editor_ui::theme::ArtisanTheme;
-use aqua_text::{FontFamily, FontWeight, TextStyle};
-use aqua_ui::element::{Box as UiBox, Element, Text};
+use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use artisan_api::{
     Answer, ApprovalRequest, Collection, Decision, Item, ItemKind, Status, ToolKind,
@@ -13,52 +11,38 @@ use std::rc::Rc;
 
 pub type Dispatch = Rc<dyn Fn(Action)>;
 
-fn body(text: impl Into<String>, theme: ArtisanTheme, muted: bool, mono: bool) -> Element {
-    Text::new(text.into())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(
-                if mono {
-                    theme.typography.mono.family
-                } else {
-                    theme.typography.sans.family
-                }
-                .to_owned(),
-            )],
-            size_px: theme.typography.editor_text_desktop,
-            line_height_px: theme.spacing.steps(6.0),
-            ..TextStyle::default()
-        })
-        .gpui_source_color(if muted {
-            theme.colors.text_muted.to_reference_text_color()
-        } else {
-            theme.colors.text.to_reference_text_color()
-        })
-        .build()
+const CARD: Surface = Surface::Card;
+
+pub const fn field_role(mono: bool) -> TextRole {
+    match mono {
+        true => TextRole::Code,
+        false => TextRole::Label,
+    }
 }
 
-fn heading(text: &str, theme: ArtisanTheme) -> Element {
-    Text::new(text.to_owned())
-        .text_style(TextStyle {
-            families: vec![FontFamily::Named(theme.typography.sans.family.to_owned())],
-            size_px: theme.typography.control_text,
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::default()
-        })
-        .gpui_source_color(theme.colors.text.to_reference_text_color())
+fn body(text: impl Into<String>, theme: ArtisanTheme, muted: bool, mono: bool) -> Element {
+    let ink = match muted {
+        true => theme.colors.text_muted,
+        false => theme.colors.text,
+    };
+    field_role(mono)
+        .text(&theme, text.into())
+        .gpui_source_color(ink.to_reference_text_color())
         .build()
 }
 
 fn card(theme: ArtisanTheme, title: &str, details: Element) -> Element {
-    let style = CardStyle::resolve(theme);
-    compact_card(style)
+    let block = UiBox::new()
+        .layout("column")
         .width(Length::Pct(100.0))
-        .child(
-            compact_card_content(style)
-                .child(heading(title, theme))
-                .build(),
-        )
-        .child(compact_card_content(style).child(details).build())
-        .build()
+        .padded(Row::FormRow.pad().y)
+        .spaced(Space::S8)
+        .style(TextRole::Label.inherit(&theme))
+        .child(TextRole::LabelStrong.text(&theme, title.to_owned()).build())
+        .child(details)
+        .build();
+    CARD.build(&theme, vec![block])
+        .style(Style::new().width(Length::Pct(100.0)))
 }
 
 fn decision_label(decision: Decision) -> &'static str {
@@ -101,7 +85,7 @@ pub fn approval<E>(
     let mut details = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(theme.spacing.steps(2.0));
+        .spaced(Space::S8);
     match &approval.request {
         ApprovalRequest::Command { cwd, .. } => {
             let command = UiBox::new()
@@ -131,23 +115,22 @@ pub fn approval<E>(
         let mut actions = UiBox::new()
             .layout("row")
             .width(Length::Pct(100.0))
-            .gap(theme.spacing.steps(2.0))
+            .spaced(Space::S8)
             .style(Style::new().wrap(true));
         for (index, decision) in approval.options.iter().copied().enumerate() {
             let id = item.id.clone();
             let dispatch = Rc::clone(&dispatch);
-            let variant = if index == 0 {
-                ButtonVariant::Default
-            } else {
-                ButtonVariant::Outline
+            let tone = match index {
+                0 => ButtonTone::Primary,
+                _ => ButtonTone::Neutral,
             };
             actions = actions.child(
                 Button::text(
                     format!("approve-{}-{index}", item.id),
                     theme,
+                    tone,
                     decision_label(decision),
                 )
-                .variant(variant)
                 .disabled(sending)
                 .on_activate(move |_| {
                     dispatch(Action::Answer {
@@ -211,7 +194,7 @@ pub fn question<E>(
     let mut details = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(theme.spacing.steps(2.0));
+        .spaced(Space::S8);
     match questions {
         Collection::Inline(questions) => {
             for index in 0..questions.len() {
@@ -246,10 +229,10 @@ pub fn answered<E>(
     let mut asked = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .gap(theme.spacing.steps(1.0))
+        .spaced(Space::S4)
         .style(
             Style::new()
-                .min_width(Length::Px(0.0))
+                .min_width(Length::Pct(0.0))
                 .gpui_source_text_color(theme.colors.text_muted.to_reference_text_color()),
         );
     match questions {
@@ -263,8 +246,8 @@ pub fn answered<E>(
     let content = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .style(Style::new().min_width(Length::Px(0.0)))
-        .gap(theme.spacing.steps(2.0))
+        .style(Style::new().min_width(Length::Pct(0.0)))
+        .spaced(Space::S8)
         .child(asked.build())
         .child(answer()?)
         .build();

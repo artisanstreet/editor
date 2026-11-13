@@ -1,7 +1,6 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use aqua_core::{GpuiBackground, Insets};
-use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::{
     AlignItems, JustifyContent,
     collection::List,
@@ -12,12 +11,19 @@ use editor_assets::AssetId;
 
 use super::{AnnotatedCode, Model};
 use crate::ui::{
-    button::{Button, ButtonVariant, LabelOverflow},
+    kit::{
+        self, Button, ButtonSize, ButtonTone, Corner, Density, Divider, Ellipsis, Hover, Label,
+        Space, Spaced, Surface, TextRole,
+    },
     rich::actions::{OpenReference, ResourceScope},
-    theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens, TextStep, TypographyTokens},
+    theme::{ArtisanTheme, Opacity},
 };
 
-const LINE_HEIGHT: f32 = 20.0;
+const LINE_HEIGHT: f32 = TextRole::Code.spec().line;
+const NOTE: kit::Row = kit::Row::ListItem(Density::Dense);
+const BADGE: f32 = 16.0;
+const MARKER: f32 = 24.0;
+const EDGE: f32 = 2.0;
 
 pub(crate) struct AnnotatedState {
     model: Arc<Model>,
@@ -89,7 +95,7 @@ impl AnnotatedCode {
         let active = state.borrow().active();
         let mut body = UiBox::new()
             .layout("column")
-            .gap(8.0)
+            .spaced(Space::S8)
             .width(Length::Pct(100.0))
             .style(Style::new().min_width(Length::Px(0.0)));
         if let Some(path) = &model.path {
@@ -102,14 +108,14 @@ impl AnnotatedCode {
             let owner = Rc::downgrade(&state);
             let rendered = Arc::downgrade(&model);
             body = body.child(
-                Button::icon_text(
+                Button::new(
                     format!("{id}-path"),
                     *theme,
-                    AssetId::TABLER_FILE_TEXT,
-                    format!("{path}:{}", model.start),
+                    ButtonTone::Quiet,
+                    ButtonSize::Md,
+                    Label::IconText(AssetId::TABLER_FILE_TEXT, format!("{path}:{}", model.start)),
                 )
-                .variant(ButtonVariant::Ghost)
-                .label_overflow(LabelOverflow::Start)
+                .ellipsis(Ellipsis::Start)
                 .on_activate(move |_| {
                     if owner
                         .upgrade()
@@ -127,8 +133,11 @@ impl AnnotatedCode {
             u16::try_from(model.number(count.saturating_sub(1)).max(1).ilog10() + 1)
                 .unwrap_or(u16::MAX),
         )
-        .mul_add(8.0, 20.0);
-        let width = model.width + gutter + if model.notes.is_empty() { 0.0 } else { 24.0 };
+        .mul_add(Space::S8.px(), Space::S8.px());
+        let width = model.width
+            + gutter
+            + Space::S12.px()
+            + if model.notes.is_empty() { 0.0 } else { MARKER };
         let height = crate::ui::rich::charts::scale::f32_of_count(count.min(18)) * LINE_HEIGHT;
         let row_model = Arc::clone(&model);
         let row_state = state.clone();
@@ -177,8 +186,9 @@ impl AnnotatedCode {
                 .with_key(format!("{id}-code-scroll")),
         );
         if !model.notes.is_empty() {
-            let height =
-                crate::ui::rich::charts::scale::f32_of_count(model.notes.len().min(6)) * 40.0;
+            let note_height = TextRole::Label.spec().line + 2.0 * NOTE.pad().y.px();
+            let height = crate::ui::rich::charts::scale::f32_of_count(model.notes.len().min(6))
+                * note_height;
             let note_model = Arc::clone(&model);
             let note_theme = *theme;
             let note_id = id.to_owned();
@@ -186,7 +196,7 @@ impl AnnotatedCode {
                 .items(0..model.notes.len())
                 .key(|index| *index)
                 .virtualize()
-                .estimated_row_height(Length::Px(40.0))
+                .estimated_row_height(Length::Px(note_height))
                 .style(
                     Style::new()
                         .width(Length::Pct(100.0))
@@ -208,63 +218,18 @@ impl AnnotatedCode {
                 })
                 .build()
                 .with_key(format!("{id}-notes-{:p}", Arc::as_ptr(&model)));
-            body = body.child(
-                UiBox::new()
-                    .width(Length::Pct(100.0))
-                    .style(
-                        Style::new()
-                            .min_width(Length::Px(0.0))
-                            .padding_insets(Insets {
-                                top: 8.0,
-                                ..Insets::default()
-                            })
-                            .gpui_border(
-                                Insets {
-                                    top: 1.0,
-                                    ..Insets::default()
-                                },
-                                theme.colors.text.at(Opacity::Rule).to_reference_paint(),
-                                false,
-                            ),
-                    )
-                    .child(notes)
-                    .build(),
-            );
+            body = body.child(Divider::Rule.build(theme, 0.0)).child(notes);
         }
         body.build()
-    }
-}
-
-fn text_style(
-    theme: &ArtisanTheme,
-    mono: bool,
-    size: f32,
-    line: f32,
-    weight: FontWeight,
-) -> TextStyle {
-    TextStyle {
-        families: vec![FontFamily::Named(
-            if mono {
-                theme.typography.mono.family
-            } else {
-                theme.typography.sans.family
-            }
-            .to_owned(),
-        )],
-        size_px: size,
-        line_height_px: line,
-        weight,
-        letter_spacing_em: mono.then_some(0.0),
-        ..TextStyle::default()
     }
 }
 
 fn badge(theme: &ArtisanTheme, number: usize, active: bool) -> Element {
     let accent = theme.colors.link;
     UiBox::new()
-        .width(16.0)
-        .height(16.0)
-        .radius(RadiusTokens::value(RadiusStep::Md))
+        .width(BADGE)
+        .height(BADGE)
+        .radius(Corner::Full.resolve(BADGE))
         .style(
             Style::new()
                 .flex_shrink(0.0)
@@ -282,13 +247,7 @@ fn badge(theme: &ArtisanTheme, number: usize, active: bool) -> Element {
         )
         .child(
             Text::new(number.to_string())
-                .text_style(text_style(
-                    theme,
-                    false,
-                    TypographyTokens::size(TextStep::X3s),
-                    16.0,
-                    FontWeight(600),
-                ))
+                .text_style(TextRole::Caption.style(theme))
                 .gpui_source_color(
                     if active {
                         theme.colors.background
@@ -342,7 +301,7 @@ fn code_row(
     };
     let mut style = Style::new().min_width(Length::Px(0.0)).gpui_border(
         Insets {
-            left: 2.0,
+            left: EDGE,
             ..Insets::default()
         },
         edge.to_reference_paint(),
@@ -356,43 +315,27 @@ fn code_row(
     let mut row = UiBox::new()
         .width(Length::Pct(100.0))
         .height(LINE_HEIGHT)
+        .spaced(Space::S12)
         .clip(true)
         .style(style);
     if !model.notes.is_empty() {
-        let mut marker = UiBox::new().width(24.0).style(
+        let mut marker = UiBox::new().width(MARKER).style(
             Style::new()
                 .flex_shrink(0.0)
-                .justify(JustifyContent::CENTER)
-                .padding_insets(Insets {
-                    top: 2.0,
-                    ..Insets::default()
-                }),
+                .align(AlignItems::CENTER)
+                .justify(JustifyContent::CENTER),
         );
         if let Some(note) = model.marker[index] {
             marker = marker.child(badge(theme, note + 1, active == Some(note)));
         }
         row = row.child(marker.build());
     }
-    let style = text_style(
-        theme,
-        true,
-        TypographyTokens::size(TextStep::XsMid),
-        LINE_HEIGHT,
-        FontWeight::NORMAL,
-    );
+    let style = TextRole::Code.style(theme);
     row = row
         .child(
             UiBox::new()
                 .width(gutter)
-                .style(
-                    Style::new()
-                        .flex_shrink(0.0)
-                        .justify(JustifyContent::END)
-                        .padding_insets(Insets {
-                            right: 12.0,
-                            ..Insets::default()
-                        }),
-                )
+                .style(Style::new().flex_shrink(0.0).justify(JustifyContent::END))
                 .child(
                     Text::new(model.number(index).to_string())
                         .text_style(style.clone())
@@ -408,11 +351,7 @@ fn code_row(
                     Style::new()
                         .flex_grow(1.0)
                         .min_width(Length::Px(0.0))
-                        .min_height(Length::Px(LINE_HEIGHT))
-                        .padding_insets(Insets {
-                            right: 12.0,
-                            ..Insets::default()
-                        }),
+                        .min_height(Length::Px(LINE_HEIGHT)),
                 )
                 .child(
                     Text::new(model.lines[index].clone())
@@ -452,36 +391,21 @@ fn note_row(
     } else {
         format!("L{}–{}", note.span.start, note.span.end)
     };
-    let mut style = Style::new()
-        .align(AlignItems::FLEX_START)
-        .padding_insets(Insets {
-            left: 6.0,
-            right: 6.0,
-            top: 4.0,
-            bottom: 4.0,
-        });
-    if on {
-        style = style.gpui_background(GpuiBackground::Solid(
-            theme
-                .colors
-                .link
-                .at(Opacity::NoteHover)
-                .to_reference_paint(),
-        ));
-    }
     let mut row = UiBox::new()
-        .gap(8.0)
-        .radius(RadiusTokens::value(RadiusStep::Sm))
-        .style(style)
-        .child(
-            UiBox::new()
-                .style(Style::new().padding_insets(Insets {
-                    top: 2.0,
-                    ..Insets::default()
-                }))
-                .child(badge(theme, index + 1, on))
-                .build(),
-        );
+        .spaced(NOTE.gap())
+        .padded(NOTE.pad().y)
+        .radius(NOTE.radius_in(Surface::Card))
+        .style(Style::new().align(AlignItems::FLEX_START));
+    if on {
+        row = row.style(Hover::Neutral.style(theme));
+    }
+    row = row.child(
+        UiBox::new()
+            .height(TextRole::Label.spec().line)
+            .style(Style::new().align(AlignItems::CENTER))
+            .child(badge(theme, index + 1, on))
+            .build(),
+    );
     if let Some(path) = &model.path {
         let action = OpenReference {
             scope,
@@ -491,29 +415,28 @@ fn note_row(
         let owner = Rc::downgrade(&state);
         let rendered = Arc::downgrade(model);
         row = row.child(
-            Button::text(format!("{id}-note-reference-{index}"), *theme, label)
-                .variant(ButtonVariant::Ghost)
-                .on_activate(move |_| {
-                    if owner
-                        .upgrade()
-                        .zip(rendered.upgrade())
-                        .is_some_and(|(state, model)| Arc::ptr_eq(&state.borrow().model, &model))
-                    {
-                        open(action.clone(), instance);
-                    }
-                })
-                .build(),
+            Button::text(
+                format!("{id}-note-reference-{index}"),
+                *theme,
+                ButtonTone::Quiet,
+                label,
+            )
+            .size(ButtonSize::Sm)
+            .on_activate(move |_| {
+                if owner
+                    .upgrade()
+                    .zip(rendered.upgrade())
+                    .is_some_and(|(state, model)| Arc::ptr_eq(&state.borrow().model, &model))
+                {
+                    open(action.clone(), instance);
+                }
+            })
+            .build(),
         );
     } else {
         row = row.child(
             Text::new(label)
-                .text_style(text_style(
-                    theme,
-                    false,
-                    TypographyTokens::size(TextStep::Xs),
-                    16.0,
-                    FontWeight::MEDIUM,
-                ))
+                .text_style(TextRole::Caption.style(theme))
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .build(),
         );
@@ -523,13 +446,7 @@ fn note_row(
             .style(Style::new().flex_grow(1.0).min_width(Length::Px(0.0)))
             .child(
                 Text::new(note.text.clone())
-                    .text_style(text_style(
-                        theme,
-                        false,
-                        TypographyTokens::size(TextStep::Sm),
-                        20.0,
-                        FontWeight::NORMAL,
-                    ))
+                    .text_style(TextRole::Label.style(theme))
                     .gpui_source_color(theme.colors.text.to_reference_text_color())
                     .wrap(true)
                     .build(),

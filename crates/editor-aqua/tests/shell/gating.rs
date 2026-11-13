@@ -392,7 +392,18 @@ fn editor_word_left_consumes_alt_left_before_workspace_back() {
 #[derive(Default)]
 struct HoverFixture {
     visible: bool,
-    offset: f32,
+}
+
+fn hover_row(theme: &editor_aqua::ui::theme::ArtisanTheme, key: &str) -> Element {
+    use editor_aqua::ui::kit::{Hover, live};
+    live::track(
+        UiBox::new()
+            .width(200.0)
+            .height(40.0)
+            .child(live::layer(Hover::Neutral, theme, 8.0, false))
+            .build()
+            .with_key(key.to_owned()),
+    )
 }
 
 impl SectionViews for HoverFixture {
@@ -403,33 +414,13 @@ impl SectionViews for HoverFixture {
         _: &ObservedWindowState,
     ) -> anyhow::Result<Element> {
         let theme = shell.preferences.theme();
-        let sidebar = &shell.entry.workspace().unwrap().sidebar;
         Ok(UiBox::new()
             .width(200.0)
             .height(200.0)
             .layout("column")
-            .child(
-                UiBox::new()
-                    .width(200.0)
-                    .height(40.0)
-                    .child(sidebar.threads_hover.background("hover-first", &theme, 8.0))
-                    .build()
-                    .with_key("hover-first"),
-            )
-            .child(
-                UiBox::new()
-                    .width(200.0)
-                    .height(40.0)
-                    .child(
-                        sidebar
-                            .threads_hover
-                            .background("hover-second", &theme, 8.0),
-                    )
-                    .build()
-                    .with_key("hover-second"),
-            )
-            .build()
-            .with_key("sidebar-threads-hover-surface"))
+            .child(hover_row(&theme, "hover-first"))
+            .child(hover_row(&theme, "hover-second"))
+            .build())
     }
 
     fn mounted(&mut self, _: &mut Shell, ui: &mut UiApp, _: &mut AppCtx<'_>, _: AquaWindowId) {
@@ -439,44 +430,40 @@ impl SectionViews for HoverFixture {
 
     fn input(
         &mut self,
-        shell: &mut Shell,
+        _: &mut Shell,
         ui: &mut UiApp,
         ctx: &mut AppCtx<'_>,
         _: AquaWindowId,
-        input: &InputEvent,
+        _: &InputEvent,
         _: bool,
     ) -> bool {
         ui.host_mut().motion_mut().set_reduced_motion(
             aqua_ui::motion::ReducedMotion::Reduce,
             ctx.now().as_secs_f64(),
         );
-        if let InputEvent::PointerMove(pointer) = input {
-            let hover = &shell.entry.workspace().unwrap().sidebar.threads_hover;
-            match pointer.position.y {
-                y if y < 40.0 => hover.hovered(
-                    "hover-first",
-                    true,
-                    editor_aqua::ui::hover::HoverTone::Neutral,
-                ),
-                y if y < 80.0 => hover.hovered(
-                    "hover-second",
-                    true,
-                    editor_aqua::ui::hover::HoverTone::Neutral,
-                ),
-                _ => hover.hide(),
-            }
-        }
         false
     }
 
     fn wake(&mut self, _: &mut Shell, ui: &mut UiApp, _: &mut AppCtx<'_>, _: AquaWindowId) -> bool {
-        let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
-            "sidebar-threads-hover-hover-first",
-        ));
-        let pill = ui.tree().sole_node_with_key(key).unwrap();
-        let paint = ui.tree().paint(pill).unwrap();
-        self.visible = paint.opacity == Some(1.0);
-        self.offset = paint.transform.map_or(0.0, |transform| transform.ty);
+        let tree = ui.tree();
+        let row = tree
+            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+                "hover-first",
+            )))
+            .unwrap();
+        let layer_key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("kit-hover-layer"));
+        let layer = tree
+            .get(row)
+            .unwrap()
+            .children
+            .iter()
+            .copied()
+            .find(|child| {
+                tree.get(*child)
+                    .is_some_and(|record| record.key == Some(layer_key))
+            })
+            .unwrap();
+        self.visible = tree.paint(layer).unwrap().opacity == Some(1.0);
         false
     }
 }

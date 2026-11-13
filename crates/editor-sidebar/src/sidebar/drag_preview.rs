@@ -1,17 +1,13 @@
-use aqua_core::{NodeId, Point, Size};
+use aqua_core::{NodeId, Point};
 use aqua_ui::{
     element::Element,
     input::DragSnapshot,
     overlay::{Align, DismissPolicy, OverlayId, OverlayKind, Side},
     popup::PopupOptions,
-    style::Style,
 };
 
 use editor_core::{DraggedThread, HostInstance};
-use editor_ui::{
-    glass::glass_card_shadows,
-    theme::{ArtisanTheme, Elevation},
-};
+use editor_ui::theme::ArtisanTheme;
 
 pub fn preview_position(snapshot: &DragSnapshot) -> Point {
     Point::new(
@@ -20,17 +16,8 @@ pub fn preview_position(snapshot: &DragSnapshot) -> Point {
     )
 }
 
-pub fn preview(title: &str, theme: ArtisanTheme, viewport: Size) -> Element {
-    super::row::drag_preview(title, theme, viewport)
-        .style(
-            Style::new().gpui_shadows(
-                glass_card_shadows(&theme, Elevation::Overlay)
-                    .into_iter()
-                    .map(aqua_ui::style::GpuiShadowLayer::from)
-                    .collect(),
-            ),
-        )
-        .exclude_from_hit_testing()
+pub fn preview(title: &str, theme: ArtisanTheme) -> Element {
+    super::row::drag_preview(title, theme).exclude_from_hit_testing()
 }
 
 pub struct DragPreviewHost {
@@ -60,7 +47,7 @@ impl DragPreviewHost {
         options.placement.align = Align::Start;
         options.placement.gap = 0.0;
         options.placement.flip = false;
-        let content = preview(&payload.title, theme, app.viewport());
+        let content = preview(&payload.title, theme);
         let overlay = app
             .open_popup_measured(owner, content, options)
             .map_err(|error| error.to_string())?;

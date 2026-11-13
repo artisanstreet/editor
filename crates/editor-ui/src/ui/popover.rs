@@ -1,12 +1,11 @@
 use aqua_ui::{
-    element::{Box as UiBox, Element, Key, Scroll},
+    element::{Element, Key, Scroll},
     style::{Axis, Length, Style},
 };
 
-use super::{
-    glass::{GlassStrength, glass_card_shadows, glass_layers},
-    theme::{ArtisanTheme, Elevation, RadiusStep, RadiusTokens},
-};
+use super::{kit::Surface, theme::ArtisanTheme};
+
+const VIEWPORT_MARGIN: f32 = 16.0;
 
 pub struct PopoverPanel {
     id: Key,
@@ -14,9 +13,6 @@ pub struct PopoverPanel {
     content: Element,
     viewport_width: f32,
     viewport_height: f32,
-    menu_padding: f32,
-    glass: Option<GlassStrength>,
-    select_menu: bool,
 }
 
 impl PopoverPanel {
@@ -33,101 +29,31 @@ impl PopoverPanel {
             content,
             viewport_width,
             viewport_height,
-            menu_padding: 6.0,
-            glass: None,
-            select_menu: false,
         }
-    }
-
-    pub const fn menu_padding(mut self, padding: f32) -> Self {
-        self.menu_padding = padding;
-        self
-    }
-    pub const fn quiet_glass_menu(mut self) -> Self {
-        self.glass = Some(GlassStrength::Quiet);
-        self
-    }
-    pub const fn strong_glass_menu(mut self) -> Self {
-        self.glass = Some(GlassStrength::Strong);
-        self
-    }
-    pub const fn select_menu(mut self) -> Self {
-        self.select_menu = true;
-        self
     }
 
     pub fn build(self) -> Element {
-        let radius = RadiusTokens::value(if self.select_menu || self.glass.is_some() {
-            RadiusStep::X2l
-        } else {
-            RadiusStep::Lg
-        });
-        let mut style = Style::new()
-            .axis(Axis::Column)
-            .max_width(Length::Px((self.viewport_width - 16.0).max(1.0)))
-            .max_height(Length::Px((self.viewport_height - 16.0).max(1.0)))
-            .radius(Length::Px(radius))
-            .gpui_source_text_color(self.theme.colors.text.to_reference_text_color());
-        if self.select_menu {
-            let mut shadows = vec![self.theme.elevation.hairline.into()];
-            shadows.extend(
-                self.theme
-                    .elevation
-                    .drops(Elevation::Overlay)
-                    .iter()
-                    .copied()
-                    .map(aqua_ui::style::GpuiShadowLayer::from),
-            );
-            style = style.gpui_shadows(shadows);
-        } else if self.glass.is_none() {
-            style = style.gpui_border(
-                aqua_core::Insets::uniform(1.0),
-                self.theme.colors.line.to_reference_paint(),
-                false,
-            );
-        }
-        if self.glass.is_some() {
-            style = style.gpui_shadows(
-                glass_card_shadows(&self.theme, Elevation::Overlay)
-                    .into_iter()
-                    .map(aqua_ui::style::GpuiShadowLayer::from)
-                    .collect(),
-            );
-        } else {
-            style = style.gpui_background(aqua_core::GpuiBackground::Solid(
-                self.theme.colors.raised.to_reference_paint(),
-            ));
-        }
+        let width = Length::Px((self.viewport_width - VIEWPORT_MARGIN).max(1.0));
+        let height = Length::Px(
+            (self.viewport_height - VIEWPORT_MARGIN - 2.0 * Surface::Menu.padding_px()).max(1.0),
+        );
         let scroll = Scroll::new()
             .style(
                 Style::new()
                     .axis(Axis::Column)
-                    .padding(Length::Px(if self.select_menu {
-                        0.0
-                    } else {
-                        self.menu_padding
-                    }))
-                    .max_width(Length::Px((self.viewport_width - 16.0).max(1.0)))
-                    .max_height(Length::Px((self.viewport_height - 16.0).max(1.0))),
+                    .max_width(width)
+                    .max_height(height),
             )
             .child(self.content)
             .build();
-        if self.glass == Some(GlassStrength::Strong) {
-            return crate::ui::chrome::account::menu_surface(&self.theme, vec![scroll])
-                .style(
-                    Style::new()
-                        .max_width(Length::Px((self.viewport_width - 16.0).max(1.0)))
-                        .max_height(Length::Px((self.viewport_height - 16.0).max(1.0))),
-                )
-                .with_key(self.id);
-        }
-        let mut root = UiBox::new()
-            .style(style)
-            .clip(self.select_menu || self.glass.is_some());
-        if let Some(strength) = self.glass {
-            root = root.child(glass_layers(&self.theme, strength, radius));
-        }
-        root.child(scroll).build().with_key(self.id)
+        Surface::Menu
+            .build(&self.theme, vec![scroll])
+            .style(
+                Style::new()
+                    .max_width(width)
+                    .gpui_source_text_color(self.theme.colors.text.to_reference_text_color()),
+            )
+            .with_key(self.id)
     }
 }
 
@@ -139,8 +65,6 @@ pub struct Popover {
     content: Element,
     viewport: aqua_core::Size,
     dismiss: std::rc::Rc<dyn Fn()>,
-    menu_padding: f32,
-    glass: Option<GlassStrength>,
 }
 
 impl Popover {
@@ -161,34 +85,18 @@ impl Popover {
             content,
             viewport,
             dismiss: std::rc::Rc::new(dismiss),
-            menu_padding: 6.0,
-            glass: None,
         }
-    }
-    pub const fn menu_padding(mut self, padding: f32) -> Self {
-        self.menu_padding = padding;
-        self
-    }
-    pub const fn quiet_glass_menu(mut self) -> Self {
-        self.glass = Some(GlassStrength::Quiet);
-        self
-    }
-    pub const fn strong_glass_menu(mut self) -> Self {
-        self.glass = Some(GlassStrength::Strong);
-        self
     }
     pub fn into_parts(self) -> (Element, aqua_ui::popup::PopupOptions) {
         use aqua_core::{InputEvent, Key as InputKey, NamedKey, Role};
         use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
-        let mut panel = PopoverPanel::new(
+        let panel = PopoverPanel::new(
             self.id,
             self.theme,
             self.content,
             self.viewport.w,
             self.viewport.h,
-        )
-        .menu_padding(self.menu_padding);
-        panel.glass = self.glass;
+        );
         let tab_dismiss = self.dismiss.clone();
         let panel = panel.build().role(Role::Menu).aria_label(self.label).debug_selector(crate::ui::menu_keys::POPOVER_MENU).on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
             if matches!(&event.input, RoutedInput::Native(InputEvent::KeyDown(key)) if key.key == InputKey::Named(NamedKey::Tab)) {
