@@ -241,7 +241,8 @@ impl Hub {
             .await?
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
-        let mut statuses = self.mcp_auth().await?;
+        let recorded = self.mcp_auth().await?;
+        let mut statuses = recorded.clone();
         statuses.retain(|name, _| servers.iter().any(|server| &server.name == name));
         for server in &servers {
             let Some(url) = server.url.as_ref().filter(|url| !url.trim().is_empty()) else {
@@ -271,6 +272,9 @@ impl Hub {
                     tracing::debug!(server = %server.name, "probing for sign-in: {error:#}");
                 }
             }
+        }
+        if statuses == recorded {
+            return Ok(());
         }
         self.store()
             .set_setting(MCP_AUTH_KEY.to_owned(), serde_json::to_value(&statuses)?)
