@@ -97,7 +97,9 @@ pub fn chips_row(theme: &ArtisanTheme, chips: &[EngineChip], row_key: &str) -> E
                         vec![
                             TextRole::Caption
                                 .text(&t, detail.clone())
-                                .gpui_source_color(t.colors.text_muted.to_reference_text_color())
+                                .gpui_source_color(
+                                    t.colors.text_muted_glass.to_reference_text_color(),
+                                )
                                 .wrap(true)
                                 .build(),
                         ],

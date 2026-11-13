@@ -225,7 +225,10 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
                 UiBox::new()
                     .spaced(Space::S8)
                     .style(Style::new().align(AlignItems::CENTER))
-                    .child(muted_glyph(&theme, *icon))
+                    .child(
+                        IconSize::Md
+                            .glyph(*icon, theme.colors.text_muted_glass.to_reference_paint()),
+                    )
                     .child(TextRole::Caption.text(&theme, value.clone()).build())
                     .build(),
             );
@@ -238,7 +241,7 @@ pub fn render_agent_card(card: &AgentCard, theme: ArtisanTheme) -> Element {
                 &theme,
                 TextRole::Caption,
                 card.purpose.clone(),
-                theme.colors.text_muted,
+                theme.colors.text_muted_glass,
             )
             .wrap(true)
             .build(),

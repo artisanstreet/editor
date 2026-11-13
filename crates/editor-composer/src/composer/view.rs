@@ -964,7 +964,7 @@ fn picker_tooltip_surface(
             vec![
                 TextRole::Caption
                     .text(theme, "")
-                    .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
+                    .gpui_source_color(theme.colors.text_muted_glass.to_reference_text_color())
                     .spans(spans)
                     .wrap(true)
                     .build(),
