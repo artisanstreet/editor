@@ -124,7 +124,9 @@ pub const TAB_CARD_PADDING_PX: f32 = Inset::Edge.px();
 pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
 const TAB_RADIUS: f32 = Radius::Panel.px();
 const FILLET_RADIUS: f32 = Inset::Frame.px();
-const SHELL_RADIUS: f32 = Radius::Shell.px();
+pub const CARD_RADIUS: f32 = Radius::Panel.px();
+const RIM: f32 = 0.09;
+const SHEET_TO_SIDEBAR: f32 = 0.47;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryKey {
@@ -152,7 +154,6 @@ impl GeometryCache {
 
 #[derive(Clone, Debug, Default)]
 pub struct Geometry {
-    pub well: Vec<PathCommand>,
     pub shell: Vec<PathCommand>,
     pub edge: Vec<PathCommand>,
 }
@@ -160,16 +161,13 @@ pub struct Geometry {
 impl Geometry {
     pub fn new(key: GeometryKey) -> Self {
         let bounds = Rect::from_origin_size(Point::ZERO, key.size);
-        let well = trace_card_hole(bounds, key.radius);
         let mut shell = trace_silhouette(bounds, key.tab_width, key.radius);
         if let Some(right) = strip_right(bounds, key.tab_width, key.reveal) {
             shell.extend(trace_strip(bounds, key.tab_width, key.radius, right));
         }
-        shell.extend(well.clone());
         let edge_bounds = Rect::from_edges(0.5, 0.5, key.size.w - 0.5, key.size.h - 0.5);
         let edge = trace_silhouette(edge_bounds, key.tab_width - 1.0, key.radius - 0.5);
         Self {
-            well,
             shell,
             edge,
         }
@@ -276,37 +274,12 @@ fn trace_strip(bounds: Rect, tab_width: f32, radius: f32, right: f32) -> Vec<Pat
     path
 }
 
-fn trace_card_hole(bounds: Rect, radius: f32) -> Vec<PathCommand> {
-    let x0 = bounds.x + TAB_CARD_PADDING_PX;
-    let y0 = bounds.y + TAB_CARD_TAB_HEIGHT_PX + TAB_CARD_PADDING_PX;
-    let x1 = bounds.right() - TAB_CARD_PADDING_PX;
-    let y1 = bounds.bottom() - TAB_CARD_PADDING_PX;
-    let r = radius - TAB_CARD_PADDING_PX;
-    vec![
-        mov(x0 + r, y0),
-        arc(r, false, x0, y0 + r),
-        line(x0, y1 - r),
-        arc(r, false, x0 + r, y1),
-        line(x1 - r, y1),
-        arc(r, false, x1, y1 - r),
-        line(x1, y0 + r),
-        arc(r, false, x1 - r, y0),
-        PathCommand::Close,
-    ]
-}
-
 #[derive(Clone, Debug)]
 pub struct ShadowPass {
     pub bounds: Rect,
     pub corners: CornerRadii,
     pub layer: ShadowLayer,
     pub clip: Rect,
-}
-#[derive(Clone, Copy, Debug)]
-pub struct BackdropPass {
-    pub bounds: Rect,
-    pub corners: CornerRadii,
-    pub blur: f32,
 }
 #[derive(Clone, Debug)]
 pub struct PathPass {
@@ -316,7 +289,7 @@ pub struct PathPass {
 #[derive(Clone, Debug)]
 pub struct PreparedTabCard {
     pub shadows: Vec<ShadowPass>,
-    pub backdrops: Vec<BackdropPass>,
+    pub backdrop: aqua_core::DisplayItem,
     pub paths: Vec<PathPass>,
 }
 
@@ -327,6 +300,22 @@ fn outside(rect: Rect, reach: Rect) -> [Rect; 4] {
         Rect::from_edges(reach.x, rect.y, rect.x, rect.bottom()),
         Rect::from_edges(rect.right(), rect.y, reach.right(), rect.bottom()),
     ]
+}
+
+fn card_fills(theme: &ArtisanTheme) -> Vec<GpuiBackground> {
+    let glass = crate::ui::kit::surface::glass::fills(
+        theme,
+        crate::ui::kit::surface::glass::Shade::Clear,
+    );
+    let settle = match theme.colors.mode.is_dark() {
+        true => Some(GpuiBackground::Solid(
+            Oklch::new(0.0, 0.0, 0.0)
+                .with_alpha(SHEET_TO_SIDEBAR)
+                .to_reference_paint(),
+        )),
+        false => None,
+    };
+    settle.into_iter().chain(glass.into_iter().take(2)).collect()
 }
 
 fn background(from: Oklch, to: Oklch, angle: f32, end: f32) -> GpuiBackground {
@@ -361,13 +350,7 @@ impl PreparedTabCard {
             });
             items.push(DisplayItem::PopClip);
         }
-        for backdrop in &self.backdrops {
-            items.push(DisplayItem::BackdropBlurRounded {
-                bounds: backdrop.bounds,
-                radius: backdrop.blur,
-                corners: backdrop.corners,
-            });
-        }
+        items.push(self.backdrop.clone());
         for path in &self.paths {
             items.push(DisplayItem::GpuiPath {
                 transformed_window_logical_bounds: path.transformed_window_logical_bounds,
@@ -384,7 +367,7 @@ impl PreparedTabCard {
         reveal: f32,
         cache: &mut GeometryCache,
     ) -> Self {
-        let radius = SHELL_RADIUS;
+        let radius = CARD_RADIUS;
         let reveal = reveal.clamp(0.0, 1.0);
         let geometry = cache.get(GeometryKey {
             size: bounds.size(),
@@ -395,10 +378,9 @@ impl PreparedTabCard {
         let local = Rect::from_origin_size(Point::ZERO, bounds.size());
         let strip = strip_right(local, tab_width, reveal);
         let mut shadows = Vec::new();
-        let mut backdrops = Vec::new();
         let mut paths = Vec::new();
         if tab_width <= 0.0 {
-            backdrops.push(BackdropPass {
+            let backdrop = aqua_core::DisplayItem::BackdropBlurRounded {
                 bounds: Rect::from_edges(
                     bounds.x,
                     bounds.y + TAB_CARD_TAB_HEIGHT_PX,
@@ -411,11 +393,11 @@ impl PreparedTabCard {
                     bottom_right: radius,
                     bottom_left: radius,
                 },
-                blur: 20.0,
-            });
+                radius: crate::ui::kit::surface::glass::BLUR,
+            };
             return Self {
                 shadows,
-                backdrops,
+                backdrop,
                 paths,
             };
         }
@@ -466,8 +448,20 @@ impl PreparedTabCard {
                 });
             }
         }
-        let colors = &theme.colors;
-        let fill = crate::ui::chrome::card::Surfaces::of(theme).bg;
+        let backdrop = aqua_core::DisplayItem::BackdropBlurPath {
+            transformed_window_logical_bounds: bounds,
+            path: Arc::new(GpuiPath {
+                commands_local: geometry.shell.clone(),
+                origin_window_logical: bounds.origin(),
+                element_transform: Transform2D::IDENTITY,
+                style: GpuiPathStyle::Fill {
+                    rule: FillRule::NonZero,
+                },
+                background: GpuiBackground::Solid(Oklch::new(1.0, 0.0, 0.0).to_reference_paint()),
+            }),
+            radius: crate::ui::kit::surface::glass::BLUR,
+        };
+        let fills = card_fills(theme);
         let mut push = |commands: &[PathCommand],
                         background: GpuiBackground,
                         stroke: bool,
@@ -496,19 +490,9 @@ impl PreparedTabCard {
                 }),
             });
         };
-        let hole = Rect::from_edges(4.0, 40.0, bounds.w - 4.0, bounds.h - 4.0);
-        push(
-            &geometry.well,
-            GpuiBackground::Solid(colors.background.to_reference_paint()),
-            false,
-            hole,
-        );
-        push(
-            &geometry.shell,
-            GpuiBackground::Solid(fill.to_reference_paint()),
-            false,
-            local,
-        );
+        for fill in fills {
+            push(&geometry.shell, fill, false, local);
+        }
         let height = bounds.h.max(1.0);
         let reach = |span: f32| (span / height).clamp(0.0, 1.0);
         let [(_, light), (_, shade)] = crate::ui::kit::surface::glass::rims(
@@ -517,12 +501,7 @@ impl PreparedTabCard {
         );
         push(
             &geometry.edge,
-            background(
-                light,
-                light.with_alpha(0.0),
-                180.0,
-                reach(TAB_CARD_TAB_HEIGHT_PX + radius),
-            ),
+            GpuiBackground::Solid(light.with_alpha(RIM).to_reference_paint()),
             true,
             local,
         );
@@ -534,7 +513,7 @@ impl PreparedTabCard {
         );
         Self {
             shadows,
-            backdrops,
+            backdrop,
             paths,
         }
     }

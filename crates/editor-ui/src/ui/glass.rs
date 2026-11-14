@@ -123,6 +123,14 @@ pub fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<Gla
 pub const KEY_RADIUS: f32 = Radius::Field.px();
 pub const COMPOSER_PADDING: f32 = Inset::Frame.px();
 pub const COMPOSER_RADIUS: f32 = Radius::Well.px();
+fn on_glass(content: Element) -> Element {
+    use aqua_ui::style::{Axis, Length};
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .style(Style::new().axis(Axis::Column))
+        .child(content)
+        .build()
+}
 
 pub struct ComposerFrame {
     theme: ArtisanTheme,
@@ -148,21 +156,7 @@ impl ComposerFrame {
         use aqua_ui::style::{Axis, Length};
         let radius = COMPOSER_RADIUS;
         match self.nested {
-            true => {
-                let surfaces = super::chrome::card::Surfaces::of(&self.theme);
-                super::chrome::card::outlined(
-                    surfaces.ink,
-                    surfaces.inner,
-                    radius,
-                    KitElevation::Rest.shadows(&self.theme),
-                    vec![self.content],
-                )
-                .style(
-                    Style::new()
-                        .width(Length::Pct(100.0))
-                        .padding(Length::Px(COMPOSER_PADDING)),
-                )
-            }
+            true => on_glass(self.content),
             false => UiBox::new()
                 .width(Length::Pct(100.0))
                 .padding(COMPOSER_PADDING)
