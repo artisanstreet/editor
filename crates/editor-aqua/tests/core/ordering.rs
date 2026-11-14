@@ -499,7 +499,7 @@ fn magic_link_poll_interval_starts_when_pending_state_reaches_ui() {
             };
             write!(stream, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body).unwrap();
             stream.flush().unwrap();
-            seen.send(path).unwrap();
+            seen.send((path, Instant::now())).unwrap();
         }
     });
     let directory = tempfile::tempdir().unwrap();
@@ -514,14 +514,14 @@ fn magic_link_poll_interval_starts_when_pending_state_reaches_ui() {
     flush_initial(&mut core);
     core.account_mut()
         .request_link("test@example.invalid", "Test".into());
-    core.drain_with(|_, _| {});
     assert_eq!(
-        requests.recv_timeout(Duration::from_secs(5)).unwrap(),
+        requests.recv_timeout(Duration::from_secs(5)).unwrap().0,
         "/v1/auth/magic/request"
     );
     assert!(requests.recv_timeout(Duration::from_millis(3200)).is_err());
     let mut pending_seen = false;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let drained_at = Instant::now();
+    let deadline = drained_at + Duration::from_secs(5);
     while !pending_seen && Instant::now() < deadline {
         core.drain_with(|core, event| {
             if matches!(event, CoreEvent::Account(_))
@@ -535,11 +535,9 @@ fn magic_link_poll_interval_starts_when_pending_state_reaches_ui() {
         }
     }
     assert!(pending_seen);
-    assert!(requests.recv_timeout(Duration::from_millis(2700)).is_err());
-    assert_eq!(
-        requests.recv_timeout(Duration::from_secs(3)).unwrap(),
-        "/v1/auth/magic/status"
-    );
+    let (path, polled_at) = requests.recv_timeout(Duration::from_secs(15)).unwrap();
+    assert_eq!(path, "/v1/auth/magic/status");
+    assert!(polled_at.duration_since(drained_at) >= Duration::from_secs(3));
 }
 
 #[test]

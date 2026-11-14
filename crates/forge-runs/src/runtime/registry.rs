@@ -25,8 +25,16 @@ pub struct Registry {
     root: PathBuf,
 }
 
+struct Held(File);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.unlock().ok();
+    }
+}
+
 pub struct Lease {
-    _file: File,
+    _held: Held,
     metadata: Option<PathBuf>,
 }
 
@@ -69,7 +77,7 @@ fn contended(error: &std::io::Error) -> bool {
         || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
-fn lock(path: &Path) -> Result<Option<File>> {
+fn lock(path: &Path) -> Result<Option<Held>> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -77,7 +85,7 @@ fn lock(path: &Path) -> Result<Option<File>> {
         .write(true)
         .open(path)?;
     match file.try_lock_exclusive() {
-        Ok(()) => Ok(Some(file)),
+        Ok(()) => Ok(Some(Held(file))),
         Err(error) if contended(&error) => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -114,6 +122,7 @@ impl Registry {
             .write(true)
             .open(self.root.join("admission.lock"))?;
         gate.lock_exclusive()?;
+        let _gate = Held(gate);
         write(&self.root.join("active.json"), member)
     }
 
@@ -179,7 +188,7 @@ impl Registry {
             registry: self.clone(),
             member,
             _lease: Arc::new(Lease {
-                _file: file,
+                _held: file,
                 metadata: Some(path.with_extension("json")),
             }),
             accepting: Arc::new(AtomicBool::new(false)),
@@ -189,14 +198,14 @@ impl Registry {
 
     pub fn services_lock(&self) -> Result<Option<Lease>> {
         Ok(lock(&self.root.join("services.lock"))?.map(|file| Lease {
-            _file: file,
+            _held: file,
             metadata: None,
         }))
     }
 
     pub fn upgrade_lock(&self) -> Result<Option<Lease>> {
         Ok(lock(&self.root.join("upgrade.lock"))?.map(|file| Lease {
-            _file: file,
+            _held: file,
             metadata: None,
         }))
     }
@@ -229,11 +238,11 @@ impl Generation {
             .read(true)
             .write(true)
             .open(self.registry.root.join("admission.lock"))?;
-        match fs2::FileExt::try_lock_shared(&gate) {
-            Ok(()) => {}
+        let _gate = match fs2::FileExt::try_lock_shared(&gate) {
+            Ok(()) => Held(gate),
             Err(error) if contended(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
-        }
+        };
         if !self.accepting() {
             return Ok(None);
         }
@@ -254,7 +263,7 @@ impl Generation {
         }
         write(&path.with_extension("json"), &self.member)?;
         Ok(Some(Lease {
-            _file: file,
+            _held: file,
             metadata: Some(path.with_extension("json")),
         }))
     }
@@ -263,7 +272,7 @@ impl Generation {
         for slot in 0..8 {
             if let Some(file) = lock(&self.registry.root.join("slots").join(slot.to_string()))? {
                 return Ok(Some(Lease {
-                    _file: file,
+                    _held: file,
                     metadata: None,
                 }));
             }
