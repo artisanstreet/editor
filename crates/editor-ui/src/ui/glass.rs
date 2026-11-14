@@ -123,6 +123,45 @@ pub fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<Gla
 pub const KEY_RADIUS: f32 = Radius::Field.px();
 pub const COMPOSER_PADDING: f32 = Inset::Frame.px();
 pub const COMPOSER_RADIUS: f32 = Radius::Well.px();
+pub const INSET_RADIUS: f32 =
+    super::tab_card::CARD_RADIUS - super::tab_card::TAB_CARD_PADDING_PX;
+
+fn inset(theme: &ArtisanTheme, content: Element) -> Element {
+    use aqua_ui::style::{Axis, Length};
+    let dark = theme.colors.mode.is_dark();
+    let (shade, rim, depth) = match dark {
+        true => (
+            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.28),
+            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.45),
+            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.5),
+        ),
+        false => (
+            Oklch::new(0.21, 0.034, 264.665).with_alpha(0.04),
+            Oklch::new(0.21, 0.034, 264.665).with_alpha(0.1),
+            Oklch::new(0.21, 0.034, 264.665).with_alpha(0.12),
+        ),
+    };
+    let inner = |dy: f32, blur: f32, spread: f32, color: Oklch| aqua_ui::style::GpuiShadowLayer {
+        dx: 0.0,
+        dy,
+        blur,
+        spread,
+        inset: true,
+        color: color.to_reference_paint(),
+    };
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .padding(COMPOSER_PADDING)
+        .radius(INSET_RADIUS)
+        .style(
+            Style::new()
+                .axis(Axis::Column)
+                .gpui_background(aqua_core::GpuiBackground::Solid(shade.to_reference_paint()))
+                .gpui_shadows(vec![inner(0.0, 0.0, 1.0, rim), inner(1.5, 4.0, 0.0, depth)]),
+        )
+        .child(content)
+        .build()
+}
 
 pub struct ComposerFrame {
     theme: ArtisanTheme,
@@ -148,21 +187,7 @@ impl ComposerFrame {
         use aqua_ui::style::{Axis, Length};
         let radius = COMPOSER_RADIUS;
         match self.nested {
-            true => {
-                let surfaces = super::chrome::card::Surfaces::of(&self.theme);
-                super::chrome::card::outlined(
-                    surfaces.ink,
-                    surfaces.bg,
-                    radius,
-                    KitElevation::Rest.shadows(&self.theme),
-                    vec![self.content],
-                )
-                .style(
-                    Style::new()
-                        .width(Length::Pct(100.0))
-                        .padding(Length::Px(COMPOSER_PADDING)),
-                )
-            }
+            true => inset(&self.theme, self.content),
             false => UiBox::new()
                 .width(Length::Pct(100.0))
                 .padding(COMPOSER_PADDING)
