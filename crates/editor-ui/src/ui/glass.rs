@@ -152,7 +152,7 @@ impl ComposerFrame {
                 let surfaces = super::chrome::card::Surfaces::of(&self.theme);
                 super::chrome::card::outlined(
                     surfaces.ink,
-                    surfaces.inner,
+                    surfaces.bg,
                     radius,
                     KitElevation::Rest.shadows(&self.theme),
                     vec![self.content],

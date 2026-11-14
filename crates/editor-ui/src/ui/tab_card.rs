@@ -467,7 +467,7 @@ impl PreparedTabCard {
             }
         }
         let colors = &theme.colors;
-        let fill = crate::ui::chrome::card::Surfaces::of(theme).bg;
+        let fill = crate::ui::chrome::card::Surfaces::of(theme).inner;
         let mut push = |commands: &[PathCommand],
                         background: GpuiBackground,
                         stroke: bool,
