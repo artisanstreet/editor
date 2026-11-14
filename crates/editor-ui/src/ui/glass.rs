@@ -147,21 +147,38 @@ impl ComposerFrame {
     pub fn build(self) -> Element {
         use aqua_ui::style::{Axis, Length};
         let radius = COMPOSER_RADIUS;
-        let shadows = match self.nested {
-            true => Vec::new(),
-            false => KitElevation::Overlay.shadows(&self.theme),
-        };
-        UiBox::new()
-            .width(Length::Pct(100.0))
-            .padding(COMPOSER_PADDING)
-            .radius(radius)
-            .style(Style::new().axis(Axis::Column).shadows(shadows))
-            .child(kit_glass::paint(
-                &self.theme,
-                kit_glass::Shade::Clear,
-                radius,
-            ))
-            .child(self.content)
-            .build()
+        match self.nested {
+            true => {
+                let surfaces = super::chrome::card::Surfaces::of(&self.theme);
+                super::chrome::card::outlined(
+                    surfaces.ink,
+                    surfaces.inner,
+                    radius,
+                    KitElevation::Rest.shadows(&self.theme),
+                    vec![self.content],
+                )
+                .style(
+                    Style::new()
+                        .width(Length::Pct(100.0))
+                        .padding(Length::Px(COMPOSER_PADDING)),
+                )
+            }
+            false => UiBox::new()
+                .width(Length::Pct(100.0))
+                .padding(COMPOSER_PADDING)
+                .radius(radius)
+                .style(
+                    Style::new()
+                        .axis(Axis::Column)
+                        .shadows(KitElevation::Overlay.shadows(&self.theme)),
+                )
+                .child(kit_glass::paint(
+                    &self.theme,
+                    kit_glass::Shade::Clear,
+                    radius,
+                ))
+                .child(self.content)
+                .build(),
+        }
     }
 }

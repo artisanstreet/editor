@@ -33,6 +33,7 @@ pub mod picker_motion;
 pub mod popover;
 pub mod preferences;
 pub mod progress;
+pub mod project_mark;
 pub mod rich;
 pub mod scroll;
 pub mod scroll_edge;

@@ -2291,7 +2291,17 @@ impl ComposerOwner {
                     .spaced(Space::S4)
                     .style(Style::new().align(AlignItems::CENTER))
                     .child(self.model(theme, &controller, host))
-                    .children(project)
+                    .children(
+                        project
+                            .map(|project| {
+                                [
+                                    editor_ui::kit::Divider::vertical(&theme, Space::S16.px()),
+                                    project,
+                                ]
+                            })
+                            .into_iter()
+                            .flatten(),
+                    )
                     .build(),
             );
             let strip = if tab.is_some() {
@@ -2631,36 +2641,6 @@ pub fn open_popup(
     )
 }
 
-fn project_mark(
-    theme: &ArtisanTheme,
-    host: &editor_core::HostData,
-    project: &artisan_api::ProjectId,
-) -> Element {
-    use aqua_core::image::ImageFit;
-    use aqua_ui::element::Media;
-    if let Some(image) = host.project_icon(project) {
-        return Media::new(image.as_ref().clone())
-            .width(IconSize::Md.px())
-            .height(IconSize::Md.px())
-            .fit(ImageFit::Contain)
-            .build();
-    }
-    let icon = match host.repository(project) {
-        None => AssetId::TABLER_FOLDER,
-        Some(repository) => match repository.host.as_deref() {
-            Some("github") => AssetId::SVGL_GITHUB,
-            Some("gitlab") => AssetId::SVGL_GITLAB,
-            Some("azure") => AssetId::SVGL_MICROSOFT_AZURE,
-            Some("bitbucket") => AssetId::SIMPLE_ICONS_BITBUCKET,
-            Some("codeberg") => AssetId::SIMPLE_ICONS_CODEBERG,
-            Some("gitea") => AssetId::SIMPLE_ICONS_GITEA,
-            Some("sourcehut") => AssetId::SIMPLE_ICONS_SOURCEHUT,
-            _ => AssetId::SVGL_GIT,
-        },
-    };
-    IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint())
-}
-
 pub fn project_menu(
     theme: ArtisanTheme,
     host: &editor_core::HostData,
@@ -2694,7 +2674,7 @@ pub fn project_menu(
         rows = rows.child(item(
             format!("composer-project-{id}"),
             project.name.clone(),
-            project_mark(&theme, host, id),
+            editor_ui::project_mark::Mark::of(host, id).view(theme.colors.text_muted),
             selected == Some(id),
             ComposerAction::ChooseProject(id.clone()),
         ));
@@ -3528,26 +3508,36 @@ pub fn project_tab(
                     Surface::Composer,
                     project.name.clone(),
                 )
-                .leading(IconSize::Md.glyph(
-                    AssetId::TABLER_FOLDER,
-                    theme.colors.text_muted.to_reference_paint(),
-                ))
+                .leading(
+                    editor_ui::project_mark::Mark::of(host, &thread.project_id)
+                        .view(theme.colors.text_muted),
+                )
                 .build(),
             ))
         }
         super::controller::ComposerTarget::NewThread { .. } => {
-            let name = controller
+            let project = controller
                 .project(host)
+                .filter(|id| host.projects.contains_key(id));
+            let name = project
                 .as_ref()
                 .and_then(|id| host.projects.get(id))
                 .map_or_else(
                     || "Choose a project".to_owned(),
                     |project| project.name.clone(),
                 );
+            let lead = project
+                .as_ref()
+                .map_or(Lead::Glyph(AssetId::TABLER_FOLDER), |id| {
+                    Lead::Avatar(
+                        editor_ui::project_mark::Mark::of(host, id).view(theme.colors.text_muted),
+                    )
+                });
             let open = controller.picker.menu == Some(super::picker::Menu::Project);
             Some(fitted(
                 Trigger::new("composer-project", theme, TriggerSize::Sm, name)
-                    .lead(Lead::Glyph(AssetId::TABLER_FOLDER))
+                    .lead(lead)
+                    .muted()
                     .open(open)
                     .on_activate(move || dispatch(ComposerAction::ToggleProject))
                     .build(),

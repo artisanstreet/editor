@@ -31,6 +31,17 @@ fn line(color: Oklch) -> Element {
         .build()
 }
 
+fn upright(color: Oklch) -> Element {
+    UiBox::new()
+        .width(LINE)
+        .style(
+            Style::new()
+                .height(Length::Pct(100.0))
+                .gpui_background(GpuiBackground::Solid(color.to_reference_paint())),
+        )
+        .build()
+}
+
 fn rule(theme: &ArtisanTheme) -> UiBox {
     let (shade, light) = shades(theme);
     UiBox::new()
@@ -43,6 +54,19 @@ impl Divider {
     #[must_use]
     pub fn guide(theme: &ArtisanTheme) -> Style {
         Style::new().gpui_background(GpuiBackground::Solid(theme.colors.line.to_reference_paint()))
+    }
+
+    #[must_use]
+    pub fn vertical(theme: &ArtisanTheme, height: f32) -> Element {
+        let (shade, light) = shades(theme);
+        UiBox::new()
+            .layout("row")
+            .height(height)
+            .gap(LINE)
+            .style(Style::new().flex_shrink(0.0))
+            .child(upright(shade))
+            .child(upright(light))
+            .build()
     }
 
     #[must_use]
