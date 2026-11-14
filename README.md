@@ -1,51 +1,18 @@
 <img src="assets/test3.png" alt="Artisan" width="100%">
 
+**Artisan Editor by Artisan Street.** A native app for Windows, Mac and Linux that brings Codex, Claude Code and OpenCode together in one interface, using the subscriptions you already have.
+
+**Every harness, first class.** Switch harness mid-thread, or let agents direct each other. Claude can ask Codex for a review and hand the implementation to OpenCode.
+
+**One account, every machine.** Sign in with your Artisan account and every machine you enroll shares the same credentials, skills, MCP servers and global prompts. Adding a machine takes one click.
+
+**Anywhere you are.** Your machines stay reachable from anywhere in the world. Open any thread from your phone's browser, check on it, and steer it.
+
+*And of course, the Artisan experience.* Every interaction, every pixel is carefully placed— the usual.
+
+---
+
 <pre>
-Artisan Editor by Artisan Street
-
-Artisan Editor is an all-in-one orchestrator for managing agent harnesses.
-Run Claude Code, Codex and OpenCode side by side in a single
-desktop app, on your own machine or on any host you connect, and keep every
-conversation, model and usage limit in one place.
-
-
-Features
---------
-
-One home for every harness
-  Start threads on Claude Code, Codex or OpenCode and switch
-  between them without changing tools. Pick models from one selector, keep
-  your favourites close, and see which engines are installed and signed in.
-
-Fast
-  A GPU-rendered desktop app written in Rust. Streaming answers render as
-  they arrive, with syntax-highlighted code, math, images and diffs.
-
-Stay in control of a running agent
-  Steer a turn while it works and approve or deny tool
-  calls as they come in. Reasoning and tool work are shown as they happen,
-  folded away once the turn settles.
-
-Your machines, your hosts
-  Agents run on a Forge, a small background service on the machine that
-  holds your projects. Connect the Editor to a Forge on another computer,
-  a server or WSL with a single invitation, and move between hosts from
-  the same window.
-
-Built to survive interruptions
-  Conversations are stored by the Forge, not the window. Close the Editor,
-  lose the network or restart a host, and your threads pick up where they
-  left off.
-
-Usage at a glance
-  Context usage per thread and plan limits per account, so you know how
-  much room is left before you hit a wall.
-
-Organised by project
-  Threads are grouped by project and repository, with recent work one click
-  away and notifications when an agent needs you.
-
-
 Contributing
 ------------
 
