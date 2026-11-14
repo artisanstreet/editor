@@ -660,39 +660,80 @@ pub struct CardParts {
     pub draft_error: Option<Element>,
 }
 
+const TEXT_INSET: f32 = Inset::Menu.px() + Space::S8.px();
+const PROMPT_PADDING_X: f32 = 8.0;
+const PROMPT_GUTTER: f32 = TEXT_INSET - editor_ui::tab_card::TAB_CARD_PADDING_PX - PROMPT_PADDING_X;
+
 pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Element {
-    let mut card = UiBox::new().layout("column").width(Length::Pct(100.0));
-    if let Some(error) = parts.thread_error {
-        card = card.child(error);
-    }
-    if let Some(error) = parts.draft_error {
-        card = card.child(error);
-    }
-    if let Some(questionnaires) = parts.questionnaires {
-        card = card.child(questionnaires);
-    }
-    if let Some(attachments) = parts.attachments {
-        card = card.child(attachments);
-    }
-    card = card.child(
+    let extras: Vec<Element> = [
+        parts.thread_error,
+        parts.draft_error,
+        parts.questionnaires,
+        parts.attachments,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let extras = (!extras.is_empty()).then(|| {
+        let inset = match nested {
+            true => Inset::Frame.px(),
+            false => 0.0,
+        };
         UiBox::new()
+            .layout("column")
             .width(Length::Pct(100.0))
-            .spaced(Space::S8)
-            .style(Style::new().align(AlignItems::END))
-            .child(
-                UiBox::new()
-                    .layout("column")
-                    .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
-                    .child(parts.prompt)
-                    .build(),
-            )
-            .child(controls(parts.primary))
-            .build(),
-    );
-    if let Some(mentions) = parts.mention_overlay {
-        card = card.child(mentions);
-    }
-    frame(theme, nested, card.build()).with_key("composer")
+            .style(Style::new().padding_insets(aqua_core::Insets {
+                left: inset,
+                right: inset,
+                top: inset,
+                bottom: 0.0,
+            }))
+            .children(extras)
+            .build()
+    });
+    let gutter = match nested {
+        true => PROMPT_GUTTER,
+        false => 0.0,
+    };
+    let entry = UiBox::new()
+        .width(Length::Pct(100.0))
+        .style(
+            Style::new()
+                .wrap(true)
+                .column_gap(Space::S8.px())
+                .row_gap(0.0)
+                .align(AlignItems::END)
+                .justify(JustifyContent::END),
+        )
+        .child(
+            UiBox::new()
+                .layout("column")
+                .style(
+                    Style::new()
+                        .flex_grow(1.0)
+                        .flex_shrink(1.0)
+                        .min_width(Length::Pct(0.0))
+                        .max_width(Length::Pct(100.0))
+                        .padding_insets(aqua_core::Insets {
+                            left: gutter,
+                            right: gutter,
+                            top: 0.0,
+                            bottom: 0.0,
+                        }),
+                )
+                .child(parts.prompt.style(Style::new().width(Length::Auto)))
+                .build(),
+        )
+        .child(controls(parts.primary))
+        .build();
+    let card = UiBox::new()
+        .layout("column")
+        .width(Length::Pct(100.0))
+        .children(extras)
+        .child(entry)
+        .children(parts.mention_overlay)
+        .build();
+    frame(theme, nested, card).with_key("composer")
 }
 
 pub fn draft_error(

@@ -127,7 +127,6 @@ fn on_glass(content: Element) -> Element {
     use aqua_ui::style::{Axis, Length};
     UiBox::new()
         .width(Length::Pct(100.0))
-        .padding(COMPOSER_PADDING)
         .style(Style::new().axis(Axis::Column))
         .child(content)
         .build()
