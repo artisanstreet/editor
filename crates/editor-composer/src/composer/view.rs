@@ -2288,7 +2288,7 @@ impl ComposerOwner {
             };
             let tab = Some(
                 UiBox::new()
-                    .height(TriggerSize::Sm.height())
+                    .height(editor_ui::tab_card::TAB_CARD_TAB_HEIGHT_PX)
                     .spaced(Space::S4)
                     .style(Style::new().align(AlignItems::CENTER))
                     .child(self.model(theme, &controller, host))
@@ -2296,7 +2296,10 @@ impl ComposerOwner {
                         project
                             .map(|project| {
                                 [
-                                    editor_ui::kit::Divider::vertical(&theme, Space::S16.px()),
+                                    editor_ui::kit::Divider::vertical(
+                                        &theme,
+                                        editor_ui::tab_card::TAB_CARD_TAB_HEIGHT_PX,
+                                    ),
                                     project,
                                 ]
                             })
