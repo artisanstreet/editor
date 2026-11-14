@@ -58,7 +58,11 @@ impl Divider {
 
     #[must_use]
     pub fn vertical(theme: &ArtisanTheme, height: f32) -> Element {
-        let (shade, light) = shades(theme);
+        let (_, light) = shades(theme);
+        let shade = match theme.colors.mode.is_dark() {
+            true => BLACK.with_alpha(0.6),
+            false => GRAY_900.with_alpha(0.16),
+        };
         UiBox::new()
             .layout("row")
             .height(height)
