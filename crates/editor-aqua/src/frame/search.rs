@@ -1,11 +1,11 @@
 use crate::frame::sidebar::{Command, Event};
-use crate::frame::sign_in::card::{field_key, keyed_field};
-use crate::ui::chrome::card::{POLAR_INK, polar_face};
+use crate::frame::sign_in::card::{field_key, key_lip, keyed_field};
+use crate::ui::chrome::card::POLAR_INK;
 use crate::ui::kit::{HitArea, IconSize, KeySize, Radius, Space, Spaced, Surface};
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::{
-    CursorIcon, DisplayItem, InputEvent, Key as Pressed, NamedKey, Oklch, PointerButton, Role,
-    Transform2D,
+    CursorIcon, DisplayItem, InputEvent, Insets, Key as Pressed, NamedKey, Oklch, PointerButton,
+    Role, Transform2D,
 };
 use aqua_ui::element::{Box as UiBox, Canvas, Element};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -17,7 +17,6 @@ use std::rc::Rc;
 pub const OVERLAY: &str = "artisan-frame-search-overlay";
 pub const QUERY: &str = "sidebar-thread-search";
 pub const RAIL_KEY: KeySize = KeySize::Md;
-pub const RAIL_GAP: Space = Space::S6;
 const BAR: KeySize = KeySize::Lg;
 const BLUR: f32 = 4.0;
 const RISE: f32 = 8.0;
@@ -56,6 +55,7 @@ fn new_thread_key(emit: Rc<dyn Fn(Event)>) -> Element {
     field_key(
         "artisan-sidebar-new-thread",
         "New thread",
+        BAR,
         CursorIcon::Pointer,
         IconSize::Md.glyph(AssetId::TABLER_PENCIL_PLUS, POLAR_INK.to_reference_paint()),
         Rc::new(move || emit(Event::Navigate(Command::New))),
@@ -65,10 +65,30 @@ fn new_thread_key(emit: Rc<dyn Fn(Event)>) -> Element {
 #[must_use]
 pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
     let edge = RAIL_KEY.edge();
+    let lip = key_lip(RAIL_KEY);
     let search = Rc::clone(emit);
     let create = Rc::clone(emit);
-    let glass = UiBox::new()
-        .width(edge)
+    let glyph = UiBox::new()
+        .style(
+            Style::new()
+                .flex_grow(1.0)
+                .align(AlignItems::CENTER)
+                .justify(JustifyContent::CENTER)
+                .padding_insets(Insets {
+                    left: 0.0,
+                    right: lip,
+                    top: 0.0,
+                    bottom: 0.0,
+                }),
+        )
+        .child(IconSize::Md.glyph(
+            AssetId::TABLER_SEARCH,
+            theme.colors.text_muted.to_reference_paint(),
+        ))
+        .build()
+        .exclude_from_hit_testing();
+    let field = UiBox::new()
+        .width(edge + lip)
         .height(edge)
         .style(Style::new().flex_shrink(0.0))
         .child(
@@ -77,24 +97,7 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
                 Role::Button,
                 "Search threads",
             )
-            .child(Surface::Field.build(
-                theme,
-                vec![
-                        UiBox::new()
-                            .style(
-                                Style::new()
-                                    .flex_grow(1.0)
-                                    .align(AlignItems::CENTER)
-                                    .justify(JustifyContent::CENTER),
-                            )
-                            .child(IconSize::Md.glyph(
-                                AssetId::TABLER_SEARCH,
-                                theme.colors.text_muted.to_reference_paint(),
-                            ))
-                            .build()
-                            .exclude_from_hit_testing(),
-                    ],
-            ))
+            .child(Surface::Field.build(theme, vec![glyph]))
             .on_activate(move || search(Event::Search(true)))
             .build()
             .cursor(CursorIcon::Pointer),
@@ -102,63 +105,21 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
         .build();
     UiBox::new()
         .layout("row")
-        .spaced(RAIL_GAP)
-        .child(glass)
-        .child(polar_square(
+        .child(field)
+        .child(field_key(
             "artisan-sidebar-rail-new-thread",
             "New thread",
-            AssetId::TABLER_PENCIL_PLUS,
+            RAIL_KEY,
+            CursorIcon::Pointer,
+            IconSize::Md.glyph(AssetId::TABLER_PENCIL_PLUS, POLAR_INK.to_reference_paint()),
             Rc::new(move || create(Event::Navigate(Command::New))),
         ))
         .build()
 }
 
-fn polar_square(
-    key: &'static str,
-    label: &'static str,
-    icon: AssetId,
-    activate: Rc<dyn Fn()>,
-) -> Element {
-    let edge = RAIL_KEY.edge();
-    let radius = Radius::Field.px();
-    let face = Canvas::new()
-        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-        .on_paint(move |bounds| vec![polar_face(bounds, 0.0, radius)])
-        .build()
-        .exclude_from_hit_testing();
-    UiBox::new()
-        .width(edge)
-        .height(edge)
-        .style(Style::new().flex_shrink(0.0))
-        .child(
-            HitArea::new(key, Role::Button, label)
-                .child(
-                    UiBox::new()
-                        .style(
-                            Style::new()
-                                .width(Length::Pct(100.0))
-                                .height(Length::Pct(100.0))
-                                .align(AlignItems::CENTER)
-                                .justify(JustifyContent::CENTER),
-                        )
-                        .child(face)
-                        .child(
-                            IconSize::Md
-                                .glyph(icon, POLAR_INK.to_reference_paint())
-                                .exclude_from_hit_testing(),
-                        )
-                        .build(),
-                )
-                .on_activate(move || activate())
-                .build()
-                .cursor(CursorIcon::Pointer),
-        )
-        .build()
-}
-
 #[must_use]
 pub const fn rail_width() -> f32 {
-    2.0 * RAIL_KEY.edge() + RAIL_GAP.px()
+    2.0 * RAIL_KEY.edge() + key_lip(RAIL_KEY)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

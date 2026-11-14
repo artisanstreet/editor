@@ -450,6 +450,7 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
     field_key(
         "artisan-sign-in-continue",
         "Continue",
+        KEY,
         match busy {
             true => CursorIcon::Progress,
             false => CursorIcon::Pointer,
@@ -464,15 +465,21 @@ fn continue_key(Key { swap, spin }: Key, busy: bool, submit: Rc<dyn Fn()>) -> El
 }
 
 #[must_use]
+pub const fn key_lip(size: KeySize) -> f32 {
+    size.edge() * 8.0 / 45.0
+}
+
+#[must_use]
 pub fn field_key(
     key: &'static str,
     label: &'static str,
+    size: KeySize,
     cursor: CursorIcon,
     glyph: Element,
     activate: Rc<dyn Fn()>,
 ) -> Element {
     let surface: Arc<str> = continue_surface().into();
-    let edge = KEY.edge();
+    let edge = size.edge();
     let surface_width = edge * 53.0 / 45.0;
     let surface_height = edge * 49.0 / 45.0;
     let face = Canvas::new()
