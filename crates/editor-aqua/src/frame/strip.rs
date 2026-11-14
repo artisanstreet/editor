@@ -1,14 +1,17 @@
 use crate::frame::sidebar::{Command, Event};
 use crate::sidebar::list::RowState;
-use crate::ui::kit::{HitArea, Link, LinkTone, Radius, Row, RowItem, Space, Spaced, Surface, TextRole};
+use crate::ui::kit::{
+    HitArea, IconSize, Link, LinkTone, Radius, Row, RowItem, Space, Spaced, Surface, TextRole,
+};
 use crate::ui::theme::{ArtisanTheme, Oklch};
-use aqua_core::Role;
 use aqua_core::scene::GpuiQuadPulse;
+use aqua_core::{Role, Transform2D};
 use aqua_text::overflow::OverflowMode;
 use aqua_ui::element::{Box as UiBox, Element, Text};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use artisan_api::{ItemId, ProjectId, ThreadId};
+use editor_assets::AssetId;
 use std::rc::Rc;
 
 pub const ROW: Row = Row::Heading;
@@ -21,6 +24,8 @@ pub const RADIUS: Radius = Radius::Panel;
 const MIN_WIDTH: f32 = 96.0;
 const MAX_WIDTH: f32 = 720.0;
 const PULSE_MS: u32 = 1_600;
+pub const OUTLINE_CHEVRON: &str = "artisan-thread-outline-chevron";
+pub const OUTLINE_EDGE: IconSize = IconSize::Md;
 
 pub use crate::ui::project_mark::Mark;
 
@@ -34,6 +39,7 @@ pub struct Tab {
     pub mark: Mark,
     pub state: RowState,
     pub active: bool,
+    pub outline: Option<f32>,
 }
 
 #[must_use]
@@ -82,6 +88,7 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
         .children(tab.location.as_ref().map(|_| separator(theme)))
         .child(thread(theme, tab, reduced, Rc::clone(&emit)))
         .children(agents(theme, tab, &emit))
+        .children(tab.outline.map(|flip| outline(theme, flip, Rc::clone(&emit))))
         .build();
     let row = RowItem::new(
         format!("artisan-tab-row-{}", tab.id),
@@ -194,7 +201,10 @@ fn separator(theme: &ArtisanTheme) -> Element {
 fn thread(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Event)>) -> Element {
     let pulsing = tab.state == RowState::Working && !reduced;
     match tab.trail.is_empty() {
-        true => title(frame(Text::new(tab.title.clone()), true), pulsing),
+        true => title(
+            frame(Text::new(tab.title.clone()), tab.outline.is_none()),
+            pulsing,
+        ),
         false => title(
             Link::new("artisan-thread-crumb", *theme, LinkTone::Crumb, tab.title.clone())
                 .on_activate(move || emit(Event::Navigate(Command::Agent(None))))
@@ -247,4 +257,30 @@ fn title(label: Element, pulsing: bool) -> Element {
             .build(),
         false => label,
     }
+}
+
+#[must_use]
+pub fn flip(progress: f32) -> Transform2D {
+    let centre = OUTLINE_EDGE.px() / 2.0;
+    Transform2D::translate(0.0, -centre)
+        .then(Transform2D::scale(1.0, 2.0f32.mul_add(-progress, 1.0)))
+        .then(Transform2D::translate(0.0, centre))
+}
+
+fn outline(theme: &ArtisanTheme, progress: f32, emit: Rc<dyn Fn(Event)>) -> Element {
+    let edge = OUTLINE_EDGE.px();
+    let chevron = UiBox::new()
+        .width(edge)
+        .height(edge)
+        .style(Style::new().flex_shrink(0.0).transform(flip(progress)))
+        .child(OUTLINE_EDGE.glyph(
+            AssetId::TABLER_CHEVRON_DOWN,
+            theme.colors.text_muted.to_reference_paint(),
+        ))
+        .build()
+        .with_key(OUTLINE_CHEVRON);
+    HitArea::new("artisan-thread-outline", Role::Button, "Messages in this thread")
+        .child(chevron)
+        .on_activate(move || emit(Event::Navigate(Command::Outline)))
+        .build()
 }

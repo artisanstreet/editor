@@ -574,7 +574,6 @@ impl RootViews {
         ui: &mut UiApp,
         theme: crate::ui::theme::ArtisanTheme,
         width: f32,
-        window_height: f32,
         reduced_motion: bool,
         swift: bool,
         media_resources: AppMedia,
@@ -1003,22 +1002,15 @@ impl RootViews {
                 overlays.push(view::conversation_load_error(&theme, error.clone()));
             }
             if let Some(viewport) = self.transcript_viewport {
-                let invalidated = Rc::clone(&self.navigation_invalidated);
                 if let Some(navigation) = self.navigation.build(
                     &workspace.conversation,
                     core,
                     viewport,
-                    window_height,
                     self.composer_height,
                     if width >= 640.0 { 24.0 } else { 16.0 },
                     theme,
-                    reduced_motion,
                     now,
                     Rc::clone(&dispatch),
-                    Rc::new(move || {
-                        crate::core::diagnostics::rebuild_stats::record_event("inv_nav_cb");
-                        invalidated.set(true)
-                    }),
                 ) {
                     overlays.push(navigation);
                 }
@@ -1833,25 +1825,13 @@ impl RootViews {
         ui: &mut UiApp,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
-        theme: crate::ui::theme::ArtisanTheme,
     ) -> bool {
         let _tm = crate::shell::application::Tm::new("v.navigation");
-        let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        match self
-            .navigation
-            .sync(ui, &theme, std::time::Instant::now(), reduced)
-        {
-            Ok(frame) => {
-                if frame.changed || frame.animating || frame.ticking {
-                    ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
-                }
-                frame.animating
-            }
-            Err(error) => {
-                tracing::warn!(%error, "could not synchronize turn navigator");
-                false
-            }
+        let frame = self.navigation.sync(ui, std::time::Instant::now());
+        if frame.changed || frame.animating {
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
+        frame.animating
     }
 
     fn sync_resource_jump(&mut self, ui: &mut UiApp, ctx: &mut AppCtx<'_>, window: AquaWindowId) {
@@ -2217,7 +2197,10 @@ impl RootViews {
                 Effect::SignOut => shell.core.account_mut().sign_out(),
             }
         }
-        self.apply_navigation(shell);
+        if self.apply_navigation(shell, reduced) {
+            self.navigation_invalidated.set(true);
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
     }
 
     fn track_tree_edges(&mut self, ui: &UiApp) -> bool {
@@ -2229,10 +2212,11 @@ impl RootViews {
             | self.sidebar.scrolled(offset.y)
     }
 
-    fn apply_navigation(&mut self, shell: &mut Shell) {
+    fn apply_navigation(&mut self, shell: &mut Shell, reduced: bool) -> bool {
         use crate::frame::sidebar::Command;
+        let mut outlined = false;
         let Some(workspace) = shell.entry.workspace_mut() else {
-            return;
+            return outlined;
         };
         let core = &mut shell.core;
         for command in self.sidebar.take_commands() {
@@ -2241,6 +2225,10 @@ impl RootViews {
                 Command::New => workspace.sidebar.new_thread(core, None),
                 Command::Project(project) => workspace.sidebar.new_thread(core, Some(project)),
                 Command::Agent(agent) => workspace.conversation.open_agent(core, agent),
+                Command::Outline => {
+                    self.navigation.toggle(std::time::Instant::now(), reduced);
+                    outlined = true;
+                }
                 Command::OpenUrl(url) => {
                     if let Err(error) = crate::shell::open_url(&url) {
                         tracing::warn!(%error, "could not open repository URL");
@@ -2279,7 +2267,7 @@ impl RootViews {
             host.fill_threads();
         }
         if !self.sidebar.refresh_due(std::time::Instant::now()) {
-            return;
+            return outlined;
         }
         let open_project = workspace.sidebar.open.as_ref().and_then(|thread| {
             let host = core.host(workspace.sidebar.host.as_ref()?)?;
@@ -2291,7 +2279,7 @@ impl RootViews {
             .as_ref()
             .and_then(|id| core.host_mut(id))
         else {
-            return;
+            return outlined;
         };
         let projects = host.projects.keys().cloned().collect::<Vec<_>>();
         for project in &projects {
@@ -2300,6 +2288,7 @@ impl RootViews {
                 host.load_repository(project, false);
             }
         }
+        outlined
     }
 
     fn tree_emit(
@@ -2516,7 +2505,6 @@ impl SectionViews for RootViews {
             ui,
             theme,
             width,
-            window.inner_size.height as f32,
             reduced,
             swift,
             app_media,
@@ -2915,7 +2903,6 @@ impl SectionViews for RootViews {
                         ui,
                         theme,
                         card_width,
-                        viewport.height,
                         reduced,
                         shell.preferences.streaming
                             == crate::ui::preferences::StreamingMode::Swift,
@@ -3078,6 +3065,7 @@ impl SectionViews for RootViews {
         workspace
             .inspector
             .follow(&shell.core, &workspace.conversation, ui);
+        let outline = self.navigation.chevron(std::time::Instant::now());
         let navigation = workspace
             .sidebar
             .host
@@ -3112,6 +3100,7 @@ impl SectionViews for RootViews {
                             mark: crate::ui::project_mark::Mark::of(host, &project.id),
                             state: crate::sidebar::list::row_state(host, thread),
                             active: true,
+                            outline,
                         })
                     })
                     .into_iter()
@@ -3274,7 +3263,7 @@ impl SectionViews for RootViews {
         }
         let navigation_changed = {
             let _tm = crate::shell::application::Tm::new("input.views.navigation");
-            self.sync_navigation(ui, ctx, window, shell.preferences.theme())
+            self.sync_navigation(ui, ctx, window)
         };
         if navigation_changed {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_fc");
@@ -3318,7 +3307,7 @@ impl SectionViews for RootViews {
         self.bind_row_sources(ui, ctx, window);
         self.sync_resource_jump(ui, ctx, window);
         self.sync_context(shell, ui, ctx, window);
-        if self.sync_navigation(ui, ctx, window, shell.preferences.theme()) {
+        if self.sync_navigation(ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_wake");
             self.navigation_invalidated.set(true);
         }
@@ -3490,7 +3479,6 @@ impl SectionViews for RootViews {
                         &workspace.conversation,
                         &shell.core,
                         event.viewport,
-                        reduced,
                     );
                     changed |= crate::core::diagnostics::rebuild_stats::note("viewport", rebuild);
                     self.transcript_viewport = Some(event.viewport);
@@ -3581,7 +3569,7 @@ impl SectionViews for RootViews {
         consumed: bool,
     ) -> bool {
         self.sync_context(shell, ui, ctx, window);
-        if self.sync_navigation(ui, ctx, window, shell.preferences.theme()) {
+        if self.sync_navigation(ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_input");
             self.navigation_invalidated.set(true);
         }
@@ -3721,7 +3709,7 @@ impl SectionViews for RootViews {
         if self.work_clock.is_none() {
             self.tick_work_clock(shell, ctx, window, std::time::Instant::now());
         }
-        if self.sync_navigation(ui, ctx, window, shell.preferences.theme()) {
+        if self.sync_navigation(ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_a");
             self.navigation_invalidated.set(true);
         }

@@ -22,8 +22,8 @@ mod notifications;
 mod menu_keys;
 #[path = "shell/navigation_viewport.rs"]
 mod navigation_viewport;
-#[path = "shell/navigator_menu.rs"]
-mod navigator_menu;
+#[path = "shell/navigator_panel.rs"]
+mod navigator_panel;
 #[path = "shell/root.rs"]
 mod root;
 #[path = "shell/scale.rs"]

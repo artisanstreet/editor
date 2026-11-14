@@ -1,5 +1,5 @@
 use aqua_core::Point;
-use aqua_ui::element::{Box as UiBox, Element, Text};
+use aqua_ui::element::Box as UiBox;
 use artisan_api::{ItemId, OutlineEntry, Seq};
 use editor_aqua::conversation::view::{Dispatch, navigator};
 use editor_aqua::ui::theme::ArtisanTheme;
@@ -16,27 +16,17 @@ fn outline(count: usize) -> Vec<OutlineEntry> {
         .collect()
 }
 
-fn mounted_menu(count: usize, jumps: Rc<RefCell<Vec<Seq>>>) -> aqua::UiApp {
+fn mounted_panel(count: usize, jumps: Rc<RefCell<Vec<Seq>>>) -> aqua::UiApp {
     use aqua_text::{SharedFonts, SharedRuns};
     use editor_aqua::conversation::adapter::Action;
     let markers = outline(count);
-    let label: Rc<dyn Fn(&str, bool, ArtisanTheme) -> Element> =
-        Rc::new(|label, _, _| Text::new(label.to_owned()).build());
     let sink = jumps.clone();
     let dispatch: Dispatch = Rc::new(move |action| {
         if let Action::Jump(position) = action {
             sink.borrow_mut().push(position);
         }
     });
-    let menu = navigator::menu(
-        &markers,
-        None,
-        400.0,
-        ArtisanTheme::resolved(),
-        1.0,
-        label,
-        dispatch,
-    );
+    let menu = navigator::panel(&markers, None, ArtisanTheme::resolved(), 1.0, dispatch);
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         UiBox::new()
@@ -74,25 +64,25 @@ fn press_and_release(app: &mut aqua::UiApp, at: Point) {
 }
 
 #[test]
-fn clicking_a_menu_row_jumps_to_its_turn() {
+fn clicking_a_panel_row_jumps_to_its_turn() {
     let jumps = Rc::new(RefCell::new(Vec::new()));
-    let mut app = mounted_menu(8, jumps.clone());
+    let mut app = mounted_panel(8, jumps.clone());
     let at = row_center(&app, "item-3");
     press_and_release(&mut app, at);
     assert_eq!(&*jumps.borrow(), &[30]);
 }
 
 #[test]
-fn clicking_a_row_of_the_scrolled_menu_jumps_to_its_turn() {
+fn clicking_a_row_of_the_scrolled_panel_jumps_to_its_turn() {
     use aqua_ui::tree::NodeKind;
     let jumps = Rc::new(RefCell::new(Vec::new()));
-    let mut app = mounted_menu(40, jumps.clone());
+    let mut app = mounted_panel(40, jumps.clone());
     let scroll = app
         .tree()
         .traverse()
         .into_iter()
         .find(|node| matches!(app.tree().get(*node).map(|r| &r.kind), Some(NodeKind::Scroll(_))))
-        .expect("menu list scrolls");
+        .expect("panel list scrolls");
     assert!(app.tree_mut().scroll_to(scroll, Point::new(0.0, 360.0)));
     app.build_frame().unwrap();
     let at = row_center(&app, "item-12");
