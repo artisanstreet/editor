@@ -152,7 +152,6 @@ impl GeometryCache {
 
 #[derive(Clone, Debug, Default)]
 pub struct Geometry {
-    pub strip: Option<Vec<PathCommand>>,
     pub well: Vec<PathCommand>,
     pub shell: Vec<PathCommand>,
     pub edge: Vec<PathCommand>,
@@ -161,15 +160,15 @@ pub struct Geometry {
 impl Geometry {
     pub fn new(key: GeometryKey) -> Self {
         let bounds = Rect::from_origin_size(Point::ZERO, key.size);
-        let strip = strip_right(bounds, key.tab_width, key.reveal)
-            .map(|right| trace_strip(bounds, key.tab_width, key.radius, right));
         let well = trace_card_hole(bounds, key.radius);
         let mut shell = trace_silhouette(bounds, key.tab_width, key.radius);
+        if let Some(right) = strip_right(bounds, key.tab_width, key.reveal) {
+            shell.extend(trace_strip(bounds, key.tab_width, key.radius, right));
+        }
         shell.extend(well.clone());
         let edge_bounds = Rect::from_edges(0.5, 0.5, key.size.w - 0.5, key.size.h - 0.5);
         let edge = trace_silhouette(edge_bounds, key.tab_width - 1.0, key.radius - 0.5);
         Self {
-            strip,
             well,
             shell,
             edge,
@@ -467,54 +466,8 @@ impl PreparedTabCard {
                 });
             }
         }
-        backdrops.push(BackdropPass {
-            bounds: Rect::from_edges(
-                bounds.x,
-                bounds.y,
-                bounds.x + tab_width,
-                bounds.y + TAB_CARD_TAB_HEIGHT_PX,
-            ),
-            corners: CornerRadii {
-                top_left: TAB_RADIUS,
-                top_right: TAB_RADIUS,
-                bottom_right: 0.0,
-                bottom_left: 0.0,
-            },
-            blur: 20.0,
-        });
-        backdrops.push(BackdropPass {
-            bounds: body,
-            corners: CornerRadii {
-                top_left: 0.0,
-                top_right: if reveal < 1.0 { radius } else { 0.0 },
-                bottom_right: radius,
-                bottom_left: radius,
-            },
-            blur: 20.0,
-        });
-        backdrops.swap(0, 1);
-        if let Some(right) = strip {
-            let end = strip_end(local, tab_width, radius, right);
-            let bottom_right = match end.bottom {
-                StripBottom::Rounded(bottom) => bottom,
-                StripBottom::Down(_) => 0.0,
-            };
-            backdrops.push(BackdropPass {
-                bounds: Rect::from_edges(bounds.x + tab_width, bounds.y, bounds.x + right, body_y),
-                corners: CornerRadii {
-                    top_left: 0.0,
-                    top_right: end.top,
-                    bottom_right,
-                    bottom_left: 0.0,
-                },
-                blur: 20.0,
-            });
-        }
         let colors = &theme.colors;
-        let fills = crate::ui::kit::surface::glass::fills(
-            theme,
-            crate::ui::kit::surface::glass::Shade::Clear,
-        );
+        let fill = crate::ui::chrome::card::Surfaces::of(theme).bg;
         let mut push = |commands: &[PathCommand],
                         background: GpuiBackground,
                         stroke: bool,
@@ -543,16 +496,6 @@ impl PreparedTabCard {
                 }),
             });
         };
-        if let (Some(commands), Some(right)) = (&geometry.strip, strip) {
-            let strip_bottom = match strip_end(local, tab_width, radius, right).bottom {
-                StripBottom::Rounded(_) => TAB_CARD_TAB_HEIGHT_PX,
-                StripBottom::Down(drop) => TAB_CARD_TAB_HEIGHT_PX + drop,
-            };
-            let strip_bounds = Rect::from_edges(tab_width - TAB_RADIUS, 0.0, right, strip_bottom);
-            for fill in fills {
-                push(commands, fill, false, strip_bounds);
-            }
-        }
         let hole = Rect::from_edges(4.0, 40.0, bounds.w - 4.0, bounds.h - 4.0);
         push(
             &geometry.well,
@@ -560,9 +503,12 @@ impl PreparedTabCard {
             false,
             hole,
         );
-        for fill in fills {
-            push(&geometry.shell, fill, false, local);
-        }
+        push(
+            &geometry.shell,
+            GpuiBackground::Solid(fill.to_reference_paint()),
+            false,
+            local,
+        );
         let height = bounds.h.max(1.0);
         let reach = |span: f32| (span / height).clamp(0.0, 1.0);
         let [(_, light), (_, shade)] = crate::ui::kit::surface::glass::rims(
