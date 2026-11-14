@@ -18,7 +18,6 @@ pub mod hover;
 pub mod hover_tooltip;
 pub mod icon;
 pub mod inline_code_text;
-pub mod keycap;
 pub mod kit;
 pub mod local_time;
 pub mod markdown;

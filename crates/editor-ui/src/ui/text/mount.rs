@@ -734,7 +734,11 @@ fn wrap_prompt_scroll(
                     .overflow(aqua_text::overflow::OverflowMode::EndEllipsis)
                     .build(),
             )
-            .child(crate::ui::keycap::Keycap::new(*theme, "Tab").build());
+            .child(
+                crate::ui::badge::Badge::new(*theme, "Tab")
+                    .variant(crate::ui::badge::BadgeVariant::Keycap)
+                    .build(),
+            );
     }
     wrapper.child(hint.build()).child(scroll).build()
 }
