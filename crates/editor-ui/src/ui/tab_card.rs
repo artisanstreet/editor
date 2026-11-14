@@ -125,8 +125,9 @@ pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
 const TAB_RADIUS: f32 = Radius::Panel.px();
 const FILLET_RADIUS: f32 = Inset::Frame.px();
 pub const CARD_RADIUS: f32 = Radius::Panel.px();
-const RIM: f32 = 0.08;
-const SHEEN_RIM: f32 = 0.22;
+const RIM: f32 = 0.06;
+const SHEEN_RIM: f32 = 0.16;
+const SHEEN: f32 = 0.03;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryKey {
@@ -306,6 +307,25 @@ fn outside(rect: Rect, reach: Rect) -> [Rect; 4] {
         Rect::from_edges(reach.x, rect.y, rect.x, rect.bottom()),
         Rect::from_edges(rect.right(), rect.y, reach.right(), rect.bottom()),
     ]
+}
+
+fn card_fills(theme: &ArtisanTheme) -> Vec<GpuiBackground> {
+    match theme.colors.mode.is_dark() {
+        true => vec![
+            background(Oklch::new(0.252, 0.0, 0.0), Oklch::new(0.209, 0.0, 0.0), 145.0, 1.0),
+            background(
+                Oklch::new(1.0, 0.0, 0.0).with_alpha(SHEEN),
+                Oklch::new(1.0, 0.0, 0.0).with_alpha(0.0),
+                180.0,
+                0.44,
+            ),
+        ],
+        false => crate::ui::kit::surface::glass::fills(
+            theme,
+            crate::ui::kit::surface::glass::Shade::Clear,
+        )
+        .to_vec(),
+    }
 }
 
 fn background(from: Oklch, to: Oklch, angle: f32, end: f32) -> GpuiBackground {
@@ -488,10 +508,7 @@ impl PreparedTabCard {
                 blur: 20.0,
             });
         }
-        let fills = crate::ui::kit::surface::glass::fills(
-            theme,
-            crate::ui::kit::surface::glass::Shade::Clear,
-        );
+        let fills = card_fills(theme);
         let mut push = |commands: &[PathCommand],
                         background: GpuiBackground,
                         stroke: bool,

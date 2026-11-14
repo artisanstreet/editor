@@ -127,27 +127,32 @@ pub const INSET_RADIUS: f32 =
     super::tab_card::CARD_RADIUS - super::tab_card::TAB_CARD_PADDING_PX;
 
 fn inset(theme: &ArtisanTheme, content: Element) -> Element {
-    use aqua_ui::style::{Axis, Length};
-    let dark = theme.colors.mode.is_dark();
-    let (shade, rim, depth) = match dark {
-        true => (
-            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.05),
-            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.35),
-            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.4),
-        ),
-        false => (
-            Oklch::new(0.21, 0.034, 264.665).with_alpha(0.04),
-            Oklch::new(0.21, 0.034, 264.665).with_alpha(0.1),
-            Oklch::new(0.21, 0.034, 264.665).with_alpha(0.12),
-        ),
-    };
-    let inner = |dy: f32, blur: f32, spread: f32, color: Oklch| aqua_ui::style::GpuiShadowLayer {
+    use aqua_ui::style::{Axis, GpuiShadowLayer, Length};
+    let inner = |dy: f32, blur: f32, color: Oklch| GpuiShadowLayer {
         dx: 0.0,
         dy,
         blur,
-        spread,
+        spread: 0.0,
         inset: true,
         color: color.to_reference_paint(),
+    };
+    let (top, bottom, shadows) = match theme.colors.mode.is_dark() {
+        true => (
+            Oklch::new(0.1822, 0.0, 0.0),
+            Oklch::new(0.2002, 0.0, 0.0),
+            vec![
+                inner(2.0, 6.0, Oklch::new(0.0, 0.0, 0.0).with_alpha(0.55)),
+                inner(-1.0, 0.0, Oklch::new(1.0, 0.0, 0.0).with_alpha(0.05)),
+            ],
+        ),
+        false => (
+            Oklch::new(0.94, 0.004, 264.5),
+            Oklch::new(0.96, 0.003, 264.5),
+            vec![
+                inner(2.0, 6.0, Oklch::new(0.21, 0.034, 264.665).with_alpha(0.14)),
+                inner(-1.0, 0.0, Oklch::new(1.0, 0.0, 0.0).with_alpha(0.8)),
+            ],
+        ),
     };
     UiBox::new()
         .width(Length::Pct(100.0))
@@ -156,8 +161,21 @@ fn inset(theme: &ArtisanTheme, content: Element) -> Element {
         .style(
             Style::new()
                 .axis(Axis::Column)
-                .gpui_background(aqua_core::GpuiBackground::Solid(shade.to_reference_paint()))
-                .gpui_shadows(vec![inner(0.0, 0.0, 1.0, rim), inner(1.5, 4.0, 0.0, depth)]),
+                .gpui_background(aqua_core::GpuiBackground::LinearGradient {
+                    angle: 180.0,
+                    color_space: aqua_core::GpuiGradientColorSpace::Oklab,
+                    stops: [
+                        aqua_core::GpuiGradientStop {
+                            percentage: 0.0,
+                            color: top.to_reference_paint(),
+                        },
+                        aqua_core::GpuiGradientStop {
+                            percentage: 1.0,
+                            color: bottom.to_reference_paint(),
+                        },
+                    ],
+                })
+                .gpui_shadows(shadows),
         )
         .child(content)
         .build()
