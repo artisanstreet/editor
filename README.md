@@ -1,3 +1,5 @@
+<img src="assets/hero.png" alt="Artisan" width="100%">
+
 <pre>
 Artisan Editor by Artisan Street
 
