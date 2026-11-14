@@ -128,6 +128,6 @@ fn terminal_colors_apply_contrast_inverse_and_dim_in_reference_order() {
     );
     assert_eq!(spans[0].source_color_hsla, Some(white));
     assert_eq!(spans[1].source_color_hsla, Some([0.0, 0.0, 0.0, 0.0]));
-    assert!(spans[1].background_hsla.is_some());
+    assert!(spans[1].background.is_some());
     assert!((spans[2].source_color_hsla.unwrap()[3] - 0.6).abs() < 0.0001);
 }

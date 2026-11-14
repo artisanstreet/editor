@@ -118,7 +118,7 @@ pub fn marked_text(
     color: editor_ui::theme::Oklch,
     selector: String,
 ) -> aqua_ui::element::Element {
-    use editor_ui::chrome::card::{POLAR_BLUE, POLAR_INK};
+    use editor_ui::chrome::card::POLAR_INK;
     let style = role.style(theme);
     let channels = |color: editor_ui::theme::Oklch| {
         let color = color.to_reference_text_color();
@@ -129,7 +129,6 @@ pub fn marked_text(
             color.alpha,
         ]
     };
-    let mark = POLAR_BLUE.to_reference_paint();
     let plain = |text: &str| {
         aqua_text::StyledSpan::new(text, style.clone()).gpui_source_color(channels(color))
     };
@@ -145,7 +144,7 @@ pub fn marked_text(
         spans.push(
             aqua_text::StyledSpan::new(marked, style.clone())
                 .gpui_source_color(channels(POLAR_INK))
-                .gpui_background([mark.h, mark.s, mark.l, mark.a]),
+                .selection_background(),
         );
         at = range.end;
     }
