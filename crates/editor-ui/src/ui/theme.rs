@@ -444,6 +444,7 @@ mod polar {
 
     pub const WHITE: Lch = (1.0, 0.0, 0.0);
     pub const BLACK: Lch = (0.0, 0.0, 0.0);
+    pub const PANEL: Lch = (0.988, 0.004, 264.0);
     pub const GRAY_50: Lch = (0.985, 0.002, 247.839);
     pub const GRAY_100: Lch = (0.967, 0.003, 264.542);
     pub const GRAY_200: Lch = (0.928, 0.006, 264.531);
@@ -452,6 +453,11 @@ mod polar {
     pub const GRAY_500: Lch = (0.551, 0.027, 264.364);
     pub const GRAY_600: Lch = (0.446, 0.03, 256.802);
     pub const GRAY_900: Lch = (0.21, 0.034, 264.665);
+
+    pub const fn under_panel((l, c, h): Lch) -> Lch {
+        (l - (WHITE.0 - PANEL.0), c, h)
+    }
+
     pub const POLAR_50: Lch = (0.8845, 0.0, 0.0);
     pub const POLAR_100: Lch = (0.8373, 0.0, 0.0);
     pub const POLAR_300: Lch = (0.7090, 0.0, 0.0);
@@ -564,10 +570,10 @@ impl ColorTokens {
             EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700, EMERALD_950, GLASS_INK_DIM, GRAY_50, GRAY_100,
             GRAY_200, GRAY_300, GRAY_400, GRAY_500, GRAY_600, GRAY_900, INDIGO_50, INDIGO_100,
             INDIGO_200, INDIGO_300, INDIGO_400, INDIGO_500, INDIGO_600, INDIGO_700, INDIGO_800,
-            INDIGO_900, INDIGO_950, PINK_400, PINK_600, POLAR_50, POLAR_100, POLAR_300, POLAR_400,
+            INDIGO_900, INDIGO_950, PANEL, PINK_400, PINK_600, POLAR_50, POLAR_100, POLAR_300, POLAR_400,
             POLAR_500, POLAR_600, POLAR_700, POLAR_800, POLAR_900, POLAR_950, PURPLE_300,
             PURPLE_400, PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400, RED_500, RED_600,
-            RED_700, RED_950, SKY_400, SKY_700, WHITE,
+            RED_700, RED_950, SKY_400, SKY_700, WHITE, under_panel,
         };
         let dark = mode.is_dark();
         let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
@@ -683,14 +689,14 @@ impl ColorTokens {
             claude: token(CLAUDE_CLAY),
             ansi: AnsiColors(ansi.map(token)),
             frame: pick(GRAY_100, POLAR_950),
-            background: pick(WHITE, POLAR_900),
-            surface: pick(GRAY_50, POLAR_800),
-            raised: pick(GRAY_100, POLAR_800),
-            hover: pick(GRAY_200, POLAR_700),
-            selected: pick(GRAY_100, POLAR_700),
-            pressed: pick(GRAY_200, POLAR_600),
-            line: pick(GRAY_200, POLAR_700),
-            line_strong: pick(GRAY_300, POLAR_600),
+            background: pick(PANEL, POLAR_900),
+            surface: pick(under_panel(GRAY_50), POLAR_800),
+            raised: pick(under_panel(GRAY_100), POLAR_800),
+            hover: pick(under_panel(GRAY_200), POLAR_700),
+            selected: pick(under_panel(GRAY_100), POLAR_700),
+            pressed: pick(under_panel(GRAY_200), POLAR_600),
+            line: pick(under_panel(GRAY_200), POLAR_700),
+            line_strong: pick(under_panel(GRAY_300), POLAR_600),
             text: pick(BLACK, WHITE),
             text_muted: pick(GRAY_500, POLAR_300),
             text_muted_glass: pick(GRAY_500, GLASS_INK_DIM),
