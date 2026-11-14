@@ -20,25 +20,9 @@
 
 ---
 
-<pre>
-Contributing
-------------
+#### About contributing
+We welcome you to open issues for bugs and issues, or feature requests. Pull requests are closed and we do not
+accept them from anyone but Artisan Street staff. AI written or assisted issues are welcome.
 
-We don't accept pull requests; any that are opened will be closed without
-review.
-
-Suggestions are welcome. If you have an idea, found a bug, or want to
-request a feature, please <a href="https://github.com/artisanstreet/editor/issues">open an issue</a>.
-
-
-License
--------
-
-Artisan Editor is released under the <a href="LICENSE.md">BSD 3-Clause License</a>.
-You may use, modify, and redistribute it, including commercially, provided
-the copyright notice, license conditions, and disclaimer are retained.
-The copyright holders and contributors may not be used to endorse derived
-products without prior written permission.
-
-Third-party components retain their respective licenses and notices.
-</pre>
+#### About licensing
+Artisan Editor is licensed under [BSD-3](LICENSE.md). If your company builds on it, we'd appreciate you reaching out to us first; we're happy to work out an arrangement.
