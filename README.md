@@ -1,4 +1,4 @@
-<img src="assets/hero.png" alt="Artisan" width="100%">
+<img src="assets/test1.png" alt="Artisan" width="100%">
 
 <pre>
 Artisan Editor by Artisan Street
