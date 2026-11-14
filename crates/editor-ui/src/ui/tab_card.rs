@@ -127,7 +127,7 @@ const FILLET_RADIUS: f32 = Inset::Frame.px();
 pub const CARD_RADIUS: f32 = Radius::Panel.px();
 const RIM: f32 = 0.06;
 const SHEEN_RIM: f32 = 0.16;
-const SHEEN: f32 = 0.03;
+const SHEET_TO_SIDEBAR: f32 = 0.47;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryKey {
@@ -310,22 +310,19 @@ fn outside(rect: Rect, reach: Rect) -> [Rect; 4] {
 }
 
 fn card_fills(theme: &ArtisanTheme) -> Vec<GpuiBackground> {
-    match theme.colors.mode.is_dark() {
-        true => vec![
-            background(Oklch::new(0.252, 0.0, 0.0), Oklch::new(0.209, 0.0, 0.0), 145.0, 1.0),
-            background(
-                Oklch::new(1.0, 0.0, 0.0).with_alpha(SHEEN),
-                Oklch::new(1.0, 0.0, 0.0).with_alpha(0.0),
-                180.0,
-                0.44,
-            ),
-        ],
-        false => crate::ui::kit::surface::glass::fills(
-            theme,
-            crate::ui::kit::surface::glass::Shade::Clear,
-        )
-        .to_vec(),
-    }
+    let glass = crate::ui::kit::surface::glass::fills(
+        theme,
+        crate::ui::kit::surface::glass::Shade::Clear,
+    );
+    let settle = match theme.colors.mode.is_dark() {
+        true => Some(GpuiBackground::Solid(
+            Oklch::new(0.0, 0.0, 0.0)
+                .with_alpha(SHEET_TO_SIDEBAR)
+                .to_reference_paint(),
+        )),
+        false => None,
+    };
+    settle.into_iter().chain(glass).collect()
 }
 
 fn background(from: Oklch, to: Oklch, angle: f32, end: f32) -> GpuiBackground {
