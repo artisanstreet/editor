@@ -88,7 +88,10 @@ impl FakeCore {
                     return;
                 }
                 while !shutdown.load(Ordering::SeqCst) {
-                    let Ok((stream, _)) = listener.accept() else {
+                    let accepted = listener
+                        .accept()
+                        .and_then(|(stream, _)| stream.set_nonblocking(false).map(|()| stream));
+                    let Ok(stream) = accepted else {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         continue;
                     };

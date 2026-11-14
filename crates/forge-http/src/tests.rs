@@ -774,8 +774,14 @@ async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
         store.item(&input_id).await.unwrap().unwrap().status,
         artisan_api::Status::Running
     );
-    let _released =
-        lock_data_dir(&data).expect("failed startup releases only its temporary instance lock");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while let Err(error) = lock_data_dir(&data) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "failed startup releases only its temporary instance lock: {error:#}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

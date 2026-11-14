@@ -102,12 +102,14 @@ pub fn scrolled(
     let at_end = maximum > 0.0 && -scroll_offset >= maximum - 1.0;
     if at_end || gap_shown {
         inputs.push(Input::BottomReached);
-    } else if let Some(anchor) = conversation
-        .rows
-        .get(top)
-        .and_then(|(row, _)| row.anchor())
-        .and_then(|id| view.position_of(id))
-    {
+    } else {
+        let anchor = conversation
+            .rows
+            .iter()
+            .skip(top)
+            .find_map(|(row, _)| row.anchor().and_then(|id| view.position_of(id)))
+            .or(view.viewport.oldest)
+            .unwrap_or_default();
         let through = conversation
             .rows
             .iter()
@@ -117,7 +119,7 @@ pub fn scrolled(
             .filter_map(|(_, (row, _))| row.last_anchor())
             .filter_map(|id| view.position_of(id))
             .max()
-            .unwrap_or(anchor);
+            .map_or(anchor, |through| through.max(anchor));
         inputs.push(Input::ScrolledAway { anchor, through });
     }
     inputs

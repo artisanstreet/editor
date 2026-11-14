@@ -11,6 +11,8 @@ mod cancellation;
 mod coordination;
 #[path = "../tests/disk/guard.rs"]
 mod disk_guard;
+#[path = "../tests/run/mcp_auth.rs"]
+mod mcp_auth_tests;
 #[path = "../tests/run/mcp_reach.rs"]
 mod mcp_reach_tests;
 #[path = "../tests/resources/paths.rs"]

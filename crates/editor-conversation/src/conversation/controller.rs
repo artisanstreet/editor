@@ -1521,5 +1521,9 @@ fn shape_source<'a>(
 mod reset_tests;
 
 #[cfg(test)]
+#[path = "../../tests/conversation/controller/agent.rs"]
+mod agent_tests;
+
+#[cfg(test)]
 #[path = "../../tests/conversation/controller/switch.rs"]
 mod switch_tests;
