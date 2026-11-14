@@ -240,7 +240,7 @@ pub fn visual_factory(
             theme.colors.text_muted.to_reference_text_color(),
             format!("{selector}-subtitle"),
         );
-        let project_mark = super::project_mark::project_mark(
+        let project_mark = editor_ui::project_mark::project_mark(
             image,
             repository_host.as_ref().map(|host| host.as_deref()),
             IconSize::Sm,

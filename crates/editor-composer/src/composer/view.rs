@@ -2631,36 +2631,6 @@ pub fn open_popup(
     )
 }
 
-fn project_mark(
-    theme: &ArtisanTheme,
-    host: &editor_core::HostData,
-    project: &artisan_api::ProjectId,
-) -> Element {
-    use aqua_core::image::ImageFit;
-    use aqua_ui::element::Media;
-    if let Some(image) = host.project_icon(project) {
-        return Media::new(image.as_ref().clone())
-            .width(IconSize::Md.px())
-            .height(IconSize::Md.px())
-            .fit(ImageFit::Contain)
-            .build();
-    }
-    let icon = match host.repository(project) {
-        None => AssetId::TABLER_FOLDER,
-        Some(repository) => match repository.host.as_deref() {
-            Some("github") => AssetId::SVGL_GITHUB,
-            Some("gitlab") => AssetId::SVGL_GITLAB,
-            Some("azure") => AssetId::SVGL_MICROSOFT_AZURE,
-            Some("bitbucket") => AssetId::SIMPLE_ICONS_BITBUCKET,
-            Some("codeberg") => AssetId::SIMPLE_ICONS_CODEBERG,
-            Some("gitea") => AssetId::SIMPLE_ICONS_GITEA,
-            Some("sourcehut") => AssetId::SIMPLE_ICONS_SOURCEHUT,
-            _ => AssetId::SVGL_GIT,
-        },
-    };
-    IconSize::Md.glyph(icon, theme.colors.text_muted.to_reference_paint())
-}
-
 pub fn project_menu(
     theme: ArtisanTheme,
     host: &editor_core::HostData,
@@ -2694,7 +2664,7 @@ pub fn project_menu(
         rows = rows.child(item(
             format!("composer-project-{id}"),
             project.name.clone(),
-            project_mark(&theme, host, id),
+            editor_ui::project_mark::Mark::of(host, id).view(theme.colors.text_muted),
             selected == Some(id),
             ComposerAction::ChooseProject(id.clone()),
         ));

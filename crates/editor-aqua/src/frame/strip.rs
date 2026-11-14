@@ -22,7 +22,7 @@ const MIN_WIDTH: f32 = 96.0;
 const MAX_WIDTH: f32 = 720.0;
 const PULSE_MS: u32 = 1_600;
 
-pub use crate::sidebar::project_mark::Mark;
+pub use crate::ui::project_mark::Mark;
 
 pub struct Tab {
     pub id: ThreadId,

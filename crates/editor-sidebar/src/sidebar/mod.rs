@@ -7,7 +7,6 @@ pub mod usage;
 
 pub mod avatar;
 pub mod controller;
-pub mod project_mark;
 pub mod rail;
 pub mod row;
 pub mod settings_nav;

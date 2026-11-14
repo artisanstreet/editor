@@ -3055,7 +3055,7 @@ impl SectionViews for RootViews {
                             url: host
                                 .repository(&project.id)
                                 .and_then(|repository| repository.web_url.clone()),
-                            mark: crate::sidebar::project_mark::Mark::of(host, &project.id),
+                            mark: crate::ui::project_mark::Mark::of(host, &project.id),
                             state: crate::sidebar::list::row_state(host, thread),
                             active: true,
                         })

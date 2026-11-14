@@ -1,16 +1,13 @@
-use editor_core::HostData;
-use editor_ui::theme::Oklch;
-use aqua_ui::style::Style;
-use artisan_api::ProjectId;
-
-use std::sync::Arc;
-
+use crate::ui::kit::{IconSize, Radius};
+use crate::ui::theme::Oklch;
 use aqua::images::ImageHandle;
 use aqua_core::{GpuiHsla, ImageRef, image::ImageFit};
 use aqua_ui::element::{Box as UiBox, Element, Media};
+use aqua_ui::style::Style;
+use artisan_api::ProjectId;
 use editor_assets::AssetId;
-
-use editor_ui::kit::{IconSize, Radius};
+use editor_core::HostData;
+use std::sync::Arc;
 
 pub fn project_mark(
     image: Option<Arc<ImageHandle>>,

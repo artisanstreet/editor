@@ -890,7 +890,7 @@ pub fn thread_entries_view(
         .collect();
     let project_marks: HashMap<_, _> = entries.iter().filter_map(|entry| {
         let Entry::Project { id, .. } = entry else { return None; };
-        Some((id.clone(), crate::sidebar::project_mark::Mark::of(host, id)))
+        Some((id.clone(), editor_ui::project_mark::Mark::of(host, id)))
     }).collect();
     let row_entries = entries.clone();
     let row_emit = emit.clone();
