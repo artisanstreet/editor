@@ -67,7 +67,10 @@ impl Row {
 
     #[must_use]
     pub const fn interactive(self) -> bool {
-        !matches!(self, Self::Heading | Self::ListHeading | Self::FormRow)
+        !matches!(
+            self,
+            Self::Heading | Self::ListHeading | Self::FormRow | Self::KeyRow
+        )
     }
 
     #[must_use]

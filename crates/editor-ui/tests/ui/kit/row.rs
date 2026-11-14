@@ -128,12 +128,22 @@ fn a_form_rows_trailing_control_receives_the_pointer() {
 
 #[test]
 fn only_form_rows_wrap_and_skip_the_hover() {
-    let static_rows = [Row::FormRow, Row::Heading];
+    let static_rows = [Row::FormRow, Row::Heading, Row::KeyRow];
     for row in static_rows {
         assert!(!row.interactive(), "{row:?} carries no hover or activation");
     }
     assert!(Row::FormRow.wraps(), "form descriptions wrap instead of truncating");
     assert!(!Row::MenuItem.wraps(), "menu items stay on one line");
+}
+
+#[test]
+fn key_rows_are_static_facts_as_tall_as_menu_items() {
+    assert!(!Row::KeyRow.interactive(), "a fact is not a target");
+    assert_eq!(
+        Row::KeyRow.height(),
+        Row::MenuItem.height(),
+        "facts and the rows beside them share one rhythm"
+    );
 }
 
 fn hover_lights(item: RowItem) -> bool {
