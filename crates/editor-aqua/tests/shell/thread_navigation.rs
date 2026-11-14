@@ -93,3 +93,15 @@ fn disposing_the_view_closes_the_outline() {
     assert_eq!(navigation.chevron(now), None);
     assert!(!navigation.interaction.open());
 }
+
+#[test]
+fn escape_closes_only_an_open_outline() {
+    let now = Instant::now();
+    let mut navigation = ThreadNavigation::default();
+    navigation.interaction.available = true;
+    assert!(!navigation.close(now, false));
+    navigation.toggle(now, false);
+    assert!(navigation.close(now, false));
+    assert!(!navigation.interaction.open());
+    assert!(!navigation.close(now, false));
+}

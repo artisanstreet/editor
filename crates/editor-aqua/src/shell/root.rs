@@ -3658,6 +3658,14 @@ impl SectionViews for RootViews {
         if shell.entry.workspace().is_none() {
             return palette_changed;
         }
+        if modifiers.is_empty()
+            && event.key == aqua_core::Key::Named(aqua_core::NamedKey::Escape)
+            && self.navigation.close(std::time::Instant::now(), Self::reduced(ui))
+        {
+            self.navigation_invalidated.set(true);
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+            return true;
+        }
         if modifiers == aqua_core::Modifiers::ALT
             && event.key == aqua_core::Key::Named(aqua_core::NamedKey::Left)
         {

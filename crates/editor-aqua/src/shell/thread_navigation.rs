@@ -212,6 +212,16 @@ impl ThreadNavigation {
         state.recentre = open;
     }
 
+    pub fn close(&mut self, now: Instant, reduced_motion: bool) -> bool {
+        let state = &mut self.interaction;
+        let open = state.open();
+        if open {
+            state.set_open(false, now, reduced_motion);
+            state.recentre = false;
+        }
+        open
+    }
+
     pub fn chevron(&self, now: Instant) -> Option<f32> {
         self.interaction
             .available
