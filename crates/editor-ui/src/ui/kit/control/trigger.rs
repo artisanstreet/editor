@@ -38,6 +38,7 @@ pub struct Trigger {
     label: String,
     detail: Option<String>,
     lead: Option<Lead>,
+    muted: bool,
     open: bool,
     disabled: bool,
     on_activate: Option<Box<dyn Fn()>>,
@@ -57,6 +58,7 @@ impl Trigger {
             label: label.into(),
             detail: None,
             lead: None,
+            muted: false,
             open: false,
             disabled: false,
             on_activate: None,
@@ -72,6 +74,12 @@ impl Trigger {
     #[must_use]
     pub fn lead(mut self, lead: Lead) -> Self {
         self.lead = Some(lead);
+        self
+    }
+
+    #[must_use]
+    pub const fn muted(mut self) -> Self {
+        self.muted = true;
         self
     }
 
@@ -151,7 +159,7 @@ impl Trigger {
                     .flex_shrink(1.0)
                     .align(AlignItems::CENTER),
             )
-            .child(Self::text(&theme, self.label.clone(), false));
+            .child(Self::text(&theme, self.label.clone(), self.muted));
         if let Some(detail) = self.detail {
             words = words.child(Self::text(&theme, detail, true));
         }

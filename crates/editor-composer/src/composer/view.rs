@@ -2291,7 +2291,17 @@ impl ComposerOwner {
                     .spaced(Space::S4)
                     .style(Style::new().align(AlignItems::CENTER))
                     .child(self.model(theme, &controller, host))
-                    .children(project)
+                    .children(
+                        project
+                            .map(|project| {
+                                [
+                                    editor_ui::kit::Divider::vertical(&theme, Space::S16.px()),
+                                    project,
+                                ]
+                            })
+                            .into_iter()
+                            .flatten(),
+                    )
                     .build(),
             );
             let strip = if tab.is_some() {
@@ -3498,26 +3508,36 @@ pub fn project_tab(
                     Surface::Composer,
                     project.name.clone(),
                 )
-                .leading(IconSize::Md.glyph(
-                    AssetId::TABLER_FOLDER,
-                    theme.colors.text_muted.to_reference_paint(),
-                ))
+                .leading(
+                    editor_ui::project_mark::Mark::of(host, &thread.project_id)
+                        .view(theme.colors.text_muted),
+                )
                 .build(),
             ))
         }
         super::controller::ComposerTarget::NewThread { .. } => {
-            let name = controller
+            let project = controller
                 .project(host)
+                .filter(|id| host.projects.contains_key(id));
+            let name = project
                 .as_ref()
                 .and_then(|id| host.projects.get(id))
                 .map_or_else(
                     || "Choose a project".to_owned(),
                     |project| project.name.clone(),
                 );
+            let lead = project
+                .as_ref()
+                .map_or(Lead::Glyph(AssetId::TABLER_FOLDER), |id| {
+                    Lead::Avatar(
+                        editor_ui::project_mark::Mark::of(host, id).view(theme.colors.text_muted),
+                    )
+                });
             let open = controller.picker.menu == Some(super::picker::Menu::Project);
             Some(fitted(
                 Trigger::new("composer-project", theme, TriggerSize::Sm, name)
-                    .lead(Lead::Glyph(AssetId::TABLER_FOLDER))
+                    .lead(lead)
+                    .muted()
                     .open(open)
                     .on_activate(move || dispatch(ComposerAction::ToggleProject))
                     .build(),
