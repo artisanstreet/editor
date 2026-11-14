@@ -125,7 +125,7 @@ impl Key {
                 .style(Style::new().width(Length::Pct(100.0)).height(Length::Pct(100.0)))
                 .on_paint(move |bounds| vec![polar_face(bounds, 0.0, radius)])
                 .build(),
-            false => key_face(&surfaces, radius, edge),
+            false => key_face(&theme, radius, edge),
         };
         let mut button = Button::new()
             .style(

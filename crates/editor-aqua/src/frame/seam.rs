@@ -3,7 +3,7 @@ pub mod outline;
 
 use crate::ui::chrome::card::{Edge, rest_shadows};
 use crate::ui::kit::Radius;
-use crate::ui::theme::ArtisanTheme;
+use crate::ui::theme::{ArtisanTheme, ThemeMode};
 use aqua::{Aqua, Style};
 use aqua_core::shape::{ShapeProgram, ShapeTransition};
 use aqua_core::vector::{FillRule, GpuiPath, GpuiPathStyle};
@@ -91,6 +91,7 @@ pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced
                 let color = color.to_reference_paint();
                 parameters.extend([color.h, color.s, color.l, color.a]);
             }
+            parameters.push(f32::from(u8::from(theme.colors.mode.is_dark())));
             vec![DisplayItem::Shape {
                 bounds,
                 damage: Rect::from_edges(
@@ -120,6 +121,8 @@ pub fn surface(theme: ArtisanTheme, motion: Rc<RefCell<motion::Motion>>, reduced
         .with_key("artisan-thread-outline")
         .exclude_from_hit_testing()
 }
+
+const DARK: usize = 24;
 
 #[expect(
     clippy::disallowed_types,
@@ -162,7 +165,11 @@ fn paint_shape(bounds: Rect, target: Rect, parameters: &[f32]) -> Vec<DisplayIte
         gradient(colors[2], colors[3]),
         aqua_core::GpuiBackground::Solid(colors[4]),
     ];
-    let mut items = rest_shadows()
+    let mode = match parameters[DARK] > 0.5 {
+        true => ThemeMode::Dark,
+        false => ThemeMode::Light,
+    };
+    let mut items = rest_shadows(ArtisanTheme::for_mode(mode))
         .into_iter()
         .map(|layer| DisplayItem::Shadow {
             bounds: sheet,

@@ -1,12 +1,12 @@
 pub mod special;
 
 use crate::ui::asset::source_asset_glyph;
-use crate::ui::chrome::card::{POLAR_INK, polar_face};
+use crate::ui::chrome::card::{POLAR_INK, polar_face, soft};
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{Elevation, IconSize, Radius, Space, TextRole, concentric};
 use crate::ui::motion::MotionPolicy;
-use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
+use crate::ui::theme::{ArtisanTheme, Cast, Oklch, Opacity};
 use aqua::ShadowLayer;
 use aqua_core::{CursorIcon, DisplayItem, Insets, Role, Transform2D};
 use aqua_text::overflow::OverflowMode;
@@ -18,8 +18,6 @@ use editor_assets::AssetId;
 use std::sync::Arc;
 
 const PRESS: f32 = 1.5;
-const GRAY_900: Oklch = Oklch::new(0.21, 0.034, 264.665);
-const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -187,19 +185,8 @@ impl Button {
         }
     }
 
-    fn press(&self) -> ShadowLayer {
-        let (dy, blur, color) = match self.theme.colors.mode.is_dark() {
-            true => (1.5, 1.5, BLACK.with_alpha(0.3)),
-            false => (1.0, 1.5, GRAY_900.with_alpha(0.12)),
-        };
-        ShadowLayer {
-            dx: 0.0,
-            dy,
-            blur,
-            spread: 0.0,
-            inset: false,
-            color: color.to_paint(),
-        }
+    fn press(&self) -> Vec<ShadowLayer> {
+        soft(&self.theme, Cast::PRESS)
     }
 
     fn face(&self) -> Option<Element> {
@@ -274,7 +261,7 @@ impl Button {
                 .max_width(Length::Pct(100.0));
         }
         let shadows = match self.tone {
-            ButtonTone::Primary => vec![self.press()],
+            ButtonTone::Primary => self.press(),
             ButtonTone::Special => Elevation::Rest.shadows(&theme),
             ButtonTone::Neutral | ButtonTone::Quiet => Vec::new(),
         };
@@ -298,7 +285,7 @@ impl Button {
         }
         let label = self.label.words().to_owned();
         let tone = self.tone;
-        let press = self.press();
+        let lift = soft(&theme, Cast::LIFT);
         if self.disabled {
             root = root.opacity(Opacity::Disabled.alpha());
         } else if let Some(handler) = self.on_activate {
@@ -331,17 +318,7 @@ impl Button {
             }]);
         let hover = match tone {
             ButtonTone::Neutral | ButtonTone::Quiet => Style::new(),
-            ButtonTone::Primary => Style::new().shadows(vec![
-                press,
-                ShadowLayer {
-                    dx: 0.0,
-                    dy: 2.0,
-                    blur: 6.0,
-                    spread: -2.0,
-                    inset: false,
-                    color: BLACK.with_alpha(0.25).to_paint(),
-                },
-            ]),
+            ButtonTone::Primary => Style::new().shadows(lift),
             ButtonTone::Special => Style::new().opacity(0.94),
         };
         let element = element
