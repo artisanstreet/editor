@@ -123,60 +123,12 @@ pub fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<Gla
 pub const KEY_RADIUS: f32 = Radius::Field.px();
 pub const COMPOSER_PADDING: f32 = Inset::Frame.px();
 pub const COMPOSER_RADIUS: f32 = Radius::Well.px();
-pub const INSET_RADIUS: f32 =
-    super::tab_card::CARD_RADIUS - super::tab_card::TAB_CARD_PADDING_PX;
-
-fn inset(theme: &ArtisanTheme, content: Element) -> Element {
-    use aqua_ui::style::{Axis, GpuiShadowLayer, Length};
-    let inner = |dy: f32, blur: f32, color: Oklch| GpuiShadowLayer {
-        dx: 0.0,
-        dy,
-        blur,
-        spread: 0.0,
-        inset: true,
-        color: color.to_reference_paint(),
-    };
-    let (top, bottom, shadows) = match theme.colors.mode.is_dark() {
-        true => (
-            Oklch::new(0.1822, 0.0, 0.0),
-            Oklch::new(0.2002, 0.0, 0.0),
-            vec![
-                inner(2.0, 6.0, Oklch::new(0.0, 0.0, 0.0).with_alpha(0.55)),
-                inner(-1.0, 0.0, Oklch::new(1.0, 0.0, 0.0).with_alpha(0.05)),
-            ],
-        ),
-        false => (
-            Oklch::new(0.94, 0.004, 264.5),
-            Oklch::new(0.96, 0.003, 264.5),
-            vec![
-                inner(2.0, 6.0, Oklch::new(0.21, 0.034, 264.665).with_alpha(0.14)),
-                inner(-1.0, 0.0, Oklch::new(1.0, 0.0, 0.0).with_alpha(0.8)),
-            ],
-        ),
-    };
+fn on_glass(content: Element) -> Element {
+    use aqua_ui::style::{Axis, Length};
     UiBox::new()
         .width(Length::Pct(100.0))
         .padding(COMPOSER_PADDING)
-        .radius(INSET_RADIUS)
-        .style(
-            Style::new()
-                .axis(Axis::Column)
-                .gpui_background(aqua_core::GpuiBackground::LinearGradient {
-                    angle: 180.0,
-                    color_space: aqua_core::GpuiGradientColorSpace::Oklab,
-                    stops: [
-                        aqua_core::GpuiGradientStop {
-                            percentage: 0.0,
-                            color: top.to_reference_paint(),
-                        },
-                        aqua_core::GpuiGradientStop {
-                            percentage: 1.0,
-                            color: bottom.to_reference_paint(),
-                        },
-                    ],
-                })
-                .gpui_shadows(shadows),
-        )
+        .style(Style::new().axis(Axis::Column))
         .child(content)
         .build()
 }
@@ -205,7 +157,7 @@ impl ComposerFrame {
         use aqua_ui::style::{Axis, Length};
         let radius = COMPOSER_RADIUS;
         match self.nested {
-            true => inset(&self.theme, self.content),
+            true => on_glass(self.content),
             false => UiBox::new()
                 .width(Length::Pct(100.0))
                 .padding(COMPOSER_PADDING)
