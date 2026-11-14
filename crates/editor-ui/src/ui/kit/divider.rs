@@ -62,6 +62,7 @@ impl Divider {
         UiBox::new()
             .layout("row")
             .height(height)
+            .gap(LINE)
             .style(Style::new().flex_shrink(0.0))
             .child(upright(shade))
             .child(upright(light))
