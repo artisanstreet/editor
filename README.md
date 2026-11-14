@@ -8,7 +8,9 @@
 
 **Anywhere you are.** Your machines stay reachable from anywhere in the world. Open any thread from your phone's browser, check on it, and steer it.
 
-*And of course, the Artisan experience.* Every interaction, every pixel is carefully placed— the usual.
+**Very fast, and very small.** Artisan Editor is built on [Aqua](https://github.com/artisanstreet/aqua), a GUI framework built by Artisan Street.
+
+*And of course, the Artisan experience.* Every interaction, every pixel is carefully placed. The usual.
 
 <p align="center">
   <br>
