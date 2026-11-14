@@ -375,7 +375,7 @@ pub fn keyed_field(theme: &ArtisanTheme, content: Element, key: Element) -> Elem
         .layout("column")
         .style(
             Style::new()
-                .min_height(Length::Px(KEY.edge() - 2.0 * FIELD.padding_px()))
+                .height(Length::Px(KEY.edge() - 2.0 * FIELD.padding_px()))
                 .justify(JustifyContent::CENTER),
         )
         .child(content)
