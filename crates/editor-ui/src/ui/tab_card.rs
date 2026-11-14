@@ -281,12 +281,6 @@ pub struct ShadowPass {
     pub layer: ShadowLayer,
     pub clip: Rect,
 }
-#[derive(Clone, Copy, Debug)]
-pub struct BackdropPass {
-    pub bounds: Rect,
-    pub corners: CornerRadii,
-    pub blur: f32,
-}
 #[derive(Clone, Debug)]
 pub struct PathPass {
     pub transformed_window_logical_bounds: Rect,
@@ -295,7 +289,7 @@ pub struct PathPass {
 #[derive(Clone, Debug)]
 pub struct PreparedTabCard {
     pub shadows: Vec<ShadowPass>,
-    pub backdrops: Vec<BackdropPass>,
+    pub backdrop: aqua_core::DisplayItem,
     pub paths: Vec<PathPass>,
 }
 
@@ -356,13 +350,7 @@ impl PreparedTabCard {
             });
             items.push(DisplayItem::PopClip);
         }
-        for backdrop in &self.backdrops {
-            items.push(DisplayItem::BackdropBlurRounded {
-                bounds: backdrop.bounds,
-                radius: backdrop.blur,
-                corners: backdrop.corners,
-            });
-        }
+        items.push(self.backdrop.clone());
         for path in &self.paths {
             items.push(DisplayItem::GpuiPath {
                 transformed_window_logical_bounds: path.transformed_window_logical_bounds,
@@ -390,10 +378,9 @@ impl PreparedTabCard {
         let local = Rect::from_origin_size(Point::ZERO, bounds.size());
         let strip = strip_right(local, tab_width, reveal);
         let mut shadows = Vec::new();
-        let mut backdrops = Vec::new();
         let mut paths = Vec::new();
         if tab_width <= 0.0 {
-            backdrops.push(BackdropPass {
+            let backdrop = aqua_core::DisplayItem::BackdropBlurRounded {
                 bounds: Rect::from_edges(
                     bounds.x,
                     bounds.y + TAB_CARD_TAB_HEIGHT_PX,
@@ -406,11 +393,11 @@ impl PreparedTabCard {
                     bottom_right: radius,
                     bottom_left: radius,
                 },
-                blur: 20.0,
-            });
+                radius: crate::ui::kit::surface::glass::BLUR,
+            };
             return Self {
                 shadows,
-                backdrops,
+                backdrop,
                 paths,
             };
         }
@@ -461,49 +448,19 @@ impl PreparedTabCard {
                 });
             }
         }
-        backdrops.push(BackdropPass {
-            bounds: Rect::from_edges(
-                bounds.x,
-                bounds.y,
-                bounds.x + tab_width,
-                bounds.y + TAB_CARD_TAB_HEIGHT_PX,
-            ),
-            corners: CornerRadii {
-                top_left: TAB_RADIUS,
-                top_right: TAB_RADIUS,
-                bottom_right: 0.0,
-                bottom_left: 0.0,
-            },
-            blur: 20.0,
-        });
-        backdrops.push(BackdropPass {
-            bounds: body,
-            corners: CornerRadii {
-                top_left: 0.0,
-                top_right: if reveal < 1.0 { radius } else { 0.0 },
-                bottom_right: radius,
-                bottom_left: radius,
-            },
-            blur: 20.0,
-        });
-        backdrops.swap(0, 1);
-        if let Some(right) = strip {
-            let end = strip_end(local, tab_width, radius, right);
-            let bottom_right = match end.bottom {
-                StripBottom::Rounded(bottom) => bottom,
-                StripBottom::Down(_) => 0.0,
-            };
-            backdrops.push(BackdropPass {
-                bounds: Rect::from_edges(bounds.x + tab_width, bounds.y, bounds.x + right, body_y),
-                corners: CornerRadii {
-                    top_left: 0.0,
-                    top_right: end.top,
-                    bottom_right,
-                    bottom_left: 0.0,
+        let backdrop = aqua_core::DisplayItem::BackdropBlurPath {
+            transformed_window_logical_bounds: bounds,
+            path: Arc::new(GpuiPath {
+                commands_local: geometry.shell.clone(),
+                origin_window_logical: bounds.origin(),
+                element_transform: Transform2D::IDENTITY,
+                style: GpuiPathStyle::Fill {
+                    rule: FillRule::NonZero,
                 },
-                blur: 20.0,
-            });
-        }
+                background: GpuiBackground::Solid(Oklch::new(1.0, 0.0, 0.0).to_reference_paint()),
+            }),
+            radius: crate::ui::kit::surface::glass::BLUR,
+        };
         let fills = card_fills(theme);
         let mut push = |commands: &[PathCommand],
                         background: GpuiBackground,
@@ -556,7 +513,7 @@ impl PreparedTabCard {
         );
         Self {
             shadows,
-            backdrops,
+            backdrop,
             paths,
         }
     }
