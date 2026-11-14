@@ -12,7 +12,6 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 env:
-  CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
@@ -50,7 +49,6 @@ jobs:
       - name: Tests
         run: nix develop .#cargo-linux --command cargo test --locked --workspace
   windows:
-    needs: linux
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -70,7 +68,6 @@ jobs:
       - run: cargo build --locked -p ae -p forge
       - run: cargo test --locked --workspace --no-fail-fast
   macos:
-    needs: linux
     runs-on: macos-15
     timeout-minutes: 45
     steps:
