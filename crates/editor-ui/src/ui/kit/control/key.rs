@@ -1,11 +1,11 @@
 use super::focus_ring;
 use crate::ui::asset::source_asset_glyph;
-use crate::ui::chrome::card::{Surfaces, key_face};
+use crate::ui::chrome::card::{POLAR_INK, Surfaces, key_face, polar_face};
 use crate::ui::kit::tokens::{IconSize, Radius};
 use crate::ui::motion::MotionPolicy;
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::{CursorIcon, Role, Transform2D};
-use aqua_ui::element::{Box as UiBox, Button, Element, Key as NodeKey};
+use aqua_ui::element::{Box as UiBox, Button, Canvas, Element, Key as NodeKey};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::tree::ActionEvent;
 use aqua_ui::{AlignItems, JustifyContent};
@@ -41,6 +41,7 @@ pub struct Key {
     size: KeySize,
     face: KeyFace,
     wide: bool,
+    primary: bool,
     disabled: bool,
     motion: MotionPolicy,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
@@ -61,6 +62,7 @@ impl Key {
             size,
             face,
             wide: false,
+            primary: false,
             disabled: false,
             motion: MotionPolicy::Full,
             on_activate: None,
@@ -70,6 +72,12 @@ impl Key {
     #[must_use]
     pub const fn wide(mut self) -> Self {
         self.wide = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn primary(mut self) -> Self {
+        self.primary = true;
         self
     }
 
@@ -102,11 +110,22 @@ impl Key {
         } else {
             Length::Px(edge)
         };
+        let ink = match self.primary {
+            true => POLAR_INK,
+            false => surfaces.ink,
+        };
         let content = match self.face {
             KeyFace::Glyph(icon) => {
-                source_asset_glyph(icon, IconSize::Md.px(), surfaces.ink.to_reference_paint())
+                source_asset_glyph(icon, IconSize::Md.px(), ink.to_reference_paint())
             }
             KeyFace::Content(element) => element,
+        };
+        let face = match self.primary {
+            true => Canvas::new()
+                .style(Style::new().width(Length::Pct(100.0)).height(Length::Pct(100.0)))
+                .on_paint(move |bounds| vec![polar_face(bounds, 0.0, radius)])
+                .build(),
+            false => key_face(&surfaces, radius, edge),
         };
         let mut button = Button::new()
             .style(
@@ -121,7 +140,7 @@ impl Key {
             .child(
                 UiBox::new()
                     .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-                    .child(key_face(&surfaces, radius, edge))
+                    .child(face)
                     .build()
                     .exclude_from_hit_testing(),
             )

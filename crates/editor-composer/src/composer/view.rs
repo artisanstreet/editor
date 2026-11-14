@@ -133,6 +133,7 @@ pub fn primary(theme: ArtisanTheme, face: Primary, disabled: bool, dispatch: Dis
         ),
     };
     Key::new(id, theme, label, KeySize::Md, KeyFace::Glyph(icon))
+        .primary()
         .disabled(disabled)
         .on_activate(move |_| dispatch(action.clone()))
         .build()
