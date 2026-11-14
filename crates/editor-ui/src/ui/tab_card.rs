@@ -125,6 +125,8 @@ pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
 const TAB_RADIUS: f32 = Radius::Panel.px();
 const FILLET_RADIUS: f32 = Inset::Frame.px();
 pub const CARD_RADIUS: f32 = Radius::Panel.px();
+const RIM: f32 = 0.08;
+const SHEEN_RIM: f32 = 0.22;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeometryKey {
@@ -529,8 +531,14 @@ impl PreparedTabCard {
         );
         push(
             &geometry.edge,
+            GpuiBackground::Solid(light.with_alpha(RIM).to_reference_paint()),
+            true,
+            local,
+        );
+        push(
+            &geometry.edge,
             background(
-                light,
+                light.with_alpha(SHEEN_RIM),
                 light.with_alpha(0.0),
                 180.0,
                 reach(TAB_CARD_TAB_HEIGHT_PX + radius),

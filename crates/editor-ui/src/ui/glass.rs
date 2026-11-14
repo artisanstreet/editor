@@ -131,9 +131,9 @@ fn inset(theme: &ArtisanTheme, content: Element) -> Element {
     let dark = theme.colors.mode.is_dark();
     let (shade, rim, depth) = match dark {
         true => (
-            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.28),
-            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.45),
-            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.5),
+            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.05),
+            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.35),
+            Oklch::new(0.0, 0.0, 0.0).with_alpha(0.4),
         ),
         false => (
             Oklch::new(0.21, 0.034, 264.665).with_alpha(0.04),
