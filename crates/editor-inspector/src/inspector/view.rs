@@ -367,10 +367,8 @@ fn agent_row(
             thread: thread.clone(),
         })
     })
+    .hint(move || render_agent_card(&card, theme))
     .build()
-    .tooltip_with(0.5, editor_ui::hint_card::presence(), move || {
-        render_agent_card(&card, theme)
-    })
 }
 
 fn plan_row(

@@ -146,7 +146,7 @@ fn fact(theme: &ArtisanTheme, icon: AssetId, title: &str, value: &str) -> Elemen
     RowItem::new(
         format!("artisan-overview-fact-{title}"),
         *theme,
-        Row::Heading,
+        Row::KeyRow,
         SURFACE,
         format!("{title}: {value}"),
     )
@@ -169,7 +169,7 @@ fn context(theme: &ArtisanTheme, reading: &ContextReading) -> Element {
     RowItem::new(
         "artisan-overview-context",
         theme,
-        Row::Heading,
+        Row::KeyRow,
         SURFACE,
         reading.percent_sentence(),
     )
@@ -182,8 +182,7 @@ fn context(theme: &ArtisanTheme, reading: &ContextReading) -> Element {
         reading.percent(),
         crate::ui::progress::HEIGHT,
     ))
-    .build()
-    .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
+    .hint(move || {
         hint_card(
             &theme,
             "Context Window",
@@ -194,6 +193,7 @@ fn context(theme: &ArtisanTheme, reading: &ContextReading) -> Element {
             ],
         )
     })
+    .build()
 }
 
 fn subagent(
@@ -249,10 +249,8 @@ fn subagent(
             .build(),
     )
     .on_activate(move || emit(open.clone()))
+    .hint(move || render_agent_card(&tooltip, theme))
     .build()
-    .tooltip_with(0.5, crate::ui::hint_card::presence(), move || {
-        render_agent_card(&tooltip, theme)
-    })
 }
 
 fn body() -> Style {

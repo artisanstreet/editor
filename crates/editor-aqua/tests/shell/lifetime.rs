@@ -2,24 +2,27 @@ use artisan_api::ThreadId;
 use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
 use editor_aqua::shell::resource_preview::ResourcePreview;
 use std::{
+    net::TcpListener,
     sync::{Arc, mpsc},
     time::Duration,
 };
 
-fn client(core: &Core) -> ForgeClient {
-    ForgeClient::new(
-        "127.0.0.1:1",
-        &"0".repeat(64),
-        core.identity.as_ref().unwrap(),
-    )
-    .unwrap()
+fn closing_forge() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || listener.incoming().for_each(drop));
+    address
 }
 
-fn config() -> HostConfig {
+fn client(core: &Core, address: &str) -> ForgeClient {
+    ForgeClient::new(address, &"0".repeat(64), core.identity.as_ref().unwrap()).unwrap()
+}
+
+fn config(address: &str) -> HostConfig {
     HostConfig {
         id: HostId("same-host".into()),
         name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
+        address: address.into(),
         fingerprint: "0".repeat(64),
         kind: HostKind::Remote,
     }
@@ -54,8 +57,9 @@ fn preview_completion_is_discarded_after_host_removal_and_same_id_replacement() 
         dir: directory.path().to_owned(),
     })
     .unwrap();
-    let config = config();
-    core.add_test_host(&config, client(&core));
+    let address = closing_forge();
+    let config = config(&address);
+    core.add_test_host(&config, client(&core, &address));
 
     let mut current = pending_preview(&core, &config);
     wait_for_result(&current);
@@ -69,12 +73,12 @@ fn preview_completion_is_discarded_after_host_removal_and_same_id_replacement() 
     assert!(!removed.drain(&core));
     assert!(removed.content.is_none());
 
-    core.add_test_host(&config, client(&core));
+    core.add_test_host(&config, client(&core, &address));
     let new = core.host(&config.id).unwrap().instance();
     assert_ne!(old, new);
     let mut replaced = pending_preview(&core, &config);
     wait_for_result(&replaced);
-    core.add_test_host(&config, client(&core));
+    core.add_test_host(&config, client(&core, &address));
     assert!(!replaced.drain(&core));
     assert!(replaced.content.is_none());
 }

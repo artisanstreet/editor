@@ -128,10 +128,57 @@ fn a_form_rows_trailing_control_receives_the_pointer() {
 
 #[test]
 fn only_form_rows_wrap_and_skip_the_hover() {
-    let static_rows = [Row::FormRow, Row::Heading];
+    let static_rows = [Row::FormRow, Row::Heading, Row::KeyRow];
     for row in static_rows {
         assert!(!row.interactive(), "{row:?} carries no hover or activation");
     }
     assert!(Row::FormRow.wraps(), "form descriptions wrap instead of truncating");
     assert!(!Row::MenuItem.wraps(), "menu items stay on one line");
+}
+
+#[test]
+fn key_rows_are_static_facts_as_tall_as_menu_items() {
+    assert!(!Row::KeyRow.interactive(), "a fact is not a target");
+    assert_eq!(
+        Row::KeyRow.height(),
+        Row::MenuItem.height(),
+        "facts and the rows beside them share one rhythm"
+    );
+}
+
+fn hover_lights(item: RowItem) -> bool {
+    let mut app = aqua::UiApp::new(aqua_text::SharedFonts::new(), aqua_text::SharedRuns::new());
+    assert!(app.mount(move |_| item.build()).is_ok(), "the row mounts");
+    app.set_viewport(400.0, 200.0, 1.0);
+    assert!(app.build_frame().is_ok(), "the row lays out");
+    let row = app.tree().sole_node_with_key(hash_key(Key::from("row")));
+    let Some(rect) = row.and_then(|node| app.tree().rect(node)) else {
+        return false;
+    };
+    editor_ui::kit::live::advance(&mut app, std::time::Instant::now(), true);
+    assert!(
+        !editor_ui::kit::live::advance(&mut app, std::time::Instant::now(), true).changed,
+        "nothing lights before the pointer arrives"
+    );
+    app.handle_input(&aqua_core::InputEvent::PointerMove(
+        aqua_core::PointerEvent {
+            contact: 0,
+            kind: aqua_core::PointerKind::Mouse,
+            position: Point::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
+            buttons: 0,
+        },
+    ));
+    editor_ui::kit::live::advance(&mut app, std::time::Instant::now(), true).changed
+}
+
+#[test]
+fn a_row_with_a_hover_card_still_lights_on_hover() {
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let row =
+        || RowItem::new("row", *theme, Row::MenuItem, Surface::Menu, "Agent").on_activate(|| {});
+    assert!(hover_lights(row()), "a plain row lights");
+    assert!(
+        hover_lights(row().hint(|| UiBox::new().build())),
+        "a hint card sits beside the hover instead of replacing it"
+    );
 }
