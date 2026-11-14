@@ -1,6 +1,6 @@
 use super::model::{Event, Kind, Machine, Phase, Setup};
 use crate::frame::sign_in::card::{body, framed, header, wordmark};
-use crate::ui::chrome::card::{Surfaces, hex, key_face};
+use crate::ui::chrome::card::{hex, key_face};
 use crate::ui::kit::surface::{self, Tone, tint};
 use crate::ui::kit::{
     Button, ButtonTone, Density, IconSize, Radius, Row, RowItem, Space, Spaced, Surface,
@@ -153,11 +153,7 @@ fn machine_row(
     let radius = Radius::Field.px();
     let face = UiBox::new()
         .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-        .child(key_face(
-            &Surfaces::of(theme),
-            radius,
-            row.height().unwrap_or_default(),
-        ))
+        .child(key_face(theme, radius, row.height().unwrap_or_default()))
         .build()
         .exclude_from_hit_testing();
     let item = RowItem::new(

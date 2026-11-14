@@ -1,13 +1,13 @@
 use crate::ui::asset::source_asset_glyph;
-use crate::ui::chrome::card::{POLAR_HAZE, POLAR_INK, polar_face};
+use crate::ui::chrome::card::{POLAR_HAZE, POLAR_INK, polar_face, soft};
 use crate::ui::chrome::limits::{EngineLimits, Limit};
 use crate::ui::chrome::menu::{Event, Menu, Spot};
 use crate::ui::engine::engine_icon;
 use crate::ui::kit::hover::live;
 use crate::ui::kit::{Hover, Radius, Space, Surface};
-use crate::ui::theme::{ArtisanTheme, Oklch};
+use crate::ui::theme::{ArtisanTheme, Cast, Oklch};
 use aqua::images::ImageHandle;
-use aqua::{Aqua, ShadowLayer, Style, pct, px};
+use aqua::{Aqua, Style, pct, px};
 use aqua_core::{CursorIcon, DisplayItem, ImageRef, Insets, Role, image::ImageFit};
 use aqua_text::{FontFamily, FontWeight, TextStyle};
 use aqua_ui::element::{Element, Media};
@@ -45,7 +45,6 @@ const CHEVRON_RIGHT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="
 
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
 const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
-const GRAY_900: Oklch = Oklch::new(0.21, 0.034, 264.665);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Identity {
@@ -85,13 +84,10 @@ pub struct Account {
     pub limits: Vec<EngineLimits>,
 }
 
-struct Shadow(f32, f32, f32, Oklch);
-
 struct Palette {
     dark: bool,
     ink: Oklch,
     ink_dim: Oklch,
-    press: Shadow,
 }
 
 impl Palette {
@@ -101,14 +97,12 @@ impl Palette {
                 dark: true,
                 ink: WHITE,
                 ink_dim: Oklch::new(0.709, 0.0, 0.0),
-                press: Shadow(1.5, 1.5, 0.0, BLACK.with_alpha(0.3)),
             }
         } else {
             Self {
                 dark: false,
                 ink: BLACK,
                 ink_dim: Oklch::new(0.551, 0.027, 264.364),
-                press: Shadow(1.0, 1.5, 0.0, GRAY_900.with_alpha(0.12)),
             }
         }
     }
@@ -203,7 +197,7 @@ pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
             "Help & Feedback",
             AssetId::TABLER_MESSAGE_CIRCLE_QUESTION,
         ))
-        .child(upgrade(theme, &palette, &sheet))
+        .child(upgrade(theme, &sheet))
         .child(crate::ui::chrome::card::double_rule(theme, MENU_PADDING))
         .children(limits(theme, &palette, &sheet.account.limits))
         .child(entry(Spot::SignOut, "Sign out", AssetId::TABLER_LOGOUT))
@@ -307,7 +301,7 @@ fn item(
     )
 }
 
-fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Element {
+fn upgrade(theme: &ArtisanTheme, sheet: &Sheet<'_>) -> Element {
     let hover = Rc::clone(&sheet.emit);
     let pick = Rc::clone(&sheet.emit);
     let lift = if sheet.menu.highlight(Spot::Upgrade).lit() {
@@ -315,7 +309,6 @@ fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Elemen
     } else {
         0.0
     };
-    let press = &palette.press;
     Aqua::Button()
         .styles([
             Aqua::Style()
@@ -330,7 +323,7 @@ fn upgrade(theme: &ArtisanTheme, palette: &Palette, sheet: &Sheet<'_>) -> Elemen
                     bottom: 4.0,
                     ..Insets::default()
                 }),
-            Style::new().shadows(vec![layer(0.0, press.0, press.1, press.2, false, press.3)]),
+            Style::new().shadows(soft(theme, Cast::PRESS)),
         ])
         .child(polar(lift))
         .child(source_asset_glyph(
@@ -556,15 +549,4 @@ fn inline_glyph(source: &'static str, edge: f32, tint: Oklch) -> Element {
             }]
         })
         .build()
-}
-
-fn layer(dx: f32, dy: f32, blur: f32, spread: f32, inset: bool, color: Oklch) -> ShadowLayer {
-    ShadowLayer {
-        dx,
-        dy,
-        blur,
-        spread,
-        inset,
-        color: color.to_paint(),
-    }
 }
