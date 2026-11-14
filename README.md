@@ -13,7 +13,7 @@
 <p align="center">
   <br>
   <a href="https://artisan.st/auth"><img src="assets/repo-buttons/syf632g96tr4ry7u8fc21rb5.svg" alt="Create your account"></a>
-  <a href="https://github.com/artisanstreet/editor/releases/tag/nightly"><img src="assets/repo-buttons/b19285pt3phqxohqwe9hgli4.svg" alt="Download Artisan Editor"></a>
+  <a href="https://artisan.st/editor/download"><img src="assets/repo-buttons/b19285pt3phqxohqwe9hgli4.svg" alt="Download Artisan Editor"></a>
   <br>
   <br>
 </p>
