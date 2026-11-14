@@ -125,8 +125,7 @@ pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
 const TAB_RADIUS: f32 = Radius::Panel.px();
 const FILLET_RADIUS: f32 = Inset::Frame.px();
 pub const CARD_RADIUS: f32 = Radius::Panel.px();
-const RIM: f32 = 0.06;
-const SHEEN_RIM: f32 = 0.16;
+const RIM: f32 = 0.09;
 const SHEET_TO_SIDEBAR: f32 = 0.47;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -322,7 +321,7 @@ fn card_fills(theme: &ArtisanTheme) -> Vec<GpuiBackground> {
         )),
         false => None,
     };
-    settle.into_iter().chain(glass).collect()
+    settle.into_iter().chain(glass.into_iter().take(2)).collect()
 }
 
 fn background(from: Oklch, to: Oklch, angle: f32, end: f32) -> GpuiBackground {
@@ -546,17 +545,6 @@ impl PreparedTabCard {
         push(
             &geometry.edge,
             GpuiBackground::Solid(light.with_alpha(RIM).to_reference_paint()),
-            true,
-            local,
-        );
-        push(
-            &geometry.edge,
-            background(
-                light.with_alpha(SHEEN_RIM),
-                light.with_alpha(0.0),
-                180.0,
-                reach(TAB_CARD_TAB_HEIGHT_PX + radius),
-            ),
             true,
             local,
         );
