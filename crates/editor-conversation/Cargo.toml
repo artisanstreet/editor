@@ -22,6 +22,7 @@ serde_json.workspace = true
 tracing.workspace = true
 ropey.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 editor-core = { path = "../editor-core" }

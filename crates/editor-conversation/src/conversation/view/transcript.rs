@@ -292,6 +292,7 @@ impl TranscriptObservations {
             viewport.visible.start..viewport.visible.end,
             viewport.mounted.start..viewport.mounted.end,
         );
+        conversation.note_offset(viewport.distance_from_start);
         let source_prefix = conversation
             .rows
             .first()

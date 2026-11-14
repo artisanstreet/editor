@@ -3,6 +3,7 @@ use crate::qualification::fixture::{Fixture, ForgeServer};
 use anyhow::{Context, Result, bail, ensure};
 use artisan_api::{EngineId, ProjectId, ThreadId};
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -52,10 +53,11 @@ pub struct Scenario {
 }
 
 impl Scenario {
-    pub fn start(fixture_path: &Path) -> Result<(Self, Core)> {
+    pub fn start(fixture_path: &Path, latency: Option<Duration>) -> Result<(Self, Core)> {
         let directory = tempfile::tempdir().context("create capture directory")?;
         let editor_dir = directory.path().join("editor");
-        let (mut scenario, files) = Self::launch(fixture_path, directory.path(), &editor_dir)?;
+        let (mut scenario, files) =
+            Self::launch(fixture_path, directory.path(), &editor_dir, latency)?;
         scenario._directory = Some(directory);
         let core = Core::for_tests(files)?;
         Ok((scenario, core))
@@ -66,13 +68,14 @@ impl Scenario {
             !editor_dir.exists() || std::fs::read_dir(editor_dir)?.next().is_none(),
             "capture requires an empty Editor directory"
         );
-        Self::launch(fixture_path, root, editor_dir).map(|(scenario, _)| scenario)
+        Self::launch(fixture_path, root, editor_dir, None).map(|(scenario, _)| scenario)
     }
 
     fn launch(
         fixture_path: &Path,
         root: &Path,
         editor_dir: &Path,
+        latency: Option<Duration>,
     ) -> Result<(Self, EditorFiles)> {
         let fixture: Fixture = serde_json::from_slice(
             &std::fs::read(fixture_path)
@@ -89,7 +92,12 @@ impl Scenario {
             "127.0.0.1:0".parse().context("loopback address")?,
         ))?;
         runtime.block_on(fixture.seed(&server.store))?;
-        let pairing = runtime.block_on(server.pairing_input())?;
+        let mut pairing = runtime.block_on(server.pairing_input())?;
+        if let Some(delay) = latency {
+            pairing.address = runtime
+                .block_on(super::latency::proxy(server.address, delay))?
+                .to_string();
+        }
         let files = EditorFiles {
             dir: editor_dir.to_path_buf(),
         };

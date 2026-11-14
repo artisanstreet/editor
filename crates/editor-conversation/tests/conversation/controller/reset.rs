@@ -70,7 +70,7 @@ fn enqueue(conversation: &Conversation, completion: Completion) {
     );
 }
 
-fn finish_tail(conversation: &mut Conversation, core: &Core) {
+fn finish_tail(conversation: &mut Conversation, core: &mut Core) {
     enqueue(
         conversation,
         Completion::Page {
@@ -98,7 +98,7 @@ fn finish_tail(conversation: &mut Conversation, core: &Core) {
 #[test]
 fn reset_rejects_queued_pages_and_preserves_the_new_tail_until_it_loads() {
     for fetch in [Fetch::Tail, Fetch::Older { before: 10 }] {
-        let (_directory, _listener, core, mut conversation) = fixture();
+        let (_directory, _listener, mut core, mut conversation) = fixture();
         let previous = origin(&conversation);
         enqueue(
             &conversation,
@@ -113,7 +113,7 @@ fn reset_rejects_queued_pages_and_preserves_the_new_tail_until_it_loads() {
         conversation.host_event(&core, &HostEvent::Reset, false);
 
         assert_ne!(conversation.generation, previous.generation);
-        assert!(!conversation.drain(&core));
+        assert!(!conversation.drain(&mut core));
         assert!(conversation.page_task.is_some());
         assert!(conversation.rows.is_empty());
         assert_eq!(
@@ -121,13 +121,13 @@ fn reset_rejects_queued_pages_and_preserves_the_new_tail_until_it_loads() {
             Some(Fetch::Tail)
         );
         assert!(conversation.view.as_ref().unwrap().viewport.in_flight);
-        finish_tail(&mut conversation, &core);
+        finish_tail(&mut conversation, &mut core);
     }
 }
 
 #[test]
 fn mismatched_fetch_in_current_generation_does_not_cancel_the_active_tail() {
-    let (_directory, _listener, core, mut conversation) = fixture();
+    let (_directory, _listener, mut core, mut conversation) = fixture();
     enqueue(
         &conversation,
         Completion::Page {
@@ -138,15 +138,15 @@ fn mismatched_fetch_in_current_generation_does_not_cancel_the_active_tail() {
         },
     );
 
-    assert!(!conversation.drain(&core));
+    assert!(!conversation.drain(&mut core));
     assert!(conversation.page_task.is_some());
     assert!(conversation.view.as_ref().unwrap().viewport.in_flight);
-    finish_tail(&mut conversation, &core);
+    finish_tail(&mut conversation, &mut core);
 }
 
 #[test]
 fn reset_rejects_queued_work_even_when_the_new_span_reuses_its_position() {
-    let (_directory, _listener, core, mut conversation) = fixture();
+    let (_directory, _listener, mut core, mut conversation) = fixture();
     let previous = origin(&conversation);
     enqueue(
         &conversation,
@@ -162,7 +162,7 @@ fn reset_rejects_queued_work_even_when_the_new_span_reuses_its_position() {
         runtime().spawn(std::future::pending()),
     ));
 
-    assert!(!conversation.drain(&core));
+    assert!(!conversation.drain(&mut core));
     assert_eq!(conversation.work_reading, Some(10));
     assert!(conversation.work_task.is_some());
     assert!(conversation.load_error.is_none());
@@ -179,15 +179,15 @@ fn reset_rejects_queued_work_even_when_the_new_span_reuses_its_position() {
             }),
         },
     );
-    assert!(conversation.drain(&core));
+    assert!(conversation.drain(&mut core));
     assert!(conversation.work_task.is_none());
     assert!(conversation.work_reading.is_none());
-    finish_tail(&mut conversation, &core);
+    finish_tail(&mut conversation, &mut core);
 }
 
 #[test]
 fn reset_restarts_pending_agent_context_without_accepting_its_old_completion() {
-    let (_directory, _listener, core, mut conversation) = fixture();
+    let (_directory, _listener, mut core, mut conversation) = fixture();
     conversation.agent = Some(ItemId("agent".into()));
     conversation.agent_task = Some(AbortOnDropHandle::new(
         runtime().spawn(std::future::pending()),
@@ -208,21 +208,21 @@ fn reset_restarts_pending_agent_context_without_accepting_its_old_completion() {
     assert_ne!(conversation.generation, previous.generation);
     assert_eq!(conversation.agent, Some(ItemId("agent".into())));
     assert!(conversation.agent_task.is_some());
-    assert!(!conversation.drain(&core));
+    assert!(!conversation.drain(&mut core));
     assert!(conversation.agent_task.is_some());
     assert!(conversation.load_error.is_none());
 }
 
 #[test]
 fn the_landing_lock_holds_until_the_first_page_arrives() {
-    let (_directory, _listener, core, mut conversation) = fixture();
+    let (_directory, _listener, mut core, mut conversation) = fixture();
     let much_later = Instant::now() + std::time::Duration::from_secs(3600);
 
     assert_eq!(conversation.landing, Some(Landing::Loading));
     assert!(!conversation.expire_landing(much_later));
     assert!(conversation.is_landing());
 
-    finish_tail(&mut conversation, &core);
+    finish_tail(&mut conversation, &mut core);
 
     assert!(matches!(
         conversation.landing,
@@ -232,7 +232,7 @@ fn the_landing_lock_holds_until_the_first_page_arrives() {
     assert_eq!(conversation.landing, Some(Landing::Loading));
     assert!(!conversation.expire_landing(much_later));
 
-    finish_tail(&mut conversation, &core);
+    finish_tail(&mut conversation, &mut core);
     assert!(conversation.expire_landing(much_later));
     assert!(!conversation.is_landing());
 }

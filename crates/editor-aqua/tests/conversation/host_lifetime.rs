@@ -44,7 +44,7 @@ fn pending_page_rejects_removed_and_recreated_host() {
     let mut conversation = Conversation::new(&core);
     conversation.open_thread(&mut core, config.id.clone(), thread.clone());
     wait_for_page(&conversation);
-    conversation.drain(&core);
+    conversation.drain(&mut core);
     assert!(
         conversation
             .load_error
@@ -56,7 +56,7 @@ fn pending_page_rejects_removed_and_recreated_host() {
     let original = core.host(&config.id).unwrap().instance();
     wait_for_page(&conversation);
     core.remove_host(&config.id).unwrap();
-    conversation.drain(&core);
+    conversation.drain(&mut core);
     assert!(conversation.load_error.is_none());
     assert!(conversation.view.as_ref().unwrap().viewport.in_flight);
 
@@ -67,7 +67,7 @@ fn pending_page_rejects_removed_and_recreated_host() {
     wait_for_page(&conversation);
     core.add_test_host(&config, client(&core));
     assert_ne!(replacement, core.host(&config.id).unwrap().instance());
-    conversation.drain(&core);
+    conversation.drain(&mut core);
     assert!(conversation.load_error.is_none());
     assert!(conversation.view.as_ref().unwrap().viewport.in_flight);
 }

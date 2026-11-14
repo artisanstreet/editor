@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod latency;
 #[cfg(windows)]
 pub mod record;
 pub mod scenario;

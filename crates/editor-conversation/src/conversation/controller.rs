@@ -1,7 +1,7 @@
 use super::disclosure::DisclosureState;
 use super::fold::{self, Row, RowKey, RunSummary};
 use super::thread::{self, ThreadView};
-use super::viewport::{Effect, Fetch, Input, Jump};
+use super::viewport::{Effect, Fetch, Input, Jump, State};
 use editor_core::{
     Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, delivery::Delivery, runtime::runtime,
 };
@@ -44,9 +44,32 @@ pub enum Landing {
 }
 
 const LANDING_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+const HOLD: std::time::Duration = std::time::Duration::from_millis(300);
+const PARKED_THREADS: usize = 8;
+const PARKED_BYTES: usize = 128 << 20;
+
+type ParkedKey = (HostId, HostInstance, ThreadId);
+
+struct ParkedThread {
+    view: ThreadView,
+    projections: super::projection::Projections,
+    row_heights: HashMap<RowKey, f32>,
+    offset: Option<f32>,
+}
+
+struct Pending {
+    origin: Origin,
+    thread: ThreadId,
+    view: ThreadView,
+    page: AbortOnDropHandle<()>,
+    _timeout: AbortOnDropHandle<()>,
+}
 const SLOW_PAGE: std::time::Duration = std::time::Duration::from_secs(1);
 
 enum Completion {
+    Held {
+        origin: Origin,
+    },
     Page {
         origin: Origin,
         fetch: Fetch,
@@ -71,9 +94,11 @@ enum Completion {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ScrollAction {
     End,
+    Tail,
+    Offset(f32),
     To(Seq),
     Row(usize),
 }
@@ -112,6 +137,9 @@ pub struct Conversation {
     delivery: Delivery<Completion>,
     events: Vec<ConversationEvent>,
     scroll: Vec<ScrollAction>,
+    offset: Option<f32>,
+    parked: super::parked::Shelf<ParkedKey, ParkedThread>,
+    pending: Option<Pending>,
 }
 
 fn next_rows_epoch() -> u64 {
@@ -182,6 +210,9 @@ impl Conversation {
             ),
             events: Vec::new(),
             scroll: Vec::new(),
+            offset: None,
+            parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
+            pending: None,
         }
     }
 
@@ -193,9 +224,15 @@ impl Conversation {
                     if self.open.is_some() {
                         self.close(core);
                     }
-                } else if self.open.as_ref() != Some(&(host.clone(), thread.clone()))
-                    || self.host_instance != current
+                } else if self.open.as_ref() == Some(&(host.clone(), thread.clone()))
+                    && self.host_instance == current
                 {
+                    self.pending = None;
+                } else if !self.pending.as_ref().is_some_and(|pending| {
+                    pending.origin.host == host
+                        && pending.thread == thread
+                        && Some(pending.origin.instance) == current
+                }) {
                     self.open_thread(core, host, thread);
                 }
             }
@@ -205,26 +242,173 @@ impl Conversation {
     }
 
     pub fn open_thread(&mut self, core: &mut Core, host: HostId, thread: ThreadId) {
-        self.close(core);
-        let Some(host_data) = core.host_mut(&host) else {
+        let Some(instance) = core.host(&host).map(|host| host.instance()) else {
+            self.close(core);
             return;
         };
-        let instance = host_data.instance();
+        if self.pending.is_some()
+            && self.open.as_ref() == Some(&(host.clone(), thread.clone()))
+            && self.host_instance == Some(instance)
+        {
+            self.pending = None;
+            return;
+        }
+        super::open_timing::begin();
+        if let Some(parked) = self.parked.take(&(host.clone(), instance, thread.clone())) {
+            self.close(core);
+            self.resume(core, host, thread, instance, parked);
+        } else if self.holds() {
+            self.hold(core, host, thread, instance);
+        } else {
+            self.close(core);
+            let (view, effects) = ThreadView::open(thread.clone());
+            self.install(core, host, thread, instance, view, Some(Landing::Loading));
+            self.perform(core, effects);
+        }
+    }
+
+    fn install(
+        &mut self,
+        core: &mut Core,
+        host: HostId,
+        thread: ThreadId,
+        instance: HostInstance,
+        mut view: ThreadView,
+        landing: Option<Landing>,
+    ) {
+        let Some(host_data) = core.host_mut_if_instance(&host, instance) else {
+            return;
+        };
         host_data.observe_thread(Some(thread.clone()));
-        let (mut view, effects) = ThreadView::open(thread.clone());
         view.set_live(host_data.live_targets(&thread));
         self.open = Some((host, thread));
         self.host_instance = Some(instance);
         self.view = Some(view);
         self.load_error = None;
-        self.landing = Some(Landing::Loading);
-        super::open_timing::begin();
+        self.landing = landing;
         self.rebuild(core);
-        self.perform(core, effects);
         self.events.push(ConversationEvent::ItemsChanged);
     }
 
+    fn resume(
+        &mut self,
+        core: &mut Core,
+        host: HostId,
+        thread: ThreadId,
+        instance: HostInstance,
+        parked: ParkedThread,
+    ) {
+        let ParkedThread {
+            mut view,
+            projections,
+            row_heights,
+            offset,
+        } = parked;
+        let effects = view.resume();
+        let scroll = match (view.viewport.state(), offset) {
+            (State::Reading { .. }, Some(offset)) => ScrollAction::Offset(offset),
+            (State::Reading { .. } | State::Following {} | State::Jumping { .. }, _) => {
+                ScrollAction::Tail
+            }
+        };
+        self.projections = projections;
+        self.row_heights = row_heights;
+        self.install(core, host, thread, instance, view, None);
+        self.scroll.push(scroll);
+        self.perform(core, effects);
+    }
+
+    fn holds(&self) -> bool {
+        self.open.is_some()
+            && self.agent.is_none()
+            && self.load_error.is_none()
+            && self.landing.is_none()
+    }
+
+    fn hold(&mut self, core: &Core, host: HostId, thread: ThreadId, instance: HostInstance) {
+        let (view, effects) = ThreadView::open(thread.clone());
+        let origin = Origin {
+            host,
+            instance,
+            generation: self.generation.wrapping_add(1),
+        };
+        let Some(page) = effects.into_iter().find_map(|effect| match effect {
+            Effect::Fetch(fetch) => self.spawn_page(core, &origin, &thread, fetch),
+            Effect::ScrollToEnd | Effect::ScrollTo(_) => None,
+        }) else {
+            return;
+        };
+        let sender = self.delivery.sender();
+        let held = origin.clone();
+        let timeout = AbortOnDropHandle::new(runtime().spawn(async move {
+            tokio::time::sleep(HOLD).await;
+            let _ = sender.send(Completion::Held { origin: held }).await;
+        }));
+        self.pending = Some(Pending {
+            origin,
+            thread,
+            view,
+            page,
+            _timeout: timeout,
+        });
+    }
+
+    fn commit(&mut self, core: &mut Core) {
+        let Some(Pending {
+            origin,
+            thread,
+            view,
+            page,
+            ..
+        }) = self.pending.take()
+        else {
+            return;
+        };
+        self.close(core);
+        if self.generation != origin.generation {
+            self.open_thread(core, origin.host, thread);
+            return;
+        }
+        self.install(
+            core,
+            origin.host,
+            thread,
+            origin.instance,
+            view,
+            Some(Landing::Loading),
+        );
+        self.page_task = Some(page);
+    }
+
+    fn park(&mut self) {
+        let parkable = self.agent.is_none() && self.load_error.is_none() && self.landing.is_none();
+        let (Some((host, thread)), Some(instance)) = (&self.open, self.host_instance) else {
+            return;
+        };
+        let Some(view) = self.view.take().filter(|_| parkable) else {
+            return;
+        };
+        let bytes = view.resident_bytes();
+        self.parked.put(
+            (host.clone(), instance, thread.clone()),
+            ParkedThread {
+                view,
+                projections: std::mem::take(&mut self.projections),
+                row_heights: std::mem::take(&mut self.row_heights),
+                offset: self.offset,
+            },
+            bytes,
+        );
+    }
+
+    pub fn note_offset(&mut self, offset: f32) {
+        self.offset = Some(offset);
+    }
+
     pub fn close(&mut self, core: &mut Core) {
+        self.pending = None;
+        self.park();
+        self.offset = None;
         self.generation = self.generation.wrapping_add(1);
         self.page_task = None;
         self.work_task = None;
@@ -663,23 +847,35 @@ impl Conversation {
         let Some((host, thread)) = &self.open else {
             return;
         };
-        let Some(host) = self
-            .host_instance
-            .and_then(|instance| core.host_if_instance(host, instance))
-        else {
+        let Some(instance) = self.host_instance else {
             return;
         };
+        let origin = Origin {
+            host: host.clone(),
+            instance,
+            generation: self.generation,
+        };
+        let thread = thread.clone();
+        if let Some(task) = self.spawn_page(core, &origin, &thread, fetch) {
+            self.page_task = Some(task);
+        }
+    }
+
+    fn spawn_page(
+        &self,
+        core: &Core,
+        origin: &Origin,
+        thread: &ThreadId,
+        fetch: Fetch,
+    ) -> Option<AbortOnDropHandle<()>> {
+        let host = core.host_if_instance(&origin.host, origin.instance)?;
         let client = host.client.clone();
         let thread = thread.clone();
         let agent = self.agent.clone();
-        let origin = Origin {
-            host: host.id.clone(),
-            instance: host.instance(),
-            generation: self.generation,
-        };
+        let origin = origin.clone();
         let sender = self.delivery.sender();
         let asked = Instant::now();
-        self.page_task = Some(AbortOnDropHandle::new(runtime().spawn(async move {
+        Some(AbortOnDropHandle::new(runtime().spawn(async move {
             let result = match agent {
                 Some(agent) => {
                     client
@@ -700,7 +896,7 @@ impl Conversation {
                     result,
                 })
                 .await;
-        })));
+        })))
     }
 
     pub fn load_work(&mut self, core: &Core, first: Seq) {
@@ -1060,6 +1256,7 @@ impl Conversation {
                 self.rebuild(core);
             }
             HostEvent::Reset => {
+                self.parked.retain(|(parked, _, _)| parked != host_id);
                 self.generation = self.generation.wrapping_add(1);
                 self.page_task = None;
                 self.work_task = None;
@@ -1112,9 +1309,22 @@ impl Conversation {
             .is_some_and(|task| task.is_finished())
     }
 
-    pub fn drain(&mut self, core: &Core) -> bool {
+    pub fn drain(&mut self, core: &mut Core) -> bool {
         let mut changed = false;
         for completion in self.delivery.drain() {
+            let committing = match &completion {
+                Completion::Held { origin } | Completion::Page { origin, .. } => self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| &pending.origin == origin),
+                Completion::Work { .. } | Completion::Agent { .. } | Completion::Answer { .. } => {
+                    false
+                }
+            };
+            if committing {
+                self.commit(core);
+                changed = true;
+            }
             match completion {
                 Completion::Page {
                     origin,
@@ -1313,3 +1523,7 @@ mod reset_tests;
 #[cfg(test)]
 #[path = "../../tests/conversation/controller/agent.rs"]
 mod agent_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/switch.rs"]
+mod switch_tests;

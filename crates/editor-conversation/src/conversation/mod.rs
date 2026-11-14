@@ -8,6 +8,7 @@ pub mod disclosure;
 pub mod fold;
 pub mod live;
 pub mod navigator;
+pub mod parked;
 pub use editor_core::diagnostics::open_timing;
 pub mod phase;
 pub mod presentation;
