@@ -80,8 +80,8 @@ pub fn body(
 
 #[must_use]
 pub fn search_anchor() -> crate::frame::search::Anchor {
-    let edge = crate::frame::search::RAIL_KEY.edge();
-    let left = (WORDMARK_WIDTH - edge).mul_add(0.5, INK_X - WORDMARK_INK_LEFT);
+    let rail = crate::frame::search::rail_width();
+    let left = (COLLAPSED_WIDTH - rail) / 2.0;
     crate::frame::search::Anchor {
         left,
         top: TITLEBAR_HEIGHT + WORDMARK_INK_RISE + WORDMARK_HEIGHT + TREE_GAP,

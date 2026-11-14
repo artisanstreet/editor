@@ -16,7 +16,9 @@ use std::rc::Rc;
 
 pub const OVERLAY: &str = "artisan-frame-search-overlay";
 pub const QUERY: &str = "sidebar-thread-search";
-pub const RAIL_KEY: KeySize = KeySize::Lg;
+pub const RAIL_KEY: KeySize = KeySize::Md;
+pub const RAIL_GAP: Space = Space::S6;
+const BAR: KeySize = KeySize::Lg;
 const BLUR: f32 = 4.0;
 const RISE: f32 = 8.0;
 const RESULTS_BLUR: f32 = 2.0;
@@ -99,8 +101,8 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
         )
         .build();
     UiBox::new()
-        .layout("column")
-        .spaced(Space::S8)
+        .layout("row")
+        .spaced(RAIL_GAP)
         .child(glass)
         .child(polar_square(
             "artisan-sidebar-rail-new-thread",
@@ -154,6 +156,11 @@ fn polar_square(
         .build()
 }
 
+#[must_use]
+pub const fn rail_width() -> f32 {
+    2.0 * RAIL_KEY.edge() + RAIL_GAP.px()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Anchor {
     pub left: f32,
@@ -185,15 +192,17 @@ pub fn overlay(theme: &ArtisanTheme, overlay: Overlay) -> Element {
     if bar.is_none() {
         return root.build().with_key(OVERLAY).exclude_from_hit_testing();
     }
-    let edge = RAIL_KEY.edge();
+    let height = BAR.edge();
+    let top = (RAIL_KEY.edge() - height).mul_add(0.5, anchor.top);
     let reveal = ((progress - RESULTS_DELAY) / (1.0 - RESULTS_DELAY)).clamp(0.0, 1.0);
     let fill = (progress / BAR_FADE).min(1.0);
     let field = UiBox::new()
-        .width((anchor.width - edge).mul_add(progress, edge))
-        .height(edge)
+        .width((anchor.width - rail_width()).mul_add(progress, rail_width()))
+        .height(height)
         .style(
             Style::new()
-                .absolute_at(Some(anchor.left), Some(anchor.top), None, None)
+                .absolute_at(Some(anchor.left), Some(top), None, None)
+                .radius(Length::Px(Radius::Field.px()))
                 .clip(true),
         )
         .child(
@@ -212,7 +221,7 @@ pub fn overlay(theme: &ArtisanTheme, overlay: Overlay) -> Element {
     let mut list = Style::new()
         .absolute_at(
             Some(anchor.left),
-            Some(anchor.top + edge + Space::S16.px()),
+            Some(top + height + Space::S16.px()),
             None,
             Some(anchor.bottom),
         )
@@ -225,7 +234,20 @@ pub fn overlay(theme: &ArtisanTheme, overlay: Overlay) -> Element {
         .layout("column")
         .width(anchor.width)
         .style(list)
-        .children(results)
+        .child(
+            Surface::Card
+                .build(
+                    theme,
+                    vec![
+                        UiBox::new()
+                            .layout("column")
+                            .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0)))
+                            .children(results)
+                            .build(),
+                    ],
+                )
+                .style(Style::new().flex_grow(1.0).min_height(Length::Pct(0.0))),
+        )
         .build();
     let escape = Rc::clone(&emit);
     root.child(scrim(theme, progress, emit))
