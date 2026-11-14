@@ -121,7 +121,7 @@ impl Key {
             .child(
                 UiBox::new()
                     .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-                    .child(key_face(&surfaces, radius, edge))
+                    .child(key_face(&theme, radius, edge))
                     .build()
                     .exclude_from_hit_testing(),
             )

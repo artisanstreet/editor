@@ -1,5 +1,5 @@
 use crate::ui::kit::Radius;
-use crate::ui::theme::{ArtisanTheme, Oklch};
+use crate::ui::theme::{ArtisanTheme, Cast, Oklch};
 use aqua::ShadowLayer;
 use aqua::{Aqua, Style, px};
 use aqua_core::{DisplayItem, GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Rect};
@@ -75,7 +75,7 @@ pub fn inset(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
         surfaces.ink,
         surfaces.inner,
         INSET_RADIUS,
-        rest_shadows(),
+        rest_shadows(theme),
         children,
     )
 }
@@ -87,7 +87,13 @@ pub fn double_rule(theme: &ArtisanTheme, bleed: f32) -> Element {
 
 #[must_use]
 pub fn card(theme: &ArtisanTheme, surface: Oklch, children: Vec<Element>) -> Element {
-    outlined(theme.colors.text, surface, RADIUS, rest_shadows(), children)
+    outlined(
+        theme.colors.text,
+        surface,
+        RADIUS,
+        rest_shadows(theme),
+        children,
+    )
 }
 
 #[must_use]
@@ -153,37 +159,28 @@ pub(super) fn vertical(top: Oklch, bottom: Oklch) -> GpuiBackground {
 }
 
 #[must_use]
-pub fn rest_shadows() -> Vec<ShadowLayer> {
-    vec![
-        ShadowLayer {
+pub fn soft(theme: &ArtisanTheme, casts: [Cast; 2]) -> Vec<ShadowLayer> {
+    casts
+        .into_iter()
+        .map(|cast| ShadowLayer {
             dx: 0.0,
-            dy: 5.0,
-            blur: 10.0,
-            spread: 0.0,
+            dy: cast.dy,
+            blur: cast.blur,
+            spread: cast.spread,
             inset: false,
-            color: aqua_core::Oklch::BLACK.with_alpha(0.06),
-        },
-        ShadowLayer {
-            dx: 0.0,
-            dy: 1.0,
-            blur: 8.0,
-            spread: -5.0,
-            inset: false,
-            color: aqua_core::Oklch::BLACK,
-        },
-    ]
+            color: aqua_core::Oklch::BLACK.with_alpha(cast.alpha_in(theme.colors.mode)),
+        })
+        .collect()
 }
 
 #[must_use]
-pub fn key_shadows() -> Vec<ShadowLayer> {
-    vec![ShadowLayer {
-        dx: 0.0,
-        dy: 3.0,
-        blur: 4.0,
-        spread: -3.0,
-        inset: false,
-        color: aqua_core::Oklch::BLACK.with_alpha(0.4),
-    }]
+pub fn rest_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
+    soft(theme, Cast::REST)
+}
+
+#[must_use]
+pub fn key_shadows(theme: &ArtisanTheme) -> Vec<ShadowLayer> {
+    soft(theme, Cast::KEY)
 }
 
 #[must_use]
@@ -262,12 +259,13 @@ pub fn radial_glow(bounds: Rect, color: Oklch, alpha: f32) -> DisplayItem {
 }
 
 #[must_use]
-pub fn key_face(surfaces: &Surfaces, radius: f32, height: f32) -> Element {
+pub fn key_face(theme: &ArtisanTheme, radius: f32, height: f32) -> Element {
+    let surfaces = Surfaces::of(theme);
     outlined(
         surfaces.ink,
         surfaces.bg,
         radius,
-        key_shadows(),
+        key_shadows(theme),
         vec![
             Aqua::Box()
                 .styles([Style::new()

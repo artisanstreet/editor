@@ -567,13 +567,13 @@ impl ColorTokens {
             AMBER_50, AMBER_300, AMBER_400, AMBER_500, AMBER_600, AMBER_700, AMBER_950, BLACK,
             BLUE_100, BLUE_200, BLUE_300, BLUE_400, BLUE_500, BLUE_600, BLUE_700, BLUE_900, CHART,
             CLAUDE_CLAY, CYAN_300, CYAN_400, CYAN_600, CYAN_700, EMERALD_50, EMERALD_300,
-            EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700, EMERALD_950, GLASS_INK_DIM, GRAY_50, GRAY_100,
-            GRAY_200, GRAY_300, GRAY_400, GRAY_500, GRAY_600, GRAY_900, INDIGO_50, INDIGO_100,
-            INDIGO_200, INDIGO_300, INDIGO_400, INDIGO_500, INDIGO_600, INDIGO_700, INDIGO_800,
-            INDIGO_900, INDIGO_950, PANEL, PINK_400, PINK_600, POLAR_50, POLAR_100, POLAR_300, POLAR_400,
-            POLAR_500, POLAR_600, POLAR_700, POLAR_800, POLAR_900, POLAR_950, PURPLE_300,
-            PURPLE_400, PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400, RED_500, RED_600,
-            RED_700, RED_950, SKY_400, SKY_700, WHITE, under_panel,
+            EMERALD_400, EMERALD_500, EMERALD_600, EMERALD_700, EMERALD_950, GLASS_INK_DIM,
+            GRAY_50, GRAY_100, GRAY_200, GRAY_300, GRAY_400, GRAY_500, GRAY_600, GRAY_900,
+            INDIGO_50, INDIGO_100, INDIGO_200, INDIGO_300, INDIGO_400, INDIGO_500, INDIGO_600,
+            INDIGO_700, INDIGO_800, INDIGO_900, INDIGO_950, PANEL, PINK_400, PINK_600, POLAR_50,
+            POLAR_100, POLAR_300, POLAR_400, POLAR_500, POLAR_600, POLAR_700, POLAR_800, POLAR_900,
+            POLAR_950, PURPLE_300, PURPLE_400, PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400,
+            RED_500, RED_600, RED_700, RED_950, SKY_400, SKY_700, WHITE, under_panel,
         };
         let dark = mode.is_dark();
         let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
@@ -1006,8 +1006,64 @@ impl From<ShadowLayer> for aqua_ui::style::GpuiShadowLayer {
 pub struct ElevationTokens {
     pub hairline: ShadowLayer,
     pub raised: [ShadowLayer; 3],
-    pub floating: [ShadowLayer; 3],
-    pub overlay: [ShadowLayer; 4],
+    pub floating: [ShadowLayer; 2],
+    pub overlay: [ShadowLayer; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cast {
+    pub dy: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub alpha: f32,
+}
+
+impl Cast {
+    pub const KEY: [Self; 2] = [
+        Self::new(1.5, 3.5, -1.0, 0.06),
+        Self::new(4.0, 9.0, -1.0, 0.06),
+    ];
+    pub const REST: [Self; 2] = [
+        Self::new(1.5, 4.0, -1.0, 0.05),
+        Self::new(5.0, 12.0, -2.0, 0.06),
+    ];
+    pub const FLOAT: [Self; 2] = [
+        Self::new(2.0, 5.0, -1.0, 0.05),
+        Self::new(8.0, 20.0, -4.0, 0.07),
+    ];
+    pub const OVERLAY: [Self; 2] = [
+        Self::new(2.0, 6.0, -1.0, 0.05),
+        Self::new(14.0, 32.0, -6.0, 0.08),
+    ];
+    pub const PRESS: [Self; 2] = [
+        Self::new(1.0, 2.5, -0.5, 0.10),
+        Self::new(3.0, 6.0, -1.0, 0.08),
+    ];
+    pub const LIFT: [Self; 2] = [
+        Self::new(1.0, 2.5, -0.5, 0.10),
+        Self::new(4.0, 10.0, -2.0, 0.12),
+    ];
+
+    const DARK_WEIGHT: f32 = 1.7;
+    const ALPHA_CAP: f32 = 0.6;
+
+    #[must_use]
+    pub const fn new(dy: f32, blur: f32, spread: f32, alpha: f32) -> Self {
+        Self {
+            dy,
+            blur,
+            spread,
+            alpha,
+        }
+    }
+
+    #[must_use]
+    pub fn alpha_in(self, mode: ThemeMode) -> f32 {
+        match mode {
+            ThemeMode::Light => self.alpha,
+            ThemeMode::Dark => (self.alpha * Self::DARK_WEIGHT).min(Self::ALPHA_CAP),
+        }
+    }
 }
 
 impl ElevationTokens {
@@ -1027,31 +1083,29 @@ impl ElevationTokens {
             blur_radius: px(blur),
             spread_radius: px(spread),
         };
-        let (ink, edge, drop) = match mode {
-            ThemeMode::Light => (colors.gray.step(12), 0.07, 1.0),
-            ThemeMode::Dark => (colors.black, 0.10, 5.0),
+        let edge = match mode {
+            ThemeMode::Light => 0.07,
+            ThemeMode::Dark => 0.10,
         };
-        let d = |strength: f32, oy: f32, blur: f32, spread: f32| {
-            shadow(ink, (strength * drop).min(0.6), oy, blur, spread)
+        let cast = |cast: Cast| {
+            shadow(
+                colors.black,
+                cast.alpha_in(mode),
+                cast.dy,
+                cast.blur,
+                cast.spread,
+            )
         };
+        let [rest_contact, rest_ambient] = Cast::REST.map(cast);
         Self {
             hairline: shadow(colors.gray.step(12), edge, 0.0, 0.0, 0.5),
             raised: [
                 shadow(colors.white, 0.08, -0.5, 0.0, 0.0),
-                d(0.05, 1.0, 2.0, 0.0),
-                d(0.04, 2.0, 4.0, -1.0),
+                rest_contact,
+                rest_ambient,
             ],
-            floating: [
-                d(0.04, 1.0, 2.0, 0.0),
-                d(0.05, 4.0, 8.0, -2.0),
-                d(0.06, 12.0, 24.0, -8.0),
-            ],
-            overlay: [
-                d(0.05, 1.0, 2.0, 0.0),
-                d(0.06, 4.0, 8.0, -2.0),
-                d(0.07, 12.0, 24.0, -6.0),
-                d(0.07, 24.0, 48.0, -12.0),
-            ],
+            floating: Cast::FLOAT.map(cast),
+            overlay: Cast::OVERLAY.map(cast),
         }
     }
 }
