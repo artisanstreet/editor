@@ -1,4 +1,4 @@
-<img src="assets/test3.png" alt="Artisan" width="100%">
+<img src="assets/repo-banner/lwq50comgxqmien3t3345tdp.png" alt="Artisan" width="100%">
 
 **Artisan Editor by Artisan Street.** A native app for Windows, Mac and Linux that brings Codex, Claude Code and OpenCode together in one interface, using the subscriptions you already have.
 
