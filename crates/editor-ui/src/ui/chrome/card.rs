@@ -45,23 +45,23 @@ pub struct Surfaces {
 impl Surfaces {
     #[must_use]
     pub fn of(theme: &ArtisanTheme) -> Self {
-        let (bg, raised, ink, ink_dim) = match theme.colors.mode.is_dark() {
+        let (bg, inner, ink, ink_dim) = match theme.colors.mode.is_dark() {
             true => (
                 Oklch::new(0.1757, 0.0, 0.0),
-                Oklch::new(0.21, 0.0, 0.0),
+                Oklch::new(0.21, 0.0, 0.0).animate_to(WHITE, 0.06),
                 WHITE,
                 Oklch::new(0.709, 0.0, 0.0),
             ),
             false => (
                 WHITE,
-                Oklch::new(0.967, 0.003, 264.542),
+                theme.colors.raised,
                 BLACK,
                 Oklch::new(0.551, 0.027, 264.364),
             ),
         };
         Self {
             bg,
-            inner: raised.animate_to(ink, 0.06),
+            inner,
             ink,
             ink_dim,
         }
