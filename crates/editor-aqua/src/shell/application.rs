@@ -372,6 +372,9 @@ impl<V: SectionViews> ShellApplication<V> {
         self.ui
             .ui_mut()
             .set_selection_background(Some(crate::ui::chrome::card::polar_selection()));
+        self.ui.ui_mut().set_selection_ink(Some(
+            crate::ui::chrome::card::POLAR_INK.to_reference_paint(),
+        ));
         let epoch = self.ui.ui().tree().invalidation_epoch();
         let reduced =
             self.ui.ui().host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
