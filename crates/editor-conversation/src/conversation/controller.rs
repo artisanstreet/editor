@@ -1309,3 +1309,7 @@ fn shape_source<'a>(
 #[cfg(test)]
 #[path = "../../tests/conversation/controller/reset.rs"]
 mod reset_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/agent.rs"]
+mod agent_tests;
