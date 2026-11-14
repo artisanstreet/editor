@@ -11,8 +11,11 @@
 *And of course, the Artisan experience.* Every interaction, every pixel is carefully placed— the usual.
 
 <p align="center">
-  <a href="https://artisan.st/auth"><img src="assets/repo-buttons/gueapvhzy0kxwkt4v2up2h98.png" alt="Create your account" width="180"></a>
-  <a href="https://github.com/artisanstreet/editor/releases/tag/nightly"><img src="assets/repo-buttons/agjfc6mn98b72uxsa9tdq12x.png" alt="Download Artisan Editor" width="207"></a>
+  <br>
+  <a href="https://artisan.st/auth"><img src="assets/repo-buttons/syf632g96tr4ry7u8fc21rb5.svg" alt="Create your account"></a>
+  <a href="https://github.com/artisanstreet/editor/releases/tag/nightly"><img src="assets/repo-buttons/b19285pt3phqxohqwe9hgli4.svg" alt="Download Artisan Editor"></a>
+  <br>
+  <br>
 </p>
 
 ---
