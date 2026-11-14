@@ -8,6 +8,8 @@ use aqua_ui::AlignItems;
 use aqua_ui::element::{Box as UiBox, Button, Element, Key, Text};
 use aqua_ui::style::{Length, Style};
 
+const HINT_DELAY: f64 = 0.5;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Density {
     Regular,
@@ -65,7 +67,10 @@ impl Row {
 
     #[must_use]
     pub const fn interactive(self) -> bool {
-        !matches!(self, Self::Heading | Self::ListHeading | Self::FormRow)
+        !matches!(
+            self,
+            Self::Heading | Self::ListHeading | Self::FormRow | Self::KeyRow
+        )
     }
 
     #[must_use]
@@ -120,6 +125,7 @@ pub struct RowItem {
     role: Role,
     on_activate: Option<Box<dyn Fn()>>,
     on_hover: Option<Box<dyn Fn(bool)>>,
+    hint: Option<std::rc::Rc<dyn Fn() -> Element>>,
 }
 
 impl RowItem {
@@ -150,6 +156,7 @@ impl RowItem {
             },
             on_activate: None,
             on_hover: None,
+            hint: None,
         }
     }
 
@@ -222,6 +229,12 @@ impl RowItem {
     #[must_use]
     pub fn on_hover(mut self, handler: impl Fn(bool) + 'static) -> Self {
         self.on_hover = Some(Box::new(handler));
+        self
+    }
+
+    #[must_use]
+    pub fn hint(mut self, content: impl Fn() -> Element + 'static) -> Self {
+        self.hint = Some(std::rc::Rc::new(content));
         self
     }
 
@@ -328,9 +341,26 @@ impl RowItem {
 
     #[must_use]
     pub fn build(mut self) -> Element {
-        if !self.row.interactive() {
-            return self.build_static();
+        let hint = self.hint.take();
+        let row = if self.row.interactive() {
+            self.build_interactive()
+        } else {
+            self.build_static()
+        };
+        match hint {
+            Some(content) => UiBox::new()
+                .layout("column")
+                .width(Length::Pct(100.0))
+                .child(row)
+                .build()
+                .tooltip_with(HINT_DELAY, crate::ui::hint_card::presence(), move || {
+                    content()
+                }),
+            None => row,
         }
+    }
+
+    fn build_interactive(mut self) -> Element {
         let mut button = Button::new().gap(self.row.gap().px()).style(self.style());
         if let Some(face) = self.face.take() {
             button = button.child(face);
