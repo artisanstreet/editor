@@ -2302,6 +2302,55 @@ impl RootViews {
         }
     }
 
+    fn tree_emit(
+        &self,
+        workspace: &crate::shell::workspace::Workspace,
+    ) -> Rc<dyn Fn(crate::sidebar::view::ViewAction)> {
+        use crate::sidebar::view::ViewAction;
+        let emit = workspace.sidebar_emit(false);
+        if !self.sidebar.searching() {
+            return emit;
+        }
+        let close = self.sidebar.emit();
+        Rc::new(move |action| {
+            if matches!(
+                action,
+                ViewAction::OpenThread { .. }
+                    | ViewAction::OpenHit { .. }
+                    | ViewAction::NewThread(_)
+                    | ViewAction::Navigate(_)
+            ) {
+                close(crate::frame::sidebar::Event::Search(false));
+            }
+            emit(action);
+        })
+    }
+
+    fn search_parts(
+        &self,
+        workspace: &crate::shell::workspace::Workspace,
+        theme: &crate::ui::theme::ArtisanTheme,
+        tree: Option<Element>,
+        now: std::time::Instant,
+    ) -> (Option<Element>, Option<Element>, Element) {
+        let search = tree.is_some().then(|| self.search_bar(workspace, theme));
+        let ((search, tree), (bar, results)) = match self.sidebar.searching() {
+            true => ((None, None), (search, tree)),
+            false => ((search, tree), (None, None)),
+        };
+        let overlay = crate::frame::search::overlay(
+            theme,
+            crate::frame::search::Overlay {
+                progress: self.sidebar.search(now),
+                anchor: crate::frame::view::search_anchor(),
+                bar,
+                results,
+                emit: self.sidebar.emit(),
+            },
+        );
+        (search, tree, overlay)
+    }
+
     fn search_bar(
         &self,
         workspace: &crate::shell::workspace::Workspace,
@@ -2523,24 +2572,29 @@ impl SectionViews for RootViews {
                     theme,
                     height,
                     reduced,
-                    workspace.sidebar_emit(false),
+                    self.tree_emit(workspace),
                 )
             });
-        let search = tree
-            .is_some()
-            .then(|| self.search_bar(workspace, &theme));
+        let (search, tree, overlay) = self.search_parts(workspace, &theme, tree, now);
         let account = self.account_snapshot(shell);
         let element = crate::frame::view::sidebar_view(
             &theme,
             self.sidebar_model(&theme, search, tree, account.as_ref(), now),
         );
-        match ui.refresh_subtree(crate::frame::view::SIDEBAR, element) {
+        let refreshed = [
+            (crate::frame::view::SIDEBAR, element),
+            (crate::frame::search::OVERLAY, overlay),
+        ]
+        .into_iter()
+        .map(|(key, element)| match ui.refresh_subtree(key, element) {
             Ok(refreshed) => refreshed,
             Err(error) => {
-                tracing::warn!(%error, "could not refresh sidebar frame");
+                tracing::warn!(%error, key, "could not refresh sidebar frame");
                 false
             }
-        }
+        })
+        .fold(true, |all, refreshed| all && refreshed);
+        refreshed
     }
 
     fn refresh_sidebar(&self, shell: &Shell, ui: &mut UiApp, window: &ObservedWindowState) -> bool {
@@ -2559,7 +2613,7 @@ impl SectionViews for RootViews {
             shell.preferences.theme(),
             height,
             reduced,
-            workspace.sidebar_emit(false),
+            self.tree_emit(workspace),
         );
         match ui.refresh_subtree(crate::sidebar::view::ROOT_KEY, element) {
             Ok(refreshed) => refreshed,
@@ -3071,7 +3125,7 @@ impl SectionViews for RootViews {
                     theme,
                     height,
                     reduced,
-                    workspace.sidebar_emit(false),
+                    self.tree_emit(workspace),
                 );
                 let strip =
                     crate::frame::strip::strip(&theme, &tabs, reduced, &self.sidebar.emit());
@@ -3081,9 +3135,7 @@ impl SectionViews for RootViews {
             Some((tree, strip)) => (Some(tree), strip),
             None => (None, Vec::new()),
         };
-        let search = tree
-            .is_some()
-            .then(|| self.search_bar(workspace, &theme));
+        let (search, tree, overlay) = self.search_parts(workspace, &theme, tree, now);
         let overview = (matches!(shell.core.screen(), Screen::Thread { .. })
             && layout::inspector_width(card_width).is_some())
         .then(|| {
@@ -3117,6 +3169,7 @@ impl SectionViews for RootViews {
             &theme,
             titlebar,
             self.sidebar_model(&theme, search, tree, account.as_ref(), now),
+            overlay,
             match &screen {
                 Screen::Thread { .. } | Screen::NewThread { .. } => vec![
                     aqua::Aqua::Box()
@@ -3165,6 +3218,9 @@ impl SectionViews for RootViews {
     ) {
         self.sync_account_menu(shell, ui, ctx, window);
         self.sync_sign_in(shell, ui, ctx, window);
+        if self.sidebar.take_search_focus() {
+            ui.focus_key(crate::frame::search::QUERY);
+        }
         self.source_dialogs
             .retain(|export| Self::source_export_is_current(shell, export));
         self.bind_row_sources(ui, ctx, window);

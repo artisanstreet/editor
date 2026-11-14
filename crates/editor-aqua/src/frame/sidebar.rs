@@ -23,11 +23,20 @@ pub const ACCORDION: Transition = Transition {
     duration: Duration::from_millis(250),
     easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
 };
+const SEARCH_OPEN: Transition = Transition {
+    duration: Duration::from_millis(250),
+    easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
+};
+const SEARCH_CLOSE: Transition = Transition {
+    duration: Duration::from_millis(150),
+    easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
     Hover(bool),
     Toggle,
+    Search(bool),
     Account(menu::Event),
     Project(ProjectId),
     Navigate(Command),
@@ -65,6 +74,9 @@ pub struct Sidebar {
     tabs: Tabs,
     refreshed: Option<Instant>,
     fades: [Glide; 2],
+    search: Glide,
+    search_motion: Transition,
+    focus_search: bool,
     events: Rc<RefCell<VecDeque<Event>>>,
 }
 
@@ -87,6 +99,9 @@ impl Default for Sidebar {
             tabs: Tabs::default(),
             refreshed: None,
             fades: [Glide::Resting(0.0); 2],
+            search: Glide::Resting(0.0),
+            search_motion: SEARCH_OPEN,
+            focus_search: false,
             events: Rc::default(),
         }
     }
@@ -116,6 +131,9 @@ impl Sidebar {
             false => COLLAPSE_BELOW,
         };
         self.forced = window_width < threshold;
+        if self.open() {
+            self.search = Glide::Resting(0.0);
+        }
         self.width_limit = (window_width - THREAD_MIN_WIDTH - crate::frame::view::SHEET_PADDING)
             .clamp(COLLAPSED_WIDTH, OPEN_WIDTH);
         let target = match self.open() {
@@ -128,6 +146,35 @@ impl Sidebar {
             }
             self.width = self.width.retarget(target, now, RESIZE, reduced);
         }
+    }
+
+    #[must_use]
+    pub fn search(&self, now: Instant) -> f32 {
+        self.search.value(now, self.search_motion)
+    }
+
+    #[must_use]
+    pub fn searching(&self) -> bool {
+        self.search.target() > 0.5 || self.search.running()
+    }
+
+    pub fn take_search_focus(&mut self) -> bool {
+        std::mem::take(&mut self.focus_search)
+    }
+
+    fn show_search(&mut self, shown: bool, now: Instant, reduced: bool) {
+        let target = f32::from(u8::from(shown && !self.open()));
+        if self.search.target() == target {
+            return;
+        }
+        self.search_motion = match target > 0.5 {
+            true => SEARCH_OPEN,
+            false => SEARCH_CLOSE,
+        };
+        self.focus_search = target > 0.5;
+        self.search = self
+            .search
+            .retarget(target, now, self.search_motion, reduced);
     }
 
     #[must_use]
@@ -225,6 +272,7 @@ impl Sidebar {
         let moving = self.animating();
         self.wordmark.advance(now, reduced);
         self.width = self.width.settle(now);
+        self.search = self.search.settle(now);
         for fade in &mut self.fades {
             *fade = fade.settle(now);
         }
@@ -240,6 +288,7 @@ impl Sidebar {
     #[must_use]
     pub fn animating(&self) -> bool {
         self.width.running()
+            || self.search.running()
             || self.wordmark.scrambling()
             || self.menu.animating()
             || self.fades.iter().any(Glide::running)
@@ -261,6 +310,7 @@ impl Sidebar {
             Event::Hover(false) => self.wordmark.leave(now),
             Event::Toggle if !self.forced => {
                 self.open = !self.open;
+                self.search = Glide::Resting(0.0);
                 let target = if self.open {
                     OPEN_WIDTH
                 } else {
@@ -269,6 +319,7 @@ impl Sidebar {
                 self.width = self.width.retarget(target, now, RESIZE, reduced);
             }
             Event::Toggle => {}
+            Event::Search(shown) => self.show_search(shown, now, reduced),
             Event::Account(event) => {
                 self.effects.extend(self.menu.apply(event, now, reduced));
             }
@@ -277,7 +328,10 @@ impl Sidebar {
                 let target = if glide.target() > 0.5 { 0.0 } else { 1.0 };
                 *glide = glide.retarget(target, now, ACCORDION, reduced);
             }
-            Event::Navigate(command) => self.commands.push(command),
+            Event::Navigate(command) => {
+                self.show_search(false, now, reduced);
+                self.commands.push(command);
+            }
         }
     }
 }

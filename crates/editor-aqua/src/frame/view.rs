@@ -45,6 +45,7 @@ pub fn body(
     theme: &ArtisanTheme,
     titlebar: Element,
     sidebar: Sidebar,
+    overlay: Element,
     content: Vec<Element>,
     seam: Rc<std::cell::RefCell<crate::frame::seam::motion::Motion>>,
     reduced: bool,
@@ -73,7 +74,20 @@ pub fn body(
                 )
                 .build(),
         )
+        .child(overlay)
         .build()
+}
+
+#[must_use]
+pub fn search_anchor() -> crate::frame::search::Anchor {
+    let edge = crate::frame::search::RAIL_KEY.edge();
+    let left = (WORDMARK_WIDTH - edge).mul_add(0.5, INK_X - WORDMARK_INK_LEFT);
+    crate::frame::search::Anchor {
+        left,
+        top: TITLEBAR_HEIGHT + WORDMARK_INK_RISE + WORDMARK_HEIGHT + TREE_GAP,
+        width: OPEN_WIDTH - left - SHEET_PADDING,
+        bottom: TRIGGER_HEIGHT + SHEET_PADDING,
+    }
 }
 
 fn grow() -> Style {
@@ -132,6 +146,7 @@ pub fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
                 .build(),
         )
         .child(tree_view(sidebar.width, sidebar.search, sidebar.tree))
+        .child(rail_view(theme, sidebar.width, &sidebar.emit))
         .child(
             UiBox::new()
                 .height(footer_height)
@@ -148,7 +163,7 @@ pub fn sidebar_view(theme: &ArtisanTheme, sidebar: Sidebar) -> Element {
 }
 
 fn tree_view(width: f32, search: Option<Element>, tree: Option<Element>) -> Element {
-    let reveal = ((width - COLLAPSED_WIDTH) / (OPEN_WIDTH - COLLAPSED_WIDTH)).clamp(0.0, 1.0);
+    let reveal = reveal(width);
     let row = crate::sidebar::geometry::TOGGLE.pad().x.px();
     let column = UiBox::new()
         .layout("column")
@@ -173,6 +188,27 @@ fn tree_view(width: f32, search: Option<Element>, tree: Option<Element>) -> Elem
         true => column,
         false => column.exclude_from_hit_testing(),
     }
+}
+
+fn rail_view(theme: &ArtisanTheme, width: f32, emit: &Rc<dyn Fn(Event)>) -> Element {
+    let shown = 1.0 - reveal(width);
+    let anchor = search_anchor();
+    let rail = UiBox::new()
+        .style(
+            Style::new()
+                .absolute_at(Some(anchor.left), Some(anchor.top), None, None)
+                .opacity(shown),
+        )
+        .child(crate::frame::search::rail(theme, emit))
+        .build();
+    match shown > 0.0 {
+        true => rail,
+        false => rail.exclude_from_hit_testing(),
+    }
+}
+
+fn reveal(width: f32) -> f32 {
+    ((width - COLLAPSED_WIDTH) / (OPEN_WIDTH - COLLAPSED_WIDTH)).clamp(0.0, 1.0)
 }
 
 fn wordmark(theme: &ArtisanTheme, sidebar: &Sidebar) -> Element {
