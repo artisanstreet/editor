@@ -2812,6 +2812,16 @@ impl SectionViews for RootViews {
         {
             return Some(true);
         }
+        if let InputEvent::KeyDown(event) = input
+            && self.palette_dialog.is_none()
+            && self.resource_dialog.is_none()
+            && self.settings.is_none()
+            && self.image_preview.is_none()
+            && self.navigation.key(event)
+        {
+            self.navigation_invalidated.set(true);
+            return Some(true);
+        }
         let cycled = {
             let _tm = crate::shell::application::Tm::new("pre.cycle");
             crate::ui::menu_keys::cycle(ui, input)

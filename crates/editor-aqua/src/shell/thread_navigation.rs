@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use aqua_core::{Point, Rect};
+use aqua_core::{Key, KeyEvent, NamedKey, Point, Rect};
 use aqua_ui::{
     JustifyContent,
     collection_runtime::CollectionViewport,
@@ -188,6 +188,43 @@ const FLIP: Transition = Transition {
     easing: EASE,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reveal {
+    Center(usize, usize),
+    Keep(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Up,
+    Down,
+    First,
+    Last,
+    Jump,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Steer {
+    Ignored,
+    Moved,
+    Jump(Seq),
+}
+
+#[must_use]
+pub fn step(event: &KeyEvent) -> Option<Step> {
+    if !event.modifiers.is_empty() {
+        return None;
+    }
+    match event.key {
+        Key::Named(NamedKey::Up) => Some(Step::Up),
+        Key::Named(NamedKey::Down) => Some(Step::Down),
+        Key::Named(NamedKey::Home) => Some(Step::First),
+        Key::Named(NamedKey::End) => Some(Step::Last),
+        Key::Named(NamedKey::Enter) => Some(Step::Jump),
+        _ => None,
+    }
+}
+
 #[must_use]
 pub fn outside(at: Point, drawer: Option<Rect>, chevron: Option<Rect>) -> bool {
     [drawer, chevron]
@@ -200,9 +237,11 @@ struct Interaction {
     scope: Option<(String, HostInstance)>,
     panel: Glide,
     chevron: Glide,
-    center: Option<(usize, usize)>,
+    reveal: Option<Reveal>,
     recentre: bool,
     available: bool,
+    entries: Vec<Seq>,
+    cursor: Option<usize>,
 }
 
 impl Default for Interaction {
@@ -211,9 +250,11 @@ impl Default for Interaction {
             scope: None,
             panel: Glide::Resting(0.0),
             chevron: Glide::Resting(0.0),
-            center: None,
+            reveal: None,
             recentre: false,
             available: false,
+            entries: Vec::new(),
+            cursor: None,
         }
     }
 }
@@ -233,8 +274,29 @@ impl Interaction {
     fn reset(&mut self) {
         self.panel = Glide::Resting(0.0);
         self.chevron = Glide::Resting(0.0);
-        self.center = None;
+        self.reveal = None;
         self.recentre = false;
+        self.cursor = None;
+    }
+
+    fn steer(&mut self, step: Step) -> Steer {
+        let count = self.entries.len();
+        if !self.open() || count == 0 {
+            return Steer::Ignored;
+        }
+        let last = count - 1;
+        let at = self.cursor.map(|cursor| cursor.min(last));
+        let next = match (step, at) {
+            (Step::Jump, Some(cursor)) => return Steer::Jump(self.entries[cursor]),
+            (Step::Jump, None) => return Steer::Ignored,
+            (Step::Down, Some(cursor)) => (cursor + 1).min(last),
+            (Step::Down, None) | (Step::First, _) => 0,
+            (Step::Up, Some(cursor)) => cursor.saturating_sub(1),
+            (Step::Up, None) | (Step::Last, _) => last,
+        };
+        self.cursor = Some(next);
+        self.reveal = Some(Reveal::Keep(next));
+        Steer::Moved
     }
 
     fn settle(&mut self, now: Instant) -> bool {
@@ -290,6 +352,22 @@ impl ThreadNavigation {
             state.recentre = false;
         }
         open
+    }
+
+    pub fn key(&mut self, event: &KeyEvent) -> bool {
+        let Some(step) = step(event) else {
+            return false;
+        };
+        match self.interaction.steer(step) {
+            Steer::Ignored => false,
+            Steer::Moved => true,
+            Steer::Jump(position) => {
+                if let Some(context) = &self.context {
+                    (context.dispatch)(crate::conversation::adapter::Action::Jump(position));
+                }
+                true
+            }
+        }
     }
 
     pub fn dismiss(
@@ -399,11 +477,14 @@ impl ThreadNavigation {
         }
         let active = active_index(markers, reading_position(conversation, viewport));
         if std::mem::take(&mut state.recentre) {
-            state.center = Some((active, markers.len()));
+            state.reveal = Some(Reveal::Center(active, markers.len()));
+            state.cursor = Some(active);
         }
+        state.entries = markers.iter().map(|marker| marker.position).collect();
         let panel = navigator::panel(
             markers,
             Some(markers[active].position),
+            state.cursor,
             theme,
             progress,
             dispatch,
@@ -422,15 +503,24 @@ impl ThreadNavigation {
 
     pub fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> Frame {
         let mut frame = Frame::default();
-        if let Some((active, count)) = self.interaction.center
+        if let Some(reveal) = self.interaction.reveal
             && let Some(list) = keyed(ui, "turn-navigator-list")
             && let Some(scroll) = scroll_descendant(ui, list)
             && let Some(bounds) = ui.tree().pre_transform_rect(scroll)
             && bounds.h > 0.0
         {
-            let offset = navigator::panel_scroll_offset(active, count, bounds.h);
+            let offset = match reveal {
+                Reveal::Center(active, count) => {
+                    navigator::panel_scroll_offset(active, count, bounds.h)
+                }
+                Reveal::Keep(index) => navigator::panel_keep_offset(
+                    index,
+                    ui.tree().scroll_offset(scroll).map_or(0.0, |offset| offset.y),
+                    bounds.h,
+                ),
+            };
             frame.changed |= ui.tree_mut().scroll_to(scroll, Point { x: 0.0, y: offset });
-            self.interaction.center = None;
+            self.interaction.reveal = None;
         }
         if self.interaction.chevron.running()
             && let Some(node) = keyed(ui, strip::OUTLINE_CHEVRON)
