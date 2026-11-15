@@ -43,6 +43,7 @@ pub mod sky;
 pub mod slider;
 pub mod solar;
 pub mod status_chip;
+pub mod sticker;
 pub mod switch;
 pub mod tab_card;
 pub mod text;
