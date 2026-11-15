@@ -417,7 +417,7 @@ pub fn thread_menu(
         .layout("column")
         .style(Style::new().width(Length::Px(THREAD_MENU_WIDTH)));
     for action in actions {
-        if action == MenuAction::Archive || (action == MenuAction::Rename && row.settleable) {
+        if action == MenuAction::Archive {
             content = content.child(Divider::Rule.build(&theme, Surface::Menu.padding_px()));
         }
         let (id, icon, label, hover) = match action {
