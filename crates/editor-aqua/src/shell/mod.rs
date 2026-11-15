@@ -1,3 +1,4 @@
+pub mod composer_glide;
 pub mod connection;
 pub mod context_meter;
 pub mod layout;

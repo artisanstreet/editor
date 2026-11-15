@@ -1,6 +1,6 @@
 use editor_ui::kit::{Media, Picker, Radius, Space, Surface, Tone, Tooltip};
 
-const ALL: [Surface; 16] = [
+const ALL: [Surface; 17] = [
     Surface::Menu,
     Surface::Picker(Picker::List),
     Surface::Picker(Picker::Sheet),
@@ -9,6 +9,7 @@ const ALL: [Surface; 16] = [
     Surface::Dialog,
     Surface::Card,
     Surface::Inset,
+    Surface::Code,
     Surface::Composer,
     Surface::Field,
     Surface::Media(Media::Frame),

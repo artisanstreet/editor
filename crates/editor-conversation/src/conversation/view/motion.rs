@@ -1,6 +1,7 @@
 use crate::conversation::compaction::{CompactionFrame, CompactionMotion, CompactionPhase};
 use editor_ui::motion::MotionCurve;
 use editor_ui::phrase::{PhraseMotion, PhraseOverflow, retained_phrase_or_text};
+use editor_ui::sticker::{self, Sticker, StickerFrame};
 use editor_ui::kit::TextRole;
 use editor_ui::theme::ArtisanTheme;
 use aqua_core::GpuiTextColor;
@@ -36,6 +37,11 @@ struct DisclosedState {
     height: Rc<Cell<f32>>,
 }
 
+struct StickerState {
+    started: Option<Instant>,
+    width: Rc<Cell<f32>>,
+}
+
 struct EntranceState {
     started: Option<Instant>,
     height: Rc<Cell<f32>>,
@@ -55,6 +61,7 @@ pub struct RowMotion {
     chevrons: HashMap<String, Chevron>,
     compactions: HashMap<ItemId, CompactionMotion>,
     entrances: HashMap<crate::conversation::fold::RowKey, EntranceState>,
+    stickers: HashMap<crate::conversation::fold::RowKey, StickerState>,
     disclosed: HashMap<String, DisclosedState>,
     swaps: HashMap<String, SwapState>,
     arrivals: HashMap<String, (bool, Option<Instant>)>,
@@ -69,6 +76,7 @@ impl RowMotion {
             self.chevrons.clear();
             self.compactions.clear();
             self.entrances.clear();
+            self.stickers.clear();
             self.disclosed.clear();
             self.swaps.clear();
             self.arrivals.clear();
@@ -189,6 +197,28 @@ impl RowMotion {
             ),
             height,
             settling: elapsed < std::time::Duration::from_millis(205),
+        })
+    }
+
+    pub fn sticker(
+        &mut self,
+        key: crate::conversation::fold::RowKey,
+        fresh: bool,
+        reduced_motion: bool,
+        now: Instant,
+    ) -> Option<Sticker> {
+        let state = self.stickers.entry(key).or_insert_with(|| StickerState {
+            started: (fresh && !reduced_motion).then_some(now),
+            width: Rc::new(Cell::new(0.0)),
+        });
+        let elapsed = now.saturating_duration_since(state.started?);
+        if elapsed >= sticker::DURATION || reduced_motion {
+            return None;
+        }
+        self.animating = true;
+        Some(Sticker {
+            frame: StickerFrame::at(elapsed),
+            width: Rc::clone(&state.width),
         })
     }
 

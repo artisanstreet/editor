@@ -93,72 +93,16 @@ const FACE_HEIGHT: f32 = KEY - BACK - FRONT;
 const LEGEND: f32 = 0.45 * KEY;
 const MIN_WIDTH: f32 = 0.92 * KEY;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Finish {
-    Porcelain,
-    Graphite,
-}
+const BASE: f32 = 27.0;
+const CONTRAST: f32 = 0.55;
+const INK: f32 = 95.0;
+const CAST: f32 = 0.3;
+const INNER_DARK: f32 = 0.47;
+const INNER_LIGHT: f32 = 0.05;
+const RIM: f32 = 0.1;
 
-impl Finish {
-    fn of(theme: &ArtisanTheme) -> Self {
-        match theme.colors.mode.is_dark() {
-            true => Self::Porcelain,
-            false => Self::Graphite,
-        }
-    }
-
-    const fn base(self) -> f32 {
-        match self {
-            Self::Porcelain => 96.0,
-            Self::Graphite => 27.0,
-        }
-    }
-
-    const fn contrast(self) -> f32 {
-        match self {
-            Self::Porcelain => 1.0,
-            Self::Graphite => 0.55,
-        }
-    }
-
-    fn shade(self, offset: f32) -> Oklch {
-        gray(self.base() + offset * self.contrast())
-    }
-
-    const fn ink(self) -> f32 {
-        match self {
-            Self::Porcelain => 8.6,
-            Self::Graphite => 95.0,
-        }
-    }
-
-    const fn cast(self) -> f32 {
-        match self {
-            Self::Porcelain => 0.5,
-            Self::Graphite => 0.3,
-        }
-    }
-
-    const fn inner_dark(self) -> f32 {
-        match self {
-            Self::Porcelain => 0.17,
-            Self::Graphite => 0.47,
-        }
-    }
-
-    const fn inner_light(self) -> f32 {
-        match self {
-            Self::Porcelain => 0.6,
-            Self::Graphite => 0.05,
-        }
-    }
-
-    const fn rim(self) -> f32 {
-        match self {
-            Self::Porcelain => 0.9,
-            Self::Graphite => 0.1,
-        }
-    }
+fn shade(offset: f32) -> Oklch {
+    gray(BASE + offset * CONTRAST)
 }
 
 fn gray(percent: f32) -> Oklch {
@@ -227,7 +171,7 @@ fn facet(bounds: Rect, commands: Vec<PathCommand>, background: GpuiBackground) -
     }
 }
 
-fn skirts(finish: Finish) -> Element {
+fn skirts() -> Element {
     Canvas::new()
         .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
         .on_paint(move |bounds| {
@@ -246,7 +190,7 @@ fn skirts(finish: Finish) -> Element {
                         to(face_right, face_bottom),
                         PathCommand::Close,
                     ],
-                    GpuiBackground::Solid(finish.shade(-36.0).to_reference_paint()),
+                    GpuiBackground::Solid(shade(-36.0).to_reference_paint()),
                 ),
                 facet(
                     bounds,
@@ -259,7 +203,7 @@ fn skirts(finish: Finish) -> Element {
                         to(face_right, face_bottom),
                         PathCommand::Close,
                     ],
-                    gradient(90.0, finish.shade(-18.0), finish.shade(-37.0)),
+                    gradient(90.0, shade(-18.0), shade(-37.0)),
                 ),
             ]
         })
@@ -268,7 +212,6 @@ fn skirts(finish: Finish) -> Element {
 }
 
 fn keycap(theme: &ArtisanTheme, label: String) -> Element {
-    let finish = Finish::of(theme);
     let black = Oklch::new(0.0, 0.0, 0.0);
     let white = Oklch::new(1.0, 0.0, 0.0);
     let legend = Text::new(label)
@@ -279,7 +222,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
             weight: FontWeight::MEDIUM,
             ..TextStyle::default()
         })
-        .gpui_source_color(gray(finish.ink()).to_reference_text_color())
+        .gpui_source_color(gray(INK).to_reference_text_color())
         .wrap(false)
         .build();
     let face = UiBox::new()
@@ -291,7 +234,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
                 .align(AlignItems::CENTER)
                 .justify(JustifyContent::CENTER)
                 .padding_insets(Insets::hv(FACE_HEIGHT * 0.25, 0.0))
-                .gpui_background(gradient(135.0, finish.shade(-3.0), finish.shade(1.0)))
+                .gpui_background(gradient(135.0, shade(-3.0), shade(1.0)))
                 .gpui_shadows(vec![
                     shadow(
                         0.0,
@@ -299,7 +242,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
                         0.028 * KEY,
                         0.012 * KEY,
                         false,
-                        white.with_alpha(finish.rim()),
+                        white.with_alpha(RIM),
                     ),
                     shadow(
                         0.03 * KEY,
@@ -307,7 +250,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
                         0.13 * KEY,
                         0.0,
                         true,
-                        black.with_alpha(finish.inner_dark()),
+                        black.with_alpha(INNER_DARK),
                     ),
                     shadow(
                         -0.021 * KEY,
@@ -315,7 +258,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
                         0.13 * KEY,
                         0.0,
                         true,
-                        white.with_alpha(finish.inner_light()),
+                        white.with_alpha(INNER_LIGHT),
                     ),
                 ]),
         )
@@ -324,7 +267,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
     let body = UiBox::new()
         .height(KEY)
         .radius(BODY_RADIUS)
-        .fill(finish.shade(0.0).to_paint())
+        .fill(shade(0.0).to_paint())
         .clip(true)
         .style(Style::new().padding_insets(Insets {
             left: LEFT,
@@ -332,7 +275,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
             top: BACK,
             bottom: FRONT,
         }))
-        .child(skirts(finish))
+        .child(skirts())
         .child(face)
         .build();
     UiBox::new()
@@ -348,7 +291,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
                         0.18 * KEY,
                         -0.04 * KEY,
                         false,
-                        black.with_alpha(finish.cast() * 0.35 * 0.51),
+                        black.with_alpha(CAST * 0.35 * 0.51),
                     ),
                     shadow(
                         0.06 * KEY,
@@ -356,7 +299,7 @@ fn keycap(theme: &ArtisanTheme, label: String) -> Element {
                         0.52 * KEY,
                         -0.01 * KEY,
                         false,
-                        black.with_alpha(finish.cast() * 0.6 * 0.35),
+                        black.with_alpha(CAST * 0.6 * 0.35),
                     ),
                 ]),
         )

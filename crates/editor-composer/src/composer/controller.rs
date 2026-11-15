@@ -94,6 +94,7 @@ pub struct Composer {
     placeholder_generation: u64,
     placeholder_was_visible: bool,
     pub file_shake: Option<(u64, std::time::Instant)>,
+    pub cleared: Option<std::time::Instant>,
     pub notice: Option<String>,
     pub session: Option<DraftLease>,
     host_instance: Option<HostInstance>,
@@ -147,6 +148,7 @@ impl Composer {
             turn_completions: Delivery::new(NonZeroUsize::MIN),
             edit_revision: 0,
             restore_revision: Some(0),
+            cleared: None,
         }
     }
 
@@ -658,6 +660,7 @@ impl Composer {
                     }
                     self.files.clear();
                     self.restore_revision = None;
+                    self.cleared = Some(std::time::Instant::now());
                 }
                 SessionEvent::Reloaded => {
                     self.editor.borrow_mut().set_text("");

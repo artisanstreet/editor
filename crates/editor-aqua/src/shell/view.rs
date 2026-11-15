@@ -151,6 +151,7 @@ pub struct ComposerParts {
     pub attachments: Option<Element>,
     pub mention_overlay: Option<Element>,
     pub thread_error: Option<Element>,
+    pub shift: f32,
 }
 
 pub fn conversation(
@@ -200,7 +201,7 @@ pub fn conversation(
         overlays,
         Some(card),
         viewport_width,
-        workspace.conversation.is_landing(),
+        workspace.conversation.reveal(std::time::Instant::now()),
     ))
 }
 
@@ -261,6 +262,7 @@ fn measured_composer(
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     above_composer: Option<Element>,
 ) -> anyhow::Result<Element> {
+    let shift = parts.shift;
     let owner = workspace
         .composer
         .as_ref()
@@ -317,11 +319,15 @@ fn measured_composer(
     let mut column = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
-        .spaced(Space::S8);
+        .spaced(Space::S8)
+        .style(Style::new().transform(aqua_core::Transform2D::translate(0.0, shift)));
     if let Some(above) = above_composer {
         column = column.child(above);
     }
-    Ok(column.child(card).build())
+    Ok(column
+        .child(card)
+        .build()
+        .with_key(crate::shell::composer_glide::DOCK_KEY))
 }
 
 pub fn conversation_body(
@@ -352,7 +358,7 @@ pub fn conversation_body(
         overlays,
         card,
         viewport_width,
-        false,
+        1.0,
     ))
 }
 
@@ -429,7 +435,8 @@ pub fn new_conversation(
         .clip(true)
         .child(artwork)
         .child(centered_conversation(card))
-        .build())
+        .build()
+        .with_key(crate::shell::composer_glide::STAGE_KEY))
 }
 
 pub fn centered_conversation(content: Element) -> Element {

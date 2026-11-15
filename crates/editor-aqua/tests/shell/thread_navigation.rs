@@ -30,70 +30,80 @@ fn active_turn_tracks_latest_outline_marker_at_or_before_reader() {
 }
 
 #[test]
-fn menu_centering_clamps_to_the_actual_scrollable_extent() {
-    assert_eq!(navigator::menu_scroll_offset(0, 50, 180.0), 0.0);
-    assert_eq!(navigator::menu_scroll_offset(10, 50, 180.0), 288.0);
-    assert_eq!(navigator::menu_scroll_offset(49, 50, 180.0), 1620.0);
-    assert_eq!(navigator::menu_scroll_offset(1, 2, 180.0), 0.0);
-}
-
-fn outline(count: usize) -> Vec<OutlineEntry> {
-    (0..count)
-        .map(|index| OutlineEntry {
-            id: ItemId::from(format!("item-{index}")),
-            position: index as Seq * 10,
-            label: format!("turn {index}"),
-        })
-        .collect()
-}
-
-fn built_navigator(count: usize, viewport_height: f32, active: Seq) -> navigator::Navigator {
-    let mut navigator = navigator::Navigator::default();
-    let dispatch: Dispatch = Rc::new(|_| {});
-    let rail = navigator.rail(
-        &outline(count),
-        Some(active),
-        viewport_height,
-        None,
-        0.0,
-        false,
-        Instant::now(),
-        ArtisanTheme::resolved(),
-        dispatch,
-    );
-    assert!(rail.is_some());
-    navigator
+fn panel_centering_clamps_to_the_actual_scrollable_extent() {
+    assert_eq!(navigator::panel_scroll_offset(0, 50, 180.0), 0.0);
+    assert_eq!(navigator::panel_scroll_offset(10, 50, 180.0), 288.0);
+    assert_eq!(navigator::panel_scroll_offset(49, 50, 180.0), 1620.0);
+    assert_eq!(navigator::panel_scroll_offset(1, 2, 180.0), 0.0);
 }
 
 #[test]
-fn active_shift_stays_in_place_while_the_tick_set_is_unchanged() {
-    let mut navigator = built_navigator(10, 600.0, 0);
-    assert!(navigator.shift_active(3, Instant::now(), false));
-    assert!(navigator.shift_active(9, Instant::now(), false));
+fn the_outline_toggles_only_when_the_thread_has_turns() {
+    let now = Instant::now();
+    let mut navigation = ThreadNavigation::default();
+    navigation.toggle(now, false);
+    assert_eq!(navigation.chevron(now), None);
+    assert!(!navigation.interaction.open());
+    navigation.interaction.available = true;
+    navigation.toggle(now, false);
+    assert!(navigation.interaction.open());
+    assert!(navigation.interaction.recentre);
 }
 
 #[test]
-fn active_shift_asks_for_a_rebuild_when_the_tick_set_changes() {
-    let mut navigator = built_navigator(500, 600.0, 0);
-    assert!(!navigator.shift_active(250, Instant::now(), false));
-    assert!(!navigator.shift_active(1_000, Instant::now(), false));
-}
-
-#[test]
-fn tick_presence_runs_from_start_to_target_and_reports_flight() {
+fn the_panel_opens_slower_than_it_closes_and_the_chevron_flips_fastest() {
     let start = Instant::now();
-    let (begin, begin_moving) = navigator::tick_presence(true, Some(start), start);
-    assert_eq!(begin, 0.0);
-    assert!(begin_moving);
-    let (end, end_moving) =
-        navigator::tick_presence(true, Some(start), start + Duration::from_secs(2));
-    assert_eq!(end, 1.0);
-    assert!(!end_moving);
-    let (fading, _) = navigator::tick_presence(false, Some(start), start);
-    assert_eq!(fading, 1.0);
-    let (idle, idle_moving) = navigator::tick_presence(false, None, start);
-    assert_eq!(idle, 0.0);
-    assert!(!idle_moving);
+    let at = |ms| start + Duration::from_millis(ms);
+    let mut navigation = ThreadNavigation::default();
+    navigation.interaction.available = true;
+    navigation.toggle(start, false);
+    assert_eq!(navigation.chevron(start), Some(0.0));
+    let panel = navigation.interaction.panel.value(at(100), OPEN);
+    assert!(navigation.chevron(at(100)).is_some_and(|flip| flip > panel && flip < 1.0));
+    assert_eq!(navigation.chevron(at(250)), Some(1.0));
+    assert!(navigation.interaction.panel.value(at(250), OPEN) < 1.0);
+    assert_eq!(navigation.interaction.panel.value(at(400), OPEN), 1.0);
+    assert!(navigation.interaction.settle(at(400)));
+    assert!(!navigation.interaction.settle(at(400)));
+    navigation.toggle(at(400), false);
+    assert!(!navigation.interaction.open());
+    assert!(navigation.interaction.panel.value(at(600), CLOSE) > 0.0);
+    assert_eq!(navigation.interaction.panel.value(at(750), CLOSE), 0.0);
+    assert_eq!(navigation.chevron(at(650)), Some(0.0));
+}
+
+#[test]
+fn reduced_motion_snaps_the_panel_and_chevron() {
+    let now = Instant::now();
+    let mut navigation = ThreadNavigation::default();
+    navigation.interaction.available = true;
+    navigation.toggle(now, true);
+    assert_eq!(navigation.chevron(now), Some(1.0));
+    assert_eq!(navigation.interaction.panel.value(now, OPEN), 1.0);
+    assert!(!navigation.interaction.settle(now));
+}
+
+#[test]
+fn disposing_the_view_closes_the_outline() {
+    let now = Instant::now();
+    let mut navigation = ThreadNavigation::default();
+    navigation.interaction.available = true;
+    navigation.toggle(now, true);
+    navigation.dispose();
+    assert_eq!(navigation.chevron(now), None);
+    assert!(!navigation.interaction.open());
+}
+
+#[test]
+fn escape_closes_only_an_open_outline() {
+    let now = Instant::now();
+    let mut navigation = ThreadNavigation::default();
+    navigation.interaction.available = true;
+    assert!(!navigation.close(now, false));
+    navigation.toggle(now, false);
+    assert!(navigation.close(now, false));
+    assert!(!navigation.interaction.open());
+    assert!(!navigation.close(now, false));
 }
 
 #[test]

@@ -213,6 +213,7 @@ impl<V: SectionViews> ShellApplication<V> {
                 tracing::warn!(%error, "could not advance composer popup");
             }
             owner.advance_note_ticker(self.ui.ui_mut(), ctx.now().as_secs_f64());
+            owner.advance_primary(self.ui.ui_mut(), std::time::Instant::now());
             if owner.needs_animation(self.ui.ui()) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
