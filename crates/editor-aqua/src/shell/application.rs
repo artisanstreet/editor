@@ -1026,7 +1026,13 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                         .is_none_or(|window| self.views.resize_needs_rebuild(&self.shell, window));
                 self.drain(ctx, id, rebuild);
             }
-            WindowEvent::ScaleChanged(..) | WindowEvent::Focused(..) => self.drain(ctx, id, true),
+            WindowEvent::ScaleChanged(..) => self.drain(ctx, id, true),
+            WindowEvent::Focused(_, focused) => {
+                self.drain(ctx, id, true);
+                if *focused {
+                    ctx.request_frame(id, FrameReason::ANIMATION);
+                }
+            }
             _ => {}
         }
     }

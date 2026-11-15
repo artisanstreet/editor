@@ -6,6 +6,8 @@ mod browser;
 mod dialogs;
 #[path = "shell/gating.rs"]
 mod gating;
+#[path = "shell/read.rs"]
+mod read;
 #[path = "shell/refresh.rs"]
 mod refresh;
 #[path = "shell/reveal.rs"]

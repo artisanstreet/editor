@@ -11,6 +11,7 @@ use std::{
 };
 
 mod open_thread;
+mod read_watch;
 pub mod reveal;
 mod rail_refresh;
 mod wheel_sync;
@@ -157,6 +158,7 @@ pub struct RootViews {
     smooth_scroll: crate::conversation::scroll::SmoothScroll,
     wheel: crate::shell::wheel::WheelGlides,
     pending_stall: PendingStall,
+    read_watch: Option<read_watch::ReadWatch>,
     transcript_edges: crate::ui::scroll_edge::ScrollEdges,
     scroll_requests: VecDeque<crate::conversation::controller::ScrollAction>,
     composer_measurement: Rc<Cell<Option<f32>>>,
@@ -3519,6 +3521,22 @@ impl SectionViews for RootViews {
             for candidate in candidates {
                 candidate.acknowledge(&workspace.conversation, &mut shell.core, &markdown);
             }
+            let watch = read_watch::ReadWatch::of(&workspace.conversation, &shell.core, active);
+            if watch.wants_recheck(self.read_watch.as_ref()) {
+                for painted in self.observations.on_screen(ui) {
+                    if let Some(candidate) = painted.capture(
+                        &workspace.conversation,
+                        &shell.core,
+                        &markdown,
+                        &rows.scope,
+                        clip,
+                        active,
+                    ) {
+                        candidate.acknowledge(&workspace.conversation, &mut shell.core, &markdown);
+                    }
+                }
+            }
+            self.read_watch = Some(watch);
             drop(tm_ack);
             let _tm_viewports = crate::shell::application::Tm::new("fc.viewports");
             let landing_before = workspace.conversation.landing.is_some();
