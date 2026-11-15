@@ -434,3 +434,56 @@ fn row_directives_move_the_transcript_off_the_tail() {
         None
     );
 }
+
+#[test]
+fn details_grow_in_only_when_they_open() {
+    use editor_aqua::conversation::view::motion::RowMotion;
+    let now = Instant::now();
+    let mut motion = RowMotion::default();
+    assert!(motion.disclosed("tool".into(), true, false, now).is_none(), "already open on first sight");
+    assert!(motion.disclosed("tool".into(), false, false, now).is_none());
+    assert!(motion.disclosed("tool".into(), true, false, now).is_some());
+    assert!(motion.animating());
+    assert!(
+        motion
+            .disclosed("tool".into(), true, false, now + Duration::from_millis(400))
+            .is_none()
+    );
+    motion.disclosed("tool".into(), false, false, now);
+    assert!(motion.disclosed("tool".into(), true, true, now).is_none(), "reduced motion");
+}
+
+#[test]
+fn status_labels_swap_only_between_labels() {
+    use editor_aqua::conversation::view::motion::RowMotion;
+    let now = Instant::now();
+    let mut motion = RowMotion::default();
+    assert_eq!(motion.swap("status".into(), Some("Thinking".into()), false, now), None);
+    assert_eq!(motion.swap("status".into(), Some("Thinking".into()), false, now), None);
+    assert_eq!(motion.swap("status".into(), Some("Reading".into()), false, now), Some(0.0));
+    assert!(
+        motion
+            .swap("status".into(), Some("Reading".into()), false, now + Duration::from_millis(75))
+            .is_some_and(|progress| progress > 0.0 && progress < 1.0)
+    );
+    assert_eq!(
+        motion.swap("status".into(), Some("Reading".into()), false, now + Duration::from_millis(150)),
+        None
+    );
+    assert_eq!(motion.swap("status".into(), None, false, now), None, "streamed reasoning");
+    assert_eq!(motion.swap("status".into(), Some("Writing".into()), false, now), None);
+}
+
+#[test]
+fn images_fade_in_when_they_finish_loading_but_not_when_cached() {
+    use editor_aqua::conversation::view::motion::RowMotion;
+    let now = Instant::now();
+    let mut motion = RowMotion::default();
+    assert_eq!(motion.arrival("cached".into(), true, false, now), None);
+    assert_eq!(motion.arrival("loading".into(), false, false, now), None);
+    assert_eq!(motion.arrival("loading".into(), true, false, now), Some(0.0));
+    assert_eq!(
+        motion.arrival("loading".into(), true, false, now + Duration::from_millis(350)),
+        None
+    );
+}

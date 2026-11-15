@@ -95,3 +95,38 @@ fn tick_presence_runs_from_start_to_target_and_reports_flight() {
     assert_eq!(idle, 0.0);
     assert!(!idle_moving);
 }
+
+#[test]
+fn jump_to_latest_pops_in_slower_than_it_leaves() {
+    let now = Instant::now();
+    let at = |ms| now + Duration::from_millis(ms);
+    let mut latest = LatestPresence::default();
+    latest.show(true, now, false);
+    assert_eq!(latest.value(now), 0.0);
+    assert!(latest.value(at(149)) < 1.0);
+    assert_eq!(latest.value(at(250)), 1.0);
+    latest.show(false, at(250), false);
+    assert!(latest.value(at(300)) > 0.0);
+    assert_eq!(latest.value(at(400)), 0.0);
+}
+
+#[test]
+fn jump_to_latest_keeps_its_glide_while_visibility_holds() {
+    let now = Instant::now();
+    let mut latest = LatestPresence::default();
+    latest.show(true, now, false);
+    let midway = now + Duration::from_millis(100);
+    let before = latest.value(midway);
+    latest.show(true, midway, false);
+    assert_eq!(latest.value(midway), before);
+}
+
+#[test]
+fn reduced_motion_shows_and_hides_jump_to_latest_instantly() {
+    let now = Instant::now();
+    let mut latest = LatestPresence::default();
+    latest.show(true, now, true);
+    assert_eq!(latest.value(now), 1.0);
+    latest.show(false, now, true);
+    assert_eq!(latest.value(now), 0.0);
+}

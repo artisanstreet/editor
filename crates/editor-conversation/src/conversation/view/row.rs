@@ -133,6 +133,7 @@ pub fn render(
                     |text, color, mono| resources.truncate(text, color, mono, theme),
                     Rc::clone(&dispatch),
                     || resources.source(entry, SourceField::Output, theme),
+                    |details| details,
                 )?,
                 artisan_api::ItemKind::Agent { .. } => work::agent(
                     entry,
@@ -223,6 +224,7 @@ pub fn render(
                         |text, color, mono| resources.truncate(text, color, mono, theme),
                         Rc::clone(&dispatch),
                         || resources.source(entry, SourceField::Output, theme),
+                        |details| details,
                     )?
                 }
                 artisan_api::ItemKind::Plan { .. } => work::plan_entry(entry, theme),

@@ -55,6 +55,7 @@ fn stored_failures_open_sources_only_when_expanded() {
                 opened.set(true);
                 Ok(Text::new("loaded failure").build())
             },
+            |details| details,
         )
         .expect("activity row");
         assert_eq!(opened.get(), expected);

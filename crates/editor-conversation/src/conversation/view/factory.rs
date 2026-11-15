@@ -588,6 +588,14 @@ impl RowFactory {
     ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
         let collected = RefCell::new(Vec::new());
         let used = RefCell::new(std::collections::HashSet::new());
+        let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+        let disclosed = owner.motion.borrow_mut().disclosed(
+            format!("details-{}", item.id),
+            expanded,
+            self.reduced_motion,
+            now,
+        );
+        let invalidate = self.invalidate.clone();
         let result = super::work::activity_row(
             item,
             expanded,
@@ -596,6 +604,10 @@ impl RowFactory {
             |text, color, mono| truncate(text, color, mono, self.theme),
             dispatch,
             || self.source_field(owner, item, crate::conversation::content::SourceField::Output, &collected, &used),
+            move |details| match disclosed {
+                Some(frame) => frame.wrap(details, 0.0, invalidate),
+                None => details,
+            },
         )?;
         owner.retain_batches(&used.into_inner());
         batches.extend(collected.into_inner());
@@ -906,6 +918,7 @@ impl RowFactory {
     }
     fn user_attachments(
         &self,
+        owner: &super::row_cache::RowOwner,
         item: &artisan_api::Item,
     ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
         use aqua_ui::element::Box as UiBox;
@@ -923,13 +936,14 @@ impl RowFactory {
                 .justify(aqua_ui::JustifyContent::END),
         );
         for (index, hash) in images.iter().enumerate() {
-            row = row.child(self.blob_frame(item, hash, Some(index), 96.0)?);
+            row = row.child(self.blob_frame(owner, item, hash, Some(index), 96.0)?);
         }
         Ok(Some(row.build()))
     }
 
     fn blob_frame(
         &self,
+        owner: &super::row_cache::RowOwner,
         item: &artisan_api::Item,
         hash: &artisan_api::BlobHash,
         attachment: Option<usize>,
@@ -952,6 +966,13 @@ impl RowFactory {
             Some(BlobImage::Ready(image)) => Some((**image).clone()),
             _ => None,
         };
+        let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+        let arrival = owner.motion.borrow_mut().arrival(
+            format!("image-{hash}-{attachment:?}"),
+            image.is_some(),
+            self.reduced_motion,
+            now,
+        );
         let content = match (&state, &image) {
             (_, Some(image)) if attachment.is_some() => Media::new(image.clone())
                 .width(Length::Pct(100.0))
@@ -1019,6 +1040,10 @@ impl RowFactory {
                 .width(Length::Pct(100.0))
                 .height(Length::Pct(100.0))
                 .build(),
+        };
+        let content = match arrival {
+            Some(progress) => super::motion::arrived(content, progress),
+            None => content,
         };
         let aspect = image
             .as_ref()
@@ -1959,7 +1984,7 @@ impl RowFactory {
                 stored_proof = proof;
                 Some(if slot.is_bubble() {
                     let count = self.stored.as_ref().and_then(|services| services.owner.borrow().current_range(&BodyKey { item: id.clone(), slot: *slot })).map_or(1, |range| range.end);
-                    user_bubble(element, *block, count, false, if *block == 0 { self.user_attachments(item)? } else { None }, bubble_sender(item, row.model.author), self.theme)
+                    user_bubble(element, *block, count, false, if *block == 0 { self.user_attachments(&row_owner, item)? } else { None }, bubble_sender(item, row.model.author), self.theme)
                 } else { element })
             }
             Row::Text {
@@ -1975,7 +2000,7 @@ impl RowFactory {
                 use aqua_ui::style::{Length, Style};
                 let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
                 let mut root = UiBox::new().layout("column").width(Length::Pct(100.0)).spaced(Space::S8).style(Style::new().align(aqua_ui::AlignItems::END));
-                if let Some(attachments) = self.user_attachments(item)? {
+                if let Some(attachments) = self.user_attachments(&row_owner, item)? {
                     root = root.child(attachments);
                 }
                 Some(root.build())
@@ -2274,7 +2299,7 @@ impl RowFactory {
                         count,
                         source.is_empty(),
                         if *block == 0 {
-                            self.user_attachments(item)?
+                            self.user_attachments(&row_owner, item)?
                         } else {
                             None
                         },
@@ -2327,7 +2352,7 @@ impl RowFactory {
                         .ok_or_else(|| anyhow::anyhow!("committed transcript width is unavailable"))?,
                 );
                 anyhow::ensure!(width > 0.0, "measured image width is unavailable");
-                let image = self.blob_frame(item, blob, None, width)?;
+                let image = self.blob_frame(&row_owner, item, blob, None, width)?;
                 Some(
                     aqua_ui::element::Box::new()
                         .layout("column")
@@ -2359,9 +2384,17 @@ impl RowFactory {
             }
             Row::AgentResult(_) => None,
             Row::Status(run) => status::run(&row.model, run, self.theme, |text, live, theme| {
-                self.statuses
-                    .borrow_mut()
-                    .render(key.clone(), text, live, self.reduced_motion, theme)
+                let label = match &text {
+                    status::StatusText::Status(label) => Some(label.clone()),
+                    status::StatusText::Reasoning(_) => None,
+                };
+                let element = self.statuses.borrow_mut().render(key.clone(), text, live, self.reduced_motion, theme)?;
+                let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+                let swap = row_owner.motion.borrow_mut().swap(format!("status-{key:?}"), label, self.reduced_motion, now);
+                anyhow::Ok(match swap {
+                    Some(progress) => super::motion::swapped(element, progress),
+                    None => element,
+                })
             })
             .transpose()?,
             Row::AgentStatus(_, doing) => status::agent(doing.as_deref(), self.theme, |text, theme| {
@@ -2389,15 +2422,17 @@ impl RowFactory {
         let mut work_settling = false;
         let content = match (content, &self.work) {
             (Some(element), Some(work)) => {
-                let id = match row.model.row.semantic() {
-                    Row::WorkEntry { id, .. } => Some(id),
-                    Row::Chain { ids, .. } => ids.first(),
-                    _ => None,
+                let (id, standalone) = match row.model.row.semantic() {
+                    Row::WorkEntry { id, .. } => (Some(id), false),
+                    Row::Chain { ids, .. } => (ids.first(), false),
+                    Row::Prompt(id) | Row::Image(id) | Row::AgentResult(id) => (Some(id), true),
+                    Row::Text { id, slot, block: 0, .. } if slot.is_card() => (Some(id), true),
+                    _ => (None, false),
                 };
                 if let Some(id) = id {
                     let fresh = row.disclosure.clip.is_none()
                         && row.model.ui.get(id).is_some_and(|ui| ui.fresh());
-                    let live = row.model.run.as_ref().is_some_and(|run| run.live());
+                    let live = standalone || row.model.run.as_ref().is_some_and(|run| run.live());
                     let entrance = row_owner.motion.borrow_mut().entrance(
                         key.clone(),
                         fresh,
