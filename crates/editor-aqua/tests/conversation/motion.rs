@@ -1,5 +1,4 @@
 use editor_aqua::conversation::compaction::{CompactionMotion, CompactionPhase};
-use editor_aqua::conversation::navigator::tick_indices;
 use editor_aqua::conversation::scroll::{SmoothScroll, Step, wants_older};
 use std::time::{Duration, Instant};
 
@@ -62,17 +61,6 @@ fn compaction_completes_entrance_and_plays_checkpoint_after_settling() {
         now + Duration::from_millis(1001),
     );
     assert!(pulse.pulse.is_some());
-}
-
-#[test]
-fn navigator_keeps_the_active_turn_when_sampling_long_history() {
-    let indices = tick_indices(10_000, 50, Some(6234));
-    assert_eq!(indices.len(), 50);
-    assert_eq!(indices.first(), Some(&0));
-    assert_eq!(indices.last(), Some(&9999));
-    assert!(indices.contains(&6234));
-    assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
-    assert!(tick_indices(0, 0, None).is_empty());
 }
 
 #[test]

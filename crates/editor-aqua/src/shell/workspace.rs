@@ -35,7 +35,6 @@ struct QuestionSourceIdentity {
 pub struct Workspace {
     pub selections: crate::shell::selection::SelectionScope,
     pub inspector: crate::inspector::InspectorOwner,
-    pub navigator: crate::conversation::view::navigator::Navigator,
     pub conversation_selection: crate::conversation::presentation::SelectionOwners,
     pub markdown: Rc<RefCell<crate::conversation::presentation::MarkdownOwners>>,
     pub status_shimmers: Rc<RefCell<crate::conversation::view::status::StatusShimmers>>,
@@ -125,7 +124,6 @@ impl Workspace {
             code_frame_pending: false,
             code_deadline: None,
             selections,
-            navigator: crate::conversation::view::navigator::Navigator::default(),
             inspector_actions: Rc::new(RefCell::new(VecDeque::new())),
             terminal_dialog: None,
             terminal_content: None,
