@@ -187,7 +187,6 @@ const FLIP: Transition = Transition {
     duration: Duration::from_millis(250),
     easing: EASE,
 };
-const INSET: f32 = 8.0;
 
 struct Interaction {
     scope: Option<(String, HostInstance)>,
@@ -246,7 +245,6 @@ pub struct Frame {
 
 #[derive(Clone)]
 struct BuildContext {
-    composer_bottom: f32,
     theme: ArtisanTheme,
     dispatch: Dispatch,
 }
@@ -297,27 +295,15 @@ impl ThreadNavigation {
         conversation: &Conversation,
         core: &Core,
         viewport: CollectionViewport,
-        composer_height: Option<f32>,
-        composer_bottom: f32,
         theme: ArtisanTheme,
         now: Instant,
         dispatch: Dispatch,
     ) -> Option<Element> {
         self.context = Some(BuildContext {
-            composer_bottom,
             theme,
             dispatch: dispatch.clone(),
         });
-        self.build_with(
-            conversation,
-            core,
-            viewport,
-            composer_height,
-            now,
-            composer_bottom,
-            theme,
-            dispatch,
-        )
+        self.build_with(conversation, core, viewport, now, theme, dispatch)
     }
 
     pub fn refresh(
@@ -326,7 +312,6 @@ impl ThreadNavigation {
         conversation: &Conversation,
         core: &Core,
         viewport: CollectionViewport,
-        composer_height: Option<f32>,
         now: Instant,
     ) -> Result<Refresh, String> {
         let Some(context) = self.context.clone() else {
@@ -337,9 +322,7 @@ impl ThreadNavigation {
             conversation,
             core,
             viewport,
-            composer_height,
             now,
-            context.composer_bottom,
             context.theme,
             context.dispatch,
         );
@@ -364,9 +347,7 @@ impl ThreadNavigation {
         conversation: &Conversation,
         core: &Core,
         viewport: CollectionViewport,
-        composer_height: Option<f32>,
         now: Instant,
-        composer_bottom: f32,
         theme: ArtisanTheme,
         dispatch: Dispatch,
     ) -> Option<Element> {
@@ -393,12 +374,6 @@ impl ThreadNavigation {
         if std::mem::take(&mut state.recentre) {
             state.center = Some((active, markers.len()));
         }
-        let composer_height = if conversation.agent.is_none() {
-            composer_height
-        } else {
-            None
-        };
-        let above = composer_height.map_or(0.0, |height| height + composer_bottom) + INSET;
         let panel = navigator::panel(
             markers,
             Some(markers[active].position),
@@ -406,14 +381,7 @@ impl ThreadNavigation {
             progress,
             dispatch,
         );
-        Some(
-            UiBox::new()
-                .layout("column")
-                .style(Style::new().absolute_at(Some(INSET), Some(INSET), None, Some(above)))
-                .child(panel)
-                .build()
-                .with_key(OVERLAY_KEY),
-        )
+        Some(panel.with_key(OVERLAY_KEY))
     }
 
     fn markers<'a>(conversation: &Conversation, core: &'a Core) -> Option<&'a [OutlineEntry]> {

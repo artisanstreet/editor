@@ -35,5 +35,7 @@ mod viewport;
 
 #[path = "conversation/row_cache.rs"]
 mod row_cache;
+#[path = "conversation/view/drawer.rs"]
+mod view_drawer;
 #[path = "conversation/view/transcript.rs"]
 mod transcript;

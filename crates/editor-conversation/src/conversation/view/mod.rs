@@ -257,6 +257,7 @@ pub fn thread_frame(
     transcript: Element,
     overlays: Vec<Element>,
     composer: Option<Element>,
+    drawer: Option<Element>,
     viewport_width: f32,
     reveal: f32,
 ) -> Element {
@@ -305,7 +306,14 @@ pub fn thread_frame(
             .build();
         root = root.child(shell);
     }
-    root.build()
+    root.children(drawer.map(|drawer| {
+        UiBox::new()
+            .layout("column")
+            .style(Style::new().absolute_at(Some(0.0), Some(0.0), None, Some(0.0)))
+            .child(drawer)
+            .build()
+    }))
+    .build()
 }
 
 pub fn observed_row_frame(
@@ -356,6 +364,7 @@ pub fn thread_element(
         list,
         overlays,
         composer,
+        None,
         viewport_width,
         conversation.reveal(std::time::Instant::now()),
     )
@@ -382,6 +391,7 @@ pub fn try_thread_element(
         list,
         overlays,
         composer,
+        None,
         viewport_width,
         conversation.reveal(std::time::Instant::now()),
     )
@@ -408,6 +418,7 @@ pub fn batched_thread_element(
         list,
         overlays,
         composer,
+        None,
         viewport_width,
         conversation.reveal(std::time::Instant::now()),
     )
@@ -422,6 +433,7 @@ pub fn layout_batched_thread_element(
     initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
     overlays: Vec<Element>,
     composer: Option<Element>,
+    drawer: Option<Element>,
     viewport_width: f32,
 ) -> Element {
     let list = transcript::layout_batched_list(
@@ -436,6 +448,7 @@ pub fn layout_batched_thread_element(
         list,
         overlays,
         composer,
+        drawer,
         viewport_width,
         conversation.reveal(std::time::Instant::now()),
     )

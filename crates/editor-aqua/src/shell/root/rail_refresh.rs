@@ -12,7 +12,6 @@ pub(super) struct Rail<'a> {
     pub(super) navigation: &'a mut thread_navigation::ThreadNavigation,
     pub(super) marker: &'a mut Option<usize>,
     pub(super) transcript_viewport: Option<CollectionViewport>,
-    pub(super) composer_height: Option<f32>,
 }
 
 impl Rail<'_> {
@@ -30,7 +29,6 @@ impl Rail<'_> {
             conversation,
             core,
             viewport,
-            self.composer_height,
             Instant::now(),
         ) {
             Ok(Refresh::InPlace) => {
@@ -84,7 +82,6 @@ impl RootViews {
             navigation: &mut self.navigation,
             marker: &mut self.navigation_marker,
             transcript_viewport: self.transcript_viewport,
-            composer_height: self.composer_height,
         }
         .refresh_in_place(ui, ctx, window, &workspace.conversation, &shell.core, viewport)
     }
