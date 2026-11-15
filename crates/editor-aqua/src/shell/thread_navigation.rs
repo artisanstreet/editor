@@ -1,13 +1,8 @@
-use std::{
-    cell::RefCell,
-    rc::Rc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use aqua_core::Point;
-use aqua_text::overflow::OverflowMode;
 use aqua_ui::{
-    AlignItems, JustifyContent,
+    JustifyContent,
     collection_runtime::CollectionViewport,
     element::{Box as UiBox, Element},
     style::{Length, Style},
@@ -17,14 +12,13 @@ use artisan_api::{OutlineEntry, Seq};
 use crate::{
     conversation::{
         controller::Conversation,
-        view::{
-            Dispatch,
-            navigator::{self, Navigator},
-        },
+        view::{Dispatch, navigator},
     },
     core::{Core, HostInstance},
+    frame::strip,
     ui::{
-        kit::{Finish, IconButton, IconButtonSize, Space, Spaced, Surface, TextRole},
+        chrome::glide::{CubicBezier, Glide, Transition},
+        kit::{Finish, IconButton, IconButtonSize, Surface},
         theme::ArtisanTheme,
     },
 };
@@ -39,19 +33,6 @@ pub fn viewport_moves_navigation(
         previous.viewport_height.to_bits() != next.viewport_height.to_bits()
             || previous_marker != next_marker
     })
-}
-
-pub fn shifted_in_place(
-    navigation: &mut ThreadNavigation,
-    previous: Option<CollectionViewport>,
-    next: CollectionViewport,
-    next_marker: Option<usize>,
-    now: Instant,
-    reduced_motion: bool,
-) -> bool {
-    previous.is_some_and(|previous| {
-        previous.viewport_height.to_bits() == next.viewport_height.to_bits()
-    }) && next_marker.is_some_and(|marker| navigation.shift_active(marker, now, reduced_motion))
 }
 
 pub fn active_marker(
@@ -129,30 +110,81 @@ fn show_latest(thread: bool, composer: bool, agent: bool, following: bool, curre
     thread && composer && !agent && !following && current
 }
 
-#[derive(Default)]
+const EASE: CubicBezier = CubicBezier::new(0.22, 1.0, 0.36, 1.0);
+const OPEN: Transition = Transition {
+    duration: Duration::from_millis(400),
+    easing: EASE,
+};
+const CLOSE: Transition = Transition {
+    duration: Duration::from_millis(350),
+    easing: EASE,
+};
+const FLIP: Transition = Transition {
+    duration: Duration::from_millis(250),
+    easing: EASE,
+};
+const INSET: f32 = 8.0;
+
 struct Interaction {
     scope: Option<(String, HostInstance)>,
-    hovered: bool,
-    opened: Option<Instant>,
+    panel: Glide,
+    chevron: Glide,
     center: Option<(usize, usize)>,
-    epoch: u64,
+    recentre: bool,
+    available: bool,
+}
+
+impl Default for Interaction {
+    fn default() -> Self {
+        Self {
+            scope: None,
+            panel: Glide::Resting(0.0),
+            chevron: Glide::Resting(0.0),
+            center: None,
+            recentre: false,
+            available: false,
+        }
+    }
+}
+
+impl Interaction {
+    fn open(&self) -> bool {
+        self.panel.target() > 0.5
+    }
+
+    fn set_open(&mut self, open: bool, now: Instant, reduced: bool) {
+        let target = if open { 1.0 } else { 0.0 };
+        let transition = if open { OPEN } else { CLOSE };
+        self.panel = self.panel.retarget(target, now, transition, reduced);
+        self.chevron = self.chevron.retarget(target, now, FLIP, reduced);
+    }
+
+    fn reset(&mut self) {
+        self.panel = Glide::Resting(0.0);
+        self.chevron = Glide::Resting(0.0);
+        self.center = None;
+        self.recentre = false;
+    }
+
+    fn settle(&mut self, now: Instant) -> bool {
+        let moved = self.panel.running() || self.chevron.running();
+        self.panel = self.panel.settle(now);
+        self.chevron = self.chevron.settle(now);
+        moved
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Frame {
     pub changed: bool,
     pub animating: bool,
-    pub ticking: bool,
 }
 
 #[derive(Clone)]
 struct BuildContext {
-    window_height: f32,
     composer_bottom: f32,
     theme: ArtisanTheme,
-    reduced_motion: bool,
     dispatch: Dispatch,
-    invalidate: Rc<dyn Fn()>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,29 +195,37 @@ pub enum Refresh {
 
 pub const OVERLAY_KEY: &str = "turn-navigation-overlay";
 
+#[derive(Default)]
 pub struct ThreadNavigation {
-    navigator: Rc<RefCell<Navigator>>,
-    interaction: Rc<RefCell<Interaction>>,
+    interaction: Interaction,
     context: Option<BuildContext>,
 }
 
-impl Default for ThreadNavigation {
-    fn default() -> Self {
-        Self {
-            navigator: Rc::new(RefCell::new(Navigator::default())),
-            interaction: Rc::new(RefCell::new(Interaction::default())),
-            context: None,
-        }
-    }
-}
-
 impl ThreadNavigation {
-    pub fn shift_active(&mut self, active: usize, now: Instant, reduced_motion: bool) -> bool {
-        !self.interaction.borrow().hovered
-            && self
-                .navigator
-                .borrow_mut()
-                .shift_active(active, now, reduced_motion)
+    pub fn toggle(&mut self, now: Instant, reduced_motion: bool) {
+        let state = &mut self.interaction;
+        if !state.available {
+            return;
+        }
+        let open = !state.open();
+        state.set_open(open, now, reduced_motion);
+        state.recentre = open;
+    }
+
+    pub fn close(&mut self, now: Instant, reduced_motion: bool) -> bool {
+        let state = &mut self.interaction;
+        let open = state.open();
+        if open {
+            state.set_open(false, now, reduced_motion);
+            state.recentre = false;
+        }
+        open
+    }
+
+    pub fn chevron(&self, now: Instant) -> Option<f32> {
+        self.interaction
+            .available
+            .then(|| self.interaction.chevron.value(now, FLIP))
     }
 
     pub fn build(
@@ -193,22 +233,16 @@ impl ThreadNavigation {
         conversation: &Conversation,
         core: &Core,
         viewport: CollectionViewport,
-        window_height: f32,
         composer_height: Option<f32>,
         composer_bottom: f32,
         theme: ArtisanTheme,
-        reduced_motion: bool,
         now: Instant,
         dispatch: Dispatch,
-        invalidate: Rc<dyn Fn()>,
     ) -> Option<Element> {
         self.context = Some(BuildContext {
-            window_height,
             composer_bottom,
             theme,
-            reduced_motion,
             dispatch: dispatch.clone(),
-            invalidate: invalidate.clone(),
         });
         self.build_with(
             conversation,
@@ -216,12 +250,9 @@ impl ThreadNavigation {
             viewport,
             composer_height,
             now,
-            window_height,
             composer_bottom,
             theme,
-            reduced_motion,
             dispatch,
-            invalidate,
         )
     }
 
@@ -244,12 +275,9 @@ impl ThreadNavigation {
             viewport,
             composer_height,
             now,
-            context.window_height,
             context.composer_bottom,
             context.theme,
-            context.reduced_motion,
             context.dispatch,
-            context.invalidate,
         );
         match (element, mounted) {
             (None, false) => Ok(Refresh::InPlace),
@@ -274,179 +302,94 @@ impl ThreadNavigation {
         viewport: CollectionViewport,
         composer_height: Option<f32>,
         now: Instant,
-        window_height: f32,
         composer_bottom: f32,
         theme: ArtisanTheme,
-        reduced_motion: bool,
         dispatch: Dispatch,
-        invalidate: Rc<dyn Fn()>,
     ) -> Option<Element> {
         let scope = conversation
             .selection_scope()
             .zip(conversation.host_instance());
-        {
-            let mut state = self.interaction.borrow_mut();
-            if state.scope != scope {
-                state.scope = scope;
-                state.hovered = false;
-                state.opened = None;
-                state.center = None;
-                state.epoch = state.epoch.wrapping_add(1);
-            }
+        let state = &mut self.interaction;
+        if state.scope != scope {
+            state.scope = scope;
+            state.reset();
         }
-        if !conversation.host_is_current(core) {
+        let markers = Self::markers(conversation, core);
+        state.available = markers.is_some_and(|markers| markers.len() >= 2);
+        if !state.available {
+            state.reset();
             return None;
         }
-        let (host, thread) = conversation.open.as_ref()?;
-        let summary = core.host(host)?.thread_summary(thread)?.value.as_ref()?;
-        let markers = &summary.outline;
-        if markers.len() < 2 {
-            let mut state = self.interaction.borrow_mut();
-            state.hovered = false;
-            state.opened = None;
-            state.center = None;
+        let markers = markers?;
+        let progress = state.panel.value(now, OPEN);
+        if progress <= 0.0 && !state.open() {
             return None;
         }
-        let reading = reading_position(conversation, viewport);
-        let active = active_index(markers, reading);
-        let viewport_height = viewport.viewport_height.max(window_height * 0.5);
+        let active = active_index(markers, reading_position(conversation, viewport));
+        if std::mem::take(&mut state.recentre) {
+            state.center = Some((active, markers.len()));
+        }
         let composer_height = if conversation.agent.is_none() {
             composer_height
         } else {
             None
         };
-        let (rail, max_height, _) = self.navigator.borrow_mut().rail(
+        let above = composer_height.map_or(0.0, |height| height + composer_bottom) + INSET;
+        let panel = navigator::panel(
             markers,
-            reading,
-            viewport_height,
-            composer_height,
-            composer_bottom,
-            reduced_motion,
-            now,
+            Some(markers[active].position),
             theme,
-            dispatch.clone(),
-        )?;
-        let (hovered, opened, epoch) = {
-            let state = self.interaction.borrow();
-            (state.hovered, state.opened, state.epoch)
-        };
-        let mut region = UiBox::new()
-            .spaced(Space::S4)
-            .style(Style::new().align(AlignItems::CENTER))
-            .child(rail);
-        if hovered {
-            let progress = if reduced_motion {
-                1.0
-            } else {
-                opened.map_or(1.0, |at| {
-                    crate::ui::picker_motion::smooth_out(
-                        (now.saturating_duration_since(at).as_secs_f32() / 0.15).clamp(0.0, 1.0),
-                    )
-                })
-            };
-            let label: Rc<dyn Fn(&str, bool, ArtisanTheme) -> Element> =
-                Rc::new(|label, active, theme| {
-                    let role = match active {
-                        true => TextRole::LabelStrong,
-                        false => TextRole::Label,
-                    };
-                    role.text(&theme, label.to_owned())
-                        .overflow(OverflowMode::EndEllipsis)
-                        .wrap(false)
-                        .style(Style::new().min_width(Length::Pct(0.0)).flex_shrink(1.0))
-                        .build()
-                });
-            let menu = navigator::menu(
-                markers,
-                Some(markers[active].position),
-                max_height,
-                theme,
-                progress,
-                label,
-                dispatch,
-            );
-            region = region.child(menu);
-        }
-        let interaction = Rc::downgrade(&self.interaction);
-        let count = markers.len();
-        let region = region
-            .build()
-            .with_key("turn-navigator")
-            .on_hover_change(move |over| {
-                let Some(interaction) = interaction.upgrade() else {
-                    return;
-                };
-                let mut state = interaction.borrow_mut();
-                if state.epoch != epoch || state.hovered == over {
-                    return;
-                }
-                state.hovered = over;
-                if over {
-                    state.opened = Some(Instant::now());
-                    state.center = Some((active, count));
-                } else {
-                    state.opened = None;
-                    state.center = None;
-                }
-                drop(state);
-                invalidate();
-            });
-        let above = composer_height.map_or(0.0, |height| height + composer_bottom) + 8.0;
+            progress,
+            dispatch,
+        );
         Some(
             UiBox::new()
                 .layout("column")
-                .style(
-                    Style::new()
-                        .absolute_at(Some(8.0), Some(8.0), None, Some(above))
-                        .justify(JustifyContent::CENTER),
-                )
-                .child(region)
+                .style(Style::new().absolute_at(Some(INSET), Some(INSET), None, Some(above)))
+                .child(panel)
                 .build()
                 .with_key(OVERLAY_KEY),
         )
     }
 
-    pub fn sync(
-        &mut self,
-        ui: &mut aqua::UiApp,
-        theme: &ArtisanTheme,
-        now: Instant,
-        reduced_motion: bool,
-    ) -> Result<Frame, String> {
-        let mut frame = Frame::default();
-        let center = self.interaction.borrow().center;
-        if let Some((active, count)) = center {
-            if let Some(list) = keyed(ui, "turn-navigator-list") {
-                if let Some(scroll) = scroll_descendant(ui, list) {
-                    if let Some(bounds) = ui.tree().pre_transform_rect(scroll) {
-                        if bounds.h > 0.0 {
-                            let offset = navigator::menu_scroll_offset(active, count, bounds.h);
-                            frame.changed |=
-                                ui.tree_mut().scroll_to(scroll, Point { x: 0.0, y: offset });
-                            self.interaction.borrow_mut().center = None;
-                        }
-                    }
-                }
-            }
+    fn markers<'a>(conversation: &Conversation, core: &'a Core) -> Option<&'a [OutlineEntry]> {
+        if !conversation.host_is_current(core) {
+            return None;
         }
-        frame.animating |= !reduced_motion
-            && self.interaction.borrow().opened.is_some_and(|opened| {
-                now.saturating_duration_since(opened) < Duration::from_millis(150)
-            });
-        let ticks = self.navigator.borrow_mut().advance_ticks(ui, theme, now);
-        frame.changed |= ticks.changed;
-        frame.ticking = ticks.moving;
-        Ok(frame)
+        let (host, thread) = conversation.open.as_ref()?;
+        let summary = core.host(host)?.thread_summary(thread)?.value.as_ref()?;
+        Some(&summary.outline)
+    }
+
+    pub fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> Frame {
+        let mut frame = Frame::default();
+        if let Some((active, count)) = self.interaction.center
+            && let Some(list) = keyed(ui, "turn-navigator-list")
+            && let Some(scroll) = scroll_descendant(ui, list)
+            && let Some(bounds) = ui.tree().pre_transform_rect(scroll)
+            && bounds.h > 0.0
+        {
+            let offset = navigator::panel_scroll_offset(active, count, bounds.h);
+            frame.changed |= ui.tree_mut().scroll_to(scroll, Point { x: 0.0, y: offset });
+            self.interaction.center = None;
+        }
+        if self.interaction.chevron.running()
+            && let Some(node) = keyed(ui, strip::OUTLINE_CHEVRON)
+            && let Some(record) = ui.tree().get(node)
+        {
+            let mut paint = record.paint().clone();
+            paint.transform = Some(strip::flip(self.interaction.chevron.value(now, FLIP)));
+            frame.changed |= ui.tree_mut().set_paint(node, paint);
+        }
+        frame.animating = self.interaction.settle(now);
+        frame
     }
 
     pub fn dispose(&mut self) {
         self.context = None;
-        let mut state = self.interaction.borrow_mut();
-        state.scope = None;
-        state.hovered = false;
-        state.opened = None;
-        state.center = None;
-        state.epoch = state.epoch.wrapping_add(1);
+        self.interaction.scope = None;
+        self.interaction.available = false;
+        self.interaction.reset();
     }
 }
 

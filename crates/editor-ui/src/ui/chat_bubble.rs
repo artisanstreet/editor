@@ -7,6 +7,7 @@ use aqua_ui::{
 use super::{
     glass::card_shadows,
     kit::{Surface, TextRole},
+    sticker::Sticker,
     theme::{ArtisanTheme, Oklch, Opacity},
 };
 
@@ -46,6 +47,7 @@ pub struct ChatBubbleSegment {
     answer: bool,
     tint: Option<Oklch>,
     selector: Option<String>,
+    sticker: Option<Sticker>,
 }
 
 impl ChatBubbleSegment {
@@ -59,6 +61,7 @@ impl ChatBubbleSegment {
             answer: false,
             tint: None,
             selector: None,
+            sticker: None,
         }
     }
 
@@ -69,6 +72,12 @@ impl ChatBubbleSegment {
 
     pub const fn tinted(mut self, tint: Oklch) -> Self {
         self.tint = Some(tint);
+        self
+    }
+
+    #[must_use]
+    pub fn sticker(mut self, sticker: Option<Sticker>) -> Self {
+        self.sticker = sticker;
         self
     }
 
@@ -125,14 +134,18 @@ impl ChatBubbleSegment {
             .text_style(TextRole::Prose.style(&self.theme))
             .gpui_source_text_color(self.theme.colors.text.to_reference_text_color())
             .text_wrap(true);
-        if self.position == SegmentPosition::Single {
-            style = style.gpui_shadows(
-                card_shadows(&self.theme)
-                    .into_iter()
-                    .map(aqua_ui::style::GpuiShadowLayer::from)
-                    .collect(),
-            );
-        } else {
+        let mut shadows = match self.position {
+            SegmentPosition::Single => card_shadows(&self.theme)
+                .into_iter()
+                .map(aqua_ui::style::GpuiShadowLayer::from)
+                .collect(),
+            _ => Vec::new(),
+        };
+        shadows.extend(self.sticker.as_ref().map(Sticker::lift_shadow));
+        if !shadows.is_empty() {
+            style = style.gpui_shadows(shadows);
+        }
+        if self.position != SegmentPosition::Single {
             style = style.width(Length::Pct(100.0));
         }
         if let Some(tint) = self.tint {
@@ -172,7 +185,16 @@ impl ChatBubbleSegment {
                     .build(),
             );
         }
-        let element = frame.child(self.content).build();
+        let layers = self
+            .sticker
+            .as_ref()
+            .map(|sticker| sticker.layers(&self.theme, corners, last))
+            .unwrap_or_default();
+        let element = frame.child(self.content).children(layers).build();
+        let element = match &self.sticker {
+            Some(sticker) => element.style(sticker.style()),
+            None => element,
+        };
         if let Some(selector) = self.selector {
             element.debug_selector(selector)
         } else {

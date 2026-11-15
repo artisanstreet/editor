@@ -40,6 +40,7 @@ pub enum Tone {
 pub enum Material {
     Glass(Shade),
     Recessed,
+    Sunken,
     Key,
     Raised,
     Clip,
@@ -54,6 +55,7 @@ pub enum Surface {
     Dialog,
     Card,
     Inset,
+    Code,
     Composer,
     Field,
     Media(Media),
@@ -70,6 +72,7 @@ impl Surface {
             | Self::Picker(Picker::List)
             | Self::Tooltip(_)
             | Self::Inset
+            | Self::Code
             | Self::Callout(_) => Corner::Fixed(Radius::Panel),
             Self::Media(Media::Frame) => Corner::Fixed(Radius::Panel),
             Self::Dialog | Self::Picker(Picker::Sheet) | Self::Card | Self::Bubble => {
@@ -91,6 +94,7 @@ impl Surface {
             | Self::Dialog
             | Self::Picker(Picker::Sheet)
             | Self::Card
+            | Self::Code
             | Self::Composer => Some(Space::S8),
             Self::Field => Some(Space::S8),
             Self::Callout(_) | Self::Bubble => Some(Space::S12),
@@ -110,6 +114,7 @@ impl Surface {
             | Self::Card => Material::Glass(Shade::Clear),
             Self::Picker(_) => Material::Glass(Shade::Dark),
             Self::Inset => Material::Recessed,
+            Self::Code => Material::Sunken,
             Self::Field => Material::Key,
             Self::Bubble => Material::Raised,
             Self::Media(_) => Material::Clip,
@@ -127,7 +132,7 @@ impl Surface {
             | Self::Pill(_)
             | Self::Composer
             | Self::Card => Elevation::Overlay,
-            Self::Inset | Self::Bubble | Self::Media(Media::Frame) => Elevation::Rest,
+            Self::Inset | Self::Code | Self::Bubble | Self::Media(Media::Frame) => Elevation::Rest,
             Self::Field => Elevation::Key,
             Self::Media(Media::Thumb) | Self::Callout(_) => Elevation::Flat,
         }
@@ -178,6 +183,9 @@ impl Surface {
                 .style(sized),
             Material::Recessed => {
                 outlined(surfaces.ink, surfaces.inner, radius, shadows, children).style(sized)
+            }
+            Material::Sunken => {
+                outlined(surfaces.ink, theme.colors.frame, radius, shadows, children).style(sized)
             }
             Material::Key => {
                 outlined(surfaces.ink, surfaces.bg, radius, shadows, children).style(sized)

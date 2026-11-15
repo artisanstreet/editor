@@ -53,7 +53,6 @@ impl Rail<'_> {
         conversation: &Conversation,
         core: &Core,
         viewport: CollectionViewport,
-        reduced: bool,
     ) -> bool {
         let marker = thread_navigation::active_marker(conversation, core, viewport);
         let moves = thread_navigation::viewport_moves_navigation(
@@ -62,21 +61,7 @@ impl Rail<'_> {
             *self.marker,
             marker,
         );
-        let shifted = moves
-            && thread_navigation::shifted_in_place(
-                self.navigation,
-                self.transcript_viewport,
-                viewport,
-                marker,
-                Instant::now(),
-                reduced,
-            );
-        if shifted {
-            ctx.request_frame(window, FrameReason::ANIMATION);
-        }
-        let rebuild = moves
-            && !shifted
-            && self.refresh_in_place(ui, ctx, window, conversation, core, viewport);
+        let rebuild = moves && self.refresh_in_place(ui, ctx, window, conversation, core, viewport);
         *self.marker = marker;
         rebuild
     }

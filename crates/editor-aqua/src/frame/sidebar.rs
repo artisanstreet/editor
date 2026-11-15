@@ -48,6 +48,7 @@ pub enum Command {
     OpenUrl(String),
     Project(ProjectId),
     Agent(Option<artisan_api::ItemId>),
+    Outline,
     Settle {
         host: crate::core::HostId,
         instance: crate::core::HostInstance,
