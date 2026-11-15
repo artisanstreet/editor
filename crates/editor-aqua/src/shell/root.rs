@@ -2765,6 +2765,16 @@ impl SectionViews for RootViews {
     }
 
     fn pre_input(&mut self, ui: &mut UiApp, input: &InputEvent) -> Option<bool> {
+        if let InputEvent::PointerDown(pointer, _) = input
+            && self.navigation.dismiss(
+                ui,
+                pointer.position,
+                std::time::Instant::now(),
+                Self::reduced(ui),
+            )
+        {
+            self.navigation_invalidated.set(true);
+        }
         if let InputEvent::PointerDown(pointer, aqua_core::PointerButton::Secondary) = input
             && self.image_preview.is_none()
             && ui

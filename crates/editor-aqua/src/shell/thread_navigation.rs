@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use aqua_core::Point;
+use aqua_core::{Point, Rect};
 use aqua_ui::{
     JustifyContent,
     collection_runtime::CollectionViewport,
@@ -188,6 +188,14 @@ const FLIP: Transition = Transition {
     easing: EASE,
 };
 
+#[must_use]
+pub fn outside(at: Point, drawer: Option<Rect>, chevron: Option<Rect>) -> bool {
+    [drawer, chevron]
+        .into_iter()
+        .flatten()
+        .all(|rect| !rect.contains(at))
+}
+
 struct Interaction {
     scope: Option<(String, HostInstance)>,
     panel: Glide,
@@ -282,6 +290,25 @@ impl ThreadNavigation {
             state.recentre = false;
         }
         open
+    }
+
+    pub fn dismiss(
+        &mut self,
+        ui: &aqua::UiApp,
+        at: Point,
+        now: Instant,
+        reduced_motion: bool,
+    ) -> bool {
+        if !self.interaction.open() {
+            return false;
+        }
+        let tree = ui.tree();
+        let drawer = keyed(ui, OVERLAY_KEY).and_then(|clip| {
+            let sheet = tree.get(clip)?.children.first().copied()?;
+            Some(tree.visual_rect(clip)?.intersect(tree.visual_rect(sheet)?))
+        });
+        let chevron = keyed(ui, strip::OUTLINE_CHEVRON).and_then(|node| tree.visual_rect(node));
+        outside(at, drawer, chevron) && self.close(now, reduced_motion)
     }
 
     pub fn chevron(&self, now: Instant) -> Option<f32> {
