@@ -1012,20 +1012,16 @@ impl RootViews {
             if let Some(error) = &workspace.conversation.load_error {
                 overlays.push(view::conversation_load_error(&theme, error.clone()));
             }
-            if let Some(viewport) = self.transcript_viewport {
-                if let Some(navigation) = self.navigation.build(
+            let drawer = self.transcript_viewport.and_then(|viewport| {
+                self.navigation.build(
                     &workspace.conversation,
                     core,
                     viewport,
-                    self.composer_height,
-                    if width >= 640.0 { 24.0 } else { 16.0 },
                     theme,
                     now,
                     Rc::clone(&dispatch),
-                ) {
-                    overlays.push(navigation);
-                }
-            }
+                )
+            });
             if workspace.conversation.is_landing() {
                 overlays.push(
                     aqua_ui::element::Box::new()
@@ -1062,6 +1058,7 @@ impl RootViews {
                 viewport,
                 Rc::new(move |_, key| heights.get(key).copied().unwrap_or(24.0)),
                 overlays,
+                drawer,
                 parts,
                 Rc::clone(&self.composer_measurement),
                 above_composer,
@@ -3546,7 +3543,6 @@ impl SectionViews for RootViews {
                         navigation: &mut self.navigation,
                         marker: &mut self.navigation_marker,
                         transcript_viewport: self.transcript_viewport,
-                        composer_height: self.composer_height,
                     }
                     .refresh(
                         ui,

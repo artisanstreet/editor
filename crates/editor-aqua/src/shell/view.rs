@@ -200,6 +200,7 @@ pub fn conversation(
         transcript,
         overlays,
         Some(card),
+        None,
         viewport_width,
         workspace.conversation.reveal(std::time::Instant::now()),
     ))
@@ -216,6 +217,7 @@ pub fn conversation_virtual(
     viewport: std::rc::Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
     initial_height: std::rc::Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
     overlays: Vec<Element>,
+    drawer: Option<Element>,
     parts: ComposerParts,
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     above_composer: Option<Element>,
@@ -230,6 +232,7 @@ pub fn conversation_virtual(
             initial_height,
             overlays,
             None,
+            drawer,
             viewport_width,
         ));
     }
@@ -250,6 +253,7 @@ pub fn conversation_virtual(
         initial_height,
         overlays,
         Some(card),
+        drawer,
         viewport_width,
     ))
 }
@@ -357,6 +361,7 @@ pub fn conversation_body(
         body,
         overlays,
         card,
+        None,
         viewport_width,
         1.0,
     ))

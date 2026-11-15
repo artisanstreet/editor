@@ -1,12 +1,12 @@
 use super::Dispatch;
 use crate::conversation::adapter::Action;
-use aqua_core::Transform2D;
 use aqua_text::overflow::OverflowMode;
 use aqua_ui::AlignItems;
 use aqua_ui::collection::List;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use artisan_api::{OutlineEntry, Seq};
+use editor_ui::kit::surface::drawer;
 use editor_ui::kit::{Row, RowItem, Space, Spaced, Surface, TextRole};
 use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
@@ -14,8 +14,6 @@ use std::rc::Rc;
 const PANEL: Surface = Surface::Menu;
 const PANEL_ROW: Row = Row::MenuItem;
 pub const PANEL_WIDTH: f32 = 320.0;
-const SLIDE: f32 = PANEL_WIDTH * 0.5;
-const BLUR: f32 = 2.0;
 const DIGIT_WIDTH: f32 = 7.5;
 
 fn number_width(count: usize) -> f32 {
@@ -102,18 +100,7 @@ pub fn panel(
         )
         .build()
         .with_key("turn-navigator-list");
-    let progress = progress.clamp(0.0, 1.0);
-    PANEL
-        .build(&theme, vec![list])
-        .style(
-            Style::new()
-                .width(Length::Px(PANEL_WIDTH))
-                .height(Length::Pct(100.0))
-                .opacity(progress)
-                .content_blur(BLUR * (1.0 - progress))
-                .transform(Transform2D::translate(-SLIDE * (1.0 - progress), 0.0)),
-        )
-        .with_key("turn-navigator-panel")
+    drawer::build(&theme, PANEL_WIDTH, progress, vec![list])
 }
 
 pub fn panel_scroll_offset(active: usize, count: usize, viewport_height: f32) -> f32 {
