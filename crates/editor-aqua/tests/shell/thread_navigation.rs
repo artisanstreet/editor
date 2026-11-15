@@ -1,6 +1,12 @@
 use super::*;
-use aqua_core::{Point, Rect};
+use aqua_core::{Key, KeyEvent, NamedKey, Point, Rect};
 use artisan_api::ItemId;
+use crate::ui::kit::Row;
+
+const PANEL_PITCH: f32 = match Row::MenuItem.height() {
+    Some(height) => height,
+    None => 0.0,
+};
 
 #[test]
 fn latest_is_offered_only_for_a_current_reading_thread_with_composer() {
@@ -107,6 +113,91 @@ fn escape_closes_only_an_open_outline() {
     assert!(!navigation.close(now, false));
 }
 
+fn opened(entries: Vec<Seq>, cursor: usize) -> ThreadNavigation {
+    let mut navigation = ThreadNavigation::default();
+    navigation.interaction.available = true;
+    navigation.toggle(Instant::now(), true);
+    navigation.interaction.entries = entries;
+    navigation.interaction.cursor = Some(cursor);
+    navigation
+}
+
+fn press(key: NamedKey, modifiers: aqua_core::Modifiers) -> KeyEvent {
+    KeyEvent {
+        key: Key::Named(key),
+        modifiers,
+        repeat: false,
+    }
+}
+
+#[test]
+fn arrow_keys_walk_the_outline_and_stop_at_its_ends() {
+    let mut navigation = opened(vec![10, 20, 30], 1);
+    let walk = |navigation: &mut ThreadNavigation, step| {
+        navigation.interaction.steer(step);
+        navigation.interaction.cursor
+    };
+    assert_eq!(walk(&mut navigation, Step::Down), Some(2));
+    assert_eq!(walk(&mut navigation, Step::Down), Some(2));
+    assert_eq!(walk(&mut navigation, Step::Up), Some(1));
+    assert_eq!(walk(&mut navigation, Step::First), Some(0));
+    assert_eq!(walk(&mut navigation, Step::Up), Some(0));
+    assert_eq!(walk(&mut navigation, Step::Last), Some(2));
+    assert_eq!(navigation.interaction.reveal, Some(Reveal::Keep(2)));
+}
+
+#[test]
+fn enter_jumps_to_the_turn_under_the_cursor() {
+    let mut navigation = opened(vec![10, 20, 30], 1);
+    assert_eq!(navigation.interaction.steer(Step::Jump), Steer::Jump(20));
+    navigation.interaction.cursor = Some(7);
+    assert_eq!(navigation.interaction.steer(Step::Jump), Steer::Jump(30));
+}
+
+#[test]
+fn a_closed_outline_leaves_the_keys_alone() {
+    let mut navigation = opened(vec![10, 20, 30], 1);
+    navigation.close(Instant::now(), true);
+    assert_eq!(navigation.interaction.steer(Step::Down), Steer::Ignored);
+    assert!(!navigation.key(&press(NamedKey::Down, aqua_core::Modifiers::NONE)));
+}
+
+#[test]
+fn only_bare_navigation_keys_steer_the_outline() {
+    let bare = aqua_core::Modifiers::NONE;
+    assert_eq!(step(&press(NamedKey::Down, bare)), Some(Step::Down));
+    assert_eq!(step(&press(NamedKey::Enter, bare)), Some(Step::Jump));
+    assert_eq!(step(&press(NamedKey::Down, aqua_core::Modifiers::SHIFT)), None);
+    assert_eq!(step(&press(NamedKey::Escape, bare)), None);
+}
+
+#[test]
+fn opening_puts_the_cursor_on_the_turn_being_read() {
+    let mut navigation = opened(vec![10, 20, 30], 2);
+    navigation.close(Instant::now(), true);
+    navigation.toggle(Instant::now(), true);
+    assert!(navigation.interaction.recentre);
+}
+
+#[test]
+fn clicks_close_the_outline_only_outside_the_drawer_and_chevron() {
+    let drawer = Some(Rect { x: 0.0, y: 0.0, w: 320.0, h: 600.0 });
+    let chevron = Some(Rect { x: 400.0, y: -30.0, w: 16.0, h: 16.0 });
+    assert!(!outside(Point::new(100.0, 580.0), drawer, chevron));
+    assert!(!outside(Point::new(405.0, -25.0), drawer, chevron));
+    assert!(outside(Point::new(500.0, 300.0), drawer, chevron));
+    assert!(outside(Point::new(500.0, 300.0), None, None));
+}
+
+#[test]
+fn the_cursor_scrolls_the_panel_only_when_it_leaves_the_view() {
+    let pitch = PANEL_PITCH;
+    let view = pitch * 5.0;
+    assert_eq!(navigator::panel_keep_offset(2, 0.0, view), 0.0);
+    assert_eq!(navigator::panel_keep_offset(5, 0.0, view), pitch);
+    assert_eq!(navigator::panel_keep_offset(3, pitch * 4.0, view), pitch * 3.0);
+}
+
 #[test]
 fn jump_to_latest_pops_in_slower_than_it_leaves() {
     let now = Instant::now();
@@ -140,16 +231,6 @@ fn reduced_motion_shows_and_hides_jump_to_latest_instantly() {
     assert_eq!(latest.value(now), 1.0);
     latest.show(false, now, true);
     assert_eq!(latest.value(now), 0.0);
-}
-
-#[test]
-fn clicks_close_the_outline_only_outside_the_drawer_and_chevron() {
-    let drawer = Some(Rect { x: 0.0, y: 0.0, w: 320.0, h: 600.0 });
-    let chevron = Some(Rect { x: 400.0, y: -30.0, w: 16.0, h: 16.0 });
-    assert!(!outside(Point::new(100.0, 580.0), drawer, chevron));
-    assert!(!outside(Point::new(405.0, -25.0), drawer, chevron));
-    assert!(outside(Point::new(500.0, 300.0), drawer, chevron));
-    assert!(outside(Point::new(500.0, 300.0), None, None));
 }
 
 fn mounted_drawer(progress: f32) -> aqua::UiApp {
@@ -187,9 +268,7 @@ fn mounted_drawer(progress: f32) -> aqua::UiApp {
 fn clicking_beside_the_open_drawer_closes_it_and_clicking_inside_does_not() {
     let now = Instant::now();
     let app = mounted_drawer(1.0);
-    let mut navigation = ThreadNavigation::default();
-    navigation.interaction.available = true;
-    navigation.toggle(now, true);
+    let mut navigation = opened(vec![10, 20], 0);
     assert!(!navigation.dismiss(&app, Point::new(160.0, 590.0), now, true));
     assert!(navigation.interaction.open());
     let gutter = navigator::PANEL_WIDTH + 8.0;

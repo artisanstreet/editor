@@ -66,6 +66,7 @@ fn entry(
 pub fn panel(
     markers: &[OutlineEntry],
     active: Option<Seq>,
+    cursor: Option<usize>,
     theme: ArtisanTheme,
     progress: f32,
     dispatch: Dispatch,
@@ -87,6 +88,7 @@ pub fn panel(
                 marker.label.clone(),
             )
             .body(entry(&theme, index + 1, &marker.label, current, width))
+            .selected(cursor == Some(*index))
             .on_activate(move || callback(Action::Jump(position)))
             .build()
         })
@@ -101,6 +103,18 @@ pub fn panel(
         .build()
         .with_key("turn-navigator-list");
     drawer::build(&theme, PANEL_WIDTH, progress, vec![list])
+}
+
+#[must_use]
+pub fn panel_keep_offset(index: usize, offset: f32, viewport_height: f32) -> f32 {
+    let pitch = PANEL_ROW.height().unwrap_or_default();
+    let top = index as f32 * pitch;
+    let bottom = top + pitch;
+    match (top < offset, bottom > offset + viewport_height) {
+        (true, _) => top,
+        (false, true) => bottom - viewport_height,
+        (false, false) => offset,
+    }
 }
 
 pub fn panel_scroll_offset(active: usize, count: usize, viewport_height: f32) -> f32 {

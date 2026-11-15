@@ -26,7 +26,7 @@ fn mounted_panel(count: usize, jumps: Rc<RefCell<Vec<Seq>>>) -> aqua::UiApp {
             sink.borrow_mut().push(position);
         }
     });
-    let menu = navigator::panel(&markers, None, ArtisanTheme::resolved(), 1.0, dispatch);
+    let menu = navigator::panel(&markers, None, None, ArtisanTheme::resolved(), 1.0, dispatch);
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| {
         UiBox::new()
