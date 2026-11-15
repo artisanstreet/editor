@@ -64,6 +64,8 @@ pub struct ClaudeDecoder {
     outcome: Option<Outcome>,
     compacting: Option<String>,
     counter: u32,
+    said_since_work: Vec<Said>,
+    worked_this_turn: bool,
 }
 
 #[derive(Default)]
@@ -72,6 +74,28 @@ struct Message {
     blocks: u64,
     /// Text parts not yet settled: key and text.
     texts: Vec<(String, String)>,
+    worked: bool,
+}
+
+struct Said {
+    key: String,
+    text: String,
+    phase: Phase,
+    after_idle_turn: bool,
+}
+
+impl Said {
+    fn is_reply(&self) -> bool {
+        self.phase == Phase::Final
+    }
+
+    fn is_passing_note(&self) -> bool {
+        self.is_reply() && !self.text.trim().contains('\n')
+    }
+
+    fn folded(self) -> EngineEvent {
+        assistant_text(self.key, None, self.text, Phase::Commentary)
+    }
 }
 
 struct Tool {
@@ -793,11 +817,13 @@ impl ClaudeDecoder {
                         continue;
                     };
                     self.tool_use(tool_id, name, &block["input"], parent.clone(), out);
+                    if parent.is_none() && !is_bookkeeping(name, &block["input"]) {
+                        self.work_began(&id, out);
+                    }
                 }
                 _ => {}
             }
         }
-        // Without a stream (subagent frames) nothing else will settle it.
         if !streamed {
             self.settle_message(&id, str_at(message, "stop_reason") == Some("end_turn"), out);
         }
@@ -916,6 +942,7 @@ impl ClaudeDecoder {
             _ => {}
         }
         if frame["isReplay"].as_bool() == Some(true) {
+            self.said_since_work.clear();
             if let Some(Some(id)) = self.replays.pop_front() {
                 out.push(EngineEvent::InputAccepted { id });
             }
@@ -1006,6 +1033,7 @@ impl ClaudeDecoder {
     fn result(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
         self.result_seen = true;
         self.in_turn = false;
+        self.worked_this_turn = false;
         let usage = &frame["usage"];
         let count = |field: &str| usage[field].as_u64().unwrap_or_default();
         self.usage.input += count("input_tokens");
@@ -1207,27 +1235,72 @@ impl ClaudeDecoder {
     }
 
     fn settle_message(&mut self, id: &str, end_turn: bool, out: &mut Vec<EngineEvent>) {
-        let Some(message) = self.messages.get_mut(id) else {
-            return;
-        };
-        let texts = std::mem::take(&mut message.texts);
+        let (texts, parent, worked) =
+            self.messages
+                .get_mut(id)
+                .map_or_else(Default::default, |message| {
+                    (
+                        std::mem::take(&mut message.texts),
+                        message.parent.clone(),
+                        message.worked,
+                    )
+                });
+        let said_after_work = parent.is_none() && !worked;
+        if end_turn && parent.is_none() && !texts.is_empty() {
+            self.fold_said(out, |said| said.after_idle_turn && said.is_passing_note());
+        }
         let last = texts.len().saturating_sub(1);
         for (index, (key, text)) in texts.into_iter().enumerate() {
-            let phase = if end_turn && index == last {
+            let closes_turn = end_turn && (parent.is_none() || index == last);
+            let phase = if closes_turn {
                 Phase::Final
             } else {
                 Phase::Commentary
             };
-            out.push(EngineEvent::Item {
-                key,
-                parent: message.parent.clone(),
-                status: Status::Done,
-                kind: ItemKind::AssistantMessage {
-                    text: text.into(),
+            if said_after_work {
+                self.said_since_work.push(Said {
+                    key: key.clone(),
+                    text: text.clone(),
                     phase,
-                },
-            });
+                    after_idle_turn: !self.worked_this_turn,
+                });
+            }
+            out.push(assistant_text(key, parent.clone(), text, phase));
         }
+        if end_turn && parent.is_none() {
+            self.reply_with_what_was_said(out);
+        }
+    }
+
+    fn reply_with_what_was_said(&mut self, out: &mut Vec<EngineEvent>) {
+        for said in &mut self.said_since_work {
+            if !said.is_reply() {
+                said.phase = Phase::Final;
+                out.push(assistant_text(
+                    said.key.clone(),
+                    None,
+                    said.text.clone(),
+                    Phase::Final,
+                ));
+            }
+        }
+    }
+
+    fn work_began(&mut self, message: &str, out: &mut Vec<EngineEvent>) {
+        if let Some(message) = self.messages.get_mut(message) {
+            message.worked = true;
+        }
+        self.worked_this_turn = true;
+        self.fold_said(out, Said::is_passing_note);
+        self.said_since_work.clear();
+    }
+
+    fn fold_said(&mut self, out: &mut Vec<EngineEvent>, folds: impl Fn(&Said) -> bool) {
+        let (folded, kept) = std::mem::take(&mut self.said_since_work)
+            .into_iter()
+            .partition(|said| folds(said));
+        self.said_since_work = kept;
+        out.extend(folded.into_iter().map(Said::folded));
     }
 
     fn settle_open_texts(&mut self, status: Status, out: &mut Vec<EngineEvent>) {
@@ -1268,6 +1341,34 @@ impl Tool {
 }
 
 /// What a `can_use_tool` request asks of the user for a `name` tool call.
+fn assistant_text(key: String, parent: Option<String>, text: String, phase: Phase) -> EngineEvent {
+    EngineEvent::Item {
+        key,
+        parent,
+        status: Status::Done,
+        kind: ItemKind::AssistantMessage {
+            text: text.into(),
+            phase,
+        },
+    }
+}
+
+fn is_bookkeeping(name: &str, input: &Value) -> bool {
+    let in_memory = |field: &str| {
+        str_at(input, field).is_some_and(|text| {
+            text.replace('\\', "/")
+                .split_once("/.claude/")
+                .is_some_and(|(_, inside)| inside.contains("/memory"))
+        })
+    };
+    match name {
+        "TodoWrite" | "ScheduleWakeup" => true,
+        "Read" | "Write" | "Edit" | "MultiEdit" => in_memory("file_path"),
+        "Bash" | "PowerShell" => in_memory("command"),
+        _ => false,
+    }
+}
+
 fn approval_request(kind: &ToolKind, name: &str, reason: Option<&str>) -> ApprovalRequest {
     match kind {
         ToolKind::Shell { command, cwd, .. } => ApprovalRequest::Command {
