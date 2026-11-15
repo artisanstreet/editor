@@ -2290,7 +2290,7 @@ impl ComposerOwner {
             let mut tab = self.model_tab.borrow_mut();
             let height = model_item_height(items.len());
             tab.resize(height);
-            tab.aim(active * height, now);
+            tab.aim(active * (height + MODEL_ITEM_GAP), now);
             if opening || self.reduced_motion {
                 tab.snap();
             } else {
@@ -2860,6 +2860,7 @@ const MODEL_ITEM_HEIGHT: f32 = match Row::ListItem(Density::Tall).height() {
     None => 0.0,
 };
 const MODEL_ITEM_GUTTER: f32 = Inset::Menu.px();
+const MODEL_ITEM_GAP: f32 = 1.0;
 const MODEL_PANE_INSET: f32 = Inset::Menu.px();
 const MODEL_PANE_PADDING: Space = super::model_list::PADDING;
 const MODEL_ENGINE_TAB: IconButtonSize = IconButtonSize::Md;
@@ -3408,6 +3409,7 @@ pub fn model_menu(
     let mut buttons = UiBox::new()
         .layout("column")
         .width(MODEL_SIDE_WIDTH - MODEL_ITEM_GUTTER)
+        .gap(MODEL_ITEM_GAP)
         .style(Style::new().flex_shrink(0.0));
     for (position, item) in items.iter().enumerate() {
         let target = item.pane;
@@ -3422,6 +3424,7 @@ pub fn model_menu(
         .detail(item.label)
         .role(Role::Tab)
         .nested(pane_radius, 0.0)
+        .hoverable(target != pane)
         .on_activate(move || action(ComposerAction::SelectPane(target)));
         if let Some(icon) = model_icon.filter(|_| target.is_none()) {
             side = side.leading(IconSize::Md.glyph(icon, theme.colors.text.to_reference_paint()));
@@ -3550,7 +3553,8 @@ pub fn model_menu(
 }
 
 fn model_item_height(count: usize) -> f32 {
-    MODEL_ITEM_HEIGHT.min(MODEL_PANE_HEIGHT / count.max(1) as f32)
+    let count = count.max(1) as f32;
+    MODEL_ITEM_HEIGHT.min((MODEL_PANE_HEIGHT - (count - 1.0) * MODEL_ITEM_GAP) / count)
 }
 
 

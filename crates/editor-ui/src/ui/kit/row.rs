@@ -121,6 +121,7 @@ pub struct RowItem {
     body: Option<Element>,
     trailing: Option<Element>,
     selected: bool,
+    hoverable: bool,
     disabled: bool,
     role: Role,
     on_activate: Option<Box<dyn Fn()>>,
@@ -149,6 +150,7 @@ impl RowItem {
             body: None,
             trailing: None,
             selected: false,
+            hoverable: true,
             disabled: false,
             role: match row {
                 Row::MenuItem => Role::MenuItem,
@@ -205,6 +207,12 @@ impl RowItem {
     #[must_use]
     pub const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    #[must_use]
+    pub const fn hoverable(mut self, hoverable: bool) -> Self {
+        self.hoverable = hoverable;
         self
     }
 
@@ -365,7 +373,8 @@ impl RowItem {
         if let Some(face) = self.face.take() {
             button = button.child(face);
         }
-        if !self.disabled {
+        let lit = !self.disabled && self.hoverable;
+        if lit {
             button = button.child(live::layer(
                 self.hover,
                 &self.theme,
@@ -394,9 +403,10 @@ impl RowItem {
             .role(self.role)
             .aria_selected(self.selected)
             .focusable(!self.disabled);
-        let element = match self.disabled {
-            true => element,
-            false => live::track(element.cursor(CursorIcon::Pointer)),
+        let element = match (self.disabled, lit) {
+            (true, _) => element,
+            (false, false) => element.cursor(CursorIcon::Pointer),
+            (false, true) => live::track(element.cursor(CursorIcon::Pointer)),
         };
         match self.on_hover {
             Some(handler) => element.on_hover_change(handler),
