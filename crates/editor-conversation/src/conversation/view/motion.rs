@@ -20,6 +20,23 @@ struct Chevron {
     started: Instant,
 }
 
+const SWAP: std::time::Duration = std::time::Duration::from_millis(150);
+const ARRIVAL: std::time::Duration = std::time::Duration::from_millis(350);
+const ARRIVAL_BLUR: f32 = 4.0;
+const SWAP_RISE: f32 = 4.0;
+const SWAP_BLUR: f32 = 2.0;
+
+struct SwapState {
+    label: Option<String>,
+    started: Option<Instant>,
+}
+
+struct DisclosedState {
+    open: bool,
+    started: Option<Instant>,
+    height: Rc<Cell<f32>>,
+}
+
 struct StickerState {
     started: Option<Instant>,
     width: Rc<Cell<f32>>,
@@ -45,6 +62,9 @@ pub struct RowMotion {
     compactions: HashMap<ItemId, CompactionMotion>,
     entrances: HashMap<crate::conversation::fold::RowKey, EntranceState>,
     stickers: HashMap<crate::conversation::fold::RowKey, StickerState>,
+    disclosed: HashMap<String, DisclosedState>,
+    swaps: HashMap<String, SwapState>,
+    arrivals: HashMap<String, (bool, Option<Instant>)>,
     animating: bool,
     refit: Option<Rc<dyn Fn()>>,
 }
@@ -57,6 +77,9 @@ impl RowMotion {
             self.compactions.clear();
             self.entrances.clear();
             self.stickers.clear();
+            self.disclosed.clear();
+            self.swaps.clear();
+            self.arrivals.clear();
             self.animating = false;
             self.scope = Some(scope.clone());
         }
@@ -78,6 +101,87 @@ impl RowMotion {
             height: Rc::new(Cell::new(0.0)),
         });
         let started = state.started?;
+        let height = state.height.clone();
+        self.entrance_frame(started, height, reduced_motion, now)
+    }
+
+    pub fn disclosed(
+        &mut self,
+        key: String,
+        open: bool,
+        reduced_motion: bool,
+        now: Instant,
+    ) -> Option<EntranceFrame> {
+        let state = self.disclosed.entry(key).or_insert_with(|| DisclosedState {
+            open,
+            started: None,
+            height: Rc::new(Cell::new(0.0)),
+        });
+        if open && !state.open && !reduced_motion {
+            state.started = Some(now);
+        }
+        state.open = open;
+        if !open {
+            state.started = None;
+        }
+        let started = state.started?;
+        let height = state.height.clone();
+        self.entrance_frame(started, height, reduced_motion, now)
+    }
+
+    pub fn swap(
+        &mut self,
+        key: String,
+        label: Option<String>,
+        reduced_motion: bool,
+        now: Instant,
+    ) -> Option<f32> {
+        let state = self.swaps.entry(key).or_insert_with(|| SwapState {
+            label: label.clone(),
+            started: None,
+        });
+        if label.is_some() && state.label.is_some() && state.label != label && !reduced_motion {
+            state.started = Some(now);
+        }
+        if label.is_none() {
+            state.started = None;
+        }
+        state.label = label;
+        let elapsed = now.saturating_duration_since(state.started?);
+        if elapsed >= SWAP || reduced_motion {
+            return None;
+        }
+        self.animating = true;
+        Some(MotionCurve::EaseInOut.sample_f32(elapsed.as_secs_f64() / SWAP.as_secs_f64()))
+    }
+
+    pub fn arrival(
+        &mut self,
+        key: String,
+        ready: bool,
+        reduced_motion: bool,
+        now: Instant,
+    ) -> Option<f32> {
+        let state = self.arrivals.entry(key).or_insert((ready, None));
+        if ready && !state.0 && !reduced_motion {
+            state.1 = Some(now);
+        }
+        state.0 = ready;
+        let elapsed = now.saturating_duration_since(state.1?);
+        if elapsed >= ARRIVAL || reduced_motion {
+            return None;
+        }
+        self.animating = true;
+        Some(MotionCurve::EaseInOut.sample_f32(elapsed.as_secs_f64() / ARRIVAL.as_secs_f64()))
+    }
+
+    fn entrance_frame(
+        &mut self,
+        started: Instant,
+        height: Rc<Cell<f32>>,
+        reduced_motion: bool,
+        now: Instant,
+    ) -> Option<EntranceFrame> {
         let elapsed = now.saturating_duration_since(started);
         if elapsed >= std::time::Duration::from_millis(400) || reduced_motion {
             return None;
@@ -91,7 +195,7 @@ impl RowMotion {
                     .as_secs_f64()
                     / 0.25,
             ),
-            height: state.height.clone(),
+            height,
             settling: elapsed < std::time::Duration::from_millis(205),
         })
     }
@@ -270,4 +374,37 @@ impl EntranceFrame {
             .child(content)
             .build()
     }
+}
+
+pub fn swapped(element: Element, progress: f32) -> Element {
+    use aqua_ui::element::Box as UiBox;
+    use aqua_ui::style::{Length, Style};
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .style(
+            Style::new()
+                .opacity(progress)
+                .content_blur(SWAP_BLUR * (1.0 - progress))
+                .transform(aqua_core::Transform2D::translate(
+                    0.0,
+                    SWAP_RISE * (1.0 - progress),
+                )),
+        )
+        .child(element)
+        .build()
+}
+
+pub fn arrived(element: Element, progress: f32) -> Element {
+    use aqua_ui::element::Box as UiBox;
+    use aqua_ui::style::{Length, Style};
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .height(Length::Pct(100.0))
+        .style(
+            Style::new()
+                .opacity(progress)
+                .content_blur(ARRIVAL_BLUR * (1.0 - progress)),
+        )
+        .child(element)
+        .build()
 }

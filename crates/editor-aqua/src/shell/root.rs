@@ -147,6 +147,7 @@ pub struct RootViews {
     drag_position: Option<aqua_core::Point>,
     navigation: crate::shell::thread_navigation::ThreadNavigation,
     composer_glide: crate::shell::composer_glide::ComposerGlide,
+    latest: crate::shell::thread_navigation::LatestPresence,
     transcript_viewport: Option<aqua_ui::collection_runtime::CollectionViewport>,
     navigation_marker: Option<usize>,
     context_reading: Option<crate::shell::context_meter::ContextReading>,
@@ -879,13 +880,19 @@ impl RootViews {
             self.replace_rows(Some(factory));
             return Ok(list);
         }
-        let jump = crate::shell::thread_navigation::jump_to_latest(
-            &workspace.conversation,
-            core,
-            workspace.composer.is_some(),
-            theme,
-            Rc::clone(&dispatch),
+        self.latest.show(
+            crate::shell::thread_navigation::latest_visible(
+                &workspace.conversation,
+                core,
+                workspace.composer.is_some(),
+            ),
+            now,
+            reduced_motion,
         );
+        let presence = self.latest.value(now);
+        let jump = (presence > 0.0).then(|| {
+            crate::shell::thread_navigation::jump_to_latest(theme, presence, Rc::clone(&dispatch))
+        });
         let mut controls = Vec::new();
         controls.extend(jump);
         if workspace.conversation.agent.is_none() {
@@ -3347,6 +3354,13 @@ impl SectionViews for RootViews {
         }
         if Self::sync_transcript_reveal(shell, ui) {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
+        let (moving, gone) = self.latest.sync(ui, std::time::Instant::now());
+        if moving {
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
+        if gone {
+            self.conversation_invalidated.set(true);
         }
         if self.sync_navigation(ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_wake");

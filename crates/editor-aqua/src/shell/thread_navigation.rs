@@ -75,16 +75,77 @@ pub(super) fn latest_visible(
     })
 }
 
-pub fn jump_to_latest(
-    conversation: &Conversation,
-    core: &Core,
-    composer_present: bool,
-    theme: ArtisanTheme,
-    dispatch: Dispatch,
-) -> Option<Element> {
-    if !latest_visible(conversation, core, composer_present) {
-        return None;
+const POP_IN: Transition = Transition {
+    duration: Duration::from_millis(250),
+    easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
+};
+const POP_OUT: Transition = Transition {
+    duration: Duration::from_millis(150),
+    easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
+};
+const POP_SCALE: f32 = 0.9;
+pub const LATEST_KEY: &str = "jump-latest-presence";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LatestPresence {
+    shown: Glide,
+}
+
+impl Default for LatestPresence {
+    fn default() -> Self {
+        Self {
+            shown: Glide::Resting(0.0),
+        }
     }
+}
+
+impl LatestPresence {
+    pub fn show(&mut self, visible: bool, now: Instant, reduced_motion: bool) {
+        let (target, transition) = match visible {
+            true => (1.0, POP_IN),
+            false => (0.0, POP_OUT),
+        };
+        if self.shown.target() != target {
+            self.shown = self.shown.retarget(target, now, transition, reduced_motion);
+        }
+    }
+
+    #[must_use]
+    pub fn value(&self, now: Instant) -> f32 {
+        self.shown.value(now, POP_IN)
+    }
+
+    #[must_use]
+    pub const fn shown(&self) -> bool {
+        self.shown.target() > 0.5
+    }
+
+    pub fn sync(&mut self, ui: &mut aqua::UiApp, now: Instant) -> (bool, bool) {
+        let moving = self.shown.running();
+        if moving
+            && let Some(node) = keyed(ui, LATEST_KEY)
+            && let Some(mut paint) = ui.tree().get(node).map(|record| record.paint().clone())
+        {
+            let presence = self.value(now);
+            paint.opacity = Some(presence);
+            paint.transform = Some(pop(presence));
+            ui.tree_mut().set_paint(node, paint);
+        }
+        self.shown = self.shown.settle(now);
+        let gone = moving && !self.shown.running() && !self.shown();
+        (moving, gone)
+    }
+}
+
+fn pop(presence: f32) -> aqua_core::Transform2D {
+    let centre = IconButtonSize::Md.edge() / 2.0;
+    let scale = (1.0 - POP_SCALE).mul_add(presence, POP_SCALE);
+    aqua_core::Transform2D::translate(-centre, -centre)
+        .then(aqua_core::Transform2D::scale(scale, scale))
+        .then(aqua_core::Transform2D::translate(centre, centre))
+}
+
+pub fn jump_to_latest(theme: ArtisanTheme, presence: f32, dispatch: Dispatch) -> Element {
     let size = IconButtonSize::Md;
     let button = IconButton::new(
         "jump-latest",
@@ -96,14 +157,14 @@ pub fn jump_to_latest(
     )
     .nested(Surface::Pill(size.edge()).radius_px(), 0.0)
     .on_activate(move |_| dispatch(crate::conversation::adapter::Action::JumpLatest))
-    .build();
-    Some(
-        UiBox::new()
-            .width(Length::Pct(100.0))
-            .style(Style::new().justify(JustifyContent::CENTER))
-            .child(button)
-            .build(),
-    )
+    .build()
+    .style(Style::new().opacity(presence).transform(pop(presence)))
+    .with_key(LATEST_KEY);
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .style(Style::new().justify(JustifyContent::CENTER))
+        .child(button)
+        .build()
 }
 
 fn show_latest(thread: bool, composer: bool, agent: bool, following: bool, current: bool) -> bool {

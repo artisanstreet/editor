@@ -202,6 +202,7 @@ pub fn activity_row(
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor, bool) -> Element,
     dispatch: Dispatch,
     stored_failure: impl FnOnce() -> anyhow::Result<Element>,
+    details: impl FnOnce(Element) -> Element,
 ) -> anyhow::Result<Option<Element>> {
     if activity::category(item).is_none() {
         return Ok(None);
@@ -258,14 +259,22 @@ pub fn activity_row(
                 .layout("column")
                 .width(Length::Pct(100.0))
                 .child(sentence)
-                .child(match error {
-                    TextContent::Stored(_) => stored_failure()?,
-                    TextContent::Inline(error) => TextRole::Label
-                        .text(&theme, error.trim().to_owned())
-                        .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
+                .child(details(
+                    UiBox::new()
+                        .layout("column")
+                        .width(Length::Pct(100.0))
+                        .child(match error {
+                            TextContent::Stored(_) => stored_failure()?,
+                            TextContent::Inline(error) => TextRole::Label
+                                .text(&theme, error.trim().to_owned())
+                                .gpui_source_color(
+                                    theme.colors.destructive_text.to_reference_text_color(),
+                                )
+                                .build(),
+                        })
+                        .child(spacer(FAILURE_TAIL))
                         .build(),
-                })
-                .child(spacer(FAILURE_TAIL))
+                ))
                 .build(),
         ),
         None => Some(sentence),
