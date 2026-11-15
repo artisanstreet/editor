@@ -44,6 +44,7 @@ pub enum Landing {
 }
 
 const LANDING_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+const REVEAL: std::time::Duration = std::time::Duration::from_millis(250);
 const HOLD: std::time::Duration = std::time::Duration::from_millis(300);
 const PARKED_THREADS: usize = 8;
 const PARKED_BYTES: usize = 128 << 20;
@@ -127,6 +128,7 @@ pub struct Conversation {
     pub row_heights: HashMap<RowKey, f32>,
     pub load_error: Option<String>,
     pub landing: Option<Landing>,
+    landed_at: Option<Instant>,
     pub scroll_frame: Option<Instant>,
     generation: u64,
     work_reading: Option<Seq>,
@@ -197,6 +199,7 @@ impl Conversation {
             row_heights: HashMap::new(),
             load_error: None,
             landing: None,
+            landed_at: None,
             scroll_frame: None,
             generation: 0,
             work_reading: None,
@@ -416,6 +419,7 @@ impl Conversation {
         self.answer_tasks.clear();
         self.work_reading = None;
         self.landing = None;
+        self.landed_at = None;
         self.scroll_frame = None;
         self.scroll.clear();
         self.disclosures = DisclosureState::default();
@@ -480,7 +484,34 @@ impl Conversation {
     }
 
     pub fn landed(&mut self) {
-        self.landing = None;
+        if self.landing.take().is_some() {
+            self.landed_at = Some(Instant::now());
+        }
+    }
+
+    pub fn skip_reveal(&mut self) {
+        self.landed_at = None;
+        if self
+            .landing_deadline()
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.landing = None;
+        }
+    }
+
+    pub fn reveal(&self, now: Instant) -> f32 {
+        if self.is_landing() {
+            return 0.0;
+        }
+        let since = match self.landing {
+            Some(Landing::Settling { until }) => Some(until),
+            Some(Landing::Loading) | None => self.landed_at,
+        };
+        since.map_or(1.0, |at| {
+            editor_ui::motion::MotionCurve::EaseOut.sample_f32(
+                now.saturating_duration_since(at).as_secs_f64() / REVEAL.as_secs_f64(),
+            )
+        })
     }
 
     pub const fn landing_deadline(&self) -> Option<Instant> {
@@ -495,6 +526,7 @@ impl Conversation {
             .landing_deadline()
             .is_some_and(|deadline| now >= deadline)
         {
+            self.landed_at = self.landing_deadline();
             self.landing = None;
             return true;
         }
