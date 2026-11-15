@@ -157,13 +157,16 @@ pub fn jump_to_latest(theme: ArtisanTheme, presence: f32, dispatch: Dispatch) ->
     )
     .nested(Surface::Pill(size.edge()).radius_px(), 0.0)
     .on_activate(move |_| dispatch(crate::conversation::adapter::Action::JumpLatest))
-    .build()
-    .style(Style::new().opacity(presence).transform(pop(presence)))
-    .with_key(LATEST_KEY);
+    .build();
+    let presence = UiBox::new()
+        .style(Style::new().opacity(presence).transform(pop(presence)))
+        .child(button)
+        .build()
+        .with_key(LATEST_KEY);
     UiBox::new()
         .width(Length::Pct(100.0))
         .style(Style::new().justify(JustifyContent::CENTER))
-        .child(button)
+        .child(presence)
         .build()
 }
 

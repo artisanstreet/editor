@@ -97,7 +97,7 @@ pub fn panel(
         .style(
             Style::new()
                 .flex_grow(1.0)
-                .min_height(Length::Px(0.0))
+                .min_height(Length::Pct(0.0))
                 .width(Length::Pct(100.0)),
         )
         .build()

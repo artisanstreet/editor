@@ -15,6 +15,11 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             dir: directory.path().to_owned(),
         };
         let mut resources = ShellResources::new(1.0).unwrap();
+        resources
+            .ui
+            .host_mut()
+            .motion_mut()
+            .set_reduced_motion(aqua_ui::motion::ReducedMotion::Reduce, 0.0);
         let (mut shell, _) = Shell::new(files.clone(), resources.images.clone());
         shell.core = Core::for_tests(files).unwrap();
         shell.core.set_image_assets(resources.images.clone());
@@ -379,6 +384,11 @@ fn tail_controls_force_full_refresh_only_when_visibility_changes() {
         dir: directory.path().to_owned(),
     };
     let mut resources = ShellResources::new(1.0).unwrap();
+    resources
+        .ui
+        .host_mut()
+        .motion_mut()
+        .set_reduced_motion(aqua_ui::motion::ReducedMotion::Reduce, 0.0);
     let (mut shell, _) = Shell::new(files.clone(), resources.images.clone());
     shell.core = Core::for_tests(files).unwrap();
     shell.core.set_image_assets(resources.images.clone());
