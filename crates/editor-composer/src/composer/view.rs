@@ -111,7 +111,21 @@ pub enum Primary {
     Continue,
 }
 
-pub fn primary(theme: ArtisanTheme, face: Primary, disabled: bool, dispatch: Dispatch) -> Element {
+const fn primary_icon(face: Primary) -> AssetId {
+    match face {
+        Primary::Stop => AssetId::TABLER_PLAYER_STOP_FILLED,
+        Primary::Continue => AssetId::TABLER_PLAYER_PLAY_FILLED,
+        Primary::Send => AssetId::TABLER_ARROW_UP,
+    }
+}
+
+pub fn primary(
+    theme: ArtisanTheme,
+    face: Primary,
+    outgoing: Option<(Primary, f32)>,
+    disabled: bool,
+    dispatch: Dispatch,
+) -> Element {
     let (icon, label, id, action) = match face {
         Primary::Stop => (
             AssetId::TABLER_PLAYER_STOP_FILLED,
@@ -132,7 +146,11 @@ pub fn primary(theme: ArtisanTheme, face: Primary, disabled: bool, dispatch: Dis
             ComposerAction::Send,
         ),
     };
-    Key::new(id, theme, label, KeySize::Md, KeyFace::Glyph(icon))
+    let content = super::swap::face(
+        icon,
+        outgoing.map(|(previous, progress)| (primary_icon(previous), progress)),
+    );
+    Key::new(id, theme, label, KeySize::Md, KeyFace::Content(content))
         .primary()
         .disabled(disabled)
         .on_activate(move |_| dispatch(action.clone()))
@@ -722,7 +740,8 @@ pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Ele
                         }),
                 )
                 .child(parts.prompt.style(Style::new().width(Length::Auto)))
-                .build(),
+                .build()
+                .with_key(super::swap::PROMPT),
         )
         .child(controls(parts.primary))
         .build();
@@ -921,6 +940,7 @@ pub struct ComposerOwner {
     tab_geometry: Rc<std::cell::RefCell<editor_ui::tab_card::GeometryCache>>,
     strip_moving: std::cell::Cell<bool>,
     note_ticker: std::cell::RefCell<editor_ui::marquee::Marquee>,
+    primary_swap: std::cell::Cell<super::swap::PrimarySwap>,
     model_menu_serial: std::cell::Cell<u64>,
     model_scroll: std::cell::RefCell<super::model_list::ModelScroll>,
     model_tab: std::cell::RefCell<super::sliding_tab::SlidingTab>,
@@ -1211,6 +1231,7 @@ impl ComposerOwner {
                 editor_ui::tab_card::GeometryCache::default(),
             )),
             strip_moving: std::cell::Cell::new(false),
+            primary_swap: std::cell::Cell::new(super::swap::PrimarySwap::default()),
             note_ticker: std::cell::RefCell::new(editor_ui::marquee::Marquee::new(
                 "composer-note-ticker",
                 "",
@@ -1554,6 +1575,12 @@ impl ComposerOwner {
 
     pub fn needs_animation(&self, app: &aqua::UiApp) -> bool {
         self.strip_moving.get()
+            || self
+                .primary_swap
+                .get()
+                .progress(std::time::Instant::now())
+                .is_some()
+            || self.controller.borrow().cleared.is_some()
             || self.note_ticker.borrow().is_animating()
             || (self.controller.borrow().picker.menu == Some(super::picker::Menu::Model)
                 && (self.engine_light.borrow().animating()
@@ -1606,6 +1633,26 @@ impl ComposerOwner {
                 .advance(app, reduced, now)
             }
             _ => false,
+        }
+    }
+
+    pub fn advance_primary(&self, app: &mut aqua::UiApp, now: std::time::Instant) {
+        let mut swap = self.primary_swap.get();
+        if let Some((_, progress)) = swap.progress(now) {
+            super::swap::advance(app, progress);
+        } else if swap.settle(now) {
+            super::swap::advance(app, 1.0);
+        }
+        self.primary_swap.set(swap);
+        let cleared = self.controller.borrow().cleared;
+        if let Some(cleared) = cleared {
+            match super::swap::settle_progress(cleared, now).filter(|_| !self.reduced_motion) {
+                Some(progress) => super::swap::advance_prompt(app, progress),
+                None => {
+                    super::swap::advance_prompt(app, 1.0);
+                    self.controller.borrow_mut().cleared = None;
+                }
+            }
         }
     }
 
@@ -2434,6 +2481,11 @@ impl ComposerOwner {
     ) -> Element {
         let controller = self.controller.borrow();
         let (face, disabled) = controller.primary(host);
+        let now = std::time::Instant::now();
+        let mut swap = self.primary_swap.get();
+        swap.observe(face, now, self.reduced_motion);
+        self.primary_swap.set(swap);
+        let outgoing = swap.progress(now);
         let instance = controller.host_instance();
         let generation = controller.generation();
         let host_id = controller.target.host().clone();
@@ -2459,7 +2511,7 @@ impl ComposerOwner {
                     false,
                     false,
                 ),
-                primary: primary(theme, face, disabled, Rc::clone(&self.dispatch)),
+                primary: primary(theme, face, outgoing, disabled, Rc::clone(&self.dispatch)),
                 questionnaires,
                 attachments,
                 mention_overlay,

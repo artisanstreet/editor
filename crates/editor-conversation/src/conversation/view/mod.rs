@@ -242,12 +242,23 @@ pub fn measured_row_frame(
         .build()
 }
 
+pub const TRANSCRIPT_FRAME: &str = "conversation-transcript-frame";
+
+#[must_use]
+pub fn composer_lift(viewport_width: f32) -> f32 {
+    match viewport_width >= NARROW {
+        true => COMPOSER_LIFT,
+        false => COMPOSER_LIFT_NARROW,
+    }
+    .px()
+}
+
 pub fn thread_frame(
     transcript: Element,
     overlays: Vec<Element>,
     composer: Option<Element>,
     viewport_width: f32,
-    landing: bool,
+    reveal: f32,
 ) -> Element {
     let mut body = UiBox::new()
         .width(Length::Pct(100.0))
@@ -260,9 +271,10 @@ pub fn thread_frame(
             Some(EDGE_INSET.px()),
         ))
         .clip(true)
-        .opacity(if landing { 0.0 } else { 1.0 })
+        .opacity(reveal)
         .child(transcript)
-        .build();
+        .build()
+        .with_key(TRANSCRIPT_FRAME);
     body = body.child(transcript);
     for overlay in overlays {
         body = body.child(overlay);
@@ -273,11 +285,7 @@ pub fn thread_frame(
         .height(Length::Pct(100.0))
         .child(body.build());
     if let Some(composer) = composer {
-        let bottom = match viewport_width >= NARROW {
-            true => COMPOSER_LIFT,
-            false => COMPOSER_LIFT_NARROW,
-        }
-        .px();
+        let bottom = composer_lift(viewport_width);
         let column = UiBox::new()
             .width(Length::Pct(100.0))
             .style(Style::new().max_width(Length::Px(COLUMN_MAX)))
@@ -349,7 +357,7 @@ pub fn thread_element(
         overlays,
         composer,
         viewport_width,
-        conversation.is_landing(),
+        conversation.reveal(std::time::Instant::now()),
     )
 }
 
@@ -375,7 +383,7 @@ pub fn try_thread_element(
         overlays,
         composer,
         viewport_width,
-        conversation.is_landing(),
+        conversation.reveal(std::time::Instant::now()),
     )
 }
 
@@ -401,7 +409,7 @@ pub fn batched_thread_element(
         overlays,
         composer,
         viewport_width,
-        conversation.is_landing(),
+        conversation.reveal(std::time::Instant::now()),
     )
 }
 
@@ -429,6 +437,6 @@ pub fn layout_batched_thread_element(
         overlays,
         composer,
         viewport_width,
-        conversation.is_landing(),
+        conversation.reveal(std::time::Instant::now()),
     )
 }

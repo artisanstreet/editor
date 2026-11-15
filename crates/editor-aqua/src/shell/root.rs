@@ -146,6 +146,7 @@ pub struct RootViews {
     sidebar_drag: Option<crate::sidebar::drag_preview::DragPreviewHost>,
     drag_position: Option<aqua_core::Point>,
     navigation: crate::shell::thread_navigation::ThreadNavigation,
+    composer_glide: crate::shell::composer_glide::ComposerGlide,
     transcript_viewport: Option<aqua_ui::collection_runtime::CollectionViewport>,
     navigation_marker: Option<usize>,
     context_reading: Option<crate::shell::context_meter::ContextReading>,
@@ -942,6 +943,7 @@ impl RootViews {
             attachments,
             mention_overlay: None,
             thread_error: None,
+            shift: self.composer_glide.shift(now),
         };
         let center = if workspace.conversation.rows.is_empty() {
             self.thread_landing.reset();
@@ -1818,6 +1820,29 @@ impl RootViews {
             }
         }
         changed
+    }
+
+    fn sync_transcript_reveal(shell: &mut Shell, ui: &mut UiApp) -> bool {
+        let Some(workspace) = shell.entry.workspace_mut() else {
+            return false;
+        };
+        if Self::reduced(ui) {
+            workspace.conversation.skip_reveal();
+        }
+        let reveal = workspace.conversation.reveal(std::time::Instant::now());
+        let Some(node) = ui.tree().sole_node_with_key(aqua_ui::tree::hash_key(
+            aqua_ui::element::Key::from(crate::conversation::view::TRANSCRIPT_FRAME),
+        )) else {
+            return false;
+        };
+        let Some(mut paint) = ui.tree().get(node).map(|record| record.paint().clone()) else {
+            return false;
+        };
+        if paint.opacity != Some(reveal) {
+            paint.opacity = Some(reveal);
+            ui.tree_mut().set_paint(node, paint);
+        }
+        reveal > 0.0 && reveal < 1.0
     }
 
     fn sync_navigation(
@@ -2887,6 +2912,15 @@ impl SectionViews for RootViews {
         aqua_core::checkpoint::reach();
         let card_width =
             (viewport.width - self.sidebar.width(now) - crate::frame::view::SHEET_PADDING).max(0.0);
+        match &screen {
+            Screen::Thread { .. } => self.composer_glide.dock(
+                crate::conversation::view::composer_lift(card_width),
+                now,
+                reduced,
+            ),
+            Screen::NewThread { .. } => {}
+            _ => self.composer_glide.forget(),
+        }
         let center = match &screen {
             Screen::Home => workspace.home_view(&shell.core, &theme),
             Screen::Marketplace => workspace.marketplace_view(&shell.core, theme),
@@ -2933,6 +2967,7 @@ impl SectionViews for RootViews {
                             attachments,
                             mention_overlay: None,
                             thread_error: None,
+                            shift: 0.0,
                         },
                         Rc::clone(&self.composer_measurement),
                         reduced,
@@ -3307,6 +3342,12 @@ impl SectionViews for RootViews {
         self.bind_row_sources(ui, ctx, window);
         self.sync_resource_jump(ui, ctx, window);
         self.sync_context(shell, ui, ctx, window);
+        if self.composer_glide.sync(ui, std::time::Instant::now()) {
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
+        if Self::sync_transcript_reveal(shell, ui) {
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
         if self.sync_navigation(ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_wake");
             self.navigation_invalidated.set(true);
