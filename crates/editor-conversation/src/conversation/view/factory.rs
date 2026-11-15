@@ -58,6 +58,7 @@ fn user_bubble(
     empty: bool,
     attachments: Option<aqua_ui::element::Element>,
     sender: Option<artisan_api::EngineId>,
+    sticker: Option<editor_ui::sticker::Sticker>,
     theme: ArtisanTheme,
 ) -> aqua_ui::element::Element {
     use editor_ui::chat_bubble::{ChatBubbleSegment, SegmentPosition};
@@ -74,7 +75,8 @@ fn user_bubble(
     if empty {
         return root.build();
     }
-    let bubble = ChatBubbleSegment::new(theme, SegmentPosition::for_index(index, count), content);
+    let bubble = ChatBubbleSegment::new(theme, SegmentPosition::for_index(index, count), content)
+        .sticker(sticker);
     let bubble = match sender {
         Some(engine) => bubble.tinted(match engine {
             artisan_api::EngineId::Claude => theme.colors.claude,
@@ -1658,6 +1660,19 @@ impl RowFactory {
         realized
     }
 
+    fn bubble_sticker(
+        &self,
+        owner: &super::row_cache::RowOwner,
+        key: &RowKey,
+        fresh: bool,
+    ) -> Option<editor_ui::sticker::Sticker> {
+        let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+        owner
+            .motion
+            .borrow_mut()
+            .sticker(key.clone(), fresh, self.reduced_motion, now)
+    }
+
     fn realize_inner(
         &self,
         index: usize,
@@ -1959,7 +1974,8 @@ impl RowFactory {
                 stored_proof = proof;
                 Some(if slot.is_bubble() {
                     let count = self.stored.as_ref().and_then(|services| services.owner.borrow().current_range(&BodyKey { item: id.clone(), slot: *slot })).map_or(1, |range| range.end);
-                    user_bubble(element, *block, count, false, if *block == 0 { self.user_attachments(item)? } else { None }, bubble_sender(item, row.model.author), self.theme)
+                    let sticker = self.bubble_sticker(&row_owner, key, row.model.ui.get(id).is_some_and(|ui| ui.fresh()));
+                    user_bubble(element, *block, count, false, if *block == 0 { self.user_attachments(item)? } else { None }, bubble_sender(item, row.model.author), sticker, self.theme)
                 } else { element })
             }
             Row::Text {
@@ -2268,6 +2284,7 @@ impl RowFactory {
                     element
                 };
                 Some(if slot.is_bubble() {
+                    let fresh = row.model.ui.get(&item.id).is_some_and(|ui| ui.fresh());
                     user_bubble(
                         element,
                         *block,
@@ -2279,6 +2296,7 @@ impl RowFactory {
                             None
                         },
                         bubble_sender(item, row.model.author),
+                        self.bubble_sticker(&row_owner, key, fresh),
                         self.theme,
                     )
                 } else if let Some(notice) = preview_notice {
