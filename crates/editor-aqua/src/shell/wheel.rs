@@ -162,7 +162,9 @@ impl WheelGlides {
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let glide = self.glide(surface);
         match WheelInput::classify(delta.y) {
-            Some(WheelInput::Notch(distance)) if !reduced && delta.x == 0.0 => {
+            Some(WheelInput::Notch(distance) | WheelInput::Precise(distance))
+                if !reduced && delta.x == 0.0 =>
+            {
                 glide.push_down(metrics.offset, distance, metrics.max);
                 Some(surface)
             }

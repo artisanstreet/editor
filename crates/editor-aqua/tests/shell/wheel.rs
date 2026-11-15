@@ -172,7 +172,22 @@ fn a_notch_down_from_a_scrolled_position_moves_toward_the_tail_without_reenterin
 }
 
 #[test]
-fn a_precise_wheel_gesture_cancels_the_glide_instead_of_queueing_it() {
+fn a_precise_wheel_gesture_glides_like_a_notch() {
+    let mut app = transcript();
+    let mut glides = WheelGlides::default();
+    assert!(enter_tail(&mut app));
+    app.build_frame().unwrap();
+    pause_tail(&mut app);
+    let precise = InputEvent::Scroll {
+        at: Point::new(50.0, 50.0),
+        delta: ScrollDelta { x: 0.0, y: -7.5 },
+    };
+    assert_eq!(glides.offer(&mut app, &precise), Some(Surface::Transcript));
+    assert!(glides.active());
+}
+
+#[test]
+fn a_horizontal_gesture_still_cancels_the_glide() {
     let mut app = transcript();
     let mut glides = WheelGlides::default();
     assert!(enter_tail(&mut app));
@@ -180,11 +195,11 @@ fn a_precise_wheel_gesture_cancels_the_glide_instead_of_queueing_it() {
     pause_tail(&mut app);
     glides.offer(&mut app, &notch(-3.0));
     assert!(glides.active());
-    let precise = InputEvent::Scroll {
+    let sideways = InputEvent::Scroll {
         at: Point::new(50.0, 50.0),
-        delta: ScrollDelta { x: 0.0, y: -7.5 },
+        delta: ScrollDelta { x: 12.0, y: -7.5 },
     };
-    assert_eq!(glides.offer(&mut app, &precise), None);
+    assert_eq!(glides.offer(&mut app, &sideways), None);
     assert!(!glides.active());
 }
 
