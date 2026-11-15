@@ -890,7 +890,7 @@ impl RootViews {
             reduced_motion,
         );
         let presence = self.latest.value(now);
-        let jump = (presence > 0.0).then(|| {
+        let jump = (self.latest.shown() || presence > 0.0).then(|| {
             crate::shell::thread_navigation::jump_to_latest(theme, presence, Rc::clone(&dispatch))
         });
         let mut controls = Vec::new();
@@ -2934,6 +2934,9 @@ impl SectionViews for RootViews {
             Screen::Usage => workspace.usage_view(&shell.core, theme, size),
             Screen::Thread { .. } => {
                 workspace.conversation.sync_screen(&mut shell.core);
+                if reduced {
+                    workspace.conversation.skip_reveal();
+                }
                 if !workspace.conversation.host_is_current(&shell.core) {
                     self.replace_rows(None);
                     view::centered_conversation(self.connection.waiting(theme, now, reduced))
