@@ -604,6 +604,10 @@ mod background_tests;
 mod door_tests;
 
 #[cfg(test)]
+#[path = "../tests/claude/reply.rs"]
+mod reply_tests;
+
+#[cfg(test)]
 mod tests {
     use super::ClaudeDecoder;
     use artisan_api::ItemId;
