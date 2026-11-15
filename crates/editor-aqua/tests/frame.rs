@@ -12,6 +12,8 @@ mod sign_in_dither;
 mod sign_in_model;
 #[path = "frame/sign_in/pattern.rs"]
 mod sign_in_pattern;
+#[path = "frame/strip.rs"]
+mod strip;
 #[path = "frame/tabs.rs"]
 mod tabs;
 #[path = "frame/wordmark.rs"]

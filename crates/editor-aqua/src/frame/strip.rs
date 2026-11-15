@@ -279,8 +279,14 @@ fn outline(theme: &ArtisanTheme, progress: f32, emit: Rc<dyn Fn(Event)>) -> Elem
         ))
         .build()
         .with_key(OUTLINE_CHEVRON);
-    HitArea::new("artisan-thread-outline", Role::Button, "Messages in this thread")
+    let hit = HitArea::new("artisan-thread-outline", Role::Button, "Messages in this thread")
         .child(chevron)
         .on_activate(move || emit(Event::Navigate(Command::Outline)))
+        .build();
+    UiBox::new()
+        .width(edge)
+        .height(edge)
+        .style(Style::new().flex_shrink(0.0))
+        .child(hit)
         .build()
 }

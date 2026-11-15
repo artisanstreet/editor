@@ -39,6 +39,7 @@ pub fn project_mark(
 
 const ICON: IconSize = IconSize::Md;
 
+#[derive(Default)]
 pub struct Mark {
     icon: Option<Arc<ImageHandle>>,
     forge: Option<Option<String>>,
