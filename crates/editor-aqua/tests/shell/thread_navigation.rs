@@ -1,4 +1,5 @@
 use super::*;
+use aqua_core::{Point, Rect};
 use artisan_api::ItemId;
 
 #[test]
@@ -139,4 +140,59 @@ fn reduced_motion_shows_and_hides_jump_to_latest_instantly() {
     assert_eq!(latest.value(now), 1.0);
     latest.show(false, now, true);
     assert_eq!(latest.value(now), 0.0);
+}
+
+#[test]
+fn clicks_close_the_outline_only_outside_the_drawer_and_chevron() {
+    let drawer = Some(Rect { x: 0.0, y: 0.0, w: 320.0, h: 600.0 });
+    let chevron = Some(Rect { x: 400.0, y: -30.0, w: 16.0, h: 16.0 });
+    assert!(!outside(Point::new(100.0, 580.0), drawer, chevron));
+    assert!(!outside(Point::new(405.0, -25.0), drawer, chevron));
+    assert!(outside(Point::new(500.0, 300.0), drawer, chevron));
+    assert!(outside(Point::new(500.0, 300.0), None, None));
+}
+
+fn mounted_drawer(progress: f32) -> aqua::UiApp {
+    use aqua_text::{SharedFonts, SharedRuns};
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(move |_| {
+        let theme = ArtisanTheme::resolved();
+        let panel = crate::ui::kit::surface::drawer::build(
+            &theme,
+            navigator::PANEL_WIDTH,
+            progress,
+            Vec::new(),
+        )
+        .with_key(OVERLAY_KEY);
+        UiBox::new()
+            .width(900.0)
+            .height(600.0)
+            .child(crate::conversation::view::thread_frame(
+                UiBox::new().build(),
+                Vec::new(),
+                None,
+                Some(panel),
+                900.0,
+                1.0,
+            ))
+            .build()
+    })
+    .unwrap();
+    app.set_viewport(900.0, 600.0, 1.0);
+    app.build_frame().unwrap();
+    app
+}
+
+#[test]
+fn clicking_beside_the_open_drawer_closes_it_and_clicking_inside_does_not() {
+    let now = Instant::now();
+    let app = mounted_drawer(1.0);
+    let mut navigation = ThreadNavigation::default();
+    navigation.interaction.available = true;
+    navigation.toggle(now, true);
+    assert!(!navigation.dismiss(&app, Point::new(160.0, 590.0), now, true));
+    assert!(navigation.interaction.open());
+    let gutter = navigator::PANEL_WIDTH + 8.0;
+    assert!(navigation.dismiss(&app, Point::new(gutter, 300.0), now, true));
+    assert!(!navigation.interaction.open());
 }
