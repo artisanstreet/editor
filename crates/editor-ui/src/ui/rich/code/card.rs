@@ -97,7 +97,7 @@ pub(crate) fn render(
         }
         None => row = row.child(body),
     }
-    Surface::Card.build(theme, vec![row.build()]).style(
+    Surface::Code.build(theme, vec![row.build()]).style(
         Style::new()
             .width(Length::Pct(100.0))
             .min_width(Length::Px(0.0)),
