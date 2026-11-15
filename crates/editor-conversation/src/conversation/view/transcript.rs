@@ -274,6 +274,26 @@ impl TranscriptObservations {
         std::mem::take(&mut self.0.borrow_mut().events)
     }
 
+    pub fn on_screen(&self, app: &aqua::UiApp) -> Vec<Rc<PaintedRow>> {
+        let state = self.0.borrow();
+        state
+            .painted
+            .iter()
+            .filter(|(key, painted)| {
+                painted.snapshot.active.get()
+                    && state.current_versions.get(*key) == Some(&painted.snapshot.version)
+            })
+            .filter_map(|(key, painted)| {
+                let node = app.tree().last_node_with_key(*state.key_hashes.get(key)?)?;
+                let bounds = app.tree().pre_transform_rect(node)?;
+                Some(Rc::new(PaintedRow {
+                    bounds,
+                    ..PaintedRow::clone(painted)
+                }))
+            })
+            .collect()
+    }
+
     pub fn observe_viewport(
         &self,
         conversation: &mut Conversation,

@@ -689,6 +689,11 @@ impl HostData {
         self.pump_read_acks();
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn pending_read(&self, thread: &ThreadId) -> Option<artisan_api::Seq> {
+        self.read_acks.get(thread).copied()
+    }
+
     fn pump_read_acks(&mut self) {
         if self.read_writer.is_some() {
             return;
