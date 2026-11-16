@@ -991,6 +991,7 @@ pub struct ComposerOwner {
     note_ticker: std::cell::RefCell<editor_ui::marquee::Marquee>,
     primary_swap: std::cell::Cell<super::swap::PrimarySwap>,
     model_menu_serial: std::cell::Cell<u64>,
+    prompt_edges: editor_ui::scroll_edge::ScrollEdges,
     model_scroll: std::cell::RefCell<super::model_list::ModelScroll>,
     model_tab: std::cell::RefCell<super::sliding_tab::SlidingTab>,
     last_visible: std::cell::RefCell<ComposerVisible>,
@@ -1288,6 +1289,7 @@ impl ComposerOwner {
                 "",
             )),
             model_menu_serial: std::cell::Cell::new(0),
+            prompt_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             model_scroll: std::cell::RefCell::default(),
             model_tab: std::cell::RefCell::new(super::sliding_tab::SlidingTab::new(
                 0.0,
@@ -1679,7 +1681,28 @@ impl ComposerOwner {
                 .is_some_and(|popup| popup.is_animating(app))
     }
 
-    pub fn advance_project_edges(
+    pub fn advance_edges(
+        &self,
+        app: &mut aqua::UiApp,
+        theme: &ArtisanTheme,
+        reduced: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        let prompt = self.prompt_edges(theme).advance(app, reduced, now);
+        prompt | self.advance_picker_edges(app, theme, reduced, now)
+    }
+
+    fn prompt_edges(&self, theme: &ArtisanTheme) -> editor_ui::scroll_edge::EdgeBands {
+        editor_ui::scroll_edge::EdgeBands {
+            scroll: PROMPT_SCROLL,
+            top: PROMPT_EDGE_TOP,
+            bottom: PROMPT_EDGE_BOTTOM,
+            color: theme.colors.surface,
+            edges: self.prompt_edges.clone(),
+        }
+    }
+
+    fn advance_picker_edges(
         &self,
         app: &mut aqua::UiApp,
         theme: &ArtisanTheme,
@@ -2579,13 +2602,11 @@ impl ComposerOwner {
             theme,
             nested,
             CardParts {
-                prompt: self.editor.element_with_notice_keyed(
+                prompt: self.editor.prompt_with_scroll_edges(
                     "composer-prompt",
-                    editor_ui::text::Mode::Prompt,
                     &theme,
                     placeholder,
-                    false,
-                    false,
+                    &self.prompt_edges(&theme),
                 ),
                 primary: primary(theme, face, outgoing, disabled, Rc::clone(&self.dispatch)),
                 questionnaires,
@@ -2773,6 +2794,9 @@ pub fn attachments(
 }
 
 const PROJECT_SCROLL: &str = "composer-project-scroll";
+const PROMPT_SCROLL: &str = "composer-prompt-scroll";
+const PROMPT_EDGE_TOP: &str = "composer-prompt-edge-top";
+const PROMPT_EDGE_BOTTOM: &str = "composer-prompt-edge-bottom";
 const PROJECT_EDGE_TOP: &str = "composer-project-edge-top";
 const PROJECT_EDGE_BOTTOM: &str = "composer-project-edge-bottom";
 

@@ -303,6 +303,38 @@ pub fn keyed(ui: &aqua::UiApp, key: &str) -> Option<NodeId> {
     ui.tree().sole_node_with_key(key)
 }
 
+#[derive(Clone)]
+pub struct EdgeBands {
+    pub scroll: &'static str,
+    pub top: &'static str,
+    pub bottom: &'static str,
+    pub color: Oklch,
+    pub edges: ScrollEdges,
+}
+
+impl EdgeBands {
+    pub fn advance(&self, ui: &mut aqua::UiApp, reduced: bool, now: Instant) -> bool {
+        EdgeSurface {
+            edges: &self.edges,
+            scroller: self.scroll,
+            top: self.top,
+            bottom: self.bottom,
+            top_color: self.color,
+            bottom_color: self.color,
+            paint: EdgePaint::Gradient,
+        }
+        .advance(ui, reduced, now)
+    }
+
+    #[must_use]
+    pub fn bands(&self) -> [Element; 2] {
+        [
+            self.edges.band(self.top, Edge::Top, self.color),
+            self.edges.band(self.bottom, Edge::Bottom, self.color),
+        ]
+    }
+}
+
 pub struct EdgeSurface<'a> {
     pub edges: &'a ScrollEdges,
     pub scroller: &'a str,

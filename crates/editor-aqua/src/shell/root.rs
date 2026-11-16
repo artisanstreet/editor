@@ -1695,7 +1695,7 @@ impl RootViews {
         }
         .advance(ui, reduced, now);
         if let Some(composer) = &workspace.composer {
-            moving |= composer.advance_project_edges(ui, &theme, reduced, now);
+            moving |= composer.advance_edges(ui, &theme, reduced, now);
         }
         if moving {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
