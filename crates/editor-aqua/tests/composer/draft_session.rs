@@ -767,3 +767,60 @@ fn another_clients_change_after_a_timed_out_save_still_asks_which_to_keep() {
         "a draft this client never sent is another client's change"
     );
 }
+
+#[test]
+fn the_message_posts_before_a_draft_typed_after_it_is_saved() {
+    let mut session = DraftSession::new("new:project".into());
+    session.loaded(Ok(DraftSnapshot::default()));
+    session.queue(json!({"text": "Keep my draft"}));
+    session.submit(submission());
+    save_next(&mut session);
+    session.queue(json!({"text": "the next message"}));
+    let Some(Operation::Post(request)) = session.next() else {
+        panic!("expected the message to post before the new draft is saved");
+    };
+    assert_eq!(request.message.text, "Keep my draft");
+}
+
+#[test]
+fn a_draft_typed_while_the_message_posts_survives_its_acceptance() {
+    let mut session = DraftSession::new("new:project".into());
+    session.loaded(Ok(DraftSnapshot::default()));
+    session.queue(json!({"text": "Keep my draft"}));
+    session.submit(submission());
+    save_next(&mut session);
+    assert!(matches!(session.next(), Some(Operation::Post(_))));
+    let typed = json!({"text": "the next message"});
+    session.queue(typed.clone());
+    session.posted(Ok(()));
+    assert!(!session.sending());
+    assert_eq!(session.body, typed);
+    assert!(session.pending());
+    assert!(matches!(session.next(), Some(Operation::Load)));
+    session.loaded(Ok(DraftSnapshot {
+        revision: 2,
+        body: serde_json::Value::Null,
+    }));
+    let Some(Operation::Write { request, .. }) = session.next() else {
+        panic!("expected the typed draft to be saved");
+    };
+    assert_eq!(request.body, typed);
+    assert_eq!(request.expected_revision, 2);
+}
+
+#[test]
+fn a_failed_post_reports_the_failure_and_keeps_the_submission_for_retry() {
+    let mut session = DraftSession::new("new:project".into());
+    session.loaded(Ok(DraftSnapshot::default()));
+    session.queue(json!({"text": "Keep my draft"}));
+    session.submit(submission());
+    save_next(&mut session);
+    assert!(matches!(session.next(), Some(Operation::Post(_))));
+    assert!(!session.send_failed());
+    session.posted(Err("offline".into()));
+    assert!(session.send_failed());
+    assert!(!session.sending());
+    session.retry();
+    assert!(!session.send_failed());
+    assert_original_submission(&mut session);
+}

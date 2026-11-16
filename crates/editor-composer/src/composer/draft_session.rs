@@ -23,6 +23,7 @@ enum Sending {
 struct Outgoing {
     request: Submission,
     state: Sending,
+    edited: u64,
 }
 
 pub enum Operation {
@@ -40,6 +41,7 @@ pub struct DraftSession {
     snapshot: DraftSnapshot,
     unconfirmed: Vec<Value>,
     edited: u64,
+    saved: u64,
     dirty: bool,
     busy: bool,
     removed: bool,
@@ -57,6 +59,7 @@ impl DraftSession {
             snapshot: DraftSnapshot::default(),
             unconfirmed: Vec::new(),
             edited: 0,
+            saved: 0,
             dirty: false,
             busy: false,
             removed: false,
@@ -85,6 +88,12 @@ impl DraftSession {
                 .is_some_and(|outgoing| outgoing.state != Sending::Failed)
     }
 
+    pub fn send_failed(&self) -> bool {
+        self.outgoing
+            .as_ref()
+            .is_some_and(|outgoing| outgoing.state == Sending::Failed)
+    }
+
     pub fn queue(&mut self, body: Value) -> bool {
         if self.removed || self.body == body {
             return false;
@@ -111,6 +120,7 @@ impl DraftSession {
                 self.outgoing = Some(Outgoing {
                     request: submission,
                     state: Sending::Queued,
+                    edited: self.edited,
                 })
             }
         }
@@ -165,9 +175,12 @@ impl DraftSession {
         if self.removed || self.busy || self.conflict || self.error.is_some() {
             return None;
         }
+        let posting = self.outgoing.as_ref().is_some_and(|outgoing| {
+            outgoing.state == Sending::Queued && self.saved >= outgoing.edited
+        });
         let operation = if !self.loaded {
             Operation::Load
-        } else if self.dirty {
+        } else if self.dirty && !posting {
             Operation::Write {
                 request: WriteDraft {
                     expected_revision: self.snapshot.revision,
@@ -228,6 +241,7 @@ impl DraftSession {
                 self.snapshot = result.current;
                 self.unconfirmed.clear();
                 if matched {
+                    self.saved = edited;
                     if self.edited == edited {
                         self.dirty = false;
                     }
@@ -267,12 +281,19 @@ impl DraftSession {
         self.busy = false;
         match result {
             Ok(()) => {
+                let typed_since = self
+                    .outgoing
+                    .take()
+                    .is_some_and(|outgoing| outgoing.edited != self.edited);
                 self.snapshot.revision = self.snapshot.revision.saturating_add(1);
                 self.snapshot.body = Value::Null;
                 self.unconfirmed.clear();
-                self.body = Value::Null;
-                self.dirty = false;
-                self.outgoing = None;
+                if typed_since {
+                    self.dirty = true;
+                } else {
+                    self.body = Value::Null;
+                    self.dirty = false;
+                }
                 self.error = None;
                 self.loaded = false;
             }

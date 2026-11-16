@@ -57,6 +57,12 @@ impl ComposerTarget {
     }
 }
 
+enum Outbox {
+    Idle,
+    InFlight(DraftBody),
+    Restored,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DraftBody {
     #[serde(default)]
@@ -95,6 +101,7 @@ pub struct Composer {
     placeholder_was_visible: bool,
     pub file_shake: Option<(u64, std::time::Instant)>,
     pub cleared: Option<std::time::Instant>,
+    outbox: Outbox,
     pub notice: Option<String>,
     pub session: Option<DraftLease>,
     host_instance: Option<HostInstance>,
@@ -151,6 +158,7 @@ impl Composer {
             edit_revision: 0,
             restore_revision: Some(0),
             cleared: None,
+            outbox: Outbox::Idle,
         }
     }
 
@@ -614,11 +622,8 @@ impl Composer {
         self.save();
     }
 
-    pub fn save(&self) {
-        let Some(session) = &self.session else {
-            return;
-        };
-        let body = DraftBody {
+    fn draft_body(&self) -> DraftBody {
+        DraftBody {
             text: self
                 .questionnaire
                 .aside_text()
@@ -637,7 +642,14 @@ impl Composer {
             files: self.files.clone(),
             config: self.config.clone(),
             project: self.project.clone(),
+        }
+    }
+
+    pub fn save(&self) {
+        let Some(session) = &self.session else {
+            return;
         };
+        let body = self.draft_body();
         let value = if body.text.is_empty()
             && body.images.is_empty()
             && body.files.is_empty()
@@ -661,19 +673,25 @@ impl Composer {
             return Vec::new();
         };
         let events = session.drain_events();
+        let (loaded, sending, failed, body) = session.read(|state| {
+            (
+                state.loaded,
+                state.sending(),
+                state.send_failed(),
+                state.body.clone(),
+            )
+        });
         for event in &events {
             match event {
                 SessionEvent::Accepted { .. } => {
-                    self.config = None;
-                    self.editor.borrow_mut().set_text("");
-                    if let Some(attachments) = &mut self.attachments {
-                        attachments.clear();
+                    if matches!(self.outbox, Outbox::Restored) {
+                        self.clear_input();
+                        self.cleared = Some(std::time::Instant::now());
                     }
-                    self.files.clear();
-                    self.restore_revision = None;
-                    self.cleared = Some(std::time::Instant::now());
+                    self.outbox = Outbox::Idle;
                 }
                 SessionEvent::Reloaded => {
+                    self.outbox = Outbox::Idle;
                     self.editor.borrow_mut().set_text("");
                     if let Some(attachments) = &mut self.attachments {
                         attachments.clear();
@@ -684,46 +702,80 @@ impl Composer {
                 SessionEvent::Changed => {}
             }
         }
-        let (loaded, sending, body) =
-            session.read(|state| (state.loaded, state.sending(), state.body.clone()));
+        if failed && let Outbox::InFlight(sent) = std::mem::replace(&mut self.outbox, Outbox::Restored) {
+            self.restore_sent(sent);
+        }
+        let holding = sending && matches!(self.outbox, Outbox::Restored);
         self.editor
             .borrow_mut()
-            .set_disabled(sending || self.questionnaire.sending.is_some());
+            .set_disabled(holding || self.questionnaire.sending.is_some());
         if loaded
             && self.restore_revision.take() == Some(self.edit_revision)
             && body != serde_json::Value::Null
         {
             match serde_json::from_value::<DraftBody>(body) {
-                Ok(body)
-                    if self.editor.borrow().text().trim().is_empty()
-                        && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
-                        && self.files.is_empty() =>
-                {
-                    if !self.questionnaire.restore_aside_text(&body.text) {
-                        self.editor.borrow_mut().set_text(&body.text);
-                    }
-                    self.config = body.config;
-                    self.project = body.project;
-                    if let Some(attachments) = &mut self.attachments {
-                        for hash in body.images {
-                            attachments.restore(hash);
-                        }
-                    }
-                    self.files = body
-                        .files
-                        .into_iter()
-                        .map(|mut file| {
-                            file.key = self.next_file_key;
-                            self.next_file_key = self.next_file_key.wrapping_add(1);
-                            file
-                        })
-                        .collect();
-                }
+                Ok(body) if self.input_empty() => self.restore_body(body),
                 Ok(_) => {}
                 Err(error) => self.notice = Some(format!("Couldn't read this draft: {error}")),
             }
         }
         events
+    }
+
+    fn input_empty(&self) -> bool {
+        self.editor.borrow().text().trim().is_empty()
+            && self.attachments.as_ref().is_none_or(|a| a.items.is_empty())
+            && self.files.is_empty()
+    }
+
+    fn clear_input(&mut self) {
+        self.config = None;
+        self.editor.borrow_mut().set_text("");
+        if let Some(attachments) = &mut self.attachments {
+            attachments.clear();
+        }
+        self.files.clear();
+        self.restore_revision = None;
+    }
+
+    fn restore_body(&mut self, body: DraftBody) {
+        if !self.questionnaire.restore_aside_text(&body.text) {
+            self.editor.borrow_mut().set_text(&body.text);
+        }
+        self.config = body.config;
+        self.project = body.project;
+        if let Some(attachments) = &mut self.attachments {
+            for hash in body.images {
+                attachments.restore(hash);
+            }
+        }
+        self.files = body
+            .files
+            .into_iter()
+            .map(|mut file| {
+                file.key = self.next_file_key;
+                self.next_file_key = self.next_file_key.wrapping_add(1);
+                file
+            })
+            .collect();
+    }
+
+    fn restore_sent(&mut self, sent: DraftBody) {
+        if self.input_empty() {
+            self.restore_body(sent);
+            return;
+        }
+        let typed = self.draft_body();
+        let body = DraftBody {
+            text: format!("{}\n\n{}", sent.text, typed.text),
+            images: sent.images.into_iter().chain(typed.images).collect(),
+            files: sent.files.into_iter().chain(typed.files).collect(),
+            config: sent.config.or(typed.config),
+            project: sent.project.or(typed.project),
+        };
+        self.clear_input();
+        self.restore_body(body);
+        self.edited();
     }
 
     pub fn project(&self, host: &HostData) -> Option<ProjectId> {
@@ -826,7 +878,11 @@ impl Composer {
         } else {
             self.blocked(host).is_none()
         };
-        let can_continue = matches!(&self.target, ComposerTarget::Thread { thread, .. } if !self.questionnaire.writing_answer() && self.editor.borrow().text().trim().is_empty() && self.files.is_empty() && self.attachments.as_ref().is_none_or(|items| items.items.is_empty()) && host.can_continue(thread));
+        let sending = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.read(|state| state.sending()));
+        let can_continue = !sending && matches!(&self.target, ComposerTarget::Thread { thread, .. } if !self.questionnaire.writing_answer() && self.editor.borrow().text().trim().is_empty() && self.files.is_empty() && self.attachments.as_ref().is_none_or(|items| items.items.is_empty()) && host.can_continue(thread));
         if working && !ready {
             (super::view::Primary::Stop, self.cancelling)
         } else if !working && !ready && can_continue {
@@ -905,6 +961,9 @@ impl Composer {
                 thread,
             });
         }
+        self.outbox = Outbox::InFlight(self.draft_body());
+        self.clear_input();
+        self.cleared = Some(std::time::Instant::now());
         true
     }
 }

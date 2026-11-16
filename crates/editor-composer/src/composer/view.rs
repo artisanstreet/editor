@@ -1956,8 +1956,8 @@ impl ComposerOwner {
                         self.send_answer(host, answer, composer.generation());
                         effects.push(ComposerEffect::EditorChanged);
                     }
-                } else {
-                    composer.send(host);
+                } else if composer.send(host) {
+                    effects.push(ComposerEffect::EditorChanged);
                 }
             }
             ComposerAction::Stop => {
