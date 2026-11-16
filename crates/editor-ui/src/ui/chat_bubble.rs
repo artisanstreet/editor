@@ -134,17 +134,13 @@ impl ChatBubbleSegment {
             .text_style(TextRole::Prose.style(&self.theme))
             .gpui_source_text_color(self.theme.colors.text.to_reference_text_color())
             .text_wrap(true);
-        let mut shadows = match self.position {
+        let shadows = match self.position {
             SegmentPosition::Single => card_shadows(&self.theme)
                 .into_iter()
                 .map(aqua_ui::style::GpuiShadowLayer::from)
                 .collect(),
             _ => Vec::new(),
         };
-        if let Some(sticker) = &self.sticker {
-            sticker.rest_on(&shadows);
-            shadows.push(sticker.lift_shadow());
-        }
         if !shadows.is_empty() {
             style = style.gpui_shadows(shadows);
         }
@@ -195,7 +191,7 @@ impl ChatBubbleSegment {
             .unwrap_or_default();
         let element = frame.child(self.content).children(layers).build();
         let element = match &self.sticker {
-            Some(sticker) => element.style(sticker.style()).with_key(sticker.key()),
+            Some(sticker) => element.style(sticker.style()),
             None => element,
         };
         if let Some(selector) = self.selector {

@@ -1685,18 +1685,6 @@ impl RowFactory {
         realized
     }
 
-    pub fn paint_stickers(&self, app: &mut aqua::UiApp, now: Instant) -> bool {
-        let owners: Vec<_> = self
-            .realized_owners
-            .borrow()
-            .values()
-            .filter_map(std::rc::Weak::upgrade)
-            .collect();
-        owners.iter().fold(false, |running, owner| {
-            owner.motion.borrow_mut().paint_stickers(app, now) || running
-        })
-    }
-
     fn bubble_sticker(
         &self,
         owner: &super::row_cache::RowOwner,

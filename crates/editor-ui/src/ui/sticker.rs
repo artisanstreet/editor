@@ -1,5 +1,3 @@
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,6 +7,8 @@ use aqua_core::{
     Rect, Transform2D,
 };
 use aqua_ui::element::{Box as UiBox, Canvas, Element};
+use aqua_ui::motion::Easing;
+use aqua_ui::style::timeline::{Key, Timeline};
 use aqua_ui::style::{GpuiShadowLayer, Style};
 
 use super::motion::MotionCurve;
@@ -58,80 +58,22 @@ impl StickerFrame {
         }
     }
 
-    fn transform(self, width: f32) -> Transform2D {
-        Transform2D::translate(-width, 0.0)
-            .then(Transform2D::scale(self.scale, self.scale))
-            .then(Transform2D::translate(width + self.shift.x, self.shift.y))
-    }
 }
 
-pub struct StickerLive {
-    key: String,
-    width: Cell<f32>,
-    rest: RefCell<Vec<GpuiShadowLayer>>,
-    air: Cell<Option<Oklch>>,
-}
-
-impl StickerLive {
-    #[must_use]
-    pub fn new(key: String) -> Rc<Self> {
-        Rc::new(Self {
-            key,
-            width: Cell::new(0.0),
-            rest: RefCell::new(Vec::new()),
-            air: Cell::new(None),
-        })
-    }
-
-    fn part(&self, part: &str) -> String {
-        format!("{}/sticker-{part}", self.key)
-    }
-
-    pub fn paint(&self, ui: &mut aqua::UiApp, frame: StickerFrame) -> bool {
-        let mut changed = self.repaint(ui, "bubble", |paint| {
-            paint.opacity = Some(frame.opacity);
-            paint.transform = Some(frame.transform(self.width.get()));
-            paint.gpui_shadows = self
-                .rest
-                .borrow()
-                .iter()
-                .cloned()
-                .chain((frame.glue < 1.0).then(|| lift_shadow(frame.glue)))
-                .collect();
-        });
-        if let Some(air) = self.air.get() {
-            changed |= self.repaint(ui, "sheen", |paint| {
-                paint.gpui_background = Some(sheen_background(air, frame.glue));
-            });
-        }
-        changed |= self.repaint(ui, "ear", |paint| {
-            paint.transform = Some(ear_transform(frame.curl));
-        });
-        changed
-    }
-
-    fn repaint(
-        &self,
-        ui: &mut aqua::UiApp,
-        part: &str,
-        update: impl FnOnce(&mut aqua_ui::style::Paint),
-    ) -> bool {
-        let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(self.part(part)));
-        let Some(node) = ui.tree().sole_node_with_key(key) else {
-            return false;
-        };
-        let Some(mut paint) = ui.tree().get(node).map(|record| record.paint().clone()) else {
-            return false;
-        };
-        update(&mut paint);
-        ui.tree_mut().set_paint(node, paint)
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sticker {
-    pub frame: StickerFrame,
-    pub live: Rc<StickerLive>,
+    pub elapsed: Duration,
+}
+
+const STEPS: u32 = 24;
+
+fn keys<T>(value: impl Fn(StickerFrame) -> T) -> Vec<Key<T>> {
+    (0..=STEPS)
+        .map(|step| {
+            let at = step as f32 / STEPS as f32;
+            Key::new(at, value(StickerFrame::at(DURATION.mul_f32(at))), Easing::Linear)
+        })
+        .collect()
 }
 
 fn lift_shadow(glue: f32) -> GpuiShadowLayer {
@@ -148,67 +90,40 @@ fn lift_shadow(glue: f32) -> GpuiShadowLayer {
     }
 }
 
-fn ear_transform(curl: f32) -> Transform2D {
-    let scale = curl.max(0.0);
-    Transform2D::translate(0.0, -CURL_EDGE)
-        .then(Transform2D::scale(scale, scale))
-        .then(Transform2D::translate(0.0, CURL_EDGE))
-}
-
 impl Sticker {
-    #[must_use]
-    pub fn key(&self) -> String {
-        self.live.part("bubble")
+    fn timeline(self) -> Timeline {
+        Timeline::new(DURATION).elapsed(self.elapsed)
     }
 
     #[must_use]
-    pub fn style(&self) -> Style {
-        Style::new()
-            .opacity(self.frame.opacity)
-            .transform(self.frame.transform(self.live.width.get()))
-    }
-
-    pub fn rest_on(&self, shadows: &[GpuiShadowLayer]) {
-        self.live.rest.replace(shadows.to_vec());
-    }
-
-    #[must_use]
-    pub fn lift_shadow(&self) -> GpuiShadowLayer {
-        lift_shadow(self.frame.glue)
+    pub fn style(self) -> Style {
+        Style::new().timeline(
+            self.timeline()
+                .scale((1.0, 0.0), keys(|frame| frame.scale))
+                .translate(keys(|frame| (frame.shift.x, frame.shift.y)))
+                .opacity(keys(|frame| frame.opacity))
+                .shadow(keys(|frame| lift_shadow(frame.glue))),
+        )
     }
 
     #[must_use]
-    pub fn layers(&self, theme: &ArtisanTheme, corners: CornerRadii, curl: bool) -> Vec<Element> {
+    pub fn layers(self, theme: &ArtisanTheme, corners: CornerRadii, curl: bool) -> Vec<Element> {
         let air = match theme.colors.mode.is_dark() {
             true => Oklch::new(1.0, 0.0, 0.0),
             false => Oklch::new(0.0, 0.0, 0.0),
         };
-        self.live.air.set(Some(air));
-        let mut layers = vec![
-            self.probe(),
-            sheen(corners, air, self.frame.glue).with_key(self.live.part("sheen")),
-        ];
+        let sweep = self
+            .timeline()
+            .background(keys(|frame| sheen_background(air, frame.glue)));
+        let mut layers = vec![sheen(corners, air, sweep)];
         if curl {
-            layers.push(dog_ear(theme, self.frame.curl).with_key(self.live.part("ear")));
+            let fold = self
+                .timeline()
+                .scale((0.0, 1.0), keys(|frame| frame.curl.max(0.0)))
+                .hold();
+            layers.push(dog_ear(theme, fold));
         }
         layers
-    }
-
-    fn probe(&self) -> Element {
-        let live = Rc::clone(&self.live);
-        Canvas::new()
-            .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-            .on_prepaint(move |tree, node| {
-                if let Some(bounds) = tree
-                    .get(node)
-                    .and_then(|record| record.parent)
-                    .and_then(|parent| tree.pre_transform_rect(parent))
-                {
-                    live.width.set(bounds.w);
-                }
-            })
-            .build()
-            .exclude_from_hit_testing()
     }
 }
 
@@ -231,13 +146,14 @@ fn sheen_background(air: Oklch, glue: f32) -> GpuiBackground {
     }
 }
 
-fn sheen(corners: CornerRadii, air: Oklch, glue: f32) -> Element {
+fn sheen(corners: CornerRadii, air: Oklch, sweep: Timeline) -> Element {
     UiBox::new()
         .style(
             Style::new()
                 .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
                 .corners(corners)
-                .gpui_background(sheen_background(air, glue)),
+                .gpui_background(sheen_background(air, 1.0))
+                .timeline(sweep),
         )
         .build()
         .exclude_from_hit_testing()
@@ -264,7 +180,7 @@ fn triangle(bounds: Rect, points: [Point; 3], background: GpuiBackground) -> Dis
     }
 }
 
-fn dog_ear(theme: &ArtisanTheme, curl: f32) -> Element {
+fn dog_ear(theme: &ArtisanTheme, curl: Timeline) -> Element {
     let edge = CURL_EDGE;
     let page = theme.colors.background;
     let face = theme.colors.gray.step(match theme.colors.mode.is_dark() {
@@ -281,7 +197,7 @@ fn dog_ear(theme: &ArtisanTheme, curl: f32) -> Element {
                 .absolute_at(Some(0.0), None, None, Some(0.0))
                 .width(aqua_ui::style::Length::Px(CURL_EDGE))
                 .height(aqua_ui::style::Length::Px(CURL_EDGE))
-                .transform(ear_transform(curl)),
+                .timeline(curl),
         )
         .on_paint(move |bounds| {
             let h = bounds.h;
