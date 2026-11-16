@@ -77,7 +77,7 @@ fn step(position: Seq) -> Item {
     )
 }
 
-fn deliver(conversation: &mut Conversation, core: &Core, completion: Completion) {
+fn deliver(conversation: &mut Conversation, core: &mut Core, completion: Completion) {
     assert!(
         runtime()
             .block_on(conversation.delivery.sender().send(completion))
@@ -105,11 +105,11 @@ fn page(items: Vec<Item>) -> ItemsPage {
 
 #[test]
 fn scrolling_up_into_a_subagent_task_stops_following_the_tail() {
-    let (_directory, _listener, core, mut conversation) = fixture();
+    let (_directory, _listener, mut core, mut conversation) = fixture();
     let thread = origin(&conversation);
     deliver(
         &mut conversation,
-        &core,
+        &mut core,
         Completion::Page {
             origin: thread,
             fetch: Fetch::Tail,
@@ -123,7 +123,7 @@ fn scrolling_up_into_a_subagent_task_stops_following_the_tail() {
     let effects = vec![Effect::Fetch(Fetch::Tail)];
     deliver(
         &mut conversation,
-        &core,
+        &mut core,
         Completion::Agent {
             origin: scoped.clone(),
             context: HashMap::from([(ItemId("agent".into()), Arc::new(agent()))]),
@@ -133,7 +133,7 @@ fn scrolling_up_into_a_subagent_task_stops_following_the_tail() {
     );
     deliver(
         &mut conversation,
-        &core,
+        &mut core,
         Completion::Page {
             origin: scoped,
             fetch: Fetch::Tail,

@@ -4,8 +4,8 @@ use crate::ui::chrome::card::POLAR_INK;
 use crate::ui::kit::{HitArea, IconSize, KeySize, Radius, Space, Spaced, Surface};
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::{
-    CursorIcon, DisplayItem, InputEvent, Insets, Key as Pressed, NamedKey, Oklch, PointerButton,
-    Role, Transform2D,
+    CursorIcon, DisplayItem, InputEvent, Key as Pressed, NamedKey, Oklch, PointerButton, Role,
+    Transform2D,
 };
 use aqua_ui::element::{Box as UiBox, Canvas, Element};
 use aqua_ui::input::{EventPhase, InputKind, InputResponse, RoutedInput};
@@ -63,6 +63,10 @@ fn new_thread_key(emit: Rc<dyn Fn(Event)>) -> Element {
 }
 
 #[must_use]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the search glyph pads only its right side, by the key's lip, so it centres on the key face"
+)]
 pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
     let edge = RAIL_KEY.edge();
     let lip = key_lip(RAIL_KEY);
@@ -74,7 +78,7 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
                 .flex_grow(1.0)
                 .align(AlignItems::CENTER)
                 .justify(JustifyContent::CENTER)
-                .padding_insets(Insets {
+                .padding_insets(aqua_core::Insets {
                     left: 0.0,
                     right: lip,
                     top: 0.0,
@@ -139,6 +143,10 @@ pub struct Overlay {
 }
 
 #[must_use]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the field grows out of the rail key, so its radius sits on the absolutely placed box that animates"
+)]
 pub fn overlay(theme: &ArtisanTheme, overlay: Overlay) -> Element {
     let root = UiBox::new()
         .layout("column")
