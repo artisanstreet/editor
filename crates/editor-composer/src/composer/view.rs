@@ -2397,23 +2397,10 @@ impl ComposerOwner {
             let tab = Some(
                 UiBox::new()
                     .height(editor_ui::tab_card::TAB_CARD_TAB_HEIGHT_PX)
-                    .spaced(Space::S4)
+                    .spaced(Space::S16)
                     .style(Style::new().align(AlignItems::CENTER))
                     .child(self.model(theme, &controller, host))
-                    .children(
-                        project
-                            .map(|project| {
-                                [
-                                    editor_ui::kit::Divider::vertical(
-                                        &theme,
-                                        editor_ui::tab_card::TAB_CARD_TAB_HEIGHT_PX,
-                                    ),
-                                    project,
-                                ]
-                            })
-                            .into_iter()
-                            .flatten(),
-                    )
+                    .children(project)
                     .build(),
             );
             let strip = if tab.is_some() {
