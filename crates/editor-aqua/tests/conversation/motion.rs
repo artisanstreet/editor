@@ -491,9 +491,9 @@ fn a_sticker_plays_on_paint_without_rebuilding_the_transcript() {
     let mut motion = RowMotion::default();
     let sticker = motion.sticker(key.clone(), true, false, start).unwrap();
     assert!(!motion.animating(), "a sticker must not rebuild every frame");
-    assert!(motion.sticking(start));
-    let bubble_key = sticker.key();
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.set_viewport(400.0, 200.0, 1.0);
+    app.advance_clock(1.0);
     app.mount(move |_| {
         UiBox::new()
             .width(400.0)
@@ -504,32 +504,31 @@ fn a_sticker_plays_on_paint_without_rebuilding_the_transcript() {
                     SegmentPosition::Single,
                     UiBox::new().width(200.0).height(40.0).build(),
                 )
-                .sticker(Some(sticker.clone()))
-                .build(),
+                .sticker(Some(sticker))
+                .build()
+                .with_key("bubble"),
             )
             .build()
     })
     .unwrap();
-    app.set_viewport(400.0, 200.0, 1.0);
-    app.build_frame().unwrap();
     let paint = |app: &aqua::UiApp| {
         let node = app
             .tree()
-            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
-                bubble_key.clone(),
-            )))
+            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from("bubble")))
             .unwrap();
-        app.tree().get(node).unwrap().paint().clone()
+        app.tree().paint(node).unwrap()
     };
-    let rest_shadows = paint(&app).gpui_shadows.len() - 1;
-    let middle = start + DURATION / 2;
-    assert!(motion.paint_stickers(&mut app, middle));
-    assert_eq!(paint(&app).opacity, Some(StickerFrame::at(DURATION / 2).opacity));
-    assert_eq!(paint(&app).gpui_shadows.len(), rest_shadows + 1);
-    assert!(!motion.paint_stickers(&mut app, start + DURATION));
+    assert!(app.build_frame().unwrap().is_some());
+    let lifted = paint(&app);
+    assert_eq!(lifted.opacity, Some(0.0));
+    app.advance_clock(1.0 + DURATION.as_secs_f64() / 2.0);
+    assert!(app.build_frame().unwrap().is_some());
+    let middle = paint(&app).opacity.unwrap();
+    assert!((middle - StickerFrame::at(DURATION / 2).opacity).abs() < 1e-3);
+    app.advance_clock(1.0 + DURATION.as_secs_f64());
+    assert_eq!(app.build_frame().unwrap(), None);
     let rest = paint(&app);
-    assert_eq!(rest.opacity, Some(1.0));
-    assert_eq!(rest.gpui_shadows.len(), rest_shadows);
-    assert!(!motion.sticking(start + DURATION));
-    assert!(!motion.paint_stickers(&mut app, start + DURATION * 2));
+    assert_eq!(rest.opacity, None);
+    assert_eq!(rest.transform, None);
+    assert_eq!(rest.gpui_shadows.len(), lifted.gpui_shadows.len() - 1);
 }
