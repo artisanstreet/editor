@@ -20,6 +20,15 @@ enum Sending {
     Failed,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Posting {
+    Idle,
+    Sending(ThreadId),
+    Blocked(ThreadId),
+    Accepted(ThreadId),
+    Failed,
+}
+
 struct Outgoing {
     request: Submission,
     state: Sending,
@@ -46,6 +55,7 @@ pub struct DraftSession {
     busy: bool,
     removed: bool,
     outgoing: Option<Outgoing>,
+    accepted: Option<ThreadId>,
 }
 
 impl DraftSession {
@@ -64,6 +74,7 @@ impl DraftSession {
             busy: false,
             removed: false,
             outgoing: None,
+            accepted: None,
         }
     }
 
@@ -86,6 +97,18 @@ impl DraftSession {
                 .outgoing
                 .as_ref()
                 .is_some_and(|outgoing| outgoing.state != Sending::Failed)
+    }
+
+    pub fn posting(&self) -> Posting {
+        match &self.outgoing {
+            Some(outgoing) if self.sending() => Posting::Sending(outgoing.request.thread.clone()),
+            Some(outgoing) if outgoing.state == Sending::Failed => Posting::Failed,
+            Some(outgoing) => Posting::Blocked(outgoing.request.thread.clone()),
+            None => self
+                .accepted
+                .clone()
+                .map_or(Posting::Idle, Posting::Accepted),
+        }
     }
 
     pub fn send_failed(&self) -> bool {
@@ -114,6 +137,7 @@ impl DraftSession {
         if self.removed || self.sending() {
             return;
         }
+        self.accepted = None;
         match &mut self.outgoing {
             Some(outgoing) => outgoing.state = Sending::Queued,
             None => {
@@ -166,6 +190,7 @@ impl DraftSession {
         self.busy = false;
         self.dirty = false;
         self.outgoing = None;
+        self.accepted = None;
         self.body = Value::Null;
         self.snapshot.body = Value::Null;
         self.error = Some("This Forge pairing was removed.".into());
@@ -274,7 +299,7 @@ impl DraftSession {
         self.error = Some(error);
     }
 
-    pub fn posted(&mut self, result: Result<(), String>) {
+    pub fn posted(&mut self, result: Result<(), String>, thread: ThreadId) {
         if self.removed {
             return;
         }
@@ -285,6 +310,7 @@ impl DraftSession {
                     .outgoing
                     .take()
                     .is_some_and(|outgoing| outgoing.edited != self.edited);
+                self.accepted = Some(thread);
                 self.snapshot.revision = self.snapshot.revision.saturating_add(1);
                 self.snapshot.body = Value::Null;
                 self.unconfirmed.clear();

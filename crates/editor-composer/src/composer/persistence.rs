@@ -396,7 +396,7 @@ impl DraftHandle {
                 }
                 let accepted = result.is_ok();
                 session.mutate(|shared| {
-                    shared.state.posted(result);
+                    shared.state.posted(result, request.thread.clone());
                     if accepted && !shared.state.removed() {
                         shared.emit(SessionEvent::Accepted {
                             thread: request.thread,

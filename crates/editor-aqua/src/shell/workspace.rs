@@ -58,6 +58,7 @@ pub struct Workspace {
     )>,
     draft_sessions: crate::composer::persistence::DraftSessions,
     composer_actions: Rc<RefCell<VecDeque<crate::composer::view::ComposerAction>>>,
+    sent_new_thread: Option<artisan_api::ThreadId>,
     composer_effects: Vec<crate::composer::view::ComposerEffect>,
     composer_editor_dirty: bool,
     composer_focus_pending: bool,
@@ -139,6 +140,7 @@ impl Workspace {
             composer_target: None,
             draft_sessions: crate::composer::persistence::DraftSessions::default(),
             composer_actions: Rc::new(RefCell::new(VecDeque::new())),
+            sent_new_thread: None,
             composer_effects: Vec::new(),
             composer_editor_dirty: false,
             composer_focus_pending: false,
@@ -557,7 +559,7 @@ impl Workspace {
             let anchor_key = match kind {
                 PopupKind::Model => "composer-model".to_owned(),
                 PopupKind::Project => "composer-project".to_owned(),
-                PopupKind::Mentions => "composer-prompt".to_owned(),
+                PopupKind::Mentions => mention_anchor(ui).to_owned(),
             };
             let content = match kind {
                 PopupKind::Model => {
@@ -588,16 +590,14 @@ impl Workspace {
                     ))
                 }
                 PopupKind::Mentions => {
-                    let composer = owner.controller.borrow();
-                    let width = keyed_node(ui, aqua_ui::element::Key::from("composer-prompt"))
+                    let width = keyed_node(ui, aqua_ui::element::Key::from(mention_anchor(ui)))
                         .and_then(|node| ui.tree().rect(node))
                         .map_or(viewport.w, |rect| rect.w);
-                    view::mention_menu(
+                    owner.mention_menu(
                         theme,
-                        &composer.mentions,
                         viewport,
                         width,
-                        Rc::clone(&emit),
+                        crate::shell::wheel::kept_offset(ui, view::MENTION_SCROLL).y,
                     )
                 }
             };
@@ -610,8 +610,10 @@ impl Workspace {
             } else {
                 continue;
             };
-            if let Err(error) = result {
-                tracing::warn!(%error, "could not synchronize composer popup");
+            match result {
+                Ok(()) if kind == PopupKind::Mentions => owner.mention_revealed(),
+                Ok(()) => {}
+                Err(error) => tracing::warn!(%error, "could not synchronize composer popup"),
             }
         }
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
@@ -1033,6 +1035,28 @@ impl Workspace {
             .map(Some)
     }
 
+    pub const fn take_sent_new_thread(&mut self) -> Option<artisan_api::ThreadId> {
+        self.sent_new_thread.take()
+    }
+
+    #[must_use]
+    pub fn new_thread_posting(&self) -> crate::composer::draft_session::Posting {
+        self.composer
+            .as_ref()
+            .and_then(|owner| {
+                let composer = owner.controller.borrow();
+                let new_thread = matches!(
+                    composer.target,
+                    crate::composer::controller::ComposerTarget::NewThread { .. }
+                );
+                new_thread
+                    .then(|| composer.session.as_ref())
+                    .flatten()
+                    .map(|session| session.read(|state| state.posting()))
+            })
+            .unwrap_or(crate::composer::draft_session::Posting::Idle)
+    }
+
     pub fn composer_content(
         &mut self,
         ui: &mut aqua::UiApp,
@@ -1436,6 +1460,7 @@ impl Workspace {
                 target,
                 crate::composer::controller::ComposerTarget::NewThread { .. }
             ) {
+                self.sent_new_thread = Some(thread.clone());
                 core.navigate(Screen::Thread {
                     host: target.host().clone(),
                     thread: thread.clone(),
@@ -1714,5 +1739,12 @@ impl Workspace {
             return false;
         };
         crate::conversation::read::acknowledge(candidate, &self.conversation, core, current)
+    }
+}
+
+fn mention_anchor(ui: &aqua::UiApp) -> &'static str {
+    match keyed_node(ui, "composer-tab-card-body".into()) {
+        Some(_) => "composer-tab-card-body",
+        None => "composer",
     }
 }

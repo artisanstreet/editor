@@ -424,6 +424,21 @@ pub fn conversation_notice(theme: &ArtisanTheme, text: String, error: bool) -> E
     )
 }
 
+pub struct Sky {
+    pub opacity: f32,
+    pub transform: aqua_core::Transform2D,
+}
+
+fn sky(
+    theme: &ArtisanTheme,
+    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    reduced_motion: bool,
+    look: &Sky,
+) -> Element {
+    crate::ui::sky::artwork(theme, composer_measurement, reduced_motion)
+        .style(Style::new().opacity(look.opacity).transform(look.transform))
+}
+
 pub fn new_conversation(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,
@@ -431,17 +446,54 @@ pub fn new_conversation(
     parts: ComposerParts,
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     reduced_motion: bool,
+    docked: Option<f32>,
+    look: Option<&Sky>,
 ) -> anyhow::Result<Element> {
-    let artwork = crate::ui::sky::artwork(theme, composer_measurement.clone(), reduced_motion);
+    let artwork = look.map(|look| sky(theme, composer_measurement.clone(), reduced_motion, look));
     let card = measured_composer(workspace, core, theme, parts, composer_measurement, None)?;
+    let body = match docked {
+        Some(width) => crate::conversation::view::thread_frame(
+            UiBox::new().build(),
+            Vec::new(),
+            Some(card),
+            None,
+            width,
+            1.0,
+        ),
+        None => centered_conversation(card),
+    };
     Ok(UiBox::new()
         .width(Length::Pct(100.0))
         .height(Length::Pct(100.0))
         .clip(true)
-        .child(artwork)
-        .child(centered_conversation(card))
+        .children(artwork)
+        .child(body.with_key("new-thread-body"))
         .build()
         .with_key(crate::shell::composer_glide::STAGE_KEY))
+}
+
+pub fn under_setting_sky(
+    theme: &ArtisanTheme,
+    composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+    reduced_motion: bool,
+    look: Option<&Sky>,
+    content: Element,
+) -> Element {
+    UiBox::new()
+        .width(Length::Pct(100.0))
+        .height(Length::Pct(100.0))
+        .clip(true)
+        .children(look.map(|look| sky(theme, composer_measurement, reduced_motion, look)))
+        .child(
+            UiBox::new()
+                .width(Length::Pct(100.0))
+                .height(Length::Pct(100.0))
+                .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
+                .child(content)
+                .build()
+                .with_key("thread-under-sky"),
+        )
+        .build()
 }
 
 pub fn centered_conversation(content: Element) -> Element {

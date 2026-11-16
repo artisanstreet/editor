@@ -14,6 +14,7 @@ impl RootViews {
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let now = std::time::Instant::now();
         while let Some(action) = self.scroll_requests.front() {
+            let landing = *action == crate::conversation::controller::ScrollAction::Tail;
             let Some(directive @ ScrollDirective::FollowEnd) =
                 crate::conversation::adapter::scroll_directive(conversation, action.clone(), reduced)
             else {
@@ -28,6 +29,9 @@ impl RootViews {
             ) else {
                 break;
             };
+            if landing {
+                self.wheel.cancel_transcript();
+            }
             self.scroll_requests.pop_front();
         }
     }

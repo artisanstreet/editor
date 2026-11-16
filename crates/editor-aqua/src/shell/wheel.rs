@@ -204,6 +204,10 @@ impl WheelGlides {
         }
     }
 
+    pub fn cancel_transcript(&mut self) {
+        self.transcript.cancel();
+    }
+
     pub fn active(&self) -> bool {
         self.transcript.active() || self.threads.active() || self.model.active() || self.tree.active()
     }

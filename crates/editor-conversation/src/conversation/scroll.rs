@@ -99,7 +99,7 @@ pub fn scrolled(
     if wants_older(viewport_height, scroll_offset) && !source_prefix {
         inputs.push(Input::TopReached);
     }
-    let at_end = maximum > 0.0 && -scroll_offset >= maximum - 1.0;
+    let at_end = -scroll_offset >= maximum - 1.0;
     if at_end || gap_shown {
         inputs.push(Input::BottomReached);
     } else {
@@ -206,11 +206,6 @@ pub fn apply_directive(
                     ui.scroll_collection_to(TRANSCRIPT, aqua_core::Point::new(x, target.y)) || left,
                 )
             }
-        }
-        ScrollDirective::Offset(offset) => {
-            smooth.cancel();
-            let left = leave_tail(ui);
-            Some(ui.scroll_collection_to(TRANSCRIPT, aqua_core::Point::new(x, *offset)) || left)
         }
     }
 }

@@ -1,14 +1,32 @@
 use std::time::Duration;
 
 pub const DROPDOWN_OPEN: Duration = Duration::from_millis(250);
-pub const DROPDOWN_CLOSE: Duration = Duration::from_millis(150);
+pub const DROPDOWN_CLOSE: Duration = Duration::from_millis(200);
 pub const DROPDOWN_PRE_SCALE: f32 = 0.97;
-pub const DROPDOWN_CLOSING_SCALE: f32 = 0.99;
 const HIDDEN_OFFSET: f32 = 8.0;
 #[must_use]
 pub fn smooth_out(progress: f32) -> f32 {
     let value = super::motion::MotionCurve::SmoothOut.sample(f64::from(progress)) as f32;
     value
+}
+
+#[must_use]
+pub fn eased(phase: MenuPhase, progress: f32) -> f32 {
+    let curve = match phase {
+        MenuPhase::Closing => super::motion::MotionCurve::EaseInOut,
+        MenuPhase::Hidden | MenuPhase::Opening | MenuPhase::Open => {
+            super::motion::MotionCurve::SmoothOut
+        }
+    };
+    curve.sample_f32(f64::from(progress))
+}
+
+#[must_use]
+pub const fn travel_scale(phase: MenuPhase) -> f32 {
+    match phase {
+        MenuPhase::Closing => DROPDOWN_PRE_SCALE,
+        MenuPhase::Hidden | MenuPhase::Opening | MenuPhase::Open => 1.0,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

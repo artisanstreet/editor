@@ -1,7 +1,7 @@
 use super::disclosure::DisclosureState;
 use super::fold::{self, Row, RowKey, RunSummary};
 use super::thread::{self, ThreadView};
-use super::viewport::{Effect, Fetch, Input, Jump, State};
+use super::viewport::{Effect, Fetch, Input, Jump};
 use editor_core::{
     Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, delivery::Delivery, runtime::runtime,
 };
@@ -55,7 +55,6 @@ struct ParkedThread {
     view: ThreadView,
     projections: super::projection::Projections,
     row_heights: HashMap<RowKey, f32>,
-    offset: Option<f32>,
 }
 
 struct Pending {
@@ -99,7 +98,6 @@ enum Completion {
 pub enum ScrollAction {
     End,
     Tail,
-    Offset(f32),
     To(Seq),
     Row(usize),
 }
@@ -129,6 +127,7 @@ pub struct Conversation {
     pub load_error: Option<String>,
     pub landing: Option<Landing>,
     landed_at: Option<Instant>,
+    away: bool,
     pub scroll_frame: Option<Instant>,
     generation: u64,
     work_reading: Option<Seq>,
@@ -139,7 +138,6 @@ pub struct Conversation {
     delivery: Delivery<Completion>,
     events: Vec<ConversationEvent>,
     scroll: Vec<ScrollAction>,
-    offset: Option<f32>,
     parked: super::parked::Shelf<ParkedKey, ParkedThread>,
     pending: Option<Pending>,
 }
@@ -200,6 +198,7 @@ impl Conversation {
             load_error: None,
             landing: None,
             landed_at: None,
+            away: false,
             scroll_frame: None,
             generation: 0,
             work_reading: None,
@@ -213,7 +212,6 @@ impl Conversation {
             ),
             events: Vec::new(),
             scroll: Vec::new(),
-            offset: None,
             parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
             pending: None,
         }
@@ -230,7 +228,10 @@ impl Conversation {
                 } else if self.open.as_ref() == Some(&(host.clone(), thread.clone()))
                     && self.host_instance == current
                 {
-                    self.pending = None;
+                    let switched_back = self.pending.take().is_some();
+                    if std::mem::take(&mut self.away) | switched_back {
+                        self.land_at_latest(core, Vec::new());
+                    }
                 } else if !self.pending.as_ref().is_some_and(|pending| {
                     pending.origin.host == host
                         && pending.thread == thread
@@ -240,11 +241,15 @@ impl Conversation {
                 }
             }
             Screen::NewThread { .. } => self.close(core),
-            _ => {}
+            Screen::Settings(_) => {}
+            Screen::Home | Screen::Marketplace | Screen::Usage => {
+                self.away = self.open.is_some();
+            }
         }
     }
 
     pub fn open_thread(&mut self, core: &mut Core, host: HostId, thread: ThreadId) {
+        self.away = false;
         let Some(instance) = core.host(&host).map(|host| host.instance()) else {
             self.close(core);
             return;
@@ -254,6 +259,7 @@ impl Conversation {
             && self.host_instance == Some(instance)
         {
             self.pending = None;
+            self.land_at_latest(core, Vec::new());
             return;
         }
         super::open_timing::begin();
@@ -305,20 +311,34 @@ impl Conversation {
             mut view,
             projections,
             row_heights,
-            offset,
         } = parked;
         let effects = view.resume();
-        let scroll = match (view.viewport.state(), offset) {
-            (State::Reading { .. }, Some(offset)) => ScrollAction::Offset(offset),
-            (State::Reading { .. } | State::Following {} | State::Jumping { .. }, _) => {
-                ScrollAction::Tail
-            }
-        };
         self.projections = projections;
         self.row_heights = row_heights;
         self.install(core, host, thread, instance, view, None);
-        self.scroll.push(scroll);
-        self.perform(core, effects);
+        self.land_at_latest(core, effects);
+    }
+
+    fn land_at_latest(&mut self, core: &Core, effects: Vec<Effect>) {
+        let Some(view) = &mut self.view else {
+            return;
+        };
+        let jump = match self.landing {
+            Some(Landing::Loading) => Vec::new(),
+            Some(Landing::Settling { .. }) | None => view.jump(Jump::Latest),
+        };
+        if jump.iter().any(|effect| matches!(effect, Effect::Fetch(_))) {
+            self.landing = Some(Landing::Loading);
+        }
+        if self.landing.is_none() {
+            self.landed_at = Some(Instant::now());
+        }
+        for effect in effects.into_iter().chain(jump) {
+            match effect {
+                Effect::ScrollToEnd => self.scroll.push(ScrollAction::Tail),
+                effect => self.perform(core, vec![effect]),
+            }
+        }
     }
 
     fn holds(&self) -> bool {
@@ -398,20 +418,14 @@ impl Conversation {
                 view,
                 projections: std::mem::take(&mut self.projections),
                 row_heights: std::mem::take(&mut self.row_heights),
-                offset: self.offset,
             },
             bytes,
         );
     }
 
-    pub fn note_offset(&mut self, offset: f32) {
-        self.offset = Some(offset);
-    }
-
     pub fn close(&mut self, core: &mut Core) {
         self.pending = None;
         self.park();
-        self.offset = None;
         self.generation = self.generation.wrapping_add(1);
         self.page_task = None;
         self.work_task = None;
@@ -420,6 +434,7 @@ impl Conversation {
         self.work_reading = None;
         self.landing = None;
         self.landed_at = None;
+        self.away = false;
         self.scroll_frame = None;
         self.scroll.clear();
         self.disclosures = DisclosureState::default();

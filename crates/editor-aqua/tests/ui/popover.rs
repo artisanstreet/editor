@@ -295,8 +295,11 @@ fn menus_keep_their_surface_and_callback_until_the_exit_finishes() {
     assert_eq!(closed.get(), 0);
     let paint = app.tree().paint(root).unwrap();
     assert!(paint.opacity.unwrap() > 0.0 && paint.opacity.unwrap() < 1.0);
-    assert!(paint.transform.unwrap().a > 0.99 && paint.transform.unwrap().a < 1.0);
-    host.advance(&mut app, 0.41).unwrap();
+    assert!(paint.transform.unwrap().a > 0.97 && paint.transform.unwrap().a < 1.0);
+    let closed_at = 0.25 + editor_aqua::ui::picker_motion::DROPDOWN_CLOSE.as_secs_f64();
+    host.advance(&mut app, closed_at - 0.01).unwrap();
+    assert!(host.is_open(&app));
+    host.advance(&mut app, closed_at + 0.01).unwrap();
     assert!(!host.is_open(&app));
     assert_eq!(closed.get(), 1);
 }

@@ -12,6 +12,7 @@ use aqua_ui::tree::UiCommand;
 
 use super::editor::{CommandOutcome, EditOutcome, Editor, Mode, PasteOutcome, utf8_range_to_utf16};
 use super::metrics::EditorMetrics;
+use crate::ui::scroll_edge::EdgeBands;
 use crate::ui::theme::ArtisanTheme;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +39,13 @@ pub struct EditorController {
     text_key: Rc<RefCell<Option<aqua_ui::element::Key>>>,
     theme: Rc<RefCell<Option<ArtisanTheme>>>,
     native_follow_caret: Rc<std::cell::Cell<bool>>,
+}
+
+#[derive(Clone, Copy)]
+struct Framing {
+    mode: Mode,
+    bare: bool,
+    inset: bool,
 }
 
 struct NativeEditorModel {
@@ -447,6 +455,7 @@ impl EditorController {
             false,
             false,
             self.state.borrow().shown_suggestion().map(str::to_owned),
+            None,
         )
     }
 
@@ -459,7 +468,33 @@ impl EditorController {
         bare: bool,
         inset: bool,
     ) -> Element {
-        let key = key.into();
+        let framing = Framing { mode, bare, inset };
+        self.keyed(key.into(), theme, placeholder, framing, None)
+    }
+
+    pub fn prompt_with_scroll_edges(
+        &self,
+        key: impl Into<aqua_ui::element::Key>,
+        theme: &ArtisanTheme,
+        placeholder: &str,
+        edges: &EdgeBands,
+    ) -> Element {
+        let framing = Framing {
+            mode: Mode::Prompt,
+            bare: false,
+            inset: false,
+        };
+        self.keyed(key.into(), theme, placeholder, framing, Some(edges))
+    }
+
+    fn keyed(
+        &self,
+        key: aqua_ui::element::Key,
+        theme: &ArtisanTheme,
+        placeholder: &str,
+        Framing { mode, bare, inset }: Framing,
+        edges: Option<&EdgeBands>,
+    ) -> Element {
         *self.text_key.borrow_mut() = Some(key.clone());
         let show_notice = self.state.borrow().limit_notice();
         let leaf = self
@@ -474,6 +509,7 @@ impl EditorController {
                 bare,
                 inset,
                 self.state.borrow().shown_suggestion().map(str::to_owned),
+                edges,
             ));
         if show_notice {
             root = root.child(
@@ -505,6 +541,7 @@ impl EditorController {
                 bare,
                 inset,
                 self.state.borrow().shown_suggestion().map(str::to_owned),
+                None,
             ));
         if show_notice {
             root = root.child(
@@ -690,6 +727,7 @@ fn wrap_prompt_scroll(
     bare: bool,
     inset: bool,
     suggestion: Option<String>,
+    edges: Option<&EdgeBands>,
 ) -> Element {
     if mode != Mode::Prompt {
         return leaf;
@@ -706,6 +744,10 @@ fn wrap_prompt_scroll(
         )
         .child(leaf)
         .build();
+    let scroll = match edges {
+        Some(edges) => scroll.with_key(edges.scroll),
+        None => scroll,
+    };
     let wrapper = UiBox::new().style(
         Style::new()
             .axis(Axis::Column)
@@ -740,5 +782,9 @@ fn wrap_prompt_scroll(
                     .build(),
             );
     }
-    wrapper.child(hint.build()).child(scroll).build()
+    wrapper
+        .child(hint.build())
+        .child(scroll)
+        .children(edges.map(EdgeBands::bands).into_iter().flatten())
+        .build()
 }

@@ -38,11 +38,11 @@ pub fn trigger(text: &str, caret: usize) -> Option<Trigger> {
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
+    Command,
     Skill,
     Connector,
-    Command,
     Thread,
 }
 impl Kind {
@@ -65,6 +65,33 @@ pub struct Row {
     search_title: String,
 }
 
+impl Row {
+    #[must_use]
+    pub fn new(kind: Kind, name: String, title: String, description: String) -> Self {
+        Self {
+            kind,
+            search_name: name.to_lowercase(),
+            search_title: title.to_lowercase(),
+            name,
+            title,
+            description,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reveal {
+    Section,
+    Highlighted,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Steering {
+    #[default]
+    Pointer,
+    Keys,
+}
+
 #[derive(Default)]
 pub struct Mentions {
     pub catalog: Vec<Row>,
@@ -72,6 +99,10 @@ pub struct Mentions {
     pub current: Option<Trigger>,
     pub rows: Vec<usize>,
     pub highlighted: usize,
+    reveal: Option<Reveal>,
+    steering: Steering,
+    hovered: Option<usize>,
+    pointer: Option<aqua_core::Point>,
     dismissed: Option<(usize, String)>,
 }
 
@@ -92,14 +123,7 @@ impl Mentions {
             } else {
                 name.clone()
             };
-            rows.push(Row {
-                kind,
-                search_name: name.to_lowercase(),
-                search_title: title.to_lowercase(),
-                name,
-                title,
-                description,
-            });
+            rows.push(Row::new(kind, name, title, description));
         };
         if let Some(catalog) = &host.skill_catalog {
             for skill in catalog.iter().filter(|skill| skill.enabled) {
@@ -152,22 +176,54 @@ impl Mentions {
             if thread.archived {
                 continue;
             }
-            rows.push(Row {
-                kind: Kind::Thread,
-                name: title.to_owned(),
-                title: title.to_owned(),
-                description: host
-                    .projects
+            rows.push(Row::new(
+                Kind::Thread,
+                title.to_owned(),
+                title.to_owned(),
+                host.projects
                     .get(&thread.project_id)
                     .map(|project| project.name.clone())
                     .unwrap_or_default(),
-                search_name: title.to_lowercase(),
-                search_title: title.to_lowercase(),
-            });
+            ));
         }
+        self.set_catalog(rows, titles);
+    }
+
+    fn set_catalog(&mut self, rows: Vec<Row>, titles: Vec<String>) {
+        let highlighted = self
+            .highlighted_row()
+            .map(|row| (row.kind, row.name.clone()));
         self.catalog = rows;
         self.threads = titles;
         self.rebuild();
+        self.hovered = self.hovered.filter(|hovered| *hovered < self.rows.len());
+        if self.rows.is_empty() {
+            return;
+        }
+        let kept = highlighted.and_then(|(kind, name)| {
+            self.rows.iter().position(|index| {
+                self.catalog
+                    .get(*index)
+                    .is_some_and(|row| row.kind == kind && row.name == name)
+            })
+        });
+        match kept {
+            Some(index) if index == self.highlighted => {}
+            Some(index) => {
+                self.highlighted = index;
+                self.reveal_at(Reveal::Highlighted);
+            }
+            None => {
+                self.highlighted = self.first_of_trigger();
+                self.reveal_at(Reveal::Section);
+            }
+        }
+    }
+
+    fn highlighted_row(&self) -> Option<&Row> {
+        self.rows
+            .get(self.highlighted)
+            .and_then(|index| self.catalog.get(*index))
     }
     pub fn sync(&mut self, text: &str, caret: usize) {
         let current = trigger(text, caret);
@@ -181,8 +237,10 @@ impl Mentions {
             self.dismissed = None;
         }
         self.current = current;
-        self.highlighted = 0;
         self.rebuild();
+        self.hovered = None;
+        self.highlighted = self.first_of_trigger();
+        self.reveal_at(Reveal::Section);
     }
     pub fn clear_trigger(&mut self) {
         if self.current.is_some() {
@@ -202,12 +260,84 @@ impl Mentions {
     pub fn up(&mut self) {
         if !self.rows.is_empty() {
             self.highlighted = (self.highlighted + self.rows.len() - 1) % self.rows.len();
+            self.steer_by_keys();
         }
     }
     pub fn down(&mut self) {
         if !self.rows.is_empty() {
             self.highlighted = (self.highlighted + 1) % self.rows.len();
+            self.steer_by_keys();
         }
+    }
+    fn steer_by_keys(&mut self) {
+        self.steering = Steering::Keys;
+        self.reveal_at(Reveal::Highlighted);
+    }
+    pub fn hover(&mut self, index: usize, inside: bool) {
+        match inside {
+            true if index < self.rows.len() => {
+                self.hovered = Some(index);
+                if self.steering == Steering::Pointer {
+                    self.highlighted = index;
+                }
+            }
+            true => {}
+            false => {
+                if self.hovered == Some(index) {
+                    self.hovered = None;
+                }
+            }
+        }
+    }
+    pub fn pointer_at(&mut self, pointer: Option<aqua_core::Point>) -> bool {
+        if pointer == self.pointer {
+            return false;
+        }
+        self.pointer = pointer;
+        if self.steering == Steering::Pointer {
+            return false;
+        }
+        self.steering = Steering::Pointer;
+        match self.hovered {
+            Some(hovered) if hovered != self.highlighted => {
+                self.highlighted = hovered;
+                true
+            }
+            Some(_) | None => false,
+        }
+    }
+    pub fn kinds(&self) -> Vec<Kind> {
+        self.rows
+            .iter()
+            .filter_map(|index| self.catalog.get(*index).map(|row| row.kind))
+            .collect()
+    }
+    fn reveal_at(&mut self, reveal: Reveal) {
+        self.reveal = Some(reveal);
+    }
+
+    pub const fn mark_revealed(&mut self) {
+        self.reveal = None;
+    }
+
+    #[must_use]
+    pub fn scroll(&self, kept: f32, metrics: Metrics) -> f32 {
+        self.reveal.map_or(kept, |reveal| {
+            scroll_offset(&self.kinds(), self.highlighted, reveal, kept, metrics)
+        })
+    }
+    fn first_of_trigger(&self) -> usize {
+        let Some(trigger) = &self.current else {
+            return 0;
+        };
+        self.rows
+            .iter()
+            .position(|index| {
+                self.catalog
+                    .get(*index)
+                    .is_some_and(|row| row.kind.sigil() == trigger.sigil)
+            })
+            .unwrap_or(0)
     }
     pub fn replacement(&self, text: &str, index: usize) -> Option<(Range<usize>, String)> {
         let trigger = self.current.as_ref()?;
@@ -240,11 +370,12 @@ impl Mentions {
             return;
         }
         let query = trigger.query.trim().to_lowercase();
+        let commands = trigger.at_start;
         let mut ranked: Vec<_> = self
             .catalog
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.kind.sigil() == trigger.sigil)
+            .filter(|(_, row)| row.kind != Kind::Command || commands)
             .filter_map(|(index, row)| {
                 let rank = if query.is_empty() || row.search_name.starts_with(&query) {
                     0
@@ -259,7 +390,7 @@ impl Mentions {
                 } else {
                     return None;
                 };
-                Some((row.kind == Kind::Thread, rank, index))
+                Some((row.kind, rank, index))
             })
             .collect();
         ranked.sort_unstable();
@@ -362,3 +493,74 @@ impl Mentions {
         })
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Metrics {
+    pub divider: f32,
+    pub heading: f32,
+    pub row: f32,
+    pub viewport: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Span {
+    section_top: f32,
+    top: f32,
+    bottom: f32,
+}
+
+fn spans(kinds: &[Kind], metrics: Metrics) -> (Vec<Span>, f32) {
+    let mut spans = Vec::with_capacity(kinds.len());
+    let mut y = 0.0;
+    let mut previous = None;
+    let mut section_top = 0.0;
+    for kind in kinds {
+        if previous != Some(*kind) {
+            if previous.is_some() {
+                y += metrics.divider;
+            }
+            section_top = y;
+            y += metrics.heading;
+            previous = Some(*kind);
+        }
+        spans.push(Span {
+            section_top,
+            top: y,
+            bottom: y + metrics.row,
+        });
+        y += metrics.row;
+    }
+    (spans, y)
+}
+
+fn scroll_offset(
+    kinds: &[Kind],
+    highlighted: usize,
+    reveal: Reveal,
+    kept: f32,
+    metrics: Metrics,
+) -> f32 {
+    let (spans, height) = spans(kinds, metrics);
+    let max = (height - metrics.viewport).max(0.0);
+    let Some(span) = spans.get(highlighted) else {
+        return kept.clamp(0.0, max);
+    };
+    let section_first = highlighted == 0 || kinds.get(highlighted - 1) != kinds.get(highlighted);
+    let top = match section_first {
+        true => span.section_top,
+        false => span.top,
+    };
+    let offset = match reveal {
+        Reveal::Section => top,
+        Reveal::Highlighted if top < kept => top,
+        Reveal::Highlighted if span.bottom > kept + metrics.viewport => {
+            span.bottom - metrics.viewport
+        }
+        Reveal::Highlighted => kept,
+    };
+    offset.clamp(0.0, max)
+}
+
+#[cfg(test)]
+#[path = "../../tests/composer/mentions.rs"]
+mod tests;

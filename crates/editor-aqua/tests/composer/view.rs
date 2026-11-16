@@ -74,3 +74,59 @@ fn a_sent_message_leaves_the_prompt_on_screen_at_once() {
     app.build_frame().unwrap();
     assert_eq!(app.tree().editor_snapshot(prompt).unwrap().text, "");
 }
+
+#[test]
+fn moving_the_pointer_after_arrowing_hands_the_mention_highlight_back() {
+    use editor_aqua::composer::mentions::{Kind, Row};
+    use editor_aqua::composer::view::ComposerAction;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().join("editor"),
+    })
+    .unwrap();
+    let identity = Identity::generate("composer-mentions").unwrap();
+    let print = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
+    let host = HostId("composer-mentions".into());
+    core.add_test_host(
+        &HostConfig {
+            id: host.clone(),
+            name: "Forge".into(),
+            address: "127.0.0.1:1".into(),
+            fingerprint: print,
+            kind: HostKind::Local,
+        },
+        client,
+    );
+    let mut sessions = DraftSessions::default();
+    let mut owner = ComposerOwner::new(
+        &core,
+        &mut sessions,
+        ComposerTarget::NewThread {
+            host: host.clone(),
+            project: None,
+        },
+        std::rc::Rc::new(|_| {}),
+    );
+    {
+        let mut composer = owner.controller.borrow_mut();
+        composer.mentions.catalog = ["alpha", "beta", "gamma"]
+            .into_iter()
+            .map(|name| Row::new(Kind::Thread, name.into(), name.into(), String::new()))
+            .collect();
+        composer.mentions.sync("@", 1);
+    }
+    let resting = aqua_core::Point::new(10.0, 10.0);
+    assert!(!owner.mention_pointer(Some(resting)));
+    owner.controller.borrow_mut().mentions.down();
+    owner.dispatch_with_change(&mut core, ComposerAction::HoverMention(0, false), None);
+
+    let (_, changed) =
+        owner.dispatch_with_change(&mut core, ComposerAction::HoverMention(2, true), None);
+    assert!(!changed);
+    assert!(!owner.mention_pointer(Some(resting)));
+    assert_eq!(owner.controller.borrow().mentions.highlighted, 1);
+
+    assert!(owner.mention_pointer(Some(aqua_core::Point::new(12.0, 10.0))));
+    assert_eq!(owner.controller.borrow().mentions.highlighted, 2);
+}
