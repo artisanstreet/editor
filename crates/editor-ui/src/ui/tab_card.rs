@@ -113,7 +113,8 @@ impl TabCard {
                     .width(Length::Pct(100.0))
                     .padding(TAB_CARD_PADDING_PX)
                     .child(self.body)
-                    .build(),
+                    .build()
+                    .with_key(format!("{}-body", self.id)),
             )
             .build()
             .with_key(self.id)

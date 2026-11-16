@@ -3373,6 +3373,15 @@ impl SectionViews for RootViews {
         self.bind_row_sources(ui, ctx, window);
         self.sync_resource_jump(ui, ctx, window);
         self.sync_context(shell, ui, ctx, window);
+        if let Some(owner) = shell
+            .entry
+            .workspace()
+            .and_then(|workspace| workspace.composer.as_ref())
+            && owner.mention_pointer(ui.tree().pointer_position())
+        {
+            self.conversation_invalidated.set(true);
+            ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
+        }
         if self.composer_glide.sync(ui, std::time::Instant::now()) {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }

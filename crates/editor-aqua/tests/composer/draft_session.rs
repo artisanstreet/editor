@@ -169,7 +169,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
     );
     assert!(
         !owner
-            .dispatch_with_change(&mut core, ComposerAction::HoverMention(999), None)
+            .dispatch_with_change(&mut core, ComposerAction::HoverMention(999, true), None)
             .1
     );
     assert!(
