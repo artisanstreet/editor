@@ -3,6 +3,7 @@ mod pages;
 pub use images::{BlobImage, BlobImages};
 mod preferences;
 mod project_icons;
+pub mod stopping;
 mod wsl;
 pub use pages::{ThreadPage, ThreadPageDirection};
 pub use wsl::WslStatus;
@@ -345,6 +346,7 @@ pub struct HostData {
     pub projects: BTreeMap<ProjectId, Project>,
     pub threads: HashMap<ThreadId, Thread>,
     pub runs: HashMap<ThreadId, Run>,
+    stopping: HashMap<ThreadId, stopping::Stopping>,
     pub settings: serde_json::Map<String, serde_json::Value>,
     pub engines: BTreeMap<EngineId, EngineStatus>,
     pub account: Option<Account>,
@@ -435,6 +437,7 @@ impl HostData {
             projects: BTreeMap::new(),
             threads: HashMap::new(),
             runs: HashMap::new(),
+            stopping: HashMap::new(),
             settings: serde_json::Map::new(),
             engines: BTreeMap::new(),
             account: None,
@@ -627,7 +630,46 @@ impl HostData {
         });
         threads
     }
+    pub fn stop_optimistically(&mut self, thread: &ThreadId) {
+        let Some(run) = self.runs.get_mut(thread) else {
+            return;
+        };
+        let Some(stopping) = stopping::Stopping::begin(run, artisan_api::now()) else {
+            return;
+        };
+        self.stopping.insert(thread.clone(), stopping);
+        self.pending_events.push(HostEvent::ThreadChanged {
+            thread_id: thread.clone(),
+        });
+        self.pending_events.push(HostEvent::Changed);
+    }
+
+    pub fn stop_failed(&mut self, thread: &ThreadId) {
+        let Some(stopping) = self.stopping.remove(thread) else {
+            return;
+        };
+        if let Some(run) = self.runs.get_mut(thread) {
+            stopping.revert(run);
+        }
+        self.pending_events.push(HostEvent::ThreadChanged {
+            thread_id: thread.clone(),
+        });
+        self.pending_events.push(HostEvent::Changed);
+    }
+
     fn remember_run(&mut self, run: Run) {
+        let thread = run.thread_id.clone();
+        let run = match self.stopping.get(&thread).cloned() {
+            Some(stopping) => match stopping.hold(run) {
+                stopping::Held::Stopping(held) => held,
+                stopping::Held::Settled(settled) => {
+                    self.stopping.remove(&thread);
+                    settled
+                }
+                stopping::Held::Other(other) => other,
+            },
+            None => run,
+        };
         match self.runs.get(&run.thread_id) {
             Some(known) if known.id != run.id && known.started_at > run.started_at => {}
             _ => {

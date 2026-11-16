@@ -958,6 +958,8 @@ struct AnswerCompletion {
 
 #[derive(Clone, Debug)]
 pub enum ComposerEffect {
+    Stopping(editor_core::HostId, artisan_api::ThreadId),
+    StopFailed(editor_core::HostId, artisan_api::ThreadId),
     EditorChanged,
     FocusEditor,
     NewProject,
@@ -1784,7 +1786,17 @@ impl ComposerOwner {
             composer.drain_attachments(core, assets);
             composer.sync(core)
         };
-        let effects = self.drain_answers(core);
+        let mut effects = self.drain_answers(core);
+        {
+            let mut composer = self.controller.borrow_mut();
+            let host = composer.target.host().clone();
+            effects.extend(
+                composer
+                    .take_failed_stops()
+                    .into_iter()
+                    .map(|thread| ComposerEffect::StopFailed(host.clone(), thread)),
+            );
+        }
         let edited_here = self.controller.borrow().editor.borrow().paint_revision() != revision;
         let visible = ComposerVisible::capture(&self.controller.borrow());
         let changed = edited_here || !self.last_visible.borrow().same_chrome(&visible);
@@ -1948,7 +1960,11 @@ impl ComposerOwner {
                     composer.send(host);
                 }
             }
-            ComposerAction::Stop => composer.stop(host),
+            ComposerAction::Stop => {
+                if let Some(thread) = composer.stop(host) {
+                    effects.push(ComposerEffect::Stopping(host.id.clone(), thread));
+                }
+            }
             ComposerAction::Continue => composer.continue_turn(host),
             ComposerAction::ClearGoal => composer.clear_goal(host),
             ComposerAction::Unpark => composer.unpark(host),

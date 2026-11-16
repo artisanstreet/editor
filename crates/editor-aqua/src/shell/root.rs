@@ -441,6 +441,8 @@ impl RootViews {
             .filter_map(|effect| match effect {
                 ComposerEffect::OpenImage(key) => workspace.composer_image(key),
                 ComposerEffect::EditorChanged
+                | ComposerEffect::Stopping(..)
+                | ComposerEffect::StopFailed(..)
                 | ComposerEffect::FocusEditor
                 | ComposerEffect::NewProject
                 | ComposerEffect::OpenQuestionSource(_)

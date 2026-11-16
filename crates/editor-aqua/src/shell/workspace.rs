@@ -841,12 +841,22 @@ impl Workspace {
 
     fn route_composer_effects(
         &mut self,
-        core: &Core,
+        core: &mut Core,
         effects: Vec<crate::composer::view::ComposerEffect>,
     ) {
         use crate::composer::view::ComposerEffect;
         for effect in effects {
             match effect {
+                ComposerEffect::Stopping(host, thread) => {
+                    if let Some(host) = core.host_mut(&host) {
+                        host.stop_optimistically(&thread);
+                    }
+                }
+                ComposerEffect::StopFailed(host, thread) => {
+                    if let Some(host) = core.host_mut(&host) {
+                        host.stop_failed(&thread);
+                    }
+                }
                 ComposerEffect::EditorChanged => self.composer_editor_dirty = true,
                 ComposerEffect::FocusEditor => self.composer_focus_pending = true,
                 ComposerEffect::NewProject => self.sidebar.add_project(core),
