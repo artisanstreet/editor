@@ -682,6 +682,10 @@ const TEXT_INSET: f32 = Inset::Menu.px() + Space::S8.px();
 const PROMPT_PADDING_X: f32 = 8.0;
 const PROMPT_GUTTER: f32 = TEXT_INSET - editor_ui::tab_card::TAB_CARD_PADDING_PX - PROMPT_PADDING_X;
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the extras inset only the sides and top, and the prompt gutter only the sides; the kit pads all four sides alike"
+)]
 pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Element {
     let extras: Vec<Element> = [
         parts.thread_error,
@@ -3387,6 +3391,11 @@ fn model_axis_pane(
         .with_key(format!("composer-axis-pane-{axis:?}"))
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "the model rail's 1 px item gap and the sheet's top-trimmed inset have no kit token"
+)]
 pub fn model_menu(
     theme: ArtisanTheme,
     host: &editor_core::HostData,
