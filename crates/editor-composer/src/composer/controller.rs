@@ -100,6 +100,7 @@ pub struct Composer {
     host_instance: Option<HostInstance>,
     target_generation: u64,
     pub cancelling: bool,
+    failed_stops: Vec<ThreadId>,
     pub continuing: bool,
     turn_completions: Delivery<TurnCompletion>,
     edit_revision: u64,
@@ -144,6 +145,7 @@ impl Composer {
             host_instance,
             target_generation: 0,
             cancelling: false,
+            failed_stops: Vec::new(),
             continuing: false,
             turn_completions: Delivery::new(NonZeroUsize::MIN),
             edit_revision: 0,
@@ -231,8 +233,12 @@ impl Composer {
         self.turn_completions.wake_mailbox()
     }
 
-    pub fn stop(&mut self, host: &HostData) {
-        self.turn_action(host, TurnAction::Stop);
+    pub fn stop(&mut self, host: &HostData) -> Option<ThreadId> {
+        self.turn_action(host, TurnAction::Stop)
+    }
+
+    pub fn take_failed_stops(&mut self) -> Vec<ThreadId> {
+        std::mem::take(&mut self.failed_stops)
     }
 
     pub fn clear_goal(&mut self, host: &HostData) {
@@ -246,16 +252,16 @@ impl Composer {
         self.turn_action(host, TurnAction::Continue);
     }
 
-    fn turn_action(&mut self, host: &HostData, action: TurnAction) {
+    fn turn_action(&mut self, host: &HostData, action: TurnAction) -> Option<ThreadId> {
         let ComposerTarget::Thread { thread, .. } = &self.target else {
-            return;
+            return None;
         };
         if self.host_instance != Some(host.instance()) {
-            return;
+            return None;
         }
         match action {
-            TurnAction::Stop if self.cancelling => return,
-            TurnAction::Continue if self.continuing => return,
+            TurnAction::Stop if self.cancelling => return None,
+            TurnAction::Continue if self.continuing => return None,
             TurnAction::Stop => self.cancelling = true,
             TurnAction::Continue => self.continuing = true,
             TurnAction::ClearGoal | TurnAction::Unpark | TurnAction::Permissions => {}
@@ -265,6 +271,7 @@ impl Composer {
         let instance = host.instance();
         let generation = self.target_generation;
         let delivery = self.turn_completions.sender();
+        let issued = thread.clone();
         runtime().spawn(async move {
             let result = match action {
                 TurnAction::Stop => client.cancel(&thread).await,
@@ -284,6 +291,7 @@ impl Composer {
                 })
                 .await;
         });
+        matches!(action, TurnAction::Stop).then_some(issued)
     }
 
     pub fn apply_permissions(&self, host: &HostData, permissions: artisan_api::Permissions) {
@@ -330,6 +338,9 @@ impl Composer {
     pub fn drain_turn_actions(&mut self, core: &Core) -> bool {
         let before = (self.cancelling, self.continuing, self.notice.clone());
         for completion in self.turn_completions.drain() {
+            if matches!(completion.action, TurnAction::Stop) && completion.error.is_some() {
+                self.failed_stops.push(completion.thread.clone());
+            }
             if core.host(self.target.host()).map(HostData::instance) != Some(completion.instance)
                 || self.target_generation != completion.generation
                 || !matches!(&self.target, ComposerTarget::Thread { thread, .. } if *thread == completion.thread)
