@@ -158,15 +158,18 @@ fn a_slow_switch_falls_back_to_loading_and_keeps_the_request_in_flight() {
 }
 
 #[test]
-fn going_back_before_the_page_arrives_cancels_the_switch() {
+fn going_back_before_the_page_arrives_cancels_the_switch_and_lands_at_the_latest_message() {
     let (_directory, _listener, mut core, mut conversation) = fixture();
     land(&mut conversation, &mut core, "first");
     conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("second".into()));
     let origin = held(&conversation);
+    conversation.scroll_actions();
 
     conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("first".into()));
 
     assert!(conversation.pending.is_none());
+    assert_eq!(conversation.scroll_actions(), [ScrollAction::Tail]);
+    assert!(conversation.landed_at.is_some());
     assert!(
         runtime()
             .block_on(
@@ -183,7 +186,7 @@ fn going_back_before_the_page_arrives_cancels_the_switch() {
 }
 
 #[test]
-fn returning_to_a_parked_thread_shows_it_at_once_and_refreshes_it() {
+fn returning_to_a_parked_thread_fades_it_in_at_once_and_refreshes_it() {
     let (_directory, _listener, mut core, mut conversation) = fixture();
     land(&mut conversation, &mut core, "first");
     conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("second".into()));
@@ -207,6 +210,7 @@ fn returning_to_a_parked_thread_shows_it_at_once_and_refreshes_it() {
         Some(Fetch::Refresh)
     );
     assert_eq!(conversation.scroll_actions(), [ScrollAction::Tail]);
+    assert!(conversation.landed_at.is_some());
 }
 
 #[test]
@@ -225,4 +229,161 @@ fn a_reset_forgets_the_parked_threads_of_its_host() {
     conversation.host_event(&core, &HostEvent::Reset, false);
 
     assert!(conversation.parked.is_empty());
+}
+
+#[test]
+fn returning_to_a_parked_thread_whose_latest_rows_were_evicted_waits_for_them() {
+    let (_directory, _listener, mut core, mut conversation) = fixture();
+    land(&mut conversation, &mut core, "first");
+    conversation.view.as_mut().unwrap().viewport.gap = Some(1);
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("second".into()));
+    let origin = held(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        page_for(origin, Fetch::Tail, "second"),
+    );
+    conversation.landed();
+    conversation.scroll_actions();
+
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("first".into()));
+
+    assert!(conversation.is_landing());
+    assert_eq!(conversation.reveal(Instant::now()), 0.0);
+    assert!(conversation.scroll_actions().is_empty());
+    let origin = current(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        page_for(origin, Fetch::Tail, "first"),
+    );
+    assert_eq!(conversation.scroll_actions(), [ScrollAction::End]);
+    assert!(matches!(
+        super::super::adapter::scroll_directive(&conversation, ScrollAction::End, false),
+        Some(super::super::adapter::ScrollDirective::FollowEnd)
+    ));
+}
+
+#[test]
+fn coming_back_while_evicted_rows_load_keeps_the_request_in_flight() {
+    let (_directory, _listener, mut core, mut conversation) = fixture();
+    land(&mut conversation, &mut core, "first");
+    conversation.view.as_mut().unwrap().viewport.gap = Some(1);
+    conversation.open_thread(&mut core, HostId(HOST.into()), ThreadId("second".into()));
+    let origin = held(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        page_for(origin, Fetch::Tail, "second"),
+    );
+    let thread = Screen::Thread {
+        host: HostId(HOST.into()),
+        thread: ThreadId("first".into()),
+    };
+    core.navigate(thread.clone());
+    conversation.sync_screen(&mut core);
+    let asked = conversation
+        .page_task
+        .as_ref()
+        .map(|task| task.abort_handle().id());
+    assert!(asked.is_some());
+
+    core.navigate(Screen::Usage);
+    conversation.sync_screen(&mut core);
+    core.navigate(thread);
+    conversation.sync_screen(&mut core);
+
+    assert_eq!(
+        conversation
+            .page_task
+            .as_ref()
+            .map(|task| task.abort_handle().id()),
+        asked
+    );
+    assert_eq!(conversation.landing, Some(Landing::Loading));
+}
+
+#[test]
+fn coming_back_from_another_screen_lands_the_open_thread_at_the_latest_message() {
+    let (_directory, _listener, mut core, mut conversation) = fixture();
+    land(&mut conversation, &mut core, "first");
+    conversation.viewport(
+        &core,
+        Input::ScrolledAway {
+            anchor: 1,
+            through: 1,
+        },
+    );
+    conversation.scroll_actions();
+    let thread = Screen::Thread {
+        host: HostId(HOST.into()),
+        thread: ThreadId("first".into()),
+    };
+    core.navigate(thread.clone());
+    conversation.sync_screen(&mut core);
+    assert!(conversation.scroll_actions().is_empty());
+
+    core.navigate(Screen::Usage);
+    conversation.sync_screen(&mut core);
+    core.navigate(thread);
+    conversation.sync_screen(&mut core);
+
+    assert_eq!(conversation.scroll_actions(), [ScrollAction::Tail]);
+    assert!(
+        conversation
+            .view
+            .as_ref()
+            .unwrap()
+            .viewport
+            .state()
+            .is_following()
+    );
+    assert!(conversation.landed_at.is_some());
+}
+
+#[test]
+fn a_thread_too_short_to_scroll_follows_new_messages() {
+    let (_directory, _listener, mut core, mut conversation) = fixture();
+    land(&mut conversation, &mut core, "first");
+
+    let inputs =
+        super::super::scroll::scrolled(&conversation, 0, 600.0, 0.0, 0.0, false, false, |_| false);
+
+    assert!(
+        inputs
+            .iter()
+            .any(|input| matches!(input, Input::BottomReached))
+    );
+}
+
+#[test]
+fn coming_back_while_the_first_page_loads_keeps_waiting_for_it() {
+    let (_directory, _listener, mut core, mut conversation) = fixture();
+    let thread = Screen::Thread {
+        host: HostId(HOST.into()),
+        thread: ThreadId("first".into()),
+    };
+    core.navigate(thread.clone());
+    conversation.sync_screen(&mut core);
+
+    core.navigate(Screen::Usage);
+    conversation.sync_screen(&mut core);
+    core.navigate(thread);
+    conversation.sync_screen(&mut core);
+
+    assert_eq!(conversation.landing, Some(Landing::Loading));
+    assert!(conversation.landed_at.is_none());
+    let origin = current(&conversation);
+    deliver(
+        &mut conversation,
+        &mut core,
+        page_for(origin, Fetch::Tail, "first"),
+    );
+    assert!(conversation.is_landing());
+    let actions = conversation.scroll_actions();
+    assert!(!actions.is_empty());
+    assert!(actions.iter().all(|action| matches!(
+        super::super::adapter::scroll_directive(&conversation, action.clone(), false),
+        Some(super::super::adapter::ScrollDirective::FollowEnd)
+    )));
 }

@@ -602,6 +602,7 @@ impl RootViews {
             self.row_cache.borrow_mut().rebind(None);
             self.smooth_scroll.cancel();
             self.scroll_requests.clear();
+            self.wheel.cancel_transcript();
             self.row_motion = Rc::default();
         }
         workspace
