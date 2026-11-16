@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cancellation_waits_for_adapter_cleanup_and_drains_its_final_events() {
+async fn a_stop_is_published_at_once_while_the_adapter_cleans_up_and_drains_its_final_events() {
     for engine in [EngineId::Codex, EngineId::Claude, EngineId::OpenCode] {
         let entered = Arc::new(tokio::sync::Notify::new());
         let ready = Arc::new(tokio::sync::Notify::new());
@@ -52,7 +52,7 @@ async fn cancellation_waits_for_adapter_cleanup_and_drains_its_final_events() {
                 .unwrap()
                 .unwrap()
                 .status,
-            RunStatus::Running
+            RunStatus::Cancelled
         );
         release.notify_one();
         let runs = fixture.settled().await;

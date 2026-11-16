@@ -440,6 +440,17 @@ async fn execute(
     inbox.close();
     cancel.cancel();
     let mut outcome = outcome;
+    if !adapter_finished
+        && outcome.status == RunStatus::Cancelled
+        && !hub.inner.shutdown.is_cancelled()
+    {
+        match announce_stop(hub, run, items).await {
+            Ok(stopped) => *run = stopped,
+            Err(error) => {
+                tracing::warn!(thread = %run.thread_id, run = %run.id, "announce the stop before the engine confirms it: {error:#}");
+            }
+        }
+    }
     if !adapter_finished {
         let deadline = tokio::time::sleep(Duration::from_secs(45));
         tokio::pin!(deadline);
@@ -1233,14 +1244,34 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
 }
 
 /// Settles the run and anything it left open.
-async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Result<()> {
-    let store = hub.store();
-    let open = items
+fn open_items(items: &Work) -> Vec<ItemId> {
+    items
         .by_key
         .values()
         .filter(|item| item.persisted && !item.status.is_terminal())
         .map(|item| item.id.clone())
-        .collect();
+        .collect()
+}
+
+/// Settles a stopped run as soon as the stop lands, so clients don't wait
+/// on the engine confirming it. The engine's teardown carries on after.
+async fn announce_stop(hub: &Hub, run: &Run, items: &Work) -> Result<Run> {
+    let stopped = Run {
+        status: RunStatus::Cancelled,
+        ended_at: Some(artisan_api::now()),
+        ..run.clone()
+    };
+    let (stopped, _) = hub
+        .store()
+        .settle_run(stopped, open_items(items), None)
+        .await
+        .with_context(|| format!("settle stopped run {}", run.id))?;
+    Ok(stopped)
+}
+
+async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Result<()> {
+    let store = hub.store();
+    let open = open_items(items);
     if let Some(error) = &outcome.error {
         tracing::warn!(thread = %run.thread_id, run = %run.id, "run ended {:?}: {error}", outcome.status);
     }
@@ -1275,7 +1306,7 @@ async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Res
     };
     run.status = outcome.status;
     run.error = outcome.error;
-    run.ended_at = Some(artisan_api::now());
+    run.ended_at = run.ended_at.or_else(|| Some(artisan_api::now()));
     let (_, parked) = store
         .settle_run(run.clone(), open, park)
         .await
