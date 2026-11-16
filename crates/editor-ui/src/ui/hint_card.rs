@@ -1,7 +1,7 @@
 use crate::ui::kit::{Space, Surface, TextRole, Tooltip};
+use crate::ui::picker_motion::{DROPDOWN_CLOSE, DROPDOWN_OPEN};
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_text::StyledSpan;
-use crate::ui::picker_motion::{DROPDOWN_CLOSE, DROPDOWN_OPEN};
 use aqua_ui::element::{Box as UiBox, Element, Text};
 use aqua_ui::motion::{Easing, Motion, Presence};
 use aqua_ui::style::{Length, Style};
@@ -67,6 +67,6 @@ pub fn presence() -> Presence {
         ))
         .exit(Motion::tween(
             DROPDOWN_CLOSE.as_secs_f64(),
-            Easing::SmoothOut,
+            Easing::EaseInOut,
         ))
 }

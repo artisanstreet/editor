@@ -661,20 +661,18 @@ impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
             let mut state = self.state.borrow_mut();
             state
                 .motion
-                .apply_progress(generation, super::picker_motion::smooth_out(progress));
+                .apply_progress(generation, super::picker_motion::eased(phase, progress));
             let frame = state.motion.frame();
             if settled {
                 state.finish(generation, !closing);
             }
             frame
         };
-        let target_scale = if closing {
-            super::picker_motion::DROPDOWN_CLOSING_SCALE
-        } else {
-            1.0
-        };
-        self.scale = (target_scale - self.from_scale)
-            .mul_add(super::picker_motion::smooth_out(progress), self.from_scale);
+        let target_scale = super::picker_motion::travel_scale(phase);
+        self.scale = (target_scale - self.from_scale).mul_add(
+            super::picker_motion::eased(phase, progress),
+            self.from_scale,
+        );
         let scale = self.scale;
         let element = (self.factory)().style(
             Style::new()

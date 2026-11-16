@@ -106,14 +106,24 @@ impl ContextMeterTooltip {
             self.target = target;
             self.started = now;
         }
-        let duration = if desired { 0.25 } else { 0.15 };
+        let (phase, duration) = match desired {
+            true => (
+                crate::ui::picker_motion::MenuPhase::Opening,
+                crate::ui::picker_motion::DROPDOWN_OPEN,
+            ),
+            false => (
+                crate::ui::picker_motion::MenuPhase::Closing,
+                crate::ui::picker_motion::DROPDOWN_CLOSE,
+            ),
+        };
+        let duration = duration.as_secs_f64();
         let progress = if reduced_motion {
             1.0
         } else {
             ((now - self.started) / duration).clamp(0.0, 1.0) as f32
         };
         self.value = (self.target - self.from)
-            .mul_add(crate::ui::picker_motion::smooth_out(progress), self.from);
+            .mul_add(crate::ui::picker_motion::eased(phase, progress), self.from);
         if let Some(popup) = self.popup {
             if let Some(root) = app.host().popup_root(popup) {
                 let mut paint = app
@@ -121,7 +131,7 @@ impl ContextMeterTooltip {
                     .paint(root)
                     .ok_or_else(|| "context card is not mounted".to_owned())?;
                 paint.opacity = Some(self.value);
-                let rest = if desired { 0.97 } else { 0.99 };
+                let rest = crate::ui::picker_motion::DROPDOWN_PRE_SCALE;
                 let scale = (1.0_f32 - rest).mul_add(self.value, rest);
                 let width = app
                     .host()

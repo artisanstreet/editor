@@ -360,12 +360,9 @@ impl AnimatedPickerHost {
             1.0
         };
         let settled = progress >= 1.0;
-        let eased = super::picker_motion::smooth_out(progress);
-        let target_scale = if closing {
-            super::picker_motion::DROPDOWN_CLOSING_SCALE
-        } else {
-            1.0
-        };
+        let phase = self.motion.phase();
+        let eased = super::picker_motion::eased(phase, progress);
+        let target_scale = super::picker_motion::travel_scale(phase);
         self.scale = (target_scale - self.from_scale).mul_add(eased, self.from_scale);
         self.motion.apply_progress(generation, eased);
         self.apply_frame(app)?;
