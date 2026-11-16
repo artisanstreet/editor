@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,49 +65,137 @@ impl StickerFrame {
     }
 }
 
+pub struct StickerLive {
+    key: String,
+    width: Cell<f32>,
+    rest: RefCell<Vec<GpuiShadowLayer>>,
+    air: Cell<Option<Oklch>>,
+}
+
+impl StickerLive {
+    #[must_use]
+    pub fn new(key: String) -> Rc<Self> {
+        Rc::new(Self {
+            key,
+            width: Cell::new(0.0),
+            rest: RefCell::new(Vec::new()),
+            air: Cell::new(None),
+        })
+    }
+
+    fn part(&self, part: &str) -> String {
+        format!("{}/sticker-{part}", self.key)
+    }
+
+    pub fn paint(&self, ui: &mut aqua::UiApp, frame: StickerFrame) -> bool {
+        let mut changed = self.repaint(ui, "bubble", |paint| {
+            paint.opacity = Some(frame.opacity);
+            paint.transform = Some(frame.transform(self.width.get()));
+            paint.gpui_shadows = self
+                .rest
+                .borrow()
+                .iter()
+                .cloned()
+                .chain((frame.glue < 1.0).then(|| lift_shadow(frame.glue)))
+                .collect();
+        });
+        if let Some(air) = self.air.get() {
+            changed |= self.repaint(ui, "sheen", |paint| {
+                paint.gpui_background = Some(sheen_background(air, frame.glue));
+            });
+        }
+        changed |= self.repaint(ui, "ear", |paint| {
+            paint.transform = Some(ear_transform(frame.curl));
+        });
+        changed
+    }
+
+    fn repaint(
+        &self,
+        ui: &mut aqua::UiApp,
+        part: &str,
+        update: impl FnOnce(&mut aqua_ui::style::Paint),
+    ) -> bool {
+        let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(self.part(part)));
+        let Some(node) = ui.tree().sole_node_with_key(key) else {
+            return false;
+        };
+        let Some(mut paint) = ui.tree().get(node).map(|record| record.paint().clone()) else {
+            return false;
+        };
+        update(&mut paint);
+        ui.tree_mut().set_paint(node, paint)
+    }
+}
+
 #[derive(Clone)]
 pub struct Sticker {
     pub frame: StickerFrame,
-    pub width: Rc<Cell<f32>>,
+    pub live: Rc<StickerLive>,
+}
+
+fn lift_shadow(glue: f32) -> GpuiShadowLayer {
+    let lift = 1.0 - glue;
+    GpuiShadowLayer {
+        dx: -6.0 * lift,
+        dy: 12.0 * lift,
+        blur: 28.0 * lift,
+        spread: 0.0,
+        inset: false,
+        color: Oklch::new(0.0, 0.0, 0.0)
+            .with_alpha(LIFT_ALPHA * lift)
+            .to_reference_paint(),
+    }
+}
+
+fn ear_transform(curl: f32) -> Transform2D {
+    let scale = curl.max(0.0);
+    Transform2D::translate(0.0, -CURL_EDGE)
+        .then(Transform2D::scale(scale, scale))
+        .then(Transform2D::translate(0.0, CURL_EDGE))
 }
 
 impl Sticker {
     #[must_use]
+    pub fn key(&self) -> String {
+        self.live.part("bubble")
+    }
+
+    #[must_use]
     pub fn style(&self) -> Style {
         Style::new()
             .opacity(self.frame.opacity)
-            .transform(self.frame.transform(self.width.get()))
+            .transform(self.frame.transform(self.live.width.get()))
+    }
+
+    pub fn rest_on(&self, shadows: &[GpuiShadowLayer]) {
+        self.live.rest.replace(shadows.to_vec());
     }
 
     #[must_use]
     pub fn lift_shadow(&self) -> GpuiShadowLayer {
-        let lift = 1.0 - self.frame.glue;
-        GpuiShadowLayer {
-            dx: -6.0 * lift,
-            dy: 12.0 * lift,
-            blur: 28.0 * lift,
-            spread: 0.0,
-            inset: false,
-            color: Oklch::new(0.0, 0.0, 0.0)
-                .with_alpha(LIFT_ALPHA * lift)
-                .to_reference_paint(),
-        }
+        lift_shadow(self.frame.glue)
     }
 
     #[must_use]
     pub fn layers(&self, theme: &ArtisanTheme, corners: CornerRadii, curl: bool) -> Vec<Element> {
-        let mut layers = vec![self.probe()];
-        if self.frame.glue < 1.0 {
-            layers.push(sheen(theme, corners, self.frame.glue));
-        }
-        if curl && self.frame.curl > 0.0 {
-            layers.push(dog_ear(theme, CURL_EDGE * self.frame.curl));
+        let air = match theme.colors.mode.is_dark() {
+            true => Oklch::new(1.0, 0.0, 0.0),
+            false => Oklch::new(0.0, 0.0, 0.0),
+        };
+        self.live.air.set(Some(air));
+        let mut layers = vec![
+            self.probe(),
+            sheen(corners, air, self.frame.glue).with_key(self.live.part("sheen")),
+        ];
+        if curl {
+            layers.push(dog_ear(theme, self.frame.curl).with_key(self.live.part("ear")));
         }
         layers
     }
 
     fn probe(&self) -> Element {
-        let width = Rc::clone(&self.width);
+        let live = Rc::clone(&self.live);
         Canvas::new()
             .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
             .on_prepaint(move |tree, node| {
@@ -116,7 +204,7 @@ impl Sticker {
                     .and_then(|record| record.parent)
                     .and_then(|parent| tree.pre_transform_rect(parent))
                 {
-                    width.set(bounds.w);
+                    live.width.set(bounds.w);
                 }
             })
             .build()
@@ -124,31 +212,32 @@ impl Sticker {
     }
 }
 
-fn sheen(theme: &ArtisanTheme, corners: CornerRadii, glue: f32) -> Element {
-    let air = match theme.colors.mode.is_dark() {
-        true => Oklch::new(1.0, 0.0, 0.0),
-        false => Oklch::new(0.0, 0.0, 0.0),
-    };
+fn sheen_background(air: Oklch, glue: f32) -> GpuiBackground {
     let edge = 1.0 - glue;
+    let alpha = if glue < 1.0 { SHEEN_ALPHA } else { 0.0 };
+    GpuiBackground::LinearGradient {
+        angle: 45.0,
+        color_space: GpuiGradientColorSpace::Oklab,
+        stops: [
+            GpuiGradientStop {
+                percentage: (edge - SHEEN_EDGE).max(0.0),
+                color: air.with_alpha(alpha).to_reference_paint(),
+            },
+            GpuiGradientStop {
+                percentage: edge,
+                color: air.with_alpha(0.0).to_reference_paint(),
+            },
+        ],
+    }
+}
+
+fn sheen(corners: CornerRadii, air: Oklch, glue: f32) -> Element {
     UiBox::new()
         .style(
             Style::new()
                 .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
                 .corners(corners)
-                .gpui_background(GpuiBackground::LinearGradient {
-                    angle: 45.0,
-                    color_space: GpuiGradientColorSpace::Oklab,
-                    stops: [
-                        GpuiGradientStop {
-                            percentage: (edge - SHEEN_EDGE).max(0.0),
-                            color: air.with_alpha(SHEEN_ALPHA).to_reference_paint(),
-                        },
-                        GpuiGradientStop {
-                            percentage: edge,
-                            color: air.with_alpha(0.0).to_reference_paint(),
-                        },
-                    ],
-                }),
+                .gpui_background(sheen_background(air, glue)),
         )
         .build()
         .exclude_from_hit_testing()
@@ -175,7 +264,8 @@ fn triangle(bounds: Rect, points: [Point; 3], background: GpuiBackground) -> Dis
     }
 }
 
-fn dog_ear(theme: &ArtisanTheme, edge: f32) -> Element {
+fn dog_ear(theme: &ArtisanTheme, curl: f32) -> Element {
+    let edge = CURL_EDGE;
     let page = theme.colors.background;
     let face = theme.colors.gray.step(match theme.colors.mode.is_dark() {
         true => 6,
@@ -186,7 +276,13 @@ fn dog_ear(theme: &ArtisanTheme, edge: f32) -> Element {
         false => 5,
     });
     Canvas::new()
-        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
+        .style(
+            Style::new()
+                .absolute_at(Some(0.0), None, None, Some(0.0))
+                .width(aqua_ui::style::Length::Px(CURL_EDGE))
+                .height(aqua_ui::style::Length::Px(CURL_EDGE))
+                .transform(ear_transform(curl)),
+        )
         .on_paint(move |bounds| {
             let h = bounds.h;
             let corner = [

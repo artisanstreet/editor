@@ -141,7 +141,10 @@ impl ChatBubbleSegment {
                 .collect(),
             _ => Vec::new(),
         };
-        shadows.extend(self.sticker.as_ref().map(Sticker::lift_shadow));
+        if let Some(sticker) = &self.sticker {
+            sticker.rest_on(&shadows);
+            shadows.push(sticker.lift_shadow());
+        }
         if !shadows.is_empty() {
             style = style.gpui_shadows(shadows);
         }
@@ -192,7 +195,7 @@ impl ChatBubbleSegment {
             .unwrap_or_default();
         let element = frame.child(self.content).children(layers).build();
         let element = match &self.sticker {
-            Some(sticker) => element.style(sticker.style()),
+            Some(sticker) => element.style(sticker.style()).with_key(sticker.key()),
             None => element,
         };
         if let Some(selector) = self.selector {

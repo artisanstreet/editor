@@ -1685,6 +1685,18 @@ impl RowFactory {
         realized
     }
 
+    pub fn paint_stickers(&self, app: &mut aqua::UiApp, now: Instant) -> bool {
+        let owners: Vec<_> = self
+            .realized_owners
+            .borrow()
+            .values()
+            .filter_map(std::rc::Weak::upgrade)
+            .collect();
+        owners.iter().fold(false, |running, owner| {
+            owner.motion.borrow_mut().paint_stickers(app, now) || running
+        })
+    }
+
     fn bubble_sticker(
         &self,
         owner: &super::row_cache::RowOwner,
@@ -2496,7 +2508,11 @@ impl RowFactory {
                 owner.fully_visible() && !owner.is_settling() && !owner.is_animating()
             });
         let quiescent = self.content_keyed.get() || row_settles_statically(&row.model);
-        let motionless = !row_owner.motion.borrow().animating();
+        let motionless = {
+            let motion = row_owner.motion.borrow();
+            let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+            !motion.animating() && !motion.sticking(now)
+        };
         let disclosure_rest = row.disclosure == RowDisclosure::default();
         let settled = !self.unsettled.get()
             && !work_settling

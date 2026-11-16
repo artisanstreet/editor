@@ -3379,6 +3379,13 @@ impl SectionViews for RootViews {
         if Self::sync_transcript_reveal(shell, ui) {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
+        if self
+            .rows
+            .as_ref()
+            .is_some_and(|rows| rows.paint_stickers(ui, std::time::Instant::now()))
+        {
+            ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
         let (moving, gone) = self.latest.sync(ui, std::time::Instant::now());
         if moving {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);

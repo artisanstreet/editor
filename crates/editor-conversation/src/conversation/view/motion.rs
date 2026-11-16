@@ -39,7 +39,8 @@ struct DisclosedState {
 
 struct StickerState {
     started: Option<Instant>,
-    width: Rc<Cell<f32>>,
+    live: Rc<sticker::StickerLive>,
+    settled: bool,
 }
 
 struct EntranceState {
@@ -207,19 +208,42 @@ impl RowMotion {
         reduced_motion: bool,
         now: Instant,
     ) -> Option<Sticker> {
-        let state = self.stickers.entry(key).or_insert_with(|| StickerState {
+        let state = self.stickers.entry(key.clone()).or_insert_with(|| StickerState {
             started: (fresh && !reduced_motion).then_some(now),
-            width: Rc::new(Cell::new(0.0)),
+            live: sticker::StickerLive::new(format!("{key:?}")),
+            settled: false,
         });
         let elapsed = now.saturating_duration_since(state.started?);
         if elapsed >= sticker::DURATION || reduced_motion {
             return None;
         }
-        self.animating = true;
         Some(Sticker {
             frame: StickerFrame::at(elapsed),
-            width: Rc::clone(&state.width),
+            live: Rc::clone(&state.live),
         })
+    }
+
+    #[must_use]
+    pub fn sticking(&self, now: Instant) -> bool {
+        self.stickers.values().any(|state| {
+            state
+                .started
+                .is_some_and(|started| now.saturating_duration_since(started) < sticker::DURATION)
+        })
+    }
+
+    pub fn paint_stickers(&mut self, ui: &mut aqua::UiApp, now: Instant) -> bool {
+        let mut running = false;
+        for state in self.stickers.values_mut() {
+            let Some(started) = state.started.filter(|_| !state.settled) else {
+                continue;
+            };
+            let elapsed = now.saturating_duration_since(started).min(sticker::DURATION);
+            state.live.paint(ui, StickerFrame::at(elapsed));
+            state.settled = elapsed >= sticker::DURATION;
+            running |= !state.settled;
+        }
+        running
     }
 
     pub fn begin_frame(&mut self) {
