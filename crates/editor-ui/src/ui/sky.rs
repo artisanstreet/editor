@@ -8,6 +8,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
+pub const KEY: &str = "new-thread-winter-sky";
+
 static PROGRAM: LazyLock<Arc<FragmentShader>> = LazyLock::new(|| {
     Arc::new(FragmentShader {
         name: "artisan.winter-sky".into(),
@@ -61,6 +63,6 @@ pub fn artwork(
         .style(Style::new().absolute_at(Some(2.0), Some(2.0), Some(2.0), Some(2.0)))
         .child(canvas)
         .build()
-        .with_key("new-thread-winter-sky")
+        .with_key(KEY)
         .exclude_from_hit_testing()
 }

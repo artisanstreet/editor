@@ -1,6 +1,6 @@
 use self::open_thread::PendingStall;
 use crate::core::Screen;
-use crate::shell::{application::SectionViews, host::Shell, layout, view};
+use crate::shell::{application::SectionViews, composer_glide::Route, host::Shell, layout, view};
 use aqua::prelude::{AquaWindowId, InputEvent, ObservedWindowState};
 use aqua::{AppCtx, UiApp};
 use aqua_ui::element::Element;
@@ -2941,15 +2941,18 @@ impl SectionViews for RootViews {
         aqua_core::checkpoint::reach();
         let card_width =
             (viewport.width - self.sidebar.width(now) - crate::frame::view::SHEET_PADDING).max(0.0);
-        match &screen {
-            Screen::Thread { .. } => self.composer_glide.dock(
-                crate::conversation::view::composer_lift(card_width),
-                now,
-                reduced,
-            ),
-            Screen::NewThread { .. } => {}
-            _ => self.composer_glide.forget(),
-        }
+        let lift = crate::conversation::view::composer_lift(card_width);
+        let sent = workspace.take_sent_new_thread();
+        let route = match &screen {
+            Screen::NewThread { .. } => Route::NewThread(workspace.new_thread_posting()),
+            Screen::Thread { thread, .. } => Route::Thread { thread, sent },
+            _ => Route::Elsewhere,
+        };
+        self.composer_glide.follow(route, lift, now, reduced);
+        let sky = view::Sky {
+            opacity: self.composer_glide.sky_opacity(now),
+            transform: self.composer_glide.sky_transform(now),
+        };
         let center = match &screen {
             Screen::Home => workspace.home_view(&shell.core, &theme),
             Screen::Marketplace => workspace.marketplace_view(&shell.core, theme),
@@ -2999,14 +3002,26 @@ impl SectionViews for RootViews {
                             attachments,
                             mention_overlay: None,
                             thread_error: None,
-                            shift: 0.0,
+                            shift: self.composer_glide.shift(now),
                         },
                         Rc::clone(&self.composer_measurement),
                         reduced,
+                        self.composer_glide.launched().then_some(card_width),
+                        self.composer_glide.sky_shown(now).then_some(&sky),
                     )?
                 }
             }
             Screen::Settings(_) => unreachable!(),
+        };
+        let center = match &screen {
+            Screen::Thread { .. } => view::under_setting_sky(
+                &theme,
+                Rc::clone(&self.composer_measurement),
+                reduced,
+                self.composer_glide.sky_setting(now).then_some(&sky),
+                center,
+            ),
+            _ => center,
         };
         aqua_core::checkpoint::reach();
         if !matches!(screen, Screen::Thread { .. }) {
@@ -3383,8 +3398,19 @@ impl SectionViews for RootViews {
             self.conversation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
         }
-        if self.composer_glide.sync(ui, std::time::Instant::now()) {
+        if let Some(workspace) = shell.entry.workspace()
+            && matches!(shell.core.workspace_screen(), Screen::NewThread { .. })
+            && self.composer_glide.awaits(&workspace.new_thread_posting())
+        {
+            self.conversation_invalidated.set(true);
+            ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
+        }
+        let glide = self.composer_glide.sync(ui, std::time::Instant::now());
+        if glide.moving {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+        }
+        if glide.sky_gone {
+            self.conversation_invalidated.set(true);
         }
         if Self::sync_transcript_reveal(shell, ui) {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);

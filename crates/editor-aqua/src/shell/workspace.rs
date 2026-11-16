@@ -58,6 +58,7 @@ pub struct Workspace {
     )>,
     draft_sessions: crate::composer::persistence::DraftSessions,
     composer_actions: Rc<RefCell<VecDeque<crate::composer::view::ComposerAction>>>,
+    sent_new_thread: Option<artisan_api::ThreadId>,
     composer_effects: Vec<crate::composer::view::ComposerEffect>,
     composer_editor_dirty: bool,
     composer_focus_pending: bool,
@@ -139,6 +140,7 @@ impl Workspace {
             composer_target: None,
             draft_sessions: crate::composer::persistence::DraftSessions::default(),
             composer_actions: Rc::new(RefCell::new(VecDeque::new())),
+            sent_new_thread: None,
             composer_effects: Vec::new(),
             composer_editor_dirty: false,
             composer_focus_pending: false,
@@ -1033,6 +1035,28 @@ impl Workspace {
             .map(Some)
     }
 
+    pub const fn take_sent_new_thread(&mut self) -> Option<artisan_api::ThreadId> {
+        self.sent_new_thread.take()
+    }
+
+    #[must_use]
+    pub fn new_thread_posting(&self) -> crate::composer::draft_session::Posting {
+        self.composer
+            .as_ref()
+            .and_then(|owner| {
+                let composer = owner.controller.borrow();
+                let new_thread = matches!(
+                    composer.target,
+                    crate::composer::controller::ComposerTarget::NewThread { .. }
+                );
+                new_thread
+                    .then(|| composer.session.as_ref())
+                    .flatten()
+                    .map(|session| session.read(|state| state.posting()))
+            })
+            .unwrap_or(crate::composer::draft_session::Posting::Idle)
+    }
+
     pub fn composer_content(
         &mut self,
         ui: &mut aqua::UiApp,
@@ -1436,6 +1460,7 @@ impl Workspace {
                 target,
                 crate::composer::controller::ComposerTarget::NewThread { .. }
             ) {
+                self.sent_new_thread = Some(thread.clone());
                 core.navigate(Screen::Thread {
                     host: target.host().clone(),
                     thread: thread.clone(),

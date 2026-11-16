@@ -1,5 +1,5 @@
 use artisan_api::{DraftSnapshot, DraftWriteResult};
-use editor_aqua::composer::draft_session::{DraftSession, Operation};
+use editor_aqua::composer::draft_session::{DraftSession, Operation, Posting};
 use serde_json::json;
 
 #[test]
@@ -604,7 +604,7 @@ fn assert_original_submission(session: &mut DraftSession) {
     assert_eq!(request.message.text, original.message.text);
     assert_eq!(request.thread, original.thread);
     assert_eq!(request.create.unwrap().id, original.create.unwrap().id);
-    session.posted(Ok(()));
+    session.posted(Ok(()), submission().thread);
     assert!(!session.sending());
     assert!(!session.pending());
     assert!(session.body.is_null());
@@ -792,7 +792,7 @@ fn a_draft_typed_while_the_message_posts_survives_its_acceptance() {
     assert!(matches!(session.next(), Some(Operation::Post(_))));
     let typed = json!({"text": "the next message"});
     session.queue(typed.clone());
-    session.posted(Ok(()));
+    session.posted(Ok(()), submission().thread);
     assert!(!session.sending());
     assert_eq!(session.body, typed);
     assert!(session.pending());
@@ -817,10 +817,32 @@ fn a_failed_post_reports_the_failure_and_keeps_the_submission_for_retry() {
     save_next(&mut session);
     assert!(matches!(session.next(), Some(Operation::Post(_))));
     assert!(!session.send_failed());
-    session.posted(Err("offline".into()));
+    session.posted(Err("offline".into()), submission().thread);
     assert!(session.send_failed());
     assert!(!session.sending());
     session.retry();
     assert!(!session.send_failed());
     assert_original_submission(&mut session);
+}
+
+#[test]
+fn posting_follows_a_new_thread_send_from_queued_to_accepted() {
+    let mut session = DraftSession::new("new:project".into());
+    session.loaded(Ok(DraftSnapshot::default()));
+    assert_eq!(session.posting(), Posting::Idle);
+    session.queue(json!({"text": "Keep my draft"}));
+    session.submit(submission());
+    let thread = submission().thread;
+    assert_eq!(session.posting(), Posting::Sending(thread.clone()));
+    save_next(&mut session);
+    assert!(matches!(session.next(), Some(Operation::Post(_))));
+    session.posted(Err("offline".into()), thread.clone());
+    assert_eq!(session.posting(), Posting::Failed);
+    session.retry();
+    assert_eq!(session.posting(), Posting::Sending(thread.clone()));
+    assert!(matches!(session.next(), Some(Operation::Post(_))));
+    session.posted(Ok(()), thread.clone());
+    assert_eq!(session.posting(), Posting::Accepted(thread));
+    session.submit(submission());
+    assert!(matches!(session.posting(), Posting::Sending(_)));
 }
