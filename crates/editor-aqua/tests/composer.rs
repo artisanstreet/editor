@@ -19,3 +19,5 @@ mod picker;
 mod questionnaire;
 #[path = "composer/sliding_tab.rs"]
 mod sliding_tab;
+#[path = "composer/view.rs"]
+mod view;
