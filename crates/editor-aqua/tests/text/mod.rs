@@ -241,6 +241,45 @@ fn mounted_preedit_without_cursor_follows_editor_source_and_submits() {
 }
 
 #[test]
+fn submitting_leaves_the_prompt_to_whatever_the_app_writes_next() {
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::ui::text::mount::{EditorController, EditorEvent};
+    use editor_aqua::ui::theme::ArtisanTheme;
+    use std::cell::RefCell;
+
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let recorded = events.clone();
+    let controller = EditorController::new(Editor::new("send me", Mode::Prompt), move |event| {
+        recorded.borrow_mut().push(event)
+    });
+    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    runtime
+        .mount(|_| controller.element(Mode::Prompt, &ArtisanTheme::resolved(), ""))
+        .unwrap();
+    runtime.set_viewport(400.0, 200.0, 1.0);
+    runtime.build_frame().unwrap();
+    let node = runtime
+        .tree()
+        .traverse()
+        .into_iter()
+        .find(|node| runtime.tree().editor_snapshot(*node).is_some())
+        .unwrap();
+    runtime.tree_mut().set_focused(Some(node));
+    controller.sync(runtime.tree_mut(), node);
+    runtime.handle_input(&InputEvent::KeyDown(KeyEvent {
+        key: Key::Named(NamedKey::Enter),
+        modifiers: Modifiers::NONE,
+        repeat: false,
+    }));
+    assert!(events.borrow().contains(&EditorEvent::Submitted));
+    controller.state().borrow_mut().set_text("");
+    controller.sync(runtime.tree_mut(), node);
+    runtime.build_frame().unwrap();
+    assert_eq!(runtime.tree().editor_snapshot(node).unwrap().text, "");
+}
+
+#[test]
 fn mounted_vertical_keys_update_authoritative_selection() {
     use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
     use aqua_text::{SharedFonts, SharedRuns};

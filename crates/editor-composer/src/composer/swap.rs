@@ -13,7 +13,7 @@ use super::view::Primary;
 pub const DURATION: Duration = Duration::from_millis(250);
 pub const INCOMING: &str = "composer-primary-in";
 pub const OUTGOING: &str = "composer-primary-out";
-pub const PROMPT: &str = "composer-prompt";
+pub const PROMPT: &str = "composer-prompt-settle";
 pub const SETTLE: Duration = Duration::from_millis(250);
 const SETTLE_RISE: f32 = 6.0;
 const BLUR: f32 = 2.0;
