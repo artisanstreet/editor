@@ -3531,7 +3531,14 @@ pub fn model_menu(
     }
     sheet
         .build(&theme, children)
-        .style(Style::new().width(Length::Px(MODEL_MENU_WIDTH.min(viewport.w - MENU_VIEWPORT_MARGIN))))
+        .style(
+            Style::new()
+                .width(Length::Px(MODEL_MENU_WIDTH.min(viewport.w - MENU_VIEWPORT_MARGIN)))
+                .padding_insets(aqua_core::Insets {
+                    left: MODEL_ITEM_GUTTER,
+                    ..aqua_core::Insets::uniform(sheet.padding_px())
+                }),
+        )
         .with_key("composer-model-menu")
         .on_input(
             aqua_ui::input::InputKind::KeyDown,
