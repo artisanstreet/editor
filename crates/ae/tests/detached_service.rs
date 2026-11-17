@@ -14,6 +14,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::time::Duration;
+    use test_support::net::PortReservation;
 
     /// The `forge` built beside this `ae` (`cargo test --workspace` builds it).
     fn forge_binary() -> PathBuf {
@@ -106,18 +107,14 @@ mod tests {
         }
     }
 
-    fn unused_loopback_address() -> SocketAddr {
-        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
-        reservation.local_addr().unwrap()
-    }
-
     fn stderr(output: &Output) -> String {
         String::from_utf8_lossy(&output.stderr).into_owned()
     }
 
     #[test]
     fn restart_waits_for_its_own_shutdown_and_new_listener() {
-        let instance = Instance::new(unused_loopback_address());
+        let port = PortReservation::loopback();
+        let instance = Instance::new(port.address());
         instance.succeeds("start");
         assert!(instance.listening(), "start returns once Forge answers");
         let first = instance.pid();
@@ -159,7 +156,8 @@ mod tests {
 
     #[test]
     fn service_operations_wait_for_the_existing_lifecycle_owner() {
-        let instance = Instance::new(unused_loopback_address());
+        let port = PortReservation::loopback();
+        let instance = Instance::new(port.address());
         for action in ["start", "restart", "stop"] {
             let first = std::fs::read(instance.data.join("forge.pid")).ok();
             let lock = std::fs::OpenOptions::new()
@@ -216,7 +214,8 @@ mod tests {
 
     #[test]
     fn start_reports_a_forge_that_exits_and_shows_its_log() {
-        let instance = Instance::new(unused_loopback_address());
+        let port = PortReservation::loopback();
+        let instance = Instance::new(port.address());
         // Holding this instance's data lock makes its Forge exit before it
         // binds, a real startup failure that touches no other Forge.
         let _lock = forge_http::lock_data_dir(&instance.data).unwrap();
@@ -233,7 +232,8 @@ mod tests {
 
     #[test]
     fn start_never_reports_ready_when_the_store_cant_open() {
-        let instance = Instance::new(unused_loopback_address());
+        let port = PortReservation::loopback();
+        let instance = Instance::new(port.address());
         std::fs::create_dir(instance.data.join("forge.sqlite3")).unwrap();
         let output = instance.run("start");
         assert!(!output.status.success());
