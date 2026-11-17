@@ -468,6 +468,13 @@ impl Conversation {
         );
     }
 
+    #[cfg(feature = "qualification")]
+    pub fn items(&self) -> impl Iterator<Item = &Item> {
+        self.view
+            .iter()
+            .flat_map(|view| view.items.values().map(Arc::as_ref))
+    }
+
     pub fn selection_scope(&self) -> Option<String> {
         let (host, thread) = self.open.as_ref()?;
         Some(format!(
