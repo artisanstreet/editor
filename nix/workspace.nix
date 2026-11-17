@@ -252,20 +252,6 @@ let
       bin = "editor-aqua";
     };
   };
-  release = lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
-    release = import ./release.nix {
-      inherit pkgs version;
-      linux = {
-        inherit ae forge;
-      };
-      windows = {
-        ae = windows.ae-windows;
-        forge = windows.forge-windows;
-        editor = windows.artisan-editor-windows;
-      };
-    };
-  };
-
   # Checks: clippy and the tests over the workspace, in the dev profile, on
   # one shared dependency cache.
   checkBase = platforms.linux.environment // {
@@ -385,8 +371,7 @@ let
         '';
       };
   };
-  # `nix run .#release`: the dev loop with Cargo's release profile. The
-  # signed release archives stay `nix build .#release` (packages, not apps).
+  # `nix run .#release`: the dev loop with Cargo's release profile.
   devRelease = import ./dev.nix {
     inherit pkgs;
     profile = "release";
@@ -418,8 +403,7 @@ in
     default = ae;
     inherit ae forge;
   }
-  // windows
-  // release;
+  // windows;
   apps = {
     default = dev;
     inherit dev devfast;
