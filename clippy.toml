@@ -16,6 +16,7 @@ disallowed-types = [
     { path = "aqua_ui::element::Button", reason = "use the editor_ui::kit component or token instead" },
     { path = "editor_ui::button::Button", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
     { path = "editor_ui::theme::RadiusStep", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
+    { path = "editor_ui::theme::ProseTypography", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
 ]
 
 disallowed-methods = [
