@@ -1,29 +1,57 @@
-use editor_aqua::logging::open;
-use std::io::Write as _;
+use std::path::Path;
+use std::process::Command;
+
+fn launch_without_fixture(data: &Path, temporary: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_editor-aqua"))
+        .arg("--source-encoded")
+        .env("ARTISAN_EDITOR_DATA", data)
+        .env_remove("ARTISAN_AQUA_FIXTURE_DIR")
+        .env_remove("RUST_LOG")
+        .env("TMPDIR", temporary)
+        .env("TMP", temporary)
+        .env("TEMP", temporary)
+        .output()
+        .unwrap()
+}
 
 #[test]
-fn oversized_writes_and_reopening_keep_size_and_retention_bounded() {
-    let dir = tempfile::tempdir().unwrap();
-    let limit = 64;
-    let mut writer = open(dir.path(), limit).unwrap();
-    writer.write_all(&vec![b'x'; limit * 20 + 3]).unwrap();
-    writer.flush().unwrap();
-    drop(writer);
-    let mut writer = open(dir.path(), limit).unwrap();
-    writer.write_all(&vec![b'y'; limit * 2]).unwrap();
-    writer.flush().unwrap();
-    let files: Vec<_> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .map(Result::unwrap)
-        .collect();
-    assert_eq!(files.len(), 7);
+fn a_launch_that_fails_before_the_window_opens_is_in_the_editor_log() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let output = launch_without_fixture(&data, root.path());
+    assert!(!output.status.success(), "the launch must fail");
+    let log = std::fs::read_to_string(data.join("logs").join("editor.log")).unwrap();
     assert!(
-        files
-            .iter()
-            .all(|file| file.metadata().unwrap().len() <= limit as u64)
+        log.contains(
+            "the Editor could not launch: qualification requires ARTISAN_AQUA_FIXTURE_DIR"
+        ),
+        "{log}"
     );
-    assert_eq!(
-        std::fs::read(dir.path().join("editor.log")).unwrap(),
-        b"yyy"
+}
+
+#[test]
+fn an_unusable_log_folder_falls_back_to_a_temporary_log_that_names_the_cause() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    std::fs::write(&data, b"").unwrap();
+    let output = launch_without_fixture(&data, root.path());
+    assert!(!output.status.success(), "the launch must fail");
+    let fallback = root
+        .path()
+        .join("artisan-editor")
+        .join("logs")
+        .join("editor.log");
+    let log = std::fs::read_to_string(&fallback).unwrap();
+    assert!(
+        log.contains("the Editor logs to a temporary folder"),
+        "{log}"
     );
+    assert!(
+        log.contains(&format!(
+            "create the log folder {}",
+            data.join("logs").display()
+        )),
+        "{log}"
+    );
+    assert!(log.contains("the Editor could not launch"), "{log}");
 }

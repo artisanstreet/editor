@@ -39,7 +39,10 @@ fn late_live_updates_of_the_stopped_run_stay_stopped() {
     let Held::Stopping(held) = stopping.hold(update) else {
         panic!("a late live update must not restart the spinner");
     };
-    assert_eq!((held.status, held.ended_at, held.seq), (RunStatus::Cancelled, Some(50), 9));
+    assert_eq!(
+        (held.status, held.ended_at, held.seq),
+        (RunStatus::Cancelled, Some(50), 9)
+    );
 }
 
 #[test]

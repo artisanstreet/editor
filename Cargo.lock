@@ -1413,6 +1413,7 @@ name = "diagnostics"
 version = "0.0.0"
 dependencies = [
  "artisan-paths",
+ "file-rotate",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -1567,7 +1568,6 @@ dependencies = [
  "editor-sources",
  "editor-ui",
  "embed-resource",
- "file-rotate",
  "forge-http",
  "forge-store",
  "futures",

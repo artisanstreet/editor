@@ -7,6 +7,7 @@ description = "Crash reports, rotating log files and the tracing subscriber shar
 
 [dependencies]
 artisan-paths.workspace = true
+file-rotate = "0.8.0"
 thiserror.workspace = true
 tracing.workspace = true
 tracing-error.workspace = true

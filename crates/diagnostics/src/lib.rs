@@ -1,8 +1,10 @@
 pub mod crash;
+pub mod log_file;
 pub mod recent;
 pub mod subscriber;
 
 pub use crash::CrashReporter;
+pub use log_file::{Destination, Limit, OpenLogError};
 pub use recent::RecentLines;
 pub use subscriber::{SubscribeError, subscribe};
 

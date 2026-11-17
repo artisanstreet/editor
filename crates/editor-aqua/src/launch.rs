@@ -53,6 +53,25 @@ pub fn launch() -> anyhow::Result<()> {
         }
         aqua::prelude::Launch::Ordinary => {}
     }
+    let qualifying = std::env::args().any(|argument| argument == "--qualify-editor");
+    if !qualifying {
+        let data = EditorFiles::default_location().dir;
+        diagnostics::CrashReporter {
+            app: artisan_paths::App::Editor,
+            version: concat!(env!("CARGO_PKG_VERSION"), " (", env!("EDITOR_COMMIT"), ")"),
+            recent: crate::logging::init(&data)?,
+            data,
+        }
+        .install();
+    }
+    let launched = run(qualifying);
+    if let Err(error) = &launched {
+        tracing::error!("the Editor could not launch: {error:#}");
+    }
+    launched
+}
+
+fn run(qualifying: bool) -> anyhow::Result<()> {
     if matches!(crate::setup::begin()?, crate::setup::Outcome::Finished) {
         return Ok(());
     }
@@ -71,7 +90,6 @@ pub fn launch() -> anyhow::Result<()> {
     let source_encoded = std::env::args()
         .skip(1)
         .any(|arg| arg == "--source-encoded");
-    let qualifying = std::env::args().any(|argument| argument == "--qualify-editor");
     anyhow::ensure!(
         !qualifying
             || (!std::env::args()
@@ -117,15 +135,6 @@ pub fn launch() -> anyhow::Result<()> {
         "qualification window dimensions must be positive"
     );
     let fit_launch = !qualifying && !source_encoded;
-    if !qualifying {
-        diagnostics::CrashReporter {
-            app: artisan_paths::App::Editor,
-            version: concat!(env!("CARGO_PKG_VERSION"), " (", env!("EDITOR_COMMIT"), ")"),
-            data: EditorFiles::default_location().dir,
-            recent: crate::logging::init()?,
-        }
-        .install();
-    }
     let mut config = aqua::AquaConfig::default();
     config.window.title = "Artisan Editor".to_owned();
     config.window.inner_size.width = width;

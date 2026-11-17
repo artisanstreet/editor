@@ -24,10 +24,9 @@ fn enabled() -> bool {
 fn report(stage: &str, detail: &str) {
     OPENED.with(|opened| {
         if let Some(opened) = opened.borrow().as_ref() {
-            eprintln!(
-                "open-timing: stage={stage} since_open_ms={:.2} unix_ms={} {detail}",
-                opened.at.elapsed().as_secs_f64() * 1000.0,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())
+            tracing::info!(
+                "open-timing: stage={stage} since_open_ms={:.2} {detail}",
+                opened.at.elapsed().as_secs_f64() * 1000.0
             );
         }
     });
@@ -163,7 +162,7 @@ pub fn note_fail(reason: &'static str) {
 
 pub fn rpc_done(started: Duration, finished: Duration) {
     if enabled() {
-        eprintln!(
+        tracing::info!(
             "open-timing: read_rpc spawn_ms={:.2} total_ms={:.2}",
             started.as_secs_f64() * 1000.0,
             finished.as_secs_f64() * 1000.0
