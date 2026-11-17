@@ -92,6 +92,7 @@ struct Fixture {
     hub: Hub,
     thread_id: ThreadId,
     dir: tempfile::TempDir,
+    resident: usize,
 }
 
 async fn fixture(script: Script) -> Fixture {
@@ -140,10 +141,12 @@ async fn fixture_with_parts(
         })
         .await
         .unwrap();
+    let resident = hub.inner.tasks.len();
     Fixture {
         hub,
         thread_id: thread.id,
         dir,
+        resident,
     }
 }
 
@@ -243,6 +246,15 @@ impl Fixture {
             .into_iter()
             .filter(|run| run.thread_id == self.thread_id)
             .collect()
+    }
+
+    async fn quiescent(&self) {
+        test_support::wait::eventually(
+            "the hub's run and side tasks to finish",
+            Duration::from_secs(10),
+            || async move { self.hub.inner.tasks.len() <= self.resident },
+        )
+        .await;
     }
 
     async fn wait_for(&self, check: impl Fn(&[Item]) -> bool + Send + Sync) {
@@ -1495,7 +1507,7 @@ async fn failed_preparation_preserves_input_without_a_retry_loop() {
     let input = fixture.hub.store().item(&input.id).await.unwrap().unwrap();
     assert_eq!(input.status, Status::Running);
     assert!(input.run_id.is_none());
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    fixture.quiescent().await;
     assert!(!fixture.hub.is_live(&fixture.thread_id));
     assert_eq!(
         fixture
@@ -2121,7 +2133,7 @@ async fn new_input_during_failed_preparation_allows_one_new_attempt() {
         }
     }
     assert_eq!(attempts.len(), 2);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    fixture.quiescent().await;
     assert_eq!(
         fixture
             .hub
@@ -2214,7 +2226,7 @@ async fn a_failed_bounded_batch_does_not_retry_its_already_observed_tail() {
             .len(),
         40
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    fixture.quiescent().await;
     assert_eq!(
         fixture
             .hub
@@ -2400,7 +2412,7 @@ async fn missing_historical_image_fails_a_created_run_without_dropping_or_retryi
             .status,
         Status::Running
     );
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    fixture.quiescent().await;
     assert_eq!(
         fixture
             .hub
@@ -3534,8 +3546,11 @@ async fn turned_off_side_queries_ask_nothing() {
         .await
         .unwrap();
     fixture.settled().await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(asked.lock().unwrap().is_empty());
+    fixture.quiescent().await;
+    assert!(
+        asked.lock().unwrap().is_empty(),
+        "turned-off side queries ask nothing once the turn's work is done"
+    );
 }
 
 /// Switches the fixture's thread to `engine` with its next message.
@@ -4080,6 +4095,7 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
         hub,
         thread_id,
         dir,
+        ..
     } = fixture;
     drop(hub);
     let data = dir.path().to_path_buf();
