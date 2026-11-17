@@ -47,7 +47,7 @@ mod question;
 mod reasoning;
 mod retained;
 mod rpc;
-mod trace;
+pub mod trace;
 #[cfg(test)]
 mod transcript_tests;
 mod usage;

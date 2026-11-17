@@ -54,7 +54,21 @@ pub(crate) fn spawn_in(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let trace = Trace::start(turn.trace_dir.as_deref(), name);
+    let trace = turn
+        .trace_dir
+        .as_deref()
+        .map_or_else(Trace::default, |dir| {
+            Trace::start(dir, name).map_or_else(
+                |error| {
+                    tracing::warn!(
+                        error = &error as &dyn std::error::Error,
+                        "this engine process runs without a diagnostic trace"
+                    );
+                    Trace::default()
+                },
+                |started| started.trace,
+            )
+        });
     spawn_command(command, trace)
         .with_context(|| format!("starting {} in {}", turn.binary.display(), cwd.display()))
 }
