@@ -186,7 +186,23 @@ pub enum EngineCommand {
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    init_tracing();
+    let recent = match diagnostics::subscribe("warn", std::io::stderr) {
+        Ok(recent) => recent,
+        Err(error) => {
+            eprintln!("error: {}", diagnostics::chain(&error));
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    match App::Ae.data() {
+        Ok(data) => diagnostics::CrashReporter {
+            app: App::Ae,
+            version: LONG_VERSION,
+            data,
+            recent,
+        }
+        .install(),
+        Err(error) => tracing::warn!("crash reports are off: find ae's data folder: {error}"),
+    }
     match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -285,15 +301,4 @@ fn forge_service(command: &ForgeCommand) -> Result<()> {
         ForgeCommand::Restart => ui::task("Restarting Forge", "Forge restarted", service::restart)
             .map(|pid| ui::success(started(pid))),
     }
-}
-
-/// Warnings and up on stderr, unless `RUST_LOG` says more.
-fn init_tracing() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
 }

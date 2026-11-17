@@ -63,6 +63,7 @@ dependencies = [
  "clap",
  "claude-ai-browser",
  "cliclack",
+ "diagnostics",
  "ed25519-dalek",
  "forge-engines",
  "forge-http",
@@ -81,7 +82,6 @@ dependencies = [
  "test-support",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1409,6 +1409,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagnostics"
+version = "0.0.0"
+dependencies = [
+ "artisan-paths",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-error",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1541,6 +1553,7 @@ dependencies = [
  "artisan-paths",
  "artisan-payload",
  "base64 0.22.1",
+ "diagnostics",
  "editor-aqua",
  "editor-assets",
  "editor-audio",
@@ -2044,6 +2057,7 @@ dependencies = [
  "artisan-paths",
  "clap",
  "dhat",
+ "diagnostics",
  "forge-http",
  "forge-isolation",
  "forge-runs",
@@ -2052,7 +2066,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -5575,6 +5588,16 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
  "valuable",
+]
+
+[[package]]
+name = "tracing-error"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b1581020d7a273442f5b45074a6a57d5757ad0a47dac0e9f0bd57b81936f3db"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

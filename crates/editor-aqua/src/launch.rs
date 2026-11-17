@@ -118,7 +118,13 @@ pub fn launch() -> anyhow::Result<()> {
     );
     let fit_launch = !qualifying && !source_encoded;
     if !qualifying {
-        crate::logging::init();
+        diagnostics::CrashReporter {
+            app: artisan_paths::App::Editor,
+            version: concat!(env!("CARGO_PKG_VERSION"), " (", env!("EDITOR_COMMIT"), ")"),
+            data: EditorFiles::default_location().dir,
+            recent: crate::logging::init()?,
+        }
+        .install();
     }
     let mut config = aqua::AquaConfig::default();
     config.window.title = "Artisan Editor".to_owned();

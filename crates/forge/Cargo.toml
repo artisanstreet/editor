@@ -22,12 +22,12 @@ anyhow.workspace = true
 dhat = { workspace = true, optional = true }
 artisan-paths.workspace = true
 clap.workspace = true
+diagnostics.workspace = true
 forge-http.workspace = true
 forge-isolation.workspace = true
 forge-runs.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

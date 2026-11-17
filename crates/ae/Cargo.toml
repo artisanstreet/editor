@@ -20,6 +20,7 @@ artisan-payload.workspace = true
 base64.workspace = true
 clap.workspace = true
 cliclack = "=0.5.6"
+diagnostics.workspace = true
 ed25519-dalek.workspace = true
 forge-engines.workspace = true
 forge-runs.workspace = true
@@ -37,7 +38,6 @@ semver.workspace = true
 sysinfo = "=0.31.4"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [build-dependencies]
 artisan-payload.workspace = true

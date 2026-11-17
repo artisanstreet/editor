@@ -37,6 +37,7 @@ aqua-gpu-ref = { workspace = true, optional = true }
 artisan-api = { workspace = true, features = ["tls"] }
 artisan-account.workspace = true
 artisan-paths.workspace = true
+diagnostics.workspace = true
 artisan-payload.workspace = true
 semver.workspace = true
 editor-assets.workspace = true

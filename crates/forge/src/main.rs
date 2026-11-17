@@ -61,11 +61,32 @@ fn main() -> std::process::ExitCode {
             .or_else(|| App::Forge.data().ok())
             .map(|data| data.join("forge.log"));
     }
-    if let Err(error) = init_tracing(cli.log.as_deref()) {
-        eprintln!("error: {error:#}");
-        return std::process::ExitCode::FAILURE;
+    let recent = match init_tracing(cli.log.as_deref()) {
+        Ok(recent) => recent,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let data_dir = match cli.data.clone() {
+        Some(dir) => dir,
+        None => match App::Forge.data() {
+            Ok(dir) => dir,
+            Err(error) => {
+                tracing::error!("find Forge's data folder: {error}");
+                eprintln!("error: find Forge's data folder: {error}");
+                return std::process::ExitCode::FAILURE;
+            }
+        },
+    };
+    diagnostics::CrashReporter {
+        app: App::Forge,
+        version: LONG_VERSION,
+        data: data_dir.clone(),
+        recent,
     }
-    match run(cli) {
+    .install();
+    match run(cli, data_dir) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!("{error:#}");
@@ -75,11 +96,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
-    let data_dir = match cli.data {
-        Some(dir) => dir,
-        None => App::Forge.data().context("find Forge's data folder")?,
-    };
+fn run(cli: Cli, data_dir: PathBuf) -> Result<()> {
     let listen = match cli.listen {
         Some(listen) => listen,
         None => forge_http::configured_listen(&data_dir)?,
@@ -177,14 +194,7 @@ async fn stop_requested() {
     tracing::info!("asked to stop");
 }
 
-/// Info and up, unless `RUST_LOG` says otherwise. Under systemd stderr is
-/// the journal.
-fn init_tracing(log: Option<&std::path::Path>) -> Result<()> {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(false);
+fn init_tracing(log: Option<&std::path::Path>) -> Result<diagnostics::RecentLines> {
     match log {
         Some(path) => {
             if let Some(parent) = path.parent() {
@@ -196,9 +206,8 @@ fn init_tracing(log: Option<&std::path::Path>) -> Result<()> {
                 .append(true)
                 .open(path)
                 .with_context(|| format!("open {}", path.display()))?;
-            builder.with_writer(std::sync::Mutex::new(file)).init();
+            Ok(diagnostics::subscribe("info", std::sync::Mutex::new(file))?)
         }
-        None => builder.with_writer(std::io::stderr).init(),
+        None => Ok(diagnostics::subscribe("info", std::io::stderr)?),
     }
-    Ok(())
 }

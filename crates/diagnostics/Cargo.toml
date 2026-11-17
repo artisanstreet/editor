@@ -1,0 +1,19 @@
+[package]
+name = "diagnostics"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Crash reports, rotating log files and the tracing subscriber shared by ae, Forge and the Editor."
+
+[dependencies]
+artisan-paths.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-error.workspace = true
+tracing-subscriber = { workspace = true, features = ["registry"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
