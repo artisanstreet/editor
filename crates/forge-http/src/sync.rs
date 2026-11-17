@@ -656,7 +656,7 @@ mod tests {
     async fn stub_server(
         tamper: bool,
         manifest: Option<Vec<u8>>,
-    ) -> (String, Stub, tokio::task::JoinHandle<()>) {
+    ) -> (String, Stub, test_support::http::StubServer) {
         use axum::routing::{get, post};
         let stub = Stub {
             reports: Arc::new(Mutex::new(Vec::new())),
@@ -668,12 +668,8 @@ mod tests {
             .route("/v1/config/bundles/3/manifest", get(serve_manifest))
             .route(CONFIG_STATE_PATH, post(report))
             .with_state(stub.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        (format!("http://{address}"), stub, task)
+        let server = test_support::http::StubServer::serve(router).await;
+        (server.url().to_owned(), stub, server)
     }
 
     /// Full config journey against Core-shaped routes: 200 applies through

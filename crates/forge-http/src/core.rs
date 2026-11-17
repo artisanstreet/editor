@@ -427,12 +427,8 @@ mod tests {
     /// headers and body shapes Core specifies.
     #[tokio::test]
     async fn machine_journey_against_stub_core() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, stub_router()).await.unwrap();
-        });
-        let client = CoreClient::new(&format!("http://{address}")).unwrap();
+        let core = test_support::http::StubServer::serve(stub_router()).await;
+        let client = CoreClient::new(core.url()).unwrap();
         let keypair = artisan_account::MachineKeypair::from_secret([0x21_u8; 32]).unwrap();
         let secret = *keypair.secret();
         let public = *keypair.public();

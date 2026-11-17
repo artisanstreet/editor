@@ -155,22 +155,19 @@ pub mod tests {
         axum::Json(keys)
     }
 
-    pub async fn verifier_with_stub(jwks: serde_json::Value) -> (GrantVerifier, String) {
+    pub async fn verifier_with_stub(
+        jwks: serde_json::Value,
+    ) -> (GrantVerifier, test_support::http::StubServer) {
         let router = axum::Router::new()
             .route("/.well-known/jwks.json", get(jwks_stub))
             .with_state(jwks);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        let base = format!("http://{address}");
+        let server = test_support::http::StubServer::serve(router).await;
         let verifier = GrantVerifier::new(
-            &format!("{base}/.well-known/jwks.json"),
+            &format!("{}/.well-known/jwks.json", server.url()),
             "https://core.example.invalid",
         )
         .unwrap();
-        (verifier, base)
+        (verifier, server)
     }
 
     fn issuer() -> (ed25519_dalek::SigningKey, String) {
@@ -229,7 +226,7 @@ pub mod tests {
     #[tokio::test]
     async fn tunnel_grants_verify_against_core_jwks() {
         let (issuer_key, x) = issuer();
-        let (verifier, _base) = verifier_with_stub(serde_json::json!({
+        let (verifier, _jwks) = verifier_with_stub(serde_json::json!({
             "keys": [{"kty": "OKP", "crv": "Ed25519", "x": x, "kid": "k1",
                       "use": "sig", "alg": "EdDSA"}],
         }))

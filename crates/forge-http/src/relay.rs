@@ -952,12 +952,11 @@ mod tests {
         }
 
         let (issuer_key, issuer_x) = test_issuer();
-        let (verifier, _jwks_base) =
-            crate::account_auth::tests::verifier_with_stub(serde_json::json!({
-                "keys": [{"kty": "OKP", "crv": "Ed25519", "x": issuer_x, "kid": "k1",
-                          "use": "sig", "alg": "EdDSA"}],
-            }))
-            .await;
+        let (verifier, _jwks) = crate::account_auth::tests::verifier_with_stub(serde_json::json!({
+            "keys": [{"kty": "OKP", "crv": "Ed25519", "x": issuer_x, "kid": "k1",
+                      "use": "sig", "alg": "EdDSA"}],
+        }))
+        .await;
         let forge_cnf = [0x44_u8; 32];
         let editor_cnf = [0x33_u8; 32];
         let editor_noise = [0x11_u8; 32];
