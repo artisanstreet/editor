@@ -1,6 +1,6 @@
 mod registry;
 
-pub use registry::{Generation, Lease, Member, Registry};
+pub use registry::{Generation, Lease, Member, Registry, RegistryFileError, read, write};
 
 use artisan_api::{Answer, EditorReply, ItemId, SendMessage, ThreadId};
 use forge_store::Acceptance;

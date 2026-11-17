@@ -81,3 +81,17 @@ fn thread_identities_with_extensions_have_independent_ownership() {
     assert!(owners.iter().any(|(id, _)| id == &first));
     assert!(owners.iter().any(|(id, _)| id == &second));
 }
+
+#[test]
+fn a_damaged_registry_file_is_named_in_the_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let registry = Registry::open(directory.path()).unwrap();
+    let active = registry.root().join("active.json");
+    std::fs::write(&active, b"{\"id\":").unwrap();
+    let error = registry.active().unwrap_err();
+    let text = format!("{error:#}");
+    assert!(
+        text.contains(&format!("parse the registry file {}", active.display())),
+        "{text}"
+    );
+}

@@ -249,16 +249,7 @@ pub async fn serve(
         process::notify(gateway.pid)?;
     }
     let tcp = TcpListener::from_std(service.listener.try_clone()?)?;
-    let maintenance = service.clone();
-    let maintenance_stop = stop_token.clone();
-    let maintenance_task = tokio::spawn(async move {
-        loop {
-            tokio::select! {()=maintenance_stop.cancelled()=>break,()=tokio::time::sleep(Duration::from_millis(250))=>{}}
-            if let Err(error) = maintain(&maintenance).await {
-                tracing::warn!("generation maintenance: {error:#}");
-            }
-        }
-    });
+    let maintenance_task = spawn_maintenance(service.clone(), stop_token.clone());
     backend.release();
     let mut connections = JoinSet::new();
     let replaced = loop {
@@ -284,6 +275,24 @@ pub async fn serve(
     drain(&service, replaced, &mut connections).await?;
     control_task.await??;
     Ok(())
+}
+
+fn spawn_maintenance(
+    maintenance: Service,
+    maintenance_stop: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {()=maintenance_stop.cancelled()=>break,()=tokio::time::sleep(Duration::from_millis(250))=>{}}
+            if let Err(error) = maintain(&maintenance).await {
+                tracing::warn!(
+                    gateway = %maintenance.gateway.id,
+                    backend = %maintenance.gateway.backend.id,
+                    "generation maintenance: {error:#}"
+                );
+            }
+        }
+    })
 }
 
 fn start_control(

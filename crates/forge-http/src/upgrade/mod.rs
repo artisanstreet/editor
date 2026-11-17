@@ -37,7 +37,7 @@ pub enum Outcome {
 
 pub fn gateway(data: &Path) -> Result<Option<Gateway>> {
     let registry = Registry::open(data)?;
-    read(&registry.root().join("gateway.json"))
+    Ok(read(&registry.root().join("gateway.json"))?)
 }
 
 pub async fn replace(data: &Path, binary: &Path) -> Result<Gateway> {
@@ -91,19 +91,4 @@ pub async fn serve(
     controller::serve(config, handoff, stop).await
 }
 
-pub fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub fn write(path: &Path, value: &impl Serialize) -> Result<()> {
-    let mut file =
-        tempfile::NamedTempFile::new_in(path.parent().context("upgrade path has no parent")?)?;
-    serde_json::to_writer(file.as_file_mut(), value)?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
-    Ok(())
-}
+pub use forge_runs::runtime::{read, write};

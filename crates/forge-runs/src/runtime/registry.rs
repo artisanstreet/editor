@@ -55,20 +55,84 @@ pub struct Generation {
     draining: Arc<AtomicBool>,
 }
 
-fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryFileError {
+    #[error("read the registry file {path}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse the registry file {path}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("write the registry file {path}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("encode the registry file {path}")]
+    Encode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("lock the registry file {path}")]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("create the registry folder {path}")]
+    CreateFolder {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, RegistryFileError> {
     match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|source| RegistryFileError::Parse {
+                    path: path.to_owned(),
+                    source,
+                })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(source) => Err(RegistryFileError::Read {
+            path: path.to_owned(),
+            source,
+        }),
     }
 }
 
-fn write(path: &Path, value: &impl Serialize) -> Result<()> {
-    let parent = path.parent().context("registry path has no parent")?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer(file.as_file_mut(), value)?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|error| error.error)?;
+pub fn write(path: &Path, value: &impl Serialize) -> Result<(), RegistryFileError> {
+    let failed = |source| RegistryFileError::Write {
+        path: path.to_owned(),
+        source,
+    };
+    let Some(parent) = path.parent() else {
+        unreachable!(
+            "invariant: registry file {} lives inside a folder",
+            path.display()
+        );
+    };
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(failed)?;
+    serde_json::to_writer(file.as_file_mut(), value).map_err(|source| {
+        RegistryFileError::Encode {
+            path: path.to_owned(),
+            source,
+        }
+    })?;
+    file.as_file().sync_all().map_err(failed)?;
+    file.persist(path).map_err(|error| failed(error.error))?;
     Ok(())
 }
 
@@ -77,31 +141,44 @@ fn contended(error: &std::io::Error) -> bool {
         || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
 }
 
-fn lock(path: &Path) -> Result<Option<Held>> {
+fn lock(path: &Path) -> Result<Option<Held>, RegistryFileError> {
+    let failed = |source| RegistryFileError::Lock {
+        path: path.to_owned(),
+        source,
+    };
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(path)?;
+        .open(path)
+        .map_err(failed)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(Some(Held(file))),
         Err(error) if contended(&error) => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(failed(error)),
     }
+}
+
+fn create_folder(path: &Path) -> Result<(), RegistryFileError> {
+    std::fs::create_dir_all(path).map_err(|source| RegistryFileError::CreateFolder {
+        path: path.to_owned(),
+        source,
+    })
 }
 
 impl Registry {
     pub fn open(data: &Path) -> Result<Self> {
         let root = data.join("runtime");
-        std::fs::create_dir_all(&root)?;
+        create_folder(&root)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("restrict {} to this user", root.display()))?;
         }
         for folder in ["generations", "threads", "slots", "binaries"] {
-            std::fs::create_dir_all(root.join(folder))?;
+            create_folder(&root.join(folder))?;
         }
         Ok(Self { root })
     }
@@ -111,7 +188,7 @@ impl Registry {
     }
 
     pub fn active(&self) -> Result<Option<Member>> {
-        read(&self.root.join("active.json"))
+        Ok(read(&self.root.join("active.json"))?)
     }
 
     pub fn promote(&self, member: &Member) -> Result<()> {
@@ -123,7 +200,7 @@ impl Registry {
             .open(self.root.join("admission.lock"))?;
         gate.lock_exclusive()?;
         let _gate = Held(gate);
-        write(&self.root.join("active.json"), member)
+        Ok(write(&self.root.join("active.json"), member)?)
     }
 
     pub fn peers(&self) -> Result<Vec<Member>> {
@@ -152,7 +229,7 @@ impl Registry {
         if lock(&path.with_extension("lock"))?.is_some() {
             return Ok(None);
         }
-        read(&path.with_extension("json"))
+        Ok(read(&path.with_extension("json"))?)
     }
 
     pub fn owners(&self) -> Result<Vec<(ThreadId, Member)>> {
