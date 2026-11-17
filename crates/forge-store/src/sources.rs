@@ -2,8 +2,7 @@
 
 use crate::{Store, collection, content, source_index};
 use anyhow::{Result, ensure};
-use artisan_api::{Item, now};
-use forge_content::ItemTexts as _;
+use artisan_api::now;
 use std::sync::Arc;
 
 impl Store {
@@ -83,18 +82,6 @@ impl Store {
     pub async fn resolve_text(&self, text: &artisan_api::TextContent) -> Result<String> {
         let text = text.clone();
         self.read(move |conn| content::resolve(conn, &text)).await
-    }
-
-    pub async fn resolve_item_text(&self, mut item: Item) -> Result<Item> {
-        self.read(move |conn| {
-            collection::hydrate_item(conn, &mut item.kind)?;
-            item.kind.try_visit_texts_mut(|text| {
-                *text = content::resolve(conn, text)?.into();
-                Ok::<_, anyhow::Error>(())
-            })?;
-            Ok(item)
-        })
-        .await
     }
 
     pub async fn gc_content(&self) -> Result<usize> {
