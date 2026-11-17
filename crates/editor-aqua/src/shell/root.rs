@@ -136,7 +136,6 @@ pub struct RootViews {
     preview_actions: Rc<RefCell<VecDeque<(u64, crate::ui::media::preview::Action)>>>,
     motion_epoch: Option<std::time::Instant>,
     ui_now: aqua::Instant,
-    context_tooltip: crate::shell::titlebar::ContextMeterTooltip,
     sidebar: crate::frame::sidebar::Sidebar,
     seam: Rc<RefCell<crate::frame::seam::motion::Motion>>,
     avatar: crate::frame::avatar::Avatar,
@@ -1565,17 +1564,6 @@ impl RootViews {
         {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
-        match self.context_tooltip.sync(
-            ui,
-            self.context_reading.as_ref(),
-            shell.preferences.theme(),
-            ctx.now().as_secs_f64(),
-            reduced,
-        ) {
-            Ok(true) => ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION),
-            Ok(false) => {}
-            Err(error) => tracing::warn!(%error, "could not synchronize context meter"),
-        }
     }
 
     fn sync_scroll(
@@ -2855,7 +2843,6 @@ impl SectionViews for RootViews {
             self.stored.borrow_mut().drain_cleanup(ui);
             self.composer_height = None;
             self.composer_measurement.set(None);
-            self.context_tooltip.reset(ui);
             self.sidebar_overlays.dispose(ui);
             if let Some(preview) = self.sidebar_drag.take() {
                 preview.dispose(ui);
@@ -2891,7 +2878,6 @@ impl SectionViews for RootViews {
             self.stored.borrow_mut().drain_cleanup(ui);
             self.composer_height = None;
             self.composer_measurement.set(None);
-            self.context_tooltip.reset(ui);
             self.sidebar_overlays.dispose(ui);
             if let Some(preview) = self.sidebar_drag.take() {
                 preview.dispose(ui);
