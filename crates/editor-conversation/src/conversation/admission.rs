@@ -13,90 +13,8 @@ pub fn immediate(row: &Row) -> bool {
     )
 }
 
-pub fn speculative_frontier(
-    rows: &[(Row, u64)],
-    reduce_motion: bool,
-    mut unfolding: impl FnMut(&Row) -> bool,
-    mut visible: impl FnMut(&RowKey) -> bool,
-    mut mounted_awaiting: impl FnMut(&RowKey) -> Option<bool>,
-    mut fresh: impl FnMut(&Row) -> bool,
-) -> Option<RowKey> {
-    if reduce_motion {
-        return None;
-    }
-    rows.iter()
-        .find(|(row, _)| {
-            if immediate(row) || unfolding(row) {
-                return false;
-            }
-            let key = row.key();
-            if !visible(&key) {
-                return false;
-            }
-            if let Some(awaiting) = mounted_awaiting(&key) {
-                return awaiting;
-            }
-            match row.semantic() {
-                Row::Text {
-                    slot: Slot::Prose, ..
-                }
-                | Row::WorkEntry { .. }
-                | Row::Chain { .. }
-                | Row::Prompt(_)
-                | Row::Image(_) => fresh(row),
-                Row::Projected { .. }
-                | Row::Work { .. }
-                | Row::EarlierWork { .. }
-                | Row::Text { .. }
-                | Row::Compaction(_)
-                | Row::Gap
-                | Row::Status(_)
-                | Row::AgentResult(_)
-                | Row::AgentStatus(..) => false,
-            }
-        })
-        .map(|(row, _)| row.key())
-}
-
 pub fn behind_reveal(index: usize, row: &Row, frontier: Option<usize>) -> bool {
     !immediate(row) && frontier.is_some_and(|frontier| index > frontier)
-}
-
-pub fn revealed_rows(rows: &[(Row, u64)], frontier: Option<usize>) -> &[(Row, u64)] {
-    let end = frontier.map_or(rows.len(), |index| index + 1);
-    &rows[..end.min(rows.len())]
-}
-
-pub fn changed_from(previous: Option<usize>, next: Option<usize>, len: usize) -> Option<usize> {
-    let from = previous.unwrap_or(len).min(next.unwrap_or(len)) + 1;
-    (from < len).then_some(from)
-}
-
-pub fn sync_frontier(
-    current: Option<RowKey>,
-    queued: Option<RowKey>,
-    reduce_motion: bool,
-    awaiting: impl FnOnce(&RowKey) -> bool,
-    speculative: impl FnOnce() -> Option<RowKey>,
-) -> Option<RowKey> {
-    if queued == current {
-        return current;
-    }
-    if let Some(key) = queued {
-        return Some(key);
-    }
-    let current = current?;
-    if !reduce_motion && awaiting(&current) {
-        return Some(current);
-    }
-    speculative()
-}
-
-pub fn publish_frontier(
-    queued: Option<RowKey>,
-    speculative: impl FnOnce() -> Option<RowKey>,
-) -> Option<RowKey> {
-    queued.or_else(speculative)
 }
 
 #[derive(Default)]
@@ -147,9 +65,6 @@ impl RevealQueue {
             row.settling = settling;
         }
     }
-    pub fn remove(&mut self, key: &RowKey) {
-        self.rows.remove(key);
-    }
     pub fn rush(&mut self, before: u64) {
         self.rushed_before = self.rushed_before.max(before);
         for row in self.rows.values_mut() {
@@ -170,9 +85,6 @@ pub struct LiveBlockArrivals {
     pub seen: Instant,
 }
 impl LiveBlockArrivals {
-    pub fn is_fresh(&self, block: usize) -> bool {
-        self.fresh.contains_key(&block)
-    }
     pub fn baseline(blocks: usize) -> Self {
         Self {
             high_water: blocks,

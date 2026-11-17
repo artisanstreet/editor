@@ -1,12 +1,12 @@
 use crate::conversation::compaction::{CompactionFrame, CompactionMotion, CompactionPhase};
-use editor_ui::motion::MotionCurve;
-use editor_ui::phrase::{PhraseMotion, PhraseOverflow, retained_phrase_or_text};
-use editor_ui::sticker::{self, Sticker};
-use editor_ui::kit::TextRole;
-use editor_ui::theme::ArtisanTheme;
 use aqua_core::GpuiTextColor;
 use aqua_ui::element::Element;
 use artisan_api::ItemId;
+use editor_ui::kit::TextRole;
+use editor_ui::motion::MotionCurve;
+use editor_ui::phrase::{PhraseMotion, PhraseOverflow, retained_phrase_or_text};
+use editor_ui::sticker::{self, Sticker};
+use editor_ui::theme::ArtisanTheme;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -206,9 +206,12 @@ impl RowMotion {
         reduced_motion: bool,
         now: Instant,
     ) -> Option<Sticker> {
-        let state = self.stickers.entry(key.clone()).or_insert_with(|| StickerState {
-            started: (fresh && !reduced_motion).then_some(now),
-        });
+        let state = self
+            .stickers
+            .entry(key.clone())
+            .or_insert_with(|| StickerState {
+                started: (fresh && !reduced_motion).then_some(now),
+            });
         let elapsed = now.saturating_duration_since(state.started?);
         if elapsed >= sticker::DURATION || reduced_motion {
             return None;
@@ -312,16 +315,6 @@ impl RowMotion {
         let (frame, moving) = motion.advance(phase, !reduced_motion, now);
         self.animating |= moving;
         frame
-    }
-
-    pub fn retain(
-        &mut self,
-        phrases: impl Fn(&str) -> bool,
-        compactions: impl Fn(&ItemId) -> bool,
-    ) {
-        self.phrases.retain(|key, _| phrases(key));
-        self.chevrons.retain(|key, _| phrases(key));
-        self.compactions.retain(|id, _| compactions(id));
     }
 }
 

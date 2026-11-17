@@ -131,13 +131,6 @@ pub fn gap_visible(rows: &[(Row, u64)], revealed_count: usize, last_below_viewpo
         && !last_below_viewport
 }
 
-pub fn row_destination(
-    collection: &aqua_ui::collection_runtime::CollectionState,
-    index: usize,
-) -> Option<f32> {
-    (index < collection.len()).then(|| -collection.offset_of(index))
-}
-
 pub const TRANSCRIPT: &str = "conversation-transcript";
 
 pub fn following_tail(ui: &aqua::UiApp) -> bool {

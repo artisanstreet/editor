@@ -6,7 +6,6 @@ pub mod notice;
 pub mod request;
 pub mod resources;
 pub mod reveal;
-pub mod row;
 pub mod row_cache;
 pub mod row_sources;
 pub mod source_actions;
@@ -17,11 +16,11 @@ pub mod work;
 use crate::conversation::adapter::{Action, RowModel};
 use crate::conversation::disclosure::RowDisclosure;
 use crate::conversation::fold::Row;
-use editor_ui::kit::{Button, ButtonTone, Divider, IconSize, Space};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
+use editor_ui::kit::{Button, ButtonTone, Divider, IconSize, Space};
+use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
 pub type Dispatch = Rc<dyn Fn(Action)>;
@@ -314,114 +313,6 @@ pub fn thread_frame(
             .build()
     }))
     .build()
-}
-
-pub fn observed_row_frame(
-    model: &RowModel,
-    disclosure: RowDisclosure,
-    held: bool,
-    content: Option<Element>,
-    theme: ArtisanTheme,
-    observed: Rc<dyn Fn(aqua_core::Rect)>,
-) -> Element {
-    let frame = row_frame(model, disclosure, held, content, theme);
-    let probe = aqua_ui::element::Canvas::new()
-        .width(Length::Pct(100.0))
-        .height(Length::Pct(100.0))
-        .style(Style::new().absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0)))
-        .on_observe(move |tree, node| {
-            if let Some(bounds) = tree.pre_transform_rect(node) {
-                observed(bounds);
-            }
-        })
-        .build()
-        .exclude_from_hit_testing();
-    UiBox::new()
-        .width(Length::Pct(100.0))
-        .child(frame)
-        .child(probe)
-        .build()
-}
-
-pub fn thread_element(
-    conversation: &crate::conversation::controller::Conversation,
-    estimated_height: f32,
-    row: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> Element>,
-    viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
-    composer: Option<Element>,
-    viewport_width: f32,
-) -> Element {
-    let list = transcript::list(
-        conversation,
-        estimated_height,
-        row,
-        viewport,
-        initial_height,
-    );
-    thread_frame(
-        list,
-        overlays,
-        composer,
-        None,
-        viewport_width,
-        conversation.reveal(std::time::Instant::now()),
-    )
-}
-
-pub fn try_thread_element(
-    conversation: &crate::conversation::controller::Conversation,
-    estimated_height: f32,
-    row: transcript::PreparedRowFactory,
-    viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
-    composer: Option<Element>,
-    viewport_width: f32,
-) -> Element {
-    let list = transcript::try_list(
-        conversation,
-        estimated_height,
-        row,
-        viewport,
-        initial_height,
-    );
-    thread_frame(
-        list,
-        overlays,
-        composer,
-        None,
-        viewport_width,
-        conversation.reveal(std::time::Instant::now()),
-    )
-}
-
-pub fn batched_thread_element(
-    conversation: &crate::conversation::controller::Conversation,
-    estimated_height: f32,
-    row: transcript::BatchedRowFactory,
-    viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
-    composer: Option<Element>,
-    viewport_width: f32,
-) -> Element {
-    let list = transcript::batched_list(
-        conversation,
-        estimated_height,
-        row,
-        viewport,
-        initial_height,
-    );
-    thread_frame(
-        list,
-        overlays,
-        composer,
-        None,
-        viewport_width,
-        conversation.reveal(std::time::Instant::now()),
-    )
 }
 
 pub fn layout_batched_thread_element(

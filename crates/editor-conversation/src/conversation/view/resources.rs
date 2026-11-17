@@ -1,16 +1,9 @@
-use crate::conversation::content::{SourceAction, SourceField, SourceOwners};
+use crate::conversation::content::SourceField;
 use crate::conversation::presentation::PresentationScope;
-use crate::conversation::questions::{QuestionCollection, QuestionCollectionAction};
-use editor_core::Core;
-use editor_ui::theme::ArtisanTheme;
 use aqua_text::document::SelectionSource;
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use aqua_ui::collection::{BatchedCollectionRow, SelectionBatchOwner, SelectionSourceBatch};
-use aqua_ui::collection_runtime::PreparedCollectionRow;
-use aqua_ui::element::Element;
-use artisan_api::{CollectionRef, Item};
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -102,35 +95,6 @@ impl ResourceBatches {
             })
             .collect()
     }
-    pub fn from_prepared(
-        &mut self,
-        scope: &PresentationScope,
-        key: ResourceKey,
-        document: SelectionDocumentId,
-        prepared: PreparedCollectionRow,
-    ) -> anyhow::Result<BatchedCollectionRow> {
-        let mut sources = prepared.selection_sources.into_iter();
-        let selection = match sources.next() {
-            Some((actual, source)) => {
-                anyhow::ensure!(actual == document, "conversation source document mismatch");
-                Some(source)
-            }
-            None => None,
-        };
-        anyhow::ensure!(
-            sources.next().is_none(),
-            "conversation source has more than one selection source"
-        );
-        self.row(
-            scope,
-            key,
-            document,
-            editor_sources::ContentView {
-                element: prepared.element,
-                selection,
-            },
-        )
-    }
 
     pub fn rebind(&mut self, app: &mut aqua::UiApp, scope: Option<PresentationScope>) {
         if self.scope != scope {
@@ -211,72 +175,4 @@ impl ResourceBatches {
         self.retain(app, |_| false);
         self.scope = None;
     }
-}
-
-fn prepared(
-    document: SelectionDocumentId,
-    view: editor_sources::ContentView,
-) -> PreparedCollectionRow {
-    PreparedCollectionRow {
-        element: view.element,
-        selection_sources: view
-            .selection
-            .into_iter()
-            .map(|source| (document, source))
-            .collect(),
-    }
-}
-
-pub fn stored_source(
-    owners: &mut SourceOwners,
-    current: &PresentationScope,
-    core: &Core,
-    scope: &PresentationScope,
-    item: &Item,
-    field: SourceField,
-    theme: ArtisanTheme,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    emit: Rc<dyn Fn(SourceAction)>,
-) -> anyhow::Result<PreparedCollectionRow> {
-    anyhow::ensure!(
-        scope == current && core.host_if_instance(&scope.host, scope.instance).is_some(),
-        "stale conversation presentation scope"
-    );
-    anyhow::ensure!(
-        owners.open(core, &scope.host, scope.instance, item, field.clone()),
-        "stored conversation source is unavailable"
-    );
-    let view = owners
-        .view(&item.id, &field, theme, document, source_id, emit)
-        .ok_or_else(|| anyhow::anyhow!("stored conversation source is unavailable"))?;
-    Ok(prepared(document, view))
-}
-
-pub fn stored_questions(
-    owner: &mut QuestionCollection,
-    current: &PresentationScope,
-    core: &Core,
-    scope: &PresentationScope,
-    item: &Item,
-    source: &CollectionRef,
-    theme: ArtisanTheme,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    stored_detail: Option<Element>,
-    emit: Rc<dyn Fn(QuestionCollectionAction)>,
-) -> anyhow::Result<PreparedCollectionRow> {
-    anyhow::ensure!(
-        scope == current && core.host_if_instance(&scope.host, scope.instance).is_some(),
-        "stale conversation presentation scope"
-    );
-    anyhow::ensure!(
-        owner.open(core, &scope.host, scope.instance, &item.id, source),
-        "stored questions are unavailable"
-    );
-    let view = owner
-        .view(theme, document, source_id, stored_detail, emit)
-        .map_err(anyhow::Error::msg)?
-        .ok_or_else(|| anyhow::anyhow!("stored questions are unavailable"))?;
-    Ok(prepared(document, view))
 }

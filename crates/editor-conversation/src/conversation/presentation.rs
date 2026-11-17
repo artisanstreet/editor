@@ -1,21 +1,21 @@
 use super::controller::Conversation;
 use super::fold::Slot;
-use editor_core::{Core, HostId, HostInstance};
 use aqua::ui_app::UiApp;
 use aqua_text::document::{SelectionDocumentId, SelectionSource, SelectionSourceId};
 use aqua_ui::element::Element;
 use artisan_api::{ItemId, ThreadId};
+use editor_core::{Core, HostId, HostInstance};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use aqua_core::GpuiHsla;
+use editor_assets::AssetId;
 use editor_ui::markdown::MarkdownEngine;
 use editor_ui::markdown::presenter::{
     CodeServices, HeatmapServices, MarkdownPresenter, MediaServices, PreparationProof,
 };
 use editor_ui::markdown::visual::{BodyTone, LinkAction};
 use editor_ui::theme::ArtisanTheme;
-use aqua_core::GpuiHsla;
-use editor_assets::AssetId;
 
 fn prepare_body(
     presenter: &mut MarkdownPresenter,
@@ -148,44 +148,6 @@ impl SelectionOwners {
             }
         }
         Ok(prepared.element)
-    }
-
-    pub fn prepare_collection_row(
-        &mut self,
-        scope: &PresentationScope,
-        key: BodyKey,
-        prepared: PreparedElement,
-    ) -> anyhow::Result<aqua_ui::collection_runtime::PreparedCollectionRow> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
-        let ids: HashSet<_> = prepared.sources.iter().map(|source| source.id).collect();
-        anyhow::ensure!(
-            ids.len() == prepared.sources.len(),
-            "duplicate source identities within a conversation body"
-        );
-        anyhow::ensure!(
-            self.bodies
-                .iter()
-                .all(|(other, sources)| *other == key || sources.is_disjoint(&ids)),
-            "selection source identity belongs to another conversation body"
-        );
-        anyhow::ensure!(
-            self.bodies
-                .get(&key)
-                .is_none_or(|previous| previous == &ids),
-            "conversation selection sources changed without releasing the previous revision"
-        );
-        self.bodies.insert(key, ids);
-        Ok(aqua_ui::collection_runtime::PreparedCollectionRow {
-            element: prepared.element,
-            selection_sources: prepared
-                .sources
-                .into_iter()
-                .map(|source| (self.document, source))
-                .collect(),
-        })
     }
 
     pub fn retain(&mut self, app: &mut UiApp, mut retained: impl FnMut(&BodyKey) -> bool) {
@@ -330,43 +292,6 @@ impl MarkdownOwners {
         }
     }
 
-    pub fn set_media_services(
-        &mut self,
-        conversation: &Conversation,
-        core: &Core,
-        scope: &PresentationScope,
-        key: BodyKey,
-        id: &str,
-        services: MediaServices,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            scope.current(conversation, core) && self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
-        anyhow::ensure!(
-            conversation
-                .view
-                .as_ref()
-                .and_then(|view| view.item(&key.item))
-                .is_some(),
-            "conversation body is unavailable"
-        );
-        anyhow::ensure!(
-            id == key.item.to_string(),
-            "invalid conversation body identity"
-        );
-        anyhow::ensure!(
-            services.width.is_finite() && services.width > 0.0,
-            "measured media width is unavailable"
-        );
-        if let Some(body) = self.bodies.get(&key) {
-            anyhow::ensure!(body.id == id, "stale conversation body identity");
-            body.presenter.set_media_services(id, services.clone())?;
-        }
-        self.media.insert(key, (id.to_owned(), services));
-        Ok(())
-    }
-
     pub(crate) fn set_realization_media(
         &mut self,
         scope: &PresentationScope,
@@ -434,9 +359,15 @@ impl MarkdownOwners {
             self.selection.retain(app, |key| key != &request.key);
             body.source = std::rc::Rc::from(request.source);
         }
-        body.preparation = Some(prepare_body(&mut body.presenter, engine, request.source, request.key.slot)?);
+        body.preparation = Some(prepare_body(
+            &mut body.presenter,
+            engine,
+            request.source,
+            request.key.slot,
+        )?);
         let presenter = &body.presenter;
-        body.projected.retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
+        body.projected
+            .retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
         body.rendered = None;
         let rendered = body.presenter.render_with_services(
             request.id,
@@ -468,76 +399,6 @@ impl MarkdownOwners {
         )?;
         body.rendered = Some(rendered.proof);
         Ok(element)
-    }
-
-    pub fn rendered_current(&self, scope: &PresentationScope, key: &BodyKey, source: &str) -> bool {
-        self.scope.as_ref() == Some(scope)
-            && self.bodies.get(key).is_some_and(|body| {
-                *body.source == *source
-                    && body
-                        .rendered
-                        .as_ref()
-                        .is_some_and(|proof| body.presenter.is_current(proof))
-            })
-    }
-
-    pub fn prepare_projected(
-        &mut self,
-        app: &mut UiApp,
-        scope: &PresentationScope,
-        key: BodyKey,
-        id: &str,
-        engine: &MarkdownEngine,
-        source: &str,
-    ) -> anyhow::Result<(usize, u64)> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
-        let slot = key.slot;
-        let body = self
-            .bodies
-            .entry(key.clone())
-            .or_insert_with(|| MarkdownBody {
-                presenter: MarkdownPresenter::default(),
-                id: id.to_owned(),
-                source: std::rc::Rc::from(""),
-                ids: Vec::new(),
-                rendered: None,
-                revision: 0,
-                projected: HashMap::new(),
-                batch: None,
-                prepared_item_seq: None,
-                preparation: None,
-            });
-        if body.id != id {
-            body.presenter.release(&body.id);
-            if let Some(batch) = body.batch.take() {
-                app.release_selection_batch_owner(batch.document(), batch.owner());
-            }
-            body.id = id.to_owned();
-            body.rendered = None;
-            body.projected.clear();
-            body.prepared_item_seq = None;
-            body.preparation = None;
-            self.selection.retain(app, |other| other != &key);
-        }
-        if *body.source != *source {
-            body.rendered = None;
-            body.prepared_item_seq = None;
-            body.preparation = None;
-            body.revision = body.revision.wrapping_add(1);
-            self.selection.retain(app, |other| other != &key);
-            body.source = std::rc::Rc::from(source);
-        }
-        body.preparation = Some(prepare_body(&mut body.presenter, engine, source, slot)?);
-        let presenter = &body.presenter;
-        body.projected.retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
-        let count = body
-            .presenter
-            .projected_count()
-            .ok_or_else(|| anyhow::anyhow!("Markdown projection is unavailable"))?;
-        Ok((count, body.revision))
     }
 
     pub fn prepare_on_realization(
@@ -584,41 +445,14 @@ impl MarkdownOwners {
         }
         body.preparation = Some(prepare_body(&mut body.presenter, engine, source, slot)?);
         let presenter = &body.presenter;
-        body.projected.retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
+        body.projected
+            .retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
         body.prepared_item_seq = Some(item_seq);
         let count = body
             .presenter
             .projected_count()
             .ok_or_else(|| anyhow::anyhow!("Markdown projection is unavailable"))?;
         Ok((count, body.revision))
-    }
-
-    pub fn render_projected(
-        &mut self,
-        app: &mut UiApp,
-        scope: &PresentationScope,
-        request: MarkdownRender<'_>,
-        row: usize,
-        allocate: impl FnMut() -> SelectionSourceId,
-    ) -> anyhow::Result<Element> {
-        let prepared = self.prepare_projected_row(scope, request, row, None, allocate)?;
-        for batch in prepared.batches {
-            app.register_selection_sources_in(batch.document(), batch.sources().to_vec())?;
-        }
-        Ok(prepared.element)
-    }
-
-    pub fn prepare_projected_row(
-        &mut self,
-        scope: &PresentationScope,
-        request: MarkdownRender<'_>,
-        row: usize,
-        code: Option<&CodeServices>,
-        allocate: impl FnMut() -> SelectionSourceId,
-    ) -> anyhow::Result<aqua_ui::collection::BatchedCollectionRow> {
-        Ok(self
-            .prepare_projected_row_with_geometry(scope, request, row, code, None, allocate)?
-            .row)
     }
 
     pub fn prepare_projected_row_with_geometry(

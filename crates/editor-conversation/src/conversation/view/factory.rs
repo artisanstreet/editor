@@ -5,15 +5,15 @@ use crate::conversation::fold::{self, Row, RowKey, Slot};
 use crate::conversation::presentation::{
     BodyKey, MarkdownOwners, MarkdownRender, PresentationScope, ScopedCodeAction,
 };
-use editor_ui::markdown::presenter::HeatmapServices;
-use editor_ui::markdown::visual::{BodyTone, LinkAction};
-use editor_ui::rich::actions::{ResourceScope, ShowCopyMenu};
-use editor_ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
-use editor_ui::theme::ArtisanTheme;
 use aqua_text::document::SelectionSourceId;
 use aqua_ui::collection::BatchedCollectionRow;
 use aqua_ui::collection_runtime::CollectionError;
 use artisan_api::{ItemKind, Status, TextContent};
+use editor_ui::kit::{Button, ButtonTone, Space, Spaced, TextRole};
+use editor_ui::markdown::presenter::HeatmapServices;
+use editor_ui::markdown::visual::{BodyTone, LinkAction};
+use editor_ui::rich::actions::{ResourceScope, ShowCopyMenu};
+use editor_ui::theme::ArtisanTheme;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -61,9 +61,9 @@ fn user_bubble(
     sticker: Option<editor_ui::sticker::Sticker>,
     theme: ArtisanTheme,
 ) -> aqua_ui::element::Element {
-    use editor_ui::chat_bubble::{ChatBubbleSegment, SegmentPosition};
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
+    use editor_ui::chat_bubble::{ChatBubbleSegment, SegmentPosition};
     let mut root = UiBox::new()
         .layout("column")
         .width(Length::Pct(100.0))
@@ -238,7 +238,10 @@ pub fn row_settles_statically(model: &RowModel) -> bool {
             model.row.semantic(),
             Row::Text { .. } | Row::Chain { .. } | Row::WorkEntry { .. } | Row::Work { .. }
         ))
-        && model.items.values().all(|item| item.status != Status::Running)
+        && model
+            .items
+            .values()
+            .all(|item| item.status != Status::Running)
         && model.ui.values().all(|ui| !ui.fresh())
         && (status || model.live.is_empty())
 }
@@ -263,8 +266,8 @@ impl RowFactory {
         aqua_ui::element::Element,
         Option<crate::conversation::stored::StoredProof>,
     )> {
-        use editor_ui::markdown::stored::{LeafPreparation, StoredPreparation};
         use aqua_ui::element::Text;
+        use editor_ui::markdown::stored::{LeafPreparation, StoredPreparation};
         let services = self
             .stored
             .as_ref()
@@ -444,9 +447,9 @@ impl RowFactory {
         batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
     ) -> anyhow::Result<aqua_ui::element::Element> {
         use crate::conversation::view::resources::ResourceKey;
+        use aqua_ui::element::Text;
         use editor_ui::markdown::literal::LiteralPreparation;
         use editor_ui::markdown::stored::StoredPreparation;
-        use aqua_ui::element::Text;
         let services = self
             .stored
             .as_ref()
@@ -590,7 +593,10 @@ impl RowFactory {
     ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
         let collected = RefCell::new(Vec::new());
         let used = RefCell::new(std::collections::HashSet::new());
-        let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+        let now = self
+            .work
+            .as_ref()
+            .map_or_else(Instant::now, |work| work.now);
         let disclosed = owner.motion.borrow_mut().disclosed(
             format!("details-{}", item.id),
             expanded,
@@ -605,7 +611,15 @@ impl RowFactory {
             self.theme,
             |text, color, mono| truncate(text, color, mono, self.theme),
             dispatch,
-            || self.source_field(owner, item, crate::conversation::content::SourceField::Output, &collected, &used),
+            || {
+                self.source_field(
+                    owner,
+                    item,
+                    crate::conversation::content::SourceField::Output,
+                    &collected,
+                    &used,
+                )
+            },
             move |details| match disclosed {
                 Some(frame) => frame.wrap(details, 0.0, invalidate),
                 None => details,
@@ -737,7 +751,10 @@ impl RowFactory {
                 field == crate::conversation::content::SourceField::ApprovalCommand,
             )
             .text(&theme, text.clone());
-            if matches!(field, crate::conversation::content::SourceField::Question(_)) {
+            if matches!(
+                field,
+                crate::conversation::content::SourceField::Question(_)
+            ) {
                 element = element.wrap(true).style(
                     aqua_ui::style::Style::new()
                         .width(aqua_ui::style::Length::Pct(100.0))
@@ -934,7 +951,9 @@ impl RowFactory {
         let mut row = UiBox::new().layout("row").spaced(Space::S8).style(
             Style::new()
                 .wrap(true)
-                .max_width(Length::Px(editor_ui::chat_bubble::ChatBubbleSegment::MAX_WIDTH))
+                .max_width(Length::Px(
+                    editor_ui::chat_bubble::ChatBubbleSegment::MAX_WIDTH,
+                ))
                 .justify(aqua_ui::JustifyContent::END),
         );
         for (index, hash) in images.iter().enumerate() {
@@ -951,11 +970,11 @@ impl RowFactory {
         attachment: Option<usize>,
         width: f32,
     ) -> anyhow::Result<aqua_ui::element::Element> {
-        use editor_core::host::BlobImage;
-        use editor_ui::media_frame::MediaFrame;
         use aqua_core::image::ImageFit;
         use aqua_ui::element::{Box as UiBox, Media};
         use aqua_ui::style::{Length, Style};
+        use editor_core::host::BlobImage;
+        use editor_ui::media_frame::MediaFrame;
         let resources = self
             .blob_images
             .as_ref()
@@ -968,7 +987,10 @@ impl RowFactory {
             Some(BlobImage::Ready(image)) => Some((**image).clone()),
             _ => None,
         };
-        let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+        let now = self
+            .work
+            .as_ref()
+            .map_or_else(Instant::now, |work| work.now);
         let arrival = owner.motion.borrow_mut().arrival(
             format!("image-{hash}-{attachment:?}"),
             image.is_some(),
@@ -1032,10 +1054,7 @@ impl RowFactory {
                 if attachment.is_some() {
                     column = column.padded(Space::S8);
                 }
-                column
-                    .child(text)
-                    .child(retry)
-                    .build()
+                column.child(text).child(retry).build()
             }
             _ if attachment.is_none() => MediaFrame::placeholder(self.theme),
             _ => UiBox::new()
@@ -1125,57 +1144,6 @@ impl RowFactory {
                 .child(frame)
                 .build())
         }
-    }
-
-    pub fn prepare_prose(
-        conversation: &mut crate::conversation::controller::Conversation,
-        core: &editor_core::Core,
-        app: &mut aqua::UiApp,
-        markdown: &mut MarkdownOwners,
-        engine: &editor_ui::markdown::MarkdownEngine,
-        scope: &PresentationScope,
-        id: &artisan_api::ItemId,
-    ) -> anyhow::Result<bool> {
-        anyhow::ensure!(
-            scope.current(conversation, core),
-            "stale conversation presentation scope"
-        );
-        let key = BodyKey {
-            item: id.clone(),
-            slot: Slot::Prose,
-        };
-        let version = conversation
-            .body_version(&key)
-            .ok_or_else(|| anyhow::anyhow!("conversation body is unavailable"))?;
-        let item = conversation
-            .view
-            .as_ref()
-            .and_then(|view| view.shared_item(id))
-            .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
-        anyhow::ensure!(
-            item.status != Status::Running,
-            "live prose reveal is unavailable"
-        );
-        let ItemKind::AssistantMessage {
-            text: TextContent::Inline(source),
-            ..
-        } = &item.kind
-        else {
-            anyhow::bail!("stored or non-assistant prose is unavailable");
-        };
-        markdown.rebind(app, Some(scope.clone()));
-        let (count, revision) =
-            markdown.prepare_projected(app, scope, key.clone(), &id.to_string(), engine, source)?;
-        Ok(conversation.publish_projection(
-            core,
-            scope,
-            key,
-            crate::conversation::projection::BodyProjection {
-                version,
-                revision,
-                leaves: 0..count,
-            },
-        ))
     }
 
     pub fn new(
@@ -1404,9 +1372,10 @@ impl RowFactory {
         let snapshots =
             crate::conversation::adapter::RowSnapshots::capture(conversation, composer_height)
                 .ok_or_else(|| anyhow::anyhow!("conversation snapshot is unavailable"))?;
-        let frontier = conversation.reveal_frontier.as_ref().and_then(|frontier| {
-            conversation.row_position(frontier)
-        });
+        let frontier = conversation
+            .reveal_frontier
+            .as_ref()
+            .and_then(|frontier| conversation.row_position(frontier));
         let mut disclosure = Vec::with_capacity(conversation.rows.len());
         let mut held = Vec::with_capacity(conversation.rows.len());
         for (index, (row, _)) in conversation.rows.iter().enumerate() {
@@ -1452,27 +1421,6 @@ impl RowFactory {
         self
     }
 
-    pub fn set_media_services(
-        &self,
-        conversation: &crate::conversation::controller::Conversation,
-        core: &editor_core::Core,
-        key: BodyKey,
-        services: editor_ui::markdown::presenter::MediaServices,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(self.live.get(), "disposed conversation row factory");
-        let id = key.item.to_string();
-        self.markdown.borrow_mut().set_media_services(
-            conversation,
-            core,
-            &self.scope,
-            key,
-            &id,
-            services,
-        )?;
-        (self.invalidate)();
-        Ok(())
-    }
-
     pub fn viewport_callback(
         &self,
     ) -> anyhow::Result<Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>> {
@@ -1514,11 +1462,6 @@ impl RowFactory {
         self
     }
 
-    pub fn with_body_versions(mut self, versions: HashMap<BodyKey, u64>) -> Self {
-        self.projection_versions = versions;
-        self
-    }
-
     pub fn publish_projections(
         &self,
         conversation: &mut crate::conversation::controller::Conversation,
@@ -1534,10 +1477,6 @@ impl RowFactory {
         }
         let pending = std::mem::take(&mut *self.pending_projections.borrow_mut());
         conversation.publish_projections(core, &self.scope, pending)
-    }
-
-    pub fn retire(&self) {
-        self.active.set(false);
     }
 
     pub fn dispose(&self) {
@@ -1627,19 +1566,6 @@ impl RowFactory {
         result
     }
 
-    pub fn sync_reveal_geometry(
-        &self,
-        app: &mut aqua::UiApp,
-        conversation: &crate::conversation::controller::Conversation,
-        core: &editor_core::Core,
-        frame: super::reveal::GeometryFrame<'_>,
-    ) -> Option<bool> {
-        if !self.live.get() || frame.scope != &self.scope {
-            return None;
-        }
-        super::reveal::sync_geometry(app, conversation, core, &self.markdown.borrow(), frame)
-    }
-
     pub fn callback(self: &Rc<Self>) -> BatchedRowFactory {
         let owner = Rc::clone(self);
         Rc::new(move |index, key| {
@@ -1691,7 +1617,10 @@ impl RowFactory {
         key: &RowKey,
         fresh: bool,
     ) -> Option<editor_ui::sticker::Sticker> {
-        let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+        let now = self
+            .work
+            .as_ref()
+            .map_or_else(Instant::now, |work| work.now);
         owner
             .motion
             .borrow_mut()
@@ -1742,11 +1671,13 @@ impl RowFactory {
             &row.model.row.key() == key,
             "stale conversation row identity"
         );
-        editor_core::diagnostics::rebuild_stats::record_event(if self.row_cache.borrow().get(key).is_some() {
-            "row_rerealized"
-        } else {
-            "row_realized"
-        });
+        editor_core::diagnostics::rebuild_stats::record_event(
+            if self.row_cache.borrow().get(key).is_some() {
+                "row_rerealized"
+            } else {
+                "row_realized"
+            },
+        );
         self.unsettled.set(false);
         self.content_keyed.set(false);
         self.settled.borrow_mut().remove(key);
@@ -1975,47 +1906,127 @@ impl RowFactory {
                     )?,
                     ItemKind::Plan { .. } => work::plan_entry(item, self.theme),
                     ItemKind::Notice { .. } => self.notice_row(&row_owner, item, &mut batches)?,
-                    ItemKind::Question { .. } => self.question_card(&row_owner, item, &mut batches)?,
+                    ItemKind::Question { .. } => {
+                        self.question_card(&row_owner, item, &mut batches)?
+                    }
                     _ => {
                         anyhow::bail!("conversation work entry renderer is unavailable for {key:?}")
                     }
                 }
             }
-            Row::Text { id, slot: slot @ Slot::Plain(section), block, .. }
-                if row.model.items.get(id).is_some_and(|item| matches!(slot.text(item), Some(TextContent::Stored(_)))) => {
-                let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
-                let Some(TextContent::Stored(reference)) = slot.text(item) else { anyhow::bail!("stored source changed") };
-                Some(self.literal_row(&row_owner, item, *slot, *section, *block, reference, row.model.version, &mut batches)?)
-            }
-            Row::Text { id, slot, block, .. }
-                if matches!(slot, Slot::Prose | Slot::Text(_))
-                    && row.model.items.get(id).is_some_and(|item| {
-                        (*slot != Slot::Prose || item.status != Status::Running)
-                            && matches!(slot.text(item), Some(TextContent::Stored(_)))
-                    }) => {
-                let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
-                let Some(TextContent::Stored(reference)) = slot.text(item) else { anyhow::bail!("stored source changed") };
-                let (element, proof) = self.stored_row(row, &row_owner, item, *slot, *block, reference, &reveal, content_width, &mut batches)?;
-                stored_proof = proof;
-                Some(if slot.is_bubble() {
-                    let count = self.stored.as_ref().and_then(|services| services.owner.borrow().current_range(&BodyKey { item: id.clone(), slot: *slot })).map_or(1, |range| range.end);
-                    let sticker = self.bubble_sticker(&row_owner, key, row.model.ui.get(id).is_some_and(|ui| ui.fresh()));
-                    user_bubble(element, *block, count, false, if *block == 0 { self.user_attachments(&row_owner, item)? } else { None }, bubble_sender(item, row.model.author), sticker, self.theme)
-                } else { element })
-            }
             Row::Text {
                 id,
-                slot,
-                block: 0,
+                slot: slot @ Slot::Plain(section),
+                block,
                 ..
-            } if matches!(slot, Slot::Text(_))
+            } if row
+                .model
+                .items
+                .get(id)
+                .is_some_and(|item| matches!(slot.text(item), Some(TextContent::Stored(_)))) =>
+            {
+                let item = row
+                    .model
+                    .items
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                let Some(TextContent::Stored(reference)) = slot.text(item) else {
+                    anyhow::bail!("stored source changed")
+                };
+                Some(self.literal_row(
+                    &row_owner,
+                    item,
+                    *slot,
+                    *section,
+                    *block,
+                    reference,
+                    row.model.version,
+                    &mut batches,
+                )?)
+            }
+            Row::Text {
+                id, slot, block, ..
+            } if matches!(slot, Slot::Prose | Slot::Text(_))
                 && row.model.items.get(id).is_some_and(|item| {
-                    slot.inline_text(item).is_some_and(str::is_empty)
-                }) => {
+                    (*slot != Slot::Prose || item.status != Status::Running)
+                        && matches!(slot.text(item), Some(TextContent::Stored(_)))
+                }) =>
+            {
+                let item = row
+                    .model
+                    .items
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                let Some(TextContent::Stored(reference)) = slot.text(item) else {
+                    anyhow::bail!("stored source changed")
+                };
+                let (element, proof) = self.stored_row(
+                    row,
+                    &row_owner,
+                    item,
+                    *slot,
+                    *block,
+                    reference,
+                    &reveal,
+                    content_width,
+                    &mut batches,
+                )?;
+                stored_proof = proof;
+                Some(if slot.is_bubble() {
+                    let count = self
+                        .stored
+                        .as_ref()
+                        .and_then(|services| {
+                            services.owner.borrow().current_range(&BodyKey {
+                                item: id.clone(),
+                                slot: *slot,
+                            })
+                        })
+                        .map_or(1, |range| range.end);
+                    let sticker = self.bubble_sticker(
+                        &row_owner,
+                        key,
+                        row.model.ui.get(id).is_some_and(|ui| ui.fresh()),
+                    );
+                    user_bubble(
+                        element,
+                        *block,
+                        count,
+                        false,
+                        if *block == 0 {
+                            self.user_attachments(&row_owner, item)?
+                        } else {
+                            None
+                        },
+                        bubble_sender(item, row.model.author),
+                        sticker,
+                        self.theme,
+                    )
+                } else {
+                    element
+                })
+            }
+            Row::Text {
+                id, slot, block: 0, ..
+            } if matches!(slot, Slot::Text(_))
+                && row
+                    .model
+                    .items
+                    .get(id)
+                    .is_some_and(|item| slot.inline_text(item).is_some_and(str::is_empty)) =>
+            {
                 use aqua_ui::element::Box as UiBox;
                 use aqua_ui::style::{Length, Style};
-                let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
-                let mut root = UiBox::new().layout("column").width(Length::Pct(100.0)).spaced(Space::S8).style(Style::new().align(aqua_ui::AlignItems::END));
+                let item = row
+                    .model
+                    .items
+                    .get(id)
+                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                let mut root = UiBox::new()
+                    .layout("column")
+                    .width(Length::Pct(100.0))
+                    .spaced(Space::S8)
+                    .style(Style::new().align(aqua_ui::AlignItems::END));
                 if let Some(attachments) = self.user_attachments(&row_owner, item)? {
                     root = root.child(attachments);
                 }
@@ -2041,7 +2052,8 @@ impl RowFactory {
                     })
                     .copied();
                 let sealed = shape_count.is_some_and(|count| *block + 1 < count);
-                let fresh = *slot == Slot::Prose && row.model.ui.get(id).is_some_and(|ui| ui.fresh());
+                let fresh =
+                    *slot == Slot::Prose && row.model.ui.get(id).is_some_and(|ui| ui.fresh());
                 anyhow::ensure!(
                     reveal.is_some() || (!running && !fresh),
                     "live or fresh prose reveal is unavailable"
@@ -2148,8 +2160,11 @@ impl RowFactory {
                     .then(|| live.as_ref().and_then(|binding| binding.preview_notice()))
                     .flatten();
                 let shaped = self.shape_counts.contains_key(&body_key);
-                if (if shaped { *block + 1 == count } else { *block == 0 })
-                    && let Some(binding) = &live
+                if (if shaped {
+                    *block + 1 == count
+                } else {
+                    *block == 0
+                }) && let Some(binding) = &live
                 {
                     self.pending_live
                         .borrow_mut()
@@ -2336,21 +2351,57 @@ impl RowFactory {
                 })
             }
             Row::Prompt(id) => {
-                let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation prompt item is unavailable"))?;
+                let item =
+                    row.model.items.get(id).ok_or_else(|| {
+                        anyhow::anyhow!("conversation prompt item is unavailable")
+                    })?;
                 if matches!(&item.kind, ItemKind::Question { .. }) {
                     self.question_card(&row_owner, item, &mut batches)?
                 } else {
-                    let dispatch = self.dispatch.as_ref().ok_or_else(|| anyhow::anyhow!("conversation actions are unavailable"))?;
-                    let approval = self.approval_card(&row_owner, item, row.model.ui.get(id), Rc::clone(dispatch), &mut batches)?;
+                    let dispatch = self
+                        .dispatch
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("conversation actions are unavailable"))?;
+                    let approval = self.approval_card(
+                        &row_owner,
+                        item,
+                        row.model.ui.get(id),
+                        Rc::clone(dispatch),
+                        &mut batches,
+                    )?;
                     if approval.is_some() {
                         approval
                     } else {
-                        let work = self.work.as_ref().ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
+                        let work = self.work.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("conversation work motion is unavailable")
+                        })?;
                         match &item.kind {
-                            ItemKind::Tool { .. } | ItemKind::UserMessage { from_agent: Some(_), .. } => self.activity_row(&row_owner, item, row.model.ui.get(id).and_then(|ui| ui.expanded).unwrap_or(false), &work.names, Rc::clone(dispatch), &mut batches)?,
-                            ItemKind::Agent { .. } => work::agent(item, self.theme, |text, color| truncate(text, color, false, self.theme), Rc::clone(dispatch)),
+                            ItemKind::Tool { .. }
+                            | ItemKind::UserMessage {
+                                from_agent: Some(_),
+                                ..
+                            } => self.activity_row(
+                                &row_owner,
+                                item,
+                                row.model
+                                    .ui
+                                    .get(id)
+                                    .and_then(|ui| ui.expanded)
+                                    .unwrap_or(false),
+                                &work.names,
+                                Rc::clone(dispatch),
+                                &mut batches,
+                            )?,
+                            ItemKind::Agent { .. } => work::agent(
+                                item,
+                                self.theme,
+                                |text, color| truncate(text, color, false, self.theme),
+                                Rc::clone(dispatch),
+                            ),
                             ItemKind::Plan { .. } => work::plan_entry(item, self.theme),
-                            ItemKind::Notice { .. } => self.notice_row(&row_owner, item, &mut batches)?,
+                            ItemKind::Notice { .. } => {
+                                self.notice_row(&row_owner, item, &mut batches)?
+                            }
                             _ => None,
                         }
                     }
@@ -2365,10 +2416,10 @@ impl RowFactory {
                 let ItemKind::Image { blob, .. } = &item.kind else {
                     anyhow::bail!("conversation image item has changed");
                 };
-                let width = super::reading_width(
-                    content_width
-                        .ok_or_else(|| anyhow::anyhow!("committed transcript width is unavailable"))?,
-                );
+                let width =
+                    super::reading_width(content_width.ok_or_else(|| {
+                        anyhow::anyhow!("committed transcript width is unavailable")
+                    })?);
                 anyhow::ensure!(width > 0.0, "measured image width is unavailable");
                 let image = self.blob_frame(&row_owner, item, blob, None, width)?;
                 Some(
@@ -2381,21 +2432,34 @@ impl RowFactory {
             }
             Row::Compaction(id) => {
                 use crate::conversation::compaction::CompactionPhase;
-                let item = row.model.items.get(id).ok_or_else(|| anyhow::anyhow!("conversation compaction item is unavailable"))?;
+                let item = row.model.items.get(id).ok_or_else(|| {
+                    anyhow::anyhow!("conversation compaction item is unavailable")
+                })?;
                 let ItemKind::Compaction { .. } = &item.kind else {
                     anyhow::bail!("conversation compaction item has changed");
                 };
-                let work = self.work.as_ref().ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
+                let work = self
+                    .work
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
                 let phase = match item.status {
                     Status::Running => CompactionPhase::Running,
                     Status::Done => CompactionPhase::Done,
-                    Status::AwaitingUser | Status::Failed | Status::Declined | Status::Cancelled => CompactionPhase::Stopped,
+                    Status::AwaitingUser
+                    | Status::Failed
+                    | Status::Declined
+                    | Status::Cancelled => CompactionPhase::Stopped,
                 };
                 let fresh = row.model.ui.get(id).is_some_and(|ui| ui.fresh());
-                let frame = row_owner.motion.borrow_mut().compaction(id, phase, fresh, work.now, self.reduced_motion);
-                let shimmer_key = (!self.reduced_motion).then(|| {
-                    aqua_ui::tree::hash_key(("compaction-shimmer", format!("{key:?}")))
-                });
+                let frame = row_owner.motion.borrow_mut().compaction(
+                    id,
+                    phase,
+                    fresh,
+                    work.now,
+                    self.reduced_motion,
+                );
+                let shimmer_key = (!self.reduced_motion)
+                    .then(|| aqua_ui::tree::hash_key(("compaction-shimmer", format!("{key:?}"))));
                 super::compaction::row(item, frame, self.theme, |phase, switch, frame, theme| {
                     super::compaction::label(phase, switch, frame, theme, shimmer_key)
                 })
@@ -2406,22 +2470,42 @@ impl RowFactory {
                     status::StatusText::Status(label) => Some(label.clone()),
                     status::StatusText::Reasoning(_) => None,
                 };
-                let element = self.statuses.borrow_mut().render(key.clone(), text, live, self.reduced_motion, theme)?;
-                let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
-                let swap = row_owner.motion.borrow_mut().swap(format!("status-{key:?}"), label, self.reduced_motion, now);
+                let element = self.statuses.borrow_mut().render(
+                    key.clone(),
+                    text,
+                    live,
+                    self.reduced_motion,
+                    theme,
+                )?;
+                let now = self
+                    .work
+                    .as_ref()
+                    .map_or_else(Instant::now, |work| work.now);
+                let swap = row_owner.motion.borrow_mut().swap(
+                    format!("status-{key:?}"),
+                    label,
+                    self.reduced_motion,
+                    now,
+                );
                 anyhow::Ok(match swap {
                     Some(progress) => super::motion::swapped(element, progress),
                     None => element,
                 })
             })
             .transpose()?,
-            Row::AgentStatus(_, doing) => status::agent(doing.as_deref(), self.theme, |text, theme| {
-                self.statuses
-                    .borrow_mut()
-                    .agent(key.clone(), text, self.reduced_motion, theme)
-            })
-            .transpose()?,
-            Row::Text { id, slot: Slot::Plain(section), .. } => {
+            Row::AgentStatus(_, doing) => {
+                status::agent(doing.as_deref(), self.theme, |text, theme| {
+                    self.statuses
+                        .borrow_mut()
+                        .agent(key.clone(), text, self.reduced_motion, theme)
+                })
+                .transpose()?
+            }
+            Row::Text {
+                id,
+                slot: Slot::Plain(section),
+                ..
+            } => {
                 let item = row
                     .model
                     .items
@@ -2444,7 +2528,9 @@ impl RowFactory {
                     Row::WorkEntry { id, .. } => (Some(id), false),
                     Row::Chain { ids, .. } => (ids.first(), false),
                     Row::Prompt(id) | Row::Image(id) | Row::AgentResult(id) => (Some(id), true),
-                    Row::Text { id, slot, block: 0, .. } if slot.is_card() => (Some(id), true),
+                    Row::Text {
+                        id, slot, block: 0, ..
+                    } if slot.is_card() => (Some(id), true),
                     _ => (None, false),
                 };
                 if let Some(id) = id {
@@ -2490,15 +2576,16 @@ impl RowFactory {
                         .is_some_and(|(owner, _, _)| owner.is_settling()));
             queue.borrow_mut().finish(key, settling);
         }
-        let reveal_done = reveal
-            .as_ref()
-            .is_none_or(|(owner, _, _)| {
-                owner.fully_visible() && !owner.is_settling() && !owner.is_animating()
-            });
+        let reveal_done = reveal.as_ref().is_none_or(|(owner, _, _)| {
+            owner.fully_visible() && !owner.is_settling() && !owner.is_animating()
+        });
         let quiescent = self.content_keyed.get() || row_settles_statically(&row.model);
         let motionless = {
             let motion = row_owner.motion.borrow();
-            let now = self.work.as_ref().map_or_else(Instant::now, |work| work.now);
+            let now = self
+                .work
+                .as_ref()
+                .map_or_else(Instant::now, |work| work.now);
             !motion.animating() && !motion.sticking(now)
         };
         let disclosure_rest = row.disclosure == RowDisclosure::default();

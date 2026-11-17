@@ -1,6 +1,6 @@
-use editor_sources::SourceProviderExt;
 use super::fold::{PlainSection, TextSection};
 use artisan_api::{ApprovalRequest, Item, ItemKind, TextContent};
+use editor_sources::SourceProviderExt;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SourceField {
@@ -125,10 +125,10 @@ impl SourceField {
     }
 }
 
-use editor_core::{Core, HostId, HostInstance};
-use editor_sources::{ContentAction, ContentEffect, ContentText, ContentView};
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use artisan_api::{ContentRef, ItemId};
+use editor_core::{Core, HostId, HostInstance};
+use editor_sources::{ContentAction, ContentEffect, ContentText, ContentView};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -411,22 +411,6 @@ impl SourceOwners {
             owner
                 .text
                 .finish_export_result(core, request.generation, result);
-        }
-    }
-
-    pub fn drain(&mut self, core: &Core, id: &ItemId, field: &SourceField) -> Option<SourceEffect> {
-        let owner = self.owners.get_mut(&(id.clone(), field.clone()))?;
-        match editor_sources::drain_content(&mut owner.text, core)? {
-            ContentEffect::Clipboard(copied) => Some(SourceEffect::Clipboard(copied)),
-            ContentEffect::SavePath(generation) => Some(SourceEffect::SavePath(SourceExport {
-                host: owner.host.clone(),
-                instance: owner.instance,
-                item: id.clone(),
-                field: field.clone(),
-                source: owner.text.window().source().clone(),
-                identity: owner.text.identity(),
-                generation,
-            })),
         }
     }
 

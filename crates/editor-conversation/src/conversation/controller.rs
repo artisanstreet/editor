@@ -2,10 +2,10 @@ use super::disclosure::DisclosureState;
 use super::fold::{self, Row, RowKey, RunSummary};
 use super::thread::{self, ThreadView};
 use super::viewport::{Effect, Fetch, Input, Jump};
+use artisan_api::{Answer, Item, ItemId, ItemKind, ItemsPage, RunId, Seq, ThreadId};
 use editor_core::{
     Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, delivery::Delivery, runtime::runtime,
 };
-use artisan_api::{Answer, Item, ItemId, ItemKind, ItemsPage, RunId, Seq, ThreadId};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -13,12 +13,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::task::AbortOnDropHandle;
-
-pub enum ConversationEvent {
-    ItemsChanged,
-    AgentChanged,
-    NewProject,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Origin {
@@ -136,7 +130,6 @@ pub struct Conversation {
     agent_task: Option<AbortOnDropHandle<()>>,
     answer_tasks: HashMap<ItemId, AbortOnDropHandle<()>>,
     delivery: Delivery<Completion>,
-    events: Vec<ConversationEvent>,
     scroll: Vec<ScrollAction>,
     parked: super::parked::Shelf<ParkedKey, ParkedThread>,
     pending: Option<Pending>,
@@ -210,7 +203,6 @@ impl Conversation {
                 NonZeroUsize::new(64).unwrap(),
                 core.wake_mailbox().sender(),
             ),
-            events: Vec::new(),
             scroll: Vec::new(),
             parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
             pending: None,
@@ -296,7 +288,6 @@ impl Conversation {
         self.load_error = None;
         self.landing = landing;
         self.rebuild(core);
-        self.events.push(ConversationEvent::ItemsChanged);
     }
 
     fn resume(
@@ -451,9 +442,7 @@ impl Conversation {
         self.mounted_for = None;
         self.row_heights.clear();
         self.load_error = None;
-        if self.agent.take().is_some() {
-            self.events.push(ConversationEvent::AgentChanged);
-        }
+        self.agent = None;
         if let Some((host, _)) = self.open.take() {
             if let Some(instance) = self.host_instance.take()
                 && let Some(host) = core.host_mut_if_instance(&host, instance)
@@ -463,7 +452,6 @@ impl Conversation {
             self.view = None;
             self.rows.clear();
             self.runs.clear();
-            self.events.push(ConversationEvent::ItemsChanged);
         }
     }
 
@@ -478,12 +466,6 @@ impl Conversation {
             self.host_instance,
             panel,
         );
-    }
-
-    pub fn items(&self) -> impl Iterator<Item = &Item> {
-        self.view
-            .iter()
-            .flat_map(|view| view.items.values().map(Arc::as_ref))
     }
 
     pub fn selection_scope(&self) -> Option<String> {
@@ -523,9 +505,8 @@ impl Conversation {
             Some(Landing::Loading) | None => self.landed_at,
         };
         since.map_or(1.0, |at| {
-            editor_ui::motion::MotionCurve::EaseOut.sample_f32(
-                now.saturating_duration_since(at).as_secs_f64() / REVEAL.as_secs_f64(),
-            )
+            editor_ui::motion::MotionCurve::EaseOut
+                .sample_f32(now.saturating_duration_since(at).as_secs_f64() / REVEAL.as_secs_f64())
         })
     }
 
@@ -559,9 +540,6 @@ impl Conversation {
             }
     }
 
-    pub fn events(&mut self) -> Vec<ConversationEvent> {
-        std::mem::take(&mut self.events)
-    }
     pub fn scroll_actions(&mut self) -> Vec<ScrollAction> {
         std::mem::take(&mut self.scroll)
     }
@@ -781,18 +759,6 @@ impl Conversation {
         true
     }
 
-    pub fn claim_prose_arrival(&mut self, id: &ItemId, block: usize) -> bool {
-        self.arrivals.borrow_mut().get_mut(id).map_or_else(
-            || {
-                self.view
-                    .as_ref()
-                    .and_then(|view| view.ui.get(id))
-                    .is_some_and(thread::ItemUi::fresh)
-            },
-            |arrival| arrival.claim(block),
-        )
-    }
-
     fn observe_live_prose_arrival(&mut self, id: &ItemId) {
         if !self.visible_items.contains(id) {
             return;
@@ -816,26 +782,6 @@ impl Conversation {
             .entry(id.clone())
             .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(blocks))
             .observed();
-    }
-
-    pub fn publish_projection(
-        &mut self,
-        core: &Core,
-        scope: &super::presentation::PresentationScope,
-        key: super::presentation::BodyKey,
-        projection: super::projection::BodyProjection,
-    ) -> bool {
-        if !scope.current(self, core)
-            || self.body_versions.get(&key) != Some(&projection.version)
-            || projection.leaves.end < projection.leaves.start
-        {
-            return false;
-        }
-        if !self.projections.publish(key, projection) {
-            return false;
-        }
-        self.rebuild(core);
-        true
     }
 
     pub fn publish_projections(
@@ -1085,21 +1031,6 @@ impl Conversation {
         }
         self.rebuild(core);
         self.scroll.push(ScrollAction::End);
-        self.events.push(ConversationEvent::AgentChanged);
-        self.events.push(ConversationEvent::ItemsChanged);
-    }
-
-    pub fn agent_context(&self) -> Option<Option<(u64, Option<String>)>> {
-        let agent = self.agent.as_ref()?;
-        let item = self.view.as_ref()?.item(agent);
-        Some(item.and_then(|item| match &item.kind {
-            ItemKind::Agent {
-                context_used: Some(used),
-                model,
-                ..
-            } => Some((*used, model.clone())),
-            _ => None,
-        }))
     }
 
     pub fn agent_trail(&self) -> Vec<(ItemId, String)> {
@@ -1281,7 +1212,6 @@ impl Conversation {
                         self.reveal.borrow_mut().rush(item.position);
                     }
                     self.rebuild(core);
-                    self.events.push(ConversationEvent::ItemsChanged);
                 }
             }
             HostEvent::Live { thread_id, target } if thread_id == &thread => {
@@ -1315,7 +1245,6 @@ impl Conversation {
                 view.set_live(host.live_targets(&thread));
                 self.perform(core, effects);
                 self.rebuild(core);
-                self.events.push(ConversationEvent::ItemsChanged);
             }
             _ => {}
         }
@@ -1427,7 +1356,6 @@ impl Conversation {
                         );
                     }
                     self.perform(core, effects);
-                    self.events.push(ConversationEvent::ItemsChanged);
                 }
                 Completion::Work {
                     origin,
@@ -1443,7 +1371,6 @@ impl Conversation {
                             self.load_error = None;
                             if view.apply_work(first, page) {
                                 self.rebuild(core);
-                                self.events.push(ConversationEvent::ItemsChanged);
                             }
                         }
                         Err(error) => {
@@ -1474,7 +1401,6 @@ impl Conversation {
                     if self.load_error.is_none() {
                         self.perform(core, effects);
                     }
-                    self.events.push(ConversationEvent::AgentChanged);
                 }
                 Completion::Answer {
                     origin,

@@ -114,78 +114,6 @@ impl TranscriptObservations {
         self.0.borrow_mut().reader_toward_end = Some(toward_end);
     }
 
-    pub fn prefetch_stored(
-        &self,
-        conversation: &Conversation,
-        core: &editor_core::Core,
-        scope: &PresentationScope,
-        viewport: CollectionViewport,
-        clip: aqua_core::Rect,
-        painted: &[Rc<PaintedRow>],
-        following_tail: bool,
-    ) -> bool {
-        if !scope.current(conversation, core) {
-            return false;
-        }
-        let state = self.0.borrow();
-        let top = conversation
-            .rows
-            .get(viewport.visible.start)
-            .map(|(row, _)| row.key());
-        let following = conversation
-            .view
-            .as_ref()
-            .is_some_and(|view| view.viewport.state().is_following());
-        let mut changed = false;
-        for observation in painted {
-            let snapshot = &observation.snapshot;
-            if !snapshot.active.get()
-                || !snapshot.revealed
-                || snapshot
-                    .reveal_ready
-                    .as_ref()
-                    .is_some_and(|ready| !ready.get())
-                || observation.bounds.h <= 0.0
-                || observation.bounds.intersect(clip).is_empty()
-            {
-                continue;
-            }
-            let Some((weak, proof)) = &snapshot.stored else {
-                continue;
-            };
-            let Some(owner) = weak.upgrade() else {
-                continue;
-            };
-            let Some((row, _)) = conversation
-                .row_position(&snapshot.row.key())
-                .and_then(|index| conversation.rows.get(index))
-                .filter(|(_, version)| *version == snapshot.version)
-            else {
-                continue;
-            };
-            let Some(item) = row
-                .anchor()
-                .and_then(|id| conversation.view.as_ref()?.item(id))
-            else {
-                continue;
-            };
-            if snapshot.item_seq != Some(item.seq) {
-                continue;
-            }
-            changed |= owner.borrow_mut().prefetch(
-                proof,
-                scope,
-                row,
-                item,
-                top.clone(),
-                state.reader_moves,
-                state.reader_toward_end,
-                following_tail,
-                following,
-            );
-        }
-        changed
-    }
     pub fn viewport_callback(
         &self,
         active: Rc<std::cell::Cell<bool>>,
@@ -402,9 +330,8 @@ impl TranscriptObservations {
             let hash = match state.key_hashes.get(key) {
                 Some(hash) => *hash,
                 None => {
-                    let hash = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(format!(
-                        "{key:?}"
-                    )));
+                    let hash =
+                        aqua_ui::tree::hash_key(aqua_ui::element::Key::from(format!("{key:?}")));
                     let key = key.clone();
                     state.key_hashes.insert(key, hash);
                     hash
@@ -676,52 +603,6 @@ struct TranscriptRow {
     key: RowKey,
 }
 
-pub fn list(
-    conversation: &Conversation,
-    estimated_height: f32,
-    row: Rc<dyn Fn(usize, &RowKey) -> Element>,
-    viewport: Rc<dyn Fn(CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &RowKey) -> f32>,
-) -> Element {
-    let rows: Vec<_> = conversation
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, (row, _))| TranscriptRow {
-            index,
-            key: row.key(),
-        })
-        .collect();
-    let heights = rows.clone();
-    List::new()
-        .items(rows)
-        .key(|row: &TranscriptRow| format!("{:?}", row.key))
-        .row(move |entry: &TranscriptRow| row(entry.index, &entry.key))
-        .virtualize()
-        .estimated_row_height(Length::Px(estimated_height))
-        .overscan(0)
-        .overscan_pixels(transcript_overscan_pixels(conversation))
-        .initial_height(move |index| initial_height(index, &heights[index].key))
-        .on_viewport(move |event| viewport(event))
-        .style(
-            Style::new()
-                .width(Length::Pct(100.0))
-                .height(Length::Pct(100.0)),
-        )
-        .build()
-        .with_key("conversation-transcript")
-}
-
-pub type PreparedRowFactory = Rc<
-    dyn Fn(
-        usize,
-        &RowKey,
-    ) -> Result<
-        aqua_ui::collection_runtime::PreparedCollectionRow,
-        aqua_ui::collection_runtime::CollectionError,
-    >,
->;
-
 pub type BatchedRowFactory = Rc<
     dyn Fn(
         usize,
@@ -783,78 +664,6 @@ pub fn layout_batched_list(
             row(entry.index, &entry.key, layout)
         })
         .width_class(|width| width.min(TRANSCRIPT_MAX_WIDTH))
-        .virtualize()
-        .estimated_row_height(Length::Px(estimated_height))
-        .overscan(0)
-        .overscan_pixels(transcript_overscan_pixels(conversation))
-        .initial_height(move |index| initial_height(index, &heights[index].key))
-        .on_viewport(move |event| viewport(event))
-        .style(
-            Style::new()
-                .width(Length::Pct(100.0))
-                .height(Length::Pct(100.0)),
-        )
-        .build()
-        .with_key("conversation-transcript")
-}
-
-pub fn batched_list(
-    conversation: &Conversation,
-    estimated_height: f32,
-    row: BatchedRowFactory,
-    viewport: Rc<dyn Fn(CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &RowKey) -> f32>,
-) -> Element {
-    let rows: Vec<_> = conversation
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, (row, _))| TranscriptRow {
-            index,
-            key: row.key(),
-        })
-        .collect();
-    let heights = rows.clone();
-    List::new()
-        .items(rows)
-        .key(|row: &TranscriptRow| format!("{:?}", row.key))
-        .try_batched_row(move |entry: &TranscriptRow| row(entry.index, &entry.key))
-        .virtualize()
-        .estimated_row_height(Length::Px(estimated_height))
-        .overscan(0)
-        .overscan_pixels(transcript_overscan_pixels(conversation))
-        .initial_height(move |index| initial_height(index, &heights[index].key))
-        .on_viewport(move |event| viewport(event))
-        .style(
-            Style::new()
-                .width(Length::Pct(100.0))
-                .height(Length::Pct(100.0)),
-        )
-        .build()
-        .with_key("conversation-transcript")
-}
-
-pub fn try_list(
-    conversation: &Conversation,
-    estimated_height: f32,
-    row: PreparedRowFactory,
-    viewport: Rc<dyn Fn(CollectionViewport)>,
-    initial_height: Rc<dyn Fn(usize, &RowKey) -> f32>,
-) -> Element {
-    let rows: Vec<_> = conversation
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, (row, _))| TranscriptRow {
-            index,
-            key: row.key(),
-        })
-        .collect();
-    let heights = rows.clone();
-    List::new()
-        .items(rows)
-        .key(|row: &TranscriptRow| format!("{:?}", row.key))
-        .try_row(move |entry: &TranscriptRow| row(entry.index, &entry.key))
         .virtualize()
         .estimated_row_height(Length::Px(estimated_height))
         .overscan(0)

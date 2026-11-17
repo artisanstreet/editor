@@ -8,31 +8,6 @@ use editor_ui::markdown::stored::{LeafPreparation, StoredOwner, StoredPreparatio
 use editor_ui::markdown::visual::{BodyTone, LinkAction};
 use editor_ui::theme::ArtisanTheme;
 
-pub fn edge_offset(
-    loaded: std::ops::Range<usize>,
-    count: usize,
-    ordinal: usize,
-    top: bool,
-    following_tail: bool,
-    following_viewport: bool,
-) -> Option<usize> {
-    if !loaded.contains(&ordinal) {
-        return None;
-    }
-    if loaded.start > 0
-        && !following_tail
-        && !following_viewport
-        && ordinal.saturating_sub(loaded.start) < 4
-        && top
-    {
-        Some(loaded.start.saturating_sub(32))
-    } else if loaded.end < count && loaded.end.saturating_sub(ordinal) <= 4 {
-        Some(loaded.start.saturating_add(32))
-    } else {
-        None
-    }
-}
-
 pub fn retired_leaves(
     window: &std::ops::Range<usize>,
     retained: impl IntoIterator<Item = usize>,
@@ -47,18 +22,6 @@ pub fn retired_leaves(
     retired
 }
 
-pub fn reverses_in_place(
-    previous_moves: u64,
-    previous_top: Option<&super::fold::RowKey>,
-    previous_newer: bool,
-    moves: u64,
-    top: Option<&super::fold::RowKey>,
-    toward_end: Option<bool>,
-    newer: bool,
-) -> bool {
-    previous_newer != newer
-        && (previous_moves == moves || previous_top == top || toward_end != Some(newer))
-}
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
 use aqua_ui::collection::SelectionSourceBatch;
 use artisan_api::{ContentRef, SourceIndexFormat, TextContent};
@@ -160,7 +123,6 @@ pub struct StoredConversation {
     cleanup: Rc<RefCell<Vec<PendingRelease>>>,
     live: Vec<Weak<StoredLeafLease>>,
     order: VecDeque<(BodyKey, usize)>,
-    frontiers: HashMap<BodyKey, (ContentRef, u64, Option<super::fold::RowKey>, bool)>,
 }
 
 impl StoredConversation {
@@ -168,17 +130,12 @@ impl StoredConversation {
         if self.scope != scope {
             self.owner.clear();
             self.literal.clear();
-            self.frontiers.clear();
             self.order.clear();
             for (_, body) in self.bodies.drain() {
                 body.release();
             }
             self.scope = scope;
         }
-    }
-
-    pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
-        self.owner.wake_mailbox()
     }
 
     pub fn ensure(
@@ -515,67 +472,6 @@ impl StoredConversation {
             .prepare(&self.owner, &leaf_key, source, ordinal)
     }
 
-    pub fn owner(&self) -> &StoredOwner {
-        &self.owner
-    }
-
-    pub(crate) fn prefetch(
-        &mut self,
-        proof: &StoredProof,
-        scope: &PresentationScope,
-        row: &super::fold::Row,
-        item: &artisan_api::Item,
-        top: Option<super::fold::RowKey>,
-        reader_moves: u64,
-        toward_end: Option<bool>,
-        following_tail: bool,
-        following_viewport: bool,
-    ) -> bool {
-        if !proof.accepts_row(self, scope, row, item) {
-            return false;
-        }
-        let loaded = proof.source.loaded_range();
-        let Some(offset) = edge_offset(
-            loaded.clone(),
-            proof.source.block_count(),
-            proof.ordinal,
-            top.as_ref() == Some(&row.key()),
-            following_tail,
-            following_viewport,
-        ) else {
-            return false;
-        };
-        let newer = offset > loaded.start;
-        if self.frontiers.get(&proof.key).is_some_and(
-            |(source, moves, previous_top, previous_newer)| {
-                source == proof.source.source_ref()
-                    && reverses_in_place(
-                        *moves,
-                        previous_top.as_ref(),
-                        *previous_newer,
-                        reader_moves,
-                        top.as_ref(),
-                        toward_end,
-                        newer,
-                    )
-            },
-        ) {
-            return false;
-        }
-        let Some(body) = self.bodies.get(&proof.key) else {
-            return false;
-        };
-        self.frontiers.insert(
-            proof.key.clone(),
-            (proof.source.source_ref().clone(), reader_moves, top, newer),
-        );
-        matches!(
-            self.owner
-                .move_window(&body.owner, &proof.source, offset as u64),
-            StoredPreparation::Ready(_)
-        )
-    }
-
     pub fn current_range(&self, key: &BodyKey) -> Option<std::ops::Range<usize>> {
         let body = self.bodies.get(key)?;
         match self.owner.current(&body.owner) {
@@ -656,8 +552,6 @@ impl StoredConversation {
         for (key, window) in windows {
             self.retire_outside(&key, &window);
         }
-        self.frontiers
-            .retain(|key, _| self.bodies.contains_key(key));
         self.order.retain(|(key, _)| self.bodies.contains_key(key));
         let mut changed = !updates.is_empty() || media_changed || literal_changed;
         changed |= conversation.publish_projections(core, &scope, projections);

@@ -1,9 +1,9 @@
 use super::controller::{Conversation, ScrollAction};
-use super::fold::{self, Row, RowKey, RunSummary};
+use super::fold::{self, Row, RunSummary};
 use super::thread::ItemUi;
 use super::viewport::Input;
-use editor_core::Core;
 use artisan_api::{Answer, Item, ItemId, LiveTarget, RunId, Seq};
+use editor_core::Core;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -296,24 +296,6 @@ pub fn scroll_directive(
     }
 }
 
-pub fn changed_disclosures(
-    conversation: &mut Conversation,
-    now: Instant,
-    reduce_motion: bool,
-) -> super::disclosure::DisclosureFrame {
-    conversation.disclosures.advance_disclosures(
-        &conversation.rows,
-        &conversation.row_heights,
-        conversation.view.as_ref(),
-        now,
-        reduce_motion,
-    )
-}
-
-pub fn row_key(model: &RowModel) -> RowKey {
-    model.row.key()
-}
-
 pub fn sync_questionnaires(
     conversation: &Conversation,
     core: &Core,
@@ -359,30 +341,6 @@ pub fn sync_questionnaires(
     }
 }
 
-pub fn composer_goal(
-    conversation: &Conversation,
-    core: &Core,
-) -> Option<Option<editor_composer::goal_strip::ComposerGoal>> {
-    use editor_composer::goal_strip::{ComposerGoal, ComposerGoalState};
-    use artisan_api::ThreadGoalState;
-    if !conversation.host_is_current(core) {
-        return None;
-    }
-    let (host, thread) = conversation.open.as_ref()?;
-    let summary = core.host(host)?.thread_summary(thread)?.value.as_ref()?;
-    Some(summary.goal.as_ref().map(|goal| ComposerGoal {
-        objective: goal.summary.clone(),
-        state: match goal.state {
-            ThreadGoalState::Active => ComposerGoalState::Active,
-            ThreadGoalState::Paused => ComposerGoalState::Paused,
-            ThreadGoalState::Blocked => ComposerGoalState::Blocked,
-            ThreadGoalState::UsageLimited => ComposerGoalState::UsageLimited,
-            ThreadGoalState::BudgetLimited => ComposerGoalState::BudgetLimited,
-        },
-        detail: None,
-    }))
-}
-
 pub fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId, Seq)> {
     if !conversation.host_is_current(core) {
         return None;
@@ -399,19 +357,6 @@ pub fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId
     let ends_run = last.run_id.as_ref() == Some(&run.id)
         || rowed().all(|item| item.run_id.as_ref() != Some(&run.id));
     (!run.status.is_live() && ends_run && run.seq >= newest).then(|| (last.id.clone(), run.seq))
-}
-
-pub fn restore_anchor(
-    conversation: &Conversation,
-    anchors: &[(RowKey, Option<ItemId>, f32)],
-) -> Option<(usize, f32)> {
-    anchors.iter().find_map(|(key, item, offset)| {
-        conversation
-            .rows
-            .iter()
-            .position(|(row, _)| row.key() == *key && row.anchor() == item.as_ref())
-            .map(|index| (index, *offset))
-    })
 }
 
 pub fn agent_names(conversation: &Conversation) -> HashMap<ItemId, String> {

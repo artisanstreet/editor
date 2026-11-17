@@ -1,8 +1,8 @@
-use editor_sources::SourceProviderExt;
+use artisan_api::{Collection, CollectionRef, ContentRef, ItemId, Question, QuestionOption};
 use editor_composer::questionnaire::QuestionnairePanel;
 use editor_core::{Core, HostId, HostInstance, RangeState};
+use editor_sources::SourceProviderExt;
 use editor_sources::{CollectionBrowser, page_record};
-use artisan_api::{Collection, CollectionRef, ContentRef, ItemId, Question, QuestionOption};
 use std::{cell::RefCell, rc::Rc};
 
 struct Owner<T: serde::de::DeserializeOwned + Send + 'static> {
@@ -391,37 +391,6 @@ impl QuestionCollection {
             owner.browser.borrow_mut().set_source(source.clone());
             owner.source = source.clone();
         }
-    }
-
-    pub fn open(
-        &mut self,
-        core: &Core,
-        host: &HostId,
-        instance: HostInstance,
-        item: &ItemId,
-        source: &CollectionRef,
-    ) -> bool {
-        let Some(host_data) = core.host_if_instance(host, instance) else {
-            self.owner = None;
-            return false;
-        };
-        if self
-            .owner
-            .as_ref()
-            .is_none_or(|owner| !owner.matches(host, instance, item, source))
-        {
-            self.owner = Some(Owner {
-                host: host.clone(),
-                instance,
-                item: item.clone(),
-                source: source.clone(),
-                browser: Rc::new(RefCell::new(CollectionBrowser::new(
-                    host_data,
-                    source.clone(),
-                ))),
-            });
-        }
-        true
     }
 
     pub fn clear(&mut self) {
