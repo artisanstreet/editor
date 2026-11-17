@@ -15,15 +15,15 @@ qualification = ["editor-conversation/qualification", "test-support", "dep:forge
 capture = ["qualification", "dep:aqua-gpu-d3d11", "dep:aqua-gpu-ref", "dep:aqua-runtime"]
 
 [dependencies]
-editor-core = { path = "../editor-core" }
-editor-ui = { path = "../editor-ui" }
-editor-sources = { path = "../editor-sources" }
-editor-composer = { path = "../editor-composer" }
-editor-conversation = { path = "../editor-conversation" }
-editor-sidebar = { path = "../editor-sidebar" }
-editor-inspector = { path = "../editor-inspector" }
-editor-settings = { path = "../editor-settings" }
-editor-marketplace = { path = "../editor-marketplace" }
+editor-core.workspace = true
+editor-ui.workspace = true
+editor-sources.workspace = true
+editor-composer.workspace = true
+editor-conversation.workspace = true
+editor-sidebar.workspace = true
+editor-inspector.workspace = true
+editor-settings.workspace = true
+editor-marketplace.workspace = true
 aqua = { workspace = true }
 aqua-core = { workspace = true }
 aqua-protocol = { workspace = true }
@@ -33,19 +33,19 @@ aqua-reactive = { workspace = true }
 aqua-runtime = { workspace = true, optional = true }
 aqua-gpu-d3d11 = { workspace = true, optional = true }
 aqua-gpu-ref = { workspace = true, optional = true }
-artisan-api = { path = "../artisan-api", features = ["tls"] }
-artisan-account = { path = "../artisan-account" }
-artisan-paths = { path = "../artisan-paths" }
-artisan-payload = { path = "../artisan-payload" }
-semver = "=1.0.28"
-editor-assets = { path = "../editor-assets" }
-editor-audio = { path = "../editor-audio" }
-forge-http = { path = "../forge-http", optional = true }
-forge-store = { path = "../forge-store", optional = true }
+artisan-api = { workspace = true, features = ["tls"] }
+artisan-account.workspace = true
+artisan-paths.workspace = true
+artisan-payload.workspace = true
+semver.workspace = true
+editor-assets.workspace = true
+editor-audio.workspace = true
+forge-http = { workspace = true, optional = true }
+forge-store = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
-palette = "0.7"
+palette.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 serde.workspace = true
@@ -75,41 +75,9 @@ editor-aqua = { path = ".", features = ["test-support"] }
 sha2.workspace = true
 hex.workspace = true
 
-[lints.rust]
-unsafe_code = "forbid"
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-panic = "deny"
-todo = "deny"
-unimplemented = "deny"
-dbg_macro = "deny"
-allow_attributes_without_reason = "deny"
-undocumented_unsafe_blocks = "deny"
-str_to_string = "deny"
-missing_assert_message = "deny"
-unwrap_in_result = "deny"
-collapsible_if = "allow"
-collapsible_match = "allow"
-too_many_arguments = "allow"
-type_complexity = "allow"
-useless_conversion = "allow"
-needless_borrow = "allow"
-needless_borrows_for_generic_args = "allow"
-large_enum_variant = "allow"
-should_implement_trait = "allow"
-manual_clamp = "allow"
-manual_flatten = "allow"
-unnecessary_fold = "allow"
-unnecessary_unwrap = "allow"
-unnecessary_to_owned = "allow"
-unnecessary_result_map_or_else = "allow"
-let_and_return = "allow"
-derivable_impls = "allow"
-clone_on_copy = "allow"
-arc_with_non_send_sync = "allow"
-rc_buffer = "allow"
-
 [build-dependencies]
-artisan-payload = { path = "../artisan-payload" }
+artisan-payload.workspace = true
 embed-resource = "=3.0.11"
+
+[lints]
+workspace = true

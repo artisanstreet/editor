@@ -7,16 +7,16 @@ description = "The Artisan MCP: what an agent can do with Artisan, served to eve
 
 [dependencies]
 anyhow.workspace = true
-artisan-api = { path = "../artisan-api" }
-forge-runs = { path = "../forge-runs" }
-forge-store = { path = "../forge-store" }
+artisan-api.workspace = true
+forge-runs.workspace = true
+forge-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
-forge-engines = { path = "../forge-engines" }
+forge-engines.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 

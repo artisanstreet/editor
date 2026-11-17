@@ -1,6 +1,20 @@
 //! Forge's network API: HTTPS (HTTP/2) with mutual TLS, JSON routes and one
 //! server-sent event stream. Nothing is tied to a connection; a client's
 //! only sync state is the last seq it saw.
+#![expect(
+    clippy::unused_result_ok,
+    missing_debug_implementations,
+    unreachable_pub,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![allow(
+    clippy::allow_attributes,
+    clippy::assertions_on_result_states,
+    clippy::let_underscore_untyped,
+    let_underscore_drop,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 
 mod account_auth;
 mod account_service;

@@ -1,3 +1,7 @@
+#![allow(
+    clippy::unused_result_ok,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 #![cfg(target_os = "linux")]
 
 use artisan_api::PairRequest;

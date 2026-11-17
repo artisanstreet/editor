@@ -1,3 +1,10 @@
+#![expect(
+    clippy::allow_attributes,
+    clippy::undocumented_unsafe_blocks,
+    clippy::unused_result_ok,
+    unreachable_pub,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]

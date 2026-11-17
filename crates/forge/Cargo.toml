@@ -20,19 +20,19 @@ dhat-heap = ["dep:dhat"]
 [dependencies]
 anyhow.workspace = true
 dhat = { workspace = true, optional = true }
-artisan-paths = { path = "../artisan-paths" }
+artisan-paths.workspace = true
 clap.workspace = true
-forge-http = { path = "../forge-http" }
-forge-isolation = { path = "../forge-isolation" }
-forge-runs = { path = "../forge-runs" }
+forge-http.workspace = true
+forge-isolation.workspace = true
+forge-runs.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-artisan-api = { path = "../artisan-api", features = ["tls"] }
-forge-store = { path = "../forge-store" }
+artisan-api = { workspace = true, features = ["tls"] }
+forge-store.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 
 [lints]

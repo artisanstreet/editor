@@ -2,6 +2,10 @@
 //! stopped. `ae forge start` runs it as a service; run by hand it logs to
 //! the terminal. On Windows it has no console (its autostart would open
 //! one), so it always logs to `forge.log` in its data folder.
+#![expect(
+    clippy::print_stderr,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use anyhow::{Context, Result};

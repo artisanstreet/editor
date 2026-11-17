@@ -7,6 +7,23 @@
 //!
 //! `threads`, `items`, `sources`, `settings`, `pairing` and `blobs` hold the
 //! [`Store`] operations of each part; `read` and `writer` hold the SQL.
+#![expect(
+    clippy::field_scoped_visibility_modifiers,
+    clippy::iter_over_hash_type,
+    clippy::needless_pass_by_ref_mut,
+    clippy::renamed_function_params,
+    clippy::string_slice,
+    clippy::unused_result_ok,
+    missing_debug_implementations,
+    unreachable_pub,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![allow(
+    clippy::assertions_on_result_states,
+    clippy::rest_pat_in_fully_bound_structs,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 
 pub mod admin;
 mod blobs;

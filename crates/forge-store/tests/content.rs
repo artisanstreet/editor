@@ -1,3 +1,7 @@
+#![expect(
+    clippy::string_slice,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 use artisan_api::{
     ContentQuery, CreateProject, CreateThread, EngineConfig, EngineId, Event, ItemId, ItemKind,
     ItemsQuery, Phase, ProjectId, Status, TextContent, ThreadId,

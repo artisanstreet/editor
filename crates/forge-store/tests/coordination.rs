@@ -1,3 +1,8 @@
+#![expect(
+    clippy::assertions_on_result_states,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 #![cfg(test)]
 
 use artisan_api::{

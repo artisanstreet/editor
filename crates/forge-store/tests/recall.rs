@@ -1,4 +1,9 @@
 //! Recall finds what was said and done in other threads.
+#![expect(
+    clippy::print_stderr,
+    clippy::unused_result_ok,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 
 use artisan_api::{
     Collection, CreateProject, CreateThread, EngineConfig, EngineId, FileChange, FileOp, ItemId,

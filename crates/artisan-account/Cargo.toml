@@ -14,7 +14,7 @@ tokio = { workspace = true, features = ["macros", "sync", "time", "net", "io-uti
 tokio-tungstenite.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 futures.workspace = true
-artisan-api = { path = "../artisan-api" }
+artisan-api.workspace = true
 ed25519-dalek.workspace = true
 base64.workspace = true
 sha2.workspace = true

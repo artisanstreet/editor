@@ -7,10 +7,10 @@ description = "Live runs: start, steer, answer and cancel engine runs, and turn 
 
 [dependencies]
 anyhow.workspace = true
-artisan-api = { path = "../artisan-api" }
-forge-content = { path = "../forge-content" }
-forge-engines = { path = "../forge-engines" }
-forge-store = { path = "../forge-store" }
+artisan-api.workspace = true
+forge-content.workspace = true
+forge-engines.workspace = true
+forge-store.workspace = true
 fs2.workspace = true
 serde.workspace = true
 serde_json.workspace = true

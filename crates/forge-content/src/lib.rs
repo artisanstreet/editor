@@ -3,6 +3,10 @@
 //! those sources get. The store applies it when it saves an item; engine
 //! decoders apply the same rules to the copies they keep of settled items, so
 //! a later event about the same item names sources the store already has.
+#![expect(
+    clippy::renamed_function_params,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 
 mod texts;
 

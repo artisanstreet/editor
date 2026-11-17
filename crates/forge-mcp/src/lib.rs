@@ -1,3 +1,10 @@
+#![expect(
+    clippy::string_slice,
+    clippy::unused_result_ok,
+    missing_debug_implementations,
+    unreachable_pub,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 mod awareness;
 mod coordination;
 mod format;

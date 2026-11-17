@@ -3,6 +3,10 @@
 //! `@thread title`s, matched against the threads, and the `/command` a
 //! message can start with. Rendering and provider input use
 //! the same spans.
+#![expect(
+    clippy::string_slice,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 
 use std::{collections::HashSet, ops::Range};
 

@@ -6,7 +6,7 @@ version.workspace = true
 description = "Forge's content policy over artisan-api items: which texts and collections become stored sources, and their identities."
 
 [dependencies]
-artisan-api = { path = "../artisan-api" }
+artisan-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

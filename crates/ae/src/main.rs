@@ -3,6 +3,22 @@
 //!
 //! In a terminal it asks what it needs to know; every question has a flag,
 //! so agents and scripts run it without one.
+#![expect(
+    clippy::allow_attributes,
+    clippy::exit,
+    clippy::print_stderr,
+    clippy::print_stdout,
+    clippy::unused_result_ok,
+    missing_debug_implementations,
+    unreachable_pub,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![allow(
+    clippy::assertions_on_result_states,
+    clippy::let_underscore_untyped,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 
 mod account;
 mod bundle;

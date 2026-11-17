@@ -2,6 +2,10 @@
 //! binaries, never an installed service. Every instance is its own Artisan
 //! Street (HOME and XDG folders in a temp dir) with `forge` installed in it
 //! and its own loopback port.
+#![allow(
+    clippy::unused_result_ok,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 
 #[cfg(test)]
 #[cfg(unix)]

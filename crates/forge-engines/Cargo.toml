@@ -11,10 +11,10 @@ legacy-import = []
 
 [dependencies]
 anyhow.workspace = true
-artisan-api = { path = "../artisan-api" }
-artisan-mentions = { path = "../artisan-mentions" }
-forge-content = { path = "../forge-content" }
-forge-isolation = { path = "../forge-isolation" }
+artisan-api.workspace = true
+artisan-mentions.workspace = true
+forge-content.workspace = true
+forge-isolation.workspace = true
 base64.workspace = true
 chrono.workspace = true
 vte.workspace = true
@@ -38,7 +38,7 @@ sha2.workspace = true
 hex.workspace = true
 similar.workspace = true
 shlex = "=2.0.1"
-semver = "=1.0.28"
+semver.workspace = true
 toml.workspace = true
 tar.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "sync", "macros", "rt", "time", "fs"] }

@@ -7,6 +7,23 @@
 //! A user message is stored `running` and becomes `done` once an engine has
 //! it. Whatever is still `running` when a run ends starts the next run, so a
 //! message sent while a run winds down is never lost.
+#![expect(
+    missing_debug_implementations,
+    unreachable_pub,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![allow(
+    clippy::assertions_on_result_states,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::inconsistent_struct_constructor,
+    clippy::iter_over_hash_type,
+    clippy::partial_pub_fields,
+    clippy::string_slice,
+    clippy::unused_result_ok,
+    trivial_casts,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 
 mod agents;
 mod approvals;

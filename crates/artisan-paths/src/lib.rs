@@ -8,6 +8,10 @@
 //! One version of each app is installed; installing replaces its binary.
 //! A `location` file in that default folder names another folder to use as
 //! the root instead.
+#![expect(
+    clippy::unused_result_ok,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 
 use std::io::{Error, ErrorKind, Result};
 use std::path::{Path, PathBuf};

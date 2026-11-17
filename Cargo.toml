@@ -46,6 +46,36 @@ rust-version = "1.98.0"
 version = "0.0.0"
 
 [workspace.dependencies]
+artisan-account = { path = "crates/artisan-account" }
+artisan-api = { path = "crates/artisan-api" }
+artisan-markdown-index = { path = "crates/artisan-markdown-index" }
+artisan-mentions = { path = "crates/artisan-mentions" }
+artisan-paths = { path = "crates/artisan-paths" }
+artisan-payload = { path = "crates/artisan-payload" }
+claude-ai-browser = { path = "crates/claude-ai-browser" }
+editor-assets = { path = "crates/editor-assets" }
+editor-audio = { path = "crates/editor-audio" }
+editor-composer = { path = "crates/editor-composer" }
+editor-conversation = { path = "crates/editor-conversation" }
+editor-core = { path = "crates/editor-core" }
+editor-inspector = { path = "crates/editor-inspector" }
+editor-marketplace = { path = "crates/editor-marketplace" }
+editor-settings = { path = "crates/editor-settings" }
+editor-sidebar = { path = "crates/editor-sidebar" }
+editor-sources = { path = "crates/editor-sources" }
+editor-ui = { path = "crates/editor-ui" }
+forge-computer = { path = "crates/forge-computer" }
+forge-content = { path = "crates/forge-content" }
+forge-engines = { path = "crates/forge-engines" }
+forge-http = { path = "crates/forge-http" }
+forge-isolation = { path = "crates/forge-isolation" }
+forge-mcp = { path = "crates/forge-mcp" }
+forge-runs = { path = "crates/forge-runs" }
+forge-store = { path = "crates/forge-store" }
+semver = "=1.0.28"
+palette = "0.7"
+rustix = "=1.1.4"
+windows = "=0.62.2"
 aqua = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
 aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
 aqua-protocol = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
@@ -147,7 +177,17 @@ uuid = { version = "=1.26.0", default-features = false, features = ["std", "v7"]
 zip = { version = "=4.6.1", default-features = false, features = ["deflate"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
+elided_lifetimes_in_paths = "deny"
+let_underscore_drop = "deny"
+missing_debug_implementations = "deny"
+redundant_lifetimes = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unit_bindings = "deny"
+unreachable_pub = "deny"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
 
 [profile.dev]
 opt-level = 1
@@ -175,8 +215,7 @@ missing_panics_doc = "allow"
 doc_markdown = "allow"
 must_use_candidate = "allow"
 unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+expect_used = "allow"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
@@ -188,8 +227,39 @@ str_to_string = "deny"
 wildcard_enum_match_arm = "deny"
 let_underscore_must_use = "deny"
 missing_assert_message = "deny"
-unwrap_in_result = "deny"
 map_err_ignore = "deny"
+allow_attributes = "deny"
+assertions_on_result_states = "deny"
+empty_drop = "deny"
+empty_structs_with_brackets = "deny"
+exit = "deny"
+field_scoped_visibility_modifiers = "deny"
+float_cmp_const = "deny"
+format_push_string = "deny"
+if_then_some_else_none = "deny"
+infinite_loop = "deny"
+iter_over_hash_type = "deny"
+let_underscore_untyped = "deny"
+lossy_float_literal = "deny"
+mem_forget = "deny"
+mutex_atomic = "deny"
+partial_pub_fields = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+rc_mutex = "deny"
+redundant_type_annotations = "deny"
+renamed_function_params = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+same_name_method = "deny"
+string_slice = "deny"
+try_err = "deny"
+unneeded_field_pattern = "deny"
+unused_result_ok = "deny"
+verbose_file_reads = "deny"
+missing_const_for_fn = "allow"
+option_if_let_else = "allow"
+redundant_pub_crate = "allow"
+significant_drop_tightening = "allow"
 
 [patch.crates-io]
 syntect = { path = "vendor/highlighting/syntect" }

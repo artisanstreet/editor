@@ -1,5 +1,14 @@
+#![expect(
+    clippy::cast_precision_loss,
+    clippy::float_cmp,
+    clippy::needless_borrow,
+    clippy::string_slice,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 #[path = "ui/kit/divider.rs"]
 mod divider;
+#[path = "ui/kit/enforcement.rs"]
+mod enforcement;
 #[path = "ui/kit/hover.rs"]
 mod hover;
 #[path = "ui/kit/tokens/radius.rs"]
@@ -12,5 +21,3 @@ mod special;
 mod surface;
 #[path = "ui/kit/tokens/text_role.rs"]
 mod text_role;
-#[path = "ui/kit/enforcement.rs"]
-mod enforcement;

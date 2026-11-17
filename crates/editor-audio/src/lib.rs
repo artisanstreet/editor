@@ -6,6 +6,19 @@
 //! Platform output remains `PulseAudio`'s native
 //! protocol on Linux and the BSDs (`PipeWire` and `WSLg` serve it too), `cpal`
 //! on Windows and macOS.
+#![expect(
+    clippy::field_scoped_visibility_modifiers,
+    clippy::inconsistent_struct_constructor,
+    clippy::unused_result_ok,
+    missing_debug_implementations,
+    unreachable_pub,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![allow(
+    clippy::assertions_on_result_states,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 
 mod decode;
 mod mix;

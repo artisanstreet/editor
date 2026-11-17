@@ -1,3 +1,10 @@
+#![expect(
+    clippy::assertions_on_result_states,
+    clippy::string_slice,
+    clippy::unused_result_ok,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 use artisan_api::{
     BlobHash, CreateProject, CreateThread, EngineConfig, EngineId, Event, Item, ItemId, ItemKind,
     ItemsQuery, MessageDirection, Permissions, Phase, ProjectId, Question, Run, RunId, RunStatus,

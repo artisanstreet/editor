@@ -7,10 +7,10 @@ description = "Computer use: an MCP server that lets agents see and drive a virt
 
 [dependencies]
 anyhow.workspace = true
-artisan-api = { path = "../artisan-api" }
+artisan-api.workspace = true
 base64.workspace = true
-forge-mcp = { path = "../forge-mcp" }
-forge-runs = { path = "../forge-runs" }
+forge-mcp.workspace = true
+forge-runs.workspace = true
 png = "=0.18.1"
 serde.workspace = true
 serde_json.workspace = true
@@ -18,7 +18,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "=0.62.2", features = [
+windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
@@ -34,20 +34,10 @@ windows = { version = "=0.62.2", features = [
 ] }
 
 [dev-dependencies]
-forge-store = { path = "../forge-store" }
-forge-engines = { path = "../forge-engines" }
+forge-store.workspace = true
+forge-engines.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
-# The workspace forbids unsafe code; the Windows backend calls Win32 and
-# allows it in that one module, so this crate denies it instead.
-[lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-doc_markdown = "allow"
-must_use_candidate = "allow"
+[lints]
+workspace = true

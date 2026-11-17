@@ -1,3 +1,22 @@
+#![expect(
+    clippy::assertions_on_result_states,
+    clippy::cast_possible_truncation,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::float_cmp,
+    clippy::iter_on_single_items,
+    clippy::let_underscore_untyped,
+    clippy::needless_borrow,
+    clippy::redundant_clone,
+    clippy::renamed_function_params,
+    clippy::semicolon_if_nothing_returned,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
+    clippy::wildcard_enum_match_arm,
+    let_underscore_drop,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 #![cfg(test)]
 
 #[path = "conversation/compaction_view.rs"]
@@ -35,7 +54,7 @@ mod viewport;
 
 #[path = "conversation/row_cache.rs"]
 mod row_cache;
-#[path = "conversation/view/drawer.rs"]
-mod view_drawer;
 #[path = "conversation/view/transcript.rs"]
 mod transcript;
+#[path = "conversation/view/drawer.rs"]
+mod view_drawer;

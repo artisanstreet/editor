@@ -1,3 +1,8 @@
+#![expect(
+    clippy::string_slice,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 use artisan_markdown_index::{LeafRecord, MarkdownIndex, TableAlignment};
 use pulldown_cmark::{Event, Tag};
 

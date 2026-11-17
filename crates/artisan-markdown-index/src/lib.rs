@@ -2,6 +2,11 @@
 //! The scan owns no source or block AST. Borrowed event payloads become offsets;
 //! decoded escapes and entities are interned. A fetched complete leaf replays
 //! these events, so reference links keep their original document resolution.
+#![expect(
+    unreachable_pub,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 
 use std::ops::Range;
 use std::sync::Arc;

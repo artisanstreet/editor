@@ -1,13 +1,24 @@
+#![expect(
+    clippy::clone_on_ref_ptr,
+    clippy::float_cmp,
+    clippy::string_slice,
+    clippy::too_many_lines,
+    clippy::wildcard_enum_match_arm,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 #[path = "markdown/presenter.rs"]
 mod presenter;
 #[path = "markdown/reveal.rs"]
 mod reveal;
-#[expect(clippy::disallowed_types, reason = "test fixture driving the raw aqua text and element APIs, not view code")]
-#[path = "markdown/visual.rs"]
-mod visual;
 #[cfg(feature = "qualification")]
 #[path = "markdown/transport.rs"]
 mod transport;
+#[expect(
+    clippy::disallowed_types,
+    reason = "test fixture driving the raw aqua text and element APIs, not view code"
+)]
+#[path = "markdown/visual.rs"]
+mod visual;
 
 mod prose_measure {
     use aqua_ui::style::Length;

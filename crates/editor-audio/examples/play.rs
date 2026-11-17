@@ -1,5 +1,9 @@
 //! Plays a file, or a generated one-second quiet sine tone, and prints the
 //! player's snapshots: `cargo run -p editor-audio --example play [file]`.
+#![expect(
+    clippy::print_stdout,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 
 use std::path::PathBuf;
 use std::thread;

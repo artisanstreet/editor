@@ -1,3 +1,9 @@
+#![expect(
+    clippy::print_stdout,
+    missing_debug_implementations,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;

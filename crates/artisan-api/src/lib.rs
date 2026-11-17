@@ -1,3 +1,19 @@
+#![expect(
+    clippy::iter_over_hash_type,
+    clippy::ref_option,
+    clippy::renamed_function_params,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unused_self,
+    missing_debug_implementations,
+    unused_qualifications,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![allow(
+    clippy::allow_attributes,
+    clippy::assertions_on_result_states,
+    clippy::wildcard_imports,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 mod agent_names;
 mod content;
 mod engine;

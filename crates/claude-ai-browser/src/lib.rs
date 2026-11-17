@@ -13,6 +13,10 @@
 //!
 //! This runs where the user is — `ae` or the Editor — never on a Forge that
 //! may be another machine. The session is then handed to the Forge.
+#![expect(
+    clippy::unused_result_ok,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

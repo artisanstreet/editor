@@ -1,4 +1,35 @@
 //! App-independent computer use, served by Forge's authenticated MCP gateway.
+#![expect(
+    clippy::allow_attributes,
+    clippy::allow_attributes_without_reason,
+    clippy::derive_partial_eq_without_eq,
+    clippy::if_then_some_else_none,
+    clippy::let_underscore_untyped,
+    clippy::literal_string_with_formatting_args,
+    clippy::map_err_ignore,
+    clippy::renamed_function_params,
+    clippy::too_long_first_doc_paragraph,
+    clippy::use_self,
+    clippy::wildcard_enum_match_arm,
+    missing_debug_implementations,
+    unreachable_pub,
+    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+)]
+#![allow(
+    clippy::assertions_on_result_states,
+    clippy::borrow_as_ptr,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::enum_glob_use,
+    clippy::let_underscore_must_use,
+    clippy::undocumented_unsafe_blocks,
+    clippy::unreadable_literal,
+    clippy::wildcard_imports,
+    let_underscore_drop,
+    unused_qualifications,
+    reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
+)]
 pub mod desktop;
 pub mod frame;
 mod operations;
