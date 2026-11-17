@@ -621,7 +621,7 @@ mod tests {
             .iter()
             .filter(|asset| asset.id.as_str().starts_with("jetbrains.theme2023-"))
             .collect();
-        assert_eq!(assets.len(), 211);
+        assert_eq!(assets.len(), 210);
         assert!(assets.iter().all(|asset| asset.source.contains("<svg")));
         for table in [
             LIGHT_NAMES,

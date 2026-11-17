@@ -1,19 +1,9 @@
 # Artisan first-party artwork — provenance notes
 
-Scope: `crates/editor-assets/svg/artisan/*` — `app-icon.svg`, `star.svg`,
-`logo-gradient.svg`, `success-check.svg`, `wordmark-stacked.svg`.
+Scope: `crates/editor-assets/svg/artisan/*` — `starburst.svg`,
+`wordmark-stacked.svg` and the `rail-*.svg` layers.
 
 These are first-party Artisan product graphics:
-
-- `app-icon.svg` (720×720) and `logo-gradient.svg` (720×720 gradient backdrop
-  also serialized as a nested base64 `<image>` inside the app icon): the
-  application identity art. The legacy tree additionally contains a sibling
-  forge variant that is unreferenced (excluded from vendoring).
-- `star.svg` (100×100): decorative mark used as a CSS luminance mask in the
-  compaction model setting.
-- `success-check.svg` (16×16 stroke path): static half of the onboarding
-  success indicator; the legacy frontend draws it with a CSS stroke-dash
-  animation (`t-check-draw`) which the native UI reimplements.
 
 - `wordmark-stacked.svg` (136.675×225.15): the stacked AR/TIS/AN company
   wordmark as outlines, laid out exactly as the legacy `artisan-logo.svelte`
@@ -38,7 +28,3 @@ These notes record historical source provenance. The current catalog is
 covered by the repository's Artisan Street Terms (AST) in `LICENSE.md`;
 third-party marks retain their individual notices. The historical typography
 note above does not establish a separate typeface licence.
-
-Third-party tool credit preserved verbatim from excluded sibling file
-`forge.svg`'s comment: "SVG created with Arrow, by QuiverAI
-(https://quiver.ai)".

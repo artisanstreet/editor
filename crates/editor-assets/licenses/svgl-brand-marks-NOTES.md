@@ -22,7 +22,7 @@ Scope: `modules/assets/svg/svgl/*` (12 entries) and
 Each svgl/brand asset is treated as `LicenseRef-Brand-Mark`.
 This records precisely what is known: these are the trademarked brand marks of
 their respective owners (GitHub, GitLab, Git, Microsoft Azure, Anthropic
-Claude, Cursor, DeepSeek, Google Gemini, xAI Grok, Meta, OpenAI, Alibaba Qwen,
+Claude, Cursor, DeepSeek, xAI Grok, Meta, OpenAI, Alibaba Qwen,
 Moonshot AI Kimi, OpenCode, Z.ai). Use to identify the
 corresponding product/service (nominative use) is how the legacy frontend used
 them; nothing here claims a copyright license from the owner. Brand-resource
