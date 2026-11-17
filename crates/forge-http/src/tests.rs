@@ -47,40 +47,13 @@ async fn forge() -> (tempfile::TempDir, SocketAddr, Store) {
     (dir, address, store)
 }
 
-/// Reads SSE envelopes until `stop` says so.
 async fn read_events(
     response: reqwest::Response,
-    stop: impl Fn(&Envelope) -> bool + Send + Sync,
+    what: &str,
+    stop: impl Fn(&Envelope) -> bool,
 ) -> Vec<Envelope> {
-    let mut response = response;
-    let mut buffer = String::new();
-    let mut envelopes = Vec::new();
-    let read = async {
-        while let Some(chunk) = response.chunk().await.unwrap() {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            while let Some(end) = buffer.find("\n\n") {
-                let block: String = buffer.drain(..end + 2).collect();
-                let data: String = block
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("data:"))
-                    .map(str::trim)
-                    .collect();
-                if data.is_empty() {
-                    continue;
-                }
-                let envelope: Envelope = serde_json::from_str(&data).unwrap();
-                let done = stop(&envelope);
-                envelopes.push(envelope);
-                if done {
-                    return;
-                }
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(10), read)
+    test_support::sse::read_until(response.bytes_stream(), what, Duration::from_secs(10), stop)
         .await
-        .expect("events arrive");
-    envelopes
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -231,6 +204,7 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
         .unwrap();
     let events = read_events(
         stream,
+        "the failed run",
         |envelope| matches!(&envelope.event, Event::Run { run } if run.status == RunStatus::Failed),
     )
     .await;
@@ -260,10 +234,21 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
         .send()
         .await
         .unwrap();
-    let events = read_events(stream, |envelope| {
+    let events = read_events(stream, "the engine status after resuming", |envelope| {
         matches!(envelope.event, Event::Engine { .. })
     })
     .await;
+    assert!(
+        matches!(events[0].event, Event::Hello { .. }),
+        "a resumed stream opens with Hello"
+    );
+    assert!(
+        matches!(
+            events.last().map(|envelope| &envelope.event),
+            Some(Event::Engine { .. })
+        ),
+        "a resumed stream still delivers live engine status"
+    );
     assert!(
         events
             .iter()
