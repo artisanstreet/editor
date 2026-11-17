@@ -116,10 +116,8 @@ fn outline_text(source: &str) -> Option<String> {
     static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     let fonts = FONTS.get_or_init(|| {
         let mut fonts = usvg::fontdb::Database::new();
-        for font in editor_assets::fonts::ALL {
-            for face in font.static_faces {
-                fonts.load_font_data(face.to_vec());
-            }
+        for face in editor_assets::fonts::FACES {
+            fonts.load_font_data(face.to_vec());
         }
         fonts.set_sans_serif_family(FONT_FAMILY);
         Arc::new(fonts)

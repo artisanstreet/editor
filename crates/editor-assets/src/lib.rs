@@ -108,16 +108,6 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Self; 7] = [
-        Self::Artisan,
-        Self::Brand,
-        Self::Jetbrains,
-        Self::Lobe,
-        Self::SimpleIcons,
-        Self::Svgl,
-        Self::Tabler,
-    ];
-
     #[must_use]
     pub const fn prefix(self) -> &'static str {
         match self {
@@ -199,8 +189,6 @@ macro_rules! catalog {
             $(
                 pub const $const_name: AssetId = AssetId::from_id($id);
             )*
-
-            pub const CONSTANTS: &[AssetId] = &[$(AssetId::$const_name),*];
         }
 
         pub const ALL: &[Asset] = &[
@@ -551,12 +539,6 @@ catalog! {
     (TABLER_ZOOM_OUT, "tabler.zoom-out", Family::Tabler, Some("0 0 24 24"), true, "svg/tabler/zoom-out.svg"),
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct LicenseFile {
-    pub path: &'static str,
-    pub contents: &'static str,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnknownAsset {
     pub id: String,
@@ -569,49 +551,6 @@ impl fmt::Display for UnknownAsset {
 }
 
 impl std::error::Error for UnknownAsset {}
-
-pub const LICENSE_FILES: &[LicenseFile] = &[
-    LicenseFile {
-        path: "licenses/artisan-first-party-NOTES.md",
-        contents: include_str!("../licenses/artisan-first-party-NOTES.md"),
-    },
-    LicenseFile {
-        path: "licenses/jetbrains-2023-LICENSE.md",
-        contents: include_str!("../licenses/jetbrains-2023-LICENSE.md"),
-    },
-    LicenseFile {
-        path: "licenses/jetbrains-file-icons-README.md",
-        contents: include_str!("../licenses/jetbrains-file-icons-README.md"),
-    },
-    LicenseFile {
-        path: "licenses/lobe-icons-MIT.txt",
-        contents: include_str!("../licenses/lobe-icons-MIT.txt"),
-    },
-    LicenseFile {
-        path: "licenses/simple-icons-CC0.txt",
-        contents: include_str!("../licenses/simple-icons-CC0.txt"),
-    },
-    LicenseFile {
-        path: "licenses/simple-icons-NOTES.md",
-        contents: include_str!("../licenses/simple-icons-NOTES.md"),
-    },
-    LicenseFile {
-        path: "licenses/svgl-api-evidence.json",
-        contents: include_str!("../licenses/svgl-api-evidence.json"),
-    },
-    LicenseFile {
-        path: "licenses/svgl-brand-marks-NOTES.md",
-        contents: include_str!("../licenses/svgl-brand-marks-NOTES.md"),
-    },
-    LicenseFile {
-        path: "licenses/svgl-svelte-LICENSE.txt",
-        contents: include_str!("../licenses/svgl-svelte-LICENSE.txt"),
-    },
-    LicenseFile {
-        path: "licenses/tabler-MIT.txt",
-        contents: include_str!("../licenses/tabler-MIT.txt"),
-    },
-];
 
 #[must_use]
 pub const fn get(id: AssetId) -> &'static Asset {
@@ -628,9 +567,4 @@ pub fn lookup(id: &str) -> Result<&'static Asset, UnknownAsset> {
             },
             |index| Ok(&ALL[index]),
         )
-}
-
-#[must_use]
-pub fn license(path: &str) -> Option<&'static LicenseFile> {
-    LICENSE_FILES.iter().find(|file| file.path == path)
 }
