@@ -2150,6 +2150,7 @@ dependencies = [
  "artisan-api",
  "axum",
  "base64 0.22.1",
+ "diagnostics",
  "dirs",
  "ed25519-dalek",
  "forge-computer",

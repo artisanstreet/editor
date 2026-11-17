@@ -4,7 +4,6 @@
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
 #![cfg(test)]
-
 #![cfg(unix)]
 
 use artisan_api::PairRequest;
@@ -21,10 +20,18 @@ struct Running {
 }
 impl Drop for Running {
     fn drop(&mut self) {
-        let gateway = upgrade::gateway(&self.data).ok().flatten().map(|gateway| gateway.pid);
+        let gateway = upgrade::gateway(&self.data)
+            .ok()
+            .flatten()
+            .map(|gateway| gateway.pid);
         let backends = forge_runs::runtime::Registry::open(&self.data)
             .and_then(|registry| registry.peers())
-            .map(|peers| peers.into_iter().map(|member| member.pid).collect::<Vec<_>>())
+            .map(|peers| {
+                peers
+                    .into_iter()
+                    .map(|member| member.pid)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let pids: Vec<u32> = gateway
             .into_iter()
@@ -64,16 +71,18 @@ fn alive(pid: u32) -> bool {
 async fn start() -> (tempfile::TempDir, Running, upgrade::Gateway) {
     let directory = tempfile::tempdir().unwrap();
     let data = directory.path().join("data");
-    let log = std::fs::File::create(directory.path().join("forge.log")).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_forge"))
         .arg("--data")
         .arg(&data)
         .arg("--listen")
         .arg("127.0.0.1:0")
+        .arg("--log")
+        .arg(directory.path().join("forge.log"))
         .env_remove("NOTIFY_SOCKET")
+        .env_remove("RUST_LOG")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(log)
+        .stderr(Stdio::null())
         .spawn()
         .unwrap();
     let mut running = Running { child, data };
@@ -123,6 +132,24 @@ async fn device(data: &std::path::Path, address: std::net::SocketAddr) -> reqwes
         .unwrap();
     assert_eq!(paired.status(), 200);
     client
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_detached_forge_logs_its_backend_to_the_same_file() {
+    let (directory, _running, gateway) = start().await;
+    let log = std::fs::read_to_string(directory.path().join("forge.log")).unwrap();
+    let starts = log
+        .lines()
+        .filter(|line| line.contains("starting Forge"))
+        .count();
+    assert_eq!(starts, 2, "the gateway and its backend both log: {log}");
+    assert!(
+        log.contains(&format!(
+            "Forge is serving address={}",
+            gateway.backend.address
+        )),
+        "{log}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

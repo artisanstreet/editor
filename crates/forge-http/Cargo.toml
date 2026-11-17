@@ -17,6 +17,7 @@ artisan-account.workspace = true
 artisan-api = { workspace = true, features = ["tls"] }
 axum = { workspace = true }
 base64.workspace = true
+diagnostics.workspace = true
 forge-engines.workspace = true
 forge-computer.workspace = true
 forge-mcp.workspace = true

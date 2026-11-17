@@ -86,9 +86,10 @@ async fn stop_member(gateway: &Gateway) -> Result<()> {
 pub async fn serve(
     config: crate::ServeConfig,
     handoff: Option<PathBuf>,
+    log: diagnostics::Destination,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
-    controller::serve(config, handoff, stop).await
+    controller::serve(config, handoff, log, stop).await
 }
 
 pub use forge_runs::runtime::{read, write};

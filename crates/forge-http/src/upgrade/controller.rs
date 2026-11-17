@@ -22,6 +22,7 @@ struct Service {
     gateway: Gateway,
     registry: Registry,
     data: PathBuf,
+    log: diagnostics::Destination,
     listener: Arc<StdListener>,
     lock: Arc<File>,
     replaced: Arc<Notify>,
@@ -92,6 +93,7 @@ async fn replace(service: &Service, upgrade: Upgrade) -> Result<Gateway> {
     let replacement = process::candidate(
         &service.registry,
         &service.data,
+        &service.log,
         &upgrade.binary,
         service.listener.try_clone()?,
         service.lock.try_clone()?,
@@ -184,6 +186,7 @@ fn binding(
 pub async fn serve(
     config: crate::ServeConfig,
     handoff: Option<PathBuf>,
+    log: diagnostics::Destination,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     tokio::pin!(stop);
@@ -198,8 +201,12 @@ pub async fn serve(
         id,
         directory,
     } = binding(&config, &registry, handoff)?;
-    let mut backend =
-        process::spawn_backend(&binary, &config.data_dir, &directory.join("backend.json"))?;
+    let mut backend = process::spawn_backend(
+        &binary,
+        &config.data_dir,
+        &log,
+        &directory.join("backend.json"),
+    )?;
     let member = match process::ready(&mut backend, &directory.join("backend.json")).await {
         Ok(member) => member,
         Err(error) => {
@@ -227,6 +234,7 @@ pub async fn serve(
         gateway: gateway.clone(),
         registry: registry.clone(),
         data: config.data_dir.clone(),
+        log,
         listener: Arc::new(listener),
         lock: Arc::new(lock),
         replaced: Arc::clone(&replaced),
@@ -368,7 +376,8 @@ async fn maintain(service: &Service) -> Result<()> {
             .join("binaries")
             .join(&service.gateway.id)
             .join(format!("restart-{}.json", artisan_api::ItemId::new()));
-        let mut child = process::spawn_backend(&service.gateway.binary, &service.data, &ready)?;
+        let mut child =
+            process::spawn_backend(&service.gateway.binary, &service.data, &service.log, &ready)?;
         let member = process::ready(&mut child, &ready).await?;
         process::healthy(&member).await?;
         runtime::request(&member, &Command::Activate).await?;

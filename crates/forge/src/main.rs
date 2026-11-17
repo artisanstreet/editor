@@ -11,6 +11,8 @@
 use anyhow::{Context, Result};
 use artisan_paths::App;
 use clap::Parser;
+#[cfg(unix)]
+use diagnostics::Destination;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -154,7 +156,8 @@ fn run(cli: Cli, data_dir: PathBuf) -> Result<()> {
                 )?;
                 server.run_until(stop).await
             } else {
-                forge_http::upgrade::serve(config, cli.handoff, stop).await
+                let log = cli.log.map_or(Destination::Stderr, Destination::File);
+                forge_http::upgrade::serve(config, cli.handoff, log, stop).await
             }
         })
     }

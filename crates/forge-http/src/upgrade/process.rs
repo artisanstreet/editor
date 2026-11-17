@@ -1,5 +1,6 @@
 use super::{Gateway, Ready, read};
 use anyhow::{Context, Result, ensure};
+use diagnostics::Destination;
 use forge_runs::runtime::{self, Command, Member, Registry};
 use std::os::unix::fs::PermissionsExt as _;
 use std::{
@@ -52,8 +53,24 @@ pub fn inherited_lock() -> Result<File> {
     Ok(File::from(rustix::io::dup(std::io::stdout())?))
 }
 
-pub fn spawn_backend(binary: &Path, data: &Path, ready: &Path) -> Result<ChildProcess> {
-    std::process::Command::new(binary)
+fn logging_to(command: &mut std::process::Command, log: &Destination) {
+    match log {
+        Destination::Stderr => {}
+        Destination::File(path) => {
+            command.arg("--log").arg(path);
+        }
+    }
+}
+
+pub fn spawn_backend(
+    binary: &Path,
+    data: &Path,
+    log: &Destination,
+    ready: &Path,
+) -> Result<ChildProcess> {
+    let mut command = std::process::Command::new(binary);
+    logging_to(&mut command, log);
+    command
         .arg("--data")
         .arg(data)
         .arg("--listen")
@@ -74,12 +91,15 @@ pub fn spawn_backend(binary: &Path, data: &Path, ready: &Path) -> Result<ChildPr
 pub fn spawn_gateway(
     binary: &Path,
     data: &Path,
+    log: &Destination,
     handoff: &Path,
     listener: std::net::TcpListener,
     lock: File,
 ) -> Result<ChildProcess> {
     let listener: std::os::fd::OwnedFd = listener.into();
-    std::process::Command::new(binary)
+    let mut command = std::process::Command::new(binary);
+    logging_to(&mut command, log);
+    command
         .arg("--data")
         .arg(data)
         .arg("--handoff")
@@ -168,6 +188,7 @@ pub fn notify(pid: u32) -> Result<()> {
 pub async fn candidate(
     registry: &Registry,
     data: &Path,
+    log: &Destination,
     binary: &Path,
     listener: std::net::TcpListener,
     lock: File,
@@ -184,7 +205,7 @@ pub async fn candidate(
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o700))?;
     let handoff = directory.join("handoff.json");
     super::write(&handoff, &serde_json::json!({"id":id}))?;
-    let mut child = spawn_gateway(&staged, data, &handoff, listener, lock)?;
+    let mut child = spawn_gateway(&staged, data, log, &handoff, listener, lock)?;
     let result = async {
         let Ready { gateway } = ready(&mut child, &directory.join("ready.json")).await?;
         ensure!(
