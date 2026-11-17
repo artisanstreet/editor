@@ -63,6 +63,16 @@ impl AgentState {
         matches!(self, Self::Done | Self::Failed | Self::Cancelled)
     }
 
+    const fn of(status: Status) -> Self {
+        match status {
+            Status::Running => Self::Working,
+            Status::AwaitingUser => Self::WaitingForUser,
+            Status::Done => Self::Done,
+            Status::Failed => Self::Failed,
+            Status::Declined | Status::Cancelled => Self::Cancelled,
+        }
+    }
+
     const fn status(self) -> Status {
         match self {
             Self::Working => Status::Running,
@@ -533,13 +543,17 @@ impl Hub {
         Ok((item, child))
     }
 
-    /// Where an agent's thread is now.
-    async fn child_state(&self, child: &ThreadId) -> Result<(AgentState, Option<String>)> {
+    async fn child_state(
+        &self,
+        child: &ThreadId,
+        shown: Status,
+    ) -> Result<(AgentState, Option<String>)> {
         let store = self.store();
         if store.awaits_user(child).await? {
             return Ok((AgentState::WaitingForUser, None));
         }
-        if self.is_live(child) || !store.pending_inputs(child).await?.items.is_empty() {
+        let running_here = self.lock().contains_key(child);
+        if running_here || !store.pending_inputs(child).await?.items.is_empty() {
             return Ok((AgentState::Working, None));
         }
         let run = store.latest_run(child).await?;
@@ -547,10 +561,11 @@ impl Hub {
             None => (AgentState::Working, None),
             Some(run) => match run.status {
                 RunStatus::Running => (AgentState::Working, None),
+                _ if self.remote_target(child, false).ok().flatten().is_some() => (
+                    AgentState::of(shown),
+                    run.error.filter(|_| shown == Status::Failed),
+                ),
                 RunStatus::Done => (AgentState::Done, None),
-                // A restart cut it short, or it is parked until the
-                // provider has room or the usage limit resets, and it
-                // carries on.
                 RunStatus::Interrupted | RunStatus::Failed
                     if store.continue_pending(child).await? =>
                 {
@@ -564,10 +579,9 @@ impl Hub {
         })
     }
 
-    /// Brings an agent's item in line with its thread, and reports it.
     async fn refresh_agent(&self, item: Item, child: &ThreadId) -> Result<AgentInfo> {
         let store = self.store();
-        let (state, error) = self.child_state(child).await?;
+        let (state, error) = self.child_state(child, item.status).await?;
         let result = if state.is_settled() {
             store.last_reply(child).await?
         } else {
@@ -618,7 +632,6 @@ impl Hub {
                     thread: child_thread,
                 },
             };
-            // A settled agent that was messaged works again.
             if item.status.is_terminal()
                 && !next.is_terminal()
                 && let Some(run) = &item.run_id
@@ -759,25 +772,13 @@ impl Hub {
         Ok(())
     }
 
-    /// A run of `thread` ended: if it runs an agent, update the parent, and
-    /// deliver a background agent's result.
-    pub(crate) async fn agent_run_ended(&self, thread: &ThreadId) {
-        if let Err(error) = self.settle_agent(thread).await {
-            tracing::error!(%thread, "updating the agent this thread runs: {error:#}");
-        }
-    }
-
-    /// Something in `thread` started or stopped waiting on the user.
     pub(crate) async fn agent_attention(&self, thread: &ThreadId) {
-        if let Err(error) = self.settle_agent(thread).await {
+        if let Err(error) = Box::pin(self.settle_agent(thread)).await {
             tracing::error!(%thread, "updating the agent this thread runs: {error:#}");
         }
     }
 
     async fn settle_agent(&self, thread: &ThreadId) -> Result<()> {
-        // Serialize reports with Stop and with reconciliation, so a report
-        // is either included in Stop's cutoff or observes its cancellation.
-        let _admission = self.inner.admission.lock().await;
         let store = self.store();
         let Some(child) = store.thread(thread).await? else {
             return Ok(());
@@ -785,10 +786,12 @@ impl Hub {
         let Some(agent) = &child.spawned_by else {
             return Ok(());
         };
+        let _admission = self.inner.admission.lock().await;
         let Some(item) = store.item(agent).await? else {
             return Ok(());
         };
         let was = item.status;
+        let since = item.seq;
         let parent = item.thread_id.clone();
         let background = matches!(
             item.kind,
@@ -798,6 +801,10 @@ impl Hub {
             }
         );
         let info = self.refresh_agent(item, thread).await?;
+        let fresh = store
+            .latest_run(thread)
+            .await?
+            .is_some_and(|run| run.seq > since);
         let waited = self
             .waiters_lock()
             .get(agent)
@@ -807,6 +814,7 @@ impl Hub {
             && !was.is_terminal()
             && info.state.is_settled()
             && info.state != AgentState::Cancelled
+            && fresh
         {
             self.deliver_result(&parent, &info).await?;
         }

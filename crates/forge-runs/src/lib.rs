@@ -628,15 +628,22 @@ impl Hub {
 
     async fn cancel_owned(&self, thread_id: &ThreadId) -> Result<()> {
         let cutoff = self.store().head();
-        if let Some(run) = self.lock().get(thread_id) {
+        let running = self.lock().get(thread_id).is_some_and(|run| {
             run.cancel_through.store(cutoff, Ordering::Release);
             run.cancel.cancel();
-        }
+            true
+        });
         self.store()
             .cancel_pending_inputs(thread_id.clone(), cutoff)
             .await?;
-        // A parked turn is stopped too: it isn't picked up again.
         self.store().unpark(thread_id.clone()).await?;
+        if !running {
+            let hub = self.clone();
+            let thread = thread_id.clone();
+            self.inner
+                .tasks
+                .spawn(async move { hub.agent_attention(&thread).await });
+        }
         self.resume_pending();
         Ok(())
     }
@@ -938,7 +945,7 @@ impl Hub {
                 hub.resume_pending();
             }
             if !hub.inner.shutdown.is_cancelled() {
-                hub.agent_run_ended(&thread_id).await;
+                hub.agent_attention(&thread_id).await;
             }
             if matches!(outcome, Ok(artisan_api::RunStatus::Done))
                 && !hub.inner.shutdown.is_cancelled()
