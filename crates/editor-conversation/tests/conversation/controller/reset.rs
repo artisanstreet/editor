@@ -1,6 +1,6 @@
 use super::*;
-use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
 use artisan_api::Status;
+use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
 
 fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
     let directory = tempfile::tempdir().unwrap();

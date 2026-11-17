@@ -396,6 +396,7 @@ impl HostData {
         let retry = Arc::new(Notify::new());
         let (observed, observation) = watch::channel(None);
         let connection = connection::follow(
+            &id,
             client.clone(),
             delivery.sender().map(HostMessage::Update),
             Arc::clone(&retry),

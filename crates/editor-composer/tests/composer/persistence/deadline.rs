@@ -15,6 +15,7 @@ fn pending_write() -> (DraftHandle, artisan_api::WriteDraft, u64) {
     };
     let (changed, _) = watch::channel(0);
     let handle = DraftHandle(Arc::new(Inner {
+        host: HostId("deadline-test".into()),
         client,
         shared: Mutex::new(Shared {
             state,

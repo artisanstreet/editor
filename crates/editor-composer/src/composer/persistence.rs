@@ -1,6 +1,6 @@
 use super::draft_session::{DraftSession, Operation, SAVE_DELAY, Submission};
-use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use artisan_api::{ItemId, ThreadId};
+use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
@@ -10,6 +10,7 @@ use std::{
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
@@ -26,6 +27,7 @@ struct Shared {
 }
 
 struct Inner {
+    host: HostId,
     client: ForgeClient,
     shared: Mutex<Shared>,
     changed: watch::Sender<u64>,
@@ -181,7 +183,7 @@ impl DraftSessions {
         scope: String,
         client: ForgeClient,
     ) -> Option<DraftLease> {
-        let key = (host, instance, scope.clone());
+        let key = (host.clone(), instance, scope.clone());
         if let Some(session) = self.sessions.get(&key) {
             return Some(DraftLease::new(session.clone()));
         }
@@ -203,6 +205,7 @@ impl DraftSessions {
         }
         let (changed, _) = watch::channel(0);
         let session = DraftHandle(Arc::new(Inner {
+            host,
             client,
             shared: Mutex::new(Shared {
                 state: DraftSession::new(scope),
@@ -337,14 +340,18 @@ impl DraftHandle {
             return;
         };
         let session = self.clone();
-        runtime().spawn(async move {
-            let cancelled = session.0.cancelled.clone();
-            tokio::select! {
-                biased;
-                () = cancelled.cancelled() => {}
-                () = session.perform(operation) => {}
+        let span = tracing::info_span!("draft", host = %session.0.host);
+        runtime().spawn(
+            async move {
+                let cancelled = session.0.cancelled.clone();
+                tokio::select! {
+                    biased;
+                    () = cancelled.cancelled() => {}
+                    () = session.perform(operation) => {}
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 
     async fn perform(self, operation: Operation) {
@@ -374,6 +381,11 @@ impl DraftHandle {
                 session.mutate(|shared| shared.state.written(&request, edited, result));
             }
             Operation::Post(request) => {
+                let span = tracing::info_span!(
+                    "send_message",
+                    thread = %request.thread,
+                    message = %request.message.id
+                );
                 let result = async {
                     if let Some(create) = &request.create {
                         client.create_thread(create).await?;
@@ -383,6 +395,7 @@ impl DraftHandle {
                         .await?;
                     Ok::<(), anyhow::Error>(())
                 }
+                .instrument(span)
                 .await
                 .map_err(|error| format!("{error:#}"));
                 if let Err(error) = &result {

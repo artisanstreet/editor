@@ -916,7 +916,8 @@ impl Hub {
             },
         );
         let hub = self.clone();
-        self.inner.tasks.spawn(async move {
+        let span = tracing::info_span!("run", thread = %thread_id, run = %run_id);
+        let run = async move {
             let _leases = leases;
             let outcome = Box::pin(run::drive(
                 &hub,
@@ -943,7 +944,10 @@ impl Hub {
             {
                 hub.after_turn(thread_id, run_id).await;
             }
-        });
+        };
+        self.inner
+            .tasks
+            .spawn(tracing::Instrument::instrument(run, span));
     }
 
     fn homes_lock(&self) -> Result<(std::sync::MutexGuard<'_, ()>, std::fs::File)> {

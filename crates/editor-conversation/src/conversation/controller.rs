@@ -241,6 +241,7 @@ impl Conversation {
     }
 
     pub fn open_thread(&mut self, core: &mut Core, host: HostId, thread: ThreadId) {
+        let _span = tracing::info_span!("open_thread", %host, %thread).entered();
         self.away = false;
         let Some(instance) = core.host(&host).map(|host| host.instance()) else {
             self.close(core);
@@ -875,28 +876,34 @@ impl Conversation {
         let origin = origin.clone();
         let sender = self.delivery.sender();
         let asked = Instant::now();
-        Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let result = match agent {
-                Some(agent) => {
-                    client
-                        .agent_items(&thread, &agent, &thread::query(fetch, thread::PAGE))
-                        .await
-                }
-                None => {
-                    client
-                        .transcript(&thread, &thread::query(fetch, thread::ROWS_PAGE))
-                        .await
-                }
-            };
-            let _ = sender
-                .send(Completion::Page {
-                    origin,
-                    fetch,
-                    asked,
-                    result,
-                })
-                .await;
-        })))
+        let span = tracing::info_span!("thread_page", host = %origin.host, %thread);
+        Some(AbortOnDropHandle::new(runtime().spawn(
+            tracing::Instrument::instrument(
+                async move {
+                    let result = match agent {
+                        Some(agent) => {
+                            client
+                                .agent_items(&thread, &agent, &thread::query(fetch, thread::PAGE))
+                                .await
+                        }
+                        None => {
+                            client
+                                .transcript(&thread, &thread::query(fetch, thread::ROWS_PAGE))
+                                .await
+                        }
+                    };
+                    let _ = sender
+                        .send(Completion::Page {
+                            origin,
+                            fetch,
+                            asked,
+                            result,
+                        })
+                        .await;
+                },
+                span,
+            ),
+        )))
     }
 
     pub fn load_work(&mut self, core: &Core, first: Seq) {

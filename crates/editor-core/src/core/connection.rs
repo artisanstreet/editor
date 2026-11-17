@@ -1,6 +1,7 @@
 use crate::core::client::ForgeClient;
 use crate::core::delivery::MappedSender;
 use crate::core::host::HostMessage;
+use crate::core::hosts::HostId;
 use crate::core::runtime::runtime;
 use anyhow::{Context, Result, bail};
 use artisan_api::{Envelope, Event, Seq, ThreadId};
@@ -39,71 +40,76 @@ enum End {
 }
 
 pub(super) fn follow(
+    host: &HostId,
     client: ForgeClient,
     mut updates: MappedSender<Update, HostMessage>,
     retry: Arc<Notify>,
     mut observed: watch::Receiver<Option<ThreadId>>,
 ) -> AbortOnDropHandle<()> {
-    AbortOnDropHandle::new(runtime().spawn(async move {
-        let budget = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024));
-        let mut since = None;
-        let mut attempt = 0_u32;
-        loop {
-            if (since.is_none() || attempt > 0)
-                && updates
-                    .send(Update::Status(ConnectionStatus::Connecting))
+    let span = tracing::info_span!("host_events", %host);
+    AbortOnDropHandle::new(runtime().spawn(tracing::Instrument::instrument(
+        async move {
+            let budget = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024));
+            let mut since = None;
+            let mut attempt = 0_u32;
+            loop {
+                if (since.is_none() || attempt > 0)
+                    && updates
+                        .send(Update::Status(ConnectionStatus::Connecting))
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
+                let result = session(
+                    &client,
+                    &mut since,
+                    &mut updates,
+                    &retry,
+                    &mut observed,
+                    &mut attempt,
+                    &budget,
+                )
+                .await;
+                if updates.is_closed() {
+                    return;
+                }
+                let (reason, code) = match result {
+                    Ok(End::Reset) => {
+                        since = None;
+                        attempt = 0;
+                        continue;
+                    }
+                    Ok(End::Observation) => continue,
+                    Ok(End::Closed) => ("Forge's event stream closed".to_owned(), None),
+                    Err(error) => (
+                        format!("{error:#}"),
+                        error
+                            .downcast_ref::<artisan_api::ApiError>()
+                            .map(|error| error.code),
+                    ),
+                };
+                attempt = attempt.saturating_add(1);
+                if updates
+                    .send(Update::Status(ConnectionStatus::Offline {
+                        attempt,
+                        reason,
+                        code,
+                    }))
                     .await
                     .is_err()
-            {
-                return;
-            }
-            let result = session(
-                &client,
-                &mut since,
-                &mut updates,
-                &retry,
-                &mut observed,
-                &mut attempt,
-                &budget,
-            )
-            .await;
-            if updates.is_closed() {
-                return;
-            }
-            let (reason, code) = match result {
-                Ok(End::Reset) => {
-                    since = None;
-                    attempt = 0;
-                    continue;
+                {
+                    return;
                 }
-                Ok(End::Observation) => continue,
-                Ok(End::Closed) => ("Forge's event stream closed".to_owned(), None),
-                Err(error) => (
-                    format!("{error:#}"),
-                    error
-                        .downcast_ref::<artisan_api::ApiError>()
-                        .map(|error| error.code),
-                ),
-            };
-            attempt = attempt.saturating_add(1);
-            if updates
-                .send(Update::Status(ConnectionStatus::Offline {
-                    attempt,
-                    reason,
-                    code,
-                }))
-                .await
-                .is_err()
-            {
-                return;
+                tokio::select! {
+                    () = tokio::time::sleep(backoff(attempt)) => {},
+                    () = retry.notified() => {},
+                    _ = observed.changed() => {},
+                }
             }
-            tokio::select! {
-                () = tokio::time::sleep(backoff(attempt)) => {},
-                () = retry.notified() => {},
-                _ = observed.changed() => {},
-            }
-        }
-    }))
+        },
+        span,
+    )))
 }
 
 fn backoff(attempt: u32) -> Duration {

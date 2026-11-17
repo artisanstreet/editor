@@ -22,6 +22,7 @@ use std::sync::Arc;
 use tower_http::CompressionLevel;
 use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
+use tracing::Instrument as _;
 
 #[derive(Clone)]
 pub struct App {
@@ -265,12 +266,20 @@ struct InternalError(Arc<anyhow::Error>);
 
 /// Logs every internal failure with the request that met it; ids are in the path.
 async fn log_internal(request: Request, next: Next) -> Response {
-    let (method, path) = (request.method().clone(), request.uri().path().to_owned());
-    let response = next.run(request).await;
-    if let Some(InternalError(failure)) = response.extensions().get::<InternalError>() {
-        tracing::error!(%method, %path, "request failed: {failure:#}");
+    let span = tracing::info_span!(
+        "request",
+        method = %request.method(),
+        path = request.uri().path()
+    );
+    async move {
+        let response = next.run(request).await;
+        if let Some(InternalError(failure)) = response.extensions().get::<InternalError>() {
+            tracing::error!("request failed: {failure:#}");
+        }
+        response
     }
-    response
+    .instrument(span)
+    .await
 }
 
 pub type Result<T> = std::result::Result<T, Failure>;
