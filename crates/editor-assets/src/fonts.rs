@@ -92,18 +92,6 @@ pub const ALL: &[BundledFont] = &[
             include_bytes!("../fonts/spline-sans-mono-700.ttf"),
         ],
     },
-    BundledFont {
-        file_name: "test-founders-grotesk-bold.otf",
-        family: "Test Founders Grotesk",
-        weights: (600, 700),
-        license_path: "licenses/founders-grotesk-test.txt",
-        license_text: include_str!("../licenses/founders-grotesk-test.txt"),
-        bytes: include_bytes!("../fonts/test-founders-grotesk-bold.otf"),
-        static_faces: &[
-            include_bytes!("../fonts/test-founders-grotesk-semibold.otf"),
-            include_bytes!("../fonts/test-founders-grotesk-bold.otf"),
-        ],
-    },
 ];
 
 /// Shapes the embedded bytes for `gpui::TextSystem::add_fonts`.
