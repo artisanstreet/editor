@@ -26,7 +26,6 @@
     clippy::match_same_arms,
     clippy::match_wildcard_for_single_variants,
     clippy::needless_borrow,
-    clippy::needless_borrows_for_generic_args,
     clippy::needless_continue,
     clippy::needless_pass_by_ref_mut,
     clippy::needless_pass_by_value,

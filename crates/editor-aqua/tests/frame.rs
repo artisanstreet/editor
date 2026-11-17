@@ -1,6 +1,5 @@
 #![expect(
     clippy::float_cmp,
-    clippy::redundant_clone,
     clippy::suboptimal_flops,
     clippy::too_many_lines,
     clippy::unchecked_time_subtraction,
