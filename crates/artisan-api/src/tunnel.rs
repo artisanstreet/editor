@@ -206,8 +206,6 @@ pub struct StreamStart {
     pub stream: String,
 }
 
-pub const STREAM_START_KEY: &str = "$stream";
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamEvent {
@@ -224,6 +222,5 @@ pub const STREAM_EVENT_KEY: &str = "$event";
 
 pub const METHOD_SUBSCRIBE: &str = "SUBSCRIBE";
 pub const METHOD_UNSUBSCRIBE: &str = "UNSUBSCRIBE";
-pub const EVENTS_PATH: &str = "/events";
 
 pub const STREAM_QUEUE_ENVELOPES: usize = 256;

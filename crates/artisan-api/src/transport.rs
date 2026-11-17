@@ -115,14 +115,6 @@ pub enum ClaudeAiState {
     },
 }
 
-impl ClaudeAiState {
-    /// Whether a turn can run on claude.ai now.
-    #[must_use]
-    pub const fn usable(&self) -> bool {
-        matches!(self, Self::SignedIn { .. })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

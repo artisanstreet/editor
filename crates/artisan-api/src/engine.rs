@@ -99,11 +99,6 @@ impl EngineConfig {
             .and_then(serde_json::Value::as_u64)
             .filter(|tokens| (1..=100_000_000).contains(tokens))
     }
-
-    #[must_use]
-    pub fn option_str(&self, key: &str) -> Option<&str> {
-        self.options.get(key).and_then(serde_json::Value::as_str)
-    }
 }
 
 /// What an engine may do without asking.

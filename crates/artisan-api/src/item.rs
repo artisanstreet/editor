@@ -331,10 +331,6 @@ impl Output {
             omitted_bytes: 0,
         }
     }
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.text.byte_len() == 0 && self.omitted_bytes == 0
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
