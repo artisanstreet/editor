@@ -7,8 +7,6 @@ use artisan_api::{CatalogSkill, Listing, McpServer, SkillAction};
 use presentation::{Item, Kind};
 use std::time::{Duration, Instant};
 
-pub const MARKETPLACE_SCREEN_SELECTOR: &str = "route-marketplace";
-pub const MARKETPLACE_SEARCH_SELECTOR: &str = "marketplace-search";
 pub const REMOTE_SEARCH_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

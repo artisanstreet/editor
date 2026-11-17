@@ -1022,24 +1022,6 @@ fn remembered_config(host: &HostData) -> Option<EngineConfig> {
     fitted_remembered_config(host, config)
 }
 
-pub fn remembered_harness_config(
-    host: &HostData,
-    engine: artisan_api::EngineId,
-) -> Option<EngineConfig> {
-    if let Some(config) = host.pending_harness_config(engine) {
-        return fitted_remembered_config(host, config.clone());
-    }
-    let value = host
-        .setting(artisan_api::HARNESS_CONFIGS_KEY)
-        .and_then(|configs| configs.get(engine.as_str()))
-        .or_else(|| host.setting("default_engine_config"))?;
-    let config: EngineConfig = serde_json::from_value(value.clone()).ok()?;
-    if config.engine != engine {
-        return None;
-    }
-    fitted_remembered_config(host, config)
-}
-
 fn fitted_remembered_config(host: &HostData, mut config: EngineConfig) -> Option<EngineConfig> {
     let status = host.engines.get(&config.engine)?;
     if !matches!(status.install, artisan_api::InstallState::Installed { .. })

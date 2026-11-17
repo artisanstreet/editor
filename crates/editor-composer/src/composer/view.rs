@@ -1341,13 +1341,6 @@ impl ComposerOwner {
         self.reduced_motion = reduced;
     }
 
-    pub fn tooltip_target(&self) -> Option<(editor_core::HostInstance, u64)> {
-        let composer = self.controller.borrow();
-        composer
-            .host_instance()
-            .map(|instance| (instance, composer.generation()))
-    }
-
     pub fn tooltip_deadline(&self) -> Option<std::time::Instant> {
         self.tooltip.borrow().deadline()
     }
@@ -1454,55 +1447,6 @@ impl ComposerOwner {
 
     pub fn mention_pointer(&self, pointer: Option<aqua_core::Point>) -> bool {
         self.controller.borrow_mut().mentions.pointer_at(pointer)
-    }
-
-    pub fn open_animated_popup(
-        &mut self,
-        app: &mut aqua::UiApp,
-        anchor: aqua_core::NodeId,
-        kind: PopupKind,
-        factory: impl Fn() -> Element + 'static,
-        now: f64,
-    ) -> Result<(), String> {
-        use aqua_ui::popup::PopupFocus;
-        use editor_ui::popover::{AnimatedPickerHost, PickerEntrance};
-        let entrance = PickerEntrance::Scale {
-            origin: aqua_core::Point::new(0.0, 1.0),
-        };
-        let open_duration = editor_ui::picker_motion::DROPDOWN_OPEN;
-        let close_duration = editor_ui::picker_motion::DROPDOWN_CLOSE;
-        let action = Rc::clone(&self.dispatch);
-        let popup = AnimatedPickerHost::open_above(
-            app,
-            anchor,
-            factory,
-            kind.gap(),
-            PopupFocus::Preserve,
-            entrance,
-            if self.reduced_motion {
-                std::time::Duration::ZERO
-            } else {
-                open_duration
-            },
-            if self.reduced_motion {
-                std::time::Duration::ZERO
-            } else {
-                close_duration
-            },
-            now,
-            move |_| {
-                action(match kind {
-                    PopupKind::Mentions => ComposerAction::DismissMentions,
-                    _ => ComposerAction::ClosePicker,
-                })
-            },
-        )?;
-        match kind {
-            PopupKind::Model => self.model_popup = Some(popup),
-            PopupKind::Mentions => self.mention_popup = Some(popup),
-            PopupKind::Project => self.project_popup = Some(popup),
-        }
-        Ok(())
     }
 
     pub fn open_popup_content(
@@ -1617,15 +1561,6 @@ impl ComposerOwner {
                     popup.refresh_content(app, content)
                 }),
         }
-    }
-
-    pub fn open_project_popup(
-        &mut self,
-        app: &mut aqua::UiApp,
-        anchor: aqua_core::NodeId,
-        content: Element,
-    ) -> Result<(), String> {
-        self.open_popup_content(app, anchor, PopupKind::Project, content, 0.0)
     }
 
     pub fn close_popup(
@@ -1781,19 +1716,6 @@ impl ComposerOwner {
                 if popup.is_open(app) {
                     popup.advance(app, now)?;
                 }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn refresh_model_popup(
-        &mut self,
-        app: &mut aqua::UiApp,
-        content: Element,
-    ) -> Result<(), String> {
-        if let Some(popup) = &mut self.model_popup {
-            if popup.is_open(app) {
-                popup.refresh_content(app, content)?;
             }
         }
         Ok(())
@@ -2812,30 +2734,6 @@ impl PopupKind {
             Self::Project | Self::Model | Self::Mentions => Space::S8.px(),
         }
     }
-}
-
-pub fn open_popup(
-    app: &mut aqua::UiApp,
-    owner: aqua_core::NodeId,
-    content: Element,
-    kind: PopupKind,
-    dispatch: Dispatch,
-) -> Result<editor_ui::popover::PickerPopupHost, String> {
-    use aqua_ui::{overlay::DismissPolicy, popup::PopupFocus};
-    editor_ui::popover::PickerPopupHost::open_above(
-        app,
-        owner,
-        content,
-        kind.gap(),
-        PopupFocus::Preserve,
-        DismissPolicy::LIGHT,
-        move |_| {
-            dispatch(match kind {
-                PopupKind::Mentions => ComposerAction::DismissMentions,
-                PopupKind::Model | PopupKind::Project => ComposerAction::ClosePicker,
-            });
-        },
-    )
 }
 
 pub fn project_menu(

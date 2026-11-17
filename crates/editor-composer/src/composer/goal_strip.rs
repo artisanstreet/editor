@@ -214,15 +214,6 @@ impl StripState {
         self.update(now, reduced)
     }
 
-    pub fn set_parked_time(
-        &mut self,
-        until: Option<artisan_api::Timestamp>,
-        now: Instant,
-        reduced: bool,
-    ) -> bool {
-        self.set_parked(until, editor_ui::local_time::moment, now, reduced)
-    }
-
     pub fn settle(&mut self) {
         self.settled = true;
     }

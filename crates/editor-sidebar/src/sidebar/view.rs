@@ -714,24 +714,6 @@ pub fn project_picker_dialog(
 
 pub const ROOT_KEY: &str = "sidebar-root";
 
-pub fn thread_list(
-    sidebar: &Sidebar,
-    core: &Core,
-    viewport_height: f32,
-    render: Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>,
-    emit: Rc<dyn Fn(ViewAction)>,
-) -> Option<Element> {
-    thread_entries(
-        sidebar,
-        core,
-        viewport_height,
-        super::geometry::entries(&sidebar.lists, sidebar.history_visible()),
-        "sidebar-threads",
-        render,
-        emit,
-    )
-}
-
 fn thread_entries(
     sidebar: &Sidebar,
     core: &Core,

@@ -2,7 +2,7 @@ use super::{Entry, entries};
 use editor_conversation::controller::Conversation;
 use editor_core::{Core, CoreEvent, HostEvent, HostId, HostInstance, Screen};
 use editor_sources::{CollectionBrowser, ContentText};
-use artisan_api::{InspectorSummary, ItemId, PlanStep, ThreadId};
+use artisan_api::{InspectorSummary, PlanStep, ThreadId};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 pub struct Inspector {
@@ -117,29 +117,6 @@ impl Inspector {
         }
     }
 
-    pub fn open_agent(&self, core: &mut Core, conversation: &mut Conversation, index: usize) {
-        let Some(agent) = self.summary.agents.get(index) else {
-            return;
-        };
-        let Some((host, _)) = &self.open else {
-            return;
-        };
-        let Some(instance) = self.instance else {
-            return;
-        };
-        if core.host_if_instance(host, instance).is_none() {
-            return;
-        }
-        if let Some(thread) = &agent.thread {
-            core.navigate(Screen::Thread {
-                host: host.clone(),
-                thread: thread.clone(),
-            });
-        } else {
-            conversation.open_agent(core, Some(agent.id.clone()));
-        }
-    }
-
     pub fn open_agent_target(
         &self,
         core: &mut Core,
@@ -193,36 +170,5 @@ impl Inspector {
             return;
         };
         self.plan = Some(Rc::new(RefCell::new(CollectionBrowser::new(host, source))));
-    }
-
-    pub fn open_step(&mut self, core: &Core, index: usize) {
-        let Some(step) = self
-            .summary
-            .plan
-            .inline()
-            .and_then(|steps| steps.get(index))
-        else {
-            return;
-        };
-        let artisan_api::TextContent::Stored(source) = &step.text else {
-            return;
-        };
-        let Some((host, _)) = &self.open else {
-            return;
-        };
-        let Some(instance) = self.instance else {
-            return;
-        };
-        let Some(host) = core.host_if_instance(host, instance) else {
-            return;
-        };
-        self.source = Some(ContentText::new(host, source.clone()));
-    }
-
-    pub fn terminal_id(&self, index: usize) -> Option<&ItemId> {
-        self.summary
-            .terminals
-            .get(index)
-            .map(|terminal| &terminal.id)
     }
 }

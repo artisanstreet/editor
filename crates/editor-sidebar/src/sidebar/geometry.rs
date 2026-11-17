@@ -202,54 +202,6 @@ pub fn entry_keys(entries: &[Entry]) -> Vec<String> {
     keys
 }
 
-pub fn splices(old: &[Entry], new: &[Entry]) -> Vec<Splice> {
-    let (old, new) = (entry_keys(old), entry_keys(new));
-    let old_set: std::collections::HashSet<_> = old.iter().collect();
-    let new_set: std::collections::HashSet<_> = new.iter().collect();
-    let (mut i, mut j) = (0, 0);
-    let mut changes = Vec::new();
-    while i < old.len() || j < new.len() {
-        if i < old.len() && j < new.len() && old[i] == new[j] {
-            i += 1;
-            j += 1;
-            continue;
-        }
-        let removed = old[i..]
-            .iter()
-            .take_while(|key| !new_set.contains(key))
-            .count();
-        if removed > 0 {
-            changes.push(Splice {
-                start: j,
-                removed,
-                inserted: 0,
-            });
-            i += removed;
-            continue;
-        }
-        let inserted = new[j..]
-            .iter()
-            .take_while(|key| !old_set.contains(key))
-            .count();
-        if inserted > 0 {
-            changes.push(Splice {
-                start: j,
-                removed: 0,
-                inserted,
-            });
-            j += inserted;
-            continue;
-        }
-        changes.push(Splice {
-            start: j,
-            removed: old.len() - i,
-            inserted: new.len() - j,
-        });
-        break;
-    }
-    changes
-}
-
 pub fn history_fraction(
     open: bool,
     from: f32,

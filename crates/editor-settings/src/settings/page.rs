@@ -1,9 +1,4 @@
 use editor_core::SettingsPage;
-use artisan_api::EngineId;
-
-pub const fn label(page: SettingsPage) -> &'static str {
-    page.label()
-}
 
 pub const fn description(page: SettingsPage) -> &'static str {
     match page {
@@ -62,6 +57,3 @@ pub const fn description(page: SettingsPage) -> &'static str {
     }
 }
 
-pub const fn engine_label(engine: EngineId) -> &'static str {
-    engine.display_name()
-}

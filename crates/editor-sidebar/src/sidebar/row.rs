@@ -32,10 +32,6 @@ pub fn menu_actions(row: &RowData, thread: &Thread) -> Vec<MenuAction> {
     actions
 }
 
-pub fn opens_keyboard_menu(key: &str, shift: bool) -> bool {
-    matches!(key, "contextmenu" | "menu") || (key == "f10" && shift)
-}
-
 pub fn opens_aqua_keyboard_menu(event: &aqua_core::KeyEvent) -> bool {
     match event.key {
         aqua_core::Key::Named(aqua_core::NamedKey::ContextMenu) => true,

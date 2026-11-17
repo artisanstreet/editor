@@ -115,11 +115,6 @@ impl Player {
         self.owner.shared.lock().seek(position);
     }
 
-    /// Stops playback and returns to idle, releasing the output stream.
-    pub fn stop(&self) {
-        self.owner.shared.lock().stop();
-    }
-
     /// The current track, state and position.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {

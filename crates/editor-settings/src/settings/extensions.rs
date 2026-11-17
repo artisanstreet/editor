@@ -2,7 +2,6 @@ use artisan_api::{McpMutation, McpServer};
 use std::collections::BTreeMap;
 
 pub const MCP_SERVERS_KEY: &str = "mcp_servers";
-pub const MANAGE_SKILLS_SELECTOR: &str = "settings-manage-skills";
 
 #[derive(Clone, Debug, Default)]
 pub struct ServerFields {
