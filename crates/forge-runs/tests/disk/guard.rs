@@ -15,6 +15,7 @@ async fn fixture_on_disk(script: Script, free: Arc<AtomicU64>) -> (Fixture, Arc<
         EngineId::Claude,
         Arc::new(move |_| Arc::clone(&harness)),
         probe,
+        Membership::Alone,
     )
     .await;
     (fixture, checks)

@@ -5,6 +5,8 @@ use super::*;
 
 #[path = "../tests/run/activity.rs"]
 mod activity;
+#[path = "../tests/agents/reports.rs"]
+mod agents;
 #[path = "../tests/run/cancellation.rs"]
 mod cancellation;
 #[path = "../tests/coordination/notifications.rs"]
@@ -104,20 +106,54 @@ async fn fixture_with_harness(harness_for: HarnessFor) -> Fixture {
 }
 
 async fn fixture_with_engine_harness(engine: EngineId, harness_for: HarnessFor) -> Fixture {
-    fixture_with_parts(engine, harness_for, disk::Probe::system()).await
+    fixture_with_parts(
+        engine,
+        harness_for,
+        disk::Probe::system(),
+        Membership::Alone,
+    )
+    .await
+}
+
+enum Membership {
+    Alone,
+    Generation,
+}
+
+fn active_generation(data: &std::path::Path) -> runtime::Generation {
+    let registry = runtime::Registry::open(data).unwrap();
+    let generation = registry
+        .register(runtime::Member {
+            id: String::new(),
+            control: String::new(),
+            token: String::new(),
+            address: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            pid: std::process::id(),
+            protocol: 0,
+            schema: 0,
+        })
+        .unwrap();
+    registry.promote(&generation.member).unwrap();
+    generation.set_accepting(true);
+    generation
 }
 
 async fn fixture_with_parts(
     engine: EngineId,
     harness_for: HarnessFor,
     disk: disk::Probe,
+    membership: Membership,
 ) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().to_path_buf();
     install_fake(&data, engine);
     let store = forge_store::Store::open(&data.join("forge")).unwrap();
     let engines = Engines::new(&data);
-    let hub = Hub::build(store, engines, data.clone(), harness_for, disk, None);
+    let generation = match membership {
+        Membership::Alone => None,
+        Membership::Generation => Some(active_generation(&data)),
+    };
+    let hub = Hub::build(store, engines, data.clone(), harness_for, disk, generation);
     let project = hub
         .store()
         .create_project(CreateProject {
@@ -4117,9 +4153,7 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
     hub.shutdown();
 }
 
-/// An Artisan agent of the fixture's thread whose own thread's last run a
-/// restart interrupted, as a Forge starting up finds it.
-async fn interrupted_agent(fixture: &Fixture) -> (ItemId, ThreadId) {
+async fn background_agent(fixture: &Fixture) -> (ItemId, ThreadId) {
     let store = fixture.hub.store();
     let parent = store.thread(&fixture.thread_id).await.unwrap().unwrap();
     let agent = ItemId::new();
@@ -4175,7 +4209,14 @@ async fn interrupted_agent(fixture: &Fixture) -> (ItemId, ThreadId) {
         })
         .await
         .unwrap();
-    store
+    (agent, child)
+}
+
+async fn interrupted_agent(fixture: &Fixture) -> (ItemId, ThreadId) {
+    let (agent, child) = background_agent(fixture).await;
+    fixture
+        .hub
+        .store()
         .upsert_run(artisan_api::Run {
             config: None,
             id: RunId::new(),

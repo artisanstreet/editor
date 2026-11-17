@@ -33,7 +33,6 @@ fn cancel_cutoff(hub: &Hub, thread_id: &ThreadId) -> u64 {
     })
 }
 
-/// Runs one engine run for the thread's undelivered messages.
 pub async fn drive(
     hub: &Hub,
     thread_id: &ThreadId,
@@ -45,7 +44,6 @@ pub async fn drive(
     let continuation = store.take_continue(thread_id.clone()).await?;
     let observed = store.pending_inputs(thread_id).await?;
     let pending = observed.items;
-    // Undelivered messages carry a stopped turn on by themselves.
     let continuation = continuation.filter(|_| pending.is_empty());
     if pending.is_empty() && continuation.is_none() {
         return Ok(RunStatus::Done);
@@ -59,15 +57,11 @@ pub async fn drive(
         live.engine = Some(engine);
     }
     let previous = store.latest_run(thread_id).await?;
-    // The thread's first run: the engine may name the thread during it.
     let first_run = previous.is_none();
     let carry_on = match continuation {
         Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
         None => None,
     };
-    // A session made on the other Claude transport cannot carry on: the
-    // run starts fresh, from the thread's history. An empty one is a
-    // session the engine said is gone.
     let transport = claude_transport(hub, engine).await;
     let session_id = carried_session(previous.as_ref(), engine, transport);
     let carried = session_id.as_ref().and(previous.as_ref());
@@ -89,9 +83,8 @@ pub async fn drive(
         continuation,
     };
     run = store.upsert_run(run).await?;
+    hub.agent_attention(thread_id).await;
 
-    // A claude.ai run can find its session needs renewing or is signed
-    // out; the Editor hears of it when the run ends.
     let claude_ai_home =
         (transport == Some(ClaudeTransport::Chat)).then(|| hub.engines().home(engine));
     let claude_ai_before = claude_ai_home
@@ -127,13 +120,9 @@ pub async fn drive(
             .cancel_pending_inputs(thread_id.clone(), cancel_cutoff)
             .await
     {
-        // Settle once as Failed, and do not retry the inputs whose durable
-        // cancellation could not be saved. Newer inputs remain eligible.
         run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
         outcome = Outcome::failed(format!("persist cancellation: {error:#}"));
     }
-    // Forge stopping ends a run unfinished, not cancelled by the user, so
-    // it can carry on after the restart.
     if hub.inner.shutdown.is_cancelled() && outcome.status == RunStatus::Cancelled {
         outcome.status = RunStatus::Interrupted;
     }
