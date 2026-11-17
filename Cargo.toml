@@ -79,7 +79,7 @@ forge-store = { path = "crates/forge-store" }
 test-support = { path = "crates/test-support" }
 semver = "=1.0.28"
 palette = "0.7"
-rustix = "=1.1.4"
+rustix = "=1.1.6"
 windows = "=0.62.2"
 aqua = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
 aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
@@ -131,14 +131,14 @@ ply-rs-bw = "=4.0.0"
 gltf = { version = "=1.4.1", default-features = false, features = ["utils"] }
 mermaid-rs-renderer = { path = "vendor/mermaid-rs-renderer" }
 pulseaudio = "=0.3.1"
-pulldown-cmark = { version = "=0.13.4", default-features = false }
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 rcgen = { version = "=0.14.9", default-features = false, features = [
     "crypto",
     "ring",
 ] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["env-filter", "fmt", "std", "tracing-log"] }
-rustls = { version = "=0.23.43", default-features = false, features = [
+rustls = { version = "=0.23.46", default-features = false, features = [
     "logging",
     "ring",
     "std",
@@ -155,7 +155,7 @@ syntect = { version = "=5.3.0", default-features = false, features = [
 ] }
 image = { version = "=0.25.10", default-features = false }
 webp = { version = "=0.3.1", default-features = false }
-rusqlite = { version = "=0.39.0", features = ["bundled"] }
+rusqlite = { version = "=0.41.1", features = ["bundled"] }
 sha2 = "=0.11.0"
 hex = "=0.4.3"
 similar = "=2.7.0"
@@ -163,7 +163,7 @@ socket2 = "=0.6.5"
 tar = "=0.4.46"
 tempfile = "=3.27.0"
 thiserror = "=2.0.20"
-tokio = { version = "=1.53.1", default-features = false }
+tokio = { version = "=1.53.3", default-features = false }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "=1.1.4"
 uuid = { version = "=1.26.0", default-features = false, features = ["std", "v7"] }
