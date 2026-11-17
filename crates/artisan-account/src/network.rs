@@ -12,8 +12,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::signin::{
-    DesktopRedeemRequest, MagicConsumeRequest, MagicConsumeResponse, MagicFinalizeRequest, MagicFinalizeResponse,
-    MagicRequest, MagicRequestResponse, MagicStatusRequest, MagicStatusResponse,
+    DesktopRedeemRequest, MagicFinalizeRequest, MagicFinalizeResponse, MagicRequest,
+    MagicRequestResponse, MagicStatusRequest, MagicStatusResponse,
 };
 
 /// Opaque session token. Never logged or displayed; redacted `Debug`,
@@ -106,11 +106,6 @@ pub struct MachineEntry {
     pub last_seen_at: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct MachinesResponse {
-    machines: Vec<MachineEntry>,
-}
-
 /// The verified profile behind `GET /v1/me`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountProfile {
@@ -131,26 +126,6 @@ pub struct AccountProfile {
 #[derive(Deserialize)]
 struct AccountDetails {
     username: Option<String>,
-}
-
-/// `GET /v1/sessions` entry (forward-compatible read).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionEntry {
-    pub id: String,
-    #[serde(default)]
-    pub device_name: Option<String>,
-    #[serde(default)]
-    pub created_at: Option<String>,
-    #[serde(default)]
-    pub expires_at: Option<String>,
-    #[serde(default)]
-    pub revoked_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct SessionsResponse {
-    #[serde(default)]
-    sessions: Vec<SessionEntry>,
 }
 
 /// `POST /v1/machines/enrollments/claim`.
@@ -191,19 +166,6 @@ pub struct GrantIssueRequest {
 pub struct GrantToken {
     pub token: String,
     pub expires_at: String,
-}
-
-/// Latest config bundle head (version + hash only; manifest sync stays with
-/// the skills sync owner). ETag revalidation is the caller's job.
-#[derive(Clone, Debug, Deserialize)]
-pub struct BundleHead {
-    pub version: u64,
-    pub content_hash: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct LatestBundleResponse {
-    bundle: Option<BundleHead>,
 }
 
 /// Session-authed Core HTTP. One client per base URL; cheap to clone.
@@ -328,19 +290,6 @@ impl CoreSessionClient {
         .await
     }
 
-    pub async fn magic_consume(&self, token: &str) -> Result<MagicConsumeResponse, NetworkError> {
-        self.post::<_, _>(
-            "/v1/auth/magic/consume",
-            &MagicConsumeRequest {
-                token: token.to_owned(),
-                request_secret: None,
-            },
-            None,
-            "approve the sign-in link",
-        )
-        .await
-    }
-
     #[expect(
         clippy::map_err_ignore,
         reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
@@ -427,16 +376,6 @@ impl CoreSessionClient {
         Ok(profile)
     }
 
-    pub async fn list_sessions(
-        &self,
-        session: &SessionToken,
-    ) -> Result<Vec<SessionEntry>, NetworkError> {
-        Ok(self
-            .get::<SessionsResponse>("/v1/sessions", Some(session), "list sessions")
-            .await?
-            .sessions)
-    }
-
     pub async fn revoke_current(&self, session: &SessionToken) -> Result<(), NetworkError> {
         let _: serde_json::Value = self
             .post(
@@ -461,55 +400,6 @@ impl CoreSessionClient {
         Ok(())
     }
 
-    pub async fn totp_enroll(
-        &self,
-        session: &SessionToken,
-    ) -> Result<TotpEnrollResponse, NetworkError> {
-        self.post::<_, _>(
-            "/v1/auth/totp/enroll",
-            &serde_json::json!({}),
-            Some(session),
-            "start second-factor enrollment",
-        )
-        .await
-    }
-
-    pub async fn totp_verify(
-        &self,
-        session: &SessionToken,
-        code: &str,
-    ) -> Result<(), NetworkError> {
-        let _: serde_json::Value = self
-            .post(
-                "/v1/auth/totp/verify",
-                &TotpVerifyRequest {
-                    code: code.to_owned(),
-                },
-                Some(session),
-                "verify the second factor",
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn totp_disable(
-        &self,
-        session: &SessionToken,
-        code: &str,
-    ) -> Result<(), NetworkError> {
-        let _: serde_json::Value = self
-            .post(
-                "/v1/auth/totp/disable",
-                &TotpDisableRequest {
-                    code: code.to_owned(),
-                },
-                Some(session),
-                "disable the second factor",
-            )
-            .await?;
-        Ok(())
-    }
-
     pub async fn claim_enrollment(
         &self,
         session: &SessionToken,
@@ -524,16 +414,6 @@ impl CoreSessionClient {
             "claim the pairing code",
         )
         .await
-    }
-
-    pub async fn list_machines(
-        &self,
-        session: &SessionToken,
-    ) -> Result<Vec<MachineEntry>, NetworkError> {
-        Ok(self
-            .get::<MachinesResponse>("/v1/machines", Some(session), "list Forges")
-            .await?
-            .machines)
     }
 
     pub async fn revoke_machine(
@@ -579,50 +459,6 @@ impl CoreSessionClient {
         )
         .await
     }
-
-    /// Latest config bundle head (version + hash). Manifest sync stays with
-    /// the skills-sync owner; the controller only caches the head.
-    pub async fn latest_bundle_head(
-        &self,
-        session: &SessionToken,
-    ) -> Result<Option<BundleHead>, NetworkError> {
-        Ok(self
-            .get::<LatestBundleResponse>(
-                "/v1/config/bundles/latest",
-                Some(session),
-                "check the config revision",
-            )
-            .await?
-            .bundle)
-    }
-
-    /// The JWKS Core publishes for grant verification.
-    pub async fn jwks(&self) -> Result<serde_json::Value, NetworkError> {
-        self.get("/.well-known/jwks.json", None, "load Core keys")
-            .await
-    }
-}
-
-/// TOTP enrollment answer: `POST /v1/auth/totp/enroll`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TotpEnrollResponse {
-    pub otpauth_url: String,
-    pub recovery_codes: Vec<String>,
-}
-
-/// `POST /v1/auth/totp/verify`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TotpVerifyRequest {
-    pub code: String,
-}
-
-/// `POST /v1/auth/totp/disable`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TotpDisableRequest {
-    pub code: String,
 }
 
 /// `POST /v1/machines/enrollments/claim` answer.

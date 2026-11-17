@@ -57,23 +57,6 @@ pub struct MagicStatusResponse {
     pub expires_at: String,
 }
 
-/// `POST /v1/auth/magic/consume` — approve from the emailed link.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MagicConsumeRequest {
-    pub token: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "requestSecret")]
-    pub request_secret: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MagicConsumeResponse {
-    pub request_id: String,
-    pub status: String,
-    pub totp_required: bool,
-}
-
 /// `POST /v1/auth/magic/finalize` — complete sign-in (originating session).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
