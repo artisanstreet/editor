@@ -1,0 +1,45 @@
+[package]
+name = "test-support"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+description = "Shared test helpers: bounded waits, a paused clock, stub servers, SSE reading and Editor fixtures."
+publish = false
+
+[features]
+tokio = ["dep:tokio"]
+sse = ["tokio", "dep:sse-core", "dep:futures", "dep:bytes", "dep:serde", "dep:serde_json"]
+http = ["tokio", "dep:axum"]
+net = ["dep:socket2"]
+items = ["dep:artisan-api"]
+editor = ["items", "dep:tempfile", "dep:aqua", "dep:aqua-core", "dep:aqua-text", "dep:aqua-ui", "dep:editor-core", "dep:editor-ui", "dep:editor-conversation"]
+shell = ["editor", "dep:editor-aqua"]
+
+[dependencies]
+aqua = { workspace = true, optional = true }
+aqua-core = { workspace = true, optional = true }
+aqua-text = { workspace = true, optional = true }
+aqua-ui = { workspace = true, optional = true }
+artisan-api = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+editor-aqua = { workspace = true, optional = true, features = ["test-support"] }
+editor-conversation = { workspace = true, optional = true, features = ["test-support"] }
+editor-core = { workspace = true, optional = true, features = ["test-support"] }
+editor-ui = { workspace = true, optional = true, features = ["test-support"] }
+futures = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
+sse-core = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "time", "net", "test-util"] }
+
+[dev-dependencies]
+futures.workspace = true
+serde.workspace = true
+test-support = { path = ".", features = ["sse", "net", "tokio"] }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

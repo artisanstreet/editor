@@ -29,6 +29,7 @@ members = [
     "crates/forge-mcp",
     "crates/forge-runs",
     "crates/forge-store",
+    "crates/test-support",
 ]
 exclude = [
     "vendor/highlighting/syntect",
@@ -53,6 +54,7 @@ artisan-mentions = { path = "crates/artisan-mentions" }
 artisan-paths = { path = "crates/artisan-paths" }
 artisan-payload = { path = "crates/artisan-payload" }
 claude-ai-browser = { path = "crates/claude-ai-browser" }
+editor-aqua = { path = "crates/editor-aqua" }
 editor-assets = { path = "crates/editor-assets" }
 editor-audio = { path = "crates/editor-audio" }
 editor-composer = { path = "crates/editor-composer" }
@@ -72,6 +74,7 @@ forge-isolation = { path = "crates/forge-isolation" }
 forge-mcp = { path = "crates/forge-mcp" }
 forge-runs = { path = "crates/forge-runs" }
 forge-store = { path = "crates/forge-store" }
+test-support = { path = "crates/test-support" }
 semver = "=1.0.28"
 palette = "0.7"
 rustix = "=1.1.4"
@@ -111,6 +114,7 @@ tower = { version = "=0.5.3", default-features = false }
 tower-http = { version = "=0.6.11", default-features = false }
 tracing = "=0.1.44"
 base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
+bytes = "=1.12.1"
 cpal = { version = "=0.18.2", default-features = false }
 fs2 = "=0.4.3"
 futures = { version = "=0.3.34", default-features = false, features = ["executor", "std"] }
@@ -152,6 +156,7 @@ rusqlite = { version = "=0.39.0", features = ["bundled"] }
 sha2 = "=0.11.0"
 hex = "=0.4.3"
 similar = "=2.7.0"
+socket2 = "=0.6.5"
 tar = "=0.4.46"
 tempfile = "=3.27.0"
 thiserror = "=2.0.20"

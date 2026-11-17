@@ -5178,6 +5178,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-support"
+version = "0.0.0"
+dependencies = [
+ "aqua",
+ "aqua-core",
+ "aqua-text",
+ "aqua-ui",
+ "artisan-api",
+ "axum",
+ "bytes",
+ "editor-aqua",
+ "editor-conversation",
+ "editor-core",
+ "editor-ui",
+ "futures",
+ "serde",
+ "serde_json",
+ "socket2",
+ "sse-core",
+ "tempfile",
+ "test-support",
+ "tokio",
+]
+
+[[package]]
 name = "textwrap"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
