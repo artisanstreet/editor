@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "Carries one program inside another: packed by a build script, written out when installing."
 
+[lib]
+doctest = false
+
 [dependencies]
 flate2.workspace = true
 

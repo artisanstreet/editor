@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "The Artisan MCP: what an agent can do with Artisan, served to every engine through Forge's gateway."
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow.workspace = true
 artisan-api.workspace = true

@@ -4,6 +4,9 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 pulldown-cmark = { workspace = true, features = ["serde"] }
 serde.workspace = true

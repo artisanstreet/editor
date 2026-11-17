@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "Forge's content policy over artisan-api items: which texts and collections become stored sources, and their identities."
 
+[lib]
+doctest = false
+
 [dependencies]
 artisan-api.workspace = true
 serde.workspace = true

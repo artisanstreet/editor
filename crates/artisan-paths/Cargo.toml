@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "Where Artisan's apps (ae, Forge, the Editor) are installed and keep their data."
 
+[lib]
+doctest = false
+
 [dev-dependencies]
 tempfile.workspace = true
 

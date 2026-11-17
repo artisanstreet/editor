@@ -5,5 +5,8 @@ license.workspace = true
 version.workspace = true
 description = "The `$skill` and `@connector` mention grammar the composer paints and Forge hands to engines."
 
+[lib]
+doctest = false
+
 [lints]
 workspace = true

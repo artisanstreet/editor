@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "Signs in to claude.ai in the user's own browser and reads the session Native Claude Mode runs on."
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow.workspace = true
 artisan-api.workspace = true

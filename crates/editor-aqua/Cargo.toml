@@ -7,6 +7,9 @@ description = "The native Windows Artisan Editor, built with Aqua"
 build = "build.rs"
 autotests = true
 
+[lib]
+doctest = false
+
 [features]
 test-support = ["editor-core/test-support", "editor-ui/test-support", "editor-sources/test-support", "editor-composer/test-support", "editor-conversation/test-support", "editor-sidebar/test-support", "editor-inspector/test-support", "editor-settings/test-support", "editor-marketplace/test-support"]
 qualification = ["editor-conversation/qualification", "test-support", "dep:forge-http", "dep:forge-store", "forge-store/qualification", "dep:rusqlite", "dep:sha2", "dep:hex"]

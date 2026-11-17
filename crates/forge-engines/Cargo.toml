@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "Engine adapters: run Claude, Codex, OpenCode, Grok and Cursor and map their wiring onto artisan-api items."
 
+[lib]
+doctest = false
+
 [features]
 default = []
 

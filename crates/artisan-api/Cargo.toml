@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "Types shared by Forge and the Editor: threads, items, runs, events and requests."
 
+[lib]
+doctest = false
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

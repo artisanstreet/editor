@@ -4,6 +4,9 @@ edition.workspace = true
 license.workspace = true
 version.workspace = true
 
+[lib]
+doctest = false
+
 [features]
 test-support = ["editor-core/test-support", "editor-ui/test-support"]
 

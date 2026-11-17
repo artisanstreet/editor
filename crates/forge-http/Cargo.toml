@@ -7,6 +7,9 @@ description = "Forge's HTTPS API: mutual-TLS auth, JSON routes and the event str
 # tests/ holds path-included unit tests (see src `#[path]`), not integration targets.
 autotests = false
 
+[lib]
+doctest = false
+
 [dependencies]
 dirs.workspace = true
 anyhow.workspace = true

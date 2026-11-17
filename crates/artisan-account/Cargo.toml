@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "AST account grants, enrollment, Noise XX E2E, and Relay transports for Forge/Editor."
 
+[lib]
+doctest = false
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

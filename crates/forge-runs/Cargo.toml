@@ -5,6 +5,9 @@ license.workspace = true
 version.workspace = true
 description = "Live runs: start, steer, answer and cancel engine runs, and turn engine events into stored items."
 
+[lib]
+doctest = false
+
 [dependencies]
 anyhow.workspace = true
 artisan-api.workspace = true
