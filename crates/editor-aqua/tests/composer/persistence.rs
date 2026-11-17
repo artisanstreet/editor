@@ -433,7 +433,7 @@ fn process_exit_waits_for_draft_write_acceptance() {
         drop(sessions);
 
         let mut shutdown = Box::pin(drain_pending(Duration::from_secs(5)));
-        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        assert!(test_support::poll::poll_once(shutdown.as_mut()).is_pending());
         let (mut socket, route, body) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
         let persisted = body["body"].clone();
@@ -516,7 +516,7 @@ fn process_exit_reports_a_rejected_draft_write() {
         drop(sessions);
 
         let mut shutdown = Box::pin(drain_pending(Duration::from_secs(5)));
-        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        assert!(test_support::poll::poll_once(shutdown.as_mut()).is_pending());
         let (mut socket, route, _) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
         respond(
