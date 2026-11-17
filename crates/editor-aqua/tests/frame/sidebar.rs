@@ -1,33 +1,5 @@
-use artisan_api::{ProjectId, ThreadId};
 use editor_aqua::frame::sidebar::{Event, Sidebar};
 use std::time::Instant;
-
-#[test]
-fn switching_tabs_preserves_manually_opened_and_closed_project_groups() {
-    let mut sidebar = Sidebar::default();
-    let now = Instant::now();
-    let project = ProjectId::new();
-    let other_project = ProjectId::new();
-    let first = ThreadId::new();
-    let second = ThreadId::new();
-    let working = [first.clone(), second.clone()];
-    sidebar.follow(&working, Some(&first));
-    assert_eq!(sidebar.openness(&project, now), 0.0);
-    assert_eq!(sidebar.openness(&other_project, now), 0.0);
-    (sidebar.emit())(Event::Project(project.clone()));
-    sidebar.take_events(now, true);
-    sidebar.follow(&working, Some(&second));
-    assert_eq!(sidebar.openness(&project, now), 1.0);
-    assert_eq!(sidebar.openness(&other_project, now), 0.0);
-    (sidebar.emit())(Event::Project(project.clone()));
-    sidebar.take_events(now, true);
-    sidebar.tick(now, true);
-    sidebar.follow(&working, Some(&first));
-    assert_eq!(sidebar.openness(&project, now), 0.0);
-    assert_eq!(sidebar.tabs().order(), working);
-    sidebar.follow(&working, None);
-    assert_eq!(sidebar.openness(&project, now), 0.0);
-}
 
 #[test]
 fn narrow_windows_force_collapse_and_restore_the_preferred_open_state() {

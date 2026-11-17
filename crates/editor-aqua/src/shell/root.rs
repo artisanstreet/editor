@@ -2237,15 +2237,6 @@ impl RootViews {
         }
     }
 
-    fn track_tree_edges(&mut self, ui: &UiApp) -> bool {
-        let (above, below) =
-            crate::shell::wheel::hidden_edges(ui, crate::shell::wheel::PROJECT_TREE);
-        let offset = crate::shell::wheel::kept_offset(ui, crate::shell::wheel::PROJECT_TREE);
-        self.sidebar
-            .edges(above, below, std::time::Instant::now(), Self::reduced(ui))
-            | self.sidebar.scrolled(offset.y)
-    }
-
     fn apply_navigation(&mut self, shell: &mut Shell, reduced: bool) -> bool {
         use crate::frame::sidebar::Command;
         let mut outlined = false;
@@ -2694,8 +2685,7 @@ impl SectionViews for RootViews {
     ) -> bool {
         let changed = self
             .sidebar
-            .take_events(std::time::Instant::now(), Self::reduced(ui))
-            | self.track_tree_edges(ui);
+            .take_events(std::time::Instant::now(), Self::reduced(ui));
         self.apply_account_effects(shell, ctx, window, Self::reduced(ui));
         let pictured = self.avatar.drain(shell.images());
         self.schedule_sidebar(ctx, window);
@@ -2733,7 +2723,6 @@ impl SectionViews for RootViews {
             ("anim_reveal", revealing == reveal::Progress::Acted),
             ("anim_events", self.sidebar.take_events(now, reduced)),
             ("anim_clock", self.tick_work_clock(shell, ctx, window, now)),
-            ("anim_edges", self.track_tree_edges(ui)),
             ("anim_sidebar", self.sidebar.tick(now, reduced)),
             ("anim_signing", signing),
         ];

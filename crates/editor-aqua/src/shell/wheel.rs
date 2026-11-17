@@ -56,20 +56,6 @@ pub fn keyed_node(ui: &UiApp, key: &str) -> Option<NodeId> {
 }
 
 #[must_use]
-pub fn hidden_edges(ui: &UiApp, key: &str) -> (bool, bool) {
-    let Some(node) = keyed_node(ui, key) else {
-        return (false, false);
-    };
-    let tree = ui.tree();
-    match (tree.scroll_offset(node), tree.rect(node), tree.content_size(node)) {
-        (Some(offset), Some(rect), Some(content)) => {
-            (offset.y > 1.0, offset.y + rect.h < content.h - 1.0)
-        }
-        _ => (false, false),
-    }
-}
-
-#[must_use]
 pub fn viewport_height(ui: &UiApp, key: &str) -> Option<f32> {
     keyed_node(ui, key)
         .and_then(|node| ui.tree().rect(node))
