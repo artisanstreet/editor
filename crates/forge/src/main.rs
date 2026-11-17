@@ -30,6 +30,11 @@ const LONG_VERSION: &str = concat!(
     ")"
 );
 
+const LOG_LIMIT: diagnostics::Limit = diagnostics::Limit {
+    bytes: 16 * 1024 * 1024,
+    archives: 4,
+};
+
 #[derive(Parser)]
 #[command(name = "forge", version = LONG_VERSION, about = "Artisan Forge")]
 struct Cli {
@@ -200,15 +205,7 @@ async fn stop_requested() {
 fn init_tracing(log: Option<&std::path::Path>) -> Result<diagnostics::RecentLines> {
     match log {
         Some(path) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
-            }
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .with_context(|| format!("open {}", path.display()))?;
+            let file = diagnostics::log_file::open(path, LOG_LIMIT)?;
             Ok(diagnostics::subscribe("info", std::sync::Mutex::new(file))?)
         }
         None => Ok(diagnostics::subscribe("info", std::io::stderr)?),

@@ -14,7 +14,6 @@ use std::time::Duration;
 pub const UNIT: &str = "artisan-forge.service";
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Artisan Forge";
-const LOG_ROTATE_BYTES: u64 = 16 * 1024 * 1024;
 
 fn data() -> Result<PathBuf> {
     App::Forge.data().context("find Forge's data folder")
@@ -184,9 +183,6 @@ fn start_unlocked() -> Result<Option<u32>> {
     let data = data()?;
     std::fs::create_dir_all(&data).with_context(|| format!("create {}", data.display()))?;
     let log = log_file()?;
-    if std::fs::metadata(&log).is_ok_and(|metadata| metadata.len() > LOG_ROTATE_BYTES) {
-        std::fs::rename(&log, data.join("forge.log.1")).ok();
-    }
     let pid = sys::spawn_detached(
         Command::new(&forge)
             .env_remove("LD_LIBRARY_PATH")
