@@ -1,146 +1,84 @@
 use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
-use aqua_text::{SharedFonts, SharedRuns};
-use artisan_api::{
-    Collection, CollectionRef, ContentId, ContentRef, Item, ItemId, ItemKind, Status, ThreadId,
-};
-use editor_aqua::conversation::adapter::RowModel;
-use editor_aqua::conversation::controller::Conversation;
+use artisan_api::{Collection, CollectionRef, ContentId, ContentRef, Item, ItemKind, Status};
 use editor_aqua::conversation::fold::{Row, RowKey};
-use editor_aqua::conversation::presentation::{MarkdownOwners, PresentationScope};
-use editor_aqua::conversation::view::factory::{RealizedRow, RowFactory};
+use editor_aqua::conversation::presentation::MarkdownOwners;
 use editor_aqua::conversation::view::row_cache::RowCache;
-use editor_aqua::conversation::view::status::StatusShimmers;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_aqua::core::Core;
 use editor_aqua::ui::theme::{ArtisanTheme, ThemeMode};
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+use test_support::editor::core::{OpenThread, connect, remote_host, test_core};
+use test_support::editor::rows::{listed, realized, row_factory, row_list, row_model, source_ids};
+use test_support::editor::ui::{click, mount, mounted, ui_app};
+use test_support::items::item;
 
 fn question(id: &str, digit: char) -> Arc<Item> {
     Arc::new(Item {
-        id: ItemId(id.into()),
-        thread_id: ThreadId("thread".into()),
         position: if id == "one" { 1 } else { 2 },
-        seq: 1,
-        run_id: None,
-        parent_id: None,
         status: Status::AwaitingUser,
-        created_at: 0,
-        updated_at: 0,
-        kind: ItemKind::Question {
-            blocking: true,
-            questions: Collection::Stored(CollectionRef {
-                source: ContentRef {
-                    id: ContentId(digit.to_string().repeat(64)),
-                    bytes: 10,
-                    lines: 1,
-                },
-                count: 1,
-            }),
-            answers: None,
-            answer_text: None,
-        },
+        ..item(
+            id,
+            "thread",
+            1,
+            ItemKind::Question {
+                blocking: true,
+                questions: Collection::Stored(CollectionRef {
+                    source: ContentRef {
+                        id: ContentId(digit.to_string().repeat(64)),
+                        bytes: 10,
+                        lines: 1,
+                    },
+                    count: 1,
+                }),
+                answers: None,
+                answer_text: None,
+            },
+        )
     })
 }
 
 #[test]
 fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_eviction() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_owned(),
-    })
-    .unwrap();
-    let config = HostConfig {
-        id: HostId("question-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        core.identity.as_ref().unwrap(),
-    )
-    .unwrap();
-    core.add_test_host(&config, client);
-    let mut conversation = Conversation::new(&core);
-    conversation.open_thread(&mut core, config.id.clone(), ThreadId("thread".into()));
-    let scope = PresentationScope::capture(&conversation, &core).unwrap();
+    let opened = OpenThread::new("question-host", "thread");
+    let scope = opened.scope();
+    let OpenThread {
+        directory: _directory,
+        core,
+        conversation,
+        ..
+    } = opened;
     let provider = core.source_provider(&scope.host, scope.instance).unwrap();
     let cache = Rc::new(RefCell::new(RowCache::default()));
     let markdown = Rc::new(RefCell::new(MarkdownOwners::new(SelectionDocumentId(415))));
     let items = [question("one", '1'), question("two", '2')];
     let rows = items
         .iter()
-        .map(|item| RealizedRow {
-            model: RowModel {
-                row: Row::Prompt(item.id.clone()),
-                version: 1,
-                items: HashMap::from([(item.id.clone(), item.clone())]),
-                live: HashMap::new(),
-                ui: HashMap::new(),
-                run: None,
-                author: None,
-                gap: 0.0,
-                end: 0.0,
-            },
-            disclosure: Default::default(),
-            held: false,
-        })
+        .map(|item| realized(row_model(Row::Prompt(item.id.clone()), [item.clone()])))
         .collect();
-    let ids = Rc::new(Cell::new(0));
-    let allocate = ids.clone();
+    let (ids, allocate) = source_ids(0);
     let emitted = Rc::new(RefCell::new(Vec::new()));
     let capture = emitted.clone();
     let factory = Rc::new(
-        RowFactory::new(
-            rows,
-            scope.clone(),
-            markdown,
-            Rc::new(RefCell::new(StatusShimmers::default())),
-            *ArtisanTheme::for_mode(ThemeMode::Dark),
-            true,
-            Rc::new(move || {
-                allocate.set(allocate.get() + 1);
-                SelectionSourceId(allocate.get())
-            }),
-            Rc::new(|| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-        )
-        .with_row_cache(cache.clone())
-        .with_sources(
-            provider.clone(),
-            SelectionDocumentId(415),
-            Rc::new(move |action| capture.borrow_mut().push(action)),
-        )
-        .unwrap(),
+        row_factory(rows, scope.clone(), markdown, true, allocate)
+            .with_row_cache(cache.clone())
+            .with_sources(
+                provider.clone(),
+                SelectionDocumentId(415),
+                Rc::new(move |action| capture.borrow_mut().push(action)),
+            )
+            .unwrap(),
     );
     let keys = [
         RowKey::Item(items[0].id.clone()),
         RowKey::Item(items[1].id.clone()),
     ];
-    let callback = factory.callback();
-    let callback_keys = keys.clone();
-    let list = aqua_ui::collection::List::new()
-        .items(vec![0_usize, 1])
-        .key(|index: &usize| format!("stored-question-{index}"))
-        .try_batched_row(move |index: &usize| callback(*index, &callback_keys[*index]))
-        .virtualize()
-        .estimated_row_height(aqua_ui::style::Length::Px(120.0))
-        .style(
-            aqua_ui::style::Style::new()
-                .width(aqua_ui::style::Length::Px(600.0))
-                .height(aqua_ui::style::Length::Px(500.0)),
-        )
-        .build();
-    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    app.set_viewport(800.0, 600.0, 1.0);
-    app.mount(|_| list).unwrap();
-    app.layout().unwrap();
+    let mut app = mounted(
+        800.0,
+        600.0,
+        row_list(&factory, listed(keys.clone()), 120.0, 500.0),
+    );
     app.build_frame().unwrap();
     let first = cache.borrow().get(&keys[0]).unwrap();
     let second = cache.borrow().get(&keys[1]).unwrap();
@@ -215,12 +153,8 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         other_browser.borrow().window().state(),
         editor_aqua::core::RangeState::Loading
     ));
-    let failed_row = factory.realize(0, &keys[0]).unwrap().element;
-    let mut failed_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    failed_app.set_viewport(800.0, 600.0, 1.0);
-    failed_app.mount(|_| failed_row).unwrap();
-    failed_app.layout().unwrap();
-    click_key(&mut failed_app, "collection-retry");
+    let mut failed_app = mounted(800.0, 600.0, factory.realize(0, &keys[0]).unwrap().element);
+    click(&mut failed_app, "collection-retry");
     let stale = emitted.borrow_mut().pop().unwrap();
     let mut changed = (*items[0]).clone();
     changed.seq += 1;
@@ -229,7 +163,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         browser.borrow().window().state(),
         editor_aqua::core::RangeState::Failed(_)
     ));
-    click_key(&mut failed_app, "collection-retry");
+    click(&mut failed_app, "collection-retry");
     let action = emitted.borrow_mut().pop().unwrap();
     assert!(action.dispatch(&core, &scope, &items[0]).0);
     assert!(matches!(
@@ -246,36 +180,19 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
         other_browser.borrow().window().state(),
         editor_aqua::core::RangeState::Loading
     ));
-    let ready_row = factory.realize(0, &keys[0]).unwrap().element;
-    let mut ready_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    ready_app.set_viewport(800.0, 600.0, 1.0);
-    ready_app.mount(|_| ready_row).unwrap();
-    ready_app.layout().unwrap();
-    click_key(&mut ready_app, "collection-entry-0");
+    let mut ready_app = mounted(800.0, 600.0, factory.realize(0, &keys[0]).unwrap().element);
+    click(&mut ready_app, "collection-entry-0");
     let choose = emitted.borrow_mut().pop().expect("question row action");
     assert!(choose.dispatch(&core, &scope, &items[0]).0);
     assert_eq!(
         browser.borrow().inline_text.as_deref(),
         Some("Ready question")
     );
-    let detail_factory = factory.callback();
-    let detail_key = keys[0].clone();
-    let list = aqua_ui::collection::List::new()
-        .items(vec![0_usize])
-        .key(|_: &usize| "question-detail-row")
-        .try_batched_row(move |index: &usize| detail_factory(*index, &detail_key))
-        .virtualize()
-        .estimated_row_height(aqua_ui::style::Length::Px(200.0))
-        .style(
-            aqua_ui::style::Style::new()
-                .width(aqua_ui::style::Length::Px(600.0))
-                .height(aqua_ui::style::Length::Px(500.0)),
-        )
-        .build();
-    let mut detail_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-    detail_app.set_viewport(800.0, 600.0, 1.0);
-    detail_app.mount(|_| list).unwrap();
-    detail_app.layout().unwrap();
+    let mut detail_app = mounted(
+        800.0,
+        600.0,
+        row_list(&factory, listed([keys[0].clone()]), 200.0, 500.0),
+    );
     assert!(
         detail_app.unregister_selection_source_in(SelectionDocumentId(415), SelectionSourceId(1))
     );
@@ -300,7 +217,7 @@ fn simultaneous_stored_question_rows_keep_independent_leases_across_cache_evicti
     assert!(weak.upgrade().is_some());
     drop(app);
     assert!(weak.upgrade().is_none());
-    let mut cleanup_app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let mut cleanup_app = ui_app(800.0, 600.0);
     cache.borrow().drain_cleanup(&mut cleanup_app);
 }
 
@@ -309,24 +226,9 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
     use artisan_api::{NoticeKind, TextContent};
     use editor_aqua::conversation::content::{SourceEffect, SourceField, SourceOwners};
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: dir.path().to_owned(),
-    })
-    .unwrap();
-    let config = HostConfig {
-        id: HostId("export-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        core.identity.as_ref().unwrap(),
-    )
-    .unwrap();
-    core.add_test_host(&config, client);
+    let mut core = test_core(dir.path());
+    let config = remote_host("export-host");
+    connect(&mut core, &config);
     let instance = core.host(&config.id).unwrap().instance();
     let provider = core.source_provider(&config.id, instance).unwrap();
     let reference = ContentRef {
@@ -334,21 +236,15 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
         bytes: 10,
         lines: 1,
     };
-    let item = Arc::new(Item {
-        id: ItemId("notice".into()),
-        thread_id: ThreadId("thread".into()),
-        position: 1,
-        seq: 1,
-        run_id: None,
-        parent_id: None,
-        status: Status::Done,
-        created_at: 0,
-        updated_at: 0,
-        kind: ItemKind::Notice {
+    let item = Arc::new(item(
+        "notice",
+        "thread",
+        1,
+        ItemKind::Notice {
             kind: NoticeKind::Info,
             text: TextContent::Stored(reference),
         },
-    });
+    ));
     let mut owners = SourceOwners::default();
     let actions = Rc::new(RefCell::new(Vec::new()));
     let make_view = |owners: &mut SourceOwners| {
@@ -367,39 +263,9 @@ fn recreated_stored_source_rejects_old_export_even_when_picker_generation_repeat
             .element
     };
     let click_export = |element| {
-        let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
-        app.set_viewport(800.0, 600.0, 1.0);
-        app.mount(|_| element).unwrap();
-        app.layout().unwrap();
-        let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("source-export"));
-        let node = app
-            .tree()
-            .traverse()
-            .into_iter()
-            .find(|node| {
-                app.tree()
-                    .get(*node)
-                    .is_some_and(|record| record.key == Some(key))
-            })
-            .unwrap();
-        let bounds = app.tree().visual_rect(node).unwrap();
-        let down = aqua_core::PointerEvent {
-            contact: 1,
-            kind: aqua_core::PointerKind::Mouse,
-            position: aqua_core::Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
-            buttons: 1,
-        };
-        aqua_ui::events::dispatch_input(
-            app.tree_mut(),
-            &aqua_core::InputEvent::PointerDown(down, aqua_core::PointerButton::Primary),
-        );
-        aqua_ui::events::dispatch_input(
-            app.tree_mut(),
-            &aqua_core::InputEvent::PointerUp(
-                aqua_core::PointerEvent { buttons: 0, ..down },
-                aqua_core::PointerButton::Primary,
-            ),
-        );
+        let mut app = ui_app(800.0, 600.0);
+        mount(&mut app, element);
+        click(&mut app, "source-export");
     };
     click_export(make_view(&mut owners));
     let Some(SourceEffect::SavePath(old)) =
@@ -432,47 +298,20 @@ fn deliver(
     editor_aqua::core::runtime::runtime().block_on(async {
         let send = completion.complete(result);
         tokio::pin!(send);
-        let deadline = tokio::time::sleep(std::time::Duration::from_secs(10));
-        tokio::pin!(deadline);
-        loop {
-            tokio::select! {
-                admitted = &mut send => { assert!(admitted); break; }
-                () = &mut deadline => panic!("range completion was not admitted"),
-                () = tokio::task::yield_now() => { browser.borrow_mut().drain(core); }
-            }
-        }
+        let admitted = test_support::wait::within(
+            "the range completion's admission",
+            Duration::from_secs(10),
+            async {
+                loop {
+                    tokio::select! {
+                        admitted = &mut send => break admitted,
+                        () = tokio::task::yield_now() => { browser.borrow_mut().drain(core); }
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(admitted, "the browser admits the range completion");
     });
     browser.borrow_mut().drain(core);
-}
-
-fn click_key(app: &mut aqua::UiApp, key: &str) {
-    let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key));
-    let node = app
-        .tree()
-        .traverse()
-        .into_iter()
-        .find(|node| {
-            app.tree()
-                .get(*node)
-                .is_some_and(|record| record.key == Some(key))
-        })
-        .unwrap();
-    let bounds = app.tree().visual_rect(node).unwrap();
-    let down = aqua_core::PointerEvent {
-        contact: 1,
-        kind: aqua_core::PointerKind::Mouse,
-        position: aqua_core::Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
-        buttons: 1,
-    };
-    aqua_ui::events::dispatch_input(
-        app.tree_mut(),
-        &aqua_core::InputEvent::PointerDown(down, aqua_core::PointerButton::Primary),
-    );
-    aqua_ui::events::dispatch_input(
-        app.tree_mut(),
-        &aqua_core::InputEvent::PointerUp(
-            aqua_core::PointerEvent { buttons: 0, ..down },
-            aqua_core::PointerButton::Primary,
-        ),
-    );
 }

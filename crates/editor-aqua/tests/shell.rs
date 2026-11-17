@@ -3,7 +3,6 @@
     clippy::clone_on_ref_ptr,
     clippy::default_trait_access,
     clippy::float_cmp,
-    clippy::items_after_statements,
     clippy::let_underscore_must_use,
     clippy::let_underscore_untyped,
     clippy::match_same_arms,

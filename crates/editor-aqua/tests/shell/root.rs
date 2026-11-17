@@ -1,72 +1,59 @@
-use artisan_api::{Item, ItemId, ItemKind, Phase, Status, TextContent, ThreadId};
+use artisan_api::ItemId;
 use editor_aqua::conversation::fold::{Row, Slot};
 use editor_aqua::conversation::presentation::BodyKey;
-use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen};
+use editor_aqua::core::Screen;
 use editor_aqua::shell::application::SectionViews;
-use editor_aqua::shell::host::{Shell, ShellResources};
 use editor_aqua::shell::root::RootViews;
 use std::sync::Arc;
+use test_support::editor::shell::{Motion, RootFrames, ThreadShell, headless, window_id};
+use test_support::editor::ui::text_opacity;
+use test_support::items::{assistant_reply, item, user_message};
+
+fn replies(opened: &mut ThreadShell, count: u64) {
+    let thread = opened.thread.clone();
+    let conversation = &mut opened.workspace().conversation;
+    for index in 0..count {
+        let reply = Arc::new(item(
+            format!("reply-{index}"),
+            thread.clone(),
+            index + 1,
+            assistant_reply(format!("Reply {index}.")),
+        ));
+        conversation.rows.push((
+            Row::Text {
+                id: reply.id.clone(),
+                slot: Slot::Prose,
+                block: 0,
+                run: None,
+            },
+            1,
+        ));
+        conversation
+            .view
+            .as_mut()
+            .unwrap()
+            .context
+            .insert(reply.id.clone(), reply);
+    }
+}
 
 #[test]
 fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
     for expire in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
-        let files = EditorFiles {
-            dir: directory.path().to_owned(),
-        };
-        let mut resources = ShellResources::new(1.0).unwrap();
-        resources
-            .ui
-            .host_mut()
-            .motion_mut()
-            .set_reduced_motion(aqua_ui::motion::ReducedMotion::Reduce, 0.0);
-        let (mut shell, _) = Shell::new(files.clone(), resources.images.clone());
-        shell.core = Core::for_tests(files).unwrap();
-        shell.core.set_image_assets(resources.images.clone());
-        let config = HostConfig {
-            id: HostId("landing-host".into()),
-            name: "Forge".into(),
-            address: "127.0.0.1:1".into(),
-            fingerprint: "0".repeat(64),
-            kind: HostKind::Remote,
-        };
-        let client = ForgeClient::new(
-            &config.address,
-            &config.fingerprint,
-            shell.core.identity.as_ref().unwrap(),
-        )
-        .unwrap();
-        shell.core.add_test_host(&config, client);
-        let thread = ThreadId("landing-thread".into());
-        shell.core.navigate(Screen::Thread {
-            host: config.id.clone(),
-            thread: thread.clone(),
-        });
-        shell.entry.sync(&shell.core);
+        let mut opened = ThreadShell::open("landing-host", "landing-thread", Motion::Reduced);
+        let window = opened.window("landing");
+        let item = Arc::new(item(
+            "landing-message",
+            opened.thread.clone(),
+            1,
+            user_message("Loaded transcript message"),
+        ));
+        let ThreadShell {
+            mut shell,
+            mut resources,
+            ..
+        } = opened;
         let workspace = shell.entry.workspace_mut().unwrap();
-        workspace.show_sidebar = false;
-        workspace
-            .conversation
-            .open_thread(&mut shell.core, config.id, thread.clone());
-        workspace.sync_composer(&shell.core, &mut resources.ui);
-        let item = Arc::new(Item {
-            id: ItemId("landing-message".into()),
-            thread_id: thread,
-            position: 1,
-            seq: 1,
-            run_id: None,
-            parent_id: None,
-            status: Status::Done,
-            created_at: 0,
-            updated_at: 0,
-            kind: ItemKind::UserMessage {
-                text: "Loaded transcript message".into(),
-                images: Vec::new(),
-                steer: false,
-                from_agent: None,
-                sender: None,
-            },
-        });
         workspace.conversation.view.as_mut().unwrap().apply_page(
             editor_aqua::conversation::viewport::Fetch::Tail,
             artisan_api::ItemsPage {
@@ -88,35 +75,12 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         workspace.conversation.landing =
             Some(editor_aqua::conversation::controller::Landing::Settling { until: deadline });
-        let id = aqua::prelude::AquaWindowId::new(1).unwrap();
-        let mut size = aqua::prelude::WindowOptions::default().inner_size;
-        size.width = 1000.0;
-        size.height = 700.0;
-        let window = aqua::prelude::ObservedWindowState::new(id, "landing".into(), size);
-        resources.ui.set_viewport(1000.0, 700.0, 1.0);
         let mut root = RootViews::default();
         let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
         resources.ui.mount(|_| element).unwrap();
         resources.ui.build_frame().unwrap();
-        let transcript_opacity = |ui: &mut aqua::UiApp| {
-            let text_node = ui.tree().traverse().into_iter().find(|node| {
-                matches!(&ui.tree().get(*node).unwrap().kind, aqua_ui::tree::NodeKind::Text(text) if text.text() == "Loaded transcript message")
-            }).expect("loaded transcript text must already be mounted");
-            let mut stack = Vec::new();
-            for (node, item) in ui.tree_mut().emit_scene() {
-                match item {
-                    aqua::prelude::DisplayItem::PushOpacity(opacity) => stack.push(opacity),
-                    aqua::prelude::DisplayItem::PopOpacity => {
-                        stack.pop().unwrap();
-                    }
-                    aqua::prelude::DisplayItem::Text { opacity, .. } if node == text_node => {
-                        return stack.iter().product::<f32>() * opacity;
-                    }
-                    _ => {}
-                }
-            }
-            panic!("loaded transcript text must be emitted into the scene")
-        };
+        let transcript_opacity =
+            |ui: &mut aqua::UiApp| text_opacity(ui, "Loaded transcript message");
         assert_eq!(
             transcript_opacity(&mut resources.ui),
             0.0,
@@ -176,61 +140,24 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             1.0,
             "later subtree refreshes must preserve visible scene text"
         );
-        let mut runtime = aqua::Aqua::new(aqua::AquaConfig {
-            headless: true,
-            ..aqua::AquaConfig::default()
-        })
-        .unwrap();
-        runtime.add_headless_window(window.clone());
-        struct Frame<'a> {
-            root: &'a mut RootViews,
-            shell: &'a mut Shell,
-            ui: &'a mut aqua::UiApp,
-        }
-        impl aqua::Application for Frame<'_> {
-            fn on_window_event(
-                &mut self,
-                _: &mut aqua::AppCtx<'_>,
-                _: aqua::prelude::AquaWindowId,
-                _: &aqua::prelude::WindowEvent,
-            ) {
-            }
-            fn on_input(
-                &mut self,
-                _: &mut aqua::AppCtx<'_>,
-                _: aqua::prelude::AquaWindowId,
-                _: &aqua::prelude::InputEvent,
-            ) {
-            }
-            fn build_scene(
-                &mut self,
-                _: &aqua::prelude::ObservedWindowState,
-                _: aqua::Instant,
-            ) -> Option<aqua::Instant> {
-                None
-            }
-            fn on_frame_completed(
-                &mut self,
-                ctx: &mut aqua::AppCtx<'_>,
-                id: aqua::prelude::AquaWindowId,
-                sequence: u64,
-            ) {
-                self.root
-                    .frame_completed(self.shell, self.ui, ctx, id, sequence);
-            }
-        }
+        let mut runtime = headless(window.clone());
         runtime.dispatch_frame_completed(
-            &mut Frame {
+            &mut RootFrames {
                 root: &mut root,
                 shell: &mut shell,
                 ui: &mut resources.ui,
             },
-            id,
+            window_id(),
             1,
         );
         let mut resized = window.clone();
         assert!(!root.resize_needs_rebuild(&shell, &resized));
-        for (width, height) in [(980.0, 700.0), (960.0, 700.0), (960.0, 600.0), (1000.0, 700.0)] {
+        for (width, height) in [
+            (980.0, 700.0),
+            (960.0, 700.0),
+            (960.0, 600.0),
+            (1000.0, 700.0),
+        ] {
             resized.inner_size.width = width;
             resized.inner_size.height = height;
             assert!(root.resize_needs_rebuild(&shell, &resized));
@@ -246,82 +173,17 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
 
 #[test]
 fn mounted_root_prepares_only_realized_bodies_and_releases_sources_on_navigation() {
-    let directory = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: directory.path().to_owned(),
-    };
-    let mut resources = ShellResources::new(1.0).unwrap();
-    let (mut shell, _) = Shell::new(files.clone(), resources.images.clone());
-    shell.core = Core::for_tests(files).unwrap();
-    shell.core.set_image_assets(resources.images.clone());
-    let config = HostConfig {
-        id: HostId("root-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        shell.core.identity.as_ref().unwrap(),
-    )
-    .unwrap();
-    shell.core.add_test_host(&config, client);
-    let thread = ThreadId("root-thread".into());
-    shell.core.navigate(Screen::Thread {
-        host: config.id.clone(),
-        thread: thread.clone(),
-    });
-    shell.entry.sync(&shell.core);
-    let workspace = shell.entry.workspace_mut().unwrap();
-    workspace.show_sidebar = false;
-    workspace
-        .conversation
-        .open_thread(&mut shell.core, config.id, thread.clone());
-    workspace.sync_composer(&shell.core, &mut resources.ui);
+    let mut opened = ThreadShell::open("root-host", "root-thread", Motion::Full);
+    let workspace = opened.workspace();
     let document = workspace.selections.conversation;
     let markdown = workspace.markdown.clone();
-    for index in 0..1000 {
-        let id = ItemId(format!("reply-{index}"));
-        let item = Arc::new(Item {
-            id: id.clone(),
-            thread_id: thread.clone(),
-            position: index + 1,
-            seq: index + 1,
-            run_id: None,
-            parent_id: None,
-            status: Status::Done,
-            created_at: 0,
-            updated_at: 0,
-            kind: ItemKind::AssistantMessage {
-                text: TextContent::Inline(format!("Reply {index}.")),
-                phase: Phase::Final,
-            },
-        });
-        workspace
-            .conversation
-            .view
-            .as_mut()
-            .unwrap()
-            .context
-            .insert(id.clone(), item);
-        workspace.conversation.rows.push((
-            Row::Text {
-                id,
-                slot: Slot::Prose,
-                block: 0,
-                run: None,
-            },
-            1,
-        ));
-    }
-    let id = aqua::prelude::AquaWindowId::new(1).unwrap();
-    let mut size = aqua::prelude::WindowOptions::default().inner_size;
-    size.width = 1000.0;
-    size.height = 700.0;
-    let window = aqua::prelude::ObservedWindowState::new(id, "root".into(), size);
-    resources.ui.set_viewport(1000.0, 700.0, 1.0);
+    replies(&mut opened, 1000);
+    let window = opened.window("root");
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        ..
+    } = opened;
     let mut root = RootViews::default();
     let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
     resources.ui.mount(|_| element).unwrap();
@@ -379,86 +241,15 @@ fn mounted_root_prepares_only_realized_bodies_and_releases_sources_on_navigation
 
 #[test]
 fn tail_controls_force_full_refresh_only_when_visibility_changes() {
-    let directory = tempfile::tempdir().unwrap();
-    let files = EditorFiles {
-        dir: directory.path().to_owned(),
-    };
-    let mut resources = ShellResources::new(1.0).unwrap();
-    resources
-        .ui
-        .host_mut()
-        .motion_mut()
-        .set_reduced_motion(aqua_ui::motion::ReducedMotion::Reduce, 0.0);
-    let (mut shell, _) = Shell::new(files.clone(), resources.images.clone());
-    shell.core = Core::for_tests(files).unwrap();
-    shell.core.set_image_assets(resources.images.clone());
-    let config = HostConfig {
-        id: HostId("root-host".into()),
-        name: "Forge".into(),
-        address: "127.0.0.1:1".into(),
-        fingerprint: "0".repeat(64),
-        kind: HostKind::Remote,
-    };
-    let client = ForgeClient::new(
-        &config.address,
-        &config.fingerprint,
-        shell.core.identity.as_ref().unwrap(),
-    )
-    .unwrap();
-    shell.core.add_test_host(&config, client);
-    let thread = ThreadId("root-thread".into());
-    shell.core.navigate(Screen::Thread {
-        host: config.id.clone(),
-        thread: thread.clone(),
-    });
-    shell.entry.sync(&shell.core);
-    let workspace = shell.entry.workspace_mut().unwrap();
-    workspace.show_sidebar = false;
-    workspace
-        .conversation
-        .open_thread(&mut shell.core, config.id, thread.clone());
-    workspace.sync_composer(&shell.core, &mut resources.ui);
-    workspace.conversation.landing = None;
-    for index in 0..40 {
-        let id = ItemId(format!("reply-{index}"));
-        let item = Arc::new(Item {
-            id: id.clone(),
-            thread_id: thread.clone(),
-            position: index + 1,
-            seq: index + 1,
-            run_id: None,
-            parent_id: None,
-            status: Status::Done,
-            created_at: 0,
-            updated_at: 0,
-            kind: ItemKind::AssistantMessage {
-                text: TextContent::Inline(format!("Reply {index}.")),
-                phase: Phase::Final,
-            },
-        });
-        workspace
-            .conversation
-            .view
-            .as_mut()
-            .unwrap()
-            .context
-            .insert(id.clone(), item);
-        workspace.conversation.rows.push((
-            Row::Text {
-                id,
-                slot: Slot::Prose,
-                block: 0,
-                run: None,
-            },
-            1,
-        ));
-    }
-    let id = aqua::prelude::AquaWindowId::new(1).unwrap();
-    let mut size = aqua::prelude::WindowOptions::default().inner_size;
-    size.width = 1000.0;
-    size.height = 700.0;
-    let window = aqua::prelude::ObservedWindowState::new(id, "root".into(), size);
-    resources.ui.set_viewport(1000.0, 700.0, 1.0);
+    let mut opened = ThreadShell::open("root-host", "root-thread", Motion::Reduced);
+    opened.workspace().conversation.landing = None;
+    replies(&mut opened, 40);
+    let window = opened.window("root");
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        ..
+    } = opened;
     let mut root = RootViews::default();
     let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
     resources.ui.mount(|_| element).unwrap();

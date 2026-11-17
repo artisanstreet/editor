@@ -1,4 +1,6 @@
 use super::*;
+use crate::ui::markdown::presenter::{MarkdownPresenter, PresenterError, StoredProjectedMarkdown};
+use crate::ui::markdown::visual::BodyTone;
 use artisan_api::{SourceIndexHeader, SourceLeafDescriptor};
 
 fn page(source: &ContentRef, metadata: &ContentRef) -> SourceIndexRange {
@@ -29,6 +31,83 @@ fn page(source: &ContentRef, metadata: &ContentRef) -> SourceIndexRange {
             },
         ],
     }
+}
+
+type PreparedLeaf = (
+    artisan_markdown_index::LeafContext,
+    bool,
+    IndexedLeafContent,
+    Arc<str>,
+    usize,
+);
+
+fn cached_source(provider: ScopedSourceProvider) -> (StoredOwner, StoredSource) {
+    let reference = ContentRef::from_text("abc");
+    let metadata = ContentRef::from_text("{}");
+    let mut owner = StoredOwner::default();
+    owner.remember_page(provider.clone(), Arc::new(page(&reference, &metadata)));
+    let StoredPreparation::Ready(source) =
+        owner.ensure("row", provider, reference, SourceIndexFormat::Markdown)
+    else {
+        panic!("expected cached page")
+    };
+    (owner, source)
+}
+
+fn prepared(
+    owner: &mut StoredOwner,
+    source: &StoredSource,
+    key: &str,
+    ordinal: usize,
+    generation: u64,
+    result: PreparedLeaf,
+) -> LeafPreparation {
+    owner.leaves.push_back(LeafEntry {
+        key: key.into(),
+        source: source.clone(),
+        descriptor: source.descriptor(ordinal).unwrap().clone(),
+        generation,
+        capacity: None,
+        phase: LeafPhase::Working,
+        task: None,
+    });
+    assert!(
+        runtime::runtime()
+            .block_on(owner.delivery.sender().send(Completion::Prepared {
+                key: key.into(),
+                generation,
+                _worker: None,
+                _capacity: None,
+                result: Ok(result),
+            }))
+            .is_ok()
+    );
+    owner.drain();
+    owner.leaf(key, source, ordinal)
+}
+
+fn render_leaf(
+    presenter: &MarkdownPresenter,
+    owner: &StoredOwner,
+    ordinal: usize,
+    slot_start: usize,
+) -> Result<StoredProjectedMarkdown, PresenterError> {
+    presenter.render_stored_leaf(
+        owner,
+        "row",
+        ordinal,
+        slot_start,
+        true,
+        crate::ui::theme::ArtisanTheme::for_mode(crate::ui::theme::ThemeMode::Dark),
+        BodyTone::Foreground,
+        std::rc::Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
+        std::rc::Rc::new(|| {}),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 #[test]
@@ -246,15 +325,7 @@ fn leaf_admission_precedes_collector_allocation() {
 #[test]
 fn prepared_publication_charges_retained_bytes_and_ignores_cancelled_generation() {
     let (_directory, _core, _config, provider) = owner_fixture();
-    let reference = ContentRef::from_text("abc");
-    let metadata = ContentRef::from_text("{}");
-    let mut owner = StoredOwner::default();
-    owner.remember_page(provider.clone(), Arc::new(page(&reference, &metadata)));
-    let StoredPreparation::Ready(source) =
-        owner.ensure("row", provider, reference, SourceIndexFormat::Markdown)
-    else {
-        panic!("expected cached page")
-    };
+    let (mut owner, source) = cached_source(provider);
     let descriptor = source.descriptor(0).unwrap().clone();
     owner.leaves.push_back(LeafEntry {
         key: "leaf".into(),
@@ -420,31 +491,12 @@ fn empty_source_range_advances_from_metadata_without_fetching_source() {
 
 #[test]
 fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
-    use crate::ui::markdown::presenter::MarkdownPresenter;
-    use crate::ui::markdown::visual::BodyTone;
     use crate::ui::markdown::{Block, Span};
     use crate::ui::theme::{ArtisanTheme, ThemeMode};
     use aqua_text::document::{SelectionDocumentId, SelectionSourceId};
     use std::rc::Rc;
     let (_directory, _core, _config, provider) = owner_fixture();
-    let reference = ContentRef::from_text("abc");
-    let metadata = ContentRef::from_text("{}");
-    let mut owner = StoredOwner::default();
-    owner.remember_page(provider.clone(), Arc::new(page(&reference, &metadata)));
-    let StoredPreparation::Ready(source) =
-        owner.ensure("row", provider, reference, SourceIndexFormat::Markdown)
-    else {
-        panic!("expected page")
-    };
-    owner.leaves.push_back(LeafEntry {
-        key: "leaf".into(),
-        source: source.clone(),
-        descriptor: source.descriptor(0).unwrap().clone(),
-        generation: 4,
-        capacity: None,
-        phase: LeafPhase::Working,
-        task: None,
-    });
+    let (mut owner, source) = cached_source(provider);
     let context = artisan_markdown_index::LeafContext {
         lists: vec![artisan_markdown_index::ListLevel {
             source_start: 0,
@@ -454,7 +506,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         }],
         ..Default::default()
     };
-    let result = Ok((
+    let result = (
         context,
         false,
         IndexedLeafContent::Block(Block::Paragraph {
@@ -463,20 +515,8 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         }),
         Arc::<str>::from("abc"),
         256,
-    ));
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "leaf".into(),
-                generation: 4,
-                _worker: None,
-                _capacity: None,
-                result
-            }))
-            .is_ok()
     );
-    owner.drain();
-    let LeafPreparation::Ready(leaf) = owner.leaf("leaf", &source, 0) else {
+    let LeafPreparation::Ready(leaf) = prepared(&mut owner, &source, "leaf", 0, 4, result) else {
         panic!("expected leaf")
     };
     let mut presenter = MarkdownPresenter::default();
@@ -493,24 +533,8 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             |part| SelectionSourceId(100 + part as u64),
         )
         .unwrap();
-    let render = |presenter: &MarkdownPresenter, owner: &StoredOwner| {
-        presenter.render_stored_leaf(
-            owner,
-            "row",
-            0,
-            0,
-            true,
-            &theme,
-            BodyTone::Foreground,
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-    };
+    let render =
+        |presenter: &MarkdownPresenter, owner: &StoredOwner| render_leaf(presenter, owner, 0, 0);
     let first = render(&presenter, &owner).unwrap();
     let second = render(&presenter, &owner).unwrap();
     assert!(Arc::ptr_eq(&first.selection_batch, &second.selection_batch));
@@ -596,15 +620,6 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         ranges(&app).is_empty(),
         "settled stored text must release its completed fade ranges"
     );
-    owner.leaves.push_back(LeafEntry {
-        key: "table".into(),
-        source: source.clone(),
-        descriptor: source.descriptor(1).unwrap().clone(),
-        generation: 5,
-        capacity: None,
-        phase: LeafPhase::Working,
-        task: None,
-    });
     let table = IndexedLeafContent::TableRow {
         header: false,
         alignments: vec![
@@ -620,20 +635,8 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             },
         ],
     };
-    let result = Ok((Default::default(), false, table, Arc::<str>::from("c"), 256));
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "table".into(),
-                generation: 5,
-                _worker: None,
-                _capacity: None,
-                result
-            }))
-            .is_ok()
-    );
-    owner.drain();
-    let LeafPreparation::Ready(table) = owner.leaf("table", &source, 1) else {
+    let result = (Default::default(), false, table, Arc::<str>::from("c"), 256);
+    let LeafPreparation::Ready(table) = prepared(&mut owner, &source, "table", 1, 5, result) else {
         panic!("expected table")
     };
     presenter
@@ -648,24 +651,7 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
             |part| SelectionSourceId(200 + part as u64),
         )
         .unwrap();
-    let table_row = presenter
-        .render_stored_leaf(
-            &owner,
-            "row",
-            1,
-            10,
-            true,
-            &theme,
-            BodyTone::Foreground,
-            Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-            Rc::new(|| {}),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+    let table_row = render_leaf(&presenter, &owner, 1, 10).unwrap();
     let table_sources = table_row.selection_batch.sources();
     assert_eq!(
         table_sources
@@ -688,59 +674,21 @@ fn stored_presenter_retains_leaf_batch_and_rejects_revoked_proof() {
         [10, 11]
     );
     presenter.release_stored_leaf("row", 1);
-    assert!(
-        presenter
-            .render_stored_leaf(
-                &owner,
-                "row",
-                1,
-                10,
-                true,
-                &theme,
-                BodyTone::Foreground,
-                Rc::new(|_, _, _| aqua_ui::element::ui::Box::new().build()),
-                Rc::new(|| {}),
-                None,
-                None,
-                None,
-                None,
-                None
-            )
-            .is_err()
-    );
-    owner.leaves.push_back(LeafEntry {
-        key: "oversized".into(),
-        source: source.clone(),
-        descriptor: source.descriptor(0).unwrap().clone(),
-        generation: 6,
-        capacity: None,
-        phase: LeafPhase::Working,
-        task: None,
-    });
+    assert!(render_leaf(&presenter, &owner, 1, 10).is_err());
     let oversized = IndexedLeafContent::Block(Block::Paragraph {
         spans: vec![Span::Text("x".repeat(PREPARED_BYTES / 2 + 1))],
         range: 0..1,
     });
-    let result = Ok((
+    let result = (
         Default::default(),
         false,
         oversized,
         Arc::<str>::from("x"),
         1,
-    ));
-    assert!(
-        runtime::runtime()
-            .block_on(owner.delivery.sender().send(Completion::Prepared {
-                key: "oversized".into(),
-                generation: 6,
-                _worker: None,
-                _capacity: None,
-                result
-            }))
-            .is_ok()
     );
-    owner.drain();
-    let LeafPreparation::Ready(oversized) = owner.leaf("oversized", &source, 0) else {
+    let LeafPreparation::Ready(oversized) =
+        prepared(&mut owner, &source, "oversized", 0, 6, result)
+    else {
         panic!("expected oversized fixture")
     };
     assert!(
