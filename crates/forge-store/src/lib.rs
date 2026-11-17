@@ -32,11 +32,7 @@ mod content;
 pub mod coordination;
 pub mod discovery;
 mod hot;
-#[cfg(any(feature = "legacy-import", test))]
-mod import_writes;
 mod items;
-#[cfg(feature = "legacy-import")]
-pub mod legacy;
 mod pairing;
 mod read;
 mod recall;
@@ -46,6 +42,8 @@ mod schema;
 mod settings;
 mod source_index;
 mod sources;
+#[cfg(test)]
+mod stamped_writes;
 mod text_search;
 mod threads;
 mod writer;

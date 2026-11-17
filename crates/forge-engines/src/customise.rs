@@ -18,10 +18,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "legacy-import")]
-mod legacy;
-#[cfg(feature = "legacy-import")]
-pub use legacy::import_legacy_extensions;
 mod prompt;
 mod skills;
 
@@ -642,7 +638,7 @@ fn skill_metadata_in(text: &str, folder: Option<&str>) -> Option<(String, String
     Some((name, field("description").unwrap_or_default()))
 }
 
-#[cfg(any(test, feature = "legacy-import"))]
+#[cfg(test)]
 fn frontmatter_name(text: &str) -> Option<String> {
     skill_metadata(text).map(|(name, _)| name)
 }
@@ -786,47 +782,6 @@ mod tests {
         );
         assert!(!home.join(".claude/CLAUDE.md").exists());
         assert!(launch.args.is_empty() && !home.join(".artisan/claude-mcp.json").exists());
-    }
-
-    #[cfg(feature = "legacy-import")]
-    #[test]
-    fn imports_copy_real_skill_folders_once() {
-        let root = tempfile::tempdir().unwrap();
-        let root = root.path();
-        let skills_dir = root.join("skills");
-        skill(&skills_dir, "kept");
-        let claude = root.join("claude");
-        let codex = root.join("codex");
-        skill(&claude.join(".claude/skills"), "design");
-        skill(&claude.join(".claude/skills"), "kept");
-        skill(&codex.join(".codex/skills"), "design");
-        skill(&codex.join(".codex/skills/.system"), "builtin");
-        fs::create_dir_all(codex.join(".codex/skills/notes")).unwrap();
-        let old = root.join("old");
-        skill(&old.join("extensions/store"), "digest1");
-        fs::write(
-            old.join("extensions/store/digest1/SKILL.md"),
-            "---\nname: \"legacy\"\n---\n",
-        )
-        .unwrap();
-        skill(&old.join("extensions/store"), "digest2");
-        fs::write(
-            old.join("extensions/store/digest2/SKILL.md"),
-            "---\nname: ../escape\n---\n",
-        )
-        .unwrap();
-
-        assert!(
-            import_folder(&claude.join(".claude/skills/design"), &skills_dir, "design").unwrap()
-        );
-        assert!(
-            !import_folder(&codex.join(".codex/skills/design"), &skills_dir, "design").unwrap()
-        );
-        assert!(!import_folder(&claude.join(".claude/skills/kept"), &skills_dir, "kept").unwrap());
-        let legacy = import_legacy_extensions(&old, &skills_dir);
-        assert_eq!(legacy, ["legacy"]);
-        assert_eq!(listing(&skills_dir, root), ["design/", "kept/", "legacy/"]);
-        assert!(skills_dir.join("design/SKILL.md").is_file());
     }
 }
 

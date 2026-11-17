@@ -7,7 +7,6 @@ description = "Engine adapters: run Claude, Codex, OpenCode, Grok and Cursor and
 
 [features]
 default = []
-legacy-import = []
 
 [dependencies]
 anyhow.workspace = true

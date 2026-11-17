@@ -606,22 +606,6 @@ impl Engines {
         self.finish(engine, result).await
     }
 
-    /// Brings engines installed by the old Forge (`<old data>/toolchain`)
-    /// into this layout. Returns the engines it imported.
-    #[cfg(feature = "legacy-import")]
-    pub async fn import_legacy(&self, old_toolchain: &Path) -> Result<Vec<EngineId>> {
-        let imported = install::import_legacy(&self.inner.layout, old_toolchain).await?;
-        for engine in &imported {
-            self.apply(
-                *engine,
-                &Event::Loaded {
-                    version: self.inner.layout.current(*engine),
-                },
-            );
-        }
-        Ok(imported)
-    }
-
     /// Asks the engine for its models now. On failure the previous listing
     /// stays.
     pub async fn refresh_models(&self, engine: EngineId) -> Result<Arc<[Model]>> {

@@ -885,11 +885,6 @@ fn inside(path: &Path, strip: &str) -> Result<Option<PathBuf>> {
     Ok(Some(relative.to_path_buf()))
 }
 
-#[cfg(feature = "legacy-import")]
-mod legacy;
-#[cfg(feature = "legacy-import")]
-pub(crate) use legacy::import_legacy;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,60 +1177,6 @@ mod tests {
             { "tag_name": "artisan-v../2.1.1", "draft": false },
         ]);
         assert_eq!(tagged_versions(&releases), ["2.1.10", "2.1.2"]);
-    }
-
-    #[cfg(feature = "legacy-import")]
-    #[tokio::test]
-    async fn imports_the_old_toolchain_layout() {
-        let old = tempfile::tempdir().unwrap();
-        let data = tempfile::tempdir().unwrap();
-        let opencode = old.path().join("opencode2");
-        let entry = host_spec(EngineId::OpenCode).artifact.unwrap().entry;
-        let binary = opencode.join("versions/generation-abc").join(entry);
-        fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        fs::create_dir_all(opencode.join("versions/generation-old")).unwrap();
-        fs::create_dir_all(opencode.join("home/data/opencode")).unwrap();
-        fs::write(&binary, script("1.0.50")).unwrap();
-        fs::write(opencode.join("home/data/opencode/auth.json"), "{}").unwrap();
-        fs::write(
-            opencode.join("state.json"),
-            r#"{"active":{"binary":"opencode2","directory":"generation-abc","version":"1.0.50"},"format_version":2,
-                "previous":[{"binary":"opencode2","directory":"generation-old","version":"1.0.46"}]}"#,
-        )
-        .unwrap();
-
-        let engines = Engines::new(data.path());
-        assert_eq!(
-            engines.import_legacy(old.path()).await.unwrap(),
-            [EngineId::OpenCode]
-        );
-        assert_eq!(
-            engines.status(EngineId::OpenCode).install,
-            InstallState::Installed {
-                version: "1.0.50".into(),
-                update: None
-            }
-        );
-        assert!(
-            fs::read_to_string(engines.binary(EngineId::OpenCode).unwrap())
-                .unwrap()
-                .contains("1.0.50")
-        );
-        assert_eq!(
-            fs::read_to_string(
-                engines
-                    .home(EngineId::OpenCode)
-                    .join("data/opencode/auth.json")
-            )
-            .unwrap(),
-            "{}"
-        );
-        assert_eq!(
-            engines.status(EngineId::Claude).install,
-            InstallState::Absent
-        );
-        // Already imported: left alone.
-        assert!(engines.import_legacy(old.path()).await.unwrap().is_empty());
     }
 }
 

@@ -56,8 +56,6 @@ pub use account::{SignIn, check as check_sign_in};
 pub use claude::{CLAUDE_AI_TRANSPORT, CLAUDE_AI_UNAVAILABLE};
 pub use commands::normalize_command;
 pub use compaction::{COMPACTION_NUDGE, compaction_prompt, is_compaction_summary};
-#[cfg(feature = "legacy-import")]
-pub use customise::import_legacy_extensions;
 pub use engines::host_entry;
 pub use customise::{
     ARTISAN_MCP, COMPUTER_MCP, Customisation, McpServer, PromptApplied, PromptFile, adopt_skill,

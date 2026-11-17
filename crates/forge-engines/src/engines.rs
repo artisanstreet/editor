@@ -25,9 +25,6 @@ pub struct Spec {
     /// The engine's config directory inside its home and the variable that
     /// points the engine at it, for engines that read one.
     pub config: Option<(&'static str, &'static str)>,
-    /// Directory name under the old `toolchain/`.
-    #[cfg(feature = "legacy-import")]
-    pub legacy_dir: &'static str,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -205,8 +202,6 @@ pub const fn spec(engine: EngineId, platform: Platform) -> Spec {
             logout: Some(&["auth", "logout"]),
             models: ModelSource::ClaudeCatalog,
             config: Some((".claude", "CLAUDE_CONFIG_DIR")),
-            #[cfg(feature = "legacy-import")]
-            legacy_dir: "claude",
         },
         EngineId::Codex => {
             let target: Option<(&str, &str, &[&str])> = match platform {
@@ -263,8 +258,6 @@ pub const fn spec(engine: EngineId, platform: Platform) -> Spec {
                 logout: Some(&["logout"]),
                 models: ModelSource::CodexAppServer,
                 config: Some((".codex", "CODEX_HOME")),
-                #[cfg(feature = "legacy-import")]
-                legacy_dir: "codex",
             }
         }
         EngineId::OpenCode => {
@@ -309,8 +302,6 @@ pub const fn spec(engine: EngineId, platform: Platform) -> Spec {
                 logout: None,
                 models: ModelSource::OpenCodeCli,
                 config: None,
-                #[cfg(feature = "legacy-import")]
-                legacy_dir: "opencode2",
             }
         }
     }

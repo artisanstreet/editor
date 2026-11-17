@@ -60,7 +60,7 @@ impl Writer {
             sql,
             seq,
             events: Vec::new(),
-            #[cfg(any(feature = "legacy-import", test))]
+            #[cfg(test)]
             stamp: None,
         };
         let result = job(&mut tx)?;
@@ -84,13 +84,11 @@ pub struct Tx<'c> {
     pub(crate) sql: Transaction<'c>,
     seq: Seq,
     events: Vec<Envelope>,
-    #[cfg(any(feature = "legacy-import", test))]
+    #[cfg(test)]
     stamp: Option<Stamp>,
 }
 
-/// Timestamps a write uses instead of the clock: the legacy import keeps the
-/// old database's times this way.
-#[cfg(any(feature = "legacy-import", test))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct Stamp {
     pub(crate) created_at: Timestamp,
@@ -106,7 +104,7 @@ impl Deref for Tx<'_> {
 }
 
 impl Tx<'_> {
-    #[cfg(any(feature = "legacy-import", test))]
+    #[cfg(test)]
     pub(crate) fn with_stamp<R>(
         &mut self,
         stamp: Stamp,
@@ -201,14 +199,14 @@ impl Tx<'_> {
     }
 
     #[cfg_attr(
-        not(any(feature = "legacy-import", test)),
+        not(test),
         expect(
             clippy::unused_self,
-            reason = "the stamp override exists only for imports and tests"
+            reason = "the stamp override exists only for tests"
         )
     )]
     pub(crate) fn created_at(&self) -> Timestamp {
-        #[cfg(any(feature = "legacy-import", test))]
+        #[cfg(test)]
         if let Some(stamp) = self.stamp {
             return stamp.created_at;
         }
@@ -216,14 +214,14 @@ impl Tx<'_> {
     }
 
     #[cfg_attr(
-        not(any(feature = "legacy-import", test)),
+        not(test),
         expect(
             clippy::unused_self,
-            reason = "the stamp override exists only for imports and tests"
+            reason = "the stamp override exists only for tests"
         )
     )]
     fn updated_at(&self) -> Timestamp {
-        #[cfg(any(feature = "legacy-import", test))]
+        #[cfg(test)]
         if let Some(stamp) = self.stamp {
             return stamp.updated_at;
         }
