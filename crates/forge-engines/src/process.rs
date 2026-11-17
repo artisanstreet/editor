@@ -189,11 +189,6 @@ impl EngineProcess {
         Ok(())
     }
 
-    #[must_use]
-    pub const fn stdin_open(&self) -> bool {
-        self.stdin.is_some()
-    }
-
     /// Closes stdin, which tells line-mode CLIs to finish. `why` goes to
     /// the trace: closing it early is what ends background agents mid-work.
     pub fn close_stdin(&mut self, why: &str) {

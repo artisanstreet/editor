@@ -1359,13 +1359,6 @@ fn instructions(home: &Path, cwd: &Path) -> String {
     text.trim_end().to_owned()
 }
 
-/// A client tool in the shape claude.ai takes: `{name, description,
-/// input_schema}`. claude.ai calls it and the caller runs it.
-#[must_use]
-pub fn tool(name: &str, description: &str, schema: &Value) -> Value {
-    json!({ "name": name, "description": description, "input_schema": schema })
-}
-
 #[cfg(test)]
 mod tests;
 

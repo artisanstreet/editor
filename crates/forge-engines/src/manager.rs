@@ -418,23 +418,10 @@ impl Engines {
         self.inner.layout.home(engine)
     }
 
-    /// Environment for running the engine: its home, its config directory
-    /// and its own tool directories ahead of `PATH`.
-    #[must_use]
-    pub fn launch_env(&self, engine: EngineId) -> Vec<(String, String)> {
-        crate::engines::environment(engine, self.binary(engine).as_deref(), &self.home(engine))
-    }
-
     /// Uses the selected lease for both the executable and its helper PATH.
     #[must_use]
     pub fn launch_env_for_binary(&self, engine: EngineId, binary: &Path) -> Vec<(String, String)> {
         crate::engines::environment(engine, Some(binary), &self.home(engine))
-    }
-
-    /// Arguments that start the engine's own sign-in.
-    #[must_use]
-    pub fn login_args(engine: EngineId) -> &'static [&'static str] {
-        host_spec(engine).login
     }
 
     /// Validates a version command before an asynchronous operation is accepted.

@@ -23,7 +23,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_mins(15);
 const LOGIN_OUTPUT_CAP: usize = 64 * 1024;
 
 /// A command for an engine's own CLI in the engine home, with the config
-/// directory pinned there (as `Engines::launch_env` does) so nothing
+/// directory pinned there (as `Engines::launch_env_for_binary` does) so nothing
 /// inherited points the engine at another account.
 pub fn engine_command(engine: EngineId, binary: &Path, home: &Path) -> Command {
     if let Err(error) = std::fs::create_dir_all(home) {

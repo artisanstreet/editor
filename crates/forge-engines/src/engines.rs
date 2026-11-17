@@ -17,8 +17,6 @@ pub struct Spec {
     pub artifact: Option<Artifact>,
     /// Oldest version we install or run.
     pub minimum: Option<&'static str>,
-    /// Arguments that start the engine's own sign-in flow.
-    pub login: &'static [&'static str],
     /// Noninteractive paired-client sign-in, distinct from CLI interactive login.
     pub device_login: Option<&'static [&'static str]>,
     pub accepts_login_code: bool,
@@ -202,7 +200,6 @@ pub const fn spec(engine: EngineId, platform: Platform) -> Spec {
                 P::Other => None,
             },
             minimum: Some("2.1.220"),
-            login: &["auth", "login"],
             device_login: Some(&["auth", "login"]),
             accepts_login_code: true,
             logout: Some(&["auth", "logout"]),
@@ -261,7 +258,6 @@ pub const fn spec(engine: EngineId, platform: Platform) -> Spec {
                     None => None,
                 },
                 minimum: Some("0.142.5"),
-                login: &["login"],
                 device_login: Some(&["login", "--device-auth"]),
                 accepts_login_code: false,
                 logout: Some(&["logout"]),
@@ -300,7 +296,6 @@ pub const fn spec(engine: EngineId, platform: Platform) -> Spec {
                     None => None,
                 },
                 minimum: Some("2.0.0"),
-                login: &["auth", "login", "--standalone"],
                 // OpenCode Console's device flow prints its link and code.
                 device_login: Some(&[
                     "auth",
