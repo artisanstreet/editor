@@ -9,8 +9,6 @@ autotests = true
 
 [features]
 test-support = ["editor-core/test-support", "editor-ui/test-support", "editor-sources/test-support", "editor-composer/test-support", "editor-conversation/test-support", "editor-sidebar/test-support", "editor-inspector/test-support", "editor-settings/test-support", "editor-marketplace/test-support"]
-heap-probe = ["aqua/probe-allocator"]
-profile-heap = ["aqua/profile-alloc"]
 qualification = ["editor-conversation/qualification", "test-support", "dep:forge-http", "dep:forge-store", "forge-store/qualification", "dep:rusqlite", "dep:sha2", "dep:hex"]
 capture = ["qualification", "dep:aqua-gpu-d3d11", "dep:aqua-gpu-ref", "dep:aqua-runtime"]
 
@@ -67,7 +65,6 @@ aqua-ime-tsf = { workspace = true, features = ["double"] }
 
 [dev-dependencies]
 aqua-media = { workspace = true }
-color.workspace = true
 base64.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true

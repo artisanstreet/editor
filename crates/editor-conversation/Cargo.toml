@@ -21,16 +21,15 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 ropey.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tokio-util.workspace = true
-image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 editor-core.workspace = true
 editor-ui.workspace = true
 editor-sources.workspace = true
 editor-composer.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 editor-conversation = { path = ".", features = ["test-support"] }
 
 [lints]

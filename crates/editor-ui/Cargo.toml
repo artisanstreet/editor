@@ -35,7 +35,7 @@ image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "ti
 pulldown-cmark.workspace = true
 syntect.workspace = true
 thiserror.workspace = true
-mermaid-rs-renderer = { path = "../../vendor/mermaid-rs-renderer" }
+mermaid-rs-renderer.workspace = true
 usvg = { version = "0.48.1", default-features = false, features = ["text"] }
 vte.workspace = true
 unicode-width.workspace = true

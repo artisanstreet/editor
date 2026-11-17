@@ -106,7 +106,6 @@ ed25519-dalek = "=2.2.0"
 flate2 = "=1.1.10"
 insta = { version = "=1.49.0", features = ["json"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "logging", "tls12"] }
-tokio-stream = { version = "=0.1.19", features = ["sync"] }
 tokio-util = { version = "=0.7.19", features = ["rt"] }
 tower = { version = "=0.5.3", default-features = false }
 tower-http = { version = "=0.6.11", default-features = false }
@@ -123,10 +122,7 @@ ufbx = "=0.11.3"
 stl_io = "=0.11.0"
 ply-rs-bw = "=4.0.0"
 gltf = { version = "=1.4.1", default-features = false, features = ["utils"] }
-mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
-native-dialog = { version = "=0.9.7", default-features = false, features = [
-    "windows_dpi_awareness",
-] }
+mermaid-rs-renderer = { path = "vendor/mermaid-rs-renderer" }
 pulseaudio = "=0.3.1"
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 rcgen = { version = "=0.14.9", default-features = false, features = [
@@ -145,16 +141,6 @@ serde_json = { version = "=1.0.151", features = ["preserve_order"] }
 sse-core = { version = "=0.2.3", default-features = false, features = ["std", "stream"] }
 rodio = { version = "=0.21.1", default-features = false, features = ["symphonia-all"] }
 crossbeam-channel = "=0.5.15"
-symphonia = { version = "=0.5.5", default-features = false, features = [
-    "aac",
-    "flac",
-    "isomp4",
-    "mp3",
-    "ogg",
-    "pcm",
-    "vorbis",
-    "wav",
-] }
 syntect = { version = "=5.3.0", default-features = false, features = [
     "parsing",
     "default-syntaxes",
@@ -172,9 +158,7 @@ thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", default-features = false }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml = "=1.1.4"
-unicode-segmentation = "=1.13.3"
 uuid = { version = "=1.26.0", default-features = false, features = ["std", "v7"] }
-zip = { version = "=4.6.1", default-features = false, features = ["deflate"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

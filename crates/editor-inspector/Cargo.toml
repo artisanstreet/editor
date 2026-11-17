@@ -5,7 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [features]
-test-support = ["editor-conversation/test-support", "editor-core/test-support", "editor-ui/test-support", "editor-sources/test-support", "editor-sidebar/test-support"]
+test-support = ["editor-conversation/test-support", "editor-core/test-support", "editor-ui/test-support", "editor-sources/test-support"]
 
 [dependencies]
 editor-conversation.workspace = true
@@ -22,7 +22,6 @@ tokio-util.workspace = true
 editor-core.workspace = true
 editor-ui.workspace = true
 editor-sources.workspace = true
-editor-sidebar.workspace = true
 
 [lints]
 workspace = true
