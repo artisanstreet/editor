@@ -1,4 +1,3 @@
-use editor_sources::SourceProviderExt;
 use aqua::images::ImageAssets;
 use aqua_media::decode::DecodedImage;
 use artisan_api::{BlobHash, Event, GlobalPrompt};
@@ -6,6 +5,7 @@ use editor_aqua::core::{
     BlobImage, Core, CoreEvent, EditorFiles, ForgeClient, HostConfig, HostEvent, HostId, HostKind,
     runtime::runtime,
 };
+use editor_sources::SourceProviderExt;
 use std::sync::Arc;
 
 fn host(core: &mut Core, id: &str) -> HostId {
@@ -378,6 +378,7 @@ fn peeked_head_keeps_capacity_until_delivery_and_cancelled_senders_release_it() 
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
+    use test_support::poll::poll_once;
     let mut wake = aqua::mailbox::Mailbox::new(NonZeroUsize::MIN);
     let wakes = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&wakes);
@@ -391,16 +392,12 @@ fn peeked_head_keeps_capacity_until_delivery_and_cancelled_senders_release_it() 
         sender.send(1).await.unwrap();
         assert!(delivery.peek_order().is_some());
         assert_eq!(wake.drain(), vec![()]);
-        let (started, running) = tokio::sync::oneshot::channel();
-        let blocked_sender = sender.clone();
-        let blocked = tokio::spawn(async move {
-            let _ = started.send(());
-            blocked_sender.send(2).await
-        });
-        running.await.unwrap();
-        assert!(!blocked.is_finished());
-        blocked.abort();
-        assert!(blocked.await.unwrap_err().is_cancelled());
+        let mut blocked = Box::pin(sender.send(2));
+        assert!(
+            poll_once(blocked.as_mut()).is_pending(),
+            "a send beyond capacity waits for the peeked head"
+        );
+        drop(blocked);
         assert_eq!(delivery.drain_one(), Some(1));
         assert!(wake.drain().is_empty());
         tokio::time::timeout(Duration::from_secs(1), sender.send(3))
@@ -412,18 +409,14 @@ fn peeked_head_keeps_capacity_until_delivery_and_cancelled_senders_release_it() 
         wake.drain();
         sender.send(4).await.unwrap();
         assert!(delivery.peek_order().is_some());
-        let (started, running) = tokio::sync::oneshot::channel();
-        let waiting_sender = sender.clone();
-        let waiting = tokio::spawn(async move {
-            let _ = started.send(());
-            waiting_sender.send(5).await
-        });
-        running.await.unwrap();
-        assert!(!waiting.is_finished());
+        let mut waiting = Box::pin(sender.send(5));
+        assert!(
+            poll_once(waiting.as_mut()).is_pending(),
+            "a send beyond capacity waits for the peeked head"
+        );
         drop(delivery);
         let error = tokio::time::timeout(Duration::from_secs(1), waiting)
             .await
-            .unwrap()
             .unwrap()
             .unwrap_err();
         assert_eq!(error.0, 5);

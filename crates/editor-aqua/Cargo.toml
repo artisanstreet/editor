@@ -72,6 +72,7 @@ base64.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 editor-aqua = { path = ".", features = ["test-support"] }
+test-support = { workspace = true, features = ["shell", "net", "tokio"] }
 sha2.workspace = true
 hex.workspace = true
 
