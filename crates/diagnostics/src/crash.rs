@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_error::SpanTrace;
 
+#[derive(Debug)]
 pub struct CrashReporter {
     pub app: App,
     pub version: &'static str,
@@ -62,6 +63,10 @@ impl CrashReporter {
         data.join("crashes")
     }
 
+    #[expect(
+        clippy::print_stderr,
+        reason = "a crashing process may have no working logger, so the report path goes to stderr"
+    )]
     pub fn install(self) {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {

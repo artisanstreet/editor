@@ -6,7 +6,7 @@ use tracing_subscriber::fmt::MakeWriter;
 const LINES: usize = 200;
 const LINE_BYTES: usize = 2048;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct RecentLines {
     lines: Arc<Mutex<VecDeque<String>>>,
 }
@@ -37,18 +37,19 @@ fn bounded(line: &str) -> String {
     if line.len() <= LINE_BYTES {
         return line.to_owned();
     }
-    let end = line.floor_char_boundary(LINE_BYTES);
-    format!("{}… ({} bytes)", &line[..end], line.len())
+    let (kept, _) = line.split_at(line.floor_char_boundary(LINE_BYTES));
+    format!("{kept}… ({} bytes)", line.len())
 }
 
+#[derive(Debug)]
 pub struct RecentWriter {
     recent: RecentLines,
 }
 
 impl io::Write for RecentWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.recent.push(bytes);
-        Ok(bytes.len())
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.recent.push(buf);
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {

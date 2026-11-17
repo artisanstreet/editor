@@ -93,7 +93,7 @@ fn main() -> std::process::ExitCode {
         recent,
     }
     .install();
-    match run(cli, data_dir) {
+    match run(&cli, data_dir) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!("{error:#}");
@@ -103,7 +103,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run(cli: Cli, data_dir: PathBuf) -> Result<()> {
+fn run(cli: &Cli, data_dir: PathBuf) -> Result<()> {
     let listen = match cli.listen {
         Some(listen) => listen,
         None => forge_http::configured_listen(&data_dir)?,
@@ -150,9 +150,10 @@ fn run(cli: Cli, data_dir: PathBuf) -> Result<()> {
                 let server = forge_http::start_generation(config, registry).await?;
                 let ready = cli
                     .ready_file
+                    .as_deref()
                     .context("backend requires a readiness destination")?;
                 forge_http::upgrade::write(
-                    &ready,
+                    ready,
                     &server
                         .hub()
                         .generation()
@@ -161,8 +162,11 @@ fn run(cli: Cli, data_dir: PathBuf) -> Result<()> {
                 )?;
                 server.run_until(stop).await
             } else {
-                let log = cli.log.map_or(Destination::Stderr, Destination::File);
-                forge_http::upgrade::serve(config, cli.handoff, log, stop).await
+                let log = cli
+                    .log
+                    .clone()
+                    .map_or(Destination::Stderr, Destination::File);
+                forge_http::upgrade::serve(config, cli.handoff.clone(), log, stop).await
             }
         })
     }

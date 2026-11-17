@@ -1,6 +1,10 @@
 use std::path::Path;
 use std::process::Command;
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "an Editor that cannot be started fails the test"
+)]
 fn launch_without_fixture(data: &Path, temporary: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_editor-aqua"))
         .arg("--source-encoded")

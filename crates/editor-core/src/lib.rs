@@ -19,7 +19,6 @@
     clippy::needless_pass_by_value,
     clippy::nonminimal_bool,
     clippy::partial_pub_fields,
-    clippy::print_stderr,
     clippy::rc_buffer,
     clippy::redundant_closure_for_method_calls,
     clippy::renamed_function_params,

@@ -39,7 +39,10 @@ impl Text {
             return Self::Whole(text.to_owned());
         }
         Self::Truncated {
-            kept: text[..text.floor_char_boundary(MAX_RECORD_BYTES)].to_owned(),
+            kept: text
+                .split_at(text.floor_char_boundary(MAX_RECORD_BYTES))
+                .0
+                .to_owned(),
             bytes: text.len(),
         }
     }
@@ -202,10 +205,11 @@ fn write_records(
         )?;
         file.flush()
     };
-    if let Err(error) = written() {
+    if let Err(failure) = written() {
+        let error: &dyn std::error::Error = &failure;
         tracing::warn!(
             path = %path.display(),
-            error = &error as &dyn std::error::Error,
+            error,
             "the engine trace stopped writing"
         );
     }

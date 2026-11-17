@@ -58,8 +58,9 @@ where
         .try_init()
         .map_err(|source| SubscribeError::Install { source })?;
     if let Some(problem) = problem {
+        let error: &dyn std::error::Error = &problem;
         tracing::warn!(
-            error = &problem as &dyn std::error::Error,
+            error,
             default = default_filter,
             "using the default log filter"
         );

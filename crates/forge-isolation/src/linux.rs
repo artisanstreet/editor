@@ -273,11 +273,9 @@ pub fn attach(engines: Option<&Path>, proc_root: &Path, pid: u32) -> Result<(), 
 pub(crate) fn started(pid: u32) {
     let engines =
         engines_membership().map(|path| Path::new(std::ffi::OsStr::from_bytes(path.to_bytes())));
-    if let Err(error) = attach(engines, Path::new("/proc"), pid) {
-        tracing::warn!(
-            error = &error as &dyn std::error::Error,
-            "engine isolation is incomplete"
-        );
+    if let Err(failure) = attach(engines, Path::new("/proc"), pid) {
+        let error: &dyn std::error::Error = &failure;
+        tracing::warn!(error, "engine isolation is incomplete");
     }
 }
 

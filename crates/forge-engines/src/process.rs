@@ -59,11 +59,9 @@ pub(crate) fn spawn_in(
         .as_deref()
         .map_or_else(Trace::default, |dir| {
             Trace::start(dir, name).map_or_else(
-                |error| {
-                    tracing::warn!(
-                        error = &error as &dyn std::error::Error,
-                        "this engine process runs without a diagnostic trace"
-                    );
+                |failure| {
+                    let error: &dyn std::error::Error = &failure;
+                    tracing::warn!(error, "this engine process runs without a diagnostic trace");
                     Trace::default()
                 },
                 |started| started.trace,

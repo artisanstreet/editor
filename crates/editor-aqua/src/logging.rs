@@ -53,8 +53,9 @@ pub fn init(data: &Path) -> Result<RecentLines, SubscribeError> {
         LogFile::Fallback { file, path, usual } => {
             let recent =
                 diagnostics::subscribe(DEFAULT_FILTER, std::io::stderr.and(Mutex::new(file)))?;
+            let error: &dyn Error = &usual;
             tracing::error!(
-                error = &usual as &dyn Error,
+                error,
                 fallback = %path.display(),
                 "the Editor logs to a temporary folder"
             );
@@ -62,11 +63,9 @@ pub fn init(data: &Path) -> Result<RecentLines, SubscribeError> {
         }
         LogFile::Missing { usual, fallback } => {
             let recent = diagnostics::subscribe(DEFAULT_FILTER, std::io::stderr)?;
-            tracing::error!(
-                error = &usual as &dyn Error,
-                fallback_error = &fallback as &dyn Error,
-                "the Editor has no log file"
-            );
+            let error: &dyn Error = &usual;
+            let fallback_error: &dyn Error = &fallback;
+            tracing::error!(error, fallback_error, "the Editor has no log file");
             Ok(recent)
         }
     }
