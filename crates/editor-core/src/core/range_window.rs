@@ -195,11 +195,6 @@ impl<R: RangePage + Send> RangeWindow<R> {
         self.load(self.requested);
     }
 
-    pub fn reset(&mut self) {
-        self.pages.clear();
-        self.load(self.requested);
-    }
-
     pub fn disconnect(&mut self) {
         self.client = None;
         self.read = None;

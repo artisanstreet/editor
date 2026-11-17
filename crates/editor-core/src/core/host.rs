@@ -123,23 +123,6 @@ pub enum HostEvent {
     },
 }
 
-impl HostEvent {
-    pub fn thread(&self) -> Option<&ThreadId> {
-        match self {
-            HostEvent::ThreadSummaryChanged { thread_id }
-            | HostEvent::ThreadChanged { thread_id }
-            | HostEvent::Live { thread_id, .. } => Some(thread_id),
-            HostEvent::Item(item) => Some(&item.thread_id),
-            HostEvent::Reset
-            | HostEvent::ImagesChanged
-            | HostEvent::EngineInstall { .. }
-            | HostEvent::Changed
-            | HostEvent::WslDistro { .. }
-            | HostEvent::EditorCall { .. } => None,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Attention {
     pub waiting: usize,
@@ -601,9 +584,6 @@ impl HostData {
     pub fn suggestion(&self, thread: &ThreadId) -> Option<&str> {
         self.suggestions.get(thread).map(String::as_str)
     }
-    pub fn live(&self, thread: &ThreadId, target: &LiveTarget) -> Option<&Rope> {
-        Some(&self.live.get(thread)?.get(target)?.text)
-    }
     pub fn live_snapshot(&self, thread: &ThreadId, target: &LiveTarget) -> Option<LiveSnapshot> {
         self.live.get(thread)?.get(target).cloned()
     }
@@ -616,19 +596,6 @@ impl HostData {
                 .iter()
                 .map(|(target, stream)| (target, &stream.text))
         })
-    }
-    pub fn threads_by_activity(&self, project: Option<&ProjectId>) -> Vec<&Thread> {
-        let mut threads: Vec<_> = self
-            .threads
-            .values()
-            .filter(|thread| project.is_none_or(|project| &thread.project_id == project))
-            .collect();
-        threads.sort_by(|a, b| {
-            b.activity_seq
-                .cmp(&a.activity_seq)
-                .then_with(|| b.created_at.cmp(&a.created_at))
-        });
-        threads
     }
     pub fn stop_optimistically(&mut self, thread: &ThreadId) {
         let Some(run) = self.runs.get_mut(thread) else {
@@ -700,11 +667,6 @@ impl HostData {
         self.global_prompt = Some(Arc::new(prompt));
         self.pending_events.push(HostEvent::Changed);
         true
-    }
-    pub fn remember_skill_catalog(&mut self, catalog: Vec<artisan_api::CatalogSkill>) {
-        self.catalog_load = ProjectionLoad::default();
-        self.skill_catalog = Some(Arc::new(catalog));
-        self.pending_events.push(HostEvent::Changed);
     }
     pub fn acknowledge_read(&mut self, thread: ThreadId, observed_seq: artisan_api::Seq) {
         if self.observed.borrow().as_ref() != Some(&thread) {

@@ -302,9 +302,6 @@ impl Account {
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
-    pub fn base_url(&self) -> &str {
-        &self.base_url
-    }
     pub fn local_forge(&self) -> LocalForge {
         match (&self.binding, self.profile()) {
             (Some(binding), Some(profile)) => enrollment::local_forge(binding, profile),

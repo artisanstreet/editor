@@ -47,9 +47,6 @@ impl HostData {
             self.load_threads(false, ThreadPageDirection::Older);
         }
     }
-    pub fn thread_load_error(&self, id: &ThreadId) -> Option<&str> {
-        self.thread_pages.errors.get(id).map(String::as_str)
-    }
     pub(super) fn reset_thread_pages(&mut self, next: Option<ThreadCursor>) {
         let generation = self.thread_pages.generation.wrapping_add(1);
         self.thread_pages = ThreadPages {

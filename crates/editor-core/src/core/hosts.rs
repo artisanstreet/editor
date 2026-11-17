@@ -272,21 +272,6 @@ pub(crate) fn keep_wsl_awake(distro: &str) -> Result<tokio::process::Child> {
         .context("keep WSL awake")
 }
 
-pub fn parse_pairing(text: &str) -> Result<(String, String, String)> {
-    let parts: Vec<&str> = text
-        .split(|c: char| c.is_whitespace() || c == '/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    match parts.as_slice() {
-        [address, code, fingerprint] if fingerprint.len() == 64 => Ok((
-            (*address).to_owned(),
-            (*code).to_owned(),
-            fingerprint.to_ascii_lowercase(),
-        )),
-        _ => bail!("expected `<host:port> <code> <fingerprint>` as printed by `ae pair`"),
-    }
-}
-
 pub async fn pair(
     address: &str,
     code: &str,

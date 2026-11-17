@@ -242,15 +242,6 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn items(&self, thread: &ThreadId, query: &ItemsQuery) -> Result<ItemsPage> {
-        self.call(
-            self.http
-                .get(self.url(&format!("/threads/{thread}/items")))
-                .query(query),
-        )
-        .await
-    }
-
     pub async fn transcript(&self, thread: &ThreadId, query: &ItemsQuery) -> Result<ItemsPage> {
         self.call(
             self.http
@@ -342,19 +333,6 @@ impl ForgeClient {
             .await
     }
 
-    pub async fn set_default_model(
-        &self,
-        engine: EngineId,
-        model: &str,
-    ) -> Result<artisan_api::EngineConfig> {
-        self.call(self.json(
-            reqwest::Method::PUT,
-            &format!("/engines/{engine}/default-model"),
-            &model,
-        ))
-        .await
-    }
-
     pub async fn set_model_config(
         &self,
         config: &artisan_api::EngineConfig,
@@ -387,11 +365,6 @@ impl ForgeClient {
 
     pub async fn create_project(&self, request: &CreateProject) -> Result<Project> {
         self.call(self.json(reqwest::Method::POST, "/projects", request))
-            .await
-    }
-
-    pub async fn remove_project(&self, id: &ProjectId) -> Result<()> {
-        self.call_empty(self.http.delete(self.url(&format!("/projects/{id}"))))
             .await
     }
 
@@ -746,10 +719,6 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn engines(&self) -> Result<Vec<EngineStatus>> {
-        self.call(self.http.get(self.url("/engines"))).await
-    }
-
     pub async fn engine_action(
         &self,
         engine: EngineId,
@@ -780,10 +749,6 @@ impl ForgeClient {
                 .get(self.url(&format!("/projects/{project}/repository"))),
         )
         .await
-    }
-
-    pub async fn skills(&self) -> Result<Vec<artisan_api::Skill>> {
-        self.call(self.http.get(self.url("/skills"))).await
     }
 
     pub async fn skill_catalog(&self) -> Result<Vec<artisan_api::CatalogSkill>> {
