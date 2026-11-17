@@ -128,6 +128,7 @@ let
       rustflags = [
         "-C target-cpu=x86-64-v3"
         "-C target-feature=+crt-static"
+        "-C split-debuginfo=off"
         "-C link-arg=-l:libmcfgthread.a"
         "-C link-arg=-lntdll"
         "-C link-arg=-lkernel32"

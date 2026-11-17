@@ -8,4 +8,4 @@ rustflags = ["-C", "target-cpu=x86-64-v3"]
 # Windows binaries are cross-built with MinGW-w64 and link the C runtime and
 # GCC runtime statically, so every .exe runs without MinGW DLLs beside it.
 [target.x86_64-pc-windows-gnu]
-rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+crt-static", "-C", "split-debuginfo=off"]

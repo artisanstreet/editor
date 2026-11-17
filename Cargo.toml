@@ -192,8 +192,9 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-debug = false
-strip = true
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "none"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

@@ -133,6 +133,13 @@ jobs:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: symbols-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            target/${{ matrix.target }}/release/*.dwp
+            target/${{ matrix.target }}/release/*.dSYM
+          if-no-files-found: error
   windows:
     needs: [select, unix]
     strategy:
@@ -217,6 +224,11 @@ jobs:
         with:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: symbols-${{ matrix.os }}-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/*.pdb
           if-no-files-found: error
   assemble:
     needs: [select, unix, windows]
