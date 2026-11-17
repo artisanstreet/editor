@@ -1,45 +1,76 @@
 #![cfg(test)]
 
-use artisan_account::network::{CoreSessionClient, SessionToken};
-use std::{
-    io::{BufRead as _, BufReader, Write as _},
-    net::TcpListener,
-};
+use artisan_account::network::{AccountProfile, CoreSessionClient, SessionToken};
+use axum::http::{HeaderMap, StatusCode, Uri, header::AUTHORIZATION};
+use axum::routing::get;
+use std::sync::{Arc, Mutex};
+use test_support::http::StubServer;
 
-async fn read_profile(
-    details_status: u16,
-    details: &str,
-) -> artisan_account::network::AccountProfile {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let details = details.to_owned();
-    let server = std::thread::spawn(move || {
-        for (path, status, body) in [
-            ("/v1/me", 200, serde_json::json!({"account_id":"account", "email":"test@example.invalid", "display_name":"Sander", "totp_enrolled":false}).to_string()),
-            ("/v1/account/profile", details_status, details),
-        ] {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            assert!(line.starts_with(&format!("GET {path} ")));
-            let mut authorized = false;
-            loop {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" { break; }
-                authorized |= line.trim().eq_ignore_ascii_case("authorization: Bearer session");
-            }
-            assert!(authorized);
-            write!(stream, "HTTP/1.1 {status} Response\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
-        }
-    });
-    let profile = CoreSessionClient::new(&url)
+#[derive(Clone)]
+struct Core {
+    details: (StatusCode, String),
+    requests: Arc<Mutex<Vec<(String, bool)>>>,
+}
+
+fn authorized(headers: &HeaderMap) -> bool {
+    headers
+        .get(AUTHORIZATION)
+        .is_some_and(|value| value.as_bytes() == b"Bearer session")
+}
+
+async fn read_profile(details_status: u16, details: &str) -> AccountProfile {
+    let core = Core {
+        details: (
+            StatusCode::from_u16(details_status).unwrap(),
+            details.to_owned(),
+        ),
+        requests: Arc::default(),
+    };
+    let record = |core: &Core, uri: &Uri, headers: &HeaderMap| {
+        core.requests
+            .lock()
+            .unwrap()
+            .push((uri.path().to_owned(), authorized(headers)));
+    };
+    let router = axum::Router::new()
+        .route(
+            "/v1/me",
+            get(
+                move |axum::extract::State(core): axum::extract::State<Core>,
+                      uri: Uri,
+                      headers: HeaderMap| async move {
+                    record(&core, &uri, &headers);
+                    serde_json::json!({"account_id":"account", "email":"test@example.invalid", "display_name":"Sander", "totp_enrolled":false}).to_string()
+                },
+            ),
+        )
+        .route(
+            "/v1/account/profile",
+            get(
+                move |axum::extract::State(core): axum::extract::State<Core>,
+                      uri: Uri,
+                      headers: HeaderMap| async move {
+                    record(&core, &uri, &headers);
+                    core.details
+                },
+            ),
+        )
+        .with_state(core.clone());
+    let server = StubServer::serve(router).await;
+    let profile = CoreSessionClient::new(server.url())
         .unwrap()
         .me(&SessionToken::new("session".into()))
         .await
         .unwrap();
-    server.join().unwrap();
+    let requests = core.requests.lock().unwrap().clone();
+    assert!(
+        requests.iter().any(|(path, _)| path == "/v1/me"),
+        "the account is read from /v1/me: {requests:?}"
+    );
+    assert!(
+        requests.iter().all(|(_, authorized)| *authorized),
+        "every request carries the session token: {requests:?}"
+    );
     profile
 }
 
