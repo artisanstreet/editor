@@ -6,7 +6,7 @@ use crate::transcript::{self, Options};
 use anyhow::{Context, Result};
 use artisan_api::{
     EditorCall, EngineId, InstallState, ItemId, ItemsQuery, McpMutation, McpServer, Permissions,
-    ProjectId, SettingOwner, SignInState, ThreadId, ThreadsQuery, UpdateThread, setting_decl,
+    ProjectId, SettingOwner, SignInState, ThreadId, UpdateThread, setting_decl,
 };
 use forge_runs::{Hub, Refused, SpawnAgent};
 use forge_store::{GrepQuery, RecallScope};
@@ -922,48 +922,6 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 return Ok("No thread touched a matching path.".to_owned());
             }
             Ok(format::touches(&touches))
-        }
-        "list_threads" => {
-            #[derive(Deserialize)]
-            struct List {
-                project: Option<String>,
-                state: Option<String>,
-                title: Option<String>,
-                parent: Option<String>,
-                limit: Option<u32>,
-            }
-            let list: List = args(arguments)?;
-            let limit = list.limit.unwrap_or(30).clamp(1, 200) as usize;
-            if let Some(parent) = list.parent {
-                let threads = store.agent_threads(&thread_id(&parent)).await?;
-                return Ok(format::threads(hub, &threads));
-            }
-            let state = list.state.as_deref().unwrap_or("any");
-            let page = store
-                .threads_page(ThreadsQuery {
-                    archived: state == "archived",
-                    limit: Some(200),
-                    query: list.title,
-                    ..ThreadsQuery::default()
-                })
-                .await?;
-            let threads: Vec<&artisan_api::Thread> = page
-                .threads
-                .iter()
-                .filter(|thread| thread.spawned_by.is_none())
-                .filter(|thread| {
-                    list.project
-                        .as_deref()
-                        .is_none_or(|project| thread.project_id.as_str() == project)
-                })
-                .filter(|thread| match state {
-                    "working" => hub.is_live(&thread.id),
-                    "unread" => thread.is_unread(),
-                    _ => true,
-                })
-                .take(limit)
-                .collect();
-            Ok(format::threads(hub, threads))
         }
         "create_thread" => {
             #[derive(Deserialize)]

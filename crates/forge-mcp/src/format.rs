@@ -180,18 +180,6 @@ pub fn thread(hub: &Hub, thread: &Thread) -> String {
     )
 }
 
-pub fn threads<'a>(hub: &Hub, threads: impl IntoIterator<Item = &'a Thread>) -> String {
-    let lines: Vec<String> = threads
-        .into_iter()
-        .map(|found| format!("- {}", thread(hub, found)))
-        .collect();
-    if lines.is_empty() {
-        "No threads.".to_owned()
-    } else {
-        lines.join("\n")
-    }
-}
-
 pub fn warnings(out: &mut String, warnings: &[String]) {
     for warning in warnings {
         writeln!(out, "\nNote: {warning}").ok();
