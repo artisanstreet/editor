@@ -14,7 +14,6 @@ use super::Palette;
 use crate::{
     core::Screen,
     ui::{
-        dialog::{Dialog, DialogDismissReason},
         kit::{Density, Row, RowItem, Space, Spaced, Surface, TextRole},
         text::{
             Editor, Mode,
@@ -223,22 +222,6 @@ impl PaletteView {
                     ..InputResponse::handled()
                 }
             })
-    }
-
-    pub fn dialog(
-        &self,
-        palette: &Palette,
-        theme: &ArtisanTheme,
-        emit: Rc<dyn Fn(Event)>,
-    ) -> Dialog {
-        let dismiss = guarded(self.session, &self.active, emit.clone());
-        Dialog::new(
-            "command-palette",
-            *theme,
-            "Search threads and commands",
-            self.content(palette, theme, emit),
-        )
-        .on_dismiss(move |_: DialogDismissReason| dismiss(Action::Dismiss))
     }
 }
 

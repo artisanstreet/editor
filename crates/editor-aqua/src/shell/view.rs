@@ -154,58 +154,6 @@ pub struct ComposerParts {
     pub shift: f32,
 }
 
-pub fn conversation(
-    workspace: &crate::shell::workspace::Workspace,
-    core: &crate::core::Core,
-    theme: &ArtisanTheme,
-    viewport_width: f32,
-    transcript: Element,
-    overlays: Vec<Element>,
-    parts: ComposerParts,
-) -> anyhow::Result<Element> {
-    let owner = workspace
-        .composer
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("conversation composer is not mounted"))?;
-    let (host_id, instance, placeholder) = {
-        let mut composer = owner.controller.borrow_mut();
-        let question = workspace
-            .conversation
-            .question_pages
-            .current_question(&composer.questionnaire)
-            .cloned();
-        (
-            composer.target.host().clone(),
-            composer.host_instance(),
-            composer.placeholder(question.as_ref()),
-        )
-    };
-    let host = core
-        .host_if_instance(
-            &host_id,
-            instance.ok_or_else(|| anyhow::anyhow!("conversation Forge is not available"))?,
-        )
-        .ok_or_else(|| anyhow::anyhow!("conversation Forge is not available"))?;
-    let card = owner.surface(
-        *theme,
-        host,
-        placeholder,
-        parts.questionnaires,
-        parts.attachments,
-        parts.mention_overlay,
-        parts.thread_error,
-        std::time::Instant::now(),
-    );
-    Ok(crate::conversation::view::thread_frame(
-        transcript,
-        overlays,
-        Some(card),
-        None,
-        viewport_width,
-        workspace.conversation.reveal(std::time::Instant::now()),
-    ))
-}
-
 pub fn conversation_virtual(
     workspace: &crate::shell::workspace::Workspace,
     core: &crate::core::Core,

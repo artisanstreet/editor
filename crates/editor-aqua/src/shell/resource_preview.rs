@@ -32,11 +32,6 @@ impl PreviewText {
         }
     }
 
-    pub fn visible_line(&self, index: usize) -> Option<&str> {
-        let text = &self.text[self.offsets.get(index)?.clone()];
-        Some(&text[..text.floor_char_boundary(text.len().min(16 * 1024))])
-    }
-
     pub fn note(&self) -> String {
         format!(
             "Lines {}–{} of {}. Long lines are clipped visually. Select All copies these preview lines; Copy file copies the full file.",

@@ -632,29 +632,6 @@ impl Workspace {
         })
     }
 
-    pub fn inspector_elements(
-        &mut self,
-        core: &Core,
-        ui: &mut aqua::UiApp,
-        theme: crate::ui::theme::ArtisanTheme,
-        viewport_height: f32,
-        reduced_motion: bool,
-        now: aqua::Instant,
-    ) -> anyhow::Result<aqua_ui::element::Element> {
-        let actions = Rc::clone(&self.inspector_actions);
-        let elements = self.inspector.build(
-            core,
-            ui,
-            theme,
-            viewport_height,
-            reduced_motion,
-            now,
-            Rc::new(move |action| actions.borrow_mut().push_back(action)),
-        )?;
-        self.terminal_content = elements.terminal;
-        Ok(elements.panel)
-    }
-
     pub fn sync_terminal_dialog(
         &mut self,
         ui: &mut aqua::UiApp,
@@ -1657,14 +1634,6 @@ impl Workspace {
         }
     }
 
-    pub fn activate_palette(&mut self, core: &mut Core) {
-        if let Some(palette) = self.palette.take() {
-            if let Some(screen) = palette.selected() {
-                core.navigate(screen.clone());
-            }
-        }
-    }
-
     pub fn new_thread(core: &mut Core) {
         let screen = core
             .active_host()
@@ -1705,41 +1674,6 @@ fn keyed_descendant(
 }
 
 impl Workspace {
-    pub fn acknowledge_painted(
-        &self,
-        core: &mut Core,
-        painted_row: &crate::conversation::adapter::RowModel,
-        bounds: aqua_core::Rect,
-        clip: aqua_core::Rect,
-        window_active: bool,
-        revealed: bool,
-        prepared: impl Fn(&crate::conversation::fold::Row, &artisan_api::Item) -> bool,
-    ) -> bool {
-        if !crate::conversation::read::painted(bounds, clip, window_active, revealed) {
-            return false;
-        }
-        let row = &painted_row.row;
-        let current = |row: &crate::conversation::fold::Row, item: &artisan_api::Item| {
-            let key = painted_row.row.key();
-            row.key() == key
-                && self
-                    .conversation
-                    .rows
-                    .iter()
-                    .any(|(row, version)| row.key() == key && *version == painted_row.version)
-                && painted_row
-                    .items
-                    .get(&item.id)
-                    .is_some_and(|painted| painted.seq == item.seq)
-                && prepared(row, item)
-        };
-        let Some(candidate) =
-            crate::conversation::read::capture(&self.conversation, core, row, &current)
-        else {
-            return false;
-        };
-        crate::conversation::read::acknowledge(candidate, &self.conversation, core, current)
-    }
 }
 
 fn mention_anchor(ui: &aqua::UiApp) -> &'static str {

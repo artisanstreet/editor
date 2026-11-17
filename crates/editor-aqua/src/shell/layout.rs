@@ -67,17 +67,6 @@ pub struct EntryLayout {
     pub max_height: f32,
 }
 
-pub fn entry_layout(window: Size) -> EntryLayout {
-    EntryLayout {
-        width: if window.width < 640.0 {
-            window.width - 32.0
-        } else {
-            560.0
-        },
-        max_height: (window.height - 96.0).max(200.0),
-    }
-}
-
 pub const RAIL_WIDTH: f32 = 48.0;
 pub const CONTROL_WIDTH: f32 = crate::ui::kit::control::caption::WIDTH;
 pub const CONTROL_GLYPH: f32 = crate::ui::kit::IconSize::Md.px();

@@ -5,7 +5,7 @@ use crate::ui::preferences::Preferences;
 use crate::shell::workspace::{NotificationEffects, Workspace};
 use aqua::AppCtx;
 use aqua::images::ImageAssets;
-use aqua::prelude::{AquaWindowId, WindowRequest};
+use aqua::prelude::AquaWindowId;
 
 pub struct Shell {
     pub titlebar: crate::shell::titlebar::Titlebar,
@@ -326,12 +326,6 @@ impl Shell {
         }
     }
 
-    pub fn activate_palette(&mut self) {
-        if let Some(workspace) = self.entry.workspace_mut() {
-            workspace.activate_palette(&mut self.core);
-        }
-    }
-
     pub fn new_thread(&mut self) {
         Workspace::new_thread(&mut self.core);
     }
@@ -343,13 +337,6 @@ impl Shell {
     }
     pub fn navigate(&mut self, screen: Screen) {
         self.core.navigate(screen);
-    }
-    pub fn quit(ctx: &mut AppCtx<'_>, _window: AquaWindowId) {
-        ctx.quit();
-    }
-    pub fn close_window(ctx: &mut AppCtx<'_>, window: AquaWindowId) -> anyhow::Result<()> {
-        ctx.request_window(WindowRequest::Close(window))?;
-        Ok(())
     }
 }
 

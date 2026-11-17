@@ -65,40 +65,4 @@ impl Bootstrap {
     pub fn editor_directory(&self) -> &Path {
         &self.files.dir
     }
-
-    pub fn core_snapshot_ready(&self, core: &Core) -> bool {
-        let Some(host) = core.host(&self.host) else {
-            return false;
-        };
-        host.is_live()
-            && matches!(core.screen(), Screen::Thread { host, thread } if host == &self.host && thread == &self.thread)
-            && host.projects.len() == self.verified.snapshot.projects.len()
-            && self
-                .verified
-                .snapshot
-                .projects
-                .iter()
-                .all(|project| host.projects.get(&project.id) == Some(project))
-            && host.threads.len() == self.verified.snapshot.threads.len()
-            && self
-                .verified
-                .snapshot
-                .threads
-                .iter()
-                .all(|thread| host.threads.get(&thread.id) == Some(thread))
-            && host.runs.len() == self.verified.snapshot.runs.len()
-            && self
-                .verified
-                .snapshot
-                .runs
-                .iter()
-                .all(|run| host.runs.get(&run.thread_id) == Some(run))
-            && host.settings.len() == self.verified.snapshot.settings.len()
-            && self
-                .verified
-                .snapshot
-                .settings
-                .iter()
-                .all(|(key, value)| host.settings.get(key) == Some(value))
-    }
 }
