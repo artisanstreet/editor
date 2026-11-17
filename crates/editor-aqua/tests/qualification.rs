@@ -169,7 +169,7 @@ fn tree_manifest_covers_nested_files_and_rejects_symlinks() {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink("content", root.join("blobs/link")).unwrap();
-        assert!(TreeManifest::capture_stable(root).is_err());
+        TreeManifest::capture_stable(root).unwrap_err();
     }
 }
 
@@ -184,16 +184,20 @@ fn immutable_fixture_rejects_duplicates_unknown_references_and_changed_bytes() {
     std::fs::write(&path, &bytes).unwrap();
     parsed.verify_unchanged(&path).unwrap();
     std::fs::write(&path, [bytes, vec![b' ']].concat()).unwrap();
-    assert!(parsed.verify_unchanged(&path).is_err());
+    parsed.verify_unchanged(&path).unwrap_err();
     let mut duplicate = fixture();
     duplicate.items.push(duplicate.items[0].clone());
-    assert!(ImmutableFixture::parse(serde_json::to_vec(&duplicate).unwrap()).is_err());
+    let Err(_) = ImmutableFixture::parse(serde_json::to_vec(&duplicate).unwrap()) else {
+        panic!("the duplicate fixture must be rejected");
+    };
     let mut unknown = fixture();
     unknown.items[0].thread_id = "missing".into();
-    assert!(ImmutableFixture::parse(serde_json::to_vec(&unknown).unwrap()).is_err());
+    let Err(_) = ImmutableFixture::parse(serde_json::to_vec(&unknown).unwrap()) else {
+        panic!("the unknown fixture must be rejected");
+    };
     let mut unknown_run = fixture();
     unknown_run.items[0].run_id = Some("missing".into());
-    assert!(unknown_run.validate().is_err());
+    unknown_run.validate().unwrap_err();
 }
 
 #[test]
@@ -203,23 +207,23 @@ fn parent_order_rejects_forward_self_and_cyclic_references() {
     child.id = "item-b".into();
     child.parent_id = Some("item-a".into());
     ordered.items.push(child);
-    assert!(ordered.validate().is_ok());
+    ordered.validate().unwrap();
     let mut forward = ordered.clone();
     forward.items.swap(0, 1);
-    assert!(forward.validate().is_err());
+    forward.validate().unwrap_err();
     let mut self_parent = ordered.clone();
     self_parent.items[0].parent_id = Some("item-a".into());
-    assert!(self_parent.validate().is_err());
+    self_parent.validate().unwrap_err();
     let mut cyclic = ordered.clone();
     cyclic.items[0].parent_id = Some("item-b".into());
-    assert!(cyclic.validate().is_err());
+    cyclic.validate().unwrap_err();
     let mut thread_child = ordered.threads[0].clone();
     thread_child.id = "thread-b".into();
     thread_child.parent_thread_id = Some("thread-a".into());
     ordered.threads.push(thread_child);
-    assert!(ordered.validate().is_ok());
+    ordered.validate().unwrap();
     ordered.threads.swap(0, 1);
-    assert!(ordered.validate().is_err());
+    ordered.validate().unwrap_err();
 }
 
 #[test]
@@ -245,9 +249,9 @@ fn checkpoint_digest_canonicalizes_nested_objects_and_rejects_unsorted_pending()
         .insert("fixture".into(), serde_json::json!({"outer":{"a":3,"z":1}}));
     assert_ne!(first.digest().unwrap(), second.digest().unwrap());
     second.pending = vec!["network".into(), "images".into()];
-    assert!(second.digest().is_err());
+    second.digest().unwrap_err();
     second.pending = vec!["images".into(), "images".into()];
-    assert!(second.digest().is_err());
+    second.digest().unwrap_err();
 }
 
 #[test]
@@ -334,7 +338,7 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
         let mut invalid = fixture();
         invalid.items[0].parent_id = Some("item-a".into());
         let head = server.store.head();
-        assert!(invalid.seed(&server.store).await.is_err());
+        invalid.seed(&server.store).await.unwrap_err();
         assert_eq!(server.store.head(), head);
         let input = fixture();
         let snapshot = input.seed(&server.store).await.unwrap();
@@ -352,7 +356,7 @@ fn real_forge_builtin_and_seed_are_observed_without_dropping_scratch() {
             .set_setting("fixture-change".into(), serde_json::json!(true))
             .await
             .unwrap();
-        assert!(snapshot.verify_stable(&server.store, &input).await.is_err());
+        snapshot.verify_stable(&server.store, &input).await.unwrap_err();
         let updated = StoreSnapshot::capture_stable(&server.store, &input)
             .await
             .unwrap();

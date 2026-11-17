@@ -20,6 +20,10 @@ fn number(name: &str, default: f64) -> Result<f64> {
     })
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "the capture CLI tells its caller which host and account it serves on stdout"
+)]
 fn serve(fixture: PathBuf, editor_dir: PathBuf) -> Result<()> {
     use std::io::{Read, Write};
     let root = tempfile::tempdir().context("create the served Forge directory")?;
@@ -79,7 +83,7 @@ fn capture(script: &str) -> Result<bool> {
             .context("ARTISAN_AQUA_CAPTURE_LATENCY_MS is a whole number of milliseconds")?
             .filter(|delay| !delay.is_zero()),
     };
-    let text = std::fs::read_to_string(&script).with_context(|| format!("read {script}"))?;
+    let text = std::fs::read_to_string(script).with_context(|| format!("read {script}"))?;
     let records = run_script(options, &text)?;
     tracing::info!(captures = records.len(), "script finished");
     Ok(true)

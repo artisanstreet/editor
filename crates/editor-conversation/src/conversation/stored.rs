@@ -138,6 +138,11 @@ impl StoredConversation {
         }
     }
 
+    #[cfg(feature = "qualification")]
+    pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
+        self.owner.wake_mailbox()
+    }
+
     pub fn ensure(
         &mut self,
         scope: &PresentationScope,

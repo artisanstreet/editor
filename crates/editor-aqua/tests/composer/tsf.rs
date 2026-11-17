@@ -112,9 +112,9 @@ impl Rig {
         for _ in 0..4 {
             let mut events = Vec::new();
             self.tsf.drain(&mut events);
-            events
-                .into_iter()
-                .for_each(|event| self.step(RuntimeInput::Ime(event)));
+            for event in events {
+                self.step(RuntimeInput::Ime(event));
+            }
             self.frame();
         }
     }

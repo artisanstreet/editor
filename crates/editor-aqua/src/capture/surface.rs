@@ -24,7 +24,7 @@ pub struct Pixels {
 
 impl Pixels {
     pub fn is_opaque(&self) -> bool {
-        self.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
+        self.rgba.as_chunks::<4>().0.iter().all(|[_, _, _, alpha]| *alpha == 255)
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<()> {

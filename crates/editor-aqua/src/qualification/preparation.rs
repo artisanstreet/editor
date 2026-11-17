@@ -83,6 +83,10 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "the qualification CLI reports the prepared seed to its caller on stdout"
+)]
 pub fn prepare(path: &Path) -> Result<()> {
     let request: Preparation = serde_json::from_slice(&std::fs::read(path)?)?;
     let fixture_path = super::fixture::canonical_path(&request.fixture)?;
@@ -184,6 +188,10 @@ pub fn prepare(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::print_stdout,
+    reason = "the qualification CLI reports the restored seed to its caller on stdout"
+)]
 pub fn restore(path: &Path, expected_sha256: &str) -> Result<()> {
     let parent = path.parent().context("seed record has no parent")?;
     marked(parent)?;
