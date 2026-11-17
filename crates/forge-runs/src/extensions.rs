@@ -140,7 +140,7 @@ impl Hub {
 
     /// skills.sh's skills for `query`.
     pub async fn marketplace_search(&self, query: &str) -> Result<Vec<artisan_api::Listing>> {
-        forge_engines::search_skills(self.engines().http(), &self.skills_sh_url(), query)
+        forge_engines::search_skills(self.engines().http(), forge_engines::SKILLS_SH_URL, query)
             .await
             .map_err(|error| refused(format!("Couldn't search skills.sh: {error:#}")))
     }

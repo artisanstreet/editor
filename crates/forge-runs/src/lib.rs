@@ -104,8 +104,6 @@ struct Inner {
     approvals: Mutex<HashMap<ItemId, approvals::OwnApproval>>,
     /// How runs read the free space where they work.
     disk: disk::Probe,
-    /// Where the Marketplace searches skills.sh.
-    skills_sh: Mutex<String>,
     /// MCP sign-ins waiting for their redirect.
     mcp_flows: Mutex<mcp_auth::Flows>,
     /// Serialises changes to the `mcp_auth` setting.
@@ -214,7 +212,6 @@ impl Hub {
                 agent_waiters: Mutex::new(HashMap::new()),
                 approvals: Mutex::new(HashMap::new()),
                 disk,
-                skills_sh: Mutex::new(forge_engines::SKILLS_SH_URL.to_owned()),
                 mcp_flows: Mutex::new(mcp_auth::Flows::default()),
                 mcp_auth_writes: tokio::sync::Mutex::new(()),
                 mcp_unreachable: Mutex::default(),
@@ -229,23 +226,6 @@ impl Hub {
     #[must_use]
     pub fn store(&self) -> &Store {
         &self.inner.store
-    }
-
-    /// Points the Marketplace's skills.sh search elsewhere: a test's stub.
-    pub fn set_skills_sh_url(&self, url: impl Into<String>) {
-        *self
-            .inner
-            .skills_sh
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = url.into();
-    }
-
-    pub(crate) fn skills_sh_url(&self) -> String {
-        self.inner
-            .skills_sh
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
     }
 
     #[must_use]
