@@ -59,17 +59,7 @@ pub enum SliderCommand {
     Previous,
     Next,
 }
-impl SliderCommand {
-    pub fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "home" => Some(Self::Start),
-            "end" => Some(Self::End),
-            "left" | "down" => Some(Self::Previous),
-            "right" | "up" => Some(Self::Next),
-            _ => None,
-        }
-    }
-}
+impl SliderCommand {}
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -169,10 +159,6 @@ impl Slider {
         }
     }
 
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
     pub fn on_change(mut self, handler: impl Fn(f64) + 'static) -> Self {
         self.on_change = Some(Rc::new(handler));
         self

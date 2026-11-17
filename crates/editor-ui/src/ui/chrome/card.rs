@@ -7,7 +7,6 @@ use aqua_ui::element::Element;
 use std::sync::Arc;
 
 pub const RADIUS: f32 = Radius::Shell.px();
-pub const INSET_RADIUS: f32 = Radius::Panel.px();
 
 const RIM_LIGHT: f32 = 0.04;
 const RIM_SHADE: f32 = 0.25;
@@ -69,31 +68,8 @@ impl Surfaces {
 }
 
 #[must_use]
-pub fn inset(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
-    let surfaces = Surfaces::of(theme);
-    outlined(
-        surfaces.ink,
-        surfaces.inner,
-        INSET_RADIUS,
-        rest_shadows(theme),
-        children,
-    )
-}
-
-#[must_use]
 pub fn double_rule(theme: &ArtisanTheme, bleed: f32) -> Element {
     crate::ui::kit::Divider::Rule.build(theme, bleed)
-}
-
-#[must_use]
-pub fn card(theme: &ArtisanTheme, surface: Oklch, children: Vec<Element>) -> Element {
-    outlined(
-        theme.colors.text,
-        surface,
-        RADIUS,
-        rest_shadows(theme),
-        children,
-    )
 }
 
 #[must_use]

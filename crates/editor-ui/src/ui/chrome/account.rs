@@ -170,14 +170,6 @@ pub fn menu_surface(theme: &ArtisanTheme, children: Vec<Element>) -> Element {
     Surface::Menu.build(theme, children)
 }
 
-pub fn menu_radius() -> f32 {
-    Surface::Menu.radius_px()
-}
-
-pub fn hover_style(theme: &ArtisanTheme) -> Style {
-    Hover::Neutral.style(theme)
-}
-
 pub fn menu(theme: &ArtisanTheme, sheet: Sheet<'_>) -> Element {
     let palette = Palette::of(theme);
     let entry = |spot, title: &str, icon| item(theme, &palette, spot, title, icon, &sheet.emit);

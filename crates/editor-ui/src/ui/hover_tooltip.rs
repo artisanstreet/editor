@@ -133,10 +133,6 @@ impl TooltipHost {
         Ok(true)
     }
 
-    pub fn root(&self, app: &aqua::UiApp) -> Option<NodeId> {
-        app.host().popup_root(self.popup.overlay())
-    }
-
     pub fn is_open(&self, app: &aqua::UiApp) -> bool {
         app.host().is_open(self.popup.overlay())
     }

@@ -230,15 +230,6 @@ impl Oklch {
         self.with_alpha(self.a * purpose.alpha())
     }
     #[must_use]
-    pub const fn in_hue_of(self, family: Self) -> Self {
-        Self {
-            c: family.c,
-            h: family.h,
-            paint: None,
-            ..self
-        }
-    }
-    #[must_use]
     pub fn fade(self, amount: f32) -> Self {
         self.with_alpha(self.a * amount.clamp(0.0, 1.0))
     }
@@ -334,13 +325,6 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
-    #[must_use]
-    pub const fn toggled(self) -> Self {
-        match self {
-            Self::Light => Self::Dark,
-            Self::Dark => Self::Light,
-        }
-    }
     #[must_use]
     pub const fn is_dark(self) -> bool {
         matches!(self, Self::Dark)
@@ -753,39 +737,7 @@ pub struct TypographyTokens {
     pub editor_text_desktop: Pixels,
     pub label_text: Pixels,
 }
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum TextStep {
-    X3s,
-    X2s,
-    Xs,
-    Terminal,
-    XsMid,
-    Sm,
-    SmMid,
-    Base,
-    Lg,
-    Xl,
-    X2l,
-}
 
-impl TypographyTokens {
-    #[must_use]
-    pub const fn size(step: TextStep) -> Pixels {
-        match step {
-            TextStep::X3s => px(10.0),
-            TextStep::X2s => px(11.0),
-            TextStep::Xs => px(12.0),
-            TextStep::Terminal => px(12.5),
-            TextStep::XsMid => px(13.0),
-            TextStep::Sm => px(14.0),
-            TextStep::SmMid => px(15.0),
-            TextStep::Base => px(16.0),
-            TextStep::Lg => px(18.0),
-            TextStep::Xl => px(20.0),
-            TextStep::X2l => px(22.0),
-        }
-    }
-}
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum FontSet {
     #[default]
@@ -808,14 +760,6 @@ impl FontSet {
             .into_iter()
             .find(|fonts| Some(fonts.key()) == key)
             .unwrap_or_default()
-    }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Spline => "Spline",
-            Self::System => "System",
-        }
     }
 
     const fn sans(self) -> &'static str {
@@ -853,18 +797,12 @@ impl ProseTypography {
     pub const BODY_SIZE_PX: f32 = 16.0;
     pub const BODY_LINE_PX: f32 = 28.0;
     pub const BODY_WEIGHT: FontWeight = FontWeight(410);
-    pub const BODY_TRACKING_PX: f32 = -0.64;
     pub const TRACKING_EM: f32 = -0.04;
-    #[must_use]
-    pub const fn body_tracking_px(size_px: f32) -> f32 {
-        size_px * Self::TRACKING_EM
-    }
     pub const HEADING_WEIGHT: FontWeight = FontWeight(630);
     pub const STRONG_WEIGHT: FontWeight = FontWeight(600);
     pub const LINK_WEIGHT: FontWeight = FontWeight::MEDIUM;
     pub const CODE_SIZE_PX: f32 = 14.0;
     pub const CODE_LINE_PX: f32 = 24.0;
-    pub const CODE_PAD_PX: f32 = 16.0;
     pub const PARAGRAPH_MARGIN_PX: f32 = 20.0;
     pub const FENCE_MARGIN_PX: f32 = 24.0;
     pub const LIST_MARGIN_PX: f32 = 20.0;
@@ -941,7 +879,6 @@ pub enum RadiusStep {
 pub struct RadiusTokens;
 
 impl RadiusTokens {
-    pub const BASE_PX: f32 = 10.0;
     #[must_use]
     pub const fn value(step: RadiusStep) -> Pixels {
         match step {
@@ -960,11 +897,6 @@ impl RadiusTokens {
             RadiusStep::X3l => px(22.0),
             RadiusStep::X4l => px(26.0),
         }
-    }
-    #[must_use]
-    pub fn nested(surface: Pixels, gap: Pixels) -> Pixels {
-        let inner = f32::from(surface) - f32::from(gap);
-        px(inner.max(0.0))
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]

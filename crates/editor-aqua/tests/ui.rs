@@ -61,8 +61,5 @@ mod chat_bubble;
 #[path = "ui/media_frame.rs"]
 mod media_frame;
 
-#[path = "../../editor-ui/tests/ui/solar/sample.rs"]
-mod solar_sample;
-
 #[path = "../../editor-ui/tests/ui/sky/sample.rs"]
 mod sky_sample;

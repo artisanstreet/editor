@@ -82,10 +82,6 @@ impl Dialog {
         self.viewport_width = Some((inset, maximum));
         self
     }
-    pub fn description(mut self, text: impl Into<String>) -> Self {
-        self.description = Some(text.into());
-        self
-    }
     pub fn on_dismiss(mut self, handler: impl Fn(DialogDismissReason) + 'static) -> Self {
         self.dismiss = Some(Rc::new(handler));
         self
@@ -157,18 +153,6 @@ impl Dialog {
             .with_key(self.id)
             .role(Role::Dialog)
             .aria_label(self.title)
-    }
-
-    pub fn dismiss_callback(&self) -> Option<Rc<dyn Fn(DialogDismissReason)>> {
-        if self.dismissible {
-            self.dismiss.clone()
-        } else {
-            None
-        }
-    }
-
-    pub const fn is_soft_backdrop(&self) -> bool {
-        self.soft_backdrop
     }
 }
 
@@ -279,12 +263,6 @@ impl DialogHost {
                 self.closing.set(None);
             }
         }
-    }
-
-    pub fn handle_input(&self, app: &mut aqua::UiApp, event: &aqua_core::InputEvent) -> bool {
-        let handled = app.handle_input(event);
-        self.sync(app);
-        handled
     }
 
     pub fn is_open(&self, app: &aqua::UiApp) -> bool {

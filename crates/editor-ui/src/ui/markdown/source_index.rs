@@ -32,12 +32,6 @@ impl MarkdownIndex {
     pub fn context(&self, leaf: usize) -> Option<&LeafContext> {
         self.0.context(leaf)
     }
-    pub const fn source_bytes(&self) -> usize {
-        self.0.source_bytes()
-    }
-    pub fn resident_bytes(&self) -> usize {
-        self.0.resident_bytes()
-    }
     pub fn normalize_leaf(
         &self,
         leaf: usize,

@@ -81,11 +81,6 @@ impl ChatBubbleSegment {
         self
     }
 
-    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
-        self.selector = Some(selector.into());
-        self
-    }
-
     pub fn build(self) -> Element {
         let first = self.position.first();
         let last = self.position.last();

@@ -3,7 +3,6 @@ use crate::ui::asset::source_asset_glyph;
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Radius, concentric};
-use crate::ui::motion::MotionPolicy;
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::{CursorIcon, Role, Transform2D};
 use aqua_ui::element::{Button, Element, Key};
@@ -58,7 +57,6 @@ pub struct IconButton {
     selected: bool,
     hover: Hover,
     disabled: bool,
-    motion: MotionPolicy,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
 }
 
@@ -83,7 +81,6 @@ impl IconButton {
             selected: false,
             hover: Hover::Neutral,
             disabled: false,
-            motion: MotionPolicy::Full,
             on_activate: None,
         }
     }
@@ -128,12 +125,6 @@ impl IconButton {
     }
 
     #[must_use]
-    pub const fn destructive(mut self) -> Self {
-        self.hover = Hover::Destructive;
-        self
-    }
-
-    #[must_use]
     pub const fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         self
@@ -142,12 +133,6 @@ impl IconButton {
     #[must_use]
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-
-    #[must_use]
-    pub const fn motion_policy(mut self, motion: MotionPolicy) -> Self {
-        self.motion = motion;
         self
     }
 
@@ -219,11 +204,6 @@ impl IconButton {
                 .focus_visible_style(focus_ring(&theme))
                 .hover_style(hover),
         );
-        match self.motion {
-            MotionPolicy::Full => {
-                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.0)))
-            }
-            MotionPolicy::Reduced => element,
-        }
+        element.pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.0)))
     }
 }

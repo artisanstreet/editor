@@ -74,21 +74,8 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
         }
         self
     }
-    pub const fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
     pub fn on_change(mut self, handler: impl Fn(T) + 'static) -> Self {
         self.change = Some(Rc::new(handler));
-        self
-    }
-    pub fn on_focus_change(mut self, handler: impl Fn(usize) + 'static) -> Self {
-        self.focus_change = Some(Rc::new(handler));
-        self
-    }
-
-    pub fn focus_host(mut self, host: &SegmentedFocus) -> Self {
-        self.focus_request = Some(host.pending.clone());
         self
     }
 
@@ -205,32 +192,5 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             .with_key(self.id)
             .role(Role::RadioGroup)
             .aria_label(self.label)
-    }
-}
-
-#[derive(Default, Clone)]
-pub struct SegmentedFocus {
-    pending: Rc<std::cell::Cell<Option<(aqua_core::NodeId, usize)>>>,
-}
-
-impl SegmentedFocus {
-    pub fn sync(&self, app: &mut aqua::UiApp) -> bool {
-        let Some((current, index)) = self.pending.take() else {
-            return false;
-        };
-        let target = app
-            .tree()
-            .get(current)
-            .and_then(|item| item.parent)
-            .and_then(|parent| app.tree().get(parent))
-            .and_then(|group| group.children.get(index))
-            .copied();
-        target.is_some_and(|node| app.tree_mut().set_focused(Some(node)))
-    }
-
-    pub fn handle_input(&self, app: &mut aqua::UiApp, event: &aqua_core::InputEvent) -> bool {
-        let handled = app.handle_input(event);
-        self.sync(app);
-        handled
     }
 }

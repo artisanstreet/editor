@@ -73,10 +73,6 @@ impl MenuMotion {
         self.phase
     }
     #[must_use]
-    pub fn painted(self) -> bool {
-        self.phase != MenuPhase::Hidden
-    }
-    #[must_use]
     pub const fn transition(self) -> Option<(f32, f32, f32, f32, u64)> {
         match self.phase {
             MenuPhase::Opening | MenuPhase::Closing => Some((

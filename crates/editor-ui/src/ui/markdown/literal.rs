@@ -1,7 +1,7 @@
 use super::stored::{RangeCollector, StoredOwner, StoredSource};
-use editor_core::{delivery::Delivery, runtime};
 use aqua_text::document::{SelectionSource, SelectionSourceId};
 use artisan_api::{ContentRange, ContentRef, SourceIndexFormat, SourceLeafDescriptor};
+use editor_core::{delivery::Delivery, runtime};
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroUsize,
@@ -22,7 +22,6 @@ const MAX_FETCHES: usize = 4;
 const MAX_LEAF_BYTES: usize = 64 * 1024;
 const FETCH_HEADROOM: usize = 65_539;
 pub const MAX_NATIVE_SOURCE: usize = 16 * 1024;
-pub const NATIVE_BODY_WINDOW: usize = 64;
 
 #[derive(Clone)]
 pub enum LiteralPreparation {
@@ -47,13 +46,6 @@ pub struct LiteralLeaf {
     pub source_ref: ContentRef,
     pub ordinal: usize,
     pub source_range: Range<usize>,
-    source: StoredSource,
-    descriptor: SourceLeafDescriptor,
-    key: String,
-    generation: u64,
-    valid: Arc<AtomicBool>,
-    owner_epoch: Weak<AtomicU64>,
-    epoch: u64,
     _lease: Lease,
 }
 
@@ -64,9 +56,6 @@ pub struct LiteralSelection {
 impl LiteralSelection {
     pub fn source(&self) -> &SelectionSource {
         &self.source
-    }
-    pub fn leaf(&self) -> &Arc<LiteralLeaf> {
-        &self._leaf
     }
 }
 
@@ -193,22 +182,6 @@ impl LiteralOwner {
     pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
         self.delivery.wake_mailbox()
     }
-    pub fn release(&mut self, key: &str) {
-        self.epochs.release(key);
-        self.epochs.prune();
-        self.entries.retain(|entry| {
-            if entry.key == key {
-                entry.valid.store(false, Ordering::Relaxed);
-                false
-            } else {
-                true
-            }
-        });
-    }
-    pub fn retry(&mut self, key: &str) {
-        self.release(key);
-        self.delivery.wake();
-    }
     pub fn clear(&mut self) {
         self.epochs.clear();
         self.epoch.fetch_add(1, Ordering::Relaxed);
@@ -217,20 +190,6 @@ impl LiteralOwner {
         }
         self.entries.clear();
         self.generation = self.generation.wrapping_add(1);
-    }
-    pub fn is_current(&self, owner: &StoredOwner, leaf: &LiteralLeaf) -> bool {
-        leaf.valid.load(Ordering::Relaxed)
-            && leaf.owner_epoch.upgrade().is_some_and(|epoch| {
-                Arc::ptr_eq(&epoch, &self.epoch) && epoch.load(Ordering::Relaxed) == leaf.epoch
-            })
-            && owner.source_is_current(&leaf.source)
-            && leaf.source.format() == SourceIndexFormat::Literal
-            && leaf.source.descriptor(leaf.ordinal) == Some(&leaf.descriptor)
-            && self
-                .entries
-                .iter()
-                .find(|entry| entry.key == leaf.key)
-                .is_none_or(|entry| entry.generation == leaf.generation)
     }
     pub fn prepare(
         &mut self,
@@ -435,13 +394,6 @@ impl LiteralOwner {
                 source_ref: entry.source.source_ref().clone(),
                 ordinal: entry.descriptor.ordinal as usize,
                 source_range: start..end,
-                source: entry.source.clone(),
-                descriptor: entry.descriptor.clone(),
-                key: entry.key.clone(),
-                generation: entry.generation,
-                valid: entry.valid.clone(),
-                owner_epoch: Arc::downgrade(&self.epoch),
-                epoch: self.epoch.load(Ordering::Relaxed),
                 _lease: Lease {
                     permit: Some(permit),
                     wake: self.delivery.waker(),

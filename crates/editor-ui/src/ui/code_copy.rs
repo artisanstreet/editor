@@ -11,12 +11,7 @@ use aqua_ui::{
 };
 use editor_assets::AssetId;
 
-use super::{
-    asset::source_asset_glyph,
-    button::{Button, ButtonVariant},
-    motion::MotionCurve,
-    theme::ArtisanTheme,
-};
+use super::{asset::source_asset_glyph, button::Button, motion::MotionCurve, theme::ArtisanTheme};
 
 const HOLD: Duration = Duration::from_millis(1_500);
 const SWAP: Duration = Duration::from_millis(250);
@@ -134,7 +129,6 @@ impl CodeCopyButton {
         let effect = self.effect;
         let source = self.source;
         Button::icon(self.id, self.theme, AssetId::TABLER_COPY, "Copy code")
-            .variant(ButtonVariant::Ghost)
             .icon_slot(icon.build())
             .on_activate(move |_| {
                 let now = Instant::now();

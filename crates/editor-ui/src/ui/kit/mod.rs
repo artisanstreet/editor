@@ -13,7 +13,6 @@ pub use control::hit_area::HitArea;
 pub use control::icon_button::{Finish, IconButton, IconButtonSize};
 pub use control::key::{Key, KeyFace, KeySize};
 pub use control::link::{Link, LinkTone};
-pub use control::tabs::{Tabs, TabsStyle};
 pub use control::trigger::{Lead, Trigger, TriggerSize};
 pub use divider::Divider;
 pub use hover::{Highlight, Hover, live};

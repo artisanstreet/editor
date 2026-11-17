@@ -120,7 +120,6 @@ pub fn glass_card_shadows(theme: &ArtisanTheme, elevation: Elevation) -> Vec<Gla
     shadows
 }
 
-pub const KEY_RADIUS: f32 = Radius::Field.px();
 pub const COMPOSER_PADDING: f32 = Inset::Frame.px();
 pub const COMPOSER_RADIUS: f32 = Radius::Well.px();
 fn on_glass(content: Element) -> Element {

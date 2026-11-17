@@ -43,11 +43,6 @@ impl Switch {
         self
     }
 
-    pub const fn focus_visible(mut self, focus_visible: bool) -> Self {
-        self.focus_visible = focus_visible;
-        self
-    }
-
     pub fn on_change(mut self, handler: impl Fn(bool) + 'static) -> Self {
         self.on_change = Some(Box::new(handler));
         self

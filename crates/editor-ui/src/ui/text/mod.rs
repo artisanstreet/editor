@@ -2,7 +2,6 @@ pub mod editor;
 pub mod metrics;
 pub mod mount;
 pub mod tokens;
-pub mod truncated;
 pub mod wheel_glide;
 
 pub use aqua_text::navigation::{

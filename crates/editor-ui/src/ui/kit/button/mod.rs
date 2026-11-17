@@ -5,7 +5,6 @@ use crate::ui::chrome::card::{POLAR_INK, polar_face, soft};
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{Elevation, IconSize, Radius, Space, TextRole, concentric};
-use crate::ui::motion::MotionPolicy;
 use crate::ui::theme::{ArtisanTheme, Cast, Oklch, Opacity};
 use aqua::ShadowLayer;
 use aqua_core::{CursorIcon, DisplayItem, Insets, Role, Transform2D};
@@ -82,7 +81,6 @@ pub struct Button {
     ellipsis: Option<Ellipsis>,
     disabled: bool,
     hover: Hover,
-    motion: MotionPolicy,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
     debug_selector: Option<String>,
 }
@@ -105,7 +103,6 @@ impl Button {
             ellipsis: None,
             disabled: false,
             hover: Hover::Neutral,
-            motion: MotionPolicy::Full,
             on_activate: None,
             debug_selector: None,
         }
@@ -118,12 +115,6 @@ impl Button {
         label: impl Into<String>,
     ) -> Self {
         Self::new(key, theme, tone, ButtonSize::Md, Label::Text(label.into()))
-    }
-
-    #[must_use]
-    pub const fn destructive(mut self) -> Self {
-        self.hover = Hover::Destructive;
-        self
     }
 
     #[must_use]
@@ -156,12 +147,6 @@ impl Button {
     #[must_use]
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-
-    #[must_use]
-    pub const fn motion_policy(mut self, motion: MotionPolicy) -> Self {
-        self.motion = motion;
         self
     }
 
@@ -329,11 +314,6 @@ impl Button {
             true => live::track(element),
             false => element,
         };
-        match self.motion {
-            MotionPolicy::Full => {
-                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
-            }
-            MotionPolicy::Reduced => element,
-        }
+        element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
     }
 }

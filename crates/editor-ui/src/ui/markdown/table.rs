@@ -1,7 +1,7 @@
 use pulldown_cmark::Alignment;
 use std::ops::Range;
 
-use super::{Span, spans_text};
+use super::Span;
 
 pub use artisan_markdown_index::TableAlignment;
 
@@ -18,21 +18,7 @@ pub struct Table {
     pub range: Range<usize>,
 }
 
-impl Table {
-    #[must_use]
-    pub fn text_content(&self) -> String {
-        std::iter::once(&self.header)
-            .chain(&self.rows)
-            .map(|row| {
-                row.iter()
-                    .map(|cell| spans_text(&cell.spans))
-                    .collect::<Vec<_>>()
-                    .join("\t")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-}
+impl Table {}
 
 pub(super) struct TableBuilder {
     alignments: Vec<TableAlignment>,

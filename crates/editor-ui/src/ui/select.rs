@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 use super::picker_motion::MenuMotion;
 
-pub const MENU_MOTION: Duration = super::picker_motion::DROPDOWN_OPEN;
 pub const OPTION_HEIGHT: f32 = match super::kit::Row::MenuItem.height() {
     Some(height) => height,
     None => 0.0,
@@ -25,11 +24,6 @@ impl<V> SelectEntry<V> {
             label: label.into(),
             disabled: false,
         }
-    }
-
-    pub const fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
     }
 }
 
@@ -103,18 +97,6 @@ impl<V: Clone + Eq> SelectState<V> {
             self.query.clear();
         }
         Some(generation)
-    }
-
-    pub fn finish(&mut self, generation: u64, open: bool) -> bool {
-        let settled = if open {
-            self.motion.finish_open(generation)
-        } else {
-            self.motion.finish_close(generation)
-        };
-        if settled && !open {
-            self.shown = false;
-        }
-        settled
     }
 
     pub fn close_now(&mut self) {
@@ -279,10 +261,6 @@ impl<V: Clone + Eq + 'static> Select<V> {
     }
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
-        self
-    }
-    pub const fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
         self
     }
     pub fn on_change(mut self, change: impl Fn(V) + 'static) -> Self {
@@ -552,212 +530,5 @@ impl<V: Clone + Eq + 'static> SelectMenu<V> {
         MENU.build(&theme, vec![scroll])
             .style(Style::new().width(Length::Px(self.trigger_width.max(MENU_MIN_WIDTH))))
             .role(Role::ListBox)
-    }
-}
-
-pub struct SelectPopupHost<V: Clone + Eq + 'static> {
-    overlay: aqua_ui::overlay::OverlayId,
-    state: Rc<RefCell<SelectState<V>>>,
-    factory: Rc<dyn Fn() -> Element>,
-    on_open_change: Option<OpenChange>,
-    flight: Option<(u64, bool, f64)>,
-    scale: f32,
-    from_scale: f32,
-    now: f64,
-}
-
-impl<V: Clone + Eq + 'static> SelectPopupHost<V> {
-    pub fn open(
-        app: &mut aqua::UiApp,
-        owner: aqua_core::NodeId,
-        menu: SelectMenu<V>,
-        now: f64,
-    ) -> Result<Self, String> {
-        use aqua_ui::overlay::{Align, DismissPolicy, OverlayKind};
-        use aqua_ui::popup::{PopupFocus, PopupOptions};
-        let state = menu.state.clone();
-        if !state.borrow().open {
-            state.borrow_mut().set_open(true);
-        }
-        let on_open_change = menu.open_change.clone();
-        let factory: Rc<dyn Fn() -> Element> = Rc::new(move || {
-            SelectMenu {
-                theme: menu.theme,
-                selected: menu.selected.clone(),
-                entries: menu.entries.clone(),
-                state: menu.state.clone(),
-                trigger_width: menu.trigger_width,
-                change: menu.change.clone(),
-                open_change: menu.open_change.clone(),
-            }
-            .build()
-        });
-        let mut options = PopupOptions::menu();
-        options.kind = OverlayKind::Popover;
-        options.focus = PopupFocus::Preserve;
-        options.dismiss = DismissPolicy::MANUAL;
-        options.placement.align = Align::Start;
-        options.placement.gap = MENU_GAP;
-        options.placement.flip = false;
-        let overlay = app
-            .open_popup_measured(owner, factory(), options)
-            .map_err(|error| error.to_string())?;
-        app.set_popup_uncontained(overlay, true);
-        let mut host = Self {
-            overlay,
-            state,
-            factory,
-            on_open_change,
-            flight: None,
-            scale: super::picker_motion::DROPDOWN_PRE_SCALE,
-            from_scale: super::picker_motion::DROPDOWN_PRE_SCALE,
-            now,
-        };
-        host.advance(app, now)?;
-        Ok(host)
-    }
-
-    pub fn advance(&mut self, app: &mut aqua::UiApp, now: f64) -> Result<(), String> {
-        use super::picker_motion::MenuPhase;
-        self.now = now;
-        let (phase, transition) = {
-            let state = self.state.borrow();
-            (state.motion.phase(), state.motion.transition())
-        };
-        let Some((_, _, _, _, generation)) = transition else {
-            if phase == MenuPhase::Open {
-                app.refresh_popup(self.overlay, (self.factory)())
-                    .map_err(|error| error.to_string())?;
-            }
-            return Ok(());
-        };
-        let closing = phase == MenuPhase::Closing;
-        if self
-            .flight
-            .as_ref()
-            .is_none_or(|(old, _, _)| *old != generation)
-        {
-            self.from_scale = self.scale;
-            self.flight = Some((generation, closing, now));
-        }
-        let Some((_, _, started)) = self.flight else {
-            return Ok(());
-        };
-        let duration = if closing {
-            super::picker_motion::DROPDOWN_CLOSE
-        } else {
-            MENU_MOTION
-        }
-        .as_secs_f64();
-        let reduced =
-            app.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let progress = if duration > 0.0 && !reduced {
-            ((now - started) / duration).clamp(0.0, 1.0) as f32
-        } else {
-            1.0
-        };
-        let settled = progress >= 1.0;
-        let (opacity, _) = {
-            let mut state = self.state.borrow_mut();
-            state
-                .motion
-                .apply_progress(generation, super::picker_motion::eased(phase, progress));
-            let frame = state.motion.frame();
-            if settled {
-                state.finish(generation, !closing);
-            }
-            frame
-        };
-        let target_scale = super::picker_motion::travel_scale(phase);
-        self.scale = (target_scale - self.from_scale).mul_add(
-            super::picker_motion::eased(phase, progress),
-            self.from_scale,
-        );
-        let scale = self.scale;
-        let element = (self.factory)().style(
-            Style::new()
-                .opacity(opacity)
-                .transform(aqua_core::Transform2D::scale(scale, scale)),
-        );
-        app.refresh_popup(self.overlay, element)
-            .map_err(|error| error.to_string())?;
-        if settled {
-            self.flight = None;
-            if closing {
-                app.close_popup(self.overlay);
-            }
-        }
-        Ok(())
-    }
-
-    pub fn handle_input(
-        &mut self,
-        app: &mut aqua::UiApp,
-        event: &aqua_core::InputEvent,
-    ) -> Result<bool, String> {
-        if let aqua_core::InputEvent::PointerDown(pointer, aqua_core::PointerButton::Primary) =
-            event
-        {
-            let outside = app
-                .host()
-                .service()
-                .bounds(self.overlay)
-                .is_some_and(|bounds| !bounds.contains(pointer.position));
-            if outside && self.state.borrow().open {
-                self.state.borrow_mut().set_open(false);
-                if let Some(change) = &self.on_open_change {
-                    change(false);
-                }
-            }
-        }
-        let handled = app.handle_input(event);
-        self.advance(app, self.now)?;
-        Ok(handled)
-    }
-
-    pub fn step(
-        &mut self,
-        app: &mut aqua::UiApp,
-        input: aqua::RuntimeInput,
-    ) -> Result<aqua::RuntimeOutput, String> {
-        if let aqua::RuntimeInput::Shell(aqua_protocol::ShellEvent::Input {
-            event: aqua_core::InputEvent::PointerDown(pointer, aqua_core::PointerButton::Primary),
-            ..
-        }) = &input
-        {
-            let outside = app
-                .host()
-                .service()
-                .bounds(self.overlay)
-                .is_some_and(|bounds| !bounds.contains(pointer.position));
-            if outside && self.state.borrow().open {
-                self.state.borrow_mut().set_open(false);
-                if let Some(change) = &self.on_open_change {
-                    change(false);
-                }
-            }
-        }
-        if let aqua::RuntimeInput::Shell(aqua_protocol::ShellEvent::Frame {
-            presentation: now,
-            ..
-        })
-        | aqua::RuntimeInput::Tick(now) = &input
-        {
-            self.advance(app, now.as_secs_f64())?;
-        }
-        app.drive(input);
-        let output = app.take_pending();
-        if self.is_open(app) {
-            self.advance(app, self.now)?;
-        }
-        Ok(output)
-    }
-
-    pub fn is_open(&self, app: &aqua::UiApp) -> bool {
-        app.host().is_open(self.overlay)
-    }
-
-    pub fn is_animating(&self, _app: &aqua::UiApp) -> bool {
-        self.flight.is_some()
     }
 }

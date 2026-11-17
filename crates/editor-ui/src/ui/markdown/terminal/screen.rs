@@ -472,17 +472,6 @@ impl TerminalScreen {
         self.grid.content_len()
     }
 
-    pub fn take_dirty_line_indices(&mut self) -> Vec<usize> {
-        let count = self.grid.content_len();
-        self.grid
-            .lines
-            .iter_mut()
-            .take(count)
-            .enumerate()
-            .filter_map(|(index, line)| std::mem::take(&mut line.dirty).then_some(index))
-            .collect()
-    }
-
     #[must_use]
     pub fn lines(&self) -> impl DoubleEndedIterator<Item = &TerminalLine> + ExactSizeIterator {
         let styles = &self.grid.styles;
@@ -514,14 +503,6 @@ impl TerminalScreen {
             text.push_str(&line.text);
         }
         text
-    }
-
-    #[must_use]
-    pub fn last_nonempty_line(&self) -> Option<&str> {
-        self.lines()
-            .rev()
-            .map(|line| line.text.trim_end())
-            .find(|text| !text.is_empty())
     }
 
     #[must_use]

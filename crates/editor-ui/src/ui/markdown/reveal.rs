@@ -68,9 +68,6 @@ impl Default for PreparedReveal {
 }
 
 impl PreparedReveal {
-    pub fn has_presented(&self) -> bool {
-        self.presented.get()
-    }
     pub fn mark_presented(&self) {
         self.presented.set(true);
     }

@@ -90,12 +90,6 @@ impl Trigger {
     }
 
     #[must_use]
-    pub const fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
-
-    #[must_use]
     pub fn on_activate(mut self, handler: impl Fn() + 'static) -> Self {
         self.on_activate = Some(Box::new(handler));
         self

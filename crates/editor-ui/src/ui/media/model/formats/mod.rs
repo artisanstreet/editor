@@ -62,15 +62,7 @@ pub struct Model {
     pub format: Format,
 }
 
-impl Model {
-    pub fn resident_bytes(&self) -> usize {
-        self.mesh.positions.capacity() * std::mem::size_of::<super::mesh::Vec3>()
-            + self.mesh.normals.capacity() * std::mem::size_of::<super::mesh::Vec3>()
-            + self.mesh.colors.as_ref().map_or(0, |colors| {
-                colors.capacity() * std::mem::size_of::<super::mesh::Vec3>()
-            })
-    }
-}
+impl Model {}
 
 pub fn parse(bytes: &[u8], format: Option<Format>, up: Option<Up>) -> Result<Model, String> {
     let format = format

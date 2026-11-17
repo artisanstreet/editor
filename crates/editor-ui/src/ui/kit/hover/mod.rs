@@ -2,9 +2,8 @@ pub mod live;
 
 use crate::ui::chrome::glide::{CubicBezier, Glide, Transition};
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity};
-use aqua_core::{GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Transform2D};
-use aqua_ui::element::{Box as UiBox, Element};
-use aqua_ui::style::{GpuiShadowLayer, Length, Style};
+use aqua_core::{GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop};
+use aqua_ui::style::{GpuiShadowLayer, Style};
 use std::time::{Duration, Instant};
 
 const SMOOTH_OUT: CubicBezier = CubicBezier::new(0.22, 1.0, 0.36, 1.0);
@@ -33,15 +32,6 @@ pub struct Material {
 }
 
 impl Material {
-    #[must_use]
-    pub fn animate_to(self, to: Self, progress: f32) -> Self {
-        Self {
-            top: self.top.animate_to(to.top, progress),
-            bottom: self.bottom.animate_to(to.bottom, progress),
-            ring: self.ring.animate_to(to.ring, progress),
-        }
-    }
-
     #[must_use]
     pub fn fill(self) -> GpuiBackground {
         GpuiBackground::LinearGradient {
@@ -119,33 +109,6 @@ impl Hover {
     #[must_use]
     pub fn style(self, theme: &ArtisanTheme) -> Style {
         self.material(theme).style()
-    }
-
-    #[must_use]
-    pub fn layer(
-        self,
-        theme: &ArtisanTheme,
-        lit: Highlight,
-        now: Instant,
-        height: f32,
-        radius: f32,
-    ) -> Element {
-        let scale = lit.scale(now);
-        UiBox::new()
-            .style(self.style(theme))
-            .style(
-                Style::new()
-                    .absolute_at(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                    .radius(Length::Px(radius))
-                    .opacity(lit.opacity(now))
-                    .transform(
-                        Transform2D::translate(0.0, -height)
-                            .then(Transform2D::scale(1.0, scale))
-                            .then(Transform2D::translate(0.0, height)),
-                    ),
-            )
-            .build()
-            .exclude_from_hit_testing()
     }
 }
 

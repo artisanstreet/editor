@@ -523,38 +523,6 @@ impl EditorController {
         root.build()
     }
 
-    pub fn element_with_notice(
-        &self,
-        mode: Mode,
-        theme: &ArtisanTheme,
-        placeholder: &str,
-        bare: bool,
-        inset: bool,
-    ) -> Element {
-        let show_notice = self.state.borrow().limit_notice();
-        let mut root = UiBox::new()
-            .style(Style::new().axis(Axis::Column).min_width(px(0.0)))
-            .child(wrap_prompt_scroll(
-                self.element_with_chrome(mode, theme, placeholder, bare, inset),
-                mode,
-                theme,
-                bare,
-                inset,
-                self.state.borrow().shown_suggestion().map(str::to_owned),
-                None,
-            ));
-        if show_notice {
-            root = root.child(
-                Text::new("Text is limited to 64 KiB. Attach a file for larger content.")
-                    .font_size(12.0)
-                    .color(theme.colors.destructive_text.to_paint())
-                    .gpui_source_color(theme.colors.destructive_text.to_reference_text_color())
-                    .build(),
-            );
-        }
-        root.build()
-    }
-
     pub fn element_with_chrome(
         &self,
         mode: Mode,

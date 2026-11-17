@@ -6,10 +6,6 @@ pub struct WorkingPulse {
 }
 
 impl WorkingPulse {
-    pub fn reset(&self) {
-        self.started.set(None);
-    }
-
     pub fn wrap(
         &self,
         child: aqua_ui::element::Element,
@@ -58,26 +54,7 @@ impl WorkingPulse {
         Element::fragment(vec![before, child, after])
     }
 }
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum MotionPolicy {
-    Full,
-    Reduced,
-}
 
-impl MotionPolicy {
-    #[must_use]
-    pub const fn resolve(self, recipe: MotionRecipe) -> MotionPlan {
-        match self {
-            Self::Full => MotionPlan::Animate(recipe.animation()),
-            Self::Reduced => MotionPlan::Immediate,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MotionPlan {
-    Immediate,
-    Animate(MotionAnimation),
-}
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MotionDuration {
     Quick,
@@ -95,9 +72,6 @@ impl MotionDuration {
         }
     }
 }
-pub const SHIMMER_CYCLE: Duration = Duration::from_secs(3);
-pub const SHIMMER_DELAY: Duration = Duration::from_millis(1_500);
-pub const FADE_ARC_ROTATION: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MotionCurve {
     SmoothOut,
@@ -163,41 +137,4 @@ fn cubic_axis(t: f64, first: f64, second: f64) -> f64 {
         t,
         (3.0 * inverse * t * t).mul_add(second, 3.0 * inverse * inverse * t * first),
     )
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MotionAnimation {
-    duration: Duration,
-    curve: MotionCurve,
-}
-impl MotionAnimation {
-    pub const fn duration(self) -> Duration {
-        self.duration
-    }
-    pub const fn curve(self) -> MotionCurve {
-        self.curve
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum MotionRecipe {
-    IconSwap,
-    AccordionExpand,
-    TextSwap,
-}
-impl MotionRecipe {
-    const fn animation(self) -> MotionAnimation {
-        match self {
-            Self::IconSwap => MotionAnimation {
-                duration: MotionDuration::Fast.as_duration(),
-                curve: MotionCurve::EaseInOut,
-            },
-            Self::AccordionExpand => MotionAnimation {
-                duration: MotionDuration::Fast.as_duration(),
-                curve: MotionCurve::SmoothOut,
-            },
-            Self::TextSwap => MotionAnimation {
-                duration: MotionDuration::Quick.as_duration(),
-                curve: MotionCurve::EaseInOut,
-            },
-        }
-    }
 }

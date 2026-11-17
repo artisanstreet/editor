@@ -3,7 +3,6 @@ pub mod hit_area;
 pub mod icon_button;
 pub mod key;
 pub mod link;
-pub mod tabs;
 pub mod trigger;
 
 use crate::ui::theme::{ArtisanTheme, Opacity};

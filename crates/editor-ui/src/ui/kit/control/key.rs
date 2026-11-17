@@ -2,7 +2,6 @@ use super::focus_ring;
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::chrome::card::{POLAR_INK, Surfaces, key_face, polar_face};
 use crate::ui::kit::tokens::{IconSize, Radius};
-use crate::ui::motion::MotionPolicy;
 use crate::ui::theme::{ArtisanTheme, Opacity};
 use aqua_core::{CursorIcon, Role, Transform2D};
 use aqua_ui::element::{Box as UiBox, Button, Canvas, Element, Key as NodeKey};
@@ -43,7 +42,6 @@ pub struct Key {
     wide: bool,
     primary: bool,
     disabled: bool,
-    motion: MotionPolicy,
     on_activate: Option<Box<dyn Fn(ActionEvent)>>,
 }
 
@@ -64,7 +62,6 @@ impl Key {
             wide: false,
             primary: false,
             disabled: false,
-            motion: MotionPolicy::Full,
             on_activate: None,
         }
     }
@@ -84,12 +81,6 @@ impl Key {
     #[must_use]
     pub const fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self
-    }
-
-    #[must_use]
-    pub const fn motion_policy(mut self, motion: MotionPolicy) -> Self {
-        self.motion = motion;
         self
     }
 
@@ -122,7 +113,11 @@ impl Key {
         };
         let face = match self.primary {
             true => Canvas::new()
-                .style(Style::new().width(Length::Pct(100.0)).height(Length::Pct(100.0)))
+                .style(
+                    Style::new()
+                        .width(Length::Pct(100.0))
+                        .height(Length::Pct(100.0)),
+                )
                 .on_paint(move |bounds| vec![polar_face(bounds, 0.0, radius)])
                 .build(),
             false => key_face(&theme, radius, edge),
@@ -164,11 +159,6 @@ impl Key {
         let element = element
             .cursor(CursorIcon::Pointer)
             .focus_visible_style(focus_ring(&theme));
-        match self.motion {
-            MotionPolicy::Full => {
-                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
-            }
-            MotionPolicy::Reduced => element,
-        }
+        element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
     }
 }

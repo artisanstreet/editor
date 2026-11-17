@@ -15,9 +15,7 @@ disallowed-types = [
     { path = "aqua_ui::style::GpuiShadowLayer", reason = "use the editor_ui::kit component or token instead" },
     { path = "aqua_ui::element::Button", reason = "use the editor_ui::kit component or token instead" },
     { path = "editor_ui::button::Button", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
-    { path = "editor_ui::button::ButtonVariant", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
     { path = "editor_ui::theme::RadiusStep", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
-    { path = "editor_ui::theme::TextStep", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
 ]
 
 disallowed-methods = [
@@ -70,7 +68,6 @@ disallowed-methods = [
     { path = "aqua_ui::element::Text::font_size", reason = "use the editor_ui::kit component or token instead" },
     { path = "aqua_ui::element::Text::gpui_color", reason = "use the editor_ui::kit component or token instead" },
     { path = "editor_ui::asset::source_asset_glyph", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
-    { path = "editor_ui::asset::asset_glyph", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
     { path = "editor_ui::theme::Oklch::new", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
     { path = "editor_ui::theme::Oklch::with_alpha", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },
     { path = "editor_ui::theme::RadiusTokens::value", reason = "use the editor_ui::kit component or token instead", allow-invalid = true },

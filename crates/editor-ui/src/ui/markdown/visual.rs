@@ -3,14 +3,12 @@ use std::sync::Arc;
 use aqua_text::document::{
     CopySubstitution, SelectionDocumentId, SelectionSource, SelectionSourceId, SourceSlice,
 };
-use aqua_text::{
-    FontFamily, FontSlant, FontWeight, StyledSpan, TextInteractionRange, TextLayout, TextStyle,
-};
+use aqua_text::{FontFamily, FontSlant, FontWeight, StyledSpan, TextInteractionRange, TextStyle};
 use aqua_ui::element::{Element, ui};
 
 use super::Span;
 use super::inline::{InlineLayer, file_link_path, flatten_inline_with_swatches};
-use crate::ui::media::color::{self, Color};
+use crate::ui::media::color;
 use crate::ui::rich::actions::{OpenReference, ResourceScope, ShowCopyMenu};
 use crate::ui::theme::{ArtisanTheme, Oklch, Opacity, ProseTypography};
 use std::ops::Range;
@@ -60,39 +58,6 @@ pub enum LinkAction {
     OpenUrl(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SlotBounds {
-    pub x: f32,
-    pub y: f32,
-    pub side: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SwatchPaint {
-    pub bounds: SlotBounds,
-    pub color: Color,
-    pub edge: Oklch,
-    pub radius: f32,
-    pub border_width: f32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FileIconPaint {
-    pub bounds: SlotBounds,
-    pub asset: editor_assets::AssetId,
-}
-
-fn slot_bounds(layout: &TextLayout, offset: usize) -> Option<SlotBounds> {
-    let origin = layout.caret(offset)?;
-    let end = layout.caret(offset + '\u{2003}'.len_utf8())?;
-    let side = end.x - origin.x;
-    (side > 0.0).then_some(SlotBounds {
-        x: origin.x,
-        y: origin.y_top + (origin.height - side) / 2.0,
-        side,
-    })
-}
-
 impl PreparedInline {
     pub(super) fn resident_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
@@ -123,10 +88,6 @@ impl PreparedInline {
                 .iter()
                 .map(|color| color.value.capacity())
                 .sum::<usize>()
-    }
-
-    pub fn styled_spans(&self, theme: &ArtisanTheme, tone: BodyTone) -> Vec<StyledSpan> {
-        self.styled_spans_for(theme, tone, None, None)
     }
 
     fn styled_spans_for(
@@ -200,54 +161,6 @@ impl PreparedInline {
             spans.push(styled_span(&self.source.text[cursor..], base, base_color));
         }
         spans
-    }
-
-    pub fn file_icon_paints(
-        &self,
-        layout: &TextLayout,
-        theme: &ArtisanTheme,
-    ) -> Vec<FileIconPaint> {
-        self.file_icons
-            .iter()
-            .filter_map(|(offset, (light, dark))| {
-                Some(FileIconPaint {
-                    bounds: slot_bounds(layout, *offset)?,
-                    asset: if theme.colors.mode.is_dark() {
-                        *dark
-                    } else {
-                        *light
-                    },
-                })
-            })
-            .collect()
-    }
-
-    pub fn swatch_paints(&self, layout: &TextLayout, theme: &ArtisanTheme) -> Vec<SwatchPaint> {
-        self.colors
-            .iter()
-            .filter_map(|swatch| {
-                let offset = swatch.slot.start + '\u{2060}'.len_utf8();
-                let slot = slot_bounds(layout, offset)?;
-                let line = layout.caret(offset)?;
-                let side = (slot.side * 0.78).min(line.height * 0.62);
-                Some(SwatchPaint {
-                    bounds: SlotBounds {
-                        x: slot.x
-                            + if swatch.alone {
-                                (slot.side - side) / 2.0
-                            } else {
-                                0.0
-                            },
-                        y: line.y_top + (line.height - side) / 2.0,
-                        side,
-                    },
-                    color: color::parse(&swatch.value)?.clipped(),
-                    edge: theme.colors.text.at(Opacity::SwatchEdge),
-                    radius: side * 0.22,
-                    border_width: 1.0,
-                })
-            })
-            .collect()
     }
 
     pub fn link_action(&self, id: u64, scope: Option<ResourceScope>) -> Option<LinkAction> {
@@ -481,46 +394,6 @@ pub fn raw_leaf(
             copies: Vec::new(),
         },
     }
-}
-
-pub fn interactive_prose_leaf(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    tone: BodyTone,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf(
-        spans, theme, tone, document, source_id, order, separator, on_link, None, None, None,
-    )
-}
-
-pub fn interactive_heading_leaf(
-    spans: &[Span],
-    theme: &ArtisanTheme,
-    level: u8,
-    document: SelectionDocumentId,
-    source_id: SelectionSourceId,
-    order: Vec<u64>,
-    separator: impl Into<Arc<str>>,
-    on_link: Option<Rc<dyn Fn(LinkAction)>>,
-) -> Result<ProseLeaf, LeafError> {
-    interactive_leaf(
-        spans,
-        theme,
-        BodyTone::Foreground,
-        document,
-        source_id,
-        order,
-        separator,
-        on_link,
-        None,
-        None,
-        Some(level),
-    )
 }
 
 pub fn interactive_leaf(

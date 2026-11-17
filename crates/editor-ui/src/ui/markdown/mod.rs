@@ -162,27 +162,7 @@ pub enum Block {
     Table(Table),
 }
 
-impl Block {
-    #[must_use]
-    pub fn text_content(&self) -> String {
-        match self {
-            Self::Heading { spans, .. } | Self::Paragraph { spans, .. } => spans_text(spans),
-            Self::Code(fence) => fence.source.clone(),
-            Self::Html { source } => source.clone(),
-            Self::List { items, .. } => items
-                .iter()
-                .flat_map(|item| {
-                    item.blocks
-                        .iter()
-                        .map(Self::text_content)
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Self::Table(table) => table.text_content(),
-        }
-    }
-}
+impl Block {}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ListItem {
@@ -190,16 +170,7 @@ pub struct ListItem {
     pub task: Option<bool>,
 }
 
-impl ListItem {
-    #[must_use]
-    pub fn text_content(&self) -> String {
-        self.blocks
-            .iter()
-            .map(Block::text_content)
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-}
+impl ListItem {}
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct MarkdownDocument {

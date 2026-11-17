@@ -107,8 +107,4 @@ impl EditorMetrics {
     pub fn min_height(&self) -> f32 {
         self.line_height * self.visible_lines + self.padding_y * 2.0 + self.border_width * 2.0
     }
-
-    pub fn prompt_max_height(&self, viewport_height: f32) -> f32 {
-        (viewport_height * 0.4).max(self.min_height() * 2.0)
-    }
 }

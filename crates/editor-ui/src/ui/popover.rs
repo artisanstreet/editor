@@ -112,11 +112,6 @@ impl Popover {
     }
 }
 
-pub struct PopoverHost {
-    overlay: aqua_ui::overlay::OverlayId,
-    pending: std::rc::Rc<std::cell::Cell<bool>>,
-}
-
 pub struct PickerPopupHost {
     overlay: aqua_ui::overlay::OverlayId,
 }
@@ -441,30 +436,6 @@ impl AnimatedPickerHost {
         )
     }
 
-    pub fn step(
-        &mut self,
-        app: &mut aqua::UiApp,
-        input: aqua::RuntimeInput,
-    ) -> Result<aqua::RuntimeOutput, String> {
-        if let aqua::RuntimeInput::Shell(aqua_protocol::ShellEvent::Input { event, .. }) = &input {
-            self.request_dismissal(app, event)?;
-        }
-        if let aqua::RuntimeInput::Shell(aqua_protocol::ShellEvent::Frame {
-            presentation: now,
-            ..
-        })
-        | aqua::RuntimeInput::Tick(now) = &input
-        {
-            self.advance(app, now.as_secs_f64())?;
-        }
-        app.drive(input);
-        let output = app.take_pending();
-        if self.popup.is_open(app) {
-            self.advance(app, self.now)?;
-        }
-        Ok(output)
-    }
-
     pub fn request_dismissal(
         &mut self,
         app: &mut aqua::UiApp,
@@ -496,40 +467,5 @@ impl AnimatedPickerHost {
 
     pub fn is_animating(&self, _app: &aqua::UiApp) -> bool {
         self.motion.transition().is_some() && self.flight.is_some()
-    }
-}
-
-impl PopoverHost {
-    pub fn open(
-        app: &mut aqua::UiApp,
-        owner: aqua_core::NodeId,
-        mut popover: Popover,
-    ) -> Result<Self, String> {
-        let callback = popover.dismiss.clone();
-        let pending = std::rc::Rc::new(std::cell::Cell::new(false));
-        let queue = pending.clone();
-        popover.dismiss = std::rc::Rc::new(move || queue.set(true));
-        let (panel, mut options) = popover.into_parts();
-        options.on_close = Some(std::rc::Rc::new(move |_| callback()));
-        let overlay = app
-            .open_popup_measured(owner, panel, options)
-            .map_err(|error| error.to_string())?;
-        Ok(Self { overlay, pending })
-    }
-
-    pub fn sync(&self, app: &mut aqua::UiApp) {
-        if self.pending.replace(false) {
-            app.close_popup(self.overlay);
-        }
-    }
-
-    pub fn handle_input(&self, app: &mut aqua::UiApp, event: &aqua_core::InputEvent) -> bool {
-        let handled = app.handle_input(event);
-        self.sync(app);
-        handled
-    }
-
-    pub fn is_open(&self, app: &aqua::UiApp) -> bool {
-        app.host().is_open(self.overlay)
     }
 }

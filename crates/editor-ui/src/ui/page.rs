@@ -28,10 +28,6 @@ impl PageBlock {
     pub const fn new(content: Element) -> Self {
         Self { content }
     }
-    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
-        self.content = self.content.debug_selector(selector);
-        self
-    }
     pub fn build(self) -> Element {
         self.content
     }
@@ -45,10 +41,6 @@ impl Notice {
     const SURFACE: Surface = Surface::Callout(Tone::Danger);
     pub fn action(mut self, action: Element) -> Self {
         self.children.push(action);
-        self
-    }
-    pub fn debug_selector(mut self, selector: impl Into<String>) -> Self {
-        self.selector = Some(selector.into());
         self
     }
     pub fn build(self) -> Element {
@@ -116,7 +108,12 @@ pub fn section_shell(
                 .align(AlignItems::CENTER)
                 .justify(JustifyContent::SPACE_BETWEEN),
         )
-        .child(label(theme, title, TextRole::LabelStrong, theme.colors.text));
+        .child(label(
+            theme,
+            title,
+            TextRole::LabelStrong,
+            theme.colors.text,
+        ));
     if let Some(action) = action {
         head = head.child(action);
     }
@@ -125,7 +122,12 @@ pub fn section_shell(
         .spaced(Space::S4)
         .child(head.build());
     if let Some(intro) = intro {
-        heading = heading.child(label(theme, intro, TextRole::Label, theme.colors.text_muted));
+        heading = heading.child(label(
+            theme,
+            intro,
+            TextRole::Label,
+            theme.colors.text_muted,
+        ));
     }
     PageBlock::new(
         UiBox::new()
