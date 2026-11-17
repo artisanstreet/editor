@@ -64,5 +64,10 @@ pub fn started(process_id: u32) {
     windows::demote(process_id);
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn started(process_id: u32) {
+    linux::started(process_id);
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub const fn started(_process_id: u32) {}

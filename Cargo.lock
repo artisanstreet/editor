@@ -2187,6 +2187,8 @@ name = "forge-isolation"
 version = "0.0.0"
 dependencies = [
  "rustix",
+ "tempfile",
+ "thiserror 2.0.20",
  "tracing",
  "windows 0.62.2",
 ]

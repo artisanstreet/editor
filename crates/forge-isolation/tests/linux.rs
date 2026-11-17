@@ -105,3 +105,37 @@ fn engine_ceiling_leaves_a_bounded_reserve() {
         "a tiny machine still gives engines half"
     );
 }
+
+#[test]
+fn an_engine_that_cannot_join_the_engines_group_is_reported_with_its_pid_and_cause() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("engines").join("cgroup.procs");
+    let error = forge_isolation::linux::attach(Some(&missing), dir.path(), 4242)
+        .expect_err("a missing cgroup cannot take the engine");
+    let text = format!("{error}: {}", std::error::Error::source(&error).unwrap());
+    assert!(text.contains("4242"), "{text}");
+    assert!(text.contains(&missing.display().to_string()), "{text}");
+    assert!(text.contains("No such file"), "{text}");
+}
+
+#[test]
+fn attaching_moves_the_engine_and_raises_its_oom_score() {
+    let dir = tempfile::tempdir().unwrap();
+    let procs = dir.path().join("cgroup.procs");
+    std::fs::write(&procs, b"").unwrap();
+    let process = dir.path().join("4242");
+    std::fs::create_dir(&process).unwrap();
+    std::fs::write(process.join("oom_score_adj"), b"0").unwrap();
+    forge_isolation::linux::attach(Some(&procs), dir.path(), 4242).unwrap();
+    assert_eq!(std::fs::read_to_string(&procs).unwrap(), "4242");
+    assert_eq!(
+        std::fs::read_to_string(process.join("oom_score_adj")).unwrap(),
+        "500"
+    );
+}
+
+#[test]
+fn an_engine_that_already_exited_is_not_an_isolation_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    forge_isolation::linux::attach(None, dir.path(), 4242).unwrap();
+}

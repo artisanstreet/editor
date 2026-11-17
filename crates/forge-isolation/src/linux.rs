@@ -218,6 +218,69 @@ pub fn protect_forge() -> Vec<Outcome> {
     ]
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AttachError {
+    #[error("move engine process {pid} into {path}")]
+    JoinGroup {
+        pid: u32,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("raise the OOM score of engine process {pid} at {path}")]
+    OomScore {
+        pid: u32,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn exited(error: &std::io::Error) -> bool {
+    rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::SRCH)
+}
+
+fn write_existing(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::io::Write::write_all(
+        &mut std::fs::OpenOptions::new().write(true).open(path)?,
+        bytes,
+    )
+}
+
+pub fn attach(engines: Option<&Path>, proc_root: &Path, pid: u32) -> Result<(), AttachError> {
+    if let Some(path) = engines {
+        match write_existing(path, pid.to_string().as_bytes()) {
+            Ok(()) => {}
+            Err(source) if exited(&source) => return Ok(()),
+            Err(source) => {
+                return Err(AttachError::JoinGroup {
+                    pid,
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        }
+    }
+    let process = proc_root.join(pid.to_string());
+    let path = process.join("oom_score_adj");
+    match write_existing(&path, ENGINE_OOM_SCORE) {
+        Ok(()) => Ok(()),
+        Err(source) if exited(&source) || !process.exists() => Ok(()),
+        Err(source) => Err(AttachError::OomScore { pid, path, source }),
+    }
+}
+
+pub(crate) fn started(pid: u32) {
+    let engines =
+        engines_membership().map(|path| Path::new(std::ffi::OsStr::from_bytes(path.to_bytes())));
+    if let Err(error) = attach(engines, Path::new("/proc"), pid) {
+        tracing::warn!(
+            error = &error as &dyn std::error::Error,
+            "engine isolation is incomplete"
+        );
+    }
+}
+
 pub(crate) fn engines_membership() -> Option<&'static CStr> {
     ENGINES_MEMBERSHIP.get().map(CString::as_c_str)
 }

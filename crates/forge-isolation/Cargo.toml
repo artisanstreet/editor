@@ -10,10 +10,11 @@ test = false
 doctest = false
 
 [dependencies]
+thiserror.workspace = true
 tracing.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs", "process"] }
+rustix = { workspace = true, features = ["fs", "process", "std"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
@@ -21,6 +22,9 @@ windows = { workspace = true, features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
