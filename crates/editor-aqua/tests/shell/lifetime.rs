@@ -2,17 +2,10 @@ use artisan_api::ThreadId;
 use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
 use editor_aqua::shell::resource_preview::ResourcePreview;
 use std::{
-    net::TcpListener,
     sync::{Arc, mpsc},
     time::Duration,
 };
-
-fn closing_forge() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap().to_string();
-    std::thread::spawn(move || listener.incoming().for_each(drop));
-    address
-}
+use test_support::net::ClosingListener;
 
 fn client(core: &Core, address: &str) -> ForgeClient {
     ForgeClient::new(address, &"0".repeat(64), core.identity.as_ref().unwrap()).unwrap()
@@ -57,7 +50,8 @@ fn preview_completion_is_discarded_after_host_removal_and_same_id_replacement() 
         dir: directory.path().to_owned(),
     })
     .unwrap();
-    let address = closing_forge();
+    let forge = ClosingListener::bind();
+    let address = forge.address().to_string();
     let config = config(&address);
     core.add_test_host(&config, client(&core, &address));
 
