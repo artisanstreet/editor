@@ -357,6 +357,8 @@ fn dot(color: Oklch, pulsing: bool) -> Element {
         .build()
 }
 
+const FIT_WIDEST_PCT: f32 = 70.0;
+
 #[derive(Clone, Copy)]
 enum Span {
     Fit,
@@ -371,21 +373,14 @@ fn label(theme: &ArtisanTheme, words: &str, color: Oklch, span: Span) -> Element
         .wrap(false)
         .overflow(OverflowMode::EndEllipsis)
         .build();
-    let (grow, justify) = match span {
-        Span::Fit => (0.0, JustifyContent::START),
-        Span::Fill => (1.0, JustifyContent::START),
-        Span::Trail => (1.0, JustifyContent::END),
+    let base = Style::new()
+        .justify(JustifyContent::START)
+        .min_width(Length::Pct(0.0))
+        .clip(true);
+    let style = match span {
+        Span::Fit => base.flex_shrink(0.0).max_width(Length::Pct(FIT_WIDEST_PCT)),
+        Span::Fill => base.flex_grow(1.0),
+        Span::Trail => base.justify(JustifyContent::END).flex_grow(1.0),
     };
-    UiBox::new()
-        .layout("row")
-        .style(
-            Style::new()
-                .justify(justify)
-                .flex_grow(grow)
-                .flex_shrink(1.0)
-                .min_width(Length::Pct(0.0))
-                .clip(true),
-        )
-        .child(text)
-        .build()
+    UiBox::new().layout("row").style(style).child(text).build()
 }
