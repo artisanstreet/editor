@@ -635,6 +635,9 @@ fn interactive_leaf_impl(
             },
         )
         .build();
+    if let Some(level) = heading {
+        element = element.role(aqua_core::Role::Heading(level));
+    }
     if let Some(on_link) = on_link {
         let prepared = prepared.clone();
         element = element.on_input(
@@ -726,3 +729,7 @@ pub fn prose_leaf(
         },
     })
 }
+
+#[cfg(test)]
+#[path = "../../../tests/markdown/visual.rs"]
+mod tests;

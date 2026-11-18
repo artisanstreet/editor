@@ -2,7 +2,7 @@ use super::{
     kit::{Space, Spaced, Surface, TextRole, Tone, surface::tint},
     theme::{ArtisanTheme, Oklch},
 };
-use aqua_core::Insets;
+use aqua_core::{Insets, Role};
 use aqua_ui::{
     AlignItems, JustifyContent,
     element::{Box as UiBox, Element},
@@ -80,7 +80,7 @@ pub fn header(
         UiBox::new()
             .layout("column")
             .spaced(Space::S6)
-            .child(label(theme, title, TextRole::Heading, theme.colors.text))
+            .child(label(theme, title, TextRole::Heading, theme.colors.text).role(Role::Heading(1)))
             .child(label(
                 theme,
                 description,
@@ -104,12 +104,9 @@ pub fn section_shell(
                 .align(AlignItems::CENTER)
                 .justify(JustifyContent::SPACE_BETWEEN),
         )
-        .child(label(
-            theme,
-            title,
-            TextRole::LabelStrong,
-            theme.colors.text,
-        ));
+        .child(
+            label(theme, title, TextRole::LabelStrong, theme.colors.text).role(Role::Heading(2)),
+        );
     if let Some(action) = action {
         head = head.child(action);
     }
@@ -156,3 +153,7 @@ pub fn notice(theme: &ArtisanTheme, text: impl Into<String>) -> Notice {
         selector: None,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/ui/page.rs"]
+mod tests;
