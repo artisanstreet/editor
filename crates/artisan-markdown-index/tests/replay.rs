@@ -63,3 +63,20 @@ fn literal_replay_preserves_every_byte_and_has_no_markdown_events() {
     assert_eq!(joined, source);
     assert_eq!(LeafRecord::literal(0..0).replay(0, "").unwrap().len(), 1);
 }
+
+#[test]
+fn exact_table_membership_survives_sparse_record_replay() {
+    let index = MarkdownIndex::build(
+        "| A | B |\n| --- | --- |\n| one | two |\n| three | four |\n\nafter\n",
+    )
+    .unwrap();
+    assert!(index.record(0).unwrap().table_continues);
+    assert!(index.record(1).unwrap().table_continues);
+    assert!(!index.record(2).unwrap().table_continues);
+    assert!(!index.record(3).unwrap().table_continues);
+    let last = index.record(2).unwrap();
+    let wire = serde_json::to_string(&last).unwrap();
+    let decoded: LeafRecord = serde_json::from_str(&wire).unwrap();
+    assert_eq!(decoded.context, last.context);
+    assert!(!decoded.table_continues);
+}
