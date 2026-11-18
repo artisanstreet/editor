@@ -247,6 +247,7 @@ pub struct MarkdownPresenter {
     selection_owner: SelectionBatchOwner,
     selection_revision: Cell<u64>,
     rich: Vec<Option<RetainedRich>>,
+    fence_tokens: super::FenceTokenCache,
     next_rich_id: u64,
     proof: Arc<()>,
     leaf_proofs: Vec<(u64, Arc<()>)>,
@@ -330,6 +331,7 @@ impl Default for MarkdownPresenter {
             selection_owner: SelectionBatchOwner::new(),
             selection_revision: Cell::new(0),
             rich: Vec::new(),
+            fence_tokens: super::FenceTokenCache::default(),
             next_rich_id: 0,
             proof: Arc::new(()),
             leaf_proofs: Vec::new(),
@@ -441,9 +443,14 @@ impl MarkdownPresenter {
             self.proof = Arc::new(());
             self.document = None;
             self.projected = None;
-            let document = engine.parse_document(source)?;
-            let mut projected =
-                super::projected::ProjectedDocument::new(engine, source, command.as_deref())?;
+            let document = engine.parse_document_with_fence_memo(source, &mut self.fence_tokens)?;
+            let mut projected = super::projected::ProjectedDocument::new(
+                engine,
+                source,
+                command.as_deref(),
+                &mut self.fence_tokens,
+            )?;
+            self.fence_tokens.finish();
             let mut previous = std::mem::take(&mut self.rich);
             let fences = fence_slots(&document, &projected);
             let mut next: Vec<Option<RetainedRich>> = (0..fences.len()).map(|_| None).collect();

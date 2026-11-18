@@ -810,8 +810,14 @@ impl StoredOwner {
                     return Err("Markdown metadata does not match its descriptor".to_owned());
                 }
                 let engine = engine.as_ref().map_err(Clone::clone)?;
-                let content = normalize_record(&record, start, &source, engine)
-                    .map_err(|error| error.to_string())?;
+                let content = normalize_record(
+                    &record,
+                    start,
+                    &source,
+                    engine,
+                    &mut super::NoFenceTokenMemo,
+                )
+                .map_err(|error| error.to_string())?;
                 let (mut document, table_header) = match content {
                     IndexedLeafContent::Block(block) => (
                         super::MarkdownDocument {

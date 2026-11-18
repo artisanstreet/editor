@@ -34,25 +34,27 @@ impl MarkdownIndex {
     pub fn context(&self, leaf: usize) -> Option<&LeafContext> {
         self.0.context(leaf)
     }
-    pub fn normalize_leaf(
+    pub(crate) fn normalize_leaf(
         &self,
         leaf: usize,
         start: usize,
         source: &str,
         engine: &MarkdownEngine,
+        memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<IndexedLeafContent, MarkdownIndexError> {
         let record = self
             .0
             .record(leaf)
             .ok_or(MarkdownIndexError::IncompleteRange)?;
-        normalize_record(&record, start, source, engine)
+        normalize_record(&record, start, source, engine, memo)
     }
 }
-pub fn normalize_record(
+pub(crate) fn normalize_record(
     record: &artisan_markdown_index::LeafRecord,
     start: usize,
     source: &str,
     engine: &MarkdownEngine,
+    memo: &mut dyn super::FenceTokenMemo,
 ) -> Result<IndexedLeafContent, MarkdownIndexError> {
     let range = record.leaf.source_range();
     let exact = source
@@ -69,7 +71,7 @@ pub fn normalize_record(
         .ok_or(MarkdownIndexError::IncompleteRange)?;
     let mut document =
         DocumentBuilder::default().build_events(exact, record.replay(start, source)?)?;
-    engine.highlight_blocks(&mut document.blocks, &mut super::NoFenceTokenMemo)?;
+    engine.highlight_blocks(&mut document.blocks, memo)?;
     if document.blocks.len() != 1 {
         return Err(MarkdownIndexError::InvalidShape);
     }

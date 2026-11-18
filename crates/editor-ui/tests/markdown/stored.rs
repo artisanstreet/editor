@@ -725,7 +725,13 @@ fn stored_metadata_with_an_event_beyond_its_leaf_is_rejected_instead_of_aborting
         serde_json::json!({ "Structural": { "Html": "<" } }),
         serde_json::json!({ "Html": { "Range": { "start": 0, "end": 1 } } }),
     ] {
-        let result = normalize_record(&tampered_record(token), 0, "<", &engine);
+        let result = normalize_record(
+            &tampered_record(token),
+            0,
+            "<",
+            &engine,
+            &mut crate::ui::markdown::NoFenceTokenMemo,
+        );
         assert!(
             matches!(
                 result,

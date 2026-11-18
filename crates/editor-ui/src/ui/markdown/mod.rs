@@ -5,6 +5,7 @@
 
 pub(crate) const MAX_MARKDOWN_SOURCE_BYTES: usize = 256 * 1024;
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -25,9 +26,10 @@ pub mod stored;
 mod table;
 mod table_view;
 pub use projected::leaf_signatures;
+use source_index::normalize_record;
 pub use source_index::{
     BlockShape, IndexedLeaf, IndexedLeafContent, LeafContext, LeafSpacing, ListLevel,
-    MarkdownIndex, MarkdownIndexError, normalize_record,
+    MarkdownIndex, MarkdownIndexError,
 };
 
 use table::TableBuilder;
@@ -475,7 +477,41 @@ pub(crate) trait FenceTokenMemo {
     fn remember(&mut self, language: &str, source: &str, tokens: Arc<[CodeToken]>);
 }
 
-struct NoFenceTokenMemo;
+pub(crate) struct NoFenceTokenMemo;
+
+#[derive(Default)]
+pub(crate) struct FenceTokenCache {
+    kept: HashMap<String, HashMap<String, Arc<[CodeToken]>>>,
+    used: HashMap<String, HashMap<String, Arc<[CodeToken]>>>,
+}
+
+impl FenceTokenCache {
+    pub(crate) fn finish(&mut self) {
+        self.kept = std::mem::take(&mut self.used);
+    }
+}
+
+impl FenceTokenMemo for FenceTokenCache {
+    fn cached(&mut self, language: &str, source: &str) -> Option<Arc<[CodeToken]>> {
+        if let Some(tokens) = self
+            .used
+            .get(language)
+            .and_then(|sources| sources.get(source))
+        {
+            return Some(Arc::clone(tokens));
+        }
+        let tokens = self.kept.get_mut(language)?.remove(source)?;
+        self.remember(language, source, Arc::clone(&tokens));
+        Some(tokens)
+    }
+
+    fn remember(&mut self, language: &str, source: &str, tokens: Arc<[CodeToken]>) {
+        self.used
+            .entry(language.to_owned())
+            .or_default()
+            .insert(source.to_owned(), tokens);
+    }
+}
 
 impl FenceTokenMemo for NoFenceTokenMemo {
     fn cached(&mut self, _language: &str, _source: &str) -> Option<Arc<[CodeToken]>> {

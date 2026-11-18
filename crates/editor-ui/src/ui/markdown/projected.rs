@@ -117,6 +117,7 @@ impl ProjectedDocument {
         engine: &MarkdownEngine,
         source: &str,
         command: Option<&str>,
+        memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<Self, MarkdownIndexError> {
         let index = MarkdownIndex::build(source)?;
         let mut leaves = Vec::with_capacity(index.leaves().len());
@@ -130,7 +131,7 @@ impl ProjectedDocument {
                     .context(ordinal + 1)
                     .and_then(|next| next.table_source)
                     == context.table_source;
-            let mut content = index.normalize_leaf(ordinal, 0, source, engine)?;
+            let mut content = index.normalize_leaf(ordinal, 0, source, engine, memo)?;
             if let (0, Some(command), IndexedLeafContent::Block(Block::Paragraph { spans, .. })) =
                 (ordinal, command, &mut content)
             {
