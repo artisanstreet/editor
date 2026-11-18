@@ -659,6 +659,7 @@ impl Conversation {
             if rows != self.rows {
                 self.rows = rows;
                 self.rows_epoch = next_rows_epoch();
+                self.retain_row_heights();
             }
             self.disclosures.index_disclosure_rows(&self.rows);
             self.runs = folded.runs;
@@ -676,6 +677,15 @@ impl Conversation {
             }
             self.runs.clear();
         }
+    }
+
+    fn retain_row_heights(&mut self) {
+        let current: HashSet<RowKey> = self.rows.iter().map(|(row, _)| row.key()).collect();
+        self.row_heights.retain(|key, _| {
+            current.contains(key)
+                || self.mounted_rows.contains(key)
+                || self.disclosures.disclosure_clips.contains_key(key)
+        });
     }
 
     pub fn observe_visible_rows(
@@ -1574,3 +1584,7 @@ mod arrival_tests;
 #[cfg(test)]
 #[path = "../../tests/conversation/controller/answer.rs"]
 mod answer_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/memory.rs"]
+mod memory_tests;
