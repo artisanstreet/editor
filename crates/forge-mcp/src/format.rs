@@ -5,7 +5,7 @@
 use crate::transcript::time;
 use artisan_api::{Thread, ThreadId};
 use forge_runs::{AgentInfo, AgentState, Hub};
-use forge_store::{GrepPage, SearchPage, Touch};
+use forge_store::{GrepPage, RecallKind, SearchPage, Touch};
 use std::fmt::Write as _;
 
 pub fn models(models: &[artisan_api::Model]) -> Result<String, serde_json::Error> {
@@ -18,19 +18,18 @@ pub fn models(models: &[artisan_api::Model]) -> Result<String, serde_json::Error
     ))
 }
 
-/// Who an indexed item's text is from.
-fn who(kind: &str) -> &'static str {
+const fn who(kind: RecallKind) -> &'static str {
     match kind {
-        "user" => "You",
-        "assistant" => "Reply",
-        "tool" => "Tool",
-        "agent" => "Agent",
-        "plan" => "Plan",
-        "question" => "Question",
-        "notice" => "Note",
-        "error" => "Error",
-        "image" => "Image",
-        _ => "Item",
+        RecallKind::User => "You",
+        RecallKind::Assistant => "Reply",
+        RecallKind::Tool => "Tool",
+        RecallKind::Agent => "Agent",
+        RecallKind::Plan => "Plan",
+        RecallKind::Question => "Question",
+        RecallKind::Notice => "Note",
+        RecallKind::Error => "Error",
+        RecallKind::Image => "Image",
+        RecallKind::Compaction => "Checkpoint",
     }
 }
 
@@ -53,7 +52,7 @@ fn group(out: &mut String, last: &mut Option<ThreadId>, thread: &ThreadId, name:
     }
 }
 
-pub fn search(page: &SearchPage, offset: u32) -> String {
+pub fn search(page: &SearchPage, continued: bool) -> String {
     let mut out = String::new();
     let mut last = None;
     for hit in &page.hits {
@@ -66,7 +65,7 @@ pub fn search(page: &SearchPage, offset: u32) -> String {
         writeln!(
             out,
             "- **{}**, {}: {} `{}`",
-            who(&hit.kind),
+            who(hit.kind),
             time(hit.created_at),
             one_line(&hit.snippet),
             hit.item_id,
@@ -74,8 +73,8 @@ pub fn search(page: &SearchPage, offset: u32) -> String {
         .ok();
     }
     if let Some(next) = page.next {
-        writeln!(out, "\nMore hits: call again with offset {next}.").ok();
-    } else if offset > 0 {
+        writeln!(out, "\nMore hits: call again with cursor {next}.").ok();
+    } else if continued {
         out.push_str("\nNo more hits.\n");
     }
     out.push_str("\nRead around a hit with thread_read and its item id.\n");
@@ -95,7 +94,7 @@ pub fn grep(page: &GrepPage) -> String {
         writeln!(
             out,
             "**{}**, {}, line {} `{}`\n",
-            who(&found.kind),
+            who(found.kind),
             time(found.created_at),
             found.line,
             found.item_id,
@@ -107,11 +106,7 @@ pub fn grep(page: &GrepPage) -> String {
         out.push('\n');
     }
     if let Some(next) = page.next {
-        writeln!(
-            out,
-            "Older items not searched yet: call again with cursor {next}."
-        )
-        .ok();
+        writeln!(out, "More matches: call again with cursor {next}.").ok();
     }
     out.trim().to_owned()
 }

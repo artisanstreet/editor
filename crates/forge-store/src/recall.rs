@@ -6,6 +6,7 @@ use artisan_api::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::ops::Range;
 
 type Result<T, E = ContentError> = std::result::Result<T, E>;
 
@@ -36,6 +37,8 @@ impl From<rusqlite::Error> for GrepFailure {
 const FIELD_BYTES: usize = 64 * 1024;
 const FIELD_RANGE: u32 = 64 * 1024;
 const GREP_SCAN_ROWS: usize = 20_000;
+const PREVIEW_CHARS: usize = 400;
+const PREVIEW_LEAD: usize = 100;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Searchable {
@@ -286,7 +289,7 @@ pub fn index(conn: &Connection, item: &Item) -> Result<()> {
         rowid,
         item.thread_id.as_str(),
         item.id.as_str(),
-        kind_name(&item.kind),
+        RecallKind::of(&item.kind).name(),
         item.created_at,
         next.text,
         next.output,
@@ -297,18 +300,75 @@ pub fn index(conn: &Connection, item: &Item) -> Result<()> {
     Ok(())
 }
 
-const fn kind_name(kind: &ItemKind) -> &'static str {
-    match kind {
-        ItemKind::UserMessage { .. } => "user",
-        ItemKind::AssistantMessage { .. } => "assistant",
-        ItemKind::Tool { .. } => "tool",
-        ItemKind::Agent { .. } => "agent",
-        ItemKind::Question { .. } => "question",
-        ItemKind::Plan { .. } => "plan",
-        ItemKind::Image { .. } => "image",
-        ItemKind::Compaction { .. } => "compaction",
-        ItemKind::Notice { .. } => "notice",
-        ItemKind::Error { .. } => "error",
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallKind {
+    User,
+    Assistant,
+    Tool,
+    Agent,
+    Question,
+    Plan,
+    Image,
+    Compaction,
+    Notice,
+    Error,
+}
+
+impl RecallKind {
+    const fn of(kind: &ItemKind) -> Self {
+        match kind {
+            ItemKind::UserMessage { .. } => Self::User,
+            ItemKind::AssistantMessage { .. } => Self::Assistant,
+            ItemKind::Tool { .. } => Self::Tool,
+            ItemKind::Agent { .. } => Self::Agent,
+            ItemKind::Question { .. } => Self::Question,
+            ItemKind::Plan { .. } => Self::Plan,
+            ItemKind::Image { .. } => Self::Image,
+            ItemKind::Compaction { .. } => Self::Compaction,
+            ItemKind::Notice { .. } => Self::Notice,
+            ItemKind::Error { .. } => Self::Error,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+            Self::Agent => "agent",
+            Self::Question => "question",
+            Self::Plan => "plan",
+            Self::Image => "image",
+            Self::Compaction => "compaction",
+            Self::Notice => "notice",
+            Self::Error => "error",
+        }
+    }
+
+    const ALL: [Self; 10] = [
+        Self::User,
+        Self::Assistant,
+        Self::Tool,
+        Self::Agent,
+        Self::Question,
+        Self::Plan,
+        Self::Image,
+        Self::Compaction,
+        Self::Notice,
+        Self::Error,
+    ];
+}
+
+impl rusqlite::types::FromSql for RecallKind {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let name = value.as_str()?;
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.name() == name)
+            .ok_or_else(|| {
+                rusqlite::types::FromSqlError::Other(format!("unknown recall kind {name:?}").into())
+            })
     }
 }
 
@@ -339,7 +399,7 @@ pub struct RecallScope {
     pub project: Option<ProjectId>,
     pub engine: Option<EngineId>,
     #[serde(default)]
-    pub kinds: Vec<String>,
+    pub kinds: Vec<RecallKind>,
     pub since: Option<Timestamp>,
     pub until: Option<Timestamp>,
     #[serde(default)]
@@ -366,7 +426,8 @@ impl RecallScope {
         }
         if let Some(engine) = self.engine {
             add(
-                "json_extract(h.body,'$.config.engine')=?",
+                "COALESCE((SELECT json_extract(r.body,'$.engine') FROM items i JOIN runs r ON r.id=i.run_id
+                    WHERE i.rowid=t.rowid),json_extract(h.body,'$.config.engine'))=?",
                 Value::Text(engine.as_str().to_owned()),
             );
         }
@@ -401,15 +462,77 @@ pub struct SearchHit {
     pub thread_id: ThreadId,
     pub thread_title: Option<String>,
     pub item_id: ItemId,
-    pub kind: String,
+    pub kind: RecallKind,
     pub created_at: Timestamp,
     pub snippet: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub enum SearchCursor {
+    Text { offset: u32 },
+    Output { offset: u32 },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SearchCursorError {
+    #[error("{cursor:?} is not a search cursor from a previous page")]
+    Shape { cursor: String },
+    #[error("search cursor {cursor:?} has no offset")]
+    Offset {
+        cursor: String,
+        #[source]
+        cause: std::num::ParseIntError,
+    },
+}
+
+impl std::fmt::Display for SearchCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text { offset } => write!(f, "text:{offset}"),
+            Self::Output { offset } => write!(f, "output:{offset}"),
+        }
+    }
+}
+
+impl std::str::FromStr for SearchCursor {
+    type Err = SearchCursorError;
+
+    fn from_str(cursor: &str) -> Result<Self, Self::Err> {
+        let refused = || SearchCursorError::Shape {
+            cursor: cursor.to_owned(),
+        };
+        let (phase, offset) = cursor.split_once(':').ok_or_else(refused)?;
+        let offset = offset.parse().map_err(|cause| SearchCursorError::Offset {
+            cursor: cursor.to_owned(),
+            cause,
+        })?;
+        match phase {
+            "text" => Ok(Self::Text { offset }),
+            "output" => Ok(Self::Output { offset }),
+            _ => Err(refused()),
+        }
+    }
+}
+
+impl From<SearchCursor> for String {
+    fn from(cursor: SearchCursor) -> Self {
+        cursor.to_string()
+    }
+}
+
+impl TryFrom<String> for SearchCursor {
+    type Error = SearchCursorError;
+
+    fn try_from(cursor: String) -> Result<Self, Self::Error> {
+        cursor.parse()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchPage {
     pub hits: Vec<SearchHit>,
-    pub next: Option<u32>,
+    pub next: Option<SearchCursor>,
 }
 
 fn fts_query(query: &str) -> Option<String> {
@@ -426,19 +549,132 @@ pub struct GrepMatch {
     pub thread_id: ThreadId,
     pub thread_title: Option<String>,
     pub item_id: ItemId,
-    pub kind: String,
+    pub kind: RecallKind,
     pub created_at: Timestamp,
-    pub field: String,
+    pub field: GrepField,
     pub line: u32,
     pub before: Vec<String>,
     pub text: String,
     pub after: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrepField {
+    Text,
+    Output,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub enum GrepCursor {
+    Before {
+        row: i64,
+    },
+    At {
+        row: i64,
+        field: GrepField,
+        line: u32,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GrepCursorError {
+    #[error("{cursor:?} is not a grep cursor from a previous page")]
+    Shape { cursor: String },
+    #[error("grep cursor {cursor:?} has no row or line number")]
+    Number {
+        cursor: String,
+        #[source]
+        cause: std::num::ParseIntError,
+    },
+}
+
+impl GrepCursor {
+    const fn last_row(self) -> i64 {
+        match self {
+            Self::Before { row } => row - 1,
+            Self::At { row, .. } => row,
+        }
+    }
+
+    fn skips(self, row: i64, field: GrepField, line: u32) -> bool {
+        match self {
+            Self::Before { .. } => false,
+            Self::At {
+                row: at,
+                field: from,
+                line: first,
+            } => row == at && field.cmp(&from).then(line.cmp(&first)).is_lt(),
+        }
+    }
+}
+
+impl std::fmt::Display for GrepCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Before { row } => write!(f, "{row}"),
+            Self::At {
+                row,
+                field: GrepField::Text,
+                line,
+            } => write!(f, "{row}:text:{line}"),
+            Self::At {
+                row,
+                field: GrepField::Output,
+                line,
+            } => write!(f, "{row}:output:{line}"),
+        }
+    }
+}
+
+impl std::str::FromStr for GrepCursor {
+    type Err = GrepCursorError;
+
+    fn from_str(cursor: &str) -> Result<Self, Self::Err> {
+        let refused = || GrepCursorError::Shape {
+            cursor: cursor.to_owned(),
+        };
+        let number = |cause| GrepCursorError::Number {
+            cursor: cursor.to_owned(),
+            cause,
+        };
+        let mut parts = cursor.split(':');
+        let row = parts.next().ok_or_else(refused)?.parse().map_err(number)?;
+        match (parts.next(), parts.next(), parts.next()) {
+            (None, None, None) => Ok(Self::Before { row }),
+            (Some(field), Some(line), None) => Ok(Self::At {
+                row,
+                field: match field {
+                    "text" => GrepField::Text,
+                    "output" => GrepField::Output,
+                    _ => return Err(refused()),
+                },
+                line: line.parse().map_err(number)?,
+            }),
+            _ => Err(refused()),
+        }
+    }
+}
+
+impl From<GrepCursor> for String {
+    fn from(cursor: GrepCursor) -> Self {
+        cursor.to_string()
+    }
+}
+
+impl TryFrom<String> for GrepCursor {
+    type Error = GrepCursorError;
+
+    fn try_from(cursor: String) -> Result<Self, Self::Error> {
+        cursor.parse()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepPage {
     pub matches: Vec<GrepMatch>,
-    pub next: Option<i64>,
+    pub next: Option<GrepCursor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,7 +687,7 @@ pub struct GrepQuery {
     #[serde(default)]
     pub context: u32,
     pub max_matches: Option<u32>,
-    pub cursor: Option<i64>,
+    pub cursor: Option<GrepCursor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +698,27 @@ pub struct Touch {
     pub op: String,
     pub path: String,
     pub created_at: Timestamp,
+}
+
+fn preview(line: &str, found: Option<Range<usize>>) -> String {
+    let start = found.map_or(0, |found| {
+        line[..found.start]
+            .char_indices()
+            .rev()
+            .take(PREVIEW_LEAD)
+            .last()
+            .map_or(found.start, |(at, _)| at)
+    });
+    let end = line[start..]
+        .char_indices()
+        .nth(PREVIEW_CHARS)
+        .map_or(line.len(), |(at, _)| start + at);
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        &line[start..end],
+        if end < line.len() { "…" } else { "" }
+    )
 }
 
 fn grep_rows(
@@ -477,15 +734,13 @@ fn grep_rows(
     let max = query.max_matches.unwrap_or(50).clamp(1, 500) as usize;
     let context = query.context.min(10) as usize;
     let (filter, mut values) = scope.sql(2);
-    values.insert(
-        0,
-        rusqlite::types::Value::Integer(query.cursor.unwrap_or(i64::MAX)),
-    );
+    let resume = query.cursor.unwrap_or(GrepCursor::Before { row: i64::MAX });
+    values.insert(0, rusqlite::types::Value::Integer(resume.last_row()));
     let output = if query.output { "t.output" } else { "''" };
     let sql = format!(
         "SELECT t.rowid,t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.text,{output},t.created_at
          FROM item_text t JOIN threads h ON h.id=t.thread_id
-         WHERE t.rowid<?1{filter} ORDER BY t.rowid DESC LIMIT {}",
+         WHERE t.rowid<=?1{filter} ORDER BY t.rowid DESC LIMIT {}",
         GREP_SCAN_ROWS + 1
     );
     let mut statement = conn.prepare(&sql)?;
@@ -498,7 +753,7 @@ fn grep_rows(
         if scanned > GREP_SCAN_ROWS {
             return Ok(GrepPage {
                 matches,
-                next: last,
+                next: last.map(|row| GrepCursor::Before { row }),
             });
         }
         let rowid: i64 = row.get(0)?;
@@ -506,40 +761,51 @@ fn grep_rows(
         let thread_id = ThreadId::from(row.get::<_, String>(1)?);
         let thread_title: Option<String> = row.get(2)?;
         let item_id = ItemId::from(row.get::<_, String>(3)?);
-        let kind: String = row.get(4)?;
+        let kind: RecallKind = row.get(4)?;
         let created_at: Timestamp = row.get(7)?;
-        for (field, body) in [("text", row.get::<_, String>(5)?), ("output", row.get(6)?)] {
+        for (field, body) in [
+            (GrepField::Text, row.get::<_, String>(5)?),
+            (GrepField::Output, row.get(6)?),
+        ] {
             if !regex.is_match(&body) {
                 continue;
             }
             let lines: Vec<&str> = body.lines().collect();
             for (index, line) in lines.iter().enumerate() {
-                if !regex.is_match(line) {
+                let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                if resume.skips(rowid, field, number) {
                     continue;
                 }
-                let clip = |line: &&str| -> String { line.chars().take(400).collect() };
+                let Some(found) = regex.find(line) else {
+                    continue;
+                };
+                let around = |line: &&str| preview(line, None);
                 matches.push(GrepMatch {
                     thread_id: thread_id.clone(),
                     thread_title: thread_title.clone(),
                     item_id: item_id.clone(),
-                    kind: kind.clone(),
+                    kind,
                     created_at,
-                    field: field.to_owned(),
-                    line: u32::try_from(index + 1).unwrap_or(u32::MAX),
+                    field,
+                    line: number,
                     before: lines[index.saturating_sub(context)..index]
                         .iter()
-                        .map(clip)
+                        .map(around)
                         .collect(),
-                    text: clip(line),
+                    text: preview(line, Some(found.range())),
                     after: lines[index + 1..(index + 1 + context).min(lines.len())]
                         .iter()
-                        .map(clip)
+                        .map(around)
                         .collect(),
                 });
                 if matches.len() >= max {
                     return Ok(GrepPage {
                         matches,
-                        next: Some(rowid),
+                        next: Some(GrepCursor::At {
+                            row: rowid,
+                            field,
+                            line: number.saturating_add(1),
+                        }),
                     });
                 }
             }
@@ -551,26 +817,45 @@ fn grep_rows(
     })
 }
 
-fn search_rows(
+struct TextMatch {
+    condition: String,
+    needle: String,
+}
+
+impl TextMatch {
+    fn of(query: &str) -> Self {
+        match fts_query(query) {
+            Some(fts) => Self {
+                condition: "t.rowid IN (SELECT rowid FROM item_search WHERE item_search MATCH ?1)"
+                    .to_owned(),
+                needle: fts,
+            },
+            None => Self {
+                condition: "instr(lower(t.text),lower(?1))>0".to_owned(),
+                needle: query.trim().to_owned(),
+            },
+        }
+    }
+}
+
+fn text_hits(
     conn: &Connection,
     scope: &RecallScope,
     query: &str,
-    output: bool,
     limit: u32,
     offset: u32,
-) -> Result<SearchPage> {
-    let limit = limit.clamp(1, 100);
+) -> Result<Vec<SearchHit>> {
     let (filter, scope_values) = scope.sql(5);
     let mut values = vec![
         rusqlite::types::Value::Null,
-        rusqlite::types::Value::Integer(i64::from(limit) + 1),
+        rusqlite::types::Value::Integer(i64::from(limit)),
         rusqlite::types::Value::Integer(i64::from(offset)),
         rusqlite::types::Value::Text(query.trim().to_owned()),
     ];
     let sql = if let Some(fts) = fts_query(query) {
         values[0] = rusqlite::types::Value::Text(fts);
         format!(
-                "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.created_at,
+            "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.created_at,
                     snippet(item_search,0,'**','**','…',24)
                  FROM item_search s JOIN item_text t ON t.rowid=s.rowid JOIN threads h ON h.id=t.thread_id
                  WHERE item_search MATCH ?1{filter}
@@ -578,7 +863,7 @@ fn search_rows(
                     bm25(item_search,1.0,0.5) * CASE WHEN t.kind IN ('user','assistant','agent','plan','question')
                         THEN 3.0 ELSE 1.0 END
                  LIMIT ?2 OFFSET ?3"
-            )
+        )
     } else {
         values[0] = rusqlite::types::Value::Text(query.trim().to_owned());
         format!(
@@ -590,38 +875,75 @@ fn search_rows(
         )
     };
     values.extend(scope_values);
-    let mut hits = read_hits(conn, &sql, &values)?;
-    if output && hits.len() <= limit as usize {
-        let (filter, scope_values) = scope.sql(3);
-        let mut values = vec![
-            rusqlite::types::Value::Text(query.trim().to_owned()),
-            rusqlite::types::Value::Integer(
-                i64::from(limit) + 1
-                    - i64::try_from(hits.len()).expect("invariant: at most `limit` hits"),
-            ),
-        ];
-        values.extend(scope_values);
-        let sql = format!(
-            "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.created_at,
-                substr(t.output,max(1,instr(lower(t.output),lower(?1))-80),240)
-             FROM item_text t JOIN threads h ON h.id=t.thread_id
-             WHERE instr(lower(t.output),lower(?1))>0{filter}
-             ORDER BY t.rowid DESC LIMIT ?2"
-        );
-        let seen: std::collections::HashSet<_> =
-            hits.iter().map(|hit| hit.item_id.clone()).collect();
-        hits.extend(
-            read_hits(conn, &sql, &values)?
-                .into_iter()
-                .filter(|hit| !seen.contains(&hit.item_id)),
-        );
+    read_hits(conn, &sql, &values)
+}
+
+fn output_hits(
+    conn: &Connection,
+    scope: &RecallScope,
+    query: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<SearchHit>> {
+    let text = TextMatch::of(query);
+    let (filter, scope_values) = scope.sql(5);
+    let mut values = vec![
+        rusqlite::types::Value::Text(text.needle),
+        rusqlite::types::Value::Integer(i64::from(limit)),
+        rusqlite::types::Value::Integer(i64::from(offset)),
+        rusqlite::types::Value::Text(query.trim().to_owned()),
+    ];
+    values.extend(scope_values);
+    let sql = format!(
+        "SELECT t.thread_id,json_extract(h.body,'$.title'),t.item_id,t.kind,t.created_at,
+            substr(t.output,max(1,instr(lower(t.output),lower(?4))-80),240)
+         FROM item_text t JOIN threads h ON h.id=t.thread_id
+         WHERE instr(lower(t.output),lower(?4))>0 AND NOT ({}){filter}
+         ORDER BY t.rowid DESC LIMIT ?2 OFFSET ?3",
+        text.condition
+    );
+    read_hits(conn, &sql, &values)
+}
+
+fn search_rows(
+    conn: &Connection,
+    scope: &RecallScope,
+    query: &str,
+    output: bool,
+    limit: u32,
+    cursor: Option<SearchCursor>,
+) -> Result<SearchPage> {
+    let limit = limit.clamp(1, 100);
+    let page = |mut hits: Vec<SearchHit>, next: SearchCursor| {
+        let more = hits.len() > limit as usize;
+        hits.truncate(limit as usize);
+        SearchPage {
+            hits,
+            next: more.then_some(next),
+        }
+    };
+    match cursor.unwrap_or(SearchCursor::Text { offset: 0 }) {
+        SearchCursor::Text { offset } => {
+            let mut hits = text_hits(conn, scope, query, limit + 1, offset)?;
+            if hits.len() > limit as usize || !output {
+                return Ok(page(
+                    hits,
+                    SearchCursor::Text {
+                        offset: offset + limit,
+                    },
+                ));
+            }
+            let room = limit - u32::try_from(hits.len()).expect("invariant: at most `limit` hits");
+            hits.extend(output_hits(conn, scope, query, room + 1, 0)?);
+            Ok(page(hits, SearchCursor::Output { offset: room }))
+        }
+        SearchCursor::Output { offset } => Ok(page(
+            output_hits(conn, scope, query, limit + 1, offset)?,
+            SearchCursor::Output {
+                offset: offset + limit,
+            },
+        )),
     }
-    let more = hits.len() > limit as usize;
-    hits.truncate(limit as usize);
-    Ok(SearchPage {
-        hits,
-        next: more.then_some(offset + limit),
-    })
 }
 
 fn read_hits(
@@ -716,10 +1038,10 @@ impl Store {
         query: String,
         output: bool,
         limit: u32,
-        offset: u32,
+        cursor: Option<SearchCursor>,
     ) -> Result<SearchPage, RecallSearchError> {
         let searched = query.clone();
-        self.scan(move |conn| search_rows(conn, &scope, &query, output, limit, offset))
+        self.scan(move |conn| search_rows(conn, &scope, &query, output, limit, cursor))
             .await
             .map_err(|cause| RecallSearchError {
                 query: searched,

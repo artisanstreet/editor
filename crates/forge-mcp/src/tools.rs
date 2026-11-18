@@ -7,7 +7,7 @@ use artisan_api::{
     ProjectId, SettingOwner, SignInState, ThreadId, UpdateThread, setting_decl,
 };
 use forge_runs::{Hub, Refused, SpawnAgent};
-use forge_store::{GrepQuery, RecallScope};
+use forge_store::{GrepCursor, GrepQuery, RecallKind, RecallScope, SearchCursor};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -71,7 +71,7 @@ fn scope_properties() -> Value {
         "thread": { "type": "string", "description": "Only this thread." },
         "project": { "type": "string", "description": "Only this project's threads (an id from list_projects)." },
         "harness": { "type": "string", "description": format!("Only threads on this harness: {HARNESS}.") },
-        "kinds": { "type": "array", "items": { "type": "string", "enum": ["user", "assistant", "tool", "agent", "plan", "question", "notice", "error", "image"] }, "description": "Only these item kinds." },
+        "kinds": { "type": "array", "items": { "type": "string", "enum": ["user", "assistant", "tool", "agent", "plan", "question", "notice", "error", "image", "compaction"] }, "description": "Only these item kinds." },
         "since_days": { "type": "number", "description": "Only items from the last this many days." },
         "skip_archived": { "type": "boolean", "description": "Leave archived threads out (default false)." },
     })
@@ -125,7 +125,7 @@ fn recall_tools() -> Vec<Tool> {
                     "query": { "type": "string", "description": "Words to find; an exact phrase ranks first." },
                     "include_output": { "type": "boolean", "description": "Also search tool output (slower; default false)." },
                     "limit": { "type": "integer", "description": "Hits per page (default 15, at most 100)." },
-                    "offset": { "type": "integer", "description": "Skip this many hits (`next` from a previous page)." },
+                    "cursor": { "type": "string", "description": "The cursor a previous page said continues." },
                 }))
             },
             required: &["query"],
@@ -143,7 +143,7 @@ fn recall_tools() -> Vec<Tool> {
                     "include_output": { "type": "boolean", "description": "Also read tool output." },
                     "context": { "type": "integer", "description": "Lines around each match (at most 10)." },
                     "max_matches": { "type": "integer", "description": "Default 50, at most 500." },
-                    "cursor": { "type": "integer", "description": "`next` from a previous page." },
+                    "cursor": { "type": "string", "description": "The cursor a previous page said continues." },
                 }))
             },
             required: &["pattern"],
@@ -712,7 +712,7 @@ struct Scope {
     project: Option<String>,
     harness: Option<String>,
     #[serde(default)]
-    kinds: Vec<String>,
+    kinds: Vec<RecallKind>,
     since_days: Option<f64>,
     #[serde(default)]
     skip_archived: bool,
@@ -871,26 +871,25 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 #[serde(default)]
                 include_output: bool,
                 limit: Option<u32>,
-                offset: Option<u32>,
+                cursor: Option<SearchCursor>,
                 #[serde(flatten)]
                 scope: Scope,
             }
             let search: Search = args(arguments)?;
-            let offset = search.offset.unwrap_or(0);
             let page = store
                 .recall_search(
                     search.scope.recall()?,
                     search.query,
                     search.include_output,
                     search.limit.unwrap_or(15),
-                    search.offset.unwrap_or(0),
+                    search.cursor,
                 )
                 .await
                 .map_err(forge("search the threads"))?;
             if page.hits.is_empty() {
                 return Ok("No matches.".to_owned());
             }
-            Ok(format::search(&page, offset))
+            Ok(format::search(&page, search.cursor.is_some()))
         }
         "grep_threads" => {
             #[derive(Deserialize)]
@@ -902,7 +901,7 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                 include_output: bool,
                 context: Option<u32>,
                 max_matches: Option<u32>,
-                cursor: Option<i64>,
+                cursor: Option<GrepCursor>,
                 #[serde(flatten)]
                 scope: Scope,
             }
