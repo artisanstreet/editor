@@ -21,6 +21,8 @@ const BACKLOG_LIMIT: usize = 20_000;
 
 const QUEUE_BYTES: usize = 8 * 1024 * 1024;
 
+const AUTHORIZATION_RECHECK: Duration = Duration::from_secs(5);
+
 struct Queued {
     seq: Option<Seq>,
     data: String,
@@ -330,26 +332,41 @@ impl Cursor {
     }
 }
 
-/// Returns when the device is revoked. The store announces revocations
-/// made here at once, and one made by another process (`ae forge devices
-/// revoke`) when the next request reaches Forge.
 async fn watch_authorization(
     store: &forge_store::Store,
     device: &DeviceId,
     certificate: &str,
     mut revocations: tokio::sync::broadcast::Receiver<DeviceId>,
 ) {
+    let mut recheck = tokio::time::interval(AUTHORIZATION_RECHECK);
+    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        match revocations.recv().await {
-            Ok(revoked) if &revoked == device => return,
-            Ok(_) => {}
-            Err(RecvError::Closed) => return,
-            // Missed announcements: ask directly.
-            Err(RecvError::Lagged(_)) => {
-                if store.is_authorized(certificate).ok().flatten().is_none() {
+        tokio::select! {
+            revoked = revocations.recv() => match revoked {
+                Ok(revoked) if &revoked == device => return,
+                Ok(_) => {}
+                Err(RecvError::Closed) => return,
+                Err(RecvError::Lagged(_)) => {
+                    if !still_authorized(store, certificate) {
+                        return;
+                    }
+                }
+            },
+            _ = recheck.tick() => {
+                if !still_authorized(store, certificate) {
                     return;
                 }
             }
+        }
+    }
+}
+
+fn still_authorized(store: &forge_store::Store, certificate: &str) -> bool {
+    match store.is_authorized(certificate) {
+        Ok(device) => device.is_some(),
+        Err(error) => {
+            tracing::warn!("rechecking an event stream's device: {error:#}");
+            false
         }
     }
 }
@@ -510,5 +527,32 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn revocation_by_another_process_closes_a_passive_watcher() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = forge_store::Store::open(directory.path()).unwrap();
+        let device = store
+            .add_device("client".into(), "certificate".into())
+            .await
+            .unwrap();
+        let watcher = tokio::spawn({
+            let store = store.clone();
+            let device = device.clone();
+            let revocations = store.subscribe_revocations();
+            async move { watch_authorization(&store, &device, "certificate", revocations).await }
+        });
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(!watcher.is_finished(), "a paired device's stream stays open");
+        forge_store::admin::Admin::open(directory.path())
+            .unwrap()
+            .revoke_device(device.as_str())
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), watcher)
+            .await
+            .expect("a device revoked by `ae forge devices revoke` kept receiving events")
+            .unwrap();
     }
 }
