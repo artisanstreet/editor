@@ -843,9 +843,9 @@ async fn prepare_on(
                 engine,
                 source: Box::new(source),
             })?;
-    customisation
-        .mcp_servers
-        .retain(|server| hub.mcp().server_reachable(server));
+    customisation.mcp_servers =
+        crate::mcp_reach::answering(std::mem::take(&mut customisation.mcp_servers), &thread.id)
+            .await;
     let owner = hub.clone();
     let mut launch = tokio::task::spawn_blocking(move || {
         let _homes = owner.extensions().homes_lock()?;

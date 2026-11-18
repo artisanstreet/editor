@@ -418,9 +418,6 @@ async fn start_services(
     tasks.spawn(async move { auth.mcp().check_auth().await });
     let agents = hub.clone();
     tasks.spawn(async move { agents.reconcile_agents().await });
-    let servers = hub.clone();
-    let stop = shutdown.clone();
-    tasks.spawn(async move { servers.mcp().watch_servers(stop).await });
     if hub.generation().is_none() {
         tasks.spawn(remove_inactive_threads(
             hub.clone(),

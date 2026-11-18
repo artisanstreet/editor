@@ -1,5 +1,4 @@
 use crate::error::ErrorClass;
-use crate::mcp_reach::Endpoint;
 use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer, McpSignInStarted};
 use forge_engines::mcp_oauth::{
     self, Client, Discovery, Pkce, Probe, ProbeError, RegistrationError, Revocation, TokenError,
@@ -10,7 +9,6 @@ use forge_store::{
     SetSettingError, Store,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -281,7 +279,6 @@ pub struct Mcp {
     flows: Mutex<Flows>,
     http: mcp_oauth::Http,
     writes: tokio::sync::Mutex<()>,
-    pub(crate) unreachable: Mutex<HashSet<Endpoint>>,
 }
 
 impl Mcp {
@@ -291,7 +288,6 @@ impl Mcp {
             flows: Mutex::default(),
             http: mcp_oauth::Http::new(),
             writes: tokio::sync::Mutex::new(()),
-            unreachable: Mutex::default(),
         }
     }
 

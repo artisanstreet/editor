@@ -61,7 +61,6 @@ pub use mcp_auth::{
     Mcp, McpAuthError, McpSignInFinishError, McpSignInStartError, McpStoreError,
     ReadMcpServersError,
 };
-pub use mcp_reach::ProbeServersError;
 pub use operation::{
     AnswerError, CancelError, ClearGoalError, ContinueError, InputError, SendError, UpdateError,
 };

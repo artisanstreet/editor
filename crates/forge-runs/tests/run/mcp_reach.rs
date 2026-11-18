@@ -48,19 +48,11 @@ async fn a_turn_starts_without_servers_that_do_not_answer() {
 
     assert_eq!(
         turn_servers(&fixture, &seen).await,
-        ["down", "local", "up"],
-        "before anything is known every server is offered"
-    );
-
-    fixture.hub.mcp().probe_servers().await.unwrap();
-    assert_eq!(
-        turn_servers(&fixture, &seen).await,
         ["local", "up"],
         "a server nobody listens on is left out; command servers always start"
     );
 
     let _revived = tokio::net::TcpListener::bind(down).await.unwrap();
-    fixture.hub.mcp().probe_servers().await.unwrap();
     assert_eq!(
         turn_servers(&fixture, &seen).await,
         ["down", "local", "up"],
