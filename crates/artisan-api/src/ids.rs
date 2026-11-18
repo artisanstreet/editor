@@ -9,7 +9,6 @@ macro_rules! id {
         pub struct $name(pub String);
 
         impl $name {
-            /// A fresh, time-ordered id.
             #[must_use]
             pub fn new() -> Self {
                 Self(uuid::Uuid::now_v7().to_string())
@@ -47,27 +46,12 @@ macro_rules! id {
     };
 }
 
-id!(
-    /// A conversation.
-    ThreadId
-);
-id!(
-    /// Anything in a thread. Clients create the ids of the messages they
-    /// send, so a retried send is the same item.
-    ItemId
-);
-id!(
-    /// One engine turn (or several, when steers continue it).
-    RunId
-);
-id!(
-    /// A working directory the user opened.
-    ProjectId
-);
+id!(ThreadId);
+id!(ItemId);
+id!(RunId);
+id!(ProjectId);
 
 impl ProjectId {
-    /// The built-in "No project": each of its threads runs in a fresh
-    /// folder of its own under Forge's data folder.
     #[must_use]
     pub fn scratch() -> Self {
         Self("scratch".to_owned())
@@ -79,15 +63,10 @@ impl ProjectId {
     }
 }
 
-id!(
-    /// A paired Editor device.
-    DeviceId
-);
+id!(DeviceId);
 
-/// Forge's global change counter. Every stored change gets the next value.
 pub type Seq = u64;
 
-/// SHA-256 of a blob's bytes, lowercase hex. Blobs are content addressed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BlobHash(pub String);
@@ -98,7 +77,6 @@ impl BlobHash {
         &self.0
     }
 
-    /// Whether this looks like a SHA-256 hex digest (safe to use in a path).
     #[must_use]
     pub fn is_valid(&self) -> bool {
         self.0.len() == 64

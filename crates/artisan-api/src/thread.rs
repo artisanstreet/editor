@@ -1,7 +1,6 @@
 use crate::{EngineConfig, EngineId, ProjectId, RunId, Seq, ThreadId, Timestamp};
 use serde::{Deserialize, Serialize};
 
-/// A working directory on the Forge host.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
     pub id: ProjectId,
@@ -17,19 +16,14 @@ pub struct Project {
 pub struct Thread {
     pub id: ThreadId,
     pub project_id: ProjectId,
-    /// From the engine; until then the first line of the first message.
     pub title: Option<String>,
     pub config: EngineConfig,
-    /// Forge-local order of accepted input and run boundaries; unread after `read_seq`.
     pub activity_seq: Seq,
-    /// Event time of that activity, for approximate recency across independent Forges.
-    /// Metadata edits and read acknowledgments leave this unchanged.
     #[serde(default)]
     pub activity_at: Timestamp,
     pub read_seq: Seq,
     #[serde(default)]
     pub marked_unread: bool,
-    /// Activity acknowledged as settled by the client; monotonic.
     #[serde(default)]
     pub settled_seq: Seq,
     pub seq: Seq,
@@ -37,17 +31,10 @@ pub struct Thread {
     pub updated_at: Timestamp,
     #[serde(default)]
     pub archived: bool,
-    /// The thread this one was handed off from, or the thread whose agent
-    /// it is (with `spawned_by`).
     #[serde(default)]
     pub parent_thread_id: Option<ThreadId>,
-    /// The `Agent` item in the parent thread this thread runs, for an agent
-    /// started through the Artisan MCP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<crate::ItemId>,
-    /// When Forge picks the thread's failed turn up again by itself (the
-    /// provider was overloaded, or the usage limit resets); set while it
-    /// waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_until: Option<Timestamp>,
 }
@@ -263,19 +250,12 @@ impl From<Run> for RunWire {
     }
 }
 
-/// Why a run carries on a stopped turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Continuation {
-    /// The user asked for it (the composer's continue button).
     Requested,
-    /// Forge restarted while the turn was running.
     Restart,
-    /// The provider was overloaded or briefly unavailable, and the turn
-    /// failed after the engine's own retries.
     Overloaded,
-    /// The account's usage limit ended the turn; it carries on once the
-    /// limit resets.
     UsageLimit,
 }
 
@@ -286,7 +266,6 @@ pub enum RunStatus {
     Done,
     Failed,
     Cancelled,
-    /// Forge stopped while the run was live.
     Interrupted,
     Refused,
 }
@@ -297,7 +276,6 @@ impl RunStatus {
         matches!(self, Self::Running)
     }
 
-    /// The turn stopped before it finished, so it can be continued.
     #[must_use]
     pub const fn is_stopped(self) -> bool {
         matches!(self, Self::Cancelled | Self::Interrupted)
@@ -311,7 +289,6 @@ pub struct Usage {
     pub reasoning: u64,
     pub cache_read: u64,
     pub cache_write: Option<u64>,
-    /// Tokens in the context window after the last step.
     pub context_used: Option<u64>,
     pub context_window: Option<u64>,
     pub cost_usd: Option<f64>,

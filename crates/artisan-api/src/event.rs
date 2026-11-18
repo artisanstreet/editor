@@ -1,15 +1,9 @@
 use crate::{EngineStatus, Item, ItemId, Project, Run, RunId, Seq, Status, Thread, ThreadId};
 use serde::{Deserialize, Serialize};
 
-/// One message on `GET /events?since=N`.
-///
-/// Stored changes carry `seq`; a client that saw it can resume after it.
-/// Live events (`seq: None`) are memory-only: streaming text, reasoning,
-/// shell output. A reconnecting client gets the current live text again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Envelope {
     pub seq: Option<Seq>,
-    /// Internal publication order for snapshot overlap; never part of the wire format.
     #[serde(skip)]
     pub live_revision: u64,
     #[serde(flatten)]
@@ -19,7 +13,6 @@ pub struct Envelope {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    /// First message on every stream.
     Hello {
         head: Seq,
         protocol: u32,
@@ -40,7 +33,6 @@ pub enum Event {
     Run {
         run: Run,
     },
-    /// Compact pending-interaction update for an unobserved transcript.
     ItemState {
         id: ItemId,
         thread_id: ThreadId,
@@ -50,7 +42,6 @@ pub enum Event {
         key: String,
         value: serde_json::Value,
     },
-    /// Live: streaming text for an item, reasoning for a run, shell output.
     Live {
         thread_id: ThreadId,
         target: LiveTarget,
@@ -58,32 +49,24 @@ pub enum Event {
         append: bool,
         coverage: LiveCoverage,
     },
-    /// Live: the engine's guess at the user's next message, offered in the
-    /// composer once a run ended; `None` withdraws it.
     Suggestion {
         thread_id: ThreadId,
         text: Option<String>,
     },
-    /// Live: an engine's install, sign-in, models or usage changed.
     Engine {
         status: EngineStatus,
     },
-    /// Live: only download progress changed; catalog/account metadata stays shared.
     EngineInstall {
         engine: crate::EngineId,
         install: crate::InstallState,
     },
-    /// Live: Forge asks an Editor to act for an agent (hosts, device
-    /// settings, navigation); it answers at `POST /editor/calls/{id}`.
     EditorCall {
         id: String,
         call: crate::EditorCall,
     },
-    /// The client fell too far behind; refetch `GET /state`.
     Reset,
 }
 
-/// Byte coverage of a bounded live preview in its complete source.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveCoverage {
     pub start: u64,
@@ -100,15 +83,10 @@ impl LiveCoverage {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LiveTarget {
-    /// An `AssistantMessage` still streaming.
     Text { item_id: ItemId },
-    /// The run's current reasoning; dropped when the run ends.
     Reasoning { run_id: RunId },
-    /// A running shell tool's output; dropped when the tool ends.
     Shell { item_id: ItemId },
-    /// A tool's progress line.
     Progress { item_id: ItemId },
-    /// A transient run status line ("Retrying (2)…").
     Status { run_id: RunId },
 }
 
@@ -135,23 +113,5 @@ impl Event {
 }
 
 #[cfg(test)]
-mod engine_delta_tests {
-    use super::*;
-    #[test]
-    fn install_delta_wire_does_not_repeat_catalog_or_account_fields() {
-        let event = Event::EngineInstall {
-            engine: crate::EngineId::Codex,
-            install: crate::InstallState::Downloading {
-                version: "1.2.3".into(),
-                received: 1024,
-                total: Some(2048),
-            },
-        };
-        let wire = serde_json::to_value(&event).unwrap();
-        assert_eq!(wire["type"], "engine_install");
-        assert_eq!(wire.as_object().unwrap().len(), 3);
-        assert!(wire.get("models").is_none() && wire.get("status").is_none());
-        let replay: Event = serde_json::from_value(wire).unwrap();
-        assert_eq!(event, replay);
-    }
-}
+#[path = "../tests/event/engine_delta.rs"]
+mod engine_delta_tests;

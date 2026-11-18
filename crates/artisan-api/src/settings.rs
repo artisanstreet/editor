@@ -1,8 +1,3 @@
-//! Every setting an agent or the user can change, declared once: the
-//! Artisan MCP's `settings_*` tools read these, and so can the settings
-//! pages and `ae`. A setting lives either in Forge (shared by every Editor
-//! of that host) or in the Editor (this device's `settings.json`).
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,16 +13,9 @@ pub enum SettingOwner {
 pub enum SettingKind {
     Bool,
     ModelCustomizations,
-    /// One of these values (numbers or `null`).
-    Choice {
-        values: &'static [Option<u32>],
-    },
-    Options {
-        values: &'static [&'static str],
-    },
-    Text {
-        hint: &'static str,
-    },
+    Choice { values: &'static [Option<u32>] },
+    Options { values: &'static [&'static str] },
+    Text { hint: &'static str },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -70,11 +58,9 @@ pub struct SettingDecl {
     pub key: &'static str,
     pub owner: SettingOwner,
     pub kind: SettingKind,
-    /// The value while unset, as JSON.
     pub default: &'static str,
     pub label: &'static str,
     pub description: &'static str,
-    /// Changing it shows an approval card first.
     pub needs_approval: bool,
 }
 
@@ -317,21 +303,15 @@ pub const SETTINGS: &[SettingDecl] = &[
     },
 ];
 
-/// The declaration of `key`, if it's a setting.
 #[must_use]
 pub fn setting_decl(key: &str) -> Option<&'static SettingDecl> {
     SETTINGS.iter().find(|decl| decl.key == key)
 }
 
-/// What Forge asks a connected Editor to do for an agent: the Artisan MCP
-/// tools whose state lives in the Editor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "call", rename_all = "snake_case")]
 pub enum EditorCall {
     HostsList,
-    /// Pair with a Forge: `this_computer`, `wsl` (with `distro`), or
-    /// `remote` (with `address`, `code` and `fingerprint` from the other
-    /// machine's `ae pair`).
     HostAdd {
         kind: String,
         #[serde(default)]
@@ -356,18 +336,12 @@ pub enum EditorCall {
         key: String,
         value: Value,
     },
-    /// Open a thread of the host Forge runs on.
     OpenThread {
         thread: crate::ThreadId,
     },
-    /// Open a settings page by its link name (`general`, `hosts`, ...).
     OpenSettings {
         page: String,
     },
-    /// Start signing in to one of the calling host's HTTP MCP servers:
-    /// this Editor catches the browser's redirect. With `navigate_user`
-    /// it also opens the sign-in page and shows the server's card.
-    /// Answers `{ "authorize_url": … }`.
     McpSignIn {
         server: String,
         #[serde(default)]
@@ -375,7 +349,6 @@ pub enum EditorCall {
     },
 }
 
-/// The Editor's answer to an [`EditorCall`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EditorReply {
