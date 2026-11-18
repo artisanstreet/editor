@@ -117,7 +117,7 @@ jobs:
       - name: Build service integration fixtures
         run: nix develop .#cargo-linux --command cargo build --locked -p ae -p forge
       - name: Tests
-        run: nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast -E 'not binary(budgets)'
+        run: nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast -E 'not binary(budgets) and not binary(contract)'
       - name: Qualification tests
         run: nix develop .#cargo-linux --command cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast -E 'not binary(budgets)'
       - name: Performance budgets

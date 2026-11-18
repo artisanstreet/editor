@@ -73,5 +73,9 @@ path = "tests/budgets.rs"
 name = "simulation"
 path = "tests/simulation.rs"
 
+[[test]]
+name = "contract"
+path = "tests/contract.rs"
+
 [lints]
 workspace = true
