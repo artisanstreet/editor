@@ -12,6 +12,7 @@ fn diagram(width: f32, height: f32) -> Arc<DiagramSvg> {
         light_source: Arc::from(""),
         width_bits: width.to_bits(),
         height_bits: height.to_bits(),
+        summary: Arc::from(""),
     })
 }
 
@@ -177,4 +178,40 @@ fn drag_captures_pointer_pans_at_fit_and_releases_outside_diagram() {
     assert_eq!(tree.pointer_capture(0), None);
     assert_eq!(state.borrow().drag, None);
     assert!(!state.borrow_mut().drag_to(Point::new(500.0, 400.0)));
+}
+
+#[test]
+fn the_viewport_describes_the_parsed_nodes_and_links() {
+    use aqua_text::{SharedFonts, SharedRuns};
+    let diagram = Arc::new(
+        crate::ui::markdown::diagram::render(
+            "flowchart LR\nA[Start] -->|next| B[Review]\nB --> C[Ship]",
+        )
+        .unwrap(),
+    );
+    let state = Rc::new(RefCell::new(DiagramState::new()));
+    let invalidate: Rc<dyn Fn()> = Rc::new(|| {});
+    let element = view(
+        &ArtisanTheme::resolved(),
+        "diagram",
+        &diagram,
+        &state,
+        &invalidate,
+    );
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(move |_| element).unwrap();
+    app.set_viewport(600.0, 600.0, 1.0);
+    app.build_frame().unwrap();
+    let description = app
+        .tree()
+        .emit_semantics()
+        .into_iter()
+        .find(|node| node.label == "Mermaid diagram")
+        .and_then(|node| node.description)
+        .unwrap();
+    assert!(
+        description
+            .starts_with("Nodes: Start, Review, Ship. Links: Start → Review: next; Review → Ship."),
+        "{description}"
+    );
 }

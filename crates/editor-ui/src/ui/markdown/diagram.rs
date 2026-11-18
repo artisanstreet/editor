@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 
+use mermaid_rs_renderer::ir::Graph;
 use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict, render_svg,
 };
@@ -65,7 +66,7 @@ fn render(source: &str) -> Option<DiagramSvg> {
     }
     let themes =
         [ThemeMode::Dark, ThemeMode::Light].map(|mode| diagram_theme(ArtisanTheme::for_mode(mode)));
-    let ([dark, light], width, height) = layout_svg(source, &themes)?;
+    let ([dark, light], width, height, summary) = layout_svg(source, &themes)?;
     (dark.len().max(light.len()) <= MAX_SVG_BYTES
         && width.is_finite()
         && height.is_finite()
@@ -78,10 +79,11 @@ fn render(source: &str) -> Option<DiagramSvg> {
             light_source: Arc::from(light),
             width_bits: width.to_bits(),
             height_bits: height.to_bits(),
+            summary: Arc::from(summary),
         })
 }
 
-fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f32)> {
+fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f32, String)> {
     catch_unwind(AssertUnwindSafe(|| {
         let parsed = parse_mermaid_strict(source).ok()?;
         if parsed.graph.nodes.len()
@@ -106,10 +108,76 @@ fn layout_svg(source: &str, themes: &[Theme; 2]) -> Option<([String; 2], f32, f3
             outline_text(&render_svg(&layout, &themes[0], &config))?,
             outline_text(&render_svg(&layout, &themes[1], &config))?,
         ];
-        Some((svgs, size.width, size.height))
+        Some((svgs, size.width, size.height, summary(&parsed.graph)))
     }))
     .ok()
     .flatten()
+}
+
+fn summary(graph: &Graph) -> String {
+    let name = |id: &str| {
+        graph
+            .nodes
+            .get(id)
+            .map(|node| node.label.trim())
+            .filter(|label| !label.is_empty())
+            .unwrap_or(id)
+            .to_owned()
+    };
+    let mut nodes: Vec<_> = graph.nodes.values().collect();
+    nodes.sort_by_key(|node| {
+        (
+            graph
+                .node_order
+                .get(&node.id)
+                .copied()
+                .unwrap_or(usize::MAX),
+            node.id.as_str(),
+        )
+    });
+    let mut parts = Vec::new();
+    if let Some(title) = graph.pie_title.as_ref().or(graph.gantt_title.as_ref()) {
+        parts.push(title.clone());
+    }
+    if !nodes.is_empty() {
+        let labels: Vec<_> = nodes.iter().map(|node| name(&node.id)).collect();
+        parts.push(format!("Nodes: {}", labels.join(", ")));
+    }
+    if !graph.edges.is_empty() {
+        let edges: Vec<_> = graph
+            .edges
+            .iter()
+            .map(|edge| {
+                let arrow = match edge.directed {
+                    true => "→",
+                    false => "—",
+                };
+                let relation = format!("{} {arrow} {}", name(&edge.from), name(&edge.to));
+                match edge.label.as_deref().map(str::trim) {
+                    Some(label) if !label.is_empty() => format!("{relation}: {label}"),
+                    _ => relation,
+                }
+            })
+            .collect();
+        parts.push(format!("Links: {}", edges.join("; ")));
+    }
+    if !graph.pie_slices.is_empty() {
+        let slices: Vec<_> = graph
+            .pie_slices
+            .iter()
+            .map(|slice| format!("{}: {}", slice.label, slice.value))
+            .collect();
+        parts.push(format!("Slices: {}", slices.join(", ")));
+    }
+    if !graph.gantt_tasks.is_empty() {
+        let tasks: Vec<_> = graph
+            .gantt_tasks
+            .iter()
+            .map(|task| task.label.clone())
+            .collect();
+        parts.push(format!("Tasks: {}", tasks.join(", ")));
+    }
+    parts.join(". ")
 }
 
 fn outline_text(source: &str) -> Option<String> {

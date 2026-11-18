@@ -85,6 +85,7 @@ pub struct DiagramSvg {
     pub light_source: Arc<str>,
     pub width_bits: u32,
     pub height_bits: u32,
+    pub summary: Arc<str>,
 }
 
 impl DiagramSvg {

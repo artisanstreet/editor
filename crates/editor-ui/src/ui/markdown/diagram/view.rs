@@ -28,6 +28,7 @@ const WHEEL_ZOOM_PER_PIXEL: f32 = 0.01 * GPUI_LINE_PX / AQUA_LINE_PX;
 const KEY_PAN_PX: f32 = 32.0;
 const MIN_VIEWPORT_PX: f32 = 120.0;
 const MAX_VIEWPORT_PX: f32 = 440.0;
+const INSTRUCTIONS: &str = "Drag to pan; scroll to zoom; 0 to fit.";
 
 #[derive(Default)]
 pub(crate) struct DiagramState {
@@ -181,7 +182,11 @@ pub(crate) fn view(
         .build()
         .with_key(format!("{id}-viewport"))
         .focusable(true)
-        .aria_label("Mermaid diagram. Drag to pan; scroll to zoom; 0 to fit.")
+        .aria_label("Mermaid diagram")
+        .aria_description(match diagram.summary.is_empty() {
+            true => INSTRUCTIONS.to_owned(),
+            false => format!("{}. {INSTRUCTIONS}", diagram.summary),
+        })
         .cursor(if dragging {
             CursorIcon::Grabbing
         } else {
