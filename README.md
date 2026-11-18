@@ -24,7 +24,8 @@
 
 #### About contributing
 We welcome you to open issues for bugs and issues, or feature requests. Pull requests are closed and we do not
-accept them from anyone but Artisan Street staff. AI written or assisted issues are welcome.
+accept them from anyone but Artisan Street staff. AI written or assisted issues are welcome. Staff: building, running
+and testing are described in [docs/development.md](docs/development.md).
 
 #### About licensing
 Artisan Editor is licensed under [BSD-3-Clause](LICENSE.md). Bundled fonts, icons, artwork and Rust crates keep their own licences; the Editor, ae and Forge ship them in `NOTICES.txt`, and the Editor opens them from Settings → About. If your company builds on it, we'd appreciate you reaching out to us first; we're happy to work out an arrangement.
