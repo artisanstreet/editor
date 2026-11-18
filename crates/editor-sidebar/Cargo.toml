@@ -28,5 +28,12 @@ editor-core.workspace = true
 editor-ui.workspace = true
 neo_frizbee = "=0.10.4"
 
+[dev-dependencies]
+divan.workspace = true
+
+[[bench]]
+name = "pulses"
+harness = false
+
 [lints]
 workspace = true
