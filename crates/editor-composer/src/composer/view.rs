@@ -3095,6 +3095,15 @@ pub struct ModelMenuItem {
     pub value: String,
 }
 
+impl ModelMenuItem {
+    fn name(&self) -> String {
+        match self.value.is_empty() {
+            true => self.label.to_owned(),
+            false => format!("{}: {}", self.label, self.value),
+        }
+    }
+}
+
 pub struct ModelMenuFrame {
     pub items: Vec<ModelMenuItem>,
     pub pane: Option<super::picker::Axis>,
@@ -3690,7 +3699,7 @@ pub fn model_menu(
                         .height(Length::Px(item_height))
                         .flex_shrink(0.0),
                 )
-                .aria_label(format!("{}: {}", item.label, item.value))
+                .aria_label(item.name())
                 .aria_selected(target == pane),
         );
     }

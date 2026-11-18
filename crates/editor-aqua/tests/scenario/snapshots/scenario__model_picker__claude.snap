@@ -3,7 +3,7 @@ source: crates/editor-aqua/tests/scenario/model_picker.rs
 expression: "editor.settle_part(\"the picker to open\", Role::Menu, None, |view|\n{ view.find(Role::Button, \"Sign in to Claude Code\").is_some() })"
 ---
 Menu
-  Tab "Model: " [selected]
+  Tab "Model" [selected]
     Label
     Label "Model"
   Image
