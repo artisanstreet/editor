@@ -1,0 +1,22 @@
+{
+  "id": "01a1f000-0000-7000-8000-000000000002",
+  "project_id": "01a1f000-0000-7000-8000-000000000001",
+  "title": "Released thread",
+  "config": {
+    "engine": "claude",
+    "model": null,
+    "effort": null,
+    "permissions": "auto",
+    "options": {}
+  },
+  "activity_seq": 28,
+  "activity_at": 1795011022071,
+  "read_seq": 7,
+  "marked_unread": false,
+  "settled_seq": 0,
+  "seq": 29,
+  "created_at": 1795011021963,
+  "updated_at": 1795011022071,
+  "archived": false,
+  "parent_thread_id": null
+}

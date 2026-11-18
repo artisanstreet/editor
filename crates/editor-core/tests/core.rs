@@ -18,6 +18,8 @@ mod project_icons;
 mod range_window;
 #[path = "core/host/read_acks.rs"]
 mod read_acks;
+#[path = "core/released_forge.rs"]
+mod released_forge;
 #[path = "core/screen.rs"]
 mod screen;
 #[path = "core/host/settings.rs"]
