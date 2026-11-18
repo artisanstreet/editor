@@ -215,7 +215,7 @@ pub struct WslDistro {
     pub running: bool,
 }
 
-pub(crate) fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
+pub fn parse_wsl_verbose(text: &str) -> Vec<WslDistro> {
     text.lines()
         .skip(1)
         .filter_map(|line| {

@@ -236,6 +236,9 @@ impl Screen {
     pub fn from_link(link: &str) -> Option<Self> {
         let rest = link.strip_prefix("artisan://")?;
         let parts: Vec<&str> = rest.trim_end_matches('/').split('/').collect();
+        if parts.iter().any(|part| part.is_empty()) {
+            return None;
+        }
         match parts.as_slice() {
             ["thread", host, thread] => Some(Self::Thread {
                 host: HostId((*host).to_owned()),
