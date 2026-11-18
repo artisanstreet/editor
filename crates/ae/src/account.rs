@@ -7,10 +7,11 @@
 //! confirms the exact account/key binding. No parallel enrollment logic.
 
 use anyhow::{Context, Result, bail};
+use artisan_account::MachineKeypair;
 use artisan_paths::App;
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Args)]
 pub struct AccountArgs {
@@ -56,8 +57,7 @@ pub enum AccountCommand {
     Sync,
 }
 
-/// What `ae account` persists beside `forge.sqlite3` (0600 on unix).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct AccountFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     secret_b64u: Option<String>,
@@ -71,44 +71,209 @@ struct AccountFile {
     account_id: Option<String>,
 }
 
+impl AccountFile {
+    fn present_fields(&self) -> String {
+        let fields: Vec<&str> = [
+            (self.secret_b64u.is_some(), "secret_b64u"),
+            (self.public_b64u.is_some(), "public_b64u"),
+            (self.enrollment_id.is_some(), "enrollment_id"),
+            (self.machine_id.is_some(), "machine_id"),
+            (self.account_id.is_some(), "account_id"),
+        ]
+        .into_iter()
+        .filter_map(|(present, name)| present.then_some(name))
+        .collect();
+        fields.join(", ")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Account {
+    Unkeyed,
+    Keyed {
+        key: MachineKeypair,
+    },
+    Pending {
+        key: MachineKeypair,
+        enrollment_id: String,
+    },
+    Enrolled {
+        key: MachineKeypair,
+        machine_id: String,
+        account_id: String,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AccountFileError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("parse {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{} holds {fields}, which is not a state `ae account` writes; move it aside and enroll again", path.display())]
+    Inconsistent { path: PathBuf, fields: String },
+    #[error("{} holds an unusable machine key: {problem}", path.display())]
+    Key {
+        path: PathBuf,
+        problem: &'static str,
+    },
+    #[error("save {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl Account {
+    fn decode(path: &Path, file: AccountFile) -> Result<Self, AccountFileError> {
+        let fields = file.present_fields();
+        let inconsistent = || AccountFileError::Inconsistent {
+            path: path.to_owned(),
+            fields: fields.clone(),
+        };
+        let AccountFile {
+            secret_b64u,
+            public_b64u,
+            enrollment_id,
+            machine_id,
+            account_id,
+        } = file;
+        let key = match (secret_b64u, public_b64u) {
+            (None, None) => None,
+            (Some(secret), Some(public)) => Some(decode_key(path, &secret, &public)?),
+            (Some(_), None) | (None, Some(_)) => return Err(inconsistent()),
+        };
+        match (key, enrollment_id, machine_id, account_id) {
+            (None, None, None, None) => Ok(Self::Unkeyed),
+            (Some(key), None, None, None) => Ok(Self::Keyed { key }),
+            (Some(key), Some(enrollment_id), None, None) => {
+                Ok(Self::Pending { key, enrollment_id })
+            }
+            (Some(key), None, Some(machine_id), Some(account_id)) => Ok(Self::Enrolled {
+                key,
+                machine_id,
+                account_id,
+            }),
+            (_, _, _, _) => Err(inconsistent()),
+        }
+    }
+
+    fn encode(&self) -> AccountFile {
+        use base64::Engine as _;
+        let keyed = |key: &MachineKeypair| AccountFile {
+            secret_b64u: Some(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key.secret()),
+            ),
+            public_b64u: Some(key.public_b64u()),
+            ..AccountFile::default()
+        };
+        match self {
+            Self::Unkeyed => AccountFile::default(),
+            Self::Keyed { key } => keyed(key),
+            Self::Pending { key, enrollment_id } => AccountFile {
+                enrollment_id: Some(enrollment_id.clone()),
+                ..keyed(key)
+            },
+            Self::Enrolled {
+                key,
+                machine_id,
+                account_id,
+            } => AccountFile {
+                machine_id: Some(machine_id.clone()),
+                account_id: Some(account_id.clone()),
+                ..keyed(key)
+            },
+        }
+    }
+
+    const fn key(&self) -> Option<&MachineKeypair> {
+        match self {
+            Self::Unkeyed => None,
+            Self::Keyed { key } | Self::Pending { key, .. } | Self::Enrolled { key, .. } => {
+                Some(key)
+            }
+        }
+    }
+}
+
+fn decode_key(path: &Path, secret: &str, public: &str) -> Result<MachineKeypair, AccountFileError> {
+    use base64::Engine as _;
+    let problem = |problem| AccountFileError::Key {
+        path: path.to_owned(),
+        problem,
+    };
+    let secret: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(secret)
+        .map_err(|_encoding| problem("the secret is not base64url"))?
+        .try_into()
+        .map_err(|_length| problem("the secret is not 32 bytes"))?;
+    let public: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(public)
+        .map_err(|_encoding| problem("the public key is not base64url"))?
+        .try_into()
+        .map_err(|_length| problem("the public key is not 32 bytes"))?;
+    let key =
+        MachineKeypair::from_secret(secret).map_err(|_secret| problem("the secret is invalid"))?;
+    if key.public() != &public {
+        return Err(problem("the public key does not match the secret"));
+    }
+    Ok(key)
+}
+
 fn account_path() -> Result<PathBuf> {
     Ok(App::Forge.data()?.join("ast_account.json"))
 }
 
-fn load_account() -> Result<AccountFile> {
-    let path = account_path()?;
-    match std::fs::read(&path) {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).with_context(|| format!("read {}", path.display()))
+fn load_account(path: &Path) -> Result<Account, AccountFileError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Account::Unkeyed),
+        Err(source) => {
+            return Err(AccountFileError::Read {
+                path: path.to_owned(),
+                source,
+            });
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AccountFile::default()),
-        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
-    }
+    };
+    let file = serde_json::from_slice(&bytes).map_err(|source| AccountFileError::Parse {
+        path: path.to_owned(),
+        source,
+    })?;
+    Account::decode(path, file)
 }
 
-fn save_account(account: &AccountFile) -> Result<()> {
+fn save_account(path: &Path, account: &Account) -> Result<(), AccountFileError> {
+    let bytes = serde_json::to_vec_pretty(&account.encode())
+        .expect("invariant: an account file of strings always serializes");
+    write_private(path, &bytes).map_err(|source| AccountFileError::Write {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    let path = account_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    let folder = path
+        .parent()
+        .expect("invariant: the account file lives in Forge's data folder");
+    std::fs::create_dir_all(folder)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".ast_account-")
+        .tempfile_in(folder)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&path)
-        .with_context(|| format!("write {}", path.display()))?;
-    serde_json::to_writer_pretty(&mut file, account)?;
-    file.flush()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    std::fs::File::open(folder)?.sync_all()?;
     Ok(())
 }
 
@@ -138,37 +303,15 @@ pub fn run(args: &AccountArgs) -> Result<()> {
     }
 }
 
-fn keypair(account: &mut AccountFile) -> Result<artisan_account::MachineKeypair> {
-    use base64::Engine as _;
-    if let (Some(secret), Some(public)) = (
-        account.secret_b64u.as_deref(),
-        account.public_b64u.as_deref(),
-    ) {
-        use base64::Engine as _;
-        let secret: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(secret)
-            .context("read the machine secret")?
-            .try_into()
-            .map_err(|_secret| anyhow::anyhow!("the machine secret is not 32 bytes"))?;
-        let public: [u8; 32] = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(public)
-            .context("read the machine key")?
-            .try_into()
-            .map_err(|_key| anyhow::anyhow!("the machine key is not 32 bytes"))?;
-        let keypair = artisan_account::MachineKeypair::from_secret(secret)
-            .map_err(|_secret| anyhow::anyhow!("the machine secret is invalid"))?;
-        if keypair.public() != &public {
-            bail!("the stored machine key does not match its secret");
-        }
-        return Ok(keypair);
+fn keyed(path: &Path, account: Account) -> Result<(Account, MachineKeypair)> {
+    if let Some(key) = account.key() {
+        let key = key.clone();
+        return Ok((account, key));
     }
-    let keypair = artisan_account::MachineKeypair::generate()
-        .map_err(|_rand| anyhow::anyhow!("random key failed"))?;
-    account.secret_b64u =
-        Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(keypair.secret()));
-    account.public_b64u = Some(keypair.public_b64u());
-    save_account(account)?;
-    Ok(keypair)
+    let key = MachineKeypair::generate().context("generate a machine key")?;
+    let account = Account::Keyed { key: key.clone() };
+    save_account(path, &account)?;
+    Ok((account, key))
 }
 
 fn label_default(label: Option<&str>) -> String {
@@ -190,28 +333,17 @@ fn label_default(label: Option<&str>) -> String {
 }
 
 fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) -> Result<()> {
-    let mut account = load_account()?;
-    if account.machine_id.is_some() && !replace {
+    let path = account_path()?;
+    let account = load_account(&path)?;
+    let enrolled = matches!(account, Account::Enrolled { .. });
+    if enrolled && !replace {
         bail!("this Forge is already enrolled; see `ae account status`");
     }
-    let restart = replace && account.machine_id.is_some() && crate::service::is_running();
-    let keypair = if replace {
-        use base64::Engine as _;
-        // Core keeps revoked account/key pairs unique. Re-enrollment needs
-        // a new key, not just a new code for the revoked key. Keep the old
-        // binding on disk until Core accepts the replacement enrollment.
-        let fresh = artisan_account::MachineKeypair::generate()
-            .map_err(|_rand| anyhow::anyhow!("random key failed"))?;
-        account = AccountFile {
-            secret_b64u: Some(
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fresh.secret()),
-            ),
-            public_b64u: Some(fresh.public_b64u()),
-            ..AccountFile::default()
-        };
-        fresh
+    let restart = replace && enrolled && crate::service::is_running();
+    let key = if replace {
+        MachineKeypair::generate().context("generate a machine key")?
     } else {
-        keypair(&mut account)?
+        keyed(&path, account)?.1
     };
     let label = label_default(label);
     if label.is_empty() {
@@ -219,14 +351,17 @@ fn enroll(core: Option<&str>, label: Option<&str>, json: bool, replace: bool) ->
     }
     let created = runtime()?.block_on(async {
         client(core)?
-            .enroll_start(keypair.public(), &label, keypair.secret())
+            .enroll_start(key.public(), &label, key.secret())
             .await
     })?;
-    account.enrollment_id = Some(created.enrollment_id.clone());
-    save_account(&account)?;
+    save_account(
+        &path,
+        &Account::Pending {
+            key,
+            enrollment_id: created.enrollment_id.clone(),
+        },
+    )?;
     if restart {
-        // The old daemon holds its machine identity in memory. Restart
-        // into the pending state so it observes the new confirmation.
         crate::service::restart()?;
     }
     if json {
@@ -253,38 +388,35 @@ fn enroll_report(created: &forge_http::core::EnrollmentCreated) -> serde_json::V
 }
 
 fn status(core: Option<&str>, json: bool) -> Result<()> {
-    let account = load_account()?;
-    // Enrolled machines report their binding even though confirming clears
-    // the pending enrollment id.
-    if let Some(machine_id) = account.machine_id.as_deref() {
-        if json {
-            println!(
-                "{}",
-                enrolled_report(machine_id, account.account_id.as_deref())
-            );
+    let (key, enrollment_id) = match load_account(&account_path()?)? {
+        Account::Enrolled {
+            machine_id,
+            account_id,
+            ..
+        } => {
+            if json {
+                println!("{}", enrolled_report(&machine_id, Some(&account_id)));
+            } else {
+                println!("Enrolled: machine {machine_id} in account {account_id}.");
+            }
             return Ok(());
         }
-        println!(
-            "Enrolled: machine {machine_id} in account {}.",
-            account.account_id.as_deref().unwrap_or("?")
-        );
-        return Ok(());
-    }
-    let Some(enrollment_id) = account.enrollment_id.as_deref() else {
-        if json {
-            println!("{}", no_enrollment_report());
-            return Ok(());
+        Account::Unkeyed | Account::Keyed { .. } => {
+            if json {
+                println!("{}", no_enrollment_report());
+                return Ok(());
+            }
+            bail!("no enrollment started; run `ae account enroll`");
         }
-        bail!("no enrollment started; run `ae account enroll`");
+        Account::Pending { key, enrollment_id } => (key, enrollment_id),
     };
-    let keypair = keypair(&mut load_account()?)?;
     let status = runtime()?.block_on(async {
         client(core)?
-            .enrollment_status(enrollment_id, keypair.secret())
+            .enrollment_status(&enrollment_id, key.secret())
             .await
     })?;
     if json {
-        println!("{}", pending_report(enrollment_id, &status));
+        println!("{}", pending_report(&enrollment_id, &status));
         return Ok(());
     }
     println!("Enrollment status: {}", status.status);
@@ -305,20 +437,25 @@ fn status(core: Option<&str>, json: bool) -> Result<()> {
 }
 
 fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Result<()> {
-    let mut account = load_account()?;
-    if let Some(machine_id) = account.machine_id.clone() {
-        check_expected_account(expected_account, account.account_id.as_deref())?;
-        println!("Already enrolled as {machine_id}.");
-        return Ok(());
-    }
-    let enrollment_id = account
-        .enrollment_id
-        .clone()
-        .context("no enrollment started; run `ae account enroll`")?;
-    let keypair = keypair(&mut account)?;
+    let path = account_path()?;
+    let (key, enrollment_id) = match load_account(&path)? {
+        Account::Enrolled {
+            machine_id,
+            account_id,
+            ..
+        } => {
+            check_expected_account(expected_account, Some(&account_id))?;
+            println!("Already enrolled as {machine_id}.");
+            return Ok(());
+        }
+        Account::Unkeyed | Account::Keyed { .. } => {
+            bail!("no enrollment started; run `ae account enroll`")
+        }
+        Account::Pending { key, enrollment_id } => (key, enrollment_id),
+    };
     let status = runtime()?.block_on(async {
         client(core)?
-            .enrollment_status(&enrollment_id, keypair.secret())
+            .enrollment_status(&enrollment_id, key.secret())
             .await
     })?;
     let account_id = status.account_id.clone().context(
@@ -347,22 +484,22 @@ fn confirm(core: Option<&str>, yes: bool, expected_account: Option<&str>) -> Res
     }
     let confirmed = runtime()?.block_on(async {
         client(core)?
-            .confirm_enrollment(
-                &enrollment_id,
-                &account_id,
-                keypair.public(),
-                keypair.secret(),
-            )
+            .confirm_enrollment(&enrollment_id, &account_id, key.public(), key.secret())
             .await
     })?;
-    account.machine_id = Some(confirmed.machine_id.clone());
-    account.account_id = Some(confirmed.account_id);
-    account.enrollment_id = None;
-    save_account(&account)?;
+    let machine_id = confirmed.machine_id.clone();
+    save_account(
+        &path,
+        &Account::Enrolled {
+            key,
+            machine_id: confirmed.machine_id,
+            account_id: confirmed.account_id,
+        },
+    )?;
     if crate::service::is_running() {
         crate::service::restart()?;
     }
-    crate::ui::success(format!("Enrolled this Forge as {}.", confirmed.machine_id));
+    crate::ui::success(format!("Enrolled this Forge as {machine_id}."));
     Ok(())
 }
 
@@ -453,13 +590,13 @@ fn sync_config_now(core: Option<&str>) -> Result<()> {
     let _lock = forge_http::lock_data_dir(&data_dir)?;
     let store = forge_store::Store::open(&data_dir).context("open the Forge store")?;
     let engines = forge_engines::Engines::new(&data_dir);
-    let hub = forge_runs::Hub::new(store, engines, data_dir.clone());
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .context("build the Core HTTP client")?;
     let outcome = runtime()?.block_on(async {
-        forge_http::sync::sync_config(
+        let hub = forge_runs::Hub::new(store, engines, data_dir.clone());
+        let outcome = forge_http::sync::sync_config(
             &http,
             &forge_http::core::core_base_url(core),
             &identity.machine_id,
@@ -467,7 +604,9 @@ fn sync_config_now(core: Option<&str>) -> Result<()> {
             &hub,
             &data_dir,
         )
-        .await
+        .await;
+        hub.shutdown();
+        outcome
     })?;
     match outcome {
         forge_http::sync::ConfigOutcome::Updated(state) => {
@@ -481,155 +620,5 @@ fn sync_config_now(core: Option<&str>) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn labels_fall_back_to_a_bounded_hostname() {
-        assert_eq!(label_default(Some("  srv-1  ")), "srv-1");
-        assert!(label_default(Some("")).is_empty());
-        assert!(label_default(None).len() <= 64);
-    }
-
-    #[test]
-    fn account_file_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ast_account.json");
-        let account = AccountFile {
-            machine_id: Some("mch_1".into()),
-            account_id: Some("acct_1".into()),
-            ..AccountFile::default()
-        };
-        std::fs::write(&path, serde_json::to_string(&account).unwrap()).unwrap();
-        let read: AccountFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(read, account);
-    }
-
-    #[test]
-    fn expected_account_gate_rejects_mismatch_before_rpc() {
-        assert!(check_expected_account(None, None).is_ok());
-        assert!(check_expected_account(None, Some("acct_a")).is_ok());
-        assert!(check_expected_account(Some("acct_a"), Some("acct_a")).is_ok());
-        assert!(check_expected_account(Some(" acct_a "), Some("acct_a")).is_ok());
-        assert!(check_expected_account(Some("acct_a"), Some("acct_b")).is_err());
-        assert!(check_expected_account(Some("acct_a"), None).is_err());
-        assert!(check_expected_account(Some(""), Some("acct_a")).is_err());
-        assert!(check_expected_account(Some("   "), Some("acct_a")).is_err());
-    }
-
-    fn sorted_keys(value: &serde_json::Value) -> Vec<String> {
-        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
-        keys.sort_unstable();
-        keys
-    }
-
-    #[test]
-    fn status_json_reports_ids_with_exact_keys() {
-        let enrolled = enrolled_report("mch_1", Some("acct_1"));
-        assert_eq!(enrolled["enrolled"], true);
-        assert_eq!(enrolled["machine_id"], "mch_1");
-        assert_eq!(enrolled["account_id"], "acct_1");
-        assert_eq!(
-            sorted_keys(&enrolled),
-            ["account_id", "enrolled", "machine_id"]
-        );
-        let pending = pending_report(
-            "enr_1",
-            &artisan_account::PairStatus {
-                enrollment_id: None,
-                status: "claimed".to_owned(),
-                account_id: Some("acct_9".to_owned()),
-                email: Some("op@example.invalid".to_owned()),
-                display_name: None,
-                expires_at: None,
-            },
-        );
-        assert_eq!(pending["enrolled"], false);
-        assert_eq!(pending["enrollment_id"], "enr_1");
-        assert_eq!(pending["status"], "claimed");
-        assert_eq!(pending["account_id"], "acct_9");
-        assert_eq!(pending["email"], "op@example.invalid");
-        assert!(pending["display_name"].is_null());
-        assert_eq!(
-            sorted_keys(&pending),
-            [
-                "account_id",
-                "display_name",
-                "email",
-                "enrolled",
-                "enrollment_id",
-                "status"
-            ]
-        );
-    }
-
-    #[test]
-    fn status_json_never_carries_secrets() {
-        // Even with every secret field populated on disk, the reports only
-        // see identifiers: the builders take ids, never the file.
-        let secret = "SECRET-B64U-abcdefghijklmnopqrstuvwxyz012345";
-        let public = "PUBLIC-B64U-abcdefghijklmnopqrstuvwxyz012345";
-        let enrolled = enrolled_report("mch_1", Some("acct_1"));
-        let pending = pending_report(
-            "enr_1",
-            &artisan_account::PairStatus {
-                enrollment_id: None,
-                status: "pending".to_owned(),
-                account_id: None,
-                email: None,
-                display_name: None,
-                expires_at: None,
-            },
-        );
-        for report in [
-            serde_json::to_string(&enrolled).unwrap(),
-            serde_json::to_string(&pending).unwrap(),
-        ] {
-            assert!(!report.contains(secret));
-            assert!(!report.contains(public));
-            assert!(!report.contains("secret"));
-            assert!(!report.contains("token"));
-            assert!(!report.contains("code"));
-        }
-    }
-
-    #[test]
-    fn enroll_report_carries_the_created_dto_fields() {
-        let report = enroll_report(&forge_http::core::EnrollmentCreated {
-            enrollment_id: "enr_1".to_owned(),
-            code: "ABCDEFGH".to_owned(),
-            expires_at: "2030-01-01T00:00:00.000Z".to_owned(),
-            key_fingerprint: "fp".to_owned(),
-        });
-        assert_eq!(report["code"], "ABCDEFGH");
-        assert_eq!(report["enrollment_id"], "enr_1");
-        assert_eq!(report["expires_at"], "2030-01-01T00:00:00.000Z");
-        assert_eq!(report["key_fingerprint"], "fp");
-        assert_eq!(
-            sorted_keys(&report),
-            ["code", "enrollment_id", "expires_at", "key_fingerprint"]
-        );
-    }
-
-    #[test]
-    fn no_enrollment_json_uses_pending_keys_with_nulls() {
-        let report = no_enrollment_report();
-        assert_eq!(report["enrolled"], false);
-        assert!(report["enrollment_id"].is_null());
-        assert_eq!(report["status"], "none");
-        assert!(report["account_id"].is_null());
-        assert!(report["email"].is_null());
-        assert!(report["display_name"].is_null());
-        assert_eq!(
-            sorted_keys(&report),
-            [
-                "account_id",
-                "display_name",
-                "email",
-                "enrolled",
-                "enrollment_id",
-                "status"
-            ]
-        );
-    }
-}
+#[path = "../tests/account/state.rs"]
+mod tests;

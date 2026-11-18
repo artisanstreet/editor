@@ -36,6 +36,7 @@ sha2.workspace = true
 hex.workspace = true
 semver.workspace = true
 sysinfo = "=0.31.4"
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
 thiserror.workspace = true
 tracing.workspace = true
