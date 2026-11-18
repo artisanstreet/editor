@@ -60,7 +60,7 @@ impl Store {
     /// Inserts accepted input once and records its thread activity in the same commit.
     pub async fn insert_user_message(&self, new: NewItem) -> Result<(Item, bool)> {
         let blob_dir = self.inner.blob_dir.clone();
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let (item, created) = tx.insert_input(new, &blob_dir)?;
             if created {
                 tx.mark_activity(&item.thread_id, item.seq)?;
@@ -78,8 +78,10 @@ impl Store {
         acceptance: Acceptance,
     ) -> Result<(Item, bool, EngineId)> {
         let blob_dir = self.inner.blob_dir.clone();
-        self.write(move |tx| tx.send_message(thread_id, message, steer, acceptance, &blob_dir))
-            .await
+        self.write_acknowledged(move |tx| {
+            tx.send_message(thread_id, message, steer, acceptance, &blob_dir)
+        })
+        .await
     }
 
     pub async fn spawn_agent(
@@ -91,7 +93,7 @@ impl Store {
     ) -> Result<(Item, Thread, Item)> {
         let blob_dir = self.inner.blob_dir.clone();
         let (agent_id, parent) = (agent.id.clone(), agent.thread_id.clone());
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let agent = tx.upsert_item(agent)?;
             let child = tx.create_thread(child)?;
             let (prompt, _, _) =
@@ -148,8 +150,10 @@ impl Store {
 
     /// Asks for the thread's stopped turn to carry on with no new message.
     pub async fn request_continue(&self, thread: ThreadId) -> Result<()> {
-        self.write(move |tx| tx.request_continue(&thread, artisan_api::Continuation::Requested))
-            .await
+        self.write_acknowledged(move |tx| {
+            tx.request_continue(&thread, artisan_api::Continuation::Requested)
+        })
+        .await
     }
 
     /// Takes the thread's continue request, if it has one.
@@ -162,7 +166,7 @@ impl Store {
 
     /// Drops the thread's parked turn; returns whether it had one.
     pub async fn unpark(&self, thread: ThreadId) -> Result<bool> {
-        self.write(move |tx| tx.unpark(&thread)).await
+        self.write_acknowledged(move |tx| tx.unpark(&thread)).await
     }
 
     /// How many runs in a row, newest first, carried the thread's turn on
@@ -219,7 +223,7 @@ impl Store {
     /// in line: the cancelled ones after the last message it did read.
     /// Returns how many.
     pub async fn restore_undelivered_inputs(&self, thread: ThreadId) -> Result<usize> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let inputs: Vec<Item> = read::items(
                 tx,
                 "SELECT body FROM items WHERE thread_id=?1 AND parent_id IS NULL
@@ -249,7 +253,7 @@ impl Store {
     /// Cancels the thread's undelivered messages through `through`, and a
     /// waiting continue request.
     pub async fn cancel_pending_inputs(&self, thread: ThreadId, through: Seq) -> Result<()> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             tx.take_continue(&thread)?;
             let inputs: Vec<Item> = read::items(
                 tx,
@@ -345,7 +349,7 @@ impl Store {
         answers: Vec<Option<artisan_api::QuestionAnswer>>,
     ) -> Result<Item> {
         let blob_dir = self.inner.blob_dir.clone();
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let old = read::item(tx, &id)?.ok_or_else(|| ItemNotFound(id.clone()))?;
             let mut item = old.clone();
             let ItemKind::Question {

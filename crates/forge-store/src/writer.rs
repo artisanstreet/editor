@@ -20,8 +20,24 @@ use tokio::sync::{broadcast, mpsc};
 
 pub type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Durability {
+    Acknowledged,
+    Background,
+}
+
+impl Durability {
+    const fn synchronous(self) -> &'static str {
+        match self {
+            Self::Acknowledged => "FULL",
+            Self::Background => "NORMAL",
+        }
+    }
+}
+
 pub struct Writer {
     conn: Connection,
+    durability: Durability,
     head: Arc<AtomicU64>,
     events: Option<broadcast::Sender<Envelope>>,
     hot: Arc<crate::hot::HotPages>,
@@ -38,8 +54,12 @@ impl Writer {
     ) -> Result<Self> {
         let seq = read::max_seq(&conn)?;
         head.store(seq, Ordering::Release);
+        let durability = Durability::Background;
+        conn.pragma_update(None, "synchronous", durability.synchronous())
+            .context("set the writer's durability")?;
         Ok(Self {
             conn,
+            durability,
             head,
             events,
             hot,
@@ -53,7 +73,17 @@ impl Writer {
         }
     }
 
-    pub(crate) fn transact<R>(&mut self, job: impl FnOnce(&mut Tx<'_>) -> Result<R>) -> Result<R> {
+    pub(crate) fn transact<R>(
+        &mut self,
+        durability: Durability,
+        job: impl FnOnce(&mut Tx<'_>) -> Result<R>,
+    ) -> Result<R> {
+        if self.durability != durability {
+            self.conn
+                .pragma_update(None, "synchronous", durability.synchronous())
+                .context("set the writer's durability")?;
+            self.durability = durability;
+        }
         let sql = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)

@@ -60,7 +60,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
-use writer::{Job, Tx, Writer};
+use writer::{Durability, Job, Tx, Writer};
 
 pub use blobs::{BlobRejected, MAX_BLOB_BYTES};
 pub use items::Acceptance;
@@ -288,7 +288,6 @@ impl Store {
                 "database refused WAL (mode {mode})"
             );
         }
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "cache_size", -WRITER_CACHE_KIB)?;
         conn.pragma_update(None, "wal_autocheckpoint", WAL_BACKSTOP_PAGES)?;
         if recover {
@@ -308,7 +307,7 @@ impl Store {
         )?;
         if recover {
             writer
-                .transact(|tx| tx.recover_threads(None))
+                .transact(Durability::Background, |tx| tx.recover_threads(None))
                 .context("recover live runs")?;
         }
 
@@ -473,12 +472,27 @@ impl Store {
         R: Send + 'static,
         F: FnOnce(&mut Tx<'_>) -> Result<R> + Send + 'static,
     {
+        self.write_with(Durability::Background, job).await
+    }
+
+    async fn write_acknowledged<R, F>(&self, job: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&mut Tx<'_>) -> Result<R> + Send + 'static,
+    {
+        self.write_with(Durability::Acknowledged, job).await
+    }
+
+    async fn write_with<R, F>(&self, durability: Durability, job: F) -> Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&mut Tx<'_>) -> Result<R> + Send + 'static,
+    {
         let (reply, result) = oneshot::channel();
         self.inner
             .jobs
             .send(Box::new(move |writer: &mut Writer| {
-                // The caller stopped waiting; the write still committed.
-                reply.send(writer.transact(job)).ok();
+                reply.send(writer.transact(durability, job)).ok();
             }))
             .await
             .map_err(|_unsent_job| anyhow!("the store writer stopped"))?;

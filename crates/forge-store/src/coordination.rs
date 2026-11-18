@@ -466,7 +466,7 @@ impl Store {
         mut content: Content,
         expected_revision: Option<u64>,
     ) -> Result<Record> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let thread = read::thread(tx, &caller)?.context("calling thread no longer exists")?;
             match &mut content {
                 Content::Work {
@@ -605,7 +605,7 @@ impl Store {
         revision: u64,
         update: Update,
     ) -> Result<Record> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let mut record = get(tx, &id)?.context("coordination record not found")?;
             if record.revision != revision {
                 return Err(Conflict {

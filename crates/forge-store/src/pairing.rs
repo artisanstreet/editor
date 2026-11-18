@@ -78,7 +78,7 @@ impl Store {
         name: String,
         certificate: String,
     ) -> Result<Option<DeviceId>> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             if tx.execute(
                 "DELETE FROM pair_codes WHERE code_sha256 = ?1 AND expires_at > ?2",
                 params![code, now()],
@@ -101,7 +101,7 @@ impl Store {
 
     /// Pairing the same key again renames the device and keeps its id.
     pub async fn add_device(&self, name: String, public_key: String) -> Result<DeviceId> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let id: String = tx.query_row(
                 "INSERT INTO authorized_keys (id, name, public_key, created_at)
                  VALUES (?1, ?2, ?3, ?4)
@@ -120,7 +120,7 @@ impl Store {
     pub async fn revoke_device(&self, id: &DeviceId) -> Result<bool> {
         let key = id.clone();
         let revoked = self
-            .write(move |tx| {
+            .write_acknowledged(move |tx| {
                 Ok(tx.execute("DELETE FROM authorized_keys WHERE id = ?1", [key.as_str()])? > 0)
             })
             .await?;
@@ -145,7 +145,7 @@ impl Store {
     }
 
     pub async fn add_pair_code(&self, code_sha256: String, expires_at: Timestamp) -> Result<()> {
-        self.write(move |tx| add_pair_code(tx, &code_sha256, expires_at))
+        self.write_acknowledged(move |tx| add_pair_code(tx, &code_sha256, expires_at))
             .await
     }
 

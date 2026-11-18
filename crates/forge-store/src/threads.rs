@@ -11,7 +11,7 @@ impl Store {
     /// Creating an existing id returns the stored project unchanged.
     pub async fn create_project(&self, request: CreateProject) -> Result<Project> {
         let id = request.id.clone();
-        self.write(move |tx| tx.create_project(request))
+        self.write_acknowledged(move |tx| tx.create_project(request))
             .await
             .with_context(|| format!("create project {id}"))
     }
@@ -19,7 +19,7 @@ impl Store {
     /// Marks the project removed. `None` if it does not exist.
     pub async fn remove_project(&self, id: &ProjectId) -> Result<Option<Project>> {
         let id = id.clone();
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let Some(mut project) = read::project(tx, &id)? else {
                 return Ok(None);
             };
@@ -35,7 +35,7 @@ impl Store {
     /// Creating an existing id returns the stored thread unchanged.
     pub async fn create_thread(&self, request: CreateThread) -> Result<Thread> {
         let id = request.id.clone();
-        self.write(move |tx| tx.create_thread(request))
+        self.write_acknowledged(move |tx| tx.create_thread(request))
             .await
             .with_context(|| format!("create thread {id}"))
     }
@@ -47,7 +47,8 @@ impl Store {
         update: UpdateThread,
     ) -> Result<Option<Thread>> {
         let id = id.clone();
-        self.write(move |tx| tx.update_thread(&id, update)).await
+        self.write_acknowledged(move |tx| tx.update_thread(&id, update))
+            .await
     }
 
     /// Replaces a fallback title only if it has not changed while generation ran.
@@ -59,7 +60,7 @@ impl Store {
         title: String,
     ) -> Result<Option<Thread>> {
         let id = id.clone();
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let Some(mut thread) = read::thread(tx, &id)? else {
                 return Ok(None);
             };
@@ -87,7 +88,7 @@ impl Store {
 
     pub async fn mark_unread(&self, id: &ThreadId) -> Result<Option<Thread>> {
         let id = id.clone();
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let Some(mut thread) = read::thread(tx, &id)? else {
                 return Ok(None);
             };

@@ -19,7 +19,8 @@ impl Store {
         if key == artisan_api::MODEL_CUSTOMIZATIONS_KEY {
             artisan_api::model_customizations(&value).map_err(anyhow::Error::msg)?;
         }
-        self.write(move |tx| tx.save_setting(key, value)).await
+        self.write_acknowledged(move |tx| tx.save_setting(key, value))
+            .await
     }
 
     /// Sets a setting unless it exists; returns whether it was set.
@@ -28,7 +29,7 @@ impl Store {
         key: String,
         value: serde_json::Value,
     ) -> Result<bool> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             if read::setting(tx, &key)?.is_some() {
                 return Ok(false);
             }
@@ -58,7 +59,7 @@ impl Store {
         &self,
         mutation: artisan_api::McpMutation,
     ) -> Result<Vec<artisan_api::McpServer>> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             use artisan_api::McpMutation;
             let mut servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
                 .map(serde_json::from_value)
@@ -119,7 +120,7 @@ impl Store {
         engine: EngineId,
         model: artisan_api::Model,
     ) -> Result<artisan_api::EngineConfig> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let saved = read::setting(tx, artisan_api::MODEL_CONFIGS_KEY)?
                 .and_then(|configs| artisan_api::saved_model_config(&configs, engine, &model.id));
             let mut config = match saved {
@@ -159,7 +160,7 @@ impl Store {
     ) -> Result<artisan_api::EngineConfig> {
         config.model = Some(model.id.clone());
         let model = model.clone();
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let customizations = read::setting(tx, artisan_api::MODEL_CUSTOMIZATIONS_KEY)?
                 .as_ref()
                 .map(artisan_api::model_customizations)
@@ -181,7 +182,7 @@ impl Store {
         engine: EngineId,
         group: artisan_api::ModelGroup,
     ) -> Result<()> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let mut groups = match read::setting(tx, artisan_api::MODEL_GROUPS_KEY)? {
                 Some(serde_json::Value::Object(groups)) => groups,
                 _ => serde_json::Map::new(),
@@ -203,7 +204,7 @@ impl Store {
     }
 
     pub async fn set_skill_enabled(&self, id: String, enabled: bool) -> Result<()> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let mut disabled: std::collections::BTreeSet<String> =
                 read::setting(tx, "disabled_skills")?
                     .map(serde_json::from_value)
@@ -227,7 +228,7 @@ impl Store {
         base: u64,
         text: String,
     ) -> Result<std::result::Result<u64, u64>> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let latest = read::prompt_version(tx)?;
             if latest != base {
                 return Ok(Err(latest));
@@ -270,7 +271,7 @@ impl Store {
         scope: String,
         request: artisan_api::WriteDraft,
     ) -> Result<artisan_api::DraftWriteResult> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let current = read::draft(tx, &scope)?;
             if current.revision != request.expected_revision {
                 return Ok(artisan_api::DraftWriteResult {
@@ -312,7 +313,7 @@ impl Store {
         secret: McpSecret,
         value: String,
     ) -> Result<bool> {
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             let servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
                 .map(serde_json::from_value)
                 .transpose()?
@@ -349,7 +350,7 @@ impl Store {
     /// synced to clients.
     pub async fn set_secret(&self, key: &str, value: Option<String>) -> Result<()> {
         let key = key.to_owned();
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             match value {
                 Some(value) => tx.execute(
                     "INSERT INTO secrets (key, value) VALUES (?1, ?2)
@@ -368,7 +369,7 @@ impl Store {
     /// already; returns whichever is stored. Not synced to clients.
     pub async fn secret_or_insert(&self, key: &str, value: String) -> Result<String> {
         let key = key.to_owned();
-        self.write(move |tx| {
+        self.write_acknowledged(move |tx| {
             tx.execute(
                 "INSERT INTO secrets (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
                 params![key, value],
