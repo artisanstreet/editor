@@ -40,7 +40,7 @@ pub enum CallToolError {
 }
 
 impl CallToolError {
-    pub fn failure(&self) -> Failure<'_> {
+    pub(crate) fn failure(&self) -> Failure<'_> {
         match self {
             Self::Refused(refused) => Failure::Refused(refused.to_string()),
             Self::Forge { source, .. } => source.failure(),

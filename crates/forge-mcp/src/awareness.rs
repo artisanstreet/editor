@@ -73,7 +73,7 @@ pub enum AwarenessError {
 }
 
 impl AwarenessError {
-    pub fn failure(&self) -> Failure<'_> {
+    pub(crate) fn failure(&self) -> Failure<'_> {
         match self {
             Self::Forge { source, .. } => source.failure(),
             Self::Path { source, .. } | Self::Resource(source) => forge::coordination(source, self),

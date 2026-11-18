@@ -20,7 +20,7 @@ pub enum ListRecordsError {
 }
 
 impl ListRecordsError {
-    pub fn failure(&self) -> Failure<'_> {
+    pub(crate) fn failure(&self) -> Failure<'_> {
         match self {
             Self::Forge(source) => forge::coordination(&source.cause, self),
             Self::Cursor(_) => Failure::Broken,
@@ -65,7 +65,7 @@ pub enum CoordinationError {
 }
 
 impl CoordinationError {
-    pub fn failure(&self) -> Failure<'_> {
+    pub(crate) fn failure(&self) -> Failure<'_> {
         match self {
             Self::Forge { source, .. } => source.failure(),
             Self::Resource(source) => forge::coordination(source, self),

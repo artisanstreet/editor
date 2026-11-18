@@ -29,8 +29,8 @@ pub enum Content {
 
 #[derive(Debug)]
 pub struct ToolResult {
-    pub content: Vec<Content>,
-    pub structured_content: Option<Value>,
+    pub(crate) content: Vec<Content>,
+    pub(crate) structured_content: Option<Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,7 +42,7 @@ pub enum StructuredError {
 }
 
 impl ToolResult {
-    pub fn structured(value: Value) -> Result<Self, StructuredError> {
+    pub(crate) fn structured(value: Value) -> Result<Self, StructuredError> {
         let text = serde_json::to_string(&value).map_err(StructuredError::Encode)?;
         if text.len() > STRUCTURED_LIMIT {
             return Err(StructuredError::TooLarge { bytes: text.len() });
@@ -356,7 +356,7 @@ fn failed<E: ToolError>(server: &str, caller: &ThreadId, tool: &str, error: &E) 
 }
 
 #[must_use]
-pub fn list(tools: &[Tool]) -> Vec<Value> {
+fn list(tools: &[Tool]) -> Vec<Value> {
     tools
         .iter()
         .map(|tool| {

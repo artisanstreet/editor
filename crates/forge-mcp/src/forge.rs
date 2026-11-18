@@ -90,7 +90,7 @@ pub enum ForgeError {
 
 impl ForgeError {
     #[must_use]
-    pub fn class(&self) -> ErrorClass {
+    fn class(&self) -> ErrorClass {
         match self {
             Self::AgentQuery(error) => error.class(),
             Self::Approval(error) => error.class(),
@@ -136,7 +136,7 @@ impl ForgeError {
         }
     }
 
-    pub fn failure(&self) -> Failure<'_> {
+    pub(crate) fn failure(&self) -> Failure<'_> {
         match self {
             Self::CoordinationGet(error) => coordination(&error.cause, self),
             Self::CoordinationList(error) => coordination(&error.cause, self),
