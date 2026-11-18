@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 
 fn mode(path: &Path) -> u32 {

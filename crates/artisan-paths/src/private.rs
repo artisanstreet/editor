@@ -124,6 +124,6 @@ fn restrict(_path: &Path, _mode: u32) -> Result<(), PrivateFileError> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "../tests/paths/private.rs"]
 mod tests;
