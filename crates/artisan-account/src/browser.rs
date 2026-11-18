@@ -3,7 +3,7 @@ use sha2::{Digest as _, Sha256};
 use std::{io, time::Duration};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-const REQUEST_LIMIT: usize = 8 * 1024;
+const REQUEST_LIMIT: usize = 16 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,10 +199,13 @@ pub async fn receive(
     let listener = tokio::net::TcpListener::from_std(listener)?;
     loop {
         let (mut stream, _) = listener.accept().await?;
-        let Ok(Ok(head)) = tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await else {
-            continue;
+        let arrival = match read_get_target(&mut stream).await {
+            Ok(target) => arrival(&target, state),
+            Err(RequestError::NotGet) => Arrival::Unrelated,
+            Err(RequestError::Read(_) | RequestError::TooLarge { .. } | RequestError::TimedOut) => {
+                continue;
+            }
         };
-        let arrival = request_target(&head).map_or(Arrival::Unrelated, |target| arrival(target, state));
         let response = match &arrival {
             Arrival::Unrelated => {
                 "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
@@ -220,15 +223,41 @@ pub async fn receive(
     }
 }
 
-async fn read_head(stream: &mut tokio::net::TcpStream) -> io::Result<String> {
+#[derive(Debug, thiserror::Error)]
+pub enum RequestError {
+    #[error("reading the browser's request")]
+    Read(#[source] io::Error),
+    #[error("the browser's request is over {limit} bytes")]
+    TooLarge { limit: usize },
+    #[error("the browser didn't finish its request within {READ_TIMEOUT:?}")]
+    TimedOut,
+    #[error("the browser's request isn't a GET")]
+    NotGet,
+}
+
+pub async fn read_get_target(stream: &mut tokio::net::TcpStream) -> Result<String, RequestError> {
+    let head = tokio::time::timeout(READ_TIMEOUT, read_head(stream))
+        .await
+        .map_err(|_elapsed| RequestError::TimedOut)??;
+    request_target(&head)
+        .map(str::to_owned)
+        .ok_or(RequestError::NotGet)
+}
+
+async fn read_head(stream: &mut tokio::net::TcpStream) -> Result<String, RequestError> {
     let mut head = Vec::new();
     let mut chunk = [0_u8; 1024];
-    while !head.windows(4).any(|window| window == b"\r\n\r\n") && head.len() < REQUEST_LIMIT {
-        let read = stream.read(&mut chunk).await?;
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).await.map_err(RequestError::Read)?;
         if read == 0 {
             break;
         }
         head.extend_from_slice(&chunk[..read]);
+        if head.len() > REQUEST_LIMIT {
+            return Err(RequestError::TooLarge {
+                limit: REQUEST_LIMIT,
+            });
+        }
     }
     Ok(String::from_utf8_lossy(&head).into_owned())
 }

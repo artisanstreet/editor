@@ -4,16 +4,16 @@ use crate::core::{
     hosts::HostId,
     runtime::runtime,
 };
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
+use artisan_account::browser;
 use artisan_api::{McpSignInFinish, McpSignInStart};
 use std::{collections::HashMap, num::NonZeroUsize, time::Duration};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::AsyncWriteExt as _;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 const PREFERRED_PORT: u16 = 33418;
 const WAITS: Duration = Duration::from_mins(10);
-const MAX_REQUEST: usize = 16 * 1024;
 
 async fn bind() -> Result<(TcpListener, String)> {
     let listener = match TcpListener::bind(("127.0.0.1", PREFERRED_PORT)).await {
@@ -29,54 +29,52 @@ async fn bind() -> Result<(TcpListener, String)> {
     Ok((listener, format!("http://127.0.0.1:{port}/callback")))
 }
 
-async fn wait_for_code(
+#[derive(Debug, thiserror::Error)]
+pub enum CallbackError {
+    #[error("The browser didn't come back within 10 minutes; start the sign-in again.")]
+    TimedOut,
+    #[error("The sign-in was refused: {reason}")]
+    Denied { reason: String },
+    #[error("accepting the browser's redirect")]
+    Accept(#[source] std::io::Error),
+}
+
+pub async fn wait_for_code(
     listener: TcpListener,
     state: String,
     cancel: CancellationToken,
-) -> Result<Option<(String, TcpStream)>> {
+) -> Result<Option<(String, TcpStream)>, CallbackError> {
     let deadline = tokio::time::sleep(WAITS);
     tokio::pin!(deadline);
     loop {
         let mut stream = tokio::select! {
             () = cancel.cancelled() => return Ok(None),
-            () = &mut deadline => bail!("The browser didn't come back within 10 minutes; start the sign-in again."),
-            accepted = listener.accept() => accepted.context("accept the browser's redirect")?.0,
+            () = &mut deadline => return Err(CallbackError::TimedOut),
+            accepted = listener.accept() => accepted.map_err(CallbackError::Accept)?.0,
         };
-        let Ok(Ok(target)) =
-            tokio::time::timeout(Duration::from_secs(10), read_target(&mut stream)).await
-        else {
-            continue;
+        let target = match browser::read_get_target(&mut stream).await {
+            Ok(target) => target,
+            Err(browser::RequestError::NotGet) => {
+                respond(stream, Page::not_found()).await;
+                continue;
+            }
+            Err(
+                unreadable @ (browser::RequestError::Read(_)
+                | browser::RequestError::TooLarge { .. }
+                | browser::RequestError::TimedOut),
+            ) => {
+                tracing::debug!("ignoring an unreadable browser request: {unreadable}");
+                continue;
+            }
         };
         match callback(&target, &state) {
             Callback::Code(code) => return Ok(Some((code, stream))),
             Callback::Denied(reason) => {
                 respond(stream, Page::failed("the server", &reason)).await;
-                bail!("The sign-in was refused: {reason}");
+                return Err(CallbackError::Denied { reason });
             }
             Callback::Other => respond(stream, Page::not_found()).await,
         }
-    }
-}
-
-async fn read_target(stream: &mut TcpStream) -> Result<String> {
-    let mut request = Vec::new();
-    let mut buffer = [0_u8; 2048];
-    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-        let read = stream.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&buffer[..read]);
-        if request.len() > MAX_REQUEST {
-            bail!("the request is too large");
-        }
-    }
-    let text = String::from_utf8_lossy(&request);
-    let line = text.lines().next().unwrap_or_default();
-    let mut parts = line.split_whitespace();
-    match (parts.next(), parts.next()) {
-        (Some("GET"), Some(target)) => Ok(target.to_owned()),
-        _ => bail!("not a GET request"),
     }
 }
 
@@ -364,7 +362,7 @@ impl McpSignIns {
                         .send(Message::Phase {
                             key: task_key.clone(),
                             id,
-                            phase: McpSignInPhase::Failed(format!("{error:#}")),
+                            phase: McpSignInPhase::Failed(error.to_string()),
                         })
                         .await;
                     let _ = sender.send(Message::Cleanup { key: task_key, id }).await;
