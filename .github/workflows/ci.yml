@@ -58,6 +58,8 @@ jobs:
           git diff --exit-code -- notices
       - name: Release tooling tests
         run: python3 tests/release.py
+      - name: Benchmark gate tests
+        run: python3 tests/benches.py
       - name: Present a WSL interop registration to the dev launcher
         run: |
           mountpoint -q /proc/sys/fs/binfmt_misc || sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
@@ -115,9 +117,18 @@ jobs:
       - name: Build service integration fixtures
         run: nix develop .#cargo-linux --command cargo build --locked -p ae -p forge
       - name: Tests
-        run: nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast
+        run: nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast -E 'not binary(budgets)'
       - name: Qualification tests
-        run: nix develop .#cargo-linux --command cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast
+        run: nix develop .#cargo-linux --command cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast -E 'not binary(budgets)'
+      - name: Performance budgets
+        run: |
+          echo '## Performance budgets' >> "$GITHUB_STEP_SUMMARY"
+          nix develop .#cargo-linux --command cargo nextest run --locked --workspace --no-fail-fast -E 'binary(budgets)'
+          nix develop .#cargo-linux --command cargo nextest run --locked -p editor-aqua --features qualification --no-fail-fast -E 'binary(budgets)'
+      - name: Benchmarks against the checked-in baseline
+        run: |
+          echo '## Benchmarks' >> "$GITHUB_STEP_SUMMARY"
+          nix develop .#cargo-linux --command python3 src/benches.py
       - &save-target
         name: Save the build cache
         if: ${{ !cancelled() && env.SAVE_TARGET_CACHE == 'true' && steps.target-cache.outputs.cache-hit != 'true' }}
