@@ -1,5 +1,7 @@
-use super::fixture::{ForgeServer, ImmutableFixture, SeedSnapshot};
-use anyhow::{Context, Result, ensure};
+use super::fixture::{
+    FixtureError, ForgeServer, ImmutableFixture, MarkerError, ProduceSnapshotError,
+    RestoreSnapshotError, SeedSnapshot, StartForgeError,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -31,39 +33,162 @@ struct SeedRecord {
     snapshot_dir: PathBuf,
 }
 
-fn marked(path: &Path) -> Result<PathBuf> {
-    ensure!(
-        path.is_absolute(),
-        "qualification directory must be absolute"
-    );
-    let canonical = super::fixture::canonical_path(path)?;
-    ensure!(
-        canonical == path,
-        "qualification directory must be canonical and contain no symlinks"
-    );
-    ensure!(
-        std::fs::read(path.join(".artisan-qualification"))? == b"artisan-qualification-v1\n",
-        "invalid qualification marker"
-    );
+#[derive(Debug, thiserror::Error)]
+pub enum MarkedError {
+    #[error("check {}", path.display())]
+    Marker {
+        path: PathBuf,
+        #[source]
+        source: MarkerError,
+    },
+    #[error("{} is not canonical or passes through a symlink", path.display())]
+    NotCanonical { path: PathBuf },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FreshError {
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} is not fresh: it holds {}", directory.display(), entry.display())]
+    NotFresh { directory: PathBuf, entry: PathBuf },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("write {}", path.display())]
+pub struct WriteNewError {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareError {
+    #[error("read the preparation request {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("decode the preparation request {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("resolve the fixture {}", path.display())]
+    ResolveFixture {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the fixture {} is not a canonical regular file", path.display())]
+    FixturePath { path: PathBuf },
+    #[error("load the fixture")]
+    Fixture(#[source] FixtureError),
+    #[error("check a qualification directory")]
+    Marked(#[source] MarkedError),
+    #[error("the fixture {} lies inside {}", fixture.display(), directory.display())]
+    FixtureInside {
+        fixture: PathBuf,
+        directory: PathBuf,
+    },
+    #[error("{} and {} overlap", left.display(), right.display())]
+    Overlap { left: PathBuf, right: PathBuf },
+    #[error("check that a qualification directory is fresh")]
+    Fresh(#[source] FreshError),
+    #[error("the source and candidate Editors start with different settings")]
+    SettingsDiffer,
+    #[error("qualification listens on {address}, not a fixed loopback port")]
+    Listen { address: SocketAddr },
+    #[error("host {host:?} is empty or thread {thread} is not in the fixture")]
+    Ids { host: String, thread: String },
+    #[error("the qualification window {width}x{height} is too small or not finite")]
+    Dimensions { width: f32, height: f32 },
+    #[error("start Forge")]
+    Start(#[source] StartForgeError),
+    #[error("produce the seed snapshot")]
+    Produce(#[source] ProduceSnapshotError),
+    #[error("check that the fixture is unchanged")]
+    FixtureChanged(#[source] FixtureError),
+    #[error("encode {what}")]
+    Encode {
+        what: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("read the seeded database {}", path.display())]
+    ReadDatabase {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("write a preparation output")]
+    Write(#[source] WriteNewError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RestoreError {
+    #[error("the seed record {} is not a seed.json file in a qualification directory", path.display())]
+    RecordPath { path: PathBuf },
+    #[error("check the seed record's directory")]
+    Marked(#[source] MarkedError),
+    #[error("read the seed record {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("the seed record {} does not hash to the expected SHA-256", path.display())]
+    Mismatch { path: PathBuf },
+    #[error("decode the seed record {}", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("restore the seed snapshot")]
+    Restore(#[source] RestoreSnapshotError),
+}
+
+fn marked(path: &Path) -> Result<PathBuf, MarkedError> {
+    let canonical =
+        super::fixture::marked_directory(path).map_err(|source| MarkedError::Marker {
+            path: path.to_owned(),
+            source,
+        })?;
+    if canonical != path {
+        return Err(MarkedError::NotCanonical {
+            path: path.to_owned(),
+        });
+    }
     Ok(canonical)
 }
 
-fn fresh(path: &Path, settings: bool) -> Result<Option<String>> {
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
+fn fresh(path: &Path, settings: bool) -> Result<Option<String>, FreshError> {
+    let read = |path: &Path| {
+        let path = path.to_owned();
+        move |source| FreshError::Read { path, source }
+    };
+    for entry in std::fs::read_dir(path).map_err(read(path))? {
+        let entry = entry.map_err(read(path))?;
         let name = entry.file_name();
-        ensure!(
-            name == ".artisan-qualification" || (settings && name == "settings.json"),
-            "qualification directory is not fresh"
-        );
-        ensure!(
-            entry.file_type()?.is_file(),
-            "qualification entry is not a regular file"
-        );
+        let expected = name == ".artisan-qualification" || (settings && name == "settings.json");
+        if !expected || !entry.file_type().map_err(read(&entry.path()))?.is_file() {
+            return Err(FreshError::NotFresh {
+                directory: path.to_owned(),
+                entry: entry.path(),
+            });
+        }
     }
     let settings_path = path.join("settings.json");
     if settings_path.exists() {
-        Ok(Some(hash(&std::fs::read(settings_path)?)))
+        Ok(Some(hash(
+            &std::fs::read(&settings_path).map_err(read(&settings_path))?,
+        )))
     } else {
         Ok(None)
     }
@@ -73,28 +198,53 @@ fn hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), WriteNewError> {
+    let fail = |source| WriteNewError {
+        path: path.to_owned(),
+        source,
+    };
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
+        .open(path)
+        .map_err(fail)?;
+    file.write_all(bytes).map_err(fail)?;
+    file.sync_all().map_err(fail)
+}
+
+fn encode(what: &'static str, value: &impl Serialize) -> Result<Vec<u8>, PrepareError> {
+    serde_json::to_vec(value).map_err(|source| PrepareError::Encode { what, source })
 }
 
 #[expect(
     clippy::print_stdout,
     reason = "the qualification CLI reports the prepared seed to its caller on stdout"
 )]
-pub fn prepare(path: &Path) -> Result<()> {
-    let request: Preparation = serde_json::from_slice(&std::fs::read(path)?)?;
-    let fixture_path = super::fixture::canonical_path(&request.fixture)?;
-    ensure!(
-        request.fixture == fixture_path && std::fs::symlink_metadata(&fixture_path)?.is_file(),
-        "fixture must be a canonical regular file"
-    );
-    let fixture = ImmutableFixture::read(&fixture_path)?;
+pub fn prepare(path: &Path) -> Result<(), PrepareError> {
+    let bytes = std::fs::read(path).map_err(|source| PrepareError::Read {
+        path: path.to_owned(),
+        source,
+    })?;
+    let request: Preparation =
+        serde_json::from_slice(&bytes).map_err(|source| PrepareError::Decode {
+            path: path.to_owned(),
+            source,
+        })?;
+    let resolve = |source| PrepareError::ResolveFixture {
+        path: request.fixture.clone(),
+        source,
+    };
+    let fixture_path = super::fixture::canonical_path(&request.fixture).map_err(resolve)?;
+    if request.fixture != fixture_path
+        || !std::fs::symlink_metadata(&fixture_path)
+            .map_err(resolve)?
+            .is_file()
+    {
+        return Err(PrepareError::FixturePath {
+            path: request.fixture,
+        });
+    }
+    let fixture = ImmutableFixture::read(&fixture_path).map_err(PrepareError::Fixture)?;
     let dirs = [
         &request.forge_dir,
         &request.snapshot_dir,
@@ -104,67 +254,95 @@ pub fn prepare(path: &Path) -> Result<()> {
     ]
     .into_iter()
     .map(|path| marked(path))
-    .collect::<Result<Vec<_>>>()?;
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(PrepareError::Marked)?;
     for (index, left) in dirs.iter().enumerate() {
-        ensure!(
-            !fixture_path.starts_with(left),
-            "fixture overlaps a mutable qualification directory"
-        );
-        for right in &dirs[index + 1..] {
-            ensure!(
-                !left.starts_with(right) && !right.starts_with(left),
-                "qualification directories overlap"
-            );
+        if fixture_path.starts_with(left) {
+            return Err(PrepareError::FixtureInside {
+                fixture: fixture_path,
+                directory: left.clone(),
+            });
+        }
+        if let Some(right) = dirs[index + 1..]
+            .iter()
+            .find(|right| left.starts_with(right) || right.starts_with(left))
+        {
+            return Err(PrepareError::Overlap {
+                left: left.clone(),
+                right: right.clone(),
+            });
         }
     }
     for dir in &dirs[..3] {
-        fresh(dir, false)?;
+        fresh(dir, false).map_err(PrepareError::Fresh)?;
     }
-    let source_settings = fresh(&dirs[3], true)?;
-    let candidate_settings = fresh(&dirs[4], true)?;
-    ensure!(
-        source_settings == candidate_settings,
-        "Editor settings differ between qualification runs"
-    );
-    ensure!(
-        request.listen.ip().is_loopback() && request.listen.port() != 0,
-        "qualification requires a fixed loopback port"
-    );
-    ensure!(
-        !request.host_id.trim().is_empty()
-            && fixture
-                .fixture()
-                .threads
-                .iter()
-                .any(|thread| thread.id.as_str() == request.thread_id),
-        "invalid qualification host or thread"
-    );
-    ensure!(
-        request.width.is_finite()
-            && request.height.is_finite()
-            && request.width >= 480.0
-            && request.height >= 420.0,
-        "invalid qualification dimensions"
-    );
+    let source_settings = fresh(&dirs[3], true).map_err(PrepareError::Fresh)?;
+    let candidate_settings = fresh(&dirs[4], true).map_err(PrepareError::Fresh)?;
+    if source_settings != candidate_settings {
+        return Err(PrepareError::SettingsDiffer);
+    }
+    if !request.listen.ip().is_loopback() || request.listen.port() == 0 {
+        return Err(PrepareError::Listen {
+            address: request.listen,
+        });
+    }
+    if request.host_id.trim().is_empty()
+        || !fixture
+            .fixture()
+            .threads
+            .iter()
+            .any(|thread| thread.id.as_str() == request.thread_id)
+    {
+        return Err(PrepareError::Ids {
+            host: request.host_id,
+            thread: request.thread_id,
+        });
+    }
+    if !(request.width.is_finite()
+        && request.height.is_finite()
+        && request.width >= 480.0
+        && request.height >= 420.0)
+    {
+        return Err(PrepareError::Dimensions {
+            width: request.width,
+            height: request.height,
+        });
+    }
     let runtime = crate::core::runtime::runtime();
-    let server = runtime.block_on(ForgeServer::start(dirs[0].clone(), request.listen))?;
-    let seed = runtime.block_on(SeedSnapshot::produce(
-        server,
-        fixture.fixture(),
-        &dirs[0],
-        &dirs[1],
-    ))?;
-    fixture.verify_unchanged(&fixture_path)?;
-    let store = serde_json::to_vec(&seed.store)?;
+    let server = runtime
+        .block_on(ForgeServer::start(dirs[0].clone(), request.listen))
+        .map_err(PrepareError::Start)?;
+    let seed = runtime
+        .block_on(SeedSnapshot::produce(
+            server,
+            fixture.fixture(),
+            &dirs[0],
+            &dirs[1],
+        ))
+        .map_err(PrepareError::Produce)?;
+    fixture
+        .verify_unchanged(&fixture_path)
+        .map_err(PrepareError::FixtureChanged)?;
+    let store = encode("the store snapshot", &seed.store)?;
     let store_path = dirs[2].join("store.json");
     let seed_path = dirs[2].join("seed.json");
-    let database_hash = hash(&std::fs::read(dirs[0].join("forge.sqlite3"))?);
-    let seed_bytes = serde_json::to_vec(&SeedRecord {
-        seed,
-        snapshot_dir: dirs[1].clone(),
-    })?;
-    write_new(&store_path, &store)?;
-    write_new(&seed_path, &seed_bytes)?;
+    let database = dirs[0].join("forge.sqlite3");
+    let database_hash =
+        hash(
+            &std::fs::read(&database).map_err(|source| PrepareError::ReadDatabase {
+                path: database,
+                source,
+            })?,
+        );
+    let seed_bytes = encode(
+        "the seed record",
+        &SeedRecord {
+            seed,
+            snapshot_dir: dirs[1].clone(),
+        },
+    )?;
+    write_new(&store_path, &store).map_err(PrepareError::Write)?;
+    write_new(&seed_path, &seed_bytes).map_err(PrepareError::Write)?;
     for (name, editor_dir, settings) in [
         ("source", &dirs[3], source_settings),
         ("candidate", &dirs[4], candidate_settings),
@@ -178,8 +356,9 @@ pub fn prepare(path: &Path) -> Result<()> {
         });
         write_new(
             &dirs[2].join(format!("{name}-request.json")),
-            &serde_json::to_vec(&value)?,
-        )?;
+            &encode("a bootstrap request", &value)?,
+        )
+        .map_err(PrepareError::Write)?;
     }
     println!(
         "{}",
@@ -192,20 +371,36 @@ pub fn prepare(path: &Path) -> Result<()> {
     clippy::print_stdout,
     reason = "the qualification CLI reports the restored seed to its caller on stdout"
 )]
-pub fn restore(path: &Path, expected_sha256: &str) -> Result<()> {
-    let parent = path.parent().context("seed record has no parent")?;
-    marked(parent)?;
-    ensure!(
-        path.file_name().is_some_and(|name| name == "seed.json")
-            && std::fs::symlink_metadata(path)?.is_file(),
-        "invalid seed record path"
-    );
-    let bytes = std::fs::read(path)?;
-    ensure!(hash(&bytes) == expected_sha256, "seed record hash mismatch");
-    let record: SeedRecord = serde_json::from_slice(&bytes)?;
+pub fn restore(path: &Path, expected_sha256: &str) -> Result<(), RestoreError> {
+    let record_path = || RestoreError::RecordPath {
+        path: path.to_owned(),
+    };
+    let parent = path.parent().ok_or_else(record_path)?;
+    marked(parent).map_err(RestoreError::Marked)?;
+    let read = |source| RestoreError::Read {
+        path: path.to_owned(),
+        source,
+    };
+    if !path.file_name().is_some_and(|name| name == "seed.json")
+        || !std::fs::symlink_metadata(path).map_err(read)?.is_file()
+    {
+        return Err(record_path());
+    }
+    let bytes = std::fs::read(path).map_err(read)?;
+    if hash(&bytes) != expected_sha256 {
+        return Err(RestoreError::Mismatch {
+            path: path.to_owned(),
+        });
+    }
+    let record: SeedRecord =
+        serde_json::from_slice(&bytes).map_err(|source| RestoreError::Decode {
+            path: path.to_owned(),
+            source,
+        })?;
     record
         .seed
-        .restore_after_all_forge_handles_closed(&record.snapshot_dir, &record.seed.logical_path)?;
+        .restore_after_all_forge_handles_closed(&record.snapshot_dir, &record.seed.logical_path)
+        .map_err(RestoreError::Restore)?;
     println!(
         "{}",
         serde_json::json!({"type":"qualification_restored", "seed_sha256":expected_sha256, "forge_dir":record.seed.logical_path})

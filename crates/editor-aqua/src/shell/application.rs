@@ -839,7 +839,10 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             if let Err(error) =
                 crate::qualification::observation::record_native_state(&self.shell, sequence)
             {
-                tracing::warn!(%error, "could not record qualification state");
+                tracing::warn!(
+                    error = %::diagnostics::chain(&error),
+                    "could not record qualification state"
+                );
             }
         }
         let _tm = Tm::new("fc");

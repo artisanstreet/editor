@@ -30,16 +30,40 @@ impl NativeState {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RecordStateError {
+    #[error("encode the state of frame {frame}")]
+    Encode {
+        frame: u64,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("write the state of frame {frame} to {}", path.display())]
+    Write {
+        frame: u64,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 pub fn record_native_state(
     shell: &crate::shell::host::Shell,
     completed_frame: u64,
-) -> anyhow::Result<()> {
+) -> Result<(), RecordStateError> {
     let Some(path) = std::env::var_os("ARTISAN_AQUA_QUALIFICATION_STATE") else {
         return Ok(());
     };
     let state = NativeState::observe(shell, completed_frame);
-    std::fs::write(path, serde_json::to_vec(&state)?)?;
-    Ok(())
+    let bytes = serde_json::to_vec(&state).map_err(|source| RecordStateError::Encode {
+        frame: completed_frame,
+        source,
+    })?;
+    std::fs::write(&path, bytes).map_err(|source| RecordStateError::Write {
+        frame: completed_frame,
+        path: path.into(),
+        source,
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]

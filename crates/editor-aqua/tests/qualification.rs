@@ -5,8 +5,9 @@ mod observation;
 
 use artisan_api::{CreateProject, CreateThread, EngineConfig, EngineId, ItemKind, Phase, Status};
 use editor_aqua::qualification::fixture::{
-    CheckpointState, Fixture, FixtureItem, ForgeServer, ImmutableFixture, SeedSnapshot,
-    StoreSnapshot, TreeManifest, VerifiedBootstrap,
+    CheckpointState, EditorSettingsError, Fixture, FixtureItem, ForgeServer, ImmutableFixture,
+    LoadBootstrapError, ReadCheckedError, SeedSnapshot, StoreSnapshot, TreeManifest,
+    VerifiedBootstrap,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -85,10 +86,10 @@ fn preparation_accepts_normalized_fixture_paths_and_produces_verified_requests()
     let verified = editor_aqua::core::runtime::runtime()
         .block_on(VerifiedBootstrap::load(&bootstrap))
         .unwrap();
-    assert_eq!(verified.editor_dir, paths[4]);
-    assert_eq!(verified.request.fixture, fixture_path);
+    assert_eq!(verified.editor_dir(), paths[4]);
+    assert_eq!(verified.fixture_path(), fixture_path);
     editor_aqua::core::runtime::runtime()
-        .block_on(verified.server.shutdown_unique())
+        .block_on(verified.into_server().shutdown_unique())
         .unwrap();
 }
 
@@ -300,19 +301,39 @@ fn bootstrap_requires_absent_or_hash_matched_editor_settings_before_starting_for
             serde_json::to_vec(&request(expected)).unwrap(),
         )
         .unwrap();
-        runtime
-            .block_on(VerifiedBootstrap::load(&request_path))
-            .err()
-            .unwrap()
-            .to_string()
+        let Err(error) = runtime.block_on(VerifiedBootstrap::load(&request_path)) else {
+            panic!("a bootstrap without a seeded Forge must not load");
+        };
+        error
     };
-    assert!(check(None).contains("forge.sqlite3"));
+    let reached_the_database = |error: LoadBootstrapError| {
+        matches!(
+            error,
+            LoadBootstrapError::Database(ReadCheckedError::Read { path, .. })
+                if path.ends_with("forge.sqlite3")
+        )
+    };
+    assert!(reached_the_database(check(None)));
     std::fs::write(editor.join("settings.json"), settings).unwrap();
-    assert!(check(None).contains("settings must be absent"));
-    assert!(check(Some(&"0".repeat(64))).contains("hash mismatch"));
-    assert!(check(Some(&hash)).contains("forge.sqlite3"));
+    assert!(matches!(
+        check(None),
+        LoadBootstrapError::EditorSettings(EditorSettingsError::Present { .. })
+    ));
+    assert!(matches!(
+        check(Some(&"0".repeat(64))),
+        LoadBootstrapError::EditorSettings(EditorSettingsError::Read(
+            ReadCheckedError::Mismatch { .. }
+        ))
+    ));
+    assert!(reached_the_database(check(Some(&hash))));
     std::fs::remove_file(editor.join("settings.json")).unwrap();
-    assert!(check(Some(&hash)).contains("settings.json"));
+    assert!(matches!(
+        check(Some(&hash)),
+        LoadBootstrapError::EditorSettings(EditorSettingsError::Read(ReadCheckedError::Read {
+            path,
+            ..
+        })) if path.ends_with("settings.json")
+    ));
 }
 
 #[test]

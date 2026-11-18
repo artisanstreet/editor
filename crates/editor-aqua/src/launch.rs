@@ -22,13 +22,16 @@ fn prepare_qualification() -> Option<anyhow::Result<()>> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     match arguments.as_slice() {
         [mode, path] if mode == "--qualify-prepare" => {
-            Some(preparation::prepare(std::path::Path::new(path)))
+            Some(preparation::prepare(std::path::Path::new(path)).map_err(anyhow::Error::from))
         }
         [mode, path, digest] if mode == "--qualify-restore" => Some(
             digest
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("seed SHA-256 must be UTF-8"))
-                .and_then(|digest| preparation::restore(std::path::Path::new(path), digest)),
+                .and_then(|digest| {
+                    preparation::restore(std::path::Path::new(path), digest)
+                        .map_err(anyhow::Error::from)
+                }),
         ),
         _ if arguments
             .iter()
