@@ -1,4 +1,5 @@
-use super::{answer_text, message_author, plain_block};
+use super::source_fields::answer_text;
+use super::{message_author, plain_block};
 use crate::conversation::fold::{Row, Slot, TextSection};
 use artisan_api::{EngineId, Item, ItemId, ItemKind, Sender, Status, TextContent, ThreadId};
 
