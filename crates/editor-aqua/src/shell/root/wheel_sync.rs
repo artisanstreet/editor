@@ -4,35 +4,49 @@ use aqua::prelude::AquaWindowId;
 use aqua::{AppCtx, UiApp};
 
 impl RootViews {
+    pub(super) fn take_scroll_request(
+        &mut self,
+        conversation: &mut crate::conversation::controller::Conversation,
+    ) {
+        if let Some(latest) = conversation.scroll_actions().pop() {
+            self.scroll_request = Some(latest);
+        }
+    }
+
     pub(super) fn follow_tail_early(
         &mut self,
         conversation: &mut crate::conversation::controller::Conversation,
         ui: &mut UiApp,
     ) {
-        use crate::conversation::adapter::ScrollDirective;
-        self.scroll_requests.extend(conversation.scroll_actions());
+        use crate::conversation::adapter::{ScrollDirective, ScrollResolution, resolve_scroll};
+        self.take_scroll_request(conversation);
+        let Some(action) = &self.scroll_request else {
+            return;
+        };
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let now = std::time::Instant::now();
-        while let Some(action) = self.scroll_requests.front() {
-            let landing = *action == crate::conversation::controller::ScrollAction::Tail;
-            let Some(directive @ ScrollDirective::FollowEnd) =
-                crate::conversation::adapter::scroll_directive(conversation, action.clone(), reduced)
-            else {
-                break;
-            };
-            let Some(_) = crate::conversation::scroll::apply_directive(
-                ui,
-                &mut self.smooth_scroll,
-                &directive,
-                now,
-                0.0,
-            ) else {
-                break;
-            };
+        let landing = *action == crate::conversation::controller::ScrollAction::Tail;
+        let directive = match resolve_scroll(conversation, action, reduced) {
+            ScrollResolution::Ready(directive @ ScrollDirective::FollowEnd) => directive,
+            ScrollResolution::Cancelled => {
+                self.scroll_request = None;
+                return;
+            }
+            ScrollResolution::Ready(ScrollDirective::EaseToEnd | ScrollDirective::ToRow { .. })
+            | ScrollResolution::AwaitingRows => return,
+        };
+        if crate::conversation::scroll::apply_directive(
+            ui,
+            &mut self.smooth_scroll,
+            &directive,
+            std::time::Instant::now(),
+            0.0,
+        )
+        .is_some()
+        {
             if landing {
                 self.wheel.cancel_transcript();
             }
-            self.scroll_requests.pop_front();
+            self.scroll_request = None;
         }
     }
 

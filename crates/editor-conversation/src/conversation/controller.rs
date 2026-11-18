@@ -95,7 +95,7 @@ pub enum ScrollAction {
     End,
     Tail,
     To(Seq),
-    Row(usize),
+    Row(RowKey),
 }
 
 pub struct Conversation {
@@ -584,7 +584,9 @@ impl Conversation {
     }
 
     pub fn reveal_row(&mut self, index: usize) {
-        self.scroll.push(ScrollAction::Row(index));
+        if let Some((row, _)) = self.rows.get(index) {
+            self.scroll.push(ScrollAction::Row(row.key()));
+        }
     }
 
     pub fn jump_row(&self, position: Seq) -> Option<usize> {

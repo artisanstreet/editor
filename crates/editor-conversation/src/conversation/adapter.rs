@@ -279,26 +279,39 @@ fn row_model_from(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrollDirective {
     FollowEnd,
     EaseToEnd,
     ToRow { index: usize, animate: bool },
 }
 
-pub fn scroll_directive(
+#[derive(Debug, PartialEq)]
+pub enum ScrollResolution {
+    Ready(ScrollDirective),
+    AwaitingRows,
+    Cancelled,
+}
+
+pub fn resolve_scroll(
     conversation: &Conversation,
-    action: ScrollAction,
+    action: &ScrollAction,
     reduce_motion: bool,
-) -> Option<ScrollDirective> {
+) -> ScrollResolution {
     let animate = !reduce_motion && !conversation.is_landing();
     match action {
-        ScrollAction::End if animate => Some(ScrollDirective::EaseToEnd),
-        ScrollAction::End | ScrollAction::Tail => Some(ScrollDirective::FollowEnd),
-        ScrollAction::To(position) => Some(ScrollDirective::ToRow {
-            index: conversation.jump_row(position)?,
-            animate,
-        }),
-        ScrollAction::Row(index) => Some(ScrollDirective::ToRow { index, animate }),
+        ScrollAction::End if animate => ScrollResolution::Ready(ScrollDirective::EaseToEnd),
+        ScrollAction::End | ScrollAction::Tail => {
+            ScrollResolution::Ready(ScrollDirective::FollowEnd)
+        }
+        ScrollAction::To(position) => conversation.jump_row(*position).map_or(
+            ScrollResolution::AwaitingRows,
+            |index| ScrollResolution::Ready(ScrollDirective::ToRow { index, animate }),
+        ),
+        ScrollAction::Row(key) => conversation.row_position(key).map_or(
+            ScrollResolution::Cancelled,
+            |index| ScrollResolution::Ready(ScrollDirective::ToRow { index, animate }),
+        ),
     }
 }
 

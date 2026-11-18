@@ -259,8 +259,10 @@ fn returning_to_a_parked_thread_whose_latest_rows_were_evicted_waits_for_them() 
     );
     assert_eq!(conversation.scroll_actions(), [ScrollAction::End]);
     assert!(matches!(
-        super::super::adapter::scroll_directive(&conversation, ScrollAction::End, false),
-        Some(super::super::adapter::ScrollDirective::FollowEnd)
+        super::super::adapter::resolve_scroll(&conversation, &ScrollAction::End, false),
+        super::super::adapter::ScrollResolution::Ready(
+            super::super::adapter::ScrollDirective::FollowEnd
+        )
     ));
 }
 
@@ -383,7 +385,9 @@ fn coming_back_while_the_first_page_loads_keeps_waiting_for_it() {
     let actions = conversation.scroll_actions();
     assert!(!actions.is_empty());
     assert!(actions.iter().all(|action| matches!(
-        super::super::adapter::scroll_directive(&conversation, action.clone(), false),
-        Some(super::super::adapter::ScrollDirective::FollowEnd)
+        super::super::adapter::resolve_scroll(&conversation, action, false),
+        super::super::adapter::ScrollResolution::Ready(
+            super::super::adapter::ScrollDirective::FollowEnd
+        )
     )));
 }

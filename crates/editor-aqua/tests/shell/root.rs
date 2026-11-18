@@ -519,3 +519,47 @@ fn the_overview_only_shows_when_its_full_width_fits() {
         );
     }
 }
+
+#[test]
+fn a_reveal_whose_row_disappeared_does_not_hold_back_jumping_to_the_latest_message() {
+    use editor_aqua::conversation::adapter::{ScrollResolution, resolve_scroll};
+    use editor_aqua::conversation::controller::ScrollAction;
+    use editor_aqua::conversation::scroll::{following_tail, leave_tail};
+
+    let mut opened = ThreadShell::open("scroll-host", "scroll-thread", Motion::Reduced);
+    opened.workspace().conversation.landing = None;
+    replies(&mut opened, 40);
+    let window = opened.window("scroll");
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        ..
+    } = opened;
+    let mut root = RootViews::default();
+    let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
+    resources.ui.mount(|_| element).unwrap();
+    resources.ui.layout().unwrap();
+    leave_tail(&mut resources.ui);
+    assert!(!following_tail(&resources.ui));
+
+    let conversation = &mut shell.entry.workspace_mut().unwrap().conversation;
+    let last = conversation.rows[39].0.key();
+    conversation.reveal_row(39);
+    conversation.rows.truncate(30);
+    assert_eq!(
+        resolve_scroll(conversation, &ScrollAction::Row(last), true),
+        ScrollResolution::Cancelled
+    );
+    rebuild(&mut root, &mut shell, &mut resources.ui, &window);
+    root.advance_glides(&mut shell, &mut resources.ui);
+
+    let conversation = &mut shell.entry.workspace_mut().unwrap().conversation;
+    conversation.jump(&shell.core, editor_aqua::conversation::viewport::Jump::Latest);
+    root.advance_glides(&mut shell, &mut resources.ui);
+    rebuild(&mut root, &mut shell, &mut resources.ui, &window);
+    root.advance_glides(&mut shell, &mut resources.ui);
+    assert!(
+        following_tail(&resources.ui),
+        "jumping to the latest message follows the tail"
+    );
+}

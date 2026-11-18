@@ -168,7 +168,7 @@ pub struct RootViews {
     pending_stall: PendingStall,
     read_watch: Option<read_watch::ReadWatch>,
     transcript_edges: crate::ui::scroll_edge::ScrollEdges,
-    scroll_requests: VecDeque<crate::conversation::controller::ScrollAction>,
+    scroll_request: Option<crate::conversation::controller::ScrollAction>,
     composer_measurement: Rc<Cell<Option<f32>>>,
     composer_height: Option<f32>,
     conversation_actions: Rc<RefCell<VecDeque<ConversationAction>>>,
@@ -597,7 +597,7 @@ impl RootViews {
             self.mounted_reveals.borrow_mut().rebind(None);
             self.row_cache.borrow_mut().rebind(None);
             self.smooth_scroll.cancel();
-            self.scroll_requests.clear();
+            self.scroll_request = None;
             self.wheel.cancel_transcript();
             self.row_motion = Rc::default();
         }
@@ -1612,7 +1612,7 @@ impl RootViews {
     ) {
         let _tm = crate::shell::application::Tm::new("v.scroll");
         use crate::conversation::scroll::Step;
-        self.scroll_requests.extend(conversation.scroll_actions());
+        self.take_scroll_request(conversation);
         let Some(node) = crate::shell::wheel::keyed_node(ui, "conversation-transcript") else {
             return;
         };
@@ -1629,26 +1629,25 @@ impl RootViews {
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let now = std::time::Instant::now();
         let mut changed = false;
-        while let Some(action) = self.scroll_requests.front() {
-            let Some(directive) = crate::conversation::adapter::scroll_directive(
-                conversation,
-                action.clone(),
-                reduced,
-            ) else {
-                break;
-            };
-            let x = ui.tree().scroll_offset(node).map_or(0.0, |offset| offset.x);
-            let Some(moved) = crate::conversation::scroll::apply_directive(
-                ui,
-                &mut self.smooth_scroll,
-                &directive,
-                now,
-                x,
-            ) else {
-                break;
-            };
-            changed |= moved;
-            self.scroll_requests.pop_front();
+        if let Some(action) = &self.scroll_request {
+            use crate::conversation::adapter::ScrollResolution;
+            match crate::conversation::adapter::resolve_scroll(conversation, action, reduced) {
+                ScrollResolution::Cancelled => self.scroll_request = None,
+                ScrollResolution::AwaitingRows => {}
+                ScrollResolution::Ready(directive) => {
+                    let x = ui.tree().scroll_offset(node).map_or(0.0, |offset| offset.x);
+                    if let Some(moved) = crate::conversation::scroll::apply_directive(
+                        ui,
+                        &mut self.smooth_scroll,
+                        &directive,
+                        now,
+                        x,
+                    ) {
+                        changed |= moved;
+                        self.scroll_request = None;
+                    }
+                }
+            }
         }
         let current = ui.tree().scroll_offset(node).unwrap_or_default();
         let following = conversation
@@ -3081,7 +3080,7 @@ impl SectionViews for RootViews {
             self.thread_loading.reset();
             self.thread_landing.reset();
             self.smooth_scroll.cancel();
-            self.scroll_requests.clear();
+            self.scroll_request = None;
         }
         if !connection_held {
             self.connection.hold(None);
