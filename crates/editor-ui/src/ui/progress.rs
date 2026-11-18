@@ -1,5 +1,7 @@
 use crate::ui::theme::{ArtisanTheme, Opacity, RadiusStep, RadiusTokens};
-use aqua_core::{GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, Role};
+use aqua_core::{
+    GpuiBackground, GpuiGradientColorSpace, GpuiGradientStop, NumericRangeSemantics, Role,
+};
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{GpuiShadowLayer, Length, Style};
 
@@ -65,7 +67,11 @@ pub fn bar(theme: &ArtisanTheme, percent: f64, height: f32) -> Element {
         .style(
             Style::new()
                 .gpui_background(GpuiBackground::Solid(
-                    theme.colors.text.at(Opacity::MeterTrack).to_reference_paint(),
+                    theme
+                        .colors
+                        .text
+                        .at(Opacity::MeterTrack)
+                        .to_reference_paint(),
                 ))
                 .gpui_shadows(vec![hairline(theme.colors.text.at(Opacity::GlassBorder))]),
         )
@@ -84,4 +90,14 @@ pub fn bar(theme: &ArtisanTheme, percent: f64, height: f32) -> Element {
         .build()
         .role(Role::ProgressIndicator)
         .aria_value(format!("{percent:.0}%"))
+        .aria_range(NumericRangeSemantics {
+            min: 0.0,
+            max: 100.0,
+            value: percent,
+            step: 1.0,
+        })
 }
+
+#[cfg(test)]
+#[path = "../../tests/ui/progress.rs"]
+mod tests;
