@@ -2,7 +2,7 @@ use super::{ComputerError, ComputerMcp, Result, Session, number, string, text};
 use crate::{
     desktop::{Rect, WindowChange},
     frame,
-    runner::{self, Screen, View},
+    runner::{self, Halt, Screen, View},
     steps,
 };
 use artisan_api::ThreadId;
@@ -90,6 +90,7 @@ impl ComputerMcp {
         session: &mut Session,
         caller: &ThreadId,
         args: &Value,
+        halt: &Halt,
     ) -> Result<Vec<Content>> {
         if self.paused.load(Ordering::SeqCst) {
             return Err(Refused(
@@ -102,7 +103,7 @@ impl ComputerMcp {
             .get(caller)
             .ok_or_else(|| Refused("Take a screenshot before input.".into()))?;
         let steps = steps::parse(&args["steps"])?;
-        let result = runner::run(self.desktop.as_ref(), view, &steps, &self.paused)
+        let result = runner::run(self.desktop.as_ref(), view, &steps, &self.paused, halt)
             .map_err(ComputerError::Run)?;
         if result.interrupted {
             self.paused.store(true, Ordering::SeqCst);
@@ -180,7 +181,7 @@ impl ComputerMcp {
         }
         text(&json!({"ok":true}))
     }
-    pub(super) fn launch(&self, args: &Value, area: Rect) -> Result<Vec<Content>> {
+    pub(super) fn launch(&self, args: &Value, area: Rect, halt: &Halt) -> Result<Vec<Content>> {
         if self.paused.load(Ordering::SeqCst) {
             return Err(ComputerError::Paused);
         }
@@ -211,6 +212,7 @@ impl ComputerMcp {
         let start = std::time::Instant::now();
         let mut windows = Vec::new();
         while start.elapsed() < std::time::Duration::from_secs(3) {
+            halt.check()?;
             if self.desktop.user_activity() != generation {
                 self.paused.store(true, Ordering::SeqCst);
                 break;

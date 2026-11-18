@@ -33,7 +33,7 @@ mod tools;
 #[allow(unsafe_code)]
 mod windows;
 
-use artisan_api::ThreadId;
+use artisan_api::{Envelope, Event, ThreadId};
 use desktop::{
     CaptureError, ClipboardError, CursorError, Desktop, DisplayError, LaunchError, ProcessesError,
     Rect, WindowError, WindowId,
@@ -41,7 +41,7 @@ use desktop::{
 use forge_mcp::{Content, Failure, Tool, ToolError, ToolSet};
 use forge_runs::{Hub, Refused};
 use frame::EncodeError;
-use runner::{RunError, View};
+use runner::{Halt, Halted, RunError, StepError, View};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -50,11 +50,15 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use tokio::sync::broadcast::{self, error::RecvError};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ComputerError {
     #[error(transparent)]
     Refused(#[from] Refused),
+    #[error(transparent)]
+    Halted(#[from] Halted),
     #[error("read the computer use setting")]
     Setting(#[source] anyhow::Error),
     #[error("ask the user to take over from thread {thread}")]
@@ -126,6 +130,11 @@ impl ToolError for ComputerError {
     fn failure(&self) -> Failure<'_> {
         match self {
             Self::Refused(refused) => Failure::Refused(refused.to_string()),
+            Self::Halted(_)
+            | Self::Run(RunError::Stopped {
+                source: StepError::Halted(_),
+                ..
+            }) => Failure::Refused(diagnostics::chain(self)),
             Self::Setting(source)
             | Self::Handoff { source, .. }
             | Self::Approval { source, .. } => Failure::of_forge(source),
@@ -195,16 +204,18 @@ impl ComputerMcp {
             paused: Arc::default(),
         }
     }
-    async fn enabled(&self) -> Result<()> {
-        if self
+    async fn computer_use(&self) -> Result<bool> {
+        Ok(self
             .hub
             .store()
             .setting(forge_runs::COMPUTER_USE_KEY)
             .await
             .map_err(|source| ComputerError::Setting(source.into()))?
             .and_then(|v| v.as_bool())
-            != Some(true)
-        {
+            == Some(true))
+    }
+    async fn enabled(&self) -> Result<()> {
+        if !self.computer_use().await? {
             return Err(Refused(
                 "Computer use is off. Enable it in Artisan settings first.".into(),
             )
@@ -231,7 +242,52 @@ impl ComputerMcp {
             "focused_window":self.desktop.foreground(),"paused":self.paused.load(Ordering::SeqCst)}).to_string()),
             Content::Image { mime_type: "image/png", data: frame.png_base64().map_err(ComputerError::Encode)? }])
     }
-    fn execute(&self, caller: &ThreadId, name: &str, args: &Value) -> Result<Vec<Content>> {
+    async fn turned_off(&self, settings: &mut broadcast::Receiver<Envelope>) {
+        loop {
+            match settings.recv().await {
+                Ok(Envelope {
+                    event: Event::Setting { key, value },
+                    ..
+                }) if key == forge_runs::COMPUTER_USE_KEY => {
+                    if value.as_bool() != Some(true) {
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(missed)) => match self.computer_use().await {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        tracing::warn!(
+                            missed,
+                            "recheck computer use after missed events: {}",
+                            diagnostics::chain(&error)
+                        );
+                        return;
+                    }
+                },
+                Err(RecvError::Closed) => return,
+            }
+        }
+    }
+    async fn halted(
+        &self,
+        stop: &CancellationToken,
+        settings: &mut broadcast::Receiver<Envelope>,
+    ) -> Halted {
+        tokio::select! {
+            () = stop.cancelled() => Halted::RunStopped,
+            () = self.turned_off(settings) => Halted::ComputerUseOff,
+        }
+    }
+    fn execute(
+        &self,
+        caller: &ThreadId,
+        name: &str,
+        args: &Value,
+        halt: &Halt,
+    ) -> Result<Vec<Content>> {
+        halt.check()?;
         let mut session = match self.session.try_lock() {
             Ok(session) => session,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
@@ -250,9 +306,9 @@ impl ComputerMcp {
             "screenshot" => self.snapshot(&mut session, caller),
             "zoom" => self.zoom(&session, caller, args, area),
             "windows" => self.list_windows(args, area),
-            "input" => self.input(&mut session, caller, args),
+            "input" => self.input(&mut session, caller, args, halt),
             "window" => self.change_window(&mut session, caller, args, area),
-            "launch" => self.launch(args, area),
+            "launch" => self.launch(args, area, halt),
             "clipboard" => match string(args, "action")? {
                 "read" => text(&json!({
                     "text": self.desktop.clipboard().map_err(ComputerError::ReadClipboard)?
@@ -300,6 +356,10 @@ impl ToolSet for ComputerMcp {
         tools::list()
     }
     async fn call(&self, caller: &ThreadId, name: &str, args: Value) -> Result<Vec<Content>> {
+        let stop = self
+            .hub
+            .run_cancellation(caller)
+            .ok_or(Halted::RunStopped)?;
         self.enabled().await?;
         if name == "handoff" {
             self.paused.store(true, Ordering::SeqCst);
@@ -350,17 +410,36 @@ impl ToolSet for ComputerMcp {
                     thread: caller.clone(),
                     source,
                 })?;
-            self.enabled().await?;
         }
+        let mut settings = self.hub.store().subscribe();
+        self.enabled().await?;
+        let halt = Arc::new(Halt::default());
+        let _withdraw = WithdrawOnDrop(Arc::clone(&halt));
         let this = self.clone();
         let caller = caller.clone();
         let tool = name.to_owned();
-        tokio::task::spawn_blocking(move || this.execute(&caller, &tool, &args))
-            .await
-            .map_err(|source| ComputerError::Worker {
-                tool: name.to_owned(),
-                source,
-            })?
+        let worker_halt = Arc::clone(&halt);
+        let mut worker =
+            tokio::task::spawn_blocking(move || this.execute(&caller, &tool, &args, &worker_halt));
+        let joined = tokio::select! {
+            joined = &mut worker => joined,
+            why = self.halted(&stop, &mut settings) => {
+                halt.halt(why);
+                worker.await
+            }
+        };
+        joined.map_err(|source| ComputerError::Worker {
+            tool: name.to_owned(),
+            source,
+        })?
+    }
+}
+
+struct WithdrawOnDrop(Arc<Halt>);
+
+impl Drop for WithdrawOnDrop {
+    fn drop(&mut self) {
+        self.0.halt(Halted::Withdrawn);
     }
 }
 

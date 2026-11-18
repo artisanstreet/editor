@@ -7,6 +7,7 @@ use crate::{
     steps::{At, Key, Step, Wait},
 };
 use std::num::NonZeroU32;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -55,6 +56,33 @@ impl View {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Halted {
+    #[error("the run was stopped")]
+    RunStopped,
+    #[error("computer use was turned off")]
+    ComputerUseOff,
+    #[error("the tool call was withdrawn")]
+    Withdrawn,
+}
+
+#[derive(Debug, Default)]
+pub struct Halt(OnceLock<Halted>);
+
+impl Halt {
+    pub fn halt(&self, why: Halted) {
+        self.0.get_or_init(|| why);
+    }
+
+    pub fn halted(&self) -> Option<Halted> {
+        self.0.get().copied()
+    }
+
+    pub fn check(&self) -> Result<(), Halted> {
+        self.halted().map_or(Ok(()), Err)
+    }
+}
+
 #[derive(Debug)]
 pub enum Screen {
     Changed,
@@ -72,6 +100,8 @@ pub struct Outcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StepError {
+    #[error(transparent)]
+    Halted(Halted),
     #[error("computer input paused")]
     Paused,
     #[error("interrupted by user input")]
@@ -140,6 +170,7 @@ struct Batch<'a> {
     buttons: Vec<Button>,
     began: Instant,
     paused: &'a AtomicBool,
+    halt: &'a Halt,
 }
 impl Drop for Batch<'_> {
     fn drop(&mut self) {
@@ -167,6 +198,7 @@ impl Batch<'_> {
         failure.map_or(Ok(()), |error| Err(StepError::Release(error)))
     }
     fn check(&self) -> Result<(), StepError> {
+        self.halt.check().map_err(StepError::Halted)?;
         if self.paused.load(Ordering::SeqCst) {
             return Err(StepError::Paused);
         }
@@ -363,6 +395,7 @@ pub fn run(
     view: View,
     steps: &[Step],
     paused: &AtomicBool,
+    halt: &Halt,
 ) -> Result<Outcome, RunError> {
     for (index, step) in steps.iter().enumerate() {
         for point in points(step) {
@@ -387,6 +420,7 @@ pub fn run(
         buttons: Vec::new(),
         began: Instant::now(),
         paused,
+        halt,
     };
     let mut completed = 0;
     let mut interrupted = false;
@@ -394,7 +428,7 @@ pub fn run(
     let mut failure = None;
     for step in steps {
         if let Err(error) = batch.step(step) {
-            interrupted = desktop.user_activity() != generation || paused.load(Ordering::SeqCst);
+            interrupted = interruption(desktop, generation, paused, &error);
             if !interrupted {
                 failure = Some(error);
             }
@@ -409,8 +443,7 @@ pub fn run(
         match batch.wait(Wait::Settled(Duration::from_secs(1))) {
             Ok(calm) => settled = calm,
             Err(error) => {
-                interrupted =
-                    desktop.user_activity() != generation || paused.load(Ordering::SeqCst);
+                interrupted = interruption(desktop, generation, paused, &error);
                 if !interrupted {
                     failure = Some(error);
                 }
@@ -423,7 +456,7 @@ pub fn run(
         Err(error) => Screen::Unknown(error),
     };
     drop(batch);
-    if desktop.user_activity() == generation {
+    if desktop.user_activity() == generation && halt.halted().is_none() {
         if let Err(error) = desktop.send(&Input::MoveTo(cursor)) {
             failure.get_or_insert(StepError::RestoreCursor(error));
         }
@@ -442,4 +475,14 @@ pub fn run(
             settled,
         }),
     }
+}
+
+fn interruption(
+    desktop: &dyn Desktop,
+    generation: u64,
+    paused: &AtomicBool,
+    error: &StepError,
+) -> bool {
+    !matches!(error, StepError::Halted(_))
+        && (desktop.user_activity() != generation || paused.load(Ordering::SeqCst))
 }

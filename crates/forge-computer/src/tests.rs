@@ -9,15 +9,19 @@ use serde_json::json;
 use std::num::NonZeroU32;
 use std::{
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
+#[path = "../tests/lib/stop.rs"]
+mod stop_tests;
+
 #[allow(clippy::struct_excessive_bools)] // Independent failure modes for the test backend.
 struct Fake {
     events: Mutex<Vec<Input>>,
+    sent: tokio::sync::watch::Sender<usize>,
     cursor: Mutex<Point>,
     activity: AtomicU64,
     interrupt: bool,
@@ -31,6 +35,7 @@ impl Default for Fake {
     fn default() -> Self {
         Self {
             events: Mutex::default(),
+            sent: tokio::sync::watch::Sender::new(0),
             cursor: Mutex::new(Point { x: 110, y: 210 }),
             activity: AtomicU64::new(0),
             interrupt: false,
@@ -76,6 +81,7 @@ impl Desktop for Fake {
     }
     fn send(&self, input: &Input) -> Result<(), InputError> {
         self.events.lock().unwrap().push(*input);
+        self.sent.send_modify(|sent| *sent += 1);
         if let Input::MoveTo(p) = input {
             *self.cursor.lock().unwrap() = *p;
         }
@@ -330,24 +336,120 @@ fn run(
         view,
         steps,
         &std::sync::atomic::AtomicBool::new(false),
+        &runner::Halt::default(),
     )
+}
+
+struct Parked(tokio::sync::mpsc::UnboundedSender<()>);
+
+impl forge_engines::Harness for Parked {
+    fn run(
+        &self,
+        turn: forge_engines::Turn,
+        io: forge_engines::RunIo,
+    ) -> std::pin::Pin<Box<dyn Future<Output = forge_engines::Outcome> + Send>> {
+        let started = self.0.clone();
+        Box::pin(async move {
+            io.emit(forge_engines::EngineEvent::InputAccepted {
+                id: turn.input.id.clone(),
+            })
+            .await;
+            started.send(()).unwrap();
+            io.cancel.cancelled().await;
+            forge_engines::Outcome::Cancelled
+        })
+    }
+}
+
+struct Live {
+    _shutdown: tokio_util::sync::DropGuard,
+    hub: forge_runs::Hub,
+    store: forge_store::Store,
+    set: super::ComputerMcp,
+    desktop: Arc<Fake>,
+    thread: artisan_api::ThreadId,
+    _dir: tempfile::TempDir,
+}
+
+async fn live(desktop: Fake) -> Live {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = artisan_api::EngineId::Claude;
+    let engine_dir = dir.path().join("engines").join(engine.to_string());
+    let entry = engine_dir
+        .join("versions")
+        .join("1.0.0")
+        .join(forge_engines::host_entry(engine).unwrap());
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(entry, "").unwrap();
+    std::fs::write(engine_dir.join("current"), "1.0.0").unwrap();
+    let store = forge_store::Store::open(&dir.path().join("forge")).unwrap();
+    let (started, mut running) = tokio::sync::mpsc::unbounded_channel();
+    let harness: Arc<dyn forge_engines::Harness> = Arc::new(Parked(started));
+    let hub = forge_runs::Hub::with_harness(
+        store.clone(),
+        forge_engines::Engines::new(dir.path()),
+        dir.path().into(),
+        Arc::new(move |_| Arc::clone(&harness)),
+    );
+    let project = store
+        .create_project(artisan_api::CreateProject {
+            id: artisan_api::ProjectId::new(),
+            path: dir.path().display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(artisan_api::CreateThread {
+            id: artisan_api::ThreadId::new(),
+            project_id: project.id,
+            config: artisan_api::EngineConfig::new(engine),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    hub.send_message(
+        &thread.id,
+        artisan_api::SendMessage {
+            draft: None,
+            id: artisan_api::ItemId::new(),
+            text: "use the computer".to_owned(),
+            images: Vec::new(),
+            config: None,
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), running.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let desktop = Arc::new(desktop);
+    let set = super::ComputerMcp::with_desktop(hub.clone(), Arc::<Fake>::clone(&desktop));
+    Live {
+        _shutdown: hub.shutdown_on_drop(),
+        hub,
+        store,
+        set,
+        desktop,
+        thread: thread.id,
+        _dir: dir,
+    }
 }
 
 #[tokio::test]
 async fn protocol_returns_images_and_rechecks_setting_for_existing_credentials() {
     use forge_mcp::ToolSet;
-    let dir = tempfile::tempdir().unwrap();
-    let store = forge_store::Store::open(&dir.path().join("forge")).unwrap();
-    let hub = forge_runs::Hub::new(
-        store.clone(),
-        forge_engines::Engines::new(dir.path()),
-        dir.path().into(),
-    );
-    let _shutdown = hub.shutdown_on_drop();
-    let set = super::ComputerMcp::with_desktop(hub, std::sync::Arc::new(Fake::default()));
-    let caller = artisan_api::ThreadId::new();
+    let Live {
+        store,
+        set,
+        thread: caller,
+        ..
+    } = &live(Fake::default()).await;
     let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"screenshot"}});
-    let denied = forge_mcp::server::handle(&set, &caller, call.clone())
+    let denied = forge_mcp::server::handle(set, caller, call.clone())
         .await
         .unwrap();
     assert_eq!(denied["result"]["isError"], true);
@@ -355,7 +457,7 @@ async fn protocol_returns_images_and_rechecks_setting_for_existing_credentials()
         .set_setting("computer_use".into(), json!(true))
         .await
         .unwrap();
-    let reply = forge_mcp::server::handle(&set, &caller, call.clone())
+    let reply = forge_mcp::server::handle(set, caller, call.clone())
         .await
         .unwrap();
     assert_eq!(reply["result"]["isError"], false);
@@ -363,7 +465,7 @@ async fn protocol_returns_images_and_rechecks_setting_for_existing_credentials()
     assert_eq!(reply["result"]["content"][1]["mimeType"], "image/png");
     assert_eq!(set.tools().len(), 8);
     let zoom = set
-        .call(&caller, "zoom", json!({"x":0,"y":0,"width":5,"height":5}))
+        .call(caller, "zoom", json!({"x":0,"y":0,"width":5,"height":5}))
         .await
         .unwrap();
     assert!(matches!(zoom[1], forge_mcp::Content::Image { .. }));
@@ -371,38 +473,30 @@ async fn protocol_returns_images_and_rechecks_setting_for_existing_credentials()
         .set_setting("computer_use".into(), json!(false))
         .await
         .unwrap();
-    let revoked = forge_mcp::server::handle(&set, &caller, call)
-        .await
-        .unwrap();
+    let revoked = forge_mcp::server::handle(set, caller, call).await.unwrap();
     assert_eq!(revoked["result"]["isError"], true);
 }
 
 #[tokio::test]
 async fn interruption_pauses_subsequent_batches() {
     use forge_mcp::ToolSet;
-    let dir = tempfile::tempdir().unwrap();
-    let store = forge_store::Store::open(&dir.path().join("forge")).unwrap();
+    let Live {
+        store,
+        set,
+        thread: caller,
+        ..
+    } = &live(Fake {
+        interrupt: true,
+        ..Default::default()
+    })
+    .await;
     store
         .set_setting("computer_use".into(), json!(true))
         .await
         .unwrap();
-    let hub = forge_runs::Hub::new(
-        store,
-        forge_engines::Engines::new(dir.path()),
-        dir.path().into(),
-    );
-    let _shutdown = hub.shutdown_on_drop();
-    let set = super::ComputerMcp::with_desktop(
-        hub,
-        std::sync::Arc::new(Fake {
-            interrupt: true,
-            ..Default::default()
-        }),
-    );
-    let caller = artisan_api::ThreadId::new();
-    set.call(&caller, "screenshot", json!({})).await.unwrap();
+    set.call(caller, "screenshot", json!({})).await.unwrap();
     let reply = set
-        .call(&caller, "input", json!({"steps":[{"key":"ctrl+s"}]}))
+        .call(caller, "input", json!({"steps":[{"key":"ctrl+s"}]}))
         .await
         .unwrap();
     let forge_mcp::Content::Text(result) = &reply[0] else {
@@ -413,7 +507,7 @@ async fn interruption_pauses_subsequent_batches() {
         true
     );
     let refused = set
-        .call(&caller, "input", json!({"steps":[{"type":"do not type"}]}))
+        .call(caller, "input", json!({"steps":[{"type":"do not type"}]}))
         .await
         .unwrap_err();
     assert!(
@@ -430,8 +524,16 @@ fn handoff_interrupts_an_in_progress_wait_and_releases_held_inputs() {
         steps::parse(&json!([{"key_down":"shift"},{"wait":{"ms":30000}},{"type":"must not type"}]))
             .unwrap();
     std::thread::scope(|scope| {
-        let task =
-            scope.spawn(|| runner::run(&desktop, View::new(area()), &steps, &paused).unwrap());
+        let task = scope.spawn(|| {
+            runner::run(
+                &desktop,
+                View::new(area()),
+                &steps,
+                &paused,
+                &runner::Halt::default(),
+            )
+            .unwrap()
+        });
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while desktop.events.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
             std::thread::yield_now();

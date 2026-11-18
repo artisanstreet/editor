@@ -10,6 +10,7 @@ use artisan_api::{EditorCall, EditorReply, Event, Secret, ThreadId};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 /// Whether engines get computer use; default off.
 pub const COMPUTER_USE_KEY: &str = "computer_use";
@@ -51,6 +52,11 @@ impl Hub {
                     .is_some_and(|issued| issued.expose() == token)
             })
             .cloned()
+    }
+
+    #[must_use]
+    pub fn run_cancellation(&self, thread: &ThreadId) -> Option<CancellationToken> {
+        self.lock().get(thread).map(|run| run.cancel.child_token())
     }
 
     pub(crate) fn revoke_gateway_credential(&self, thread: &ThreadId) {
