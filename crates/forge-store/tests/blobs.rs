@@ -96,3 +96,47 @@ async fn collection_never_deletes_an_image_a_message_just_referenced() {
         }
     }
 }
+
+fn image(shade: u8) -> Vec<u8> {
+    webp::Encoder::from_rgb(&[shade, shade, shade], 1, 1)
+        .encode_lossless()
+        .to_vec()
+}
+
+#[test]
+fn uploads_waiting_their_turn_leave_the_blocking_threads_free() {
+    use fs2::FileExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let store = Store::open(dir.path()).unwrap();
+        let other_process = std::fs::File::create(dir.path().join("blobs.lock")).unwrap();
+        other_process.lock_exclusive().unwrap();
+
+        let uploads: Vec<_> = (0..4)
+            .map(|shade| {
+                let store = store.clone();
+                tokio::spawn(async move { store.put_blob(image(shade)).await })
+            })
+            .collect();
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking(|| {}),
+        )
+        .await
+        .expect("a blocking task runs beside uploads queued behind a held blob lock")
+        .unwrap();
+
+        fs2::FileExt::unlock(&other_process).unwrap();
+        for upload in uploads {
+            upload.await.unwrap().unwrap();
+        }
+    });
+}

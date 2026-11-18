@@ -310,6 +310,10 @@ impl ListDirectoryError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[error("receive an uploaded blob")]
+pub struct ReceiveBlobError(#[source] axum::Error);
+
+#[derive(Debug, thiserror::Error)]
 #[error("read blob {hash} at {}", path.display())]
 pub struct ReadBlobError {
     hash: BlobHash,
@@ -428,6 +432,7 @@ route_errors! {
     },
     ListDirectory(ListDirectoryError) => ListDirectoryError::status,
     ReadBlob(ReadBlobError) => |_| INTERNAL,
+    ReceiveBlob(ReceiveBlobError) => |_| BAD_REQUEST,
     Authorize(forge_store::AuthorizeError) => |_| INTERNAL,
     AwaitingItems(forge_store::AwaitingItemsError) => |_| INTERNAL,
     CreateProject(forge_store::CreateProjectError) => |error| classified(forge_runs::error::create_project(&error.cause)),
@@ -1160,8 +1165,15 @@ async fn set_draft(
     Ok(Json(app.hub.store().set_draft(scope, request).await?))
 }
 
-async fn put_blob(AppState(app): AppState<App>, body: Bytes) -> Result<Json<artisan_api::BlobRef>> {
-    Ok(Json(app.hub.store().put_blob(body.to_vec()).await?))
+async fn put_blob(
+    AppState(app): AppState<App>,
+    body: axum::body::Body,
+) -> Result<Json<artisan_api::BlobRef>> {
+    let upload = app.hub.store().admit_blob().await;
+    let bytes = axum::body::to_bytes(body, forge_store::MAX_BLOB_BYTES + 1024)
+        .await
+        .map_err(ReceiveBlobError)?;
+    Ok(Json(upload.put(bytes.to_vec()).await?))
 }
 
 async fn get_blob(AppState(app): AppState<App>, Path(hash): Path<String>) -> Result<Response> {

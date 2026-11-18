@@ -8,7 +8,6 @@ use std::fmt;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::PoisonError;
 use std::time::{Duration, SystemTime};
 
 pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
@@ -233,48 +232,66 @@ pub fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     Ok(blob_ref)
 }
 
-impl Store {
-    pub async fn put_blob(&self, bytes: Vec<u8>) -> Result<BlobRef, PutBlobError> {
+pub struct BlobUpload {
+    store: Store,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl BlobUpload {
+    pub async fn put(self, bytes: Vec<u8>) -> Result<BlobRef, PutBlobError> {
         let length = bytes.len();
-        let inner = std::sync::Arc::clone(&self.inner);
-        let stored = tokio::task::spawn_blocking(move || {
-            let _guard = inner
-                .blob_lock
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let _generation = inner.lock_blobs()?;
-            put(&inner.blob_dir, &bytes)
-        })
-        .await;
-        stored
-            .map_err(|task| BlobFailure::Storage(StorageError::Task(task)))
-            .and_then(|stored| stored)
+        self.store
+            .persist_blob(bytes)
+            .await
             .map_err(|cause| PutBlobError {
                 bytes: length,
                 cause: Box::new(cause),
             })
     }
+}
+
+impl Store {
+    pub async fn admit_blob(&self) -> BlobUpload {
+        let slot = std::sync::Arc::clone(&self.inner.blob_uploads)
+            .acquire_owned()
+            .await
+            .expect("invariant: the blob upload slots are never closed");
+        BlobUpload {
+            store: self.clone(),
+            _slot: slot,
+        }
+    }
+
+    pub async fn put_blob(&self, bytes: Vec<u8>) -> Result<BlobRef, PutBlobError> {
+        self.admit_blob().await.put(bytes).await
+    }
 
     pub async fn put_image(&self, bytes: Vec<u8>) -> Result<BlobRef, PutImageError> {
         let length = bytes.len();
+        let failed = |cause| PutImageError {
+            bytes: length,
+            cause: Box::new(cause),
+        };
+        let upload = self.admit_blob().await;
+        let webp = tokio::task::spawn_blocking(move || to_webp(bytes))
+            .await
+            .map_err(|task| failed(BlobFailure::Storage(StorageError::Task(task))))?
+            .map_err(failed)?;
+        upload.store.persist_blob(webp).await.map_err(failed)
+    }
+
+    async fn persist_blob(&self, bytes: Vec<u8>) -> Result<BlobRef> {
+        let persisting = std::sync::Arc::clone(&self.inner.blob_lock)
+            .lock_owned()
+            .await;
         let inner = std::sync::Arc::clone(&self.inner);
-        let stored = tokio::task::spawn_blocking(move || {
-            let bytes = to_webp(bytes)?;
-            let _guard = inner
-                .blob_lock
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+        tokio::task::spawn_blocking(move || {
+            let _persisting = persisting;
             let _generation = inner.lock_blobs()?;
             put(&inner.blob_dir, &bytes)
         })
-        .await;
-        stored
-            .map_err(|task| BlobFailure::Storage(StorageError::Task(task)))
-            .and_then(|stored| stored)
-            .map_err(|cause| PutImageError {
-                bytes: length,
-                cause: Box::new(cause),
-            })
+        .await
+        .map_err(|task| BlobFailure::Storage(StorageError::Task(task)))?
     }
 
     pub async fn input_image_paths(
@@ -330,12 +347,12 @@ impl Store {
             return Ok(0);
         }
         let inner = std::sync::Arc::clone(&self.inner);
+        let persisting = std::sync::Arc::clone(&self.inner.blob_lock)
+            .lock_owned()
+            .await;
         self.write(move |tx| {
+            let _persisting = persisting;
             let referenced = referenced_since(tx, seen)?;
-            let _guard = inner
-                .blob_lock
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
             let _generation = inner.lock_blobs()?;
             Ok(remove_unreferenced(candidates, &referenced))
         })

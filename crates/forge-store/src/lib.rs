@@ -56,8 +56,8 @@ use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
 use writer::{Durability, Job, Tx, Writer};
 
 pub use blobs::{
-    BlobFailure, BlobFileError, BlobRejected, CollectBlobsError, InputImagesError, MAX_BLOB_BYTES,
-    PutBlobError, PutImageError,
+    BlobFailure, BlobFileError, BlobRejected, BlobUpload, CollectBlobsError, InputImagesError,
+    MAX_BLOB_BYTES, PutBlobError, PutImageError,
 };
 pub use collection::AnswerRefused;
 pub use content::{ContentError, Damage};
@@ -130,6 +130,7 @@ const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
 const WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 const SMALL_WRITE_BYTES: usize = 4 * 1024;
+const BLOB_UPLOADS: usize = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CONTINUE_AFTER_RESTART_KEY: &str = "continue_after_restart";
 pub const MAX_RESTART_CONTINUATIONS: usize = 3;
@@ -287,7 +288,8 @@ struct Inner {
     database: PathBuf,
     blob_dir: PathBuf,
     resource_dir: PathBuf,
-    blob_lock: Mutex<()>,
+    blob_lock: Arc<tokio::sync::Mutex<()>>,
+    blob_uploads: Arc<Semaphore>,
 }
 
 fn open_database(path: &Path) -> Result<Connection> {
@@ -616,7 +618,8 @@ impl Store {
                 database,
                 blob_dir,
                 resource_dir,
-                blob_lock: Mutex::new(()),
+                blob_lock: Arc::new(tokio::sync::Mutex::new(())),
+                blob_uploads: Arc::new(Semaphore::new(BLOB_UPLOADS)),
             }),
         })
     }
