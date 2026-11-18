@@ -1,5 +1,3 @@
-//! Plays a file, or a generated one-second quiet sine tone, and prints the
-//! player's snapshots: `cargo run -p editor-audio --example play [file]`.
 #![expect(
     clippy::print_stdout,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
@@ -50,7 +48,6 @@ fn main() -> Result<(), String> {
     }
 }
 
-/// Writes one second of a quiet 440 Hz mono tone as a 16-bit 48 kHz WAV.
 fn write_tone() -> Result<PathBuf, String> {
     const RATE: u32 = 48_000;
     let samples: Vec<i16> = (0..RATE)
