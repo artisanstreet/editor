@@ -214,7 +214,12 @@ pub(super) enum HostCompletion {
         Result<Vec<crate::core::hosts::WslDistro>, crate::core::hosts::WslStateError>,
     ),
     WslStarted(String, Result<(), crate::core::hosts::StartWslForgeError>),
-    ReadAck(ThreadId, artisan_api::Seq, u64, Thread),
+    ReadAck(
+        ThreadId,
+        artisan_api::Seq,
+        u64,
+        Result<Thread, crate::core::client::CallError>,
+    ),
     ThreadPage {
         archived: bool,
         direction: ThreadPageDirection,
@@ -418,7 +423,7 @@ pub struct HostData {
     project_icons: project_icons::ProjectIcons,
     read_acks: BTreeMap<ThreadId, artisan_api::Seq>,
     read_observed: Option<artisan_api::Seq>,
-    read_writer: Option<AbortOnDropHandle<()>>,
+    read_writer: Option<ReadWriter>,
     read_generation: u64,
     pub wsl: Option<WslStatus>,
     wsl_target: wsl::WslTarget,
@@ -746,7 +751,12 @@ impl HostData {
             .entry(thread)
             .and_modify(|pending| *pending = (*pending).max(seq))
             .or_insert(seq);
-        self.pump_read_acks();
+        self.pump_read_acks(None);
+    }
+
+    #[cfg(feature = "test-support")]
+    pub const fn test_read_ack_in_flight(&self) -> bool {
+        self.read_writer.is_some()
     }
 
     #[cfg(feature = "test-support")]
@@ -754,15 +764,22 @@ impl HostData {
         self.read_acks.get(thread).copied()
     }
 
-    fn pump_read_acks(&mut self) {
+    pub(super) fn pump_read_acks(&mut self, after: Option<&ThreadId>) {
         if self.read_writer.is_some() {
             return;
         }
-        let Some((id, seq)) = self
-            .read_acks
-            .first_key_value()
-            .map(|(id, seq)| (id.clone(), *seq))
-        else {
+        let next = after
+            .and_then(|after| {
+                self.read_acks
+                    .range::<ThreadId, _>((
+                        std::ops::Bound::Excluded(after),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .next()
+            })
+            .or_else(|| self.read_acks.first_key_value())
+            .map(|(id, seq)| (id.clone(), *seq));
+        let Some((id, seq)) = next else {
             return;
         };
         self.read_generation = self.read_generation.wrapping_add(1);
@@ -770,29 +787,45 @@ impl HostData {
         let client = self.client.clone();
         let sender = self.delivery.sender().map(HostMessage::Completion);
         let queued = std::time::Instant::now();
+        let thread = id.clone();
         let task = crate::core::runtime::runtime().spawn(async move {
             let started = queued.elapsed();
-            loop {
-                let update = artisan_api::UpdateThread {
-                    read_seq: Some(seq),
-                    ..Default::default()
-                };
-                match client.update_thread(&id, &update).await {
-                    Ok(thread) => {
-                        crate::core::diagnostics::open_timing::rpc_done(started, queued.elapsed());
-                        let _ = sender
-                            .send(HostCompletion::ReadAck(id, seq, generation, thread))
-                            .await;
-                        return;
-                    }
-                    Err(error) => {
-                        tracing::debug!(%id, "read acknowledgement will retry: {}", ::diagnostics::chain(&error));
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let update = artisan_api::UpdateThread {
+                read_seq: Some(seq),
+                ..Default::default()
+            };
+            let result = client.update_thread(&id, &update).await;
+            match &result {
+                Ok(_) => {
+                    crate::core::diagnostics::open_timing::rpc_done(started, queued.elapsed());
+                }
+                Err(error) => {
+                    if read_ack_failure(error) == ReadAckFailure::Transient {
+                        tokio::time::sleep(READ_ACK_RETRY).await;
                     }
                 }
             }
+            let _ = sender
+                .send(HostCompletion::ReadAck(id, seq, generation, result))
+                .await;
         });
-        self.read_writer = Some(AbortOnDropHandle::new(task));
+        self.read_writer = Some(ReadWriter {
+            thread,
+            _task: AbortOnDropHandle::new(task),
+        });
+    }
+
+    pub(super) fn cancel_read_ack(&mut self, thread: &ThreadId) {
+        self.read_acks.remove(thread);
+        if self
+            .read_writer
+            .as_ref()
+            .is_some_and(|writer| &writer.thread == thread)
+        {
+            self.read_writer = None;
+            self.read_generation = self.read_generation.wrapping_add(1);
+            self.pump_read_acks(Some(thread));
+        }
     }
 
     pub fn thread_summary(&self, thread: &ThreadId) -> Option<&ThreadSummary> {
@@ -1162,22 +1195,49 @@ impl HostData {
                     self.finish_wsl_start(distro, result);
                     events.push(HostEvent::Changed);
                 }
-                HostCompletion::ReadAck(id, seq, generation, thread) => {
+                HostCompletion::ReadAck(id, seq, generation, result) => {
                     if generation != self.read_generation {
                         continue;
                     }
                     self.read_writer = None;
-                    if self
-                        .read_acks
-                        .get(&id)
-                        .is_some_and(|pending| *pending <= seq)
-                    {
-                        self.read_acks.remove(&id);
+                    match result {
+                        Ok(thread) => {
+                            if self
+                                .read_acks
+                                .get(&id)
+                                .is_some_and(|pending| *pending <= seq)
+                            {
+                                self.read_acks.remove(&id);
+                            }
+                            if self.remember_thread(thread) {
+                                events.push(HostEvent::ThreadChanged {
+                                    thread_id: id.clone(),
+                                });
+                            }
+                        }
+                        Err(error) => match read_ack_failure(&error) {
+                            ReadAckFailure::Refused => {
+                                tracing::warn!(
+                                    host = %self.id,
+                                    thread = %id,
+                                    seq,
+                                    error = %::diagnostics::chain(&error),
+                                    "Forge refused a read acknowledgement; dropping it"
+                                );
+                                self.read_acks.remove(&id);
+                            }
+                            ReadAckFailure::Transient => {
+                                tracing::debug!(
+                                    host = %self.id,
+                                    thread = %id,
+                                    seq,
+                                    error = %::diagnostics::chain(&error),
+                                    "read acknowledgement will retry"
+                                );
+                            }
+                        },
                     }
-                    if self.remember_thread(thread) {
-                        events.push(HostEvent::ThreadChanged { thread_id: id });
-                    }
-                    self.pump_read_acks();
+                    self.pump_read_acks(Some(&id));
                 }
                 HostCompletion::ThreadPage {
                     archived,
@@ -1542,4 +1602,33 @@ fn summary_bytes(summary: &artisan_api::InspectorSummary) -> usize {
         + summary.goal.as_ref().map_or(0, |goal| {
             goal.objective.resident_bytes() + goal.summary.capacity()
         })
+}
+
+const READ_ACK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct ReadWriter {
+    thread: ThreadId,
+    _task: AbortOnDropHandle<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadAckFailure {
+    Refused,
+    Transient,
+}
+
+fn read_ack_failure(error: &crate::core::client::CallError) -> ReadAckFailure {
+    use artisan_api::ErrorCode;
+    match error.api_code() {
+        Some(
+            ErrorCode::NotFound
+            | ErrorCode::BadRequest
+            | ErrorCode::Conflict
+            | ErrorCode::Unauthorized
+            | ErrorCode::VersionMismatch,
+        ) => ReadAckFailure::Refused,
+        Some(ErrorCode::Internal | ErrorCode::EngineUnavailable) | None => {
+            ReadAckFailure::Transient
+        }
+    }
 }

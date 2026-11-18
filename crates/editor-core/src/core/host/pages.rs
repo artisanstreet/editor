@@ -475,7 +475,7 @@ impl HostData {
         self.threads.remove(id);
         self.runs.remove(id);
         self.stopping.remove(id);
-        self.read_acks.remove(id);
+        self.cancel_read_ack(id);
     }
     pub(super) fn prune_threads(&mut self) {
         let mut keep: HashSet<ThreadId> = self
