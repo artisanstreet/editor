@@ -39,7 +39,6 @@ use forge_runs::Hub;
 use forge_store::Store;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -467,7 +466,7 @@ async fn serve_connection<Socket>(
         return;
     };
     let client = routes::Client {
-        certificate: tls::certificate_id(certificate),
+        certificate: forge_store::DeviceCertificate::from_der(certificate.as_ref()),
     };
     let service =
         hyper::service::service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
@@ -528,7 +527,9 @@ pub async fn identity(store: &Store) -> Result<Identity> {
 pub async fn invite(store: &Store) -> Result<PairInvite> {
     let identity = identity(store).await?;
     let (code, expires_at) = new_code()?;
-    store.add_pair_code(hash_code(&code), expires_at).await?;
+    store
+        .add_pair_code(forge_store::PairCodeHash::of(&code), expires_at)
+        .await?;
     Ok(PairInvite {
         code,
         forge_certificate: identity.certificate,
@@ -545,7 +546,7 @@ pub fn invite_offline(admin: &mut forge_store::admin::Admin) -> Result<PairInvit
     };
     let identity: Identity = serde_json::from_str(&stored).context("read Forge's identity")?;
     let (code, expires_at) = new_code()?;
-    admin.add_pair_code(&hash_code(&code), expires_at)?;
+    admin.add_pair_code(&forge_store::PairCodeHash::of(&code), expires_at)?;
     Ok(PairInvite {
         code,
         forge_certificate: identity.certificate,
@@ -563,15 +564,6 @@ fn new_code() -> Result<(String, Timestamp)> {
         .map(|byte| alphabet[usize::from(byte % 32)] as char)
         .collect();
     Ok((code, artisan_api::now() + PAIR_CODE_LIFETIME_MS))
-}
-
-pub fn hash_code(code: &str) -> String {
-    let normalised: String = code
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-    hex::encode(Sha256::digest(normalised.as_bytes()))
 }
 
 /// One Forge per data directory; anything else that opens the `Store`

@@ -72,7 +72,8 @@ pub use items::{
     ValidateAnswersError, WorkPageError,
 };
 pub use pairing::{
-    AddDeviceError, AddPairCodeError, AuthorizeError, Device, PairDeviceError, RevokeDeviceError, TouchDeviceError,
+    AddDeviceError, AddPairCodeError, AuthorizeError, CertificateError, Device, DeviceCertificate,
+    PairCodeHash, PairDeviceError, RevokeDeviceError, TouchDeviceError,
 };
 pub use read::ThreadsPageFailure;
 pub use recall::{

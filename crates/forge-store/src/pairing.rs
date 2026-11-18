@@ -1,12 +1,67 @@
 use crate::Store;
 use crate::error::{StorageError, operation_error};
 use artisan_api::{DeviceId, Timestamp, now};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::PoisonError;
 use tokio::sync::broadcast;
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PairCodeHash([u8; 32]);
+
+impl PairCodeHash {
+    #[must_use]
+    pub fn of(code: &str) -> Self {
+        let normalised: String = code
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        Self(Sha256::digest(normalised.as_bytes()).into())
+    }
+
+    fn hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DeviceCertificate(String);
+
+#[derive(Debug, thiserror::Error)]
+pub enum CertificateError {
+    #[error("the certificate is not base64")]
+    NotBase64(#[source] base64::DecodeError),
+    #[error("the certificate is empty")]
+    Empty,
+}
+
+impl DeviceCertificate {
+    #[must_use]
+    pub fn from_der(der: &[u8]) -> Self {
+        Self(STANDARD.encode(der))
+    }
+
+    pub fn parse(encoded: &str) -> Result<Self, CertificateError> {
+        let der = STANDARD
+            .decode(encoded.trim())
+            .map_err(CertificateError::NotBase64)?;
+        if der.is_empty() {
+            return Err(CertificateError::Empty);
+        }
+        Ok(Self::from_der(&der))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
@@ -72,22 +127,22 @@ impl Store {
 
     pub async fn pair_device(
         &self,
-        code: String,
+        code: PairCodeHash,
         name: String,
-        certificate: String,
+        certificate: DeviceCertificate,
     ) -> Result<Option<DeviceId>, PairDeviceError> {
         let device = name.clone();
         self.write_acknowledged(move |tx| {
             if tx.execute(
                 "DELETE FROM pair_codes WHERE code_sha256 = ?1 AND expires_at > ?2",
-                params![code, now()],
+                params![code.hex(), now()],
             )? == 0
             {
                 return Ok(None);
             }
             let id: String = tx.query_row(
                 include_str!("sql/pairing/authorize.sql"),
-                params![DeviceId::new().as_str(), name, certificate, now()],
+                params![DeviceId::new().as_str(), name, certificate.as_str(), now()],
                 |row| row.get(0),
             )?;
             Ok(Some(DeviceId(id)))
@@ -102,13 +157,13 @@ impl Store {
     pub async fn add_device(
         &self,
         name: String,
-        certificate: String,
+        certificate: DeviceCertificate,
     ) -> Result<DeviceId, AddDeviceError> {
         let device = name.clone();
         self.write_acknowledged(move |tx| {
             let id: String = tx.query_row(
                 include_str!("sql/pairing/authorize.sql"),
-                params![DeviceId::new().as_str(), name, certificate, now()],
+                params![DeviceId::new().as_str(), name, certificate.as_str(), now()],
                 |row| row.get(0),
             )?;
             Ok(DeviceId(id))
@@ -157,7 +212,7 @@ impl Store {
 
     pub async fn add_pair_code(
         &self,
-        code: String,
+        code: PairCodeHash,
         expires_at: Timestamp,
     ) -> Result<(), AddPairCodeError> {
         self.write_acknowledged(move |tx| add_pair_code(tx, &code, expires_at))
@@ -169,7 +224,7 @@ impl Store {
 
     pub fn is_authorized(
         &self,
-        certificate: &str,
+        certificate: &DeviceCertificate,
     ) -> Result<Option<DeviceId>, AuthorizeError> {
         let mut devices = self
             .inner
@@ -181,26 +236,26 @@ impl Store {
         })? {
             self.inner.revocations.send(revoked).ok();
         }
-        Ok(devices.keys.get(certificate).cloned())
+        Ok(devices.keys.get(certificate.as_str()).cloned())
     }
 }
 
 pub(crate) fn add_pair_code(
     conn: &Connection,
-    code: &str,
+    code: &PairCodeHash,
     expires_at: Timestamp,
 ) -> Result<()> {
     conn.prepare_cached(include_str!("sql/pairing/expire_codes.sql"))?
         .execute([now()])?;
     conn.prepare_cached(include_str!("sql/pairing/add_code.sql"))?
-        .execute(params![code, expires_at])?;
+        .execute(params![code.hex(), expires_at])?;
     Ok(())
 }
 
-pub(crate) fn pair_code_pending(conn: &Connection, code: &str) -> Result<bool> {
+pub(crate) fn pair_code_pending(conn: &Connection, code: &PairCodeHash) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pair_codes WHERE code_sha256 = ?1)",
-        [code],
+        [code.hex()],
         |row| row.get(0),
     )?)
 }

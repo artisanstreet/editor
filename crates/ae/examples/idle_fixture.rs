@@ -42,7 +42,10 @@ async fn main() -> Result<()> {
     let address = server.local_addr()?.to_string();
     let identity = Identity::generate("artisan-idle-fixture")?;
     store
-        .add_device("Idle fixture".into(), identity.certificate.clone())
+        .add_device(
+            "Idle fixture".into(),
+            forge_store::DeviceCertificate::parse(&identity.certificate)?,
+        )
         .await?;
     let fingerprint = fingerprint_of(&forge_http::identity(store).await?.certificate)?;
     std::fs::write(editor.join("identity.json"), serde_json::to_vec(&identity)?)?;

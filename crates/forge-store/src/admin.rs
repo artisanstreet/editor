@@ -1,5 +1,5 @@
 use crate::error::StorageError;
-use crate::{BUSY_TIMEOUT, Device, schema};
+use crate::{BUSY_TIMEOUT, Device, PairCodeHash, schema};
 use artisan_api::{DeviceId, Timestamp};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
@@ -123,7 +123,7 @@ impl Admin {
         })
     }
 
-    pub fn pair_code_pending(&self, code: &str) -> Result<bool, PairCodeError> {
+    pub fn pair_code_pending(&self, code: &PairCodeHash) -> Result<bool, PairCodeError> {
         crate::pairing::pair_code_pending(&self.conn, code).map_err(|cause| PairCodeError {
             cause: Box::new(cause),
         })
@@ -131,7 +131,7 @@ impl Admin {
 
     pub fn add_pair_code(
         &self,
-        code: &str,
+        code: &PairCodeHash,
         expires_at: Timestamp,
     ) -> Result<(), PairCodeError> {
         let saved = || -> Result<(), StorageError> {

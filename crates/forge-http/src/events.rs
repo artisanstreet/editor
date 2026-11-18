@@ -335,7 +335,7 @@ impl Cursor {
 async fn watch_authorization(
     store: &forge_store::Store,
     device: &DeviceId,
-    certificate: &str,
+    certificate: &forge_store::DeviceCertificate,
     mut revocations: tokio::sync::broadcast::Receiver<DeviceId>,
 ) {
     let mut recheck = tokio::time::interval(AUTHORIZATION_RECHECK);
@@ -361,7 +361,10 @@ async fn watch_authorization(
     }
 }
 
-fn still_authorized(store: &forge_store::Store, certificate: &str) -> bool {
+fn still_authorized(
+    store: &forge_store::Store,
+    certificate: &forge_store::DeviceCertificate,
+) -> bool {
     match store.is_authorized(certificate) {
         Ok(device) => device.is_some(),
         Err(error) => {
@@ -516,14 +519,22 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = forge_store::Store::open(directory.path()).unwrap();
         let device = store
-            .add_device("client".into(), "certificate".into())
+            .add_device(
+                "client".into(),
+                forge_store::DeviceCertificate::from_der(b"certificate"),
+            )
             .await
             .unwrap();
         let revocations = store.subscribe_revocations();
         store.revoke_device(&device).await.unwrap();
         tokio::time::timeout(
             Duration::from_millis(100),
-            watch_authorization(&store, &device, "certificate", revocations),
+            watch_authorization(
+                &store,
+                &device,
+                &forge_store::DeviceCertificate::from_der(b"certificate"),
+                revocations,
+            ),
         )
         .await
         .unwrap();
@@ -534,14 +545,25 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = forge_store::Store::open(directory.path()).unwrap();
         let device = store
-            .add_device("client".into(), "certificate".into())
+            .add_device(
+                "client".into(),
+                forge_store::DeviceCertificate::from_der(b"certificate"),
+            )
             .await
             .unwrap();
         let watcher = tokio::spawn({
             let store = store.clone();
             let device = device.clone();
             let revocations = store.subscribe_revocations();
-            async move { watch_authorization(&store, &device, "certificate", revocations).await }
+            async move {
+                watch_authorization(
+                    &store,
+                    &device,
+                    &forge_store::DeviceCertificate::from_der(b"certificate"),
+                    revocations,
+                )
+                .await;
+            }
         });
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(

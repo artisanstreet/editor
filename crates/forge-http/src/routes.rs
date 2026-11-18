@@ -37,7 +37,7 @@ pub struct App {
 /// The connection's client certificate (base64 DER).
 #[derive(Clone)]
 pub struct Client {
-    pub certificate: String,
+    pub certificate: forge_store::DeviceCertificate,
 }
 
 /// A Core-verified grant authorizing one tunneled channel. Inserted only
@@ -1271,7 +1271,7 @@ async fn pair(
     let store = app.hub.store();
     let Some(device_id) = store
         .pair_device(
-            crate::hash_code(&request.code),
+            forge_store::PairCodeHash::of(&request.code),
             request.device_name,
             client.certificate,
         )

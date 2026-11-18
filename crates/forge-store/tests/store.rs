@@ -10,7 +10,7 @@ use artisan_api::{
     ItemsQuery, MessageDirection, Permissions, Phase, ProjectId, Question, Run, RunId, RunStatus,
     Status, ThreadId, ToolKind, Usage, now,
 };
-use forge_store::{Acceptance, BlobRejected, NewItem, Store};
+use forge_store::{Acceptance, BlobRejected, DeviceCertificate, NewItem, PairCodeHash, Store};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -539,19 +539,19 @@ async fn a_pairing_code_works_once_and_not_after_it_expires() {
     let store = Store::open(&dir.0).unwrap();
     let now = now();
     store
-        .add_pair_code(String::from("fresh"), now + 600_000)
+        .add_pair_code(PairCodeHash::of("fresh"), now + 600_000)
         .await
         .unwrap();
     store
-        .add_pair_code(String::from("stale"), now - 1)
+        .add_pair_code(PairCodeHash::of("stale"), now - 1)
         .await
         .unwrap();
 
     let pair = |code: &str, key: &str| {
         store.pair_device(
-            String::from(code),
+            PairCodeHash::of(code),
             "Laptop".into(),
-            key.to_owned(),
+            DeviceCertificate::from_der(key.as_bytes()),
         )
     };
     let device = pair("fresh", "key-a").await.unwrap().unwrap();
@@ -559,13 +559,13 @@ async fn a_pairing_code_works_once_and_not_after_it_expires() {
     assert_eq!(pair("stale", "key-c").await.unwrap(), None);
     assert_eq!(
         store
-            .is_authorized(&String::from("key-a"))
+            .is_authorized(&DeviceCertificate::from_der(b"key-a"))
             .unwrap(),
         Some(device.clone())
     );
     assert_eq!(
         store
-            .is_authorized(&String::from("key-b"))
+            .is_authorized(&DeviceCertificate::from_der(b"key-b"))
             .unwrap(),
         None
     );
@@ -574,7 +574,7 @@ async fn a_pairing_code_works_once_and_not_after_it_expires() {
     assert!(store.revoke_device(&device).await.unwrap());
     assert_eq!(
         store
-            .is_authorized(&String::from("key-a"))
+            .is_authorized(&DeviceCertificate::from_der(b"key-a"))
             .unwrap(),
         None
     );
@@ -588,17 +588,17 @@ async fn abandoned_pairing_codes_do_not_pile_up() {
     let now = now();
     for attempt in 0..20 {
         store
-            .add_pair_code(String::from(&format!("abandoned-{attempt}")), now - 1)
+            .add_pair_code(PairCodeHash::of(&format!("abandoned-{attempt}")), now - 1)
             .await
             .unwrap();
     }
     store
-        .add_pair_code(String::from("current"), now + 600_000)
+        .add_pair_code(PairCodeHash::of("current"), now + 600_000)
         .await
         .unwrap();
     forge_store::admin::Admin::open(&dir.0)
         .unwrap()
-        .add_pair_code(&String::from("from-ae"), now + 600_000)
+        .add_pair_code(&PairCodeHash::of("from-ae"), now + 600_000)
         .unwrap();
 
     let stored: i64 = rusqlite::Connection::open(dir.0.join("forge.sqlite3"))
@@ -617,12 +617,12 @@ async fn a_device_revoked_by_another_process_is_refused_next() {
     let dir = TempDir::new();
     let store = Store::open(&dir.0).unwrap();
     let device = store
-        .add_device("Laptop".into(), String::from("key-a"))
+        .add_device("Laptop".into(), DeviceCertificate::from_der(b"key-a"))
         .await
         .unwrap();
     assert_eq!(
         store
-            .is_authorized(&String::from("key-a"))
+            .is_authorized(&DeviceCertificate::from_der(b"key-a"))
             .unwrap(),
         Some(device.clone())
     );
@@ -631,7 +631,7 @@ async fn a_device_revoked_by_another_process_is_refused_next() {
     assert!(admin.revoke_device(device.as_str()).unwrap().is_some());
     assert_eq!(
         store
-            .is_authorized(&String::from("key-a"))
+            .is_authorized(&DeviceCertificate::from_der(b"key-a"))
             .unwrap(),
         None
     );
@@ -967,7 +967,7 @@ async fn pairing_failure_does_not_consume_the_invitation() {
     let dir = TempDir::new();
     let store = Store::open(&dir.0).unwrap();
     store
-        .add_pair_code(String::from("invite"), now() + 60_000)
+        .add_pair_code(PairCodeHash::of("invite"), now() + 60_000)
         .await
         .unwrap();
     let conn = rusqlite::Connection::open(dir.0.join("forge.sqlite3")).unwrap();
@@ -976,9 +976,9 @@ async fn pairing_failure_does_not_consume_the_invitation() {
     assert!(
         store
             .pair_device(
-                String::from("invite"),
+                PairCodeHash::of("invite"),
                 "Laptop".into(),
-                String::from("certificate"),
+                DeviceCertificate::from_der(b"certificate"),
             )
             .await
             .is_err()
@@ -986,25 +986,25 @@ async fn pairing_failure_does_not_consume_the_invitation() {
     conn.execute_batch("DROP TRIGGER reject_device;").unwrap();
     let id = store
         .pair_device(
-            String::from("invite"),
+            PairCodeHash::of("invite"),
             "Laptop".into(),
-            String::from("certificate"),
+            DeviceCertificate::from_der(b"certificate"),
         )
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
         store
-            .is_authorized(&String::from("certificate"))
+            .is_authorized(&DeviceCertificate::from_der(b"certificate"))
             .unwrap(),
         Some(id)
     );
     assert!(
         store
             .pair_device(
-                String::from("invite"),
+                PairCodeHash::of("invite"),
                 "Laptop".into(),
-                String::from("certificate"),
+                DeviceCertificate::from_der(b"certificate"),
             )
             .await
             .unwrap()

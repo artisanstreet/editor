@@ -2279,6 +2279,7 @@ dependencies = [
  "artisan-api",
  "artisan-markdown-index",
  "artisan-paths",
+ "base64 0.22.1",
  "fff-grep",
  "forge-content",
  "fs2",

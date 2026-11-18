@@ -92,7 +92,7 @@ pub fn pair(json: bool) -> Result<()> {
     if !service::listening(address) {
         ui::warning("Forge isn't running; the Editor can't pair until it is (`ae forge start`).");
     }
-    let code = forge_http::hash_code(&invite.code);
+    let code = forge_store::PairCodeHash::of(&invite.code);
     let issued = artisan_api::now();
     let progress = ui::Progress::spinner("Waiting for an Editor");
     loop {
