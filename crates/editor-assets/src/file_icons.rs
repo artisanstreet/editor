@@ -241,25 +241,7 @@ const LIGHT_EXTENSIONS: &[(&str, AssetId)] = &[
     ("zip", AssetId::JETBRAINS_2023_ARCHIVE),
     ("zsh", AssetId::JETBRAINS_2023_SHELL),
 ];
-const LIGHT_FOLDERS: &[(&str, AssetId)] = &[
-    (".github", AssetId::JETBRAINS_2023_FOLDERGITHUB),
-    ("__fixtures__", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("__snapshots__", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("__test__", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("__tests__", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("controllers", AssetId::JETBRAINS_2023_FOLDERCONTROLLERS),
-    ("helpers", AssetId::JETBRAINS_2023_FOLDERHELPERS),
-    ("mailers", AssetId::JETBRAINS_2023_FOLDERMAILERS),
-    ("migrate", AssetId::JETBRAINS_2023_FOLDERMIGRATIONS),
-    ("spec", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("specs", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("test", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("tests", AssetId::JETBRAINS_2023_FOLDERTEST),
-    ("vendor", AssetId::JETBRAINS_2023_FOLDERVENDOR),
-];
 const LIGHT_FILE: AssetId = AssetId::JETBRAINS_2023_TEXT;
-const LIGHT_FOLDER: AssetId = AssetId::JETBRAINS_2023_FOLDER;
-const LIGHT_ROOT: AssetId = AssetId::JETBRAINS_2023_MODULE;
 const DARK_NAMES: &[(&str, AssetId)] = &[
     (".bunrc", AssetId::JETBRAINS_2023_BUN),
     (".dockerignore", AssetId::JETBRAINS_2023_IGNORED_DARK),
@@ -510,28 +492,7 @@ const DARK_EXTENSIONS: &[(&str, AssetId)] = &[
     ("zip", AssetId::JETBRAINS_2023_ARCHIVE_DARK),
     ("zsh", AssetId::JETBRAINS_2023_SHELL_DARK),
 ];
-const DARK_FOLDERS: &[(&str, AssetId)] = &[
-    (".github", AssetId::JETBRAINS_2023_FOLDERGITHUB_DARK),
-    ("__fixtures__", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("__snapshots__", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("__test__", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("__tests__", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    (
-        "controllers",
-        AssetId::JETBRAINS_2023_FOLDERCONTROLLERS_DARK,
-    ),
-    ("helpers", AssetId::JETBRAINS_2023_FOLDERHELPERS_DARK),
-    ("mailers", AssetId::JETBRAINS_2023_FOLDERMAILERS_DARK),
-    ("migrate", AssetId::JETBRAINS_2023_FOLDERMIGRATIONS_DARK),
-    ("spec", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("specs", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("test", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("tests", AssetId::JETBRAINS_2023_FOLDERTEST_DARK),
-    ("vendor", AssetId::JETBRAINS_2023_FOLDERVENDOR_DARK),
-];
 const DARK_FILE: AssetId = AssetId::JETBRAINS_2023_TEXT_DARK;
-const DARK_FOLDER: AssetId = AssetId::JETBRAINS_2023_FOLDER_DARK;
-const DARK_ROOT: AssetId = AssetId::JETBRAINS_2023_MODULE_DARK;
 
 fn find(table: &[(&str, AssetId)], name: &str) -> Option<AssetId> {
     table
@@ -560,24 +521,6 @@ pub fn file(path: &Path, dark: bool) -> AssetId {
         }
     }
     fallback
-}
-
-#[must_use]
-pub fn folder(path: &Path, dark: bool, root: bool) -> AssetId {
-    let (names, fallback) = if dark {
-        (DARK_FOLDERS, if root { DARK_ROOT } else { DARK_FOLDER })
-    } else {
-        (LIGHT_FOLDERS, if root { LIGHT_ROOT } else { LIGHT_FOLDER })
-    };
-    if root {
-        return fallback;
-    }
-    let name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-    find(names, &name).unwrap_or(fallback)
 }
 
 #[cfg(test)]
