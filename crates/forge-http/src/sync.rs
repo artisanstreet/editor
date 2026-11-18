@@ -32,7 +32,15 @@ pub struct ConfigState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigOutcome {
     Current(ConfigState),
-    Updated(ConfigState),
+    Updated {
+        state: ConfigState,
+        kept_local: Vec<LocalMcpServerKept>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalMcpServerKept {
+    pub name: String,
 }
 
 pub fn sync_state_path(data_dir: &Path) -> PathBuf {
@@ -234,7 +242,11 @@ pub async fn sync_config(
         .context("read the manifest")?;
     let synced_before = previous.map(|state| state.mcp_servers).unwrap_or_default();
     let applied = apply_manifest(hub, &bytes, &bundle.content_hash, &synced_before).await;
-    let (changed, mcp_servers) = match applied {
+    let Applied {
+        changed,
+        placed: mcp_servers,
+        kept_local,
+    } = match applied {
         Ok(applied) => applied,
         Err(error) => {
             if let Err(report) = core
@@ -263,7 +275,13 @@ pub async fn sync_config(
             state.version
         );
     }
-    Ok(ConfigOutcome::Updated(state))
+    Ok(ConfigOutcome::Updated { state, kept_local })
+}
+
+struct Applied {
+    changed: Vec<String>,
+    placed: Vec<String>,
+    kept_local: Vec<LocalMcpServerKept>,
 }
 
 async fn apply_manifest(
@@ -271,7 +289,7 @@ async fn apply_manifest(
     bytes: &[u8],
     content_hash: &str,
     synced_before: &[String],
-) -> Result<(Vec<String>, Vec<String>)> {
+) -> Result<Applied> {
     anyhow::ensure!(
         hex::encode(sha2::Sha256::digest(bytes)) == content_hash,
         "the manifest does not match the bundle hash"
@@ -282,13 +300,7 @@ async fn apply_manifest(
         "unknown manifest format {}",
         manifest.format
     );
-    let changed = apply(hub, &manifest, synced_before).await?;
-    let synced = manifest
-        .mcp_servers
-        .into_iter()
-        .map(|server| server.name)
-        .collect();
-    anyhow::Ok((changed, synced))
+    apply(hub, &manifest, synced_before).await
 }
 
 /// Skills go first, so a skill that cannot install leaves the prompt and
@@ -297,7 +309,7 @@ async fn apply(
     hub: &forge_runs::Hub,
     manifest: &EditorManifest,
     synced_before: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Applied> {
     let mut changed = Vec::new();
     for skill in &manifest.skills {
         if let Some(bundle) = &skill.bundle {
@@ -346,9 +358,14 @@ async fn apply(
             changed.push("globalPrompt".to_owned());
         }
     }
-    changed.extend(apply_mcp(hub.store(), &manifest.mcp_servers, synced_before).await?);
+    let mcp = apply_mcp(hub.store(), &manifest.mcp_servers, synced_before).await?;
+    changed.extend(mcp.changed);
     hub.check_mcp_auth().await;
-    Ok(changed)
+    Ok(Applied {
+        changed,
+        placed: mcp.placed,
+        kept_local: mcp.kept_local,
+    })
 }
 
 async fn install_bundle(hub: &forge_runs::Hub, name: &str, bundle: &SkillBundle) -> Result<()> {
@@ -378,29 +395,42 @@ async fn install_bundle(hub: &forge_runs::Hub, name: &str, bundle: &SkillBundle)
     Ok(())
 }
 
-/// Upserts the manifest's servers, keeping each one's local fields (env,
-/// headers), and removes only servers an earlier bundle placed.
 async fn apply_mcp(
     store: &forge_store::Store,
     servers: &[ManifestMcpServer],
     synced_before: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Applied> {
     let current: Vec<artisan_api::McpServer> = store
         .setting("mcp_servers")
         .await?
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default();
-    let mut changed = Vec::new();
+    let mut applied = Applied {
+        changed: Vec::new(),
+        placed: Vec::new(),
+        kept_local: Vec::new(),
+    };
     for entry in servers {
         let previous = current.iter().find(|server| server.name == entry.name);
-        let server = artisan_api::McpServer {
+        let destination = artisan_api::McpServer {
             name: entry.name.clone(),
             command: entry.command.clone().unwrap_or_default(),
             args: entry.args.clone().unwrap_or_default(),
             url: entry.url.clone(),
-            ..previous.cloned().unwrap_or_default()
+            ..artisan_api::McpServer::default()
         };
+        let server = match (previous, synced_before.contains(&entry.name)) {
+            (Some(_), false) => {
+                applied.kept_local.push(LocalMcpServerKept {
+                    name: entry.name.clone(),
+                });
+                continue;
+            }
+            (Some(previous), true) => rebind(previous, destination),
+            (None, _) => destination,
+        };
+        applied.placed.push(entry.name.clone());
         if previous != Some(&server) {
             store
                 .mutate_mcp(artisan_api::McpMutation::Upsert {
@@ -408,7 +438,7 @@ async fn apply_mcp(
                     server,
                 })
                 .await?;
-            changed.push(format!("mcp:{}", entry.name));
+            applied.changed.push(format!("mcp:{}", entry.name));
         }
     }
     let dropped = current.iter().filter(|server| {
@@ -421,9 +451,39 @@ async fn apply_mcp(
                 previous: server.clone(),
             })
             .await?;
-        changed.push(format!("mcp-removed:{}", server.name));
+        applied.changed.push(format!("mcp-removed:{}", server.name));
     }
-    Ok(changed)
+    Ok(applied)
+}
+
+fn rebind(
+    previous: &artisan_api::McpServer,
+    destination: artisan_api::McpServer,
+) -> artisan_api::McpServer {
+    if same_destination(previous, &destination) {
+        artisan_api::McpServer {
+            env: previous.env.clone(),
+            headers: previous.headers.clone(),
+            sse: previous.sse,
+            ..destination
+        }
+    } else {
+        artisan_api::McpServer {
+            sse: previous.sse,
+            ..destination
+        }
+    }
+}
+
+fn same_destination(previous: &artisan_api::McpServer, next: &artisan_api::McpServer) -> bool {
+    match (previous.url.as_deref(), next.url.as_deref()) {
+        (Some(previous), Some(next)) => match (url::Url::parse(previous), url::Url::parse(next)) {
+            (Ok(previous), Ok(next)) => previous.origin() == next.origin(),
+            (Err(_), _) | (_, Err(_)) => false,
+        },
+        (None, None) => previous.command == next.command,
+        (Some(_), None) | (None, Some(_)) => false,
+    }
 }
 
 /// The machine identity `ae account enroll/confirm` wrote to
@@ -504,8 +564,14 @@ pub(crate) async fn run_config_loop(
         match synced {
             Ok(outcome) => {
                 failing = false;
-                if let ConfigOutcome::Updated(state) = outcome {
+                if let ConfigOutcome::Updated { state, kept_local } = outcome {
                     tracing::info!(version = state.version, "applied config bundle");
+                    for kept in kept_local {
+                        tracing::warn!(
+                            server = %kept.name,
+                            "kept the MCP server created on this machine over the account's server of the same name"
+                        );
+                    }
                 }
             }
             Err(error) if failing => tracing::debug!("config sync failed: {error:#}"),
@@ -683,7 +749,7 @@ mod tests {
         let outcome = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
             .await
             .unwrap();
-        let ConfigOutcome::Updated(state) = outcome else {
+        let ConfigOutcome::Updated { state, .. } = outcome else {
             panic!("first sync must apply");
         };
         assert_eq!(state.version, 3);
@@ -777,7 +843,7 @@ mod tests {
         let outcome = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
             .await
             .unwrap();
-        assert!(matches!(outcome, ConfigOutcome::Updated(_)));
+        assert!(matches!(outcome, ConfigOutcome::Updated { .. }));
         let catalog = hub.skill_catalog().await.unwrap();
         let installed = catalog
             .iter()
@@ -860,51 +926,135 @@ mod tests {
         drop(reports);
     }
 
-    /// Sync owns only the MCP servers it placed: a server added on this
-    /// machine survives, and a synced server keeps its local headers.
+    async fn mcp_servers(store: &forge_store::Store) -> Vec<artisan_api::McpServer> {
+        store
+            .setting("mcp_servers")
+            .await
+            .unwrap()
+            .map(|servers| serde_json::from_value(servers).unwrap())
+            .unwrap_or_default()
+    }
+
+    async fn add_local(store: &forge_store::Store, server: artisan_api::McpServer) {
+        let previous = mcp_servers(store)
+            .await
+            .into_iter()
+            .find(|existing| existing.name == server.name);
+        store
+            .mutate_mcp(artisan_api::McpMutation::Upsert { previous, server })
+            .await
+            .unwrap();
+    }
+
+    fn mcp_manifest(server: &serde_json::Value) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "format": "ast-editor-config/1",
+            "mcp_servers": [server],
+        }))
+        .unwrap()
+    }
+
+    async fn sync_with(manifest: Vec<u8>, hub: &forge_runs::Hub, dir: &Path) -> ConfigOutcome {
+        let (base, _stub, _server) = stub_server(false, Some(manifest)).await;
+        sync_config(&test_client(), &base, MACHINE, &SECRET, hub, dir)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn sync_keeps_local_mcp_servers_and_their_headers() {
-        let (base, _stub, _server) = stub_server(false, None).await;
+    async fn a_server_created_on_this_machine_survives_an_account_server_of_the_same_name() {
         let dir = tempfile::tempdir().unwrap();
         let hub = test_hub(dir.path());
         let store = hub.store();
-        let local = [
+        let local = artisan_api::McpServer {
+            name: "s".into(),
+            command: "local-search".into(),
+            headers: [("Authorization".to_owned(), "Bearer local".to_owned())].into(),
+            ..Default::default()
+        };
+        add_local(store, local.clone()).await;
+        add_local(
+            store,
             artisan_api::McpServer {
                 name: "mine".into(),
                 command: "local".into(),
                 ..Default::default()
             },
-            artisan_api::McpServer {
-                name: "s".into(),
-                command: "old".into(),
-                headers: [("Authorization".to_owned(), "Bearer x".to_owned())].into(),
-                ..Default::default()
-            },
-        ];
-        for server in local {
-            store
-                .mutate_mcp(artisan_api::McpMutation::Upsert {
-                    previous: None,
-                    server,
-                })
-                .await
-                .unwrap();
-        }
-        sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path())
-            .await
-            .unwrap();
-        let mcp: Vec<artisan_api::McpServer> =
-            serde_json::from_value(store.setting("mcp_servers").await.unwrap().unwrap()).unwrap();
-        assert!(
-            mcp.iter()
-                .any(|server| server.name == "mine" && server.command == "local"),
-            "{mcp:?}"
-        );
-        let synced = mcp.iter().find(|server| server.name == "s").unwrap();
-        assert_eq!(synced.command, "srv");
+        )
+        .await;
+        let manifest = mcp_manifest(&serde_json::json!({"name": "s", "command": "srv"}));
+        let ConfigOutcome::Updated { state, kept_local } =
+            sync_with(manifest.clone(), &hub, dir.path()).await
+        else {
+            panic!("a new bundle applies");
+        };
+        assert_eq!(kept_local, [LocalMcpServerKept { name: "s".into() }]);
+        assert!(state.mcp_servers.is_empty(), "{:?}", state.mcp_servers);
+        let servers = mcp_servers(store).await;
+        assert!(servers.contains(&local), "{servers:?}");
+        assert!(servers.iter().any(|server| server.name == "mine"));
+
+        let changed = mcp_manifest(&serde_json::json!({"name": "s", "command": "srv2"}));
+        let ConfigOutcome::Updated { kept_local, .. } = sync_with(changed, &hub, dir.path()).await
+        else {
+            panic!("a changed bundle applies");
+        };
+        assert_eq!(kept_local, [LocalMcpServerKept { name: "s".into() }]);
+        assert!(mcp_servers(store).await.contains(&local));
+    }
+
+    #[tokio::test]
+    async fn synced_servers_keep_credentials_only_while_their_destination_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = test_hub(dir.path());
+        let store = hub.store();
+        let mcp_host = || {
+            test_support::http::StubServer::serve(
+                axum::Router::new().fallback(|| async { StatusCode::OK }),
+            )
+        };
+        let (first_host, other_host) = (mcp_host().await, mcp_host().await);
+        let first = |path: &str| format!("{}{path}", first_host.url());
+        let other = format!("{}/v2", other_host.url());
+        let bundle = |url: &str| mcp_manifest(&serde_json::json!({"name": "s", "url": url}));
+        sync_with(bundle(&first("/v1")), &hub, dir.path()).await;
+        let mut placed = mcp_servers(store).await.pop().unwrap();
+        placed
+            .headers
+            .insert("Authorization".into(), "Bearer local".into());
+        add_local(store, placed).await;
+
+        sync_with(bundle(&first("/v2")), &hub, dir.path()).await;
+        let same_origin = mcp_servers(store).await.pop().unwrap();
+        assert_eq!(same_origin.url, Some(first("/v2")));
         assert_eq!(
-            synced.headers.get("Authorization").map(String::as_str),
-            Some("Bearer x")
+            same_origin.headers.get("Authorization").map(String::as_str),
+            Some("Bearer local")
+        );
+
+        sync_with(bundle(&other), &hub, dir.path()).await;
+        let moved = mcp_servers(store).await.pop().unwrap();
+        assert_eq!(moved.url, Some(other));
+        assert!(
+            moved.headers.is_empty(),
+            "a header for the first host went to another provider: {:?}",
+            moved.headers
+        );
+
+        let command = |command: &str| {
+            mcp_manifest(&serde_json::json!({"name": "s", "command": command, "args": ["--stdio"]}))
+        };
+        sync_with(command("search-server"), &hub, dir.path()).await;
+        let mut stdio = mcp_servers(store).await.pop().unwrap();
+        stdio.env.insert("API_KEY".into(), "secret".into());
+        add_local(store, stdio).await;
+        sync_with(command("other-server"), &hub, dir.path()).await;
+        let replaced = mcp_servers(store).await.pop().unwrap();
+        assert_eq!(replaced.command, "other-server");
+        assert!(
+            replaced.env.is_empty(),
+            "a replacement executable received the old secrets: {:?}",
+            replaced.env
         );
     }
 }

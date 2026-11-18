@@ -609,8 +609,14 @@ fn sync_config_now(core: Option<&str>) -> Result<()> {
         outcome
     })?;
     match outcome {
-        forge_http::sync::ConfigOutcome::Updated(state) => {
+        forge_http::sync::ConfigOutcome::Updated { state, kept_local } => {
             crate::ui::success(format!("Applied config bundle version {}.", state.version));
+            for kept in kept_local {
+                crate::ui::warning(format!(
+                    "Kept the MCP server {} created on this machine; the account's server of the same name was not applied. Rename one of them to use both.",
+                    kept.name
+                ));
+            }
         }
         forge_http::sync::ConfigOutcome::Current(state) => {
             println!("Config is current (version {}).", state.version);
