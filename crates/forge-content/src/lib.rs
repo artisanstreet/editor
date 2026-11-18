@@ -53,7 +53,7 @@ pub fn collection_ref<T: Serialize>(records: &[T]) -> Result<CollectionRef, serd
     })
 }
 
-pub fn compact_collection<T: Serialize>(
+fn compact_collection<T: Serialize>(
     collection: &mut Collection<T>,
 ) -> Result<bool, serde_json::Error> {
     let Collection::Inline(records) = collection else {
