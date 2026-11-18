@@ -1,5 +1,6 @@
 use crate::shell::host::{Shell, ShellResources, ShellUpdates, set_window_scale};
 use crate::shell::native_notifications::NativeNotifications;
+use crate::shell::refresh::{Cause, Invalidation};
 use aqua::prelude::{
     A11yActionRequest, A11yNode, AquaWindowId, CursorIcon, DragRegions, FrameReason, InputEvent,
     Instant, ManagedUiApp, NodeId, ObservedWindowState, Scene, WindowEvent,
@@ -37,6 +38,9 @@ pub enum BuildError {
 }
 
 pub trait SectionViews {
+    fn take_invalidation(&mut self) -> Invalidation {
+        Invalidation::default()
+    }
     fn advance_glides(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
         false
     }
@@ -406,12 +410,14 @@ impl<V: SectionViews> ShellApplication<V> {
         ctx: &mut AppCtx<'_>,
         id: AquaWindowId,
         reason: FrameReason,
-        causes: &[&'static str],
+        invalidation: &Invalidation,
     ) {
         let _tm = Tm::new("rebuild");
         let _rebuild_span = crate::core::diagnostics::rebuild_stats::span("rb_total");
         self.shell.live.flushed(std::time::Instant::now());
-        crate::core::diagnostics::rebuild_stats::record_rebuild(causes);
+        let mut reasons = invalidation.labels();
+        reasons.extend(crate::core::diagnostics::rebuild_stats::take_notes());
+        crate::core::diagnostics::rebuild_stats::record_rebuild(&reasons);
         let Some(window) = ctx.window_state(id).cloned() else {
             return;
         };
@@ -684,33 +690,29 @@ impl<V: SectionViews> ShellApplication<V> {
             }
         }
         drop(tm_pre);
-        let mut causes: Vec<&'static str> = Vec::new();
+        let mut causes = Invalidation::default();
         let tm_workspace = Tm::new("drain.workspace");
-        let mut domain_changed = mark(&mut causes, "sections", sections_changed);
+        let mut domain_changed = causes.note(Cause::Sections, sections_changed);
         if sections_changed {
-            causes.extend(crate::core::diagnostics::rebuild_stats::take_notes());
+            causes.extend(self.views.take_invalidation());
         }
-        domain_changed |= mark(&mut causes, "titlebar", self.shell.titlebar.take_changed());
-        domain_changed |= mark(
-            &mut causes,
-            "view_events",
+        domain_changed |= causes.note(Cause::Titlebar, self.shell.titlebar.take_changed());
+        domain_changed |= causes.note(
+            Cause::ViewEvents,
             self.views
                 .take_events(&mut self.shell, self.ui.ui(), ctx, id),
         );
         if let Some(workspace) = self.shell.entry.workspace_mut() {
-            domain_changed |= mark(
-                &mut causes,
-                "code_actions",
+            domain_changed |= causes.note(
+                Cause::CodeActions,
                 workspace.drain_code_actions(&self.shell.core, ctx, id),
             );
-            domain_changed |= mark(
-                &mut causes,
-                "question_source",
+            domain_changed |= causes.note(
+                Cause::QuestionSource,
                 workspace.drain_question_source(&self.shell.core, &self.shell.dialogs, ctx, id),
             );
-            domain_changed |= mark(
-                &mut causes,
-                "inspector",
+            domain_changed |= causes.note(
+                Cause::Inspector,
                 workspace.drain_inspector(
                     &mut self.shell.core,
                     &self.shell.dialogs,
@@ -729,10 +731,9 @@ impl<V: SectionViews> ShellApplication<V> {
         let updates = self.shell.drain(active, self.ui.ui_mut());
         drop(tm_shell);
         drop(drain_span);
-        domain_changed |= mark(&mut causes, "shell_updates", updates.changed);
-        domain_changed |= mark(
-            &mut causes,
-            "composer_image",
+        domain_changed |= causes.note(Cause::ShellUpdates, updates.changed);
+        domain_changed |= causes.note(
+            Cause::ComposerImage,
             self.views
                 .open_composer_images(&mut self.shell, self.ui.ui_mut()),
         );
@@ -770,11 +771,10 @@ impl<V: SectionViews> ShellApplication<V> {
         drop(tm_sync);
         self.shell.bind(ctx, id);
         if !self.mounted {
-            causes.push("unmounted");
+            causes.note(Cause::Unmounted, true);
         }
         if domain_changed || !self.mounted {
-            let transcript_only =
-                live_only && self.mounted && causes.as_slice() == ["shell_updates"];
+            let transcript_only = live_only && self.mounted && causes.is_only(Cause::ShellUpdates);
             if !(transcript_only && self.refresh_transcript(ctx, id, FrameReason::INPUT)) {
                 self.rebuild(ctx, id, FrameReason::INPUT, &causes);
             }
@@ -849,12 +849,10 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         let animated = self
             .views
             .animate(&mut self.shell, self.ui.ui_mut(), ctx, id);
-        let mut causes = crate::core::diagnostics::rebuild_stats::take_notes();
-        if landed {
-            causes.push("landing_expiry");
-        }
+        let mut causes = self.views.take_invalidation();
+        causes.note(Cause::LandingExpiry, landed);
         if animated | landed {
-            let refresh = super::refresh::Refresh::from_causes(&causes);
+            let refresh = causes.refresh();
             if !self.refresh_sections(ctx, id, refresh) {
                 self.rebuild(ctx, id, FrameReason::ANIMATION, &causes);
             }
@@ -958,14 +956,14 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         let usage_elapsed = self
             .usage_deadline
             .is_some_and(|deadline| ctx.now() >= deadline);
-        let mut causes: Vec<&'static str> = Vec::new();
-        let notes = crate::core::diagnostics::rebuild_stats::take_notes();
-        let mut refresh = mark(&mut causes, "views_frame", views_changed);
+        let mut causes = Invalidation::default();
+        let noted = self.views.take_invalidation();
+        let mut refresh = causes.note(Cause::ViewsFrame, views_changed);
         if views_changed {
-            causes.extend(notes);
+            causes.extend(noted);
         }
-        refresh |= mark(&mut causes, "popup_animating", popup_animating);
-        refresh |= mark(&mut causes, "usage_clock", usage_elapsed);
+        refresh |= causes.note(Cause::PopupAnimating, popup_animating);
+        refresh |= causes.note(Cause::UsageClock, usage_elapsed);
         if usage_elapsed {
             self.usage_deadline =
                 Some(ctx.now() + crate::sidebar::usage_controller::CLOCK_INTERVAL);
@@ -974,16 +972,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             if workspace.sync_composer_tooltip(self.ui.ui_mut(), theme, std::time::Instant::now()) {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
-            refresh |= mark(
-                &mut causes,
-                "code_actions",
+            refresh |= causes.note(
+                Cause::CodeActions,
                 workspace.drain_code_actions(&self.shell.core, ctx, id),
             );
-            refresh |= mark(
-                &mut causes,
-                "code_frame",
-                workspace.take_code_frame(ctx.now()),
-            );
+            refresh |= causes.note(Cause::CodeFrame, workspace.take_code_frame(ctx.now()));
             if workspace
                 .markdown
                 .borrow()
@@ -991,11 +984,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
-            refresh |= mark(
-                &mut causes,
-                "inspector_tick",
-                workspace.inspector.tick(ctx.now()),
-            );
+            refresh |= causes.note(Cause::InspectorTick, workspace.inspector.tick(ctx.now()));
             let reduced = self.ui.ui().host().motion().reduced_motion()
                 == aqua_ui::motion::ReducedMotion::Reduce;
             let now = std::time::Instant::now();
@@ -1003,7 +992,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 | workspace.settings_sidebar.advance_motion(now, reduced);
             if sidebar_moving {
                 ctx.request_frame(id, FrameReason::ANIMATION);
-                refresh = mark(&mut causes, "sidebar_motion", true);
+                refresh = causes.note(Cause::SidebarMotion, true);
             }
             if workspace
                 .sidebar
@@ -1011,11 +1000,10 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 .is_some_and(|at| at <= artisan_api::now())
             {
                 workspace.sidebar.sync(&self.shell.core, artisan_api::now());
-                refresh = mark(&mut causes, "sidebar_tick", true);
+                refresh = causes.note(Cause::SidebarTick, true);
             }
-            refresh |= mark(
-                &mut causes,
-                "landing_expiry",
+            refresh |= causes.note(
+                Cause::LandingExpiry,
                 workspace.conversation.expire_landing(),
             );
             if workspace.marketplace.needs_animation() {
@@ -1026,8 +1014,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 ctx.request_frame(id, FrameReason::ANIMATION);
             }
         }
-        if refresh && !self.refresh_sections(ctx, id, super::refresh::Refresh::from_causes(&causes))
-        {
+        if refresh && !self.refresh_sections(ctx, id, causes.refresh()) {
             self.rebuild(ctx, id, FrameReason::ANIMATION, &causes);
         }
     }
@@ -1386,13 +1373,6 @@ impl Drop for Tm {
             tracing::info!(target: "tm", what = self.0, ms);
         }
     }
-}
-
-fn mark(causes: &mut Vec<&'static str>, name: &'static str, changed: bool) -> bool {
-    if changed {
-        causes.push(name);
-    }
-    changed
 }
 
 #[cfg(all(test, feature = "qualification"))]

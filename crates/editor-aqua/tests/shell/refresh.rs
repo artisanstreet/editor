@@ -1,28 +1,41 @@
-#[path = "../../src/shell/refresh.rs"]
-mod implementation;
+use editor_aqua::shell::refresh::{Cause, Invalidation, Refresh};
 
-use implementation::Refresh;
+fn refresh(causes: &[Cause]) -> Refresh {
+    let mut invalidation = Invalidation::default();
+    for cause in causes {
+        invalidation.note(*cause, true);
+    }
+    invalidation.refresh()
+}
 
 #[test]
 fn transcript_animation_and_clock_changes_stay_inside_the_transcript() {
     for causes in [
-        vec!["anim_clock"],
-        vec!["views_frame", "after_layout", "al_motion"],
-        vec!["views_frame", "al_compaction", "al_reveal", "al_stored"],
-        vec!["landing_expiry", "reveals"],
+        vec![Cause::WorkClock],
+        vec![Cause::ViewsFrame, Cause::AfterLayout, Cause::LayoutMotion],
+        vec![Cause::ViewsFrame, Cause::LayoutMotion],
+        vec![Cause::LandingExpiry, Cause::Reveals],
     ] {
-        assert_eq!(Refresh::from_causes(&causes), Refresh::Transcript);
+        assert_eq!(refresh(&causes), Refresh::Transcript);
     }
+}
+
+#[test]
+fn rows_revealed_by_scrolling_refresh_only_the_transcript() {
+    assert_eq!(
+        refresh(&[Cause::ViewsFrame, Cause::Viewport, Cause::Rows]),
+        Refresh::Transcript
+    );
 }
 
 #[test]
 fn independent_sidebar_and_transcript_updates_refresh_both_sections() {
     assert_eq!(
-        Refresh::from_causes(&["sidebar_motion", "sidebar_tick"]),
+        refresh(&[Cause::SidebarMotion, Cause::SidebarTick]),
         Refresh::Sidebar
     );
     assert_eq!(
-        Refresh::from_causes(&["sidebar_motion", "after_layout"]),
+        refresh(&[Cause::SidebarMotion, Cause::AfterLayout]),
         Refresh::Sections
     );
     assert_eq!(
@@ -32,15 +45,15 @@ fn independent_sidebar_and_transcript_updates_refresh_both_sections() {
 }
 
 #[test]
-fn unknown_or_layout_changes_keep_the_full_workspace_fallback() {
+fn unattributed_or_layout_changes_keep_the_full_workspace_fallback() {
     for causes in [
         vec![],
-        vec!["views_frame"],
-        vec!["anim_sidebar_settled", "anim_clock"],
-        vec!["anim_clock", "theme"],
-        vec!["anim_events"],
+        vec![Cause::ViewsFrame],
+        vec![Cause::SidebarSettled, Cause::WorkClock],
+        vec![Cause::WorkClock, Cause::Titlebar],
+        vec![Cause::SidebarEvents],
     ] {
-        assert_eq!(Refresh::from_causes(&causes), Refresh::Workspace);
+        assert_eq!(refresh(&causes), Refresh::Workspace);
     }
 }
 
@@ -82,16 +95,13 @@ fn combining_update_scopes_is_associative_and_workspace_changes_dominate() {
 
 #[test]
 fn sidebar_frame_animation_updates_the_chrome_and_combines_with_transcript_changes() {
+    assert_eq!(refresh(&[Cause::SidebarAnimation]), Refresh::SidebarFrame);
     assert_eq!(
-        Refresh::from_causes(&["anim_sidebar"]),
+        refresh(&[Cause::SidebarResize, Cause::SidebarTick]),
         Refresh::SidebarFrame
     );
     assert_eq!(
-        Refresh::from_causes(&["anim_sidebar_resize", "sidebar_tick"]),
-        Refresh::SidebarFrame
-    );
-    assert_eq!(
-        Refresh::from_causes(&["anim_edges", "anim_clock"]),
+        refresh(&[Cause::SidebarResize, Cause::WorkClock]),
         Refresh::FrameSections
     );
 }

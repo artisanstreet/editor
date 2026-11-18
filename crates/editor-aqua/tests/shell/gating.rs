@@ -8,6 +8,7 @@ use editor_aqua::core::{Core, EditorFiles};
 use editor_aqua::shell::{
     application::{SectionViews, ShellApplication},
     host::{Shell, ShellResources},
+    refresh::{Cause, Invalidation},
 };
 use std::{cell::Cell, rc::Rc};
 
@@ -20,14 +21,13 @@ struct Fixture {
 
 #[test]
 fn update_reasons_are_collected_without_profiling_and_drained_once() {
-    use editor_aqua::shell::{rebuild_stats, refresh::Refresh};
+    use editor_aqua::shell::rebuild_stats;
     rebuild_stats::take_notes();
     assert!(!rebuild_stats::note("ignored", false));
     rebuild_stats::note("anim_clock", true);
     rebuild_stats::note("anim_clock", true);
     let causes = rebuild_stats::take_notes();
     assert_eq!(causes, ["anim_clock"]);
-    assert_eq!(Refresh::from_causes(&causes), Refresh::Transcript);
     assert!(rebuild_stats::take_notes().is_empty());
 }
 
@@ -37,7 +37,8 @@ struct RefreshFixture {
     sidebar: Cell<usize>,
     sidebar_frame: Cell<usize>,
     transcript: usize,
-    causes: Option<Vec<&'static str>>,
+    causes: Option<Vec<Cause>>,
+    noted: Invalidation,
     allow_transcript: bool,
 }
 
@@ -99,12 +100,16 @@ impl SectionViews for RefreshFixture {
         match self.causes.take() {
             Some(causes) => {
                 for cause in causes {
-                    editor_aqua::shell::rebuild_stats::note(cause, true);
+                    self.noted.note(cause, true);
                 }
                 true
             }
             None => false,
         }
+    }
+
+    fn take_invalidation(&mut self) -> Invalidation {
+        std::mem::take(&mut self.noted)
     }
 }
 
@@ -145,29 +150,40 @@ fn independent_section_updates_avoid_root_rebuilds_and_failed_refreshes_fall_bac
         aqua.dispatch_wake(&mut app, id);
         std::thread::yield_now();
     }
-    editor_aqua::shell::rebuild_stats::take_notes();
+    app.views.take_invalidation();
     let base = app.views.builds;
-    app.views.causes = Some(vec!["sidebar_tick", "after_layout", "al_motion"]);
+    app.views.causes = Some(vec![
+        Cause::SidebarTick,
+        Cause::AfterLayout,
+        Cause::LayoutMotion,
+    ]);
     aqua.dispatch_frame_completed(&mut app, id, 1);
     assert_eq!(app.views.builds, base);
     assert_eq!(app.views.sidebar.get(), 1);
     assert_eq!(app.views.transcript, 1);
-    app.views.causes = Some(vec!["anim_sidebar_resize"]);
+    app.views.causes = Some(vec![Cause::SidebarResize]);
     aqua.dispatch_frame_completed(&mut app, id, 2);
     assert_eq!(app.views.builds, base);
     assert_eq!(app.views.sidebar_frame.get(), 1);
-    app.views.causes = Some(vec!["anim_edges", "anim_clock"]);
+    app.views.causes = Some(vec![Cause::SidebarResize, Cause::WorkClock]);
     aqua.dispatch_frame_completed(&mut app, id, 3);
     assert_eq!(app.views.builds, base);
     assert_eq!(app.views.sidebar_frame.get(), 2);
     assert_eq!(app.views.transcript, 2);
-    app.views.causes = Some(vec!["theme"]);
-    aqua.dispatch_frame_completed(&mut app, id, 2);
+    app.views.causes = Some(vec![Cause::Viewport, Cause::Rows]);
+    aqua.dispatch_frame_completed(&mut app, id, 4);
+    assert_eq!(
+        app.views.builds, base,
+        "rows revealed by scrolling refresh only the transcript"
+    );
+    assert_eq!(app.views.transcript, 3);
+    app.views.causes = Some(vec![Cause::Titlebar]);
+    aqua.dispatch_frame_completed(&mut app, id, 5);
     assert_eq!(app.views.builds, base + 1);
     app.views.allow_transcript = false;
-    app.views.causes = Some(vec!["after_layout"]);
-    aqua.dispatch_frame_completed(&mut app, id, 3);
-    assert_eq!(app.views.transcript, 3);
+    app.views.causes = Some(vec![Cause::AfterLayout]);
+    aqua.dispatch_frame_completed(&mut app, id, 6);
+    assert_eq!(app.views.transcript, 4);
     assert_eq!(app.views.builds, base + 2);
 }
 

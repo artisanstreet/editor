@@ -1,5 +1,6 @@
 use self::open_thread::PendingStall;
 use crate::core::Screen;
+use crate::shell::refresh::{Cause, Invalidation};
 use crate::shell::{
     application::{BuildError, SectionViews},
     composer_glide::Route,
@@ -105,6 +106,7 @@ const MOTION_REBUILD_INTERVAL: std::time::Duration = std::time::Duration::from_m
 
 #[derive(Default)]
 pub struct RootViews {
+    noted: Invalidation,
     motion_rebuilt: Cell<Option<std::time::Instant>>,
     #[cfg(feature = "qualification")]
     qualification_paint: crate::qualification::observation::PaintCollector,
@@ -1331,30 +1333,23 @@ impl RootViews {
         use crate::ui::color_copy_menu::ColorCopyEffect;
         use crate::ui::markdown::visual::LinkAction;
         self.connection.dispatch(&mut shell.core);
-        let mut changed = crate::core::diagnostics::rebuild_stats::note(
-            "conv_invalidated",
-            self.conversation_invalidated.replace(false),
-        );
+        let invalidated = self.conversation_invalidated.replace(false);
+        let mut changed = self.noted.note(Cause::ConversationInvalidated, invalidated);
         if self.navigation_invalidated.replace(false) {
-            changed |= crate::core::diagnostics::rebuild_stats::note(
-                "navigation",
-                self.refresh_navigation(shell, ui, ctx, window),
-            );
+            let navigated = self.refresh_navigation(shell, ui, ctx, window);
+            changed |= self.noted.note(Cause::Navigation, navigated);
         }
         self.bind_row_sources(ui, ctx, window);
         if let Some(workspace) = shell.entry.workspace_mut() {
-            changed |= crate::core::diagnostics::rebuild_stats::note(
-                "conv_stored",
-                self.stored
-                    .borrow_mut()
-                    .drain_publish(&mut workspace.conversation, &shell.core),
-            );
+            let published = self
+                .stored
+                .borrow_mut()
+                .drain_publish(&mut workspace.conversation, &shell.core);
+            changed |= self.noted.note(Cause::StoredRows, published);
         }
         self.stored.borrow_mut().drain_cleanup(ui);
-        changed |= crate::core::diagnostics::rebuild_stats::note(
-            "conv_row_sources",
-            self.drain_row_sources(shell, ctx, window),
-        );
+        let sourced = self.drain_row_sources(shell, ctx, window);
+        changed |= self.noted.note(Cause::RowSources, sourced);
         self.source_dialogs
             .retain(|export| Self::source_export_is_current(shell, export));
         for (export, result) in self.source_dialogs.drain() {
@@ -1524,10 +1519,8 @@ impl RootViews {
                 }
             }
         }
-        changed |= crate::core::diagnostics::rebuild_stats::note(
-            "conv_image_preview",
-            self.sync_image_preview(shell, ui, ctx, window),
-        );
+        let previewed = self.sync_image_preview(shell, ui, ctx, window);
+        changed |= self.noted.note(Cause::ImagePreview, previewed);
         self.warm_browser(shell);
         changed |= self.open_selection_menu(shell, ui, ctx);
         let effects = std::mem::take(&mut *self.color_effects.borrow_mut());
@@ -2749,6 +2742,10 @@ impl SectionViews for RootViews {
         changed | pictured
     }
 
+    fn take_invalidation(&mut self) -> Invalidation {
+        std::mem::take(&mut self.noted)
+    }
+
     fn animate(
         &mut self,
         shell: &mut Shell,
@@ -2776,37 +2773,30 @@ impl SectionViews for RootViews {
             self.conversation_invalidated.set(true);
             ctx.request_frame(window, aqua::prelude::FrameReason::EXPLICIT);
         }
+        let sidebar_events = self.sidebar.take_events(now, reduced);
+        let clock = self.tick_work_clock(shell, ctx, window, now);
+        let sidebar_moved = self.sidebar.tick(now, reduced);
+        let sidebar = match (sidebar_resizing, self.sidebar.resizing()) {
+            (true, false) => Cause::SidebarSettled,
+            (true | false, true) => Cause::SidebarResize,
+            (false, false) => Cause::SidebarAnimation,
+        };
         let causes = [
-            ("anim_reveal", revealing == reveal::Progress::Acted),
-            ("anim_events", self.sidebar.take_events(now, reduced)),
-            ("anim_clock", self.tick_work_clock(shell, ctx, window, now)),
-            ("anim_sidebar", self.sidebar.tick(now, reduced)),
-            ("anim_signing", signing),
+            (Cause::RevealActed, revealing == reveal::Progress::Acted),
+            (Cause::SidebarEvents, sidebar_events),
+            (Cause::WorkClock, clock),
+            (sidebar, sidebar_moved),
+            (Cause::Signing, signing),
         ];
+        let mut changed = false;
         for (cause, fired) in causes {
             if fired {
-                crate::core::diagnostics::rebuild_stats::record_event(cause);
+                crate::core::diagnostics::rebuild_stats::record_event(cause.label());
             }
-        }
-        let changed = causes.iter().any(|(_, fired)| *fired);
-        for (cause, fired) in causes {
-            let cause = match cause {
-                "anim_sidebar" if sidebar_resizing && !self.sidebar.resizing() => {
-                    "anim_sidebar_settled"
-                }
-                "anim_sidebar" if sidebar_resizing || self.sidebar.resizing() => {
-                    "anim_sidebar_resize"
-                }
-                cause => cause,
-            };
-            crate::core::diagnostics::rebuild_stats::note(cause, fired);
+            changed |= self.noted.note(cause, fired);
         }
         self.apply_account_effects(shell, ctx, window, reduced);
-        if self.sidebar.menu().open()
-            && causes
-                .iter()
-                .any(|(cause, fired)| *cause == "anim_sidebar" && *fired)
-        {
+        if self.sidebar.menu().open() && sidebar_moved {
             self.sync_account_menu(shell, ui, ctx, window);
         }
 
@@ -3489,33 +3479,25 @@ impl SectionViews for RootViews {
         let now = std::time::Instant::now();
         aqua_core::checkpoint::reach();
         self.sync_edges(shell, ui, ctx, window);
-        let mut action_changed = crate::core::diagnostics::rebuild_stats::note(
-            "wheel",
-            self.sync_wheel(shell, ui, ctx, window),
-        ) | crate::core::diagnostics::rebuild_stats::note(
-            "dispatch",
-            self.dispatch_conversation(shell, ui, ctx, window),
-        ) | crate::core::diagnostics::rebuild_stats::note(
-            "sidebar",
-            self.sync_sidebar(shell, ui, ctx, window),
-        ) | crate::core::diagnostics::rebuild_stats::note(
-            "connection_anim",
-            self.connection.animating(now, reduced),
-        ) | crate::core::diagnostics::rebuild_stats::note(
-            "loading_anim",
-            self.thread_loading.animating(now, reduced),
-        ) | crate::core::diagnostics::rebuild_stats::note(
-            "landing_anim",
-            self.thread_landing.animating(now, reduced),
-        );
+        let wheel = self.sync_wheel(shell, ui, ctx, window);
+        let dispatched = self.dispatch_conversation(shell, ui, ctx, window);
+        let sidebar = self.sync_sidebar(shell, ui, ctx, window);
+        let connecting = self.connection.animating(now, reduced);
+        let loading = self.thread_loading.animating(now, reduced);
+        let landing = self.thread_landing.animating(now, reduced);
+        let mut action_changed = self.noted.note(Cause::Wheel, wheel)
+            | self.noted.note(Cause::Dispatch, dispatched)
+            | self.noted.note(Cause::Sidebar, sidebar)
+            | self.noted.note(Cause::ConnectionAnimation, connecting)
+            | self.noted.note(Cause::LoadingAnimation, loading)
+            | self.noted.note(Cause::LandingAnimation, landing);
         if let Some(height) = self.composer_measurement.take() {
             if self
                 .composer_height
                 .is_none_or(|previous| (previous - height).abs() >= 0.5)
             {
                 self.composer_height = Some(height);
-                action_changed =
-                    crate::core::diagnostics::rebuild_stats::note("composer_height", true);
+                action_changed = self.noted.note(Cause::ComposerHeight, true);
             }
         }
         let Some(rows) = &self.rows else {
@@ -3527,8 +3509,7 @@ impl SectionViews for RootViews {
         let Some(reveals) = early_reveals else {
             return action_changed;
         };
-        let mut changed =
-            crate::core::diagnostics::rebuild_stats::note("reveals", reveals.frontier_changed);
+        let mut changed = self.noted.note(Cause::Reveals, reveals.frontier_changed);
         let reveal_active = reveals.changed || reveals.animating;
         let retry = self.pending_stall.observe(
             reveals.pending && !reveals.changed && !reveals.animating,
@@ -3661,7 +3642,7 @@ impl SectionViews for RootViews {
                         &shell.core,
                         event.viewport,
                     );
-                    changed |= crate::core::diagnostics::rebuild_stats::note("viewport", rebuild);
+                    changed |= self.noted.note(Cause::Viewport, rebuild);
                     self.transcript_viewport = Some(event.viewport);
                     let was_following = workspace
                         .conversation
@@ -3679,10 +3660,9 @@ impl SectionViews for RootViews {
                         clip,
                     ) {
                         Ok(()) => {
-                            changed |= crate::core::diagnostics::rebuild_stats::note(
-                                "rows",
-                                previous != workspace.conversation.rows_epoch(),
-                            );
+                            changed |= self
+                                .noted
+                                .note(Cause::Rows, previous != workspace.conversation.rows_epoch());
                             changed |= was_following
                                 != workspace
                                     .conversation
@@ -3697,7 +3677,7 @@ impl SectionViews for RootViews {
                 }
             }
             if landing_before && workspace.conversation.landing.is_none() {
-                changed |= crate::core::diagnostics::rebuild_stats::note("landed", true);
+                changed |= self.noted.note(Cause::Landed, true);
             }
         }
         drop(_tm_events);
@@ -3707,8 +3687,8 @@ impl SectionViews for RootViews {
             &mut workspace.conversation,
             events.heights,
         );
-        changed |= crate::core::diagnostics::rebuild_stats::note(
-            "projections",
+        changed |= self.noted.note(
+            Cause::Projections,
             rows.publish_projections(&mut workspace.conversation, &shell.core),
         );
         let after_layout = rows.after_layout(ui);
@@ -3723,14 +3703,15 @@ impl SectionViews for RootViews {
         if after_layout.rebuild {
             ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
         }
-        changed |= crate::core::diagnostics::rebuild_stats::note("after_layout", motion_due);
+        self.noted.note(Cause::LayoutMotion, after_layout.rebuild);
+        changed |= self.noted.note(Cause::AfterLayout, motion_due);
         let disclosure = workspace.conversation.advance_disclosure_frame(
             &shell.core,
             std::time::Instant::now(),
             reduced,
         );
-        changed |= crate::core::diagnostics::rebuild_stats::note(
-            "disclosure",
+        changed |= self.noted.note(
+            Cause::Disclosure,
             !disclosure.changed.is_empty() || disclosure.refold || disclosure.active,
         );
         if disclosure.active {
@@ -3781,29 +3762,22 @@ impl SectionViews for RootViews {
             let _tm = crate::shell::application::Tm::new("input.views.wheel");
             self.sync_wheel(shell, ui, ctx, window)
         };
-        let palette_changed =
-            crate::core::diagnostics::rebuild_stats::note("in_wheel", wheel_changed)
-                | {
-                    let _tm = crate::shell::application::Tm::new("input.views.palette");
-                    crate::core::diagnostics::rebuild_stats::note(
-                        "in_palette",
-                        self.dispatch_palette(shell, ui) | self.dispatch_resource(shell, ui, ctx),
-                    )
-                }
-                | {
-                    let _tm = crate::shell::application::Tm::new("input.views.conversation");
-                    crate::core::diagnostics::rebuild_stats::note(
-                        "in_conversation",
-                        self.dispatch_conversation(shell, ui, ctx, window),
-                    )
-                }
-                | {
-                    let _tm = crate::shell::application::Tm::new("input.views.sidebar");
-                    crate::core::diagnostics::rebuild_stats::note(
-                        "in_sidebar",
-                        self.sync_sidebar(shell, ui, ctx, window),
-                    )
-                };
+        let palette = {
+            let _tm = crate::shell::application::Tm::new("input.views.palette");
+            self.dispatch_palette(shell, ui) | self.dispatch_resource(shell, ui, ctx)
+        };
+        let conversation = {
+            let _tm = crate::shell::application::Tm::new("input.views.conversation");
+            self.dispatch_conversation(shell, ui, ctx, window)
+        };
+        let sidebar = {
+            let _tm = crate::shell::application::Tm::new("input.views.sidebar");
+            self.sync_sidebar(shell, ui, ctx, window)
+        };
+        let palette_changed = self.noted.note(Cause::WheelInput, wheel_changed)
+            | self.noted.note(Cause::PaletteInput, palette)
+            | self.noted.note(Cause::ConversationInput, conversation)
+            | self.noted.note(Cause::SidebarInput, sidebar);
         let failure_changed = if self.failure_dismissed.replace(false) {
             shell
                 .entry
