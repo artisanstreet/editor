@@ -1023,3 +1023,98 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
     .unwrap();
     assert!(factory.realize(0, &RowKey::Item(id)).is_ok());
 }
+
+#[test]
+fn stored_reply_that_is_still_loading_does_not_request_reveal_frames() {
+    use artisan_api::{ContentRef, Event, Item, ItemKind, Phase, Status, TextContent};
+    use editor_aqua::conversation::adapter::row_model;
+    use editor_aqua::conversation::fold::{Row, RowKey};
+    use editor_aqua::conversation::stored::StoredConversation;
+    use editor_aqua::conversation::view::reveal::MountedReveals;
+    use editor_aqua::core::runtime::runtime;
+    use editor_aqua::core::{CoreEvent, HostEvent, Screen};
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_core(directory.path());
+    let config = remote_host("stored-host");
+    connect(&mut core, &config);
+    core.host_mut(&config.id).unwrap().test_stop_connection();
+    let thread = ThreadId("stored-thread".into());
+    let id = ItemId("stored-reply".into());
+    core.navigate(Screen::Thread {
+        host: config.id.clone(),
+        thread: thread.clone(),
+    });
+    let mut conversation = Conversation::new(&core);
+    conversation.open_thread(&mut core, config.id.clone(), thread.clone());
+    let sender = core.host(&config.id).unwrap().test_transition_sender();
+    runtime().block_on(sender.event(Event::Item {
+        item: Item {
+            status: Status::Done,
+            ..items::item(
+                id.clone(),
+                thread.clone(),
+                1,
+                ItemKind::AssistantMessage {
+                    text: TextContent::Stored(ContentRef::from_text("a stored reply")),
+                    phase: Phase::Final,
+                },
+            )
+        },
+    }));
+    wait_until("the item event", Duration::from_secs(15), || {
+        let mut delivered = false;
+        core.drain_with(|core, event| {
+            delivered |= matches!(&event, CoreEvent::Host { event: HostEvent::Item(item), .. } if item.id == id);
+            conversation.core_event(core, &event, false);
+        });
+        delivered
+    });
+    let index = conversation
+        .rows
+        .iter()
+        .position(|(row, _)| matches!(row, Row::Text { id: row_id, slot: Slot::Prose, .. } if row_id == &id))
+        .unwrap();
+    let model = row_model(&conversation, index, None).unwrap();
+    let scope = PresentationScope::capture(&conversation, &core).unwrap();
+    let provider = core.source_provider(&scope.host, scope.instance).unwrap();
+    let mut app = ui_app(800.0, 600.0);
+    let markdown = Rc::new(RefCell::new(MarkdownOwners::new(SelectionDocumentId(806))));
+    markdown.borrow_mut().rebind(&mut app, Some(scope.clone()));
+    let owners = Rc::new(RefCell::new(MountedReveals::default()));
+    let factory = Rc::new(
+        row_factory(
+            vec![realized(model)],
+            scope,
+            markdown,
+            false,
+            source_ids(1100).1,
+        )
+        .with_stored(
+            Rc::new(RefCell::new(StoredConversation::default())),
+            provider,
+        )
+        .unwrap()
+        .with_reveals(&conversation, &core, owners.clone(), false)
+        .unwrap(),
+    );
+    let row_key = RowKey::Item(id);
+    mount(
+        &mut app,
+        row_list(&factory, listed([row_key.clone()]), 30.0, 300.0),
+    );
+    app.build_frame().unwrap();
+    assert!(
+        painted_texts(&app)
+            .iter()
+            .any(|text| text.contains("Loading formatted content"))
+    );
+    let sync = factory.sync_reveals(&mut app, &mut conversation, &core);
+    assert!(
+        !sync.animating,
+        "a reply waiting for its stored body has nothing to reveal and must not keep requesting frames"
+    );
+    assert_eq!(owners.borrow().ready(&row_key), Some(false));
+}

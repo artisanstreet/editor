@@ -22,9 +22,14 @@ pub(crate) struct MountedReveal {
     reveal: Rc<PreparedReveal>,
     fresh: bool,
     ready: Rc<Cell<bool>>,
-    frame: Option<OwnedGeometry>,
-    stored_frame: Option<StoredGeometry>,
+    geometry: RevealGeometry,
     settled_at: Cell<Option<(u64, u64)>>,
+}
+
+enum RevealGeometry {
+    Static,
+    Inline(OwnedGeometry),
+    Stored(StoredGeometry),
 }
 
 struct StoredGeometry {
@@ -82,8 +87,7 @@ impl MountedReveals {
                 reveal: Rc::new(PreparedReveal::default()),
                 fresh: fresh(),
                 ready: Rc::new(Cell::new(false)),
-                frame: None,
-                stored_frame: None,
+                geometry: RevealGeometry::Static,
                 settled_at: Cell::new(None),
             }))
         });
@@ -104,8 +108,7 @@ impl MountedReveals {
         let mut row = row.borrow_mut();
         row.ready.set(false);
         row.settled_at.set(None);
-        row.stored_frame = None;
-        row.frame = Some(OwnedGeometry {
+        row.geometry = RevealGeometry::Inline(OwnedGeometry {
             version,
             block,
             proof: prepared.proof,
@@ -129,9 +132,8 @@ impl MountedReveals {
         let mut row = row.borrow_mut();
         row.ready.set(false);
         row.settled_at.set(None);
-        row.frame = None;
         let text = prepared.reveal_text(&row.reveal);
-        row.stored_frame = Some(StoredGeometry {
+        row.geometry = RevealGeometry::Stored(StoredGeometry {
             version,
             block,
             proof,
@@ -147,7 +149,7 @@ impl MountedReveals {
     pub(crate) fn activate(&mut self, key: RowKey, owner: &super::row_cache::RowOwner) {
         let slot = owner.reveal.borrow();
         if let Some(row) = slot.as_ref() {
-            if let Some(frame) = &row.borrow().frame {
+            if let RevealGeometry::Inline(frame) = &row.borrow().geometry {
                 self.proofs.insert(key.clone(), frame.proof.clone());
             }
             self.rows.insert(key, Rc::downgrade(row));
@@ -205,49 +207,53 @@ impl MountedReveals {
                 row.ready.set(false);
                 continue;
             }
-            if let Some(frame) = &row.stored_frame {
-                let valid = stored.is_some_and(|stored| {
-                    conversation
-                        .row_position(key)
-                        .and_then(|index| conversation.rows.get(index))
-                        .filter(|(_, version)| *version == frame.version)
-                        .and_then(|(candidate, _)| {
-                            candidate
-                                .anchor()
-                                .and_then(|id| conversation.view.as_ref()?.item(id))
-                                .map(|item| frame.proof.accepts_row(stored, scope, candidate, item))
-                        })
-                        .unwrap_or(false)
-                });
-                if !valid {
+            let frame = match &row.geometry {
+                RevealGeometry::Static => {
                     row.ready.set(false);
-                    result.reason = "stored_invalid";
-                    result.pending = true;
                     continue;
                 }
-                let Some(changed) = sync_contents(
-                    app,
-                    key,
-                    frame.block,
-                    &frame.geometry,
-                    &frame.text,
-                    &row.reveal,
-                ) else {
-                    row.ready.set(false);
-                    result.reason = "stored_contents";
-                    result.pending = true;
+                RevealGeometry::Inline(frame) => frame,
+                RevealGeometry::Stored(frame) => {
+                    let valid = stored.is_some_and(|stored| {
+                        conversation
+                            .row_position(key)
+                            .and_then(|index| conversation.rows.get(index))
+                            .filter(|(_, version)| *version == frame.version)
+                            .and_then(|(candidate, _)| {
+                                candidate
+                                    .anchor()
+                                    .and_then(|id| conversation.view.as_ref()?.item(id))
+                                    .map(|item| {
+                                        frame.proof.accepts_row(stored, scope, candidate, item)
+                                    })
+                            })
+                            .unwrap_or(false)
+                    });
+                    if !valid {
+                        row.ready.set(false);
+                        result.reason = "stored_invalid";
+                        result.pending = true;
+                        continue;
+                    }
+                    let Some(changed) = sync_contents(
+                        app,
+                        key,
+                        frame.block,
+                        &frame.geometry,
+                        &frame.text,
+                        &row.reveal,
+                    ) else {
+                        row.ready.set(false);
+                        result.reason = "stored_contents";
+                        result.pending = true;
+                        continue;
+                    };
+                    result.changed |= changed;
+                    result.animating |= row.reveal.is_animating();
+                    row.ready.set(!row.reveal.is_animating());
+                    row.settled_at.set(row.ready.get().then_some(epochs));
                     continue;
-                };
-                result.changed |= changed;
-                result.animating |= row.reveal.is_animating();
-                row.ready.set(!row.reveal.is_animating());
-                row.settled_at.set(row.ready.get().then_some(epochs));
-                continue;
-            }
-            let Some(frame) = &row.frame else {
-                row.ready.set(false);
-                result.animating = true;
-                continue;
+                }
             };
             if frame
                 .live
