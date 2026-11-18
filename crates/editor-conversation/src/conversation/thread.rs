@@ -227,8 +227,19 @@ impl ThreadView {
             Fetch::Refresh if !refreshes(first, newest, page.more) => Fetch::Tail,
             fetch => fetch,
         };
+        let newer: Vec<Arc<Item>> = page
+            .items
+            .iter()
+            .filter_map(|item| {
+                let known = self.items.get(self.positions.get(&item.id)?)?;
+                (known.seq > item.seq).then(|| Arc::clone(known))
+            })
+            .collect();
         if fetch == Fetch::Refresh {
-            let kept = |position: Seq| first.is_none_or(|first| position < first);
+            let kept = |position: Seq| {
+                first.is_none_or(|first| position < first)
+                    || last.is_some_and(|last| position > last)
+            };
             self.items.retain(|position, _| kept(*position));
             self.work
                 .retain(|_, span| kept(span.first) && kept(span.last));
@@ -253,6 +264,9 @@ impl ThreadView {
             if item.thread_id == self.thread {
                 self.upsert(Arc::new(item));
             }
+        }
+        for item in newer {
+            self.upsert(item);
         }
         let mut effects = self.handle(&Input::Loaded {
             fetch,

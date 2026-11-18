@@ -82,3 +82,41 @@ fn a_refresh_that_skips_past_the_parked_items_starts_over_from_the_tail() {
     assert_eq!(view.viewport.oldest, Some(31));
     assert!(!view.viewport.exhausted);
 }
+
+#[test]
+fn a_late_refresh_never_reverts_an_item_a_live_update_already_changed() {
+    let mut view = history();
+    assert!(view.apply_item(item(20, 5), true));
+    send(&mut view, &Input::Resume);
+
+    view.apply_page(Fetch::Refresh, page(15..=20, 2, true));
+
+    assert_eq!(
+        view.item(&ItemId("item-20".into())).unwrap().seq,
+        5,
+        "the page was read before the live update and must not undo it"
+    );
+    assert_eq!(view.item(&ItemId("item-19".into())).unwrap().seq, 2);
+}
+
+#[test]
+fn a_late_refresh_keeps_items_that_arrived_after_it_was_read() {
+    let mut view = history();
+    assert!(view.apply_item(item(21, 3), true));
+    send(&mut view, &Input::Resume);
+
+    view.apply_page(Fetch::Refresh, page(15..=20, 2, false));
+
+    assert_eq!(positions(&view), (1..=21).collect::<Vec<_>>());
+}
+
+#[test]
+fn the_first_page_never_reverts_an_item_a_live_update_delivered_while_it_loaded() {
+    let (mut view, _) = ThreadView::open(ThreadId("thread".into()));
+    assert!(view.apply_item(item(5, 9), true));
+
+    view.apply_page(Fetch::Tail, page(1..=10, 1, false));
+
+    assert_eq!(view.item(&ItemId("item-5".into())).unwrap().seq, 9);
+    assert_eq!(positions(&view), (1..=10).collect::<Vec<_>>());
+}
