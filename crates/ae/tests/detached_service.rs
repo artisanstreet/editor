@@ -225,7 +225,7 @@ mod tests {
         assert!(!output.status.success());
         let error = stderr(&output);
         assert!(error.contains("exited while starting"), "{error}");
-        assert!(error.contains("open database"), "{error}");
+        assert!(error.contains("private database"), "{error}");
         assert!(!instance.listening());
     }
 }
