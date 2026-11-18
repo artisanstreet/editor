@@ -39,7 +39,6 @@
     clippy::too_many_lines,
     clippy::type_complexity,
     clippy::unnecessary_fold,
-    clippy::unnecessary_wraps,
     clippy::unused_self,
     clippy::unwrap_used,
     clippy::wildcard_enum_match_arm,

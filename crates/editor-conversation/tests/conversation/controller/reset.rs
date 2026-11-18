@@ -163,7 +163,13 @@ fn reset_rejects_queued_work_even_when_the_new_span_reuses_its_position() {
         Completion::Work {
             origin: previous,
             first: 10,
-            result: Err(anyhow::anyhow!("stale work failed")),
+            result: Err(editor_core::client::CallError {
+                method: "GET".parse().expect("GET is an HTTP method"),
+                path: "/threads/thread/work".into(),
+                failure: Box::new(editor_core::client::CallFailure::Inconsistent {
+                    check: "stale work failed",
+                }),
+            }),
         },
     );
     conversation.host_event(&core, &HostEvent::Reset, false);

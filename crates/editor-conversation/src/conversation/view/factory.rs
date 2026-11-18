@@ -149,6 +149,93 @@ struct StoredResources {
     provider: editor_core::host::ScopedSourceProvider,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Service {
+    Actions,
+    Work,
+    Sources,
+    SourceProvider,
+    Stored,
+    Images,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Row,
+    Item,
+    Run,
+    Disclosure,
+    Admission,
+    Source,
+    SourceField,
+    SourceView,
+    StoredSource,
+    StoredText,
+    PlainText,
+    LiveSource,
+    LeafGeometry,
+    Reveal,
+    QuestionCollection,
+    QuestionView,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Staleness {
+    Factory,
+    RowCache,
+    MotionScope,
+    RowIdentity,
+    Scope,
+    StoredProof,
+    LiveSnapshot,
+    LeafGeometry,
+    LiteralBatch,
+    AnswerBatch,
+    SourceBatch,
+    DetailBatch,
+    QuestionBatch,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RealizeRowError {
+    #[error("the row factory was built without {0:?}")]
+    Missing(Service),
+    #[error("the row's {0:?} is unavailable")]
+    Unavailable(Part),
+    #[error("the row's {0:?} changed while it was realized")]
+    Changed(Part),
+    #[error("the row's {0:?} belongs to an earlier presentation")]
+    Stale(Staleness),
+    #[error("no renderer draws row {key:?}")]
+    Unrenderable { key: RowKey },
+    #[error("the transcript has not measured its width yet")]
+    Unmeasured,
+    #[error("the media services width does not match the measured body")]
+    MediaWidth,
+    #[error("start the Markdown engine")]
+    Engine(#[from] editor_ui::markdown::MarkdownError),
+    #[error("present the row's Markdown body")]
+    Body(#[from] crate::conversation::presentation::BodyError),
+    #[error("present the row's stored body")]
+    Stored(#[from] crate::conversation::stored::StoredBodyError),
+    #[error("batch the row's selection sources")]
+    Batch(#[from] super::resources::BatchRowError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigureRowsError {
+    #[error("the conversation presentation belongs to another thread or host")]
+    StaleScope,
+    #[error("the source provider belongs to another host")]
+    StaleSourceProvider,
+    #[error("the stored conversation belongs to another host")]
+    StaleStoredScope,
+    #[error("the conversation has no row snapshot")]
+    NoSnapshot,
+    #[error("the factory was built without transcript observations")]
+    NoObservations,
+}
+
 pub struct RealizedRow {
     pub model: RowModel,
     pub disclosure: RowDisclosure,
@@ -261,16 +348,19 @@ impl RowFactory {
         )>,
         content_width: Option<f32>,
         batches: &mut Vec<Arc<aqua_ui::collection::SelectionSourceBatch>>,
-    ) -> anyhow::Result<(
-        aqua_ui::element::Element,
-        Option<crate::conversation::stored::StoredProof>,
-    )> {
+    ) -> Result<
+        (
+            aqua_ui::element::Element,
+            Option<crate::conversation::stored::StoredProof>,
+        ),
+        RealizeRowError,
+    > {
         use aqua_ui::element::Text;
         use editor_ui::markdown::stored::{LeafPreparation, StoredPreparation};
         let services = self
             .stored
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("stored conversation owner is unavailable"))?;
+            .ok_or(RealizeRowError::Missing(Service::Stored))?;
         let key = BodyKey {
             item: item.id.clone(),
             slot,
@@ -347,7 +437,7 @@ impl RowFactory {
         let document = self
             .source_resources
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("conversation source services are unavailable"))?
+            .ok_or(RealizeRowError::Missing(Service::Sources))?
             .document;
         if let (Some((owner, fresh, ready)), Some(resources)) = (reveal, &self.reveals) {
             ready.set(false);
@@ -369,7 +459,9 @@ impl RowFactory {
         order.push(block as u64);
         let media = if let (Some(width), Some(factory)) = (content_width, &self.media) {
             let width = media_width(super::reading_width(width), slot, leaf.context.lists.len());
-            anyhow::ensure!(width > 0.0, "measured media width is unavailable");
+            if width.is_nan() || width <= 0.0 {
+                return Err(RealizeRowError::Unmeasured);
+            }
             factory(&key, width)
         } else {
             None
@@ -378,7 +470,7 @@ impl RowFactory {
         let mut stored = services.owner.borrow_mut();
         let proof = stored
             .proof(&self.scope, &key, &source, block, item.seq, &proof_leaf)
-            .ok_or_else(|| anyhow::anyhow!("stored Markdown proof is stale"))?;
+            .ok_or(RealizeRowError::Stale(Staleness::StoredProof))?;
         let emit = self.on_code.clone();
         let code_scope = self.scope.clone();
         let code_key = key.clone();
@@ -444,7 +536,7 @@ impl RowFactory {
         reference: &artisan_api::ContentRef,
         version: u64,
         batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
-    ) -> anyhow::Result<aqua_ui::element::Element> {
+    ) -> Result<aqua_ui::element::Element, RealizeRowError> {
         use crate::conversation::view::resources::ResourceKey;
         use aqua_ui::element::Text;
         use editor_ui::markdown::literal::LiteralPreparation;
@@ -452,7 +544,7 @@ impl RowFactory {
         let services = self
             .stored
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("stored conversation owner is unavailable"))?;
+            .ok_or(RealizeRowError::Missing(Service::Stored))?;
         let key = BodyKey {
             item: item.id.clone(),
             slot,
@@ -524,7 +616,7 @@ impl RowFactory {
         let document = self
             .source_resources
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("conversation source services are unavailable"))?
+            .ok_or(RealizeRowError::Missing(Service::Sources))?
             .document;
         let field = crate::conversation::content::SourceField::of_slot(slot);
         let resource = ResourceKey::Source(item.id.clone(), field);
@@ -553,7 +645,9 @@ impl RowFactory {
             selection: Some(selection.source().clone()),
         };
         let mut retained = row_owner.batches.borrow_mut();
-        anyhow::ensure!(retained.set_scope(&self.scope), "stale literal batch scope");
+        if !retained.set_scope(&self.scope) {
+            return Err(RealizeRowError::Stale(Staleness::LiteralBatch));
+        }
         let prepared = retained.row(&self.scope, resource, document, view)?;
         batches.extend(prepared.batches);
         Ok(prepared.element)
@@ -565,7 +659,7 @@ impl RowFactory {
         ui: Option<&crate::conversation::thread::ItemUi>,
         dispatch: super::Dispatch,
         batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
-    ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
+    ) -> Result<Option<aqua_ui::element::Element>, RealizeRowError> {
         let collected = RefCell::new(Vec::new());
         let used = RefCell::new(std::collections::HashSet::new());
         let result = super::request::approval(
@@ -589,7 +683,7 @@ impl RowFactory {
         names: &std::collections::HashMap<artisan_api::ItemId, String>,
         dispatch: super::Dispatch,
         batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
-    ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
+    ) -> Result<Option<aqua_ui::element::Element>, RealizeRowError> {
         let collected = RefCell::new(Vec::new());
         let used = RefCell::new(std::collections::HashSet::new());
         let now = self.now;
@@ -631,7 +725,7 @@ impl RowFactory {
         owner: &Rc<super::row_cache::RowOwner>,
         item: &artisan_api::Item,
         batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
-    ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
+    ) -> Result<Option<aqua_ui::element::Element>, RealizeRowError> {
         let collected = RefCell::new(Vec::new());
         let used = RefCell::new(std::collections::HashSet::new());
         let result = super::notice::render(
@@ -650,7 +744,7 @@ impl RowFactory {
         owner: &Rc<super::row_cache::RowOwner>,
         item: &artisan_api::Item,
         batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
-    ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
+    ) -> Result<Option<aqua_ui::element::Element>, RealizeRowError> {
         use crate::conversation::content::SourceField;
         let collected = RefCell::new(Vec::new());
         let used = RefCell::new(std::collections::HashSet::new());
@@ -680,7 +774,7 @@ impl RowFactory {
         field: crate::conversation::content::SourceField,
         batches: &RefCell<Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>>,
         used: &RefCell<std::collections::HashSet<super::resources::ResourceKey>>,
-    ) -> anyhow::Result<aqua_ui::element::Element> {
+    ) -> Result<aqua_ui::element::Element, RealizeRowError> {
         use crate::conversation::view::resources::ResourceKey;
         use crate::conversation::view::row_sources::{RowSourceAction, RowSourceActionKind};
         use aqua_ui::element::Text;
@@ -692,12 +786,13 @@ impl RowFactory {
         };
         let source = field
             .text(item)
-            .ok_or_else(|| anyhow::anyhow!("conversation source field is unavailable"))?;
+            .ok_or(RealizeRowError::Unavailable(Part::SourceField))?;
         if let TextContent::Inline(text) = source {
             if field == crate::conversation::content::SourceField::AnswerText {
-                let services = self.source_resources.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("conversation source services are unavailable")
-                })?;
+                let services = self
+                    .source_resources
+                    .as_ref()
+                    .ok_or(RealizeRowError::Missing(Service::Sources))?;
                 let key = ResourceKey::Source(item.id.clone(), field);
                 used.borrow_mut().insert(key.clone());
                 let id = *owner
@@ -735,10 +830,9 @@ impl RowFactory {
                     selection: Some(source),
                 };
                 let mut retained = owner.batches.borrow_mut();
-                anyhow::ensure!(
-                    retained.set_scope(&self.scope),
-                    "stale conversation answer batch scope"
-                );
+                if !retained.set_scope(&self.scope) {
+                    return Err(RealizeRowError::Stale(Staleness::AnswerBatch));
+                }
                 let row = retained.row(&self.scope, key, services.document, view)?;
                 batches.borrow_mut().extend(row.batches);
                 return Ok(row.element);
@@ -762,11 +856,10 @@ impl RowFactory {
         let services = self
             .source_resources
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("conversation source services are unavailable"))?;
-        anyhow::ensure!(
-            services.provider.is_available(),
-            "conversation source provider is unavailable"
-        );
+            .ok_or(RealizeRowError::Missing(Service::Sources))?;
+        if !services.provider.is_available() {
+            return Err(RealizeRowError::Missing(Service::SourceProvider));
+        }
         let key = ResourceKey::Source(item.id.clone(), field.clone());
         used.borrow_mut().insert(key.clone());
         let id = *owner
@@ -774,13 +867,13 @@ impl RowFactory {
             .borrow_mut()
             .entry(key.clone())
             .or_insert_with(|| (self.allocate)());
-        anyhow::ensure!(
-            owner
-                .sources
-                .borrow_mut()
-                .open_provider(&services.provider, item, field.clone()),
-            "conversation source is unavailable"
-        );
+        if !owner
+            .sources
+            .borrow_mut()
+            .open_provider(&services.provider, item, field.clone())
+        {
+            return Err(RealizeRowError::Unavailable(Part::Source));
+        }
         let scope = self.scope.clone();
         let provider = services.provider.clone();
         let emit = services.emit.clone();
@@ -801,12 +894,11 @@ impl RowFactory {
             .sources
             .borrow()
             .view(&item.id, &field, theme, services.document, id, callback)
-            .ok_or_else(|| anyhow::anyhow!("conversation source view is unavailable"))?;
+            .ok_or(RealizeRowError::Unavailable(Part::SourceView))?;
         let mut retained = owner.batches.borrow_mut();
-        anyhow::ensure!(
-            retained.set_scope(&self.scope),
-            "stale conversation source batch scope"
-        );
+        if !retained.set_scope(&self.scope) {
+            return Err(RealizeRowError::Stale(Staleness::SourceBatch));
+        }
         let row = retained.row(&self.scope, key, services.document, view)?;
         batches.borrow_mut().extend(row.batches);
         Ok(row.element)
@@ -819,18 +911,17 @@ impl RowFactory {
         source: &artisan_api::CollectionRef,
         batches: &RefCell<Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>>,
         used: &RefCell<std::collections::HashSet<super::resources::ResourceKey>>,
-    ) -> anyhow::Result<aqua_ui::element::Element> {
+    ) -> Result<aqua_ui::element::Element, RealizeRowError> {
         use crate::conversation::view::resources::ResourceKey;
         use crate::conversation::view::row_sources::{RowSourceAction, RowSourceActionKind};
         let theme = super::request::question_theme(item, self.theme);
         let services = self
             .source_resources
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("conversation source services are unavailable"))?;
-        anyhow::ensure!(
-            services.provider.is_available(),
-            "conversation source provider is unavailable"
-        );
+            .ok_or(RealizeRowError::Missing(Service::Sources))?;
+        if !services.provider.is_available() {
+            return Err(RealizeRowError::Missing(Service::SourceProvider));
+        }
         let key = ResourceKey::Questions(item.id.clone());
         used.borrow_mut().insert(key.clone());
         let id = *owner
@@ -838,13 +929,13 @@ impl RowFactory {
             .borrow_mut()
             .entry(key.clone())
             .or_insert_with(|| (self.allocate)());
-        anyhow::ensure!(
-            owner
-                .questions
-                .borrow_mut()
-                .open_provider(&services.provider, &item.id, source),
-            "question collection is unavailable"
-        );
+        if !owner
+            .questions
+            .borrow_mut()
+            .open_provider(&services.provider, &item.id, source)
+        {
+            return Err(RealizeRowError::Unavailable(Part::QuestionCollection));
+        }
         let stored_detail = if let Some(browser) = owner.questions.borrow().browser() {
             let browser = browser.borrow();
             if let Some(detail) = &browser.detail {
@@ -887,10 +978,9 @@ impl RowFactory {
                     callback,
                 );
                 let mut retained = owner.batches.borrow_mut();
-                anyhow::ensure!(
-                    retained.set_scope(&self.scope),
-                    "stale conversation detail batch scope"
-                );
+                if !retained.set_scope(&self.scope) {
+                    return Err(RealizeRowError::Stale(Staleness::DetailBatch));
+                }
                 let row = retained.row(&self.scope, detail_key, services.document, view)?;
                 batches.borrow_mut().extend(row.batches);
                 Some(row.element)
@@ -920,12 +1010,11 @@ impl RowFactory {
             .questions
             .borrow()
             .view(theme, services.document, id, stored_detail, callback)
-            .ok_or_else(|| anyhow::anyhow!("question collection view is unavailable"))?;
+            .ok_or(RealizeRowError::Unavailable(Part::QuestionView))?;
         let mut retained = owner.batches.borrow_mut();
-        anyhow::ensure!(
-            retained.set_scope(&self.scope),
-            "stale conversation question batch scope"
-        );
+        if !retained.set_scope(&self.scope) {
+            return Err(RealizeRowError::Stale(Staleness::QuestionBatch));
+        }
         let row = retained.row(&self.scope, key, services.document, view)?;
         batches.borrow_mut().extend(row.batches);
         Ok(row.element)
@@ -934,7 +1023,7 @@ impl RowFactory {
         &self,
         owner: &super::row_cache::RowOwner,
         item: &artisan_api::Item,
-    ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
+    ) -> Result<Option<aqua_ui::element::Element>, RealizeRowError> {
         use aqua_ui::element::Box as UiBox;
         use aqua_ui::style::{Length, Style};
         let ItemKind::UserMessage { images, .. } = &item.kind else {
@@ -964,7 +1053,7 @@ impl RowFactory {
         hash: &artisan_api::BlobHash,
         attachment: Option<usize>,
         width: f32,
-    ) -> anyhow::Result<aqua_ui::element::Element> {
+    ) -> Result<aqua_ui::element::Element, RealizeRowError> {
         use aqua_core::image::ImageFit;
         use aqua_ui::element::{Box as UiBox, Media};
         use aqua_ui::style::{Length, Style};
@@ -973,7 +1062,7 @@ impl RowFactory {
         let resources = self
             .blob_images
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("conversation image services are unavailable"))?;
+            .ok_or(RealizeRowError::Missing(Service::Images))?;
         let state = resources.images.lookup(hash);
         if !matches!(&state, Some(BlobImage::Ready(_))) {
             self.unsettled.set(true);
@@ -1262,13 +1351,13 @@ impl RowFactory {
         provider: editor_core::host::ScopedSourceProvider,
         document: aqua_text::document::SelectionDocumentId,
         emit: Rc<dyn Fn(super::row_sources::RowSourceAction)>,
-    ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            provider.is_available()
-                && provider.host() == &self.scope.host
-                && provider.instance() == self.scope.instance,
-            "stale conversation source provider"
-        );
+    ) -> Result<Self, ConfigureRowsError> {
+        if !(provider.is_available()
+            && provider.host() == &self.scope.host
+            && provider.instance() == self.scope.instance)
+        {
+            return Err(ConfigureRowsError::StaleSourceProvider);
+        }
         self.source_resources = Some(SourceResources {
             provider,
             document,
@@ -1281,13 +1370,13 @@ impl RowFactory {
         mut self,
         owner: Rc<RefCell<crate::conversation::stored::StoredConversation>>,
         provider: editor_core::host::ScopedSourceProvider,
-    ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            provider.is_available()
-                && provider.host() == &self.scope.host
-                && provider.instance() == self.scope.instance,
-            "stale stored conversation scope"
-        );
+    ) -> Result<Self, ConfigureRowsError> {
+        if !(provider.is_available()
+            && provider.host() == &self.scope.host
+            && provider.instance() == self.scope.instance)
+        {
+            return Err(ConfigureRowsError::StaleStoredScope);
+        }
         owner.borrow_mut().rebind(Some(self.scope.clone()));
         self.stored = Some(StoredResources { owner, provider });
         Ok(self)
@@ -1326,11 +1415,10 @@ impl RowFactory {
         core: &editor_core::Core,
         owners: Rc<RefCell<super::reveal::MountedReveals>>,
         swift: bool,
-    ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            self.scope.current(conversation, core),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<Self, ConfigureRowsError> {
+        if !self.scope.current(conversation, core) {
+            return Err(ConfigureRowsError::StaleScope);
+        }
         owners.borrow_mut().rebind(Some(self.scope.clone()));
         let mut live = HashMap::new();
         for target in conversation.view.iter().flat_map(|view| view.live.keys()) {
@@ -1356,14 +1444,13 @@ impl RowFactory {
         conversation: &crate::conversation::controller::Conversation,
         core: &editor_core::Core,
         composer_height: Option<f32>,
-    ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            self.scope.current(conversation, core),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<Self, ConfigureRowsError> {
+        if !self.scope.current(conversation, core) {
+            return Err(ConfigureRowsError::StaleScope);
+        }
         let snapshots =
             crate::conversation::adapter::RowSnapshots::capture(conversation, composer_height)
-                .ok_or_else(|| anyhow::anyhow!("conversation snapshot is unavailable"))?;
+                .ok_or(ConfigureRowsError::NoSnapshot)?;
         let frontier = conversation
             .reveal_frontier
             .as_ref()
@@ -1415,11 +1502,12 @@ impl RowFactory {
 
     pub fn viewport_callback(
         &self,
-    ) -> anyhow::Result<Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>> {
+    ) -> Result<Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>, ConfigureRowsError>
+    {
         let observations = self
             .observations
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("transcript observations are unavailable"))?;
+            .ok_or(ConfigureRowsError::NoObservations)?;
         Ok(observations.viewport_callback(self.active.clone()))
     }
 
@@ -1560,8 +1648,9 @@ impl RowFactory {
         let owner = Rc::clone(self);
         Rc::new(move |index, key| {
             owner.realize(index, key).map_err(|error| {
-                tracing::error!(?key, "conversation row failed: {error:#}");
-                CollectionError::Validation(format!("{error:#}"))
+                let error = diagnostics::chain(&error);
+                tracing::error!(?key, "conversation row failed: {error}");
+                CollectionError::Validation(error)
             })
         })
     }
@@ -1572,13 +1661,18 @@ impl RowFactory {
             owner
                 .realize_with_layout(index, key, layout)
                 .map_err(|error| {
-                    tracing::error!(?key, "conversation row failed: {error:#}");
-                    CollectionError::Validation(format!("{error:#}"))
+                    let error = diagnostics::chain(&error);
+                    tracing::error!(?key, "conversation row failed: {error}");
+                    CollectionError::Validation(error)
                 })
         })
     }
 
-    pub fn realize(&self, index: usize, key: &RowKey) -> anyhow::Result<BatchedCollectionRow> {
+    pub fn realize(
+        &self,
+        index: usize,
+        key: &RowKey,
+    ) -> Result<BatchedCollectionRow, RealizeRowError> {
         let started = Instant::now();
         let realized = self.realize_inner(index, key, None);
         editor_core::diagnostics::open_timing::realized(started.elapsed());
@@ -1590,11 +1684,10 @@ impl RowFactory {
         index: usize,
         key: &RowKey,
         layout: &aqua_ui::collection_runtime::CollectionLayout,
-    ) -> anyhow::Result<BatchedCollectionRow> {
-        anyhow::ensure!(
-            layout.content_width.is_finite() && layout.content_width > 0.0,
-            "committed transcript width is unavailable"
-        );
+    ) -> Result<BatchedCollectionRow, RealizeRowError> {
+        if !(layout.content_width.is_finite() && layout.content_width > 0.0) {
+            return Err(RealizeRowError::Unmeasured);
+        }
         let started = Instant::now();
         let realized = self.realize_inner(index, key, Some(layout.content_width));
         editor_core::diagnostics::open_timing::realized(started.elapsed());
@@ -1619,45 +1712,46 @@ impl RowFactory {
         index: usize,
         key: &RowKey,
         content_width: Option<f32>,
-    ) -> anyhow::Result<BatchedCollectionRow> {
+    ) -> Result<BatchedCollectionRow, RealizeRowError> {
         let _realize_span = editor_core::diagnostics::rebuild_stats::span("f_realize");
-        anyhow::ensure!(self.live.get(), "stale conversation row factory");
-        anyhow::ensure!(
-            self.row_cache.borrow().scope_is(&self.scope),
-            "stale conversation row cache"
-        );
-        anyhow::ensure!(
-            self.work
-                .as_ref()
-                .is_none_or(|work| work.motion.borrow().scope_is(&self.scope)),
-            "stale conversation motion scope"
-        );
+        if !self.live.get() {
+            return Err(RealizeRowError::Stale(Staleness::Factory));
+        }
+        if !self.row_cache.borrow().scope_is(&self.scope) {
+            return Err(RealizeRowError::Stale(Staleness::RowCache));
+        }
+        if !self
+            .work
+            .as_ref()
+            .is_none_or(|work| work.motion.borrow().scope_is(&self.scope))
+        {
+            return Err(RealizeRowError::Stale(Staleness::MotionScope));
+        }
         let generated;
         let row = if let Some(lazy) = &self.lazy_rows {
             generated = RealizedRow {
                 model: lazy
                     .snapshots
                     .model(index)
-                    .ok_or_else(|| anyhow::anyhow!("conversation row is unavailable"))?,
+                    .ok_or(RealizeRowError::Unavailable(Part::Row))?,
                 disclosure: *lazy
                     .disclosure
                     .get(index)
-                    .ok_or_else(|| anyhow::anyhow!("conversation disclosure is unavailable"))?,
+                    .ok_or(RealizeRowError::Unavailable(Part::Disclosure))?,
                 held: *lazy
                     .held
                     .get(index)
-                    .ok_or_else(|| anyhow::anyhow!("conversation admission is unavailable"))?,
+                    .ok_or(RealizeRowError::Unavailable(Part::Admission))?,
             };
             &generated
         } else {
             self.rows
                 .get(index)
-                .ok_or_else(|| anyhow::anyhow!("conversation row is unavailable"))?
+                .ok_or(RealizeRowError::Unavailable(Part::Row))?
         };
-        anyhow::ensure!(
-            &row.model.row.key() == key,
-            "stale conversation row identity"
-        );
+        if &row.model.row.key() != key {
+            return Err(RealizeRowError::Stale(Staleness::RowIdentity));
+        }
         editor_core::diagnostics::rebuild_stats::record_event(
             if self.row_cache.borrow().get(key).is_some() {
                 "row_rerealized"
@@ -1748,7 +1842,7 @@ impl RowFactory {
                 let dispatch = self
                     .dispatch
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("conversation actions are unavailable"))?;
+                    .ok_or(RealizeRowError::Missing(Service::Actions))?;
                 super::load_row(&row.model.row, self.theme, Rc::clone(dispatch))
             }
             Row::Work {
@@ -1760,11 +1854,11 @@ impl RowFactory {
                 let work = self
                     .work
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
+                    .ok_or(RealizeRowError::Missing(Service::Work))?;
                 let dispatch = self
                     .dispatch
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("conversation actions are unavailable"))?;
+                    .ok_or(RealizeRowError::Missing(Service::Actions))?;
                 if *segment != 0 || row.model.run.is_none() {
                     None
                 } else {
@@ -1772,7 +1866,7 @@ impl RowFactory {
                         .model
                         .run
                         .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("conversation run is unavailable"))?;
+                        .ok_or(RealizeRowError::Unavailable(Part::Run))?;
                     let key = format!(
                         "work-{}",
                         run.as_ref().map_or_else(String::new, ToString::to_string)
@@ -1810,11 +1904,11 @@ impl RowFactory {
                 let work = self
                     .work
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
+                    .ok_or(RealizeRowError::Missing(Service::Work))?;
                 let dispatch = self
                     .dispatch
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("conversation actions are unavailable"))?;
+                    .ok_or(RealizeRowError::Missing(Service::Actions))?;
                 let open = ids
                     .first()
                     .and_then(|id| row.model.ui.get(id))
@@ -1856,16 +1950,16 @@ impl RowFactory {
                 let work = self
                     .work
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
+                    .ok_or(RealizeRowError::Missing(Service::Work))?;
                 let dispatch = self
                     .dispatch
                     .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("conversation actions are unavailable"))?;
+                    .ok_or(RealizeRowError::Missing(Service::Actions))?;
                 let item = row
                     .model
                     .items
                     .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 let expanded = row
                     .model
                     .ui
@@ -1896,9 +1990,7 @@ impl RowFactory {
                     ItemKind::Question { .. } => {
                         self.question_card(&row_owner, item, &mut batches)?
                     }
-                    _ => {
-                        anyhow::bail!("conversation work entry renderer is unavailable for {key:?}")
-                    }
+                    _ => return Err(RealizeRowError::Unrenderable { key: key.clone() }),
                 }
             }
             Row::Text {
@@ -1916,9 +2008,9 @@ impl RowFactory {
                     .model
                     .items
                     .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 let Some(TextContent::Stored(reference)) = slot.text(item) else {
-                    anyhow::bail!("stored source changed")
+                    return Err(RealizeRowError::Changed(Part::StoredSource));
                 };
                 Some(self.literal_row(
                     &row_owner,
@@ -1943,9 +2035,9 @@ impl RowFactory {
                     .model
                     .items
                     .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 let Some(TextContent::Stored(reference)) = slot.text(item) else {
-                    anyhow::bail!("stored source changed")
+                    return Err(RealizeRowError::Changed(Part::StoredSource));
                 };
                 let (element, proof) = self.stored_row(
                     row,
@@ -2008,7 +2100,7 @@ impl RowFactory {
                     .model
                     .items
                     .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 let mut root = UiBox::new()
                     .layout("column")
                     .width(Length::Pct(100.0))
@@ -2029,7 +2121,7 @@ impl RowFactory {
                     .model
                     .items
                     .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 let running = item.status == Status::Running && *slot == Slot::Prose;
                 let shape_count = self
                     .shape_counts
@@ -2041,14 +2133,13 @@ impl RowFactory {
                 let sealed = shape_count.is_some_and(|count| *block + 1 < count);
                 let fresh = *slot == Slot::Prose
                     && row.model.ui.get(id).is_some_and(|ui| ui.fresh(self.now));
-                anyhow::ensure!(
-                    reveal.is_some() || (!running && !fresh),
-                    "live or fresh prose reveal is unavailable"
-                );
+                if !(reveal.is_some() || (!running && !fresh)) {
+                    return Err(RealizeRowError::Unavailable(Part::Reveal));
+                }
                 let saved = match slot.inline_text(item) {
                     Some(source) => Some(source),
                     None if running => None,
-                    None => anyhow::bail!("stored or mismatched conversation text is unavailable"),
+                    None => return Err(RealizeRowError::Unavailable(Part::StoredText)),
                 };
                 let live = if running {
                     let bound = self
@@ -2060,18 +2151,18 @@ impl RowFactory {
                             let target = artisan_api::LiveTarget::Text {
                                 item_id: id.clone(),
                             };
-                            anyhow::ensure!(
-                                row.model.live.get(&target).is_some_and(|source| {
-                                    std::sync::Arc::ptr_eq(source, &binding.text)
-                                }),
-                                "stale live source snapshot"
-                            );
+                            if !row
+                                .model
+                                .live
+                                .get(&target)
+                                .is_some_and(|source| std::sync::Arc::ptr_eq(source, &binding.text))
+                            {
+                                return Err(RealizeRowError::Stale(Staleness::LiveSnapshot));
+                            }
                             Some(binding.clone())
                         }
                         (None, Some(_)) => None,
-                        (None, None) => {
-                            anyhow::bail!("current live source is unavailable")
-                        }
+                        (None, None) => return Err(RealizeRowError::Unavailable(Part::LiveSource)),
                     }
                 } else {
                     None
@@ -2082,7 +2173,7 @@ impl RowFactory {
                 let source = live_source
                     .as_deref()
                     .or(saved)
-                    .ok_or_else(|| anyhow::anyhow!("current live source is unavailable"))?;
+                    .ok_or(RealizeRowError::Unavailable(Part::LiveSource))?;
                 if let (Some((owner, is_fresh, ready)), Some(resources)) = (&reveal, &self.reveals)
                 {
                     ready.set(false);
@@ -2106,12 +2197,10 @@ impl RowFactory {
                 };
                 let mut owners = self.markdown.borrow_mut();
                 let mut engine = self.engine.borrow_mut();
-                if engine.is_none() {
-                    *engine = Some(editor_ui::markdown::MarkdownEngine::new()?);
-                }
-                let engine = engine
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Markdown engine is unavailable"))?;
+                let engine = match &mut *engine {
+                    Some(engine) => engine,
+                    absent @ None => absent.insert(editor_ui::markdown::MarkdownEngine::new()?),
+                };
                 let prepare_span = editor_core::diagnostics::rebuild_stats::span("f_md_prepare");
                 let (count, revision) = match owners.prepare_on_realization(
                     &self.scope,
@@ -2123,7 +2212,7 @@ impl RowFactory {
                 ) {
                     Ok(prepared) => prepared,
                     Err(error) => match self.copy.clone() {
-                        None => return Err(error),
+                        None => return Err(error.into()),
                         Some(copy) => {
                             if let Some((owner, _, _)) = &reveal {
                                 owner.mark_presented();
@@ -2160,18 +2249,18 @@ impl RowFactory {
                 if let (Some(width), Some(media)) = (content_width, &self.media) {
                     let info = owners
                         .projected_leaf_info(&self.scope, &body_key, *block)
-                        .ok_or_else(|| anyhow::anyhow!("Markdown leaf geometry is unavailable"))?;
-                    anyhow::ensure!(
-                        owners.projected_leaf_is_current(&self.scope, &body_key, *block, &info),
-                        "stale Markdown leaf geometry"
-                    );
+                        .ok_or(RealizeRowError::Unavailable(Part::LeafGeometry))?;
+                    if !owners.projected_leaf_is_current(&self.scope, &body_key, *block, &info) {
+                        return Err(RealizeRowError::Stale(Staleness::LeafGeometry));
+                    }
                     let width = media_width(super::reading_width(width), *slot, info.list_depth);
-                    anyhow::ensure!(width > 0.0, "measured media width is unavailable");
+                    if width.is_nan() || width <= 0.0 {
+                        return Err(RealizeRowError::Unmeasured);
+                    }
                     if let Some(services) = media(&body_key, width) {
-                        anyhow::ensure!(
-                            services.width == width,
-                            "media services width does not match the measured body"
-                        );
+                        if services.width != width {
+                            return Err(RealizeRowError::MediaWidth);
+                        }
                         owners.set_realization_media(
                             &self.scope,
                             &body_key,
@@ -2342,17 +2431,18 @@ impl RowFactory {
                 })
             }
             Row::Prompt(id) => {
-                let item =
-                    row.model.items.get(id).ok_or_else(|| {
-                        anyhow::anyhow!("conversation prompt item is unavailable")
-                    })?;
+                let item = row
+                    .model
+                    .items
+                    .get(id)
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 if matches!(&item.kind, ItemKind::Question { .. }) {
                     self.question_card(&row_owner, item, &mut batches)?
                 } else {
                     let dispatch = self
                         .dispatch
                         .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("conversation actions are unavailable"))?;
+                        .ok_or(RealizeRowError::Missing(Service::Actions))?;
                     let approval = self.approval_card(
                         &row_owner,
                         item,
@@ -2363,9 +2453,10 @@ impl RowFactory {
                     if approval.is_some() {
                         approval
                     } else {
-                        let work = self.work.as_ref().ok_or_else(|| {
-                            anyhow::anyhow!("conversation work motion is unavailable")
-                        })?;
+                        let work = self
+                            .work
+                            .as_ref()
+                            .ok_or(RealizeRowError::Missing(Service::Work))?;
                         match &item.kind {
                             ItemKind::Tool { .. }
                             | ItemKind::UserMessage {
@@ -2403,15 +2494,14 @@ impl RowFactory {
                     .model
                     .items
                     .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("conversation image item is unavailable"))?;
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 let ItemKind::Image { blob, .. } = &item.kind else {
-                    anyhow::bail!("conversation image item has changed");
+                    return Err(RealizeRowError::Changed(Part::Item));
                 };
-                let width =
-                    super::reading_width(content_width.ok_or_else(|| {
-                        anyhow::anyhow!("committed transcript width is unavailable")
-                    })?);
-                anyhow::ensure!(width > 0.0, "measured image width is unavailable");
+                let width = super::reading_width(content_width.ok_or(RealizeRowError::Unmeasured)?);
+                if width.is_nan() || width <= 0.0 {
+                    return Err(RealizeRowError::Unmeasured);
+                }
                 let image = self.blob_frame(&row_owner, item, blob, None, width)?;
                 Some(
                     aqua_ui::element::Box::new()
@@ -2423,11 +2513,13 @@ impl RowFactory {
             }
             Row::Compaction(id) => {
                 use crate::conversation::compaction::CompactionPhase;
-                let item = row.model.items.get(id).ok_or_else(|| {
-                    anyhow::anyhow!("conversation compaction item is unavailable")
-                })?;
+                let item = row
+                    .model
+                    .items
+                    .get(id)
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 let ItemKind::Compaction { .. } = &item.kind else {
-                    anyhow::bail!("conversation compaction item has changed");
+                    return Err(RealizeRowError::Changed(Part::Item));
                 };
                 let phase = match item.status {
                     Status::Running => CompactionPhase::Running,
@@ -2463,7 +2555,7 @@ impl RowFactory {
                     live,
                     self.reduced_motion,
                     theme,
-                )?;
+                );
                 let now = self.now;
                 let swap = row_owner.motion.borrow_mut().swap(
                     format!("status-{key:?}"),
@@ -2471,19 +2563,17 @@ impl RowFactory {
                     self.reduced_motion,
                     now,
                 );
-                anyhow::Ok(match swap {
+                match swap {
                     Some(progress) => super::motion::swapped(element, progress),
                     None => element,
-                })
-            })
-            .transpose()?,
+                }
+            }),
             Row::AgentStatus(_, doing) => {
                 status::agent(doing.as_deref(), self.theme, |text, theme| {
                     self.statuses
                         .borrow_mut()
                         .agent(key.clone(), text, self.reduced_motion, theme)
                 })
-                .transpose()?
             }
             Row::Text {
                 id,
@@ -2494,16 +2584,16 @@ impl RowFactory {
                     .model
                     .items
                     .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("conversation item is unavailable"))?;
+                    .ok_or(RealizeRowError::Unavailable(Part::Item))?;
                 let Some(text) = section.inline_text(item) else {
-                    anyhow::bail!("conversation plain text source changed");
+                    return Err(RealizeRowError::Changed(Part::PlainText));
                 };
                 Some(match section {
                     fold::PlainSection::ImageCaption => image_caption(text, self.theme),
                     _ => aqua_ui::element::Text::new(text.to_owned()).build(),
                 })
             }
-            _ => anyhow::bail!("conversation row renderer is unavailable for {key:?}"),
+            _ => return Err(RealizeRowError::Unrenderable { key: key.clone() }),
         };
         let mut work_settling = false;
         let content = match (content, &self.work) {

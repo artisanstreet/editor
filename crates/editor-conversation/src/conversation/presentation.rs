@@ -29,6 +29,32 @@ fn prepare_body(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum BodyError {
+    #[error("the conversation presentation belongs to another thread or host")]
+    StaleScope,
+    #[error("conversation body {key:?} gave two selection sources one identity")]
+    DuplicateSources { key: BodyKey },
+    #[error("conversation body {key:?} reused another body's selection source")]
+    ForeignSources { key: BodyKey },
+    #[error("register the selection sources of conversation body {key:?}")]
+    Register {
+        key: BodyKey,
+        #[source]
+        source: aqua_text::document::SelectionSourceError,
+    },
+    #[error("conversation body {key:?} has not been prepared")]
+    Unprepared { key: BodyKey },
+    #[error("conversation body {key:?} changed while it was rendered")]
+    StaleBody { key: BodyKey },
+    #[error("present conversation body {key:?}")]
+    Present {
+        key: BodyKey,
+        #[source]
+        source: editor_ui::markdown::presenter::PresenterError,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BodyKey {
     pub item: ItemId,
@@ -125,23 +151,26 @@ impl SelectionOwners {
         scope: &PresentationScope,
         key: BodyKey,
         prepared: PreparedElement,
-    ) -> anyhow::Result<Element> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<Element, BodyError> {
+        if self.scope.as_ref() != Some(scope) {
+            return Err(BodyError::StaleScope);
+        }
         let ids: HashSet<_> = prepared.sources.iter().map(|source| source.id).collect();
-        anyhow::ensure!(
-            ids.len() == prepared.sources.len(),
-            "duplicate source identities within a conversation body"
-        );
-        anyhow::ensure!(
-            self.bodies
-                .iter()
-                .all(|(other, sources)| *other == key || sources.is_disjoint(&ids)),
-            "selection source identity belongs to another conversation body"
-        );
-        app.register_selection_sources_in(self.document, prepared.sources)?;
+        if ids.len() != prepared.sources.len() {
+            return Err(BodyError::DuplicateSources { key });
+        }
+        if !self
+            .bodies
+            .iter()
+            .all(|(other, sources)| *other == key || sources.is_disjoint(&ids))
+        {
+            return Err(BodyError::ForeignSources { key });
+        }
+        app.register_selection_sources_in(self.document, prepared.sources)
+            .map_err(|source| BodyError::Register {
+                key: key.clone(),
+                source,
+            })?;
         if let Some(previous) = self.bodies.insert(key, ids.clone()) {
             for source in previous.difference(&ids) {
                 app.unregister_selection_source_in(self.document, *source);
@@ -298,18 +327,23 @@ impl MarkdownOwners {
         key: &BodyKey,
         id: &str,
         services: MediaServices,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<(), BodyError> {
+        if self.scope.as_ref() != Some(scope) {
+            return Err(BodyError::StaleScope);
+        }
         let body = self
             .bodies
             .get(key)
-            .ok_or_else(|| anyhow::anyhow!("Markdown body is unprepared"))?;
-        anyhow::ensure!(body.id == id, "stale conversation body identity");
-        body.presenter.set_media_services(id, services)?;
-        Ok(())
+            .ok_or_else(|| BodyError::Unprepared { key: key.clone() })?;
+        if body.id != id {
+            return Err(BodyError::StaleBody { key: key.clone() });
+        }
+        body.presenter
+            .set_media_services(id, services)
+            .map_err(|source| BodyError::Present {
+                key: key.clone(),
+                source,
+            })
     }
 
     pub fn render(
@@ -319,11 +353,10 @@ impl MarkdownOwners {
         engine: &MarkdownEngine,
         request: MarkdownRender<'_>,
         mut allocate: impl FnMut() -> SelectionSourceId,
-    ) -> anyhow::Result<Element> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<Element, BodyError> {
+        if self.scope.as_ref() != Some(scope) {
+            return Err(BodyError::StaleScope);
+        }
         let body = self
             .bodies
             .entry(request.key.clone())
@@ -359,35 +392,47 @@ impl MarkdownOwners {
             self.selection.retain(app, |key| key != &request.key);
             body.source = std::rc::Rc::from(request.source);
         }
-        body.preparation = Some(prepare_body(
-            &mut body.presenter,
-            engine,
-            request.source,
-            request.key.slot,
-        )?);
+        body.preparation = Some(
+            prepare_body(
+                &mut body.presenter,
+                engine,
+                request.source,
+                request.key.slot,
+            )
+            .map_err(|source| BodyError::Present {
+                key: request.key.clone(),
+                source,
+            })?,
+        );
         let presenter = &body.presenter;
         body.projected
             .retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
         body.rendered = None;
-        let rendered = body.presenter.render_with_services(
-            request.id,
-            request.theme,
-            request.tone,
-            self.selection.document(),
-            request.order,
-            |ordinal| {
-                while body.ids.len() <= ordinal {
-                    body.ids.push(allocate());
-                }
-                body.ids[ordinal]
-            },
-            request.glyph,
-            request.invalidate,
-            Some(request.on_link),
-            Some(request.on_color),
-            Some(request.heatmap),
-            request.reference_scope,
-        )?;
+        let rendered = body
+            .presenter
+            .render_with_services(
+                request.id,
+                request.theme,
+                request.tone,
+                self.selection.document(),
+                request.order,
+                |ordinal| {
+                    while body.ids.len() <= ordinal {
+                        body.ids.push(allocate());
+                    }
+                    body.ids[ordinal]
+                },
+                request.glyph,
+                request.invalidate,
+                Some(request.on_link),
+                Some(request.on_color),
+                Some(request.heatmap),
+                request.reference_scope,
+            )
+            .map_err(|source| BodyError::Present {
+                key: request.key.clone(),
+                source,
+            })?;
         let element = self.selection.mount(
             app,
             scope,
@@ -409,13 +454,17 @@ impl MarkdownOwners {
         engine: &MarkdownEngine,
         source: &str,
         item_seq: artisan_api::Seq,
-    ) -> anyhow::Result<(usize, u64)> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<(usize, u64), BodyError> {
+        if self.scope.as_ref() != Some(scope) {
+            return Err(BodyError::StaleScope);
+        }
         let slot = key.slot;
         let media = self.media.get(&key).cloned();
+        let failed = {
+            let key = key.clone();
+            move |source| BodyError::Present { key, source }
+        };
+        let replaced = BodyError::StaleBody { key: key.clone() };
         let body = self.bodies.entry(key).or_insert_with(|| MarkdownBody {
             presenter: MarkdownPresenter::default(),
             id: id.to_owned(),
@@ -428,13 +477,16 @@ impl MarkdownOwners {
             prepared_item_seq: None,
             preparation: None,
         });
-        anyhow::ensure!(
-            body.id == id,
-            "conversation body identity must be released before replacement"
-        );
+        if body.id != id {
+            return Err(replaced);
+        }
         if let Some((media_id, services)) = media {
-            anyhow::ensure!(media_id == id, "stale conversation body identity");
-            body.presenter.set_media_services(id, services)?;
+            if media_id != id {
+                return Err(replaced);
+            }
+            body.presenter
+                .set_media_services(id, services)
+                .map_err(failed.clone())?;
         }
         if *body.source != *source {
             body.rendered = None;
@@ -443,7 +495,8 @@ impl MarkdownOwners {
             body.revision = body.revision.wrapping_add(1);
             body.source = std::rc::Rc::from(source);
         }
-        body.preparation = Some(prepare_body(&mut body.presenter, engine, source, slot)?);
+        body.preparation =
+            Some(prepare_body(&mut body.presenter, engine, source, slot).map_err(failed)?);
         let presenter = &body.presenter;
         body.projected
             .retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));
@@ -451,7 +504,7 @@ impl MarkdownOwners {
         let count = body
             .presenter
             .projected_count()
-            .ok_or_else(|| anyhow::anyhow!("Markdown projection is unavailable"))?;
+            .expect("invariant: a prepared Markdown body has a projection");
         Ok((count, body.revision))
     }
 
@@ -463,43 +516,51 @@ impl MarkdownOwners {
         code: Option<&CodeServices>,
         reveal: Option<Rc<editor_ui::markdown::reveal::PreparedReveal>>,
         mut allocate: impl FnMut() -> SelectionSourceId,
-    ) -> anyhow::Result<PreparedProjectedRow> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<PreparedProjectedRow, BodyError> {
+        if self.scope.as_ref() != Some(scope) {
+            return Err(BodyError::StaleScope);
+        }
         let body = self
             .bodies
             .get_mut(&request.key)
-            .ok_or_else(|| anyhow::anyhow!("Markdown body is unprepared"))?;
-        anyhow::ensure!(
-            body.id == request.id && *body.source == *request.source,
-            "stale Markdown body"
-        );
+            .ok_or_else(|| BodyError::Unprepared {
+                key: request.key.clone(),
+            })?;
+        if body.id != request.id || *body.source != *request.source {
+            return Err(BodyError::StaleBody {
+                key: request.key.clone(),
+            });
+        }
         body.presenter
             .set_projected_reveal(request.id, row, reveal.clone());
         body.projected.remove(&row);
-        let rendered = body.presenter.render_projected_with_code(
-            row,
-            request.id,
-            request.theme,
-            request.tone,
-            self.selection.document(),
-            request.order,
-            |ordinal| {
-                while body.ids.len() <= ordinal {
-                    body.ids.push(allocate());
-                }
-                body.ids[ordinal]
-            },
-            request.glyph,
-            request.invalidate,
-            Some(request.on_link),
-            Some(request.on_color),
-            request.reference_scope,
-            Some(request.heatmap),
-            code,
-        )?;
+        let rendered = body
+            .presenter
+            .render_projected_with_code(
+                row,
+                request.id,
+                request.theme,
+                request.tone,
+                self.selection.document(),
+                request.order,
+                |ordinal| {
+                    while body.ids.len() <= ordinal {
+                        body.ids.push(allocate());
+                    }
+                    body.ids[ordinal]
+                },
+                request.glyph,
+                request.invalidate,
+                Some(request.on_link),
+                Some(request.on_color),
+                request.reference_scope,
+                Some(request.heatmap),
+                code,
+            )
+            .map_err(|source| BodyError::Present {
+                key: request.key.clone(),
+                source,
+            })?;
         if body
             .batch
             .as_ref()
@@ -511,17 +572,21 @@ impl MarkdownOwners {
                 .iter()
                 .map(|source| source.id)
                 .collect();
-            anyhow::ensure!(
-                ids.len() == rendered.selection_batch.sources().len(),
-                "duplicate source identities within a conversation body"
-            );
-            anyhow::ensure!(
-                self.selection
-                    .bodies
-                    .iter()
-                    .all(|(other, sources)| *other == request.key || sources.is_disjoint(&ids)),
-                "selection source identity belongs to another conversation body"
-            );
+            if ids.len() != rendered.selection_batch.sources().len() {
+                return Err(BodyError::DuplicateSources {
+                    key: request.key.clone(),
+                });
+            }
+            if !self
+                .selection
+                .bodies
+                .iter()
+                .all(|(other, sources)| *other == request.key || sources.is_disjoint(&ids))
+            {
+                return Err(BodyError::ForeignSources {
+                    key: request.key.clone(),
+                });
+            }
             self.selection.bodies.insert(request.key.clone(), ids);
             body.batch = Some(rendered.selection_batch.clone());
         }
@@ -558,15 +623,14 @@ impl MarkdownOwners {
         reduced_motion: bool,
         copy_enabled: bool,
         emit: Rc<dyn Fn(ScopedCodeAction)>,
-    ) -> anyhow::Result<CodeServices> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<CodeServices, BodyError> {
+        if self.scope.as_ref() != Some(scope) {
+            return Err(BodyError::StaleScope);
+        }
         let body = self
             .bodies
             .get(key)
-            .ok_or_else(|| anyhow::anyhow!("Markdown body is unprepared"))?;
+            .ok_or_else(|| BodyError::Unprepared { key: key.clone() })?;
         let bind = {
             let scope = scope.clone();
             let key = key.clone();

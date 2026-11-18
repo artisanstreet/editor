@@ -13,6 +13,14 @@ pub enum ResourceKey {
     QuestionDetail(artisan_api::ItemId),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum BatchRowError {
+    #[error("the conversation presentation belongs to another thread or host")]
+    StaleScope,
+    #[error("the selection document of {key:?} changed without releasing its owner")]
+    DocumentChanged { key: ResourceKey },
+}
+
 struct ResourceBatch {
     owner: SelectionBatchOwner,
     revision: u64,
@@ -109,17 +117,17 @@ impl ResourceBatches {
         key: ResourceKey,
         document: SelectionDocumentId,
         view: editor_sources::ContentView,
-    ) -> anyhow::Result<BatchedCollectionRow> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope),
-            "stale conversation presentation scope"
-        );
-        anyhow::ensure!(
-            self.entries
-                .get(&key)
-                .is_none_or(|entry| entry.batch.document() == document),
-            "conversation source document changed without releasing its owner"
-        );
+    ) -> Result<BatchedCollectionRow, BatchRowError> {
+        if self.scope.as_ref() != Some(scope) {
+            return Err(BatchRowError::StaleScope);
+        }
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.batch.document() != document)
+        {
+            return Err(BatchRowError::DocumentChanged { key });
+        }
         let source = view.selection;
         let changed = self.entries.get(&key).is_none_or(|entry| {
             entry.batch.document() != document || !same_source(&entry.source, &source)
@@ -147,7 +155,7 @@ impl ResourceBatches {
         let entry = self
             .entries
             .get(&key)
-            .ok_or_else(|| anyhow::anyhow!("conversation source batch is unavailable"))?;
+            .expect("invariant: a source batch is recorded before its row is returned");
         Ok(BatchedCollectionRow {
             element: view.element,
             batches: vec![Arc::clone(&entry.batch)],

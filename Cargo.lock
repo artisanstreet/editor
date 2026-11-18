@@ -1647,13 +1647,13 @@ dependencies = [
 name = "editor-conversation"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "aqua-core",
  "aqua-text",
  "aqua-ui",
  "artisan-api",
  "artisan-mentions",
+ "diagnostics",
  "editor-assets",
  "editor-composer",
  "editor-conversation",
@@ -1665,6 +1665,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-support",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",

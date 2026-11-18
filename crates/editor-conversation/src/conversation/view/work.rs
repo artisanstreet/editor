@@ -42,12 +42,21 @@ fn spacer(space: Space) -> Element {
         .build()
 }
 
-fn activator(key: String, label: impl Into<String>, child: Element, on_activate: impl Fn() + 'static) -> Element {
+fn activator(
+    key: String,
+    label: impl Into<String>,
+    child: Element,
+    on_activate: impl Fn() + 'static,
+) -> Element {
     HitArea::new(key, Role::Button, label)
         .child(child)
         .on_activate(on_activate)
         .build()
-        .style(Style::new().height(Length::Auto).min_width(Length::Pct(0.0)))
+        .style(
+            Style::new()
+                .height(Length::Auto)
+                .min_width(Length::Pct(0.0)),
+        )
 }
 
 pub fn section_title(summary: &RunSummary, now: Timestamp) -> String {
@@ -99,12 +108,17 @@ pub fn header(
                 true => "Show work",
                 false => "Hide work",
             };
-            Some(activator(format!("work-header-{run}"), words, near, move || {
-                dispatch(Action::ToggleWork {
-                    run: run.clone(),
-                    open,
-                })
-            }))
+            Some(activator(
+                format!("work-header-{run}"),
+                words,
+                near,
+                move || {
+                    dispatch(Action::ToggleWork {
+                        run: run.clone(),
+                        open,
+                    })
+                },
+            ))
         }
         None => Some(near),
     }
@@ -144,12 +158,17 @@ pub fn chain(
         .child(phrase(text.clone(), color.to_reference_text_color()))
         .child(chevron(open, color.to_reference_paint()))
         .build();
-    Some(activator(format!("work-chain-{first}"), text, child, move || {
-        dispatch(Action::ToggleChain {
-            id: first.clone(),
-            open: !open,
-        })
-    }))
+    Some(activator(
+        format!("work-chain-{first}"),
+        text,
+        child,
+        move || {
+            dispatch(Action::ToggleChain {
+                id: first.clone(),
+                open: !open,
+            })
+        },
+    ))
 }
 
 pub fn agent(
@@ -194,16 +213,16 @@ pub fn agent(
     ))
 }
 
-pub fn activity_row(
+pub fn activity_row<E>(
     item: &Item,
     expanded: bool,
     agents: &HashMap<ItemId, String>,
     theme: ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor, bool) -> Element,
     dispatch: Dispatch,
-    stored_failure: impl FnOnce() -> anyhow::Result<Element>,
+    stored_failure: impl FnOnce() -> Result<Element, E>,
     details: impl FnOnce(Element) -> Element,
-) -> anyhow::Result<Option<Element>> {
+) -> Result<Option<Element>, E> {
     if activity::category(item).is_none() {
         return Ok(None);
     }
@@ -240,12 +259,17 @@ pub fn activity_row(
     let sentence = match has_details {
         true => {
             let id = item.id.clone();
-            activator(format!("work-item-{id}"), "Toggle details", line, move || {
-                dispatch(Action::ToggleItem {
-                    id: id.clone(),
-                    expanded: !expanded,
-                })
-            })
+            activator(
+                format!("work-item-{id}"),
+                "Toggle details",
+                line,
+                move || {
+                    dispatch(Action::ToggleItem {
+                        id: id.clone(),
+                        expanded: !expanded,
+                    })
+                },
+            )
         }
         false => UiBox::new()
             .width(Length::Pct(100.0))

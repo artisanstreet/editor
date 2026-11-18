@@ -53,7 +53,7 @@ fn stored_failures_open_sources_only_when_expanded() {
             Rc::new(|_| {}),
             || {
                 opened.set(true);
-                Ok(Text::new("loaded failure").build())
+                Ok::<_, std::convert::Infallible>(Text::new("loaded failure").build())
             },
             |details| details,
         )

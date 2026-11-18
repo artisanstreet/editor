@@ -1,12 +1,12 @@
 use crate::conversation::adapter::RowModel;
 use crate::conversation::phase::{self, Phase};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::Element;
 use artisan_api::{LiveTarget, RunId};
+use editor_ui::theme::ArtisanTheme;
 
 use crate::conversation::fold::RowKey;
-use editor_ui::shimmer_text::{ShimmerText, ShimmerTiming, ShimmerTone};
 use editor_ui::kit::TextRole;
+use editor_ui::shimmer_text::{ShimmerText, ShimmerTiming, ShimmerTone};
 
 pub enum StatusText {
     Reasoning(String),
@@ -29,7 +29,7 @@ impl StatusShimmers {
         live: bool,
         reduced_motion: bool,
         theme: ArtisanTheme,
-    ) -> anyhow::Result<Element> {
+    ) -> Element {
         let (content, timing, runs) = match text {
             StatusText::Status(text) => (text, ShimmerTiming::Status, None),
             StatusText::Reasoning(text) => {
@@ -46,14 +46,14 @@ impl StatusShimmers {
                 &theme,
             )
         });
-        Ok(ShimmerText::new(key, content, theme)
+        ShimmerText::new(key, content, theme)
             .active(live)
             .reduced_motion(reduced_motion)
             .timing(timing)
             .tone(ShimmerTone::Muted)
             .truncate()
             .spans(spans)
-            .build(typography))
+            .build(typography)
     }
 
     pub fn agent(
@@ -62,14 +62,8 @@ impl StatusShimmers {
         text: String,
         reduced_motion: bool,
         theme: ArtisanTheme,
-    ) -> anyhow::Result<Element> {
-        self.render(
-            row,
-            StatusText::Status(text),
-            true,
-            reduced_motion,
-            theme,
-        )
+    ) -> Element {
+        self.render(row, StatusText::Status(text), true, reduced_motion, theme)
     }
 }
 

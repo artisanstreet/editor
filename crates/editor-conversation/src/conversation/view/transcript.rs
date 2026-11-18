@@ -87,6 +87,10 @@ impl ObservationState {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("the transcript viewport belongs to another thread or host")]
+pub struct StaleViewportError;
+
 #[derive(Clone, Default)]
 pub struct TranscriptObservations(Rc<RefCell<ObservationState>>);
 
@@ -231,11 +235,10 @@ impl TranscriptObservations {
         scope: &PresentationScope,
         viewport: CollectionViewport,
         clip: aqua_core::Rect,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            scope.current(conversation, core),
-            "stale conversation presentation scope"
-        );
+    ) -> Result<(), StaleViewportError> {
+        if !scope.current(conversation, core) {
+            return Err(StaleViewportError);
+        }
         conversation.observe_visible_rows(
             viewport.visible.start..viewport.visible.end,
             viewport.mounted.start..viewport.mounted.end,

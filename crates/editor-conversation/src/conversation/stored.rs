@@ -30,6 +30,23 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
+#[derive(Debug, thiserror::Error)]
+pub enum StoredBodyError {
+    #[error("the stored conversation belongs to another thread or host")]
+    StaleScope,
+    #[error("stored body {key:?} changed under leaf {ordinal}")]
+    StaleLeaf { key: BodyKey, ordinal: usize },
+    #[error("stored body {key:?} has not been prepared")]
+    Unprepared { key: BodyKey },
+    #[error("present leaf {ordinal} of stored body {key:?}")]
+    Present {
+        key: BodyKey,
+        ordinal: usize,
+        #[source]
+        source: editor_ui::markdown::presenter::PresenterError,
+    },
+}
+
 #[derive(Clone)]
 pub struct StoredProof {
     scope: PresentationScope,
@@ -150,14 +167,14 @@ impl StoredConversation {
         key: BodyKey,
         source: ContentRef,
         version: u64,
-    ) -> anyhow::Result<StoredPreparation> {
-        anyhow::ensure!(
-            self.scope.as_ref() == Some(scope)
-                && provider.is_available()
-                && provider.host() == &scope.host
-                && provider.instance() == scope.instance,
-            "stale stored conversation scope"
-        );
+    ) -> Result<StoredPreparation, StoredBodyError> {
+        if self.scope.as_ref() != Some(scope)
+            || !provider.is_available()
+            || provider.host() != &scope.host
+            || provider.instance() != scope.instance
+        {
+            return Err(StoredBodyError::StaleScope);
+        }
         let format = if key.slot.literal() {
             SourceIndexFormat::Literal
         } else {
@@ -338,15 +355,22 @@ impl StoredConversation {
         code_emit: Rc<dyn Fn(super::presentation::CodeAction)>,
         instance: editor_core::HostInstance,
         reduced_motion: bool,
-    ) -> anyhow::Result<(StoredProjectedMarkdown, Rc<StoredLeafLease>)> {
-        anyhow::ensure!(
-            self.owner.source_is_current(source) && self.owner.leaf_is_current(leaf.proof()),
-            "stale stored Markdown leaf"
-        );
+    ) -> Result<(StoredProjectedMarkdown, Rc<StoredLeafLease>), StoredBodyError> {
+        if !self.owner.source_is_current(source) || !self.owner.leaf_is_current(leaf.proof()) {
+            return Err(StoredBodyError::StaleLeaf {
+                key: key.clone(),
+                ordinal,
+            });
+        }
+        let failed = |source| StoredBodyError::Present {
+            key: key.clone(),
+            ordinal,
+            source,
+        };
         let body = self
             .bodies
             .get_mut(key)
-            .ok_or_else(|| anyhow::anyhow!("stored Markdown body is unavailable"))?;
+            .ok_or_else(|| StoredBodyError::Unprepared { key: key.clone() })?;
         if body
             .leases
             .get(&ordinal)
@@ -359,26 +383,30 @@ impl StoredConversation {
         }
         let leaf_owner = &body.owner;
         if let Some(media) = media {
-            body.presenter.set_media_services(&leaf_owner, media)?;
+            body.presenter
+                .set_media_services(&leaf_owner, media)
+                .map_err(failed)?;
         }
         let ids = body.ids.entry(ordinal).or_default();
         body.presenter
             .set_projected_reveal(&leaf_owner, ordinal, reveal);
-        body.presenter.prepare_stored_leaf(
-            &self.owner,
-            &leaf_owner,
-            ordinal,
-            leaf.clone(),
-            theme,
-            document,
-            order,
-            |index| {
-                while ids.len() <= index {
-                    ids.push(allocate());
-                }
-                ids[index]
-            },
-        )?;
+        body.presenter
+            .prepare_stored_leaf(
+                &self.owner,
+                &leaf_owner,
+                ordinal,
+                leaf.clone(),
+                theme,
+                document,
+                order,
+                |index| {
+                    while ids.len() <= index {
+                        ids.push(allocate());
+                    }
+                    ids[index]
+                },
+            )
+            .map_err(failed)?;
         let charts = HeatmapServices::new(*theme);
         let copy = code_emit.clone();
         let reference = code_emit;
@@ -397,22 +425,25 @@ impl StoredConversation {
                 }),
             }),
         );
-        let rendered = body.presenter.render_stored_leaf(
-            &self.owner,
-            &leaf_owner,
-            ordinal,
-            0,
-            ordinal + 1 == source.block_count(),
-            theme,
-            tone,
-            editor_ui::markdown::glyph_painter(),
-            invalidate,
-            Some(link),
-            Some(color),
-            Some(resource_scope),
-            Some(&charts),
-            Some(&code),
-        )?;
+        let rendered = body
+            .presenter
+            .render_stored_leaf(
+                &self.owner,
+                &leaf_owner,
+                ordinal,
+                0,
+                ordinal + 1 == source.block_count(),
+                theme,
+                tone,
+                editor_ui::markdown::glyph_painter(),
+                invalidate,
+                Some(link),
+                Some(color),
+                Some(resource_scope),
+                Some(&charts),
+                Some(&code),
+            )
+            .map_err(failed)?;
         let lease = match body.leases.get(&ordinal) {
             Some(existing) if Arc::ptr_eq(&existing.batch, &rendered.selection_batch) => {
                 existing.clone()

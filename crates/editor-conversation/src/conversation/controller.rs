@@ -4,7 +4,8 @@ use super::thread::{self, ThreadView};
 use super::viewport::{Effect, Fetch, Input, Jump};
 use artisan_api::{Answer, Item, ItemId, ItemKind, ItemsPage, RunId, Seq, ThreadId};
 use editor_core::{
-    Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, delivery::Delivery, runtime::runtime,
+    Core, CoreEvent, HostEvent, HostId, HostInstance, Screen, client::CallError,
+    delivery::Delivery, runtime::runtime,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -68,12 +69,12 @@ enum Completion {
         origin: Origin,
         fetch: Fetch,
         asked: Instant,
-        result: anyhow::Result<ItemsPage>,
+        result: Result<ItemsPage, CallError>,
     },
     Work {
         origin: Origin,
         first: Seq,
-        result: anyhow::Result<ItemsPage>,
+        result: Result<ItemsPage, CallError>,
     },
     Agent {
         origin: Origin,
@@ -84,7 +85,7 @@ enum Completion {
     Answer {
         origin: Origin,
         item: ItemId,
-        result: anyhow::Result<()>,
+        result: Result<(), CallError>,
     },
 }
 
@@ -908,7 +909,7 @@ impl Conversation {
                             origin,
                             fetch,
                             asked,
-                            result: result.map_err(anyhow::Error::from),
+                            result,
                         })
                         .await;
                 },
@@ -947,7 +948,7 @@ impl Conversation {
                 .send(Completion::Work {
                     origin,
                     first,
-                    result: result.map_err(anyhow::Error::from),
+                    result,
                 })
                 .await;
         })));
@@ -1169,7 +1170,7 @@ impl Conversation {
                     .send(Completion::Answer {
                         origin,
                         item: id,
-                        result: result.map_err(anyhow::Error::from),
+                        result,
                     })
                     .await;
             })),
@@ -1369,7 +1370,10 @@ impl Conversation {
                             effects
                         }
                         Err(error) => {
-                            self.load_error = Some(format!("Couldn't load this thread: {error:#}"));
+                            self.load_error = Some(format!(
+                                "Couldn't load this thread: {}",
+                                diagnostics::chain(&error)
+                            ));
                             view.page_failed()
                         }
                     };
@@ -1403,7 +1407,10 @@ impl Conversation {
                             }
                         }
                         Err(error) => {
-                            self.load_error = Some(format!("Couldn't load this work: {error:#}"))
+                            self.load_error = Some(format!(
+                                "Couldn't load this work: {}",
+                                diagnostics::chain(&error)
+                            ))
                         }
                     }
                 }
@@ -1441,7 +1448,10 @@ impl Conversation {
                         changed |= ui.sending;
                         ui.sending = false;
                         if let Err(error) = result {
-                            let error = Some(format!("Couldn't send the answer: {error:#}"));
+                            let error = Some(format!(
+                                "Couldn't send the answer: {}",
+                                diagnostics::chain(&error)
+                            ));
                             changed |= ui.error != error;
                             ui.error = error;
                         }
