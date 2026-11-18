@@ -25,7 +25,7 @@ mod source_index;
 pub mod stored;
 mod table;
 mod table_view;
-pub use projected::leaf_signatures;
+pub use projected::{ShapedSource, leaf_signatures};
 use source_index::normalize_record;
 pub use source_index::{
     BlockShape, IndexedLeaf, IndexedLeafContent, LeafContext, LeafSpacing, ListLevel,

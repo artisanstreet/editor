@@ -404,6 +404,12 @@ impl MarkdownOwners {
                 source,
             })?,
         );
+        body.presenter
+            .prepare_document(engine)
+            .map_err(|source| BodyError::Present {
+                key: request.key.clone(),
+                source,
+            })?;
         let presenter = &body.presenter;
         body.projected
             .retain(|row, (range, proof)| presenter.projected_is_current(*row, range, proof));

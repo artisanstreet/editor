@@ -28,6 +28,13 @@ impl MarkdownIndex {
     pub fn build(source: &str) -> Result<Self, MarkdownIndexError> {
         Ok(Self(artisan_markdown_index::MarkdownIndex::build(source)?))
     }
+    pub fn extend(self, previous: &str, source: &str) -> Result<(Self, usize), MarkdownIndexError> {
+        let (index, kept) = self.0.extend(previous, source)?;
+        Ok((Self(index), kept))
+    }
+    pub fn resident_bytes(&self) -> usize {
+        self.0.resident_bytes()
+    }
     pub fn leaves(&self) -> &[IndexedLeaf] {
         self.0.leaves()
     }

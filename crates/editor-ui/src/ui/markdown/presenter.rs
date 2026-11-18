@@ -241,6 +241,7 @@ pub enum PresenterError {
 
 pub struct MarkdownPresenter {
     source: String,
+    command: Option<String>,
     document: Option<MarkdownDocument>,
     projected: Option<super::projected::ProjectedDocument>,
     stored_leaves: RefCell<HashMap<(String, usize), StoredProjectedLeaf>>,
@@ -325,6 +326,7 @@ impl Default for MarkdownPresenter {
     fn default() -> Self {
         Self {
             source: String::new(),
+            command: None,
             document: None,
             projected: None,
             stored_leaves: RefCell::new(HashMap::new()),
@@ -388,31 +390,6 @@ fn fence_key(fence: &CodeFence) -> u64 {
     hasher.finish()
 }
 
-fn fence_slots<'a>(
-    document: &'a MarkdownDocument,
-    projected: &'a super::projected::ProjectedDocument,
-) -> Vec<Option<&'a CodeFence>> {
-    let mut slots: Vec<Option<&CodeFence>> = document
-        .blocks()
-        .iter()
-        .map(|block| match block {
-            Block::Code(fence) => Some(fence),
-            _ => None,
-        })
-        .collect();
-    let mut top_level: HashMap<u64, usize> = HashMap::new();
-    for fence in slots.iter().flatten() {
-        *top_level.entry(fence_key(fence)).or_default() += 1;
-    }
-    for fence in projected.code_fences() {
-        match top_level.get_mut(&fence_key(fence)) {
-            Some(count) if *count > 0 => *count -= 1,
-            Some(_) | None => slots.push(Some(fence)),
-        }
-    }
-    slots
-}
-
 impl MarkdownPresenter {
     pub fn prepare(
         &mut self,
@@ -439,118 +416,140 @@ impl MarkdownPresenter {
         source: &str,
         command: Option<String>,
     ) -> Result<PreparationProof, PresenterError> {
-        if self.document.is_none() || self.source != source {
-            self.proof = Arc::new(());
-            self.document = None;
-            self.projected = None;
-            let document = engine.parse_document_with_fence_memo(source, &mut self.fence_tokens)?;
-            let mut projected = super::projected::ProjectedDocument::new(
+        if self.projected.is_some() && self.source == source && self.command == command {
+            return Ok(PreparationProof(self.proof.clone()));
+        }
+        self.proof = Arc::new(());
+        self.document = None;
+        let extendable = self.command == command && source.starts_with(self.source.as_str());
+        let (projected, kept) = match self.projected.take() {
+            Some(previous) if extendable => previous.extend(
                 engine,
+                &self.source,
                 source,
                 command.as_deref(),
                 &mut self.fence_tokens,
-            )?;
+            )?,
+            _ => (
+                super::projected::ProjectedDocument::new(
+                    engine,
+                    source,
+                    command.as_deref(),
+                    &mut self.fence_tokens,
+                )?,
+                0,
+            ),
+        };
+        if kept == 0 {
             self.fence_tokens.finish();
-            let mut previous = std::mem::take(&mut self.rich);
-            let fences = fence_slots(&document, &projected);
-            let mut next: Vec<Option<RetainedRich>> = (0..fences.len()).map(|_| None).collect();
-            let mut reusable: HashMap<u64, VecDeque<usize>> = HashMap::new();
-            for (at, entry) in previous.iter().enumerate() {
-                if let Some(entry) = entry {
-                    reusable
-                        .entry(fence_key(&entry.source))
-                        .or_default()
-                        .push_back(at);
+        }
+        let settled = projected.code_fences_before(kept);
+        let mut previous = std::mem::take(&mut self.rich);
+        let mut next: Vec<Option<RetainedRich>> =
+            previous.drain(..settled.min(previous.len())).collect();
+        let fences: Vec<&CodeFence> = projected.code_fences().skip(next.len()).collect();
+        let offset = next.len();
+        next.extend((0..fences.len()).map(|_| None));
+        let mut reusable: HashMap<u64, VecDeque<usize>> = HashMap::new();
+        for (at, entry) in previous.iter().enumerate() {
+            if let Some(entry) = entry {
+                reusable
+                    .entry(fence_key(&entry.source))
+                    .or_default()
+                    .push_back(at);
+            }
+        }
+        for (index, fence) in fences.iter().enumerate() {
+            let Some(candidates) = reusable.get_mut(&fence_key(fence)) else {
+                continue;
+            };
+            while let Some(at) = candidates.pop_front() {
+                if previous[at].as_ref().is_some_and(|entry| {
+                    entry.source.language == fence.language
+                        && entry.source.source == fence.source
+                        && entry.source.closed == fence.closed
+                }) {
+                    next[offset + index] = previous[at].take();
+                    break;
                 }
             }
-            for (index, fence) in fences.iter().enumerate() {
-                let Some(fence) = fence else {
-                    continue;
-                };
-                let Some(candidates) = reusable.get_mut(&fence_key(fence)) else {
-                    continue;
-                };
-                while let Some(at) = candidates.pop_front() {
-                    if previous[at].as_ref().is_some_and(|entry| {
-                        entry.source.language == fence.language
-                            && entry.source.source == fence.source
-                            && entry.source.closed == fence.closed
-                    }) {
-                        next[index] = previous[at].take();
-                        break;
-                    }
+        }
+        for (index, fence) in fences.iter().enumerate() {
+            if next[offset + index].is_some() {
+                continue;
+            }
+            let Some(prepared) =
+                rich::prepare(fence.language.as_deref(), &fence.source, fence.closed)
+            else {
+                continue;
+            };
+            let old_entry = previous.get_mut(index).and_then(|entry| {
+                if entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.source.language == fence.language)
+                {
+                    entry.take()
+                } else {
+                    None
                 }
-            }
-            for (index, fence) in fences.iter().enumerate() {
-                if next[index].is_some() {
-                    continue;
+            });
+            let previous_id = old_entry.and_then(|entry| {
+                if matches!(&entry.prepared, RichFence::Ready(_))
+                    && !matches!(&prepared, RichFence::Ready(_))
+                {
+                    self.remove_rich(entry.id);
+                    None
+                } else {
+                    Some(entry.id)
                 }
-                let Some(fence) = fence else {
-                    continue;
-                };
-                let Some(prepared) =
-                    rich::prepare(fence.language.as_deref(), &fence.source, fence.closed)
-                else {
-                    continue;
-                };
-                let old_entry = previous.get_mut(index).and_then(|entry| {
-                    if entry
-                        .as_ref()
-                        .is_some_and(|entry| entry.source.language == fence.language)
-                    {
-                        entry.take()
-                    } else {
-                        None
-                    }
-                });
-                let previous_id = old_entry.and_then(|entry| {
-                    if matches!(&entry.prepared, RichFence::Ready(_))
-                        && !matches!(&prepared, RichFence::Ready(_))
-                    {
-                        self.remove_rich(entry.id);
-                        None
-                    } else {
-                        Some(entry.id)
-                    }
-                });
-                let id = previous_id.unwrap_or_else(|| {
-                    let id = self.next_rich_id;
-                    self.next_rich_id = self.next_rich_id.wrapping_add(1);
-                    id
-                });
-                next[index] = Some(RetainedRich {
-                    id,
-                    source: (*fence).clone(),
-                    prepared,
-                });
-            }
-            for removed in previous.into_iter().flatten() {
-                self.remove_rich(removed.id);
-            }
-            self.rich = next;
-            projected.bind_rich(
-                self.rich.iter().enumerate().filter_map(|(index, entry)| {
-                    entry.as_ref().map(|entry| (index, &entry.source))
-                }),
-            );
-            let previous_proofs = std::mem::take(&mut self.leaf_proofs);
-            self.leaf_proofs = (0..projected.len())
-                .map(|row| {
-                    let signature = projected.signature(row).unwrap_or_default();
-                    match previous_proofs.get(row) {
-                        Some((previous, proof)) if *previous == signature => {
-                            (signature, proof.clone())
-                        }
-                        _ => (signature, Arc::new(())),
-                    }
-                })
-                .collect();
+            });
+            let id = previous_id.unwrap_or_else(|| {
+                let id = self.next_rich_id;
+                self.next_rich_id = self.next_rich_id.wrapping_add(1);
+                id
+            });
+            next[offset + index] = Some(RetainedRich {
+                id,
+                source: (*fence).clone(),
+                prepared,
+            });
+        }
+        for removed in previous.into_iter().flatten() {
+            self.remove_rich(removed.id);
+        }
+        let mut projected = projected;
+        projected.bind_rich(|fence| next.get(fence).is_some_and(Option::is_some));
+        self.rich = next;
+        let previous_proofs = std::mem::take(&mut self.leaf_proofs);
+        self.leaf_proofs = (0..projected.len())
+            .map(|row| {
+                let signature = projected.signature(row).unwrap_or_default();
+                match previous_proofs.get(row) {
+                    Some((previous, proof)) if *previous == signature => (signature, proof.clone()),
+                    _ => (signature, Arc::new(())),
+                }
+            })
+            .collect();
+        if kept > 0 {
+            self.source.push_str(&source[self.source.len()..]);
+        } else {
             self.source.clear();
             self.source.push_str(source);
-            self.document = Some(document);
-            self.projected = Some(projected);
         }
+        self.command = command;
+        self.projected = Some(projected);
         Ok(PreparationProof(self.proof.clone()))
+    }
+
+    pub fn prepare_document(&mut self, engine: &MarkdownEngine) -> Result<(), PresenterError> {
+        if self.projected.is_none() {
+            return Err(PresenterError::Unavailable("unprepared"));
+        }
+        if self.document.is_none() {
+            self.document =
+                Some(engine.parse_document_with_fence_memo(&self.source, &mut self.fence_tokens)?);
+        }
+        Ok(())
     }
 
     fn remove_rich(&self, rich_id: u64) {
@@ -607,7 +606,7 @@ impl MarkdownPresenter {
     }
 
     fn leaf_is_current(&self, row: usize, proof: &PreparationProof) -> bool {
-        self.document.is_some()
+        self.projected.is_some()
             && self
                 .leaf_proofs
                 .get(row)
@@ -615,7 +614,7 @@ impl MarkdownPresenter {
     }
 
     pub fn is_current(&self, proof: &PreparationProof) -> bool {
-        self.document.is_some() && Arc::ptr_eq(&self.proof, &proof.0)
+        self.projected.is_some() && Arc::ptr_eq(&self.proof, &proof.0)
     }
 
     pub fn wake_mailbox(&self) -> &Mailbox<()> {
@@ -2845,6 +2844,13 @@ impl MarkdownPresenter {
         let mut sources = Vec::new();
         let mut previous_bottom: f32 = 0.0;
         let mut previous_zeroes_follower = false;
+        let mut rich_fences: HashMap<u64, VecDeque<&RetainedRich>> = HashMap::new();
+        for entry in self.rich.iter().flatten() {
+            rich_fences
+                .entry(fence_key(&entry.source))
+                .or_default()
+                .push_back(entry);
+        }
         for (index, block) in document.blocks().iter().enumerate() {
             let (top, bottom, element) = match block {
                 Block::Paragraph { spans, .. } => {
@@ -2871,8 +2877,11 @@ impl MarkdownPresenter {
                         leaf.element,
                     )
                 }
-                Block::Code(_) => {
-                    let Some(Some(entry)) = self.rich.get(index) else {
+                Block::Code(fence) => {
+                    let Some(entry) = rich_fences
+                        .get_mut(&fence_key(fence))
+                        .and_then(VecDeque::pop_front)
+                    else {
                         return Err(PresenterError::Unavailable("code fence or rich fallback"));
                     };
                     let element = self.render_rich(

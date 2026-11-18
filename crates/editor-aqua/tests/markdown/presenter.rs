@@ -43,15 +43,17 @@ fn completed_image_invalidates_retained_loading_row() {
     let images = Images::new();
     let assets = ImageAssets::default();
     let mut presenter = MarkdownPresenter::default();
+    let engine = MarkdownEngine::new().unwrap();
     presenter
         .prepare(
-            &MarkdownEngine::new().unwrap(),
+            &engine,
             &format!(
                 "```artisan-image\n{}\n```",
                 serde_json::json!({"src": source.raw(), "width": 2, "height": 1})
             ),
         )
         .unwrap();
+    presenter.prepare_document(&engine).unwrap();
     presenter
         .set_media_services(
             "item",
@@ -187,6 +189,7 @@ fn preparation_proof_and_complete_selection_follow_source_revision() {
     let original = presenter
         .prepare(&engine, "## Heading\n\nA **strong** paragraph.")
         .unwrap();
+    presenter.prepare_document(&engine).unwrap();
     let rendered = presenter
         .render(
             "item",
@@ -216,6 +219,7 @@ fn nested_lists_keep_selection_leaves_in_source_order() {
     presenter
         .prepare(&engine, "Before\n\n- alpha\n  - beta\n- gamma\n\nAfter")
         .unwrap();
+    presenter.prepare_document(&engine).unwrap();
     let rendered = presenter
         .render(
             "item",
@@ -250,6 +254,7 @@ fn table_cells_register_tab_and_row_separators_in_order() {
     presenter
         .prepare(&engine, "| A | B |\n|---|---|\n| one | two |")
         .unwrap();
+    presenter.prepare_document(&engine).unwrap();
     let rendered = presenter
         .render(
             "item",

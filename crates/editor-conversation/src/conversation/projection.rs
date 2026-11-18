@@ -58,6 +58,7 @@ impl ShapeSource<'_> {
 struct BodyShape {
     fingerprint: (usize, u64),
     signatures: Arc<[u64]>,
+    streaming: Option<editor_ui::markdown::ShapedSource>,
 }
 
 #[derive(Default)]
@@ -83,7 +84,13 @@ impl Projections {
             + self
                 .shapes
                 .values()
-                .map(|shape| size_of_val(&*shape.signatures))
+                .map(|shape| {
+                    size_of_val(&*shape.signatures)
+                        + shape
+                            .streaming
+                            .as_ref()
+                            .map_or(0, editor_ui::markdown::ShapedSource::resident_bytes)
+                })
                 .sum::<usize>()
     }
 
@@ -127,14 +134,18 @@ impl Projections {
             .then(|| artisan_mentions::special_command(&text))
             .flatten()
             .and_then(|range| text.get(range));
-        let signatures: Arc<[u64]> = editor_ui::markdown::leaf_signatures(&text, command)
-            .ok()?
-            .into();
+        let shaped = match self.shapes.remove(key).and_then(|shape| shape.streaming) {
+            Some(previous) => previous.extend(&text, command),
+            None => editor_ui::markdown::ShapedSource::new(&text, command),
+        }
+        .ok()?;
+        let signatures = shaped.signatures().clone();
         self.shapes.insert(
             key.clone(),
             BodyShape {
                 fingerprint,
                 signatures: signatures.clone(),
+                streaming: source.running.then_some(shaped),
             },
         );
         Some(signatures)

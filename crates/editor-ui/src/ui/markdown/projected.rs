@@ -16,7 +16,6 @@ use aqua_ui::collection_runtime::{SelectionBatchOwner, SelectionSourceBatch};
 use aqua_ui::element::{Element, ui};
 use aqua_ui::style::{Length, Style};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -68,26 +67,74 @@ pub fn leaf_signatures(
     source: &str,
     command: Option<&str>,
 ) -> Result<Vec<u64>, MarkdownIndexError> {
-    let index = MarkdownIndex::build(source)?;
-    (0..index.leaves().len())
-        .map(|ordinal| {
+    Ok(ShapedSource::new(source, command)?.signatures().to_vec())
+}
+
+pub struct ShapedSource {
+    source: String,
+    command: Option<String>,
+    index: MarkdownIndex,
+    signatures: Arc<[u64]>,
+}
+
+impl ShapedSource {
+    pub fn new(source: &str, command: Option<&str>) -> Result<Self, MarkdownIndexError> {
+        let index = MarkdownIndex::build(source)?;
+        Self::shaped(index, 0, &[], source, command)
+    }
+
+    pub fn extend(self, source: &str, command: Option<&str>) -> Result<Self, MarkdownIndexError> {
+        if self.command.as_deref() != command {
+            return Self::new(source, command);
+        }
+        let (index, kept) = self.index.extend(&self.source, source)?;
+        Self::shaped(index, kept, &self.signatures[..kept], source, command)
+    }
+
+    fn shaped(
+        index: MarkdownIndex,
+        kept: usize,
+        settled: &[u64],
+        source: &str,
+        command: Option<&str>,
+    ) -> Result<Self, MarkdownIndexError> {
+        let mut signatures = Vec::with_capacity(index.leaves().len());
+        signatures.extend_from_slice(settled);
+        for ordinal in kept..index.leaves().len() {
             let context = index
                 .context(ordinal)
                 .ok_or(MarkdownIndexError::InvalidShape)?;
-            let table_continues = context.table_source.is_some()
-                && index
-                    .context(ordinal + 1)
-                    .and_then(|next| next.table_source)
-                    == context.table_source;
-            Ok(leaf_signature(
+            signatures.push(leaf_signature(
                 source,
                 &index.leaves()[ordinal].source_range(),
                 context,
-                table_continues,
+                table_continues(&index, ordinal, context),
                 command.filter(|_| ordinal == 0),
-            ))
+            ));
+        }
+        Ok(Self {
+            source: source.to_owned(),
+            command: command.map(str::to_owned),
+            index,
+            signatures: signatures.into(),
         })
-        .collect()
+    }
+
+    pub fn signatures(&self) -> &Arc<[u64]> {
+        &self.signatures
+    }
+
+    pub fn resident_bytes(&self) -> usize {
+        self.source.capacity() + self.index.resident_bytes() + size_of_val(&*self.signatures)
+    }
+}
+
+fn table_continues(index: &MarkdownIndex, ordinal: usize, context: &LeafContext) -> bool {
+    context.table_source.is_some()
+        && index
+            .context(ordinal + 1)
+            .and_then(|next| next.table_source)
+            == context.table_source
 }
 
 fn leaf_signature(
@@ -108,6 +155,7 @@ fn leaf_signature(
 }
 
 pub(super) struct ProjectedDocument {
+    index: MarkdownIndex,
     leaves: Vec<Leaf>,
     cached_sources: RefCell<Option<Rc<CachedSources>>>,
 }
@@ -120,74 +168,107 @@ impl ProjectedDocument {
         memo: &mut dyn super::FenceTokenMemo,
     ) -> Result<Self, MarkdownIndexError> {
         let index = MarkdownIndex::build(source)?;
-        let mut leaves = Vec::with_capacity(index.leaves().len());
-        for ordinal in 0..index.leaves().len() {
-            let context = index
-                .context(ordinal)
-                .cloned()
-                .ok_or(MarkdownIndexError::InvalidShape)?;
-            let table_continues = context.table_source.is_some()
-                && index
-                    .context(ordinal + 1)
-                    .and_then(|next| next.table_source)
-                    == context.table_source;
-            let mut content = index.normalize_leaf(ordinal, 0, source, engine, memo)?;
-            if let (0, Some(command), IndexedLeafContent::Block(Block::Paragraph { spans, .. })) =
-                (ordinal, command, &mut content)
-            {
-                super::mark_command_spans(spans, command);
-            }
-            let rich = match &content {
-                IndexedLeafContent::Block(Block::Code(code)) => {
-                    crate::ui::rich::prepare(code.language.as_deref(), &code.source, code.closed)
-                }
-                _ => None,
-            };
-            let rich_without_source = matches!(
-                &rich,
-                Some(
-                    crate::ui::rich::RichFence::Ready(_)
-                        | crate::ui::rich::RichFence::Pending { .. }
-                )
-            ) || matches!(
-                &content,
-                IndexedLeafContent::Block(Block::Code(code)) if code.diagram.is_some()
-            );
-            let fallback_note = match rich {
-                Some(crate::ui::rich::RichFence::Invalid { note }) => Some(note),
-                _ => None,
-            };
-            let fence = match &content {
-                IndexedLeafContent::Block(Block::Code(code))
-                    if !rich_without_source && code.diagram.is_none() =>
-                {
-                    Some(super::fence::Fence::new(code))
-                }
-                _ => None,
-            };
-            let range = index.leaves()[ordinal].source_range();
-            let signature = leaf_signature(
-                source,
-                &range,
-                &context,
-                table_continues,
-                command.filter(|_| ordinal == 0),
-            );
-            leaves.push(Leaf {
-                range,
-                signature,
-                context,
-                content,
-                table_continues,
-                rich_without_source,
-                fence,
-                fallback_note,
-                rich_index: None,
-            });
+        Self::projected(index, Vec::new(), engine, source, command, memo)
+    }
+
+    pub(super) fn extend(
+        self,
+        engine: &MarkdownEngine,
+        previous: &str,
+        source: &str,
+        command: Option<&str>,
+        memo: &mut dyn super::FenceTokenMemo,
+    ) -> Result<(Self, usize), MarkdownIndexError> {
+        let (index, kept) = self.index.extend(previous, source)?;
+        let mut leaves = self.leaves;
+        leaves.truncate(kept);
+        Ok((
+            Self::projected(index, leaves, engine, source, command, memo)?,
+            kept,
+        ))
+    }
+
+    fn projected(
+        index: MarkdownIndex,
+        mut leaves: Vec<Leaf>,
+        engine: &MarkdownEngine,
+        source: &str,
+        command: Option<&str>,
+        memo: &mut dyn super::FenceTokenMemo,
+    ) -> Result<Self, MarkdownIndexError> {
+        leaves.reserve(index.leaves().len().saturating_sub(leaves.len()));
+        for ordinal in leaves.len()..index.leaves().len() {
+            leaves.push(Self::leaf(&index, ordinal, engine, source, command, memo)?);
         }
         Ok(Self {
+            index,
             leaves,
             cached_sources: RefCell::new(None),
+        })
+    }
+
+    fn leaf(
+        index: &MarkdownIndex,
+        ordinal: usize,
+        engine: &MarkdownEngine,
+        source: &str,
+        command: Option<&str>,
+        memo: &mut dyn super::FenceTokenMemo,
+    ) -> Result<Leaf, MarkdownIndexError> {
+        let context = index
+            .context(ordinal)
+            .cloned()
+            .ok_or(MarkdownIndexError::InvalidShape)?;
+        let table_continues = table_continues(index, ordinal, &context);
+        let mut content = index.normalize_leaf(ordinal, 0, source, engine, memo)?;
+        if let (0, Some(command), IndexedLeafContent::Block(Block::Paragraph { spans, .. })) =
+            (ordinal, command, &mut content)
+        {
+            super::mark_command_spans(spans, command);
+        }
+        let rich = match &content {
+            IndexedLeafContent::Block(Block::Code(code)) => {
+                crate::ui::rich::prepare(code.language.as_deref(), &code.source, code.closed)
+            }
+            _ => None,
+        };
+        let rich_without_source = matches!(
+            &rich,
+            Some(crate::ui::rich::RichFence::Ready(_) | crate::ui::rich::RichFence::Pending { .. })
+        ) || matches!(
+            &content,
+            IndexedLeafContent::Block(Block::Code(code)) if code.diagram.is_some()
+        );
+        let fallback_note = match rich {
+            Some(crate::ui::rich::RichFence::Invalid { note }) => Some(note),
+            _ => None,
+        };
+        let fence = match &content {
+            IndexedLeafContent::Block(Block::Code(code))
+                if !rich_without_source && code.diagram.is_none() =>
+            {
+                Some(super::fence::Fence::new(code))
+            }
+            _ => None,
+        };
+        let range = index.leaves()[ordinal].source_range();
+        let signature = leaf_signature(
+            source,
+            &range,
+            &context,
+            table_continues,
+            command.filter(|_| ordinal == 0),
+        );
+        Ok(Leaf {
+            range,
+            signature,
+            context,
+            content,
+            table_continues,
+            rich_without_source,
+            fence,
+            fallback_note,
+            rich_index: None,
         })
     }
     pub(super) fn len(&self) -> usize {
@@ -210,19 +291,19 @@ impl ProjectedDocument {
         })
     }
 
-    pub(super) fn bind_rich<'a>(&mut self, entries: impl Iterator<Item = (usize, &'a CodeFence)>) {
-        let mut indices: HashMap<_, VecDeque<usize>> = HashMap::new();
-        for (index, fence) in entries {
-            indices
-                .entry((&fence.language, fence.source.as_str(), fence.closed))
-                .or_default()
-                .push_back(index);
-        }
+    pub(super) fn code_fences_before(&self, row: usize) -> usize {
+        self.leaves[..row]
+            .iter()
+            .filter(|leaf| matches!(&leaf.content, IndexedLeafContent::Block(Block::Code(_))))
+            .count()
+    }
+
+    pub(super) fn bind_rich(&mut self, bound: impl Fn(usize) -> bool) {
+        let mut fence = 0;
         for leaf in &mut self.leaves {
-            if let IndexedLeafContent::Block(Block::Code(fence)) = &leaf.content {
-                leaf.rich_index = indices
-                    .get_mut(&(&fence.language, fence.source.as_str(), fence.closed))
-                    .and_then(VecDeque::pop_front);
+            if let IndexedLeafContent::Block(Block::Code(_)) = &leaf.content {
+                leaf.rich_index = bound(fence).then_some(fence);
+                fence += 1;
             }
         }
     }

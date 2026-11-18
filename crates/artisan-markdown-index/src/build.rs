@@ -24,6 +24,10 @@ struct ActiveLeaf {
     implicit: bool,
 }
 
+pub fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
+    build_from(source, 0, None)
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one pass over the parser's events, keeping list, table and leaf state together"
@@ -32,7 +36,11 @@ struct ActiveLeaf {
     clippy::wildcard_enum_match_arm,
     reason = "pulldown-cmark's events and tags: only the ones named here shape the index"
 )]
-pub fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
+pub fn build_from(
+    source: &str,
+    start: usize,
+    previous: Option<BlockShape>,
+) -> Result<MarkdownIndex, BuildIndexError> {
     if source.len() > SOURCE_BYTES {
         return Err(BuildIndexError::SourceTooLarge {
             bytes: source.len(),
@@ -50,13 +58,19 @@ pub fn build(source: &str) -> Result<MarkdownIndex, BuildIndexError> {
     let mut items = Vec::<OpenItem>::new();
     let mut alignments = Vec::<TableAlignment>::new();
     let mut quote_depth = 0;
-    let mut root_previous = None;
+    let mut root_previous = previous;
     let mut spacing = Vec::new();
     let mut table_source = None;
     let mut depth = 0usize;
     let mut active: Option<ActiveLeaf> = None;
     let mut admission_bytes = 0usize;
-    for (event, range) in Parser::new_ext(source, PARSE_OPTIONS).into_offset_iter() {
+    let suffix = source
+        .get(start..)
+        .expect("invariant: an index is rebuilt from a line boundary inside its source");
+    for (event, range) in Parser::new_ext(suffix, PARSE_OPTIONS)
+        .into_offset_iter()
+        .map(|(event, range)| (event, range.start + start..range.end + start))
+    {
         if admission_bytes > INDEX_BYTES {
             return Err(BuildIndexError::IndexTooLarge);
         }

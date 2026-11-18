@@ -158,6 +158,68 @@ impl MarkdownIndex {
         build::build(source)
     }
 
+    pub fn extend(self, previous: &str, source: &str) -> Result<(Self, usize), BuildIndexError> {
+        let Some((kept, boundary, shape)) = self.stable_prefix(previous, source) else {
+            return Ok((Self::build(source)?, 0));
+        };
+        let suffix = build::build_from(source, boundary, Some(shape))?;
+        let mut merged = self;
+        merged.leaves.truncate(kept);
+        let mut pool: std::collections::HashMap<LeafContext, usize> = merged
+            .contexts
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(id, context)| (context, id))
+            .collect();
+        for mut leaf in suffix.leaves {
+            let context = &suffix.contexts[leaf.context];
+            leaf.context = *pool.entry(context.clone()).or_insert_with(|| {
+                merged.contexts.push(context.clone());
+                merged.contexts.len() - 1
+            });
+            merged.leaves.push(leaf);
+        }
+        merged.decoded.extend(suffix.decoded);
+        merged.source_bytes = source.len();
+        if merged.resident_bytes() > INDEX_BYTES {
+            return Err(BuildIndexError::IndexTooLarge);
+        }
+        Ok((merged, kept))
+    }
+
+    fn stable_prefix(&self, previous: &str, source: &str) -> Option<(usize, usize, BlockShape)> {
+        if self.source_bytes != previous.len()
+            || !source.starts_with(previous)
+            || source.contains("]:")
+        {
+            return None;
+        }
+        (1..=self.leaves.len()).rev().find_map(|kept| {
+            let leaf = &self.leaves[kept - 1];
+            let context = &self.contexts[leaf.context];
+            if !context.lists.is_empty()
+                || context.quote_depth > 0
+                || context.table_source.is_some()
+            {
+                return None;
+            }
+            let shape = match (leaf.kind, leaf.events.first().map(|event| &event.token)) {
+                (Kind::Paragraph, _) => BlockShape::Paragraph,
+                (
+                    Kind::Heading,
+                    Some(Token::Structural(Event::Start(Tag::Heading { level, .. }))),
+                ) => BlockShape::Heading(*level as u8),
+                _ => return None,
+            };
+            let boundary = after_blank_line(previous, leaf.range.end)?;
+            self.leaves
+                .get(kept)
+                .is_none_or(|next| next.range.start >= boundary)
+                .then_some((kept, boundary, shape))
+        })
+    }
+
     pub fn record(&self, ordinal: usize) -> Option<LeafRecord> {
         let leaf = self.leaves.get(ordinal)?.clone();
         let context = self.contexts.get(leaf.context)?.clone();
@@ -221,6 +283,26 @@ impl MarkdownIndex {
                 })
                 .sum::<usize>()
     }
+}
+
+fn after_blank_line(text: &str, end: usize) -> Option<usize> {
+    let blank = |line: &str| line.trim_matches([' ', '\t', '\r']).is_empty();
+    let line_after = |start: usize| {
+        let rest = text.get(start..)?;
+        let newline = rest.find('\n')?;
+        Some((rest.get(..newline)?, start + newline + 1))
+    };
+    let line_start = if end > 0 && text.as_bytes().get(end - 1) != Some(&b'\n') {
+        let (tail, next) = line_after(end)?;
+        if !blank(tail) {
+            return None;
+        }
+        next
+    } else {
+        end
+    };
+    let (line, next) = line_after(line_start)?;
+    blank(line).then_some(next)
 }
 
 fn resolve_text<'a>(
