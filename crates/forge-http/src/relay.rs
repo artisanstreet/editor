@@ -165,6 +165,7 @@ struct Channel {
     next_receive: u64,
     window: SendWindow,
     stream: Option<Stream>,
+    requests: tokio::task::JoinSet<()>,
 }
 
 enum Grant {
@@ -188,11 +189,77 @@ struct Admission {
     verified: Result<artisan_account::GrantClaims, ChannelError>,
 }
 
+struct Charged {
+    bytes: Vec<u8>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 enum StreamMsg {
-    Frame(Vec<u8>),
+    Frame(Charged),
     End { reason: &'static str },
     Expired,
-    Response(artisan_api::TunnelResponse),
+}
+
+const QUEUED_BYTES: usize = 64 * 1024 * 1024;
+const CHANNEL_REQUESTS: usize = 16;
+
+#[derive(Clone)]
+struct Outbound {
+    tx: tokio::sync::mpsc::Sender<(String, StreamMsg)>,
+    budget: Arc<tokio::sync::Semaphore>,
+}
+
+impl Outbound {
+    async fn charge(&self, bytes: Vec<u8>) -> Charged {
+        let charged = u32::try_from(bytes.len().min(QUEUED_BYTES))
+            .expect("invariant: the tunnel's byte budget fits a semaphore");
+        let permit = Arc::clone(&self.budget)
+            .acquire_many_owned(charged)
+            .await
+            .expect("invariant: the tunnel's byte budget is never closed");
+        Charged {
+            bytes,
+            _permit: permit,
+        }
+    }
+
+    async fn send(&self, name: &str, bytes: Vec<u8>) -> bool {
+        let charged = self.charge(bytes).await;
+        self.tx
+            .send((name.to_owned(), StreamMsg::Frame(charged)))
+            .await
+            .is_ok()
+    }
+}
+
+struct TunnelSink {
+    name: String,
+    outbound: Outbound,
+}
+
+impl crate::events::EnvelopeSink for TunnelSink {
+    async fn send(&self, envelope: artisan_api::Envelope) -> Result<(), crate::events::SinkError> {
+        let seq = envelope.seq;
+        let frame = |envelope: &artisan_api::Envelope| {
+            serde_json::to_vec(&serde_json::json!({
+                "$event": {"stream": self.name, "envelope": envelope},
+            }))
+            .map_err(|source| crate::events::SinkError::Encode { seq, source })
+        };
+        let mut bytes = frame(&envelope)?;
+        if bytes.len() > QUEUED_BYTES {
+            bytes = frame(&artisan_api::Envelope {
+                seq: None,
+                live_revision: 0,
+                event: artisan_api::Event::Reset,
+            })?;
+        }
+        if self.outbound.send(&self.name, bytes).await {
+            Ok(())
+        } else {
+            Err(crate::events::SinkError::Gone)
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -409,7 +476,6 @@ use artisan_api::Reassembly;
 
 struct Stream {
     _pump: tokio_util::task::AbortOnDropHandle<()>,
-    _forwarder: tokio_util::task::AbortOnDropHandle<()>,
 }
 
 type WsSink = futures::stream::SplitSink<
@@ -433,7 +499,7 @@ struct Connection {
     channels: HashMap<String, Channel>,
     reassembly: Reassembly,
     admissions: tokio::task::JoinSet<Admission>,
-    stream_tx: tokio::sync::mpsc::Sender<(String, StreamMsg)>,
+    outbound: Outbound,
     verifier: Arc<crate::account_auth::GrantVerifier>,
     forge_cnf_secret: [u8; 32],
     account: String,
@@ -485,7 +551,10 @@ pub async fn serve_channel(
         channels: HashMap::new(),
         reassembly: Reassembly::new(),
         admissions: tokio::task::JoinSet::new(),
-        stream_tx,
+        outbound: Outbound {
+            tx: stream_tx,
+            budget: Arc::new(tokio::sync::Semaphore::new(QUEUED_BYTES)),
+        },
         verifier,
         forge_cnf_secret,
         account,
@@ -607,6 +676,7 @@ async fn handle_server_text(
                     next_receive: 0,
                     window: SendWindow::new(),
                     stream: None,
+                    requests: tokio::task::JoinSet::new(),
                 },
             );
         }
@@ -840,22 +910,46 @@ async fn dispatch_app_bytes(
                 send_response(name, &response, &mut connection.channels, sink).await?;
                 return Ok(());
             };
+            let channel = connection
+                .channels
+                .get_mut(name)
+                .expect("invariant: a channel with a verified grant is open");
             let router = crate::routes::router(connection.app.clone());
-            let tx = connection.stream_tx.clone();
-            let name = name.to_owned();
-            tokio::spawn(async move {
+            let outbound = connection.outbound.clone();
+            let id = request.id.clone();
+            let owner = name.to_owned();
+            let started = start_request(channel, async move {
+                let name = owner;
                 let response = dispatch_request(&request, &router, &claims).await;
-                if tx
-                    .send((name.clone(), StreamMsg::Response(response)))
-                    .await
-                    .is_err()
-                {
+                let bytes = serde_json::to_vec(&response)
+                    .expect("invariant: a tunneled response is plain JSON");
+                if !outbound.send(&name, bytes).await {
                     tracing::debug!(channel = %name, request = %request.id, "the Relay connection closed before the response");
                 }
             });
+            if !started {
+                let response = artisan_api::TunnelResponse::error(
+                    &id,
+                    429,
+                    "too many requests in flight on this channel; wait for one to finish",
+                );
+                send_response(name, &response, &mut connection.channels, sink).await?;
+            }
         }
     }
     Ok(())
+}
+
+fn start_request(
+    channel: &mut Channel,
+    request: impl Future<Output = ()> + Send + 'static,
+) -> bool {
+    while channel.requests.try_join_next().is_some() {}
+    if channel.requests.len() >= CHANNEL_REQUESTS {
+        return false;
+    }
+    channel.requests.spawn(request);
+    true
 }
 
 async fn subscribe(
@@ -900,62 +994,40 @@ async fn subscribe(
             expires_at.saturating_sub(now_sec()).max(0).cast_unsigned(),
         );
     let stream_id = name.to_owned();
-    let (sender, receiver) =
-        tokio::sync::mpsc::channel::<artisan_api::Envelope>(artisan_api::STREAM_QUEUE_ENVELOPES);
     let pump_app = connection.app.clone();
     let response = artisan_api::TunnelResponse::ok(
         &request.id,
         serde_json::json!({"$stream": {"stream": stream_id}}),
     );
     send_response(name, &response, channels, sink).await?;
-    let pumped = stream_id.clone();
-    let pump = tokio::spawn(async move {
-        if let Err(error) = crate::events::forward(&pump_app, &since, &sender).await {
-            tracing::debug!(channel = %pumped, error = diagnostics::chain(&error), "tunneled event stream ended");
+    let sink = TunnelSink {
+        name: stream_id.clone(),
+        outbound: connection.outbound.clone(),
+    };
+    let tx = connection.outbound.tx.clone();
+    let pump = tokio::spawn(until_expiry(stream_id, tx, expiry, async move {
+        if let Err(error) = crate::events::forward(&pump_app, &since, &sink).await {
+            tracing::debug!(channel = %sink.name, error = diagnostics::chain(&error), "tunneled event stream ended");
         }
-    });
-    let pump = tokio_util::task::AbortOnDropHandle::new(pump);
-    let forwarder = tokio::spawn(forward_stream(
-        name.to_owned(),
-        receiver,
-        connection.stream_tx.clone(),
-        expiry,
-    ));
+    }));
     let channel = channels
         .get_mut(name)
         .expect("invariant: a channel answering its subscribe request is still open");
     channel.stream = Some(Stream {
-        _pump: pump,
-        _forwarder: tokio_util::task::AbortOnDropHandle::new(forwarder),
+        _pump: tokio_util::task::AbortOnDropHandle::new(pump),
     });
     Ok(())
 }
 
-async fn forward_stream(
+async fn until_expiry(
     name: String,
-    mut receiver: tokio::sync::mpsc::Receiver<artisan_api::Envelope>,
     tx: tokio::sync::mpsc::Sender<(String, StreamMsg)>,
     expiry: tokio::time::Instant,
+    stream: impl Future<Output = ()>,
 ) {
-    let end = loop {
-        let envelope = tokio::select! {
-            () = tokio::time::sleep_until(expiry) => break StreamMsg::Expired,
-            envelope = receiver.recv() => envelope,
-        };
-        let Some(envelope) = envelope else {
-            break StreamMsg::End { reason: "closed" };
-        };
-        let frame = serde_json::json!({
-            "$event": {"stream": name, "envelope": envelope},
-        });
-        let bytes = serde_json::to_vec(&frame).expect("invariant: a JSON value always serializes");
-        if tx
-            .send((name.clone(), StreamMsg::Frame(bytes)))
-            .await
-            .is_err()
-        {
-            return;
-        }
+    let end = tokio::select! {
+        () = tokio::time::sleep_until(expiry) => StreamMsg::Expired,
+        () = stream => StreamMsg::End { reason: "closed" },
     };
     if tx.send((name.clone(), end)).await.is_err() {
         tracing::debug!(channel = %name, "the Relay connection closed before the stream's end");
@@ -985,10 +1057,7 @@ async fn handle_stream_msg(
         }
     };
     let bytes = match msg {
-        StreamMsg::Frame(bytes) => bytes,
-        StreamMsg::Response(response) => {
-            serde_json::to_vec(&response).map_err(encoded("tunneled response"))?
-        }
+        StreamMsg::Frame(Charged { bytes, .. }) => bytes,
         StreamMsg::End { reason } => {
             channel.stream = None;
             serde_json::to_vec(&serde_json::json!({"$event": {"stream": name, "end": reason}}))
@@ -1596,6 +1665,7 @@ mod tests {
                 next_receive: 0,
                 window: SendWindow::new(),
                 stream: None,
+                requests: tokio::task::JoinSet::new(),
             },
         )]
         .into()
@@ -1604,7 +1674,11 @@ mod tests {
     #[test]
     fn events_queued_before_the_grant_expired_close_the_channel_instead_of_sending() {
         let channels = open_channel(1_700_000_100);
-        let queued = StreamMsg::Frame(b"{}".to_vec());
+        let budget = Arc::new(tokio::sync::Semaphore::new(2));
+        let queued = StreamMsg::Frame(Charged {
+            bytes: b"{}".to_vec(),
+            _permit: budget.try_acquire_many_owned(2).unwrap(),
+        });
         assert_eq!(
             outgoing("ch1", &queued, &channels, 1_700_000_099),
             Outgoing::Deliver
@@ -1617,20 +1691,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_channel_runs_a_bounded_number_of_requests_and_closing_it_cancels_them() {
+        let mut channels = open_channel(1_700_000_100);
+        let channel = channels.get_mut("ch1").unwrap();
+        let mut waiting = Vec::new();
+        for _ in 0..CHANNEL_REQUESTS {
+            let (held, gone) = tokio::sync::oneshot::channel::<()>();
+            assert!(start_request(channel, async move {
+                let _held = held;
+                std::future::pending::<()>().await;
+            }));
+            waiting.push(gone);
+        }
+        assert!(!start_request(channel, async {}));
+        channels.remove("ch1");
+        for gone in waiting {
+            tokio::time::timeout(std::time::Duration::from_secs(5), gone)
+                .await
+                .expect("closing the channel cancels its requests")
+                .unwrap_err();
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_idle_tunneled_stream_ends_when_its_grant_expires() {
-        let (sender, receiver) = tokio::sync::mpsc::channel(4);
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let outbound = Outbound {
+            tx: tx.clone(),
+            budget: Arc::new(tokio::sync::Semaphore::new(QUEUED_BYTES)),
+        };
+        let sink = TunnelSink {
+            name: "ch1".into(),
+            outbound,
+        };
         let expiry = tokio::time::Instant::now() + std::time::Duration::from_secs(200);
-        let forwarder = tokio::spawn(forward_stream("ch1".into(), receiver, tx, expiry));
-        sender
-            .send(artisan_api::Envelope {
-                seq: Some(1),
-                live_revision: 0,
-                event: artisan_api::Event::Reset,
-            })
+        let pump = tokio::spawn(until_expiry("ch1".into(), tx, expiry, async move {
+            crate::events::EnvelopeSink::send(
+                &sink,
+                artisan_api::Envelope {
+                    seq: Some(1),
+                    live_revision: 0,
+                    event: artisan_api::Event::Reset,
+                },
+            )
             .await
             .unwrap();
+            std::future::pending::<()>().await;
+        }));
         let first = rx.recv().await.unwrap();
         assert!(matches!(first, (name, StreamMsg::Frame(_)) if name == "ch1"));
         let last = tokio::time::timeout(std::time::Duration::from_secs(600), rx.recv())
@@ -1639,7 +1747,50 @@ mod tests {
             .unwrap();
         assert!(matches!(last.1, StreamMsg::Expired));
         assert!(tokio::time::Instant::now() >= expiry);
-        forwarder.await.unwrap();
-        drop(sender);
+        pump.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_tunneled_stream_nobody_reads_holds_at_most_the_connection_budget() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        let outbound = Outbound {
+            tx,
+            budget: Arc::new(tokio::sync::Semaphore::new(QUEUED_BYTES)),
+        };
+        let sink = TunnelSink {
+            name: "ch1".into(),
+            outbound: outbound.clone(),
+        };
+        let item = "x".repeat(512 * 1024);
+        let pump = tokio::spawn(async move {
+            loop {
+                let envelope = artisan_api::Envelope {
+                    seq: None,
+                    live_revision: 0,
+                    event: artisan_api::Event::Suggestion {
+                        thread_id: artisan_api::ThreadId("thread".into()),
+                        text: Some(item.clone()),
+                    },
+                };
+                if crate::events::EnvelopeSink::send(&sink, envelope)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        for _ in 0..10_000 {
+            tokio::task::yield_now().await;
+        }
+        let queued = QUEUED_BYTES - outbound.budget.available_permits();
+        assert!(queued <= QUEUED_BYTES, "{queued} bytes queued");
+        assert!(
+            rx.len() * 512 * 1024 <= QUEUED_BYTES,
+            "{} frames of 512 KiB queued for a reader that never reads",
+            rx.len()
+        );
+        pump.abort();
+        rx.close();
     }
 }
