@@ -314,6 +314,14 @@ impl<V: SectionViews> ShellApplication<V> {
                         tracing::warn!(%error, "could not open URL");
                     }
                 }
+                crate::shell::workspace::SettingsPlatformEffect::OpenNotices => {
+                    if let Err(error) = crate::setup::open_notices() {
+                        tracing::warn!(
+                            error = format!("{error:#}"),
+                            "could not open the third-party notices"
+                        );
+                    }
+                }
                 crate::shell::workspace::SettingsPlatformEffect::CopyText(text) => {
                     if let Err(error) = ctx.clipboard().set_text(text) {
                         tracing::warn!(%error, "could not copy text");

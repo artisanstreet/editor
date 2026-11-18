@@ -7,6 +7,7 @@ mod window;
 use anyhow::{Context as _, Result};
 use artisan_paths::App;
 use model::{Entry, Existing, Setup};
+pub(crate) use payload::open_notices;
 
 pub enum Outcome {
     OpenEditor,

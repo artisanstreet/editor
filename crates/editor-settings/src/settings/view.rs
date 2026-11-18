@@ -65,6 +65,7 @@ pub enum ViewAction {
     McpCancelSignIn(String),
     McpSignOut(String),
     OpenUrl(String),
+    OpenNotices,
     CopyText(String),
     PromptChanged,
     PromptPresentationChanged,
@@ -101,6 +102,7 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         | ViewAction::AccountEdited
         | ViewAction::McpEdited
         | ViewAction::OpenUrl(_)
+        | ViewAction::OpenNotices
         | ViewAction::CopyText(_) => return false,
         ViewAction::PromptPresentationChanged
         | ViewAction::McpPresentationChanged
@@ -197,6 +199,7 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         ViewAction::McpEdited
         | ViewAction::McpPresentationChanged
         | ViewAction::OpenUrl(_)
+        | ViewAction::OpenNotices
         | ViewAction::CopyText(_) => {}
         ViewAction::McpSignIn(server) => _controller.sign_in_mcp(core, &server),
         ViewAction::McpCancelSignIn(server) => _controller.cancel_mcp_sign_in(core, &server),
@@ -377,7 +380,7 @@ pub fn build(
             emit,
         ),
         SettingsPage::Account => super::account_view::page(controller, core, &theme, emit),
-        SettingsPage::About => about(&theme, build_info),
+        SettingsPage::About => about(&theme, build_info, emit),
         SettingsPage::Hosts => hosts(&theme, core),
         _ => ui::column()
             .child(ui::header(&theme, page.label(), page::description(page)))
@@ -453,7 +456,7 @@ fn device_settings_error(
     )
 }
 
-fn about(theme: &ArtisanTheme, build: &BuildInfo) -> Element {
+fn about(theme: &ArtisanTheme, build: &BuildInfo, emit: Rc<dyn Fn(ViewAction)>) -> Element {
     let executable = std::env::current_exe().ok();
     let rows = super::about::rows(build, executable.as_deref())
         .into_iter()
@@ -471,6 +474,28 @@ fn about(theme: &ArtisanTheme, build: &BuildInfo) -> Element {
             None,
             None,
             ui::card(theme, rows),
+        ))
+        .child(ui::section(
+            theme,
+            "Licences",
+            None,
+            None,
+            ui::card(
+                theme,
+                vec![ui::row(
+                    theme,
+                    "Third-party notices",
+                    "Licences of the fonts, icons and libraries in the Editor, ae and Forge.",
+                    Some(ui::button(
+                        theme,
+                        "about-open-notices",
+                        "Open",
+                        ButtonTone::Quiet,
+                        false,
+                        move || emit(ViewAction::OpenNotices),
+                    )),
+                )],
+            ),
         ))
         .build()
 }

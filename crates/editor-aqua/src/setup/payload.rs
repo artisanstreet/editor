@@ -48,6 +48,14 @@ pub fn write_notices() -> Result<()> {
         .with_context(|| format!("write {}", path.display()))
 }
 
+pub fn open_notices() -> Result<()> {
+    let path = std::env::temp_dir().join("Artisan Editor NOTICES.txt");
+    NOTICES
+        .write(&path)
+        .with_context(|| format!("write {}", path.display()))?;
+    crate::shell::open_path(&path)
+}
+
 #[cfg(test)]
 #[path = "../../tests/setup/payload.rs"]
 mod tests;

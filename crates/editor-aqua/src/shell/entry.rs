@@ -50,6 +50,9 @@ impl Entry {
                 crate::settings::view::ViewAction::OpenUrl(url) => effects.push(
                     crate::shell::workspace::SettingsPlatformEffect::OpenUrl(url.clone()),
                 ),
+                crate::settings::view::ViewAction::OpenNotices => {
+                    effects.push(crate::shell::workspace::SettingsPlatformEffect::OpenNotices);
+                }
                 crate::settings::view::ViewAction::CopyText(text) => effects.push(
                     crate::shell::workspace::SettingsPlatformEffect::CopyText(text.clone()),
                 ),

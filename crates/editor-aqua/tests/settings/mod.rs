@@ -663,3 +663,65 @@ fn an_mcp_form_that_is_saving_keeps_its_fields_and_cannot_be_dismissed() {
         "Cancel cannot hide a save that keeps running"
     );
 }
+
+#[test]
+fn about_page_opens_the_third_party_notices() {
+    use aqua::UiApp;
+    use aqua_core::{InputEvent, Point, PointerButton, PointerEvent, PointerKind};
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::settings::{
+        about::BuildInfo,
+        controller::SettingsController,
+        view::{ViewAction, build},
+    };
+    use editor_aqua::ui::theme::ArtisanTheme;
+    use std::{cell::RefCell, rc::Rc};
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    core.navigate(Screen::Settings(SettingsPage::About));
+    let controller = SettingsController::default();
+    let emitted = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&emitted);
+    let page = build(
+        &controller,
+        &core,
+        ArtisanTheme::resolved(),
+        &BuildInfo::default(),
+        aqua_core::Size::new(900.0, 700.0),
+        true,
+        Rc::new(move |action| sink.borrow_mut().push(action)),
+    );
+    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let mut page = Some(page);
+    app.mount(move |_| page.take().unwrap()).unwrap();
+    app.set_viewport(900.0, 700.0, 1.0);
+    app.build_frame().unwrap();
+    let key = aqua_ui::tree::hash_key(aqua_ui::element::Key::from("about-open-notices"));
+    let button = app
+        .tree()
+        .traverse()
+        .into_iter()
+        .find(|id| {
+            app.tree()
+                .get(*id)
+                .is_some_and(|node| node.key == Some(key))
+        })
+        .expect("the About page offers the third-party notices");
+    let bounds = app.tree().rect(button).unwrap();
+    let pointer = PointerEvent {
+        contact: 0,
+        kind: PointerKind::Mouse,
+        position: Point::new(bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0),
+        buttons: 1,
+    };
+    app.handle_input(&InputEvent::PointerDown(pointer, PointerButton::Primary));
+    app.handle_input(&InputEvent::PointerUp(pointer, PointerButton::Primary));
+    assert!(matches!(
+        emitted.borrow().as_slice(),
+        [ViewAction::OpenNotices]
+    ));
+}

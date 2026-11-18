@@ -17,6 +17,7 @@ pub struct NotificationEffects {
 
 pub enum SettingsPlatformEffect {
     OpenUrl(String),
+    OpenNotices,
     CopyText(String),
 }
 
@@ -1370,6 +1371,9 @@ impl Workspace {
                 crate::settings::view::ViewAction::OpenUrl(url) => self
                     .settings_platform_effects
                     .push(SettingsPlatformEffect::OpenUrl(url.clone())),
+                crate::settings::view::ViewAction::OpenNotices => self
+                    .settings_platform_effects
+                    .push(SettingsPlatformEffect::OpenNotices),
                 crate::settings::view::ViewAction::CopyText(text) => self
                     .settings_platform_effects
                     .push(SettingsPlatformEffect::CopyText(text.clone())),
@@ -1386,6 +1390,9 @@ impl Workspace {
                 crate::settings::view::ViewAction::OpenUrl(url) => self
                     .settings_platform_effects
                     .push(SettingsPlatformEffect::OpenUrl(url.clone())),
+                crate::settings::view::ViewAction::OpenNotices => self
+                    .settings_platform_effects
+                    .push(SettingsPlatformEffect::OpenNotices),
                 crate::settings::view::ViewAction::CopyText(text) => self
                     .settings_platform_effects
                     .push(SettingsPlatformEffect::CopyText(text.clone())),

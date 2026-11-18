@@ -34,6 +34,22 @@ pub(crate) fn open_url(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub(crate) fn open_path(path: &std::path::Path) -> anyhow::Result<()> {
+    aqua::prelude::OpenTarget::path(path)?.execute()?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn open_path(path: &std::path::Path) -> anyhow::Result<()> {
+    aqua::prelude::OpenTarget::path(path)?;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "the Aqua native shell opens files on Windows only",
+    )
+    .into())
+}
+
 #[cfg(not(windows))]
 pub(crate) fn open_url(url: &str) -> anyhow::Result<()> {
     aqua::prelude::OpenTarget::url(url)?;
