@@ -20,7 +20,6 @@ aqua-ui = { workspace = true }
 artisan-api = { workspace = true, features = ["tls"] }
 artisan-mentions.workspace = true
 editor-assets.workspace = true
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

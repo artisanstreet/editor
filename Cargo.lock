@@ -1621,7 +1621,6 @@ dependencies = [
 name = "editor-composer"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "aqua-core",
  "aqua-media",

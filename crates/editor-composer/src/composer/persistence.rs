@@ -39,6 +39,23 @@ struct Inner {
     cancelled: CancellationToken,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum PostMessageError {
+    #[error("create thread {thread}")]
+    CreateThread {
+        thread: ThreadId,
+        #[source]
+        source: editor_core::client::CallError,
+    },
+    #[error("send message {message} to thread {thread}")]
+    Send {
+        thread: ThreadId,
+        message: ItemId,
+        #[source]
+        source: editor_core::client::CallError,
+    },
+}
+
 #[derive(Clone)]
 pub struct DraftHandle(Arc<Inner>);
 
@@ -509,16 +526,26 @@ impl DraftHandle {
                 );
                 let result = async {
                     if let Some(create) = &request.create {
-                        client.create_thread(create).await?;
+                        client.create_thread(create).await.map_err(|source| {
+                            PostMessageError::CreateThread {
+                                thread: request.thread.clone(),
+                                source,
+                            }
+                        })?;
                     }
                     client
                         .send_message(&request.thread, &request.message)
-                        .await?;
-                    Ok::<(), anyhow::Error>(())
+                        .await
+                        .map(drop)
+                        .map_err(|source| PostMessageError::Send {
+                            thread: request.thread.clone(),
+                            message: request.message.id.clone(),
+                            source,
+                        })
                 }
                 .instrument(span)
                 .await
-                .map_err(|error| format!("{error:#}"));
+                .map_err(|error| diagnostics::chain(&error));
                 if let Err(error) = &result {
                     tracing::warn!(
                         thread = %request.thread,
