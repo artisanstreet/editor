@@ -25,14 +25,54 @@ pub(crate) enum XValue {
     Text(String),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SeriesData {
+    Values(Vec<Option<f64>>),
+    Points(Vec<(XValue, Option<f64>)>),
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(try_from = "RawSeries")]
 pub(crate) struct SeriesSpec {
-    #[serde(default)]
     pub(crate) name: String,
+    pub(crate) data: SeriesData,
+}
+
+#[derive(Deserialize)]
+struct RawSeries {
     #[serde(default)]
-    pub(crate) values: Option<Vec<Option<f64>>>,
+    name: String,
     #[serde(default)]
-    pub(crate) points: Option<Vec<(XValue, Option<f64>)>>,
+    values: Option<Vec<Option<f64>>>,
+    #[serde(default)]
+    points: Option<Vec<(XValue, Option<f64>)>>,
+}
+
+impl TryFrom<RawSeries> for SeriesSpec {
+    type Error = String;
+
+    fn try_from(raw: RawSeries) -> Result<Self, String> {
+        let data = match (raw.values, raw.points) {
+            (Some(values), None) => SeriesData::Values(values),
+            (None, Some(points)) => SeriesData::Points(points),
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "series `{}` gives both `values` and `points`; give one",
+                    raw.name
+                ));
+            }
+            (None, None) => {
+                return Err(format!(
+                    "series `{}` gives neither `values` nor `points`",
+                    raw.name
+                ));
+            }
+        };
+        Ok(Self {
+            name: raw.name,
+            data,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -237,3 +277,7 @@ pub(crate) fn press(
         }
     })
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/ui/rich/charts/chart.rs"]
+mod tests;

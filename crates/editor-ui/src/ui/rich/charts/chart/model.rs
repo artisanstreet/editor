@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use super::super::super::kit;
 use super::super::scale::{Domain, Ticks, exact, f64_of, index_of, nice_ticks};
-use super::{Axis, ChartSpec, Mark, XValue, series_name};
+use super::{Axis, ChartSpec, Mark, SeriesData, XValue, series_name};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum XScale {
@@ -45,13 +45,16 @@ impl Model {
         let text_points = spec
             .series
             .iter()
-            .filter_map(|series| series.points.as_ref())
+            .filter_map(|series| match &series.data {
+                SeriesData::Points(points) => Some(points),
+                SeriesData::Values(_) => None,
+            })
             .flatten()
             .any(|(x, _)| matches!(x, XValue::Text(_)));
         let values_only = spec
             .series
             .iter()
-            .any(|series| series.values.is_some() && series.points.is_none());
+            .any(|series| matches!(series.data, SeriesData::Values(_)));
         let categorical = spec.categories.is_some() || text_points || values_only;
         let mut model = if categorical {
             Self::categorical(spec)
@@ -82,8 +85,10 @@ impl Model {
         let longest = spec
             .series
             .iter()
-            .filter(|series| series.points.is_none())
-            .filter_map(|series| series.values.as_ref().map(Vec::len))
+            .filter_map(|series| match &series.data {
+                SeriesData::Values(values) => Some(values.len()),
+                SeriesData::Points(_) => None,
+            })
             .max()
             .unwrap_or(0);
         while names.len() < longest {
@@ -95,13 +100,13 @@ impl Model {
         }
         let mut series = Vec::with_capacity(spec.series.len());
         for (position, spec) in spec.series.iter().enumerate() {
-            let points = match (&spec.values, &spec.points) {
-                (Some(values), None) => values
+            let points = match &spec.data {
+                SeriesData::Values(values) => values
                     .iter()
                     .enumerate()
                     .map(|(at, value)| (f64_of(at), finite(*value)))
                     .collect(),
-                (_, Some(points)) => points
+                SeriesData::Points(points) => points
                     .iter()
                     .map(|(x, y)| {
                         let name = match x {
@@ -115,7 +120,6 @@ impl Model {
                         (f64_of(at), finite(*y))
                     })
                     .collect(),
-                (None, None) => Vec::new(),
             };
             series.push(Series {
                 name: series_name(&spec.name, position).to_string(),
@@ -136,15 +140,16 @@ impl Model {
             .enumerate()
             .map(|(position, spec)| Series {
                 name: series_name(&spec.name, position).to_string(),
-                points: spec
-                    .points
-                    .iter()
-                    .flatten()
-                    .filter_map(|(x, y)| match x {
-                        XValue::Number(x) if x.is_finite() => Some((*x, finite(*y))),
-                        XValue::Number(_) | XValue::Text(_) => None,
-                    })
-                    .collect(),
+                points: match &spec.data {
+                    SeriesData::Points(points) => points.as_slice(),
+                    SeriesData::Values(_) => &[],
+                }
+                .iter()
+                .filter_map(|(x, y)| match x {
+                    XValue::Number(x) if x.is_finite() => Some((*x, finite(*y))),
+                    XValue::Number(_) | XValue::Text(_) => None,
+                })
+                .collect(),
             })
             .collect();
         Self {
@@ -350,7 +355,13 @@ impl Model {
     }
 }
 
-pub(crate) fn y_ticks(tracks: &[Track], view: Domain, mark: Mark, stacked: bool, axis: &Axis) -> Ticks {
+pub(crate) fn y_ticks(
+    tracks: &[Track],
+    view: Domain,
+    mark: Mark,
+    stacked: bool,
+    axis: &Axis,
+) -> Ticks {
     let with_base = stacked || matches!(mark, Mark::Bar | Mark::Area);
     let values = tracks
         .iter()
