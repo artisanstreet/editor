@@ -927,3 +927,42 @@ fn engine_sign_in_can_be_cancelled_while_busy_and_enter_submits_the_code() {
         ""
     );
 }
+
+#[test]
+fn an_mcp_sign_in_that_is_still_opening_can_be_cancelled() {
+    use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::settings::{
+        controller::SettingsController,
+        view::{ViewAction, dispatch},
+    };
+    use serde_json::json;
+    use std::{cell::RefCell, rc::Rc};
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    let (_silent, id) = silent_host(&mut core, "Desk");
+    core.host_mut(&id).unwrap().settings.insert(
+        "mcp_servers".into(),
+        json!([{"name": "linear", "url": "https://mcp.linear.app/mcp"}]),
+    );
+    core.navigate(Screen::Settings(SettingsPage::Extensions));
+    let mut settings = SettingsController::default();
+    settings.sync(&mut core);
+    let _started = core.start_mcp_sign_in(&id, "linear", false);
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let sink = actions.clone();
+    let mut app = render_settings(
+        &settings,
+        &core,
+        Rc::new(move |action| sink.borrow_mut().push(action)),
+    );
+    let texts = test_support::editor::ui::painted_texts(&app);
+    assert!(texts.iter().any(|text| text == "Opening…"), "{texts:?}");
+    test_support::editor::ui::click(&mut app, "mcp-cancel-sign-in-linear");
+    for action in actions.borrow_mut().drain(..) {
+        dispatch(&mut settings, &mut core, action);
+    }
+    assert!(core.mcp_sign_in(&id, "linear").is_none());
+}

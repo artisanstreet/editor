@@ -95,20 +95,38 @@ fn controls(
                 ViewAction::McpCancelSignIn(name.into()),
             ),
         ],
-        Some((McpSignInPhase::Starting | McpSignInPhase::Waiting, _)) => vec![make(
-            "busy",
-            "Opening…",
-            ButtonTone::Neutral,
-            true,
-            ViewAction::McpEdited,
-        )],
-        Some((McpSignInPhase::Finishing, _)) => vec![make(
-            "busy",
-            "Signing in…",
-            ButtonTone::Neutral,
-            true,
-            ViewAction::McpEdited,
-        )],
+        Some((McpSignInPhase::Starting | McpSignInPhase::Waiting, _)) => vec![
+            make(
+                "busy",
+                "Opening…",
+                ButtonTone::Neutral,
+                true,
+                ViewAction::McpEdited,
+            ),
+            make(
+                "cancel-sign-in",
+                "Cancel",
+                ButtonTone::Quiet,
+                false,
+                ViewAction::McpCancelSignIn(name.into()),
+            ),
+        ],
+        Some((McpSignInPhase::Finishing, _)) => vec![
+            make(
+                "busy",
+                "Signing in…",
+                ButtonTone::Neutral,
+                true,
+                ViewAction::McpEdited,
+            ),
+            make(
+                "cancel-sign-in",
+                "Cancel",
+                ButtonTone::Quiet,
+                false,
+                ViewAction::McpCancelSignIn(name.into()),
+            ),
+        ],
         Some((McpSignInPhase::Failed(_), _)) => vec![make(
             "sign-in",
             "Try again",
