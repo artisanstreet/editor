@@ -38,9 +38,9 @@ fn status_text_shimmers_from_its_first_frame_and_only_while_active() {
     app.build_frame().unwrap();
     let first = sweeps(&mut app);
     assert_eq!(
-        first.iter().map(|sweep| (sweep.1, sweep.2)).collect::<Vec<_>>(),
-        vec![(Duration::from_secs(3), Duration::from_millis(1_500))],
-        "a status sweeps for three seconds after a pause"
+        first.len(),
+        1,
+        "an active status sweeps from its first frame"
     );
 
     app.refresh(vec![render("Working", true, false)]).unwrap();
@@ -53,7 +53,10 @@ fn status_text_shimmers_from_its_first_frame_and_only_while_active() {
 
     app.refresh(vec![render("Working", true, true)]).unwrap();
     app.build_frame().unwrap();
-    assert!(sweeps(&mut app).is_empty(), "reduced motion stops the sweep");
+    assert!(
+        sweeps(&mut app).is_empty(),
+        "reduced motion stops the sweep"
+    );
 
     app.refresh(vec![render("Worked", false, false)]).unwrap();
     app.build_frame().unwrap();

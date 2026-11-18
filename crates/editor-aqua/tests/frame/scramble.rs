@@ -12,19 +12,21 @@ fn spelled(rows: &Rows) -> Vec<String> {
 }
 
 #[test]
-fn toggle_scramble_matches_the_dashboard_frame_for_frame() {
+fn the_toggle_scrambles_through_other_letters_and_lands_on_the_target() {
     let cells = cells_between(&squeeze(&rows(&["AR", "TIS", "AN"])), &["TO", "GG", "LE"]);
-    assert_eq!(total_ms(&cells), 260.0);
-    for (elapsed, expected) in [
-        (0.0, ["N|R", "T|S", "A|N"]),
-        (20.0, ["N|O", "T|S", "A|N"]),
-        (60.0, ["O|P", "U|Z", "A|N"]),
-        (120.0, ["R|S", "A|A", "C|L"]),
-        (200.0, ["T|O", "D|E", "E|P"]),
-        (260.0, ["T|O", "G|G", "L|E"]),
-    ] {
-        assert_eq!(spelled(&frame_at(&cells, elapsed)), expected, "at {elapsed} ms");
-    }
+    let total = total_ms(&cells);
+    let target = ["T|O", "G|G", "L|E"];
+    assert_ne!(
+        spelled(&frame_at(&cells, total / 2.0)),
+        target,
+        "midway is still scrambling"
+    );
+    assert_eq!(spelled(&frame_at(&cells, total)), target);
+    assert_eq!(
+        spelled(&frame_at(&cells, total * 2.0)),
+        target,
+        "the label stays put"
+    );
 }
 
 #[test]

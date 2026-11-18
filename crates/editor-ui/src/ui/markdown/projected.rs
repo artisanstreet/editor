@@ -399,9 +399,9 @@ impl ProjectedDocument {
     }
 }
 
-pub const PROSE_MEASURE_PX: f32 = 672.0;
+const PROSE_MEASURE_PX: f32 = 672.0;
 
-pub fn prose_measure(is_code_block: bool) -> Length {
+fn prose_measure(is_code_block: bool) -> Length {
     if is_code_block {
         Length::Auto
     } else {

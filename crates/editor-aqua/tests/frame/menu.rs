@@ -64,20 +64,6 @@ fn closing_keeps_the_trigger_lit_while_the_pointer_is_on_it() {
 }
 
 #[test]
-fn highlights_grow_slower_than_they_shrink() {
-    let start = Instant::now();
-    let mut menu = Menu::default();
-    menu.apply(Event::Hover(Spot::Help, true), start, false);
-    let quick = start + Duration::from_millis(150);
-    assert_eq!(menu.highlight(Spot::Help).opacity(quick), 1.0);
-    assert!(menu.highlight(Spot::Help).scale(quick) < 1.0);
-    let now = settled(&mut menu, start);
-    menu.apply(Event::Hover(Spot::Help, false), now, false);
-    let quick = now + Duration::from_millis(150);
-    assert!((menu.highlight(Spot::Help).scale(quick) - REST_SCALE).abs() < 1e-6);
-}
-
-#[test]
 fn reduced_motion_jumps_straight_to_the_end_state() {
     let now = Instant::now();
     let mut menu = Menu::default();

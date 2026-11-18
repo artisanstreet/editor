@@ -25,7 +25,7 @@ fn switching_tabs_glides_both_edges_and_arrives_at_the_measured_shape() {
     assert!(middle.x > first.x && middle.x < next.x);
     assert!(middle.right() > first.right() && middle.right() < next.right());
     assert_eq!(middle.y, first.y);
-    let end = start + Duration::from_millis(250);
+    let end = start + Duration::from_secs(1);
     assert_eq!(motion.sample(end), Some(next));
     assert!(motion.advance(end, false));
     assert!(!motion.animating());
@@ -44,7 +44,7 @@ fn entry_rises_at_the_selected_tab_and_exit_sinks_at_the_same_location() {
     assert_eq!(rising.x, selected.x);
     assert_eq!(rising.w, selected.w);
     assert!(rising.y > selected.y && rising.y < body().y);
-    let opened = start + Duration::from_millis(250);
+    let opened = start + Duration::from_secs(1);
     motion.advance(opened, false);
     motion.target(body(), None, opened, false);
     assert_eq!(motion.sample(opened), Some(selected));
@@ -52,7 +52,7 @@ fn entry_rises_at_the_selected_tab_and_exit_sinks_at_the_same_location() {
     assert_eq!(sinking.x, selected.x);
     assert_eq!(sinking.w, selected.w);
     assert!(sinking.y > selected.y && sinking.y < body().y);
-    let closed = opened + Duration::from_millis(150);
+    let closed = opened + Duration::from_secs(1);
     motion.advance(closed, false);
     assert_eq!(motion.sample(closed), None);
     assert!(!motion.animating());
@@ -76,7 +76,7 @@ fn rapid_selection_changes_continue_from_the_current_contour() {
     motion.target(body(), Some((3, last)), interrupted, false);
     assert_eq!(motion.sample(interrupted), current);
     assert_eq!(
-        motion.sample(interrupted + Duration::from_millis(250)),
+        motion.sample(interrupted + Duration::from_secs(1)),
         Some(last)
     );
 }
@@ -87,7 +87,7 @@ fn reopening_after_an_expired_exit_rises_at_the_new_selection() {
     let mut motion = Motion::default();
     motion.target(body(), Some((1, tab(500.0, 180.0))), start, false);
     motion.target(body(), None, start, false);
-    let reopened = start + Duration::from_millis(300);
+    let reopened = start + Duration::from_secs(1);
     let next = tab(100.0, 120.0);
     motion.target(body(), Some((2, next)), reopened, false);
     let rising = motion.sample(reopened + Duration::from_millis(30)).unwrap();

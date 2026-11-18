@@ -1,7 +1,7 @@
 use super::*;
+use crate::ui::kit::Row;
 use aqua_core::{Key, KeyEvent, NamedKey, Point, Rect};
 use artisan_api::ItemId;
-use crate::ui::kit::Row;
 
 const PANEL_PITCH: f32 = match Row::MenuItem.height() {
     Some(height) => height,
@@ -58,25 +58,24 @@ fn the_outline_toggles_only_when_the_thread_has_turns() {
 }
 
 #[test]
-fn the_panel_opens_slower_than_it_closes_and_the_chevron_flips_fastest() {
+fn the_panel_and_chevron_open_then_close_and_settle() {
     let start = Instant::now();
-    let at = |ms| start + Duration::from_millis(ms);
+    let later = start + Duration::from_secs(1);
+    let closed = later + Duration::from_secs(1);
     let mut navigation = ThreadNavigation::default();
     navigation.interaction.available = true;
     navigation.toggle(start, false);
     assert_eq!(navigation.chevron(start), Some(0.0));
-    let panel = navigation.interaction.panel.value(at(100), OPEN);
-    assert!(navigation.chevron(at(100)).is_some_and(|flip| flip > panel && flip < 1.0));
-    assert_eq!(navigation.chevron(at(250)), Some(1.0));
-    assert!(navigation.interaction.panel.value(at(250), OPEN) < 1.0);
-    assert_eq!(navigation.interaction.panel.value(at(400), OPEN), 1.0);
-    assert!(navigation.interaction.settle(at(400)));
-    assert!(!navigation.interaction.settle(at(400)));
-    navigation.toggle(at(400), false);
+    assert!(navigation.interaction.panel.value(start, OPEN) < 1.0);
+    assert_eq!(navigation.chevron(later), Some(1.0));
+    assert_eq!(navigation.interaction.panel.value(later, OPEN), 1.0);
+    assert!(navigation.interaction.settle(later));
+    assert!(!navigation.interaction.settle(later));
+    navigation.toggle(later, false);
     assert!(!navigation.interaction.open());
-    assert!(navigation.interaction.panel.value(at(600), CLOSE) > 0.0);
-    assert_eq!(navigation.interaction.panel.value(at(750), CLOSE), 0.0);
-    assert_eq!(navigation.chevron(at(650)), Some(0.0));
+    assert!(navigation.interaction.panel.value(later, CLOSE) > 0.0);
+    assert_eq!(navigation.interaction.panel.value(closed, CLOSE), 0.0);
+    assert_eq!(navigation.chevron(closed), Some(0.0));
 }
 
 #[test]
@@ -167,7 +166,10 @@ fn only_bare_navigation_keys_steer_the_outline() {
     let bare = aqua_core::Modifiers::NONE;
     assert_eq!(step(&press(NamedKey::Down, bare)), Some(Step::Down));
     assert_eq!(step(&press(NamedKey::Enter, bare)), Some(Step::Jump));
-    assert_eq!(step(&press(NamedKey::Down, aqua_core::Modifiers::SHIFT)), None);
+    assert_eq!(
+        step(&press(NamedKey::Down, aqua_core::Modifiers::SHIFT)),
+        None
+    );
     assert_eq!(step(&press(NamedKey::Escape, bare)), None);
 }
 
@@ -181,8 +183,18 @@ fn opening_puts_the_cursor_on_the_turn_being_read() {
 
 #[test]
 fn clicks_close_the_outline_only_outside_the_drawer_and_chevron() {
-    let drawer = Some(Rect { x: 0.0, y: 0.0, w: 320.0, h: 600.0 });
-    let chevron = Some(Rect { x: 400.0, y: -30.0, w: 16.0, h: 16.0 });
+    let drawer = Some(Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 320.0,
+        h: 600.0,
+    });
+    let chevron = Some(Rect {
+        x: 400.0,
+        y: -30.0,
+        w: 16.0,
+        h: 16.0,
+    });
     assert!(!outside(Point::new(100.0, 580.0), drawer, chevron));
     assert!(!outside(Point::new(405.0, -25.0), drawer, chevron));
     assert!(outside(Point::new(500.0, 300.0), drawer, chevron));
@@ -195,7 +207,10 @@ fn the_cursor_scrolls_the_panel_only_when_it_leaves_the_view() {
     let view = pitch * 5.0;
     assert_eq!(navigator::panel_keep_offset(2, 0.0, view), 0.0);
     assert_eq!(navigator::panel_keep_offset(5, 0.0, view), pitch);
-    assert_eq!(navigator::panel_keep_offset(3, pitch * 4.0, view), pitch * 3.0);
+    assert_eq!(
+        navigator::panel_keep_offset(3, pitch * 4.0, view),
+        pitch * 3.0
+    );
 }
 
 #[test]

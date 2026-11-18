@@ -24,7 +24,7 @@ mod source_index;
 pub mod stored;
 mod table;
 mod table_view;
-pub use projected::{PROSE_MEASURE_PX, leaf_signatures, prose_measure};
+pub use projected::leaf_signatures;
 pub use source_index::{
     BlockShape, IndexedLeaf, IndexedLeafContent, LeafContext, LeafSpacing, ListLevel,
     MarkdownIndex, MarkdownIndexError, normalize_record,

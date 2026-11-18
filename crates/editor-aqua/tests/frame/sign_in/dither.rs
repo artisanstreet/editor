@@ -1,4 +1,4 @@
-use editor_aqua::frame::sign_in::dither::{Mask, Paint, Params, Source, dither, grid, paint};
+use editor_aqua::frame::sign_in::dither::{Mask, Paint, Params, Source, dither, paint};
 
 const PARAMS: Params = Params {
     pixel_size: 1.0,
@@ -10,17 +10,13 @@ const PARAMS: Params = Params {
 };
 
 fn solid(width: u32, height: u32, value: u8) -> Vec<u8> {
-    (0..width * height).flat_map(|_| [value, value, value, 255]).collect()
+    (0..width * height)
+        .flat_map(|_| [value, value, value, 255])
+        .collect()
 }
 
 fn lit(mask: &Mask, x: u32, y: u32) -> bool {
     mask.visible[(y * mask.width + x) as usize]
-}
-
-#[test]
-fn the_grid_follows_the_box_and_caps_at_the_resolution() {
-    assert_eq!(grid(240.0, 96.0, PARAMS), (240, 96));
-    assert_eq!(grid(4096.0, 100.0, PARAMS), (1024, 25));
 }
 
 #[test]

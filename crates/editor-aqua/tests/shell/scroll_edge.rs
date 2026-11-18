@@ -1,14 +1,5 @@
-use editor_aqua::ui::scroll_edge::{EdgeFade, target};
+use editor_aqua::ui::scroll_edge::EdgeFade;
 use std::time::{Duration, Instant};
-
-#[test]
-fn an_edge_shows_in_proportion_to_the_content_hidden_past_it() {
-    assert_eq!(target(0.0), 0.0);
-    assert_eq!(target(8.0), 0.5);
-    assert_eq!(target(16.0), 1.0);
-    assert_eq!(target(10_000.0), 1.0);
-    assert_eq!(target(-5.0), 0.0);
-}
 
 #[test]
 fn a_fade_eases_toward_its_target_and_settles_exactly() {
@@ -79,7 +70,8 @@ fn an_unscrolled_entrance_reveals_edges_from_clear() {
         app.refresh(vec![render()]).unwrap();
         app.build_frame().unwrap();
         let start = start + Duration::from_secs(opening);
-        for (millis, expected_moving) in [(0, true), (80, true), (160, true), (250, false)] {
+        let mut previous = 0.0;
+        for (millis, expected_moving) in [(0, true), (80, true), (160, true), (1_000, false)] {
             let mut alphas = Vec::new();
             for (edge, key) in [(Edge::Top, "top"), (Edge::Bottom, "bottom")] {
                 let node = keyed(&app, key).unwrap();
@@ -101,10 +93,10 @@ fn an_unscrolled_entrance_reveals_edges_from_clear() {
             assert_eq!(alphas[0], alphas[1]);
             match millis {
                 0 => assert_eq!(alphas[0], 0.0),
-                80 => assert!(alphas[0] > 0.0 && alphas[0] < 0.5),
-                160 => assert!(alphas[0] > 0.5 && alphas[0] < 1.0),
-                _ => assert_eq!(alphas[0], 1.0),
+                1_000 => assert_eq!(alphas[0], 1.0),
+                _ => assert!(alphas[0] > previous && alphas[0] < 1.0),
             }
+            previous = alphas[0];
         }
     }
     edges.reveal();

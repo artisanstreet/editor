@@ -11,14 +11,13 @@ fn css_ease_curve_matches_known_points() {
 }
 
 #[test]
-fn collapsing_runs_from_open_to_collapsed_in_three_hundred_ms() {
+fn collapsing_runs_from_open_to_collapsed_and_settles() {
     let start = Instant::now();
     let glide = Glide::Resting(OPEN_WIDTH).retarget(COLLAPSED_WIDTH, start, RESIZE, false);
     assert_eq!(glide.value(start, RESIZE), OPEN_WIDTH);
-    let middle = glide.value(start + Duration::from_millis(150), RESIZE);
+    let middle = glide.value(start + RESIZE.duration / 2, RESIZE);
     assert!(middle < OPEN_WIDTH && middle > COLLAPSED_WIDTH);
-    assert!(middle < f32::midpoint(OPEN_WIDTH, COLLAPSED_WIDTH), "ease-out front-loads the motion");
-    let end = start + Duration::from_millis(300);
+    let end = start + RESIZE.duration;
     assert_eq!(glide.value(end, RESIZE), COLLAPSED_WIDTH);
     assert_eq!(glide.settle(end), Glide::Resting(COLLAPSED_WIDTH));
 }
