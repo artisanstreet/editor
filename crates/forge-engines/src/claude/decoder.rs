@@ -66,6 +66,7 @@ pub struct ClaudeDecoder {
     current: Option<String>,
     messages: HashMap<String, Message>,
     tools: HashMap<String, Tool>,
+    retired: Retired,
     /// Open `can_use_tool` requests by item key.
     pending: HashMap<String, Pending>,
     replies: Vec<Value>,
@@ -125,6 +126,32 @@ impl Said {
 
     fn folded(self) -> EngineEvent {
         assistant_text(self.key, None, self.text, Phase::Commentary)
+    }
+}
+
+const RETIRED_TOOLS: usize = 4096;
+
+#[derive(Default)]
+struct Retired {
+    order: VecDeque<String>,
+    ids: HashSet<String>,
+}
+
+impl Retired {
+    fn insert(&mut self, id: String) {
+        if !self.ids.insert(id.clone()) {
+            return;
+        }
+        self.order.push_back(id);
+        while self.order.len() > RETIRED_TOOLS
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.ids.remove(&oldest);
+        }
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.ids.contains(id)
     }
 }
 
@@ -213,6 +240,7 @@ impl ClaudeDecoder {
         let events = self.feed_raw(&frame)?;
         let events = self.reasoning_summary.normalize(events, true);
         let mut events = crate::retained::settle(self, events);
+        self.retire_settled();
         let waiting = !self.in_turn() && self.background > 0;
         if std::mem::replace(&mut self.waiting_on_background, waiting) != waiting {
             events.push(EngineEvent::background_wait(
@@ -256,7 +284,31 @@ impl ClaudeDecoder {
     /// to [`Self::take_replies`].
     pub fn answer(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
         let events = self.answer_raw(key, answer);
-        crate::retained::settle(self, events)
+        let events = crate::retained::settle(self, events);
+        self.retire_settled();
+        events
+    }
+
+    fn retire_settled(&mut self) {
+        let settled: Vec<String> = self
+            .tools
+            .iter()
+            .filter(|(id, tool)| {
+                tool.status.is_terminal()
+                    && !tool.background
+                    && !matches!(tool.kind, ItemKind::Agent { .. })
+                    && !self.pending.contains_key(*id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in settled {
+            self.tools.remove(&id);
+            self.retired.insert(id);
+        }
+    }
+
+    fn known_tool(&self, id: &str) -> bool {
+        self.tools.contains_key(id) || self.retired.contains(id)
     }
 
     fn answer_raw(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
@@ -923,7 +975,7 @@ impl ClaudeDecoder {
         parent: Option<String>,
         out: &mut Vec<EngineEvent>,
     ) {
-        if self.tools.contains_key(id) {
+        if self.known_tool(id) {
             return;
         }
         if let Err(message) = validate_input(name, input) {
@@ -1228,7 +1280,7 @@ impl ClaudeDecoder {
         let key = str_at(request, "tool_use_id")
             .unwrap_or(request_id)
             .to_owned();
-        if !self.tools.contains_key(&key) {
+        if !self.known_tool(&key) {
             if let Err(message) = validate_input(name, &input) {
                 self.refuse(request_id, &message);
                 out.push(error_item(

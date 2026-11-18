@@ -165,3 +165,37 @@ fn peer_messages_without_ids_keep_separate_rows() {
     assert_eq!(keys.len(), 2, "{keys:?}");
     assert_ne!(keys[0], keys[1]);
 }
+
+fn shell_call(n: usize) -> Value {
+    json!({ "type": "assistant", "message": { "id": format!("m{n}"), "content": [
+        { "type": "tool_use", "id": format!("t{n}"), "name": "Bash", "input": { "command": "ls" } }
+    ] } })
+}
+
+#[test]
+fn a_long_run_keeps_only_a_bounded_record_of_settled_tools() {
+    let mut decoder = ClaudeDecoder::default();
+    for n in 0..10_000 {
+        feed(&mut decoder, &shell_call(n)).unwrap();
+        feed(
+            &mut decoder,
+            &json!({ "type": "user", "message": { "content": [
+                { "type": "tool_result", "tool_use_id": format!("t{n}"), "content": "ok" }
+            ] } }),
+        )
+        .unwrap();
+    }
+    assert!(
+        decoder.tools.len() < 16,
+        "{} tools kept",
+        decoder.tools.len()
+    );
+    assert!(decoder.retired.ids.len() <= 4096);
+    let replayed = feed(&mut decoder, &shell_call(9_999)).unwrap();
+    assert!(
+        !replayed
+            .iter()
+            .any(|event| matches!(event, EngineEvent::Item { key, .. } if key == "t9999")),
+        "a replayed call to a settled tool must not reopen it: {replayed:?}"
+    );
+}
