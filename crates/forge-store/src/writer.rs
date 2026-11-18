@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehav
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 pub type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
@@ -129,7 +129,7 @@ pub struct Writer {
     conn: Connection,
     durability: Durability,
     head: Arc<AtomicU64>,
-    events: Option<broadcast::Sender<Envelope>>,
+    events: Option<crate::feed::Feed>,
     hot: Arc<crate::hot::HotPages>,
     commits: Arc<AtomicU64>,
 }
@@ -138,7 +138,7 @@ impl Writer {
     pub(crate) fn new(
         conn: Connection,
         head: Arc<AtomicU64>,
-        events: Option<broadcast::Sender<Envelope>>,
+        events: Option<crate::feed::Feed>,
         hot: Arc<crate::hot::HotPages>,
         commits: Arc<AtomicU64>,
     ) -> Result<Self> {
@@ -197,9 +197,9 @@ impl Writer {
         self.commits.fetch_add(1, Ordering::AcqRel);
         self.hot.committed(&events);
         self.head.fetch_max(seq, Ordering::AcqRel);
-        if let Some(sender) = &self.events {
+        if let Some(feed) = &self.events {
             for envelope in events {
-                sender.send(envelope).ok();
+                feed.send(envelope);
             }
         }
         Ok(result)

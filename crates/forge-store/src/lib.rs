@@ -24,6 +24,7 @@ pub mod coordination;
 pub mod discovery;
 mod encoded;
 mod error;
+mod feed;
 pub mod hot;
 mod items;
 mod pairing;
@@ -61,6 +62,7 @@ pub use blobs::{
 pub use collection::AnswerRefused;
 pub use content::{ContentError, Damage};
 pub use error::StorageError;
+pub use feed::Subscription;
 pub use items::{
     AcceptInputsError, Acceptance, AgentByAddressError, AnswerFailure, AnswerQuestionError,
     AwaitingItemsError, BeginRunError, CancelInputsError, CancelledItemsError,
@@ -112,7 +114,10 @@ pub use writer::{InputFailure, SETTINGS_BYTES, UpdateThreadFailure, WriteFailure
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 
-const EVENT_CAPACITY: usize = 8192;
+const CHANGES: feed::Budget = feed::Budget {
+    bytes: 32 * 1024 * 1024,
+    envelopes: 8192,
+};
 const READ_SLOTS: usize = 4;
 const SCAN_SLOTS: usize = 2;
 const READERS_KEPT: usize = READ_SLOTS + SCAN_SLOTS;
@@ -122,6 +127,8 @@ const CHECKPOINT_AFTER_COMMITS: u64 = 512;
 const CHECKPOINT_AFTER: Duration = Duration::from_secs(15);
 const SLOW_READ: std::time::Duration = std::time::Duration::from_millis(500);
 const WRITE_QUEUE_CAPACITY: usize = 256;
+const WRITE_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+const SMALL_WRITE_BYTES: usize = 4 * 1024;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CONTINUE_AFTER_RESTART_KEY: &str = "continue_after_restart";
 pub const MAX_RESTART_CONTINUATIONS: usize = 3;
@@ -266,8 +273,9 @@ struct Inner {
     )]
     checkpoints: std::sync::mpsc::Sender<()>,
     jobs: mpsc::Sender<Job>,
-    events: broadcast::Sender<Envelope>,
-    local_live: broadcast::Sender<Envelope>,
+    queued_write_bytes: Arc<Semaphore>,
+    events: feed::Feed,
+    local_live: feed::Feed,
     revocations: broadcast::Sender<DeviceId>,
     head: Arc<AtomicU64>,
     live_revision: AtomicU64,
@@ -522,7 +530,7 @@ impl Store {
             })?;
         }
 
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let events = feed::Feed::new(CHANGES);
         let head = Arc::new(AtomicU64::new(0));
         let hot = Arc::new(hot::HotPages::default());
         let commits = Arc::new(AtomicU64::new(0));
@@ -573,8 +581,9 @@ impl Store {
                 checkpointer: checkpointer_thread,
                 checkpoints,
                 jobs,
+                queued_write_bytes: Arc::new(Semaphore::new(WRITE_QUEUE_BYTES)),
                 events,
-                local_live: broadcast::channel(EVENT_CAPACITY).0,
+                local_live: feed::Feed::new(CHANGES),
                 revocations: broadcast::channel(64).0,
                 head,
                 live_revision: AtomicU64::new(0),
@@ -623,36 +632,46 @@ impl Store {
     }
 
     #[must_use]
-    pub fn subscribe(&self) -> broadcast::Receiver<Envelope> {
+    pub fn subscribe(&self) -> Subscription {
         self.inner.events.subscribe()
     }
 
+    #[must_use]
+    pub fn retained_change_bytes(&self) -> usize {
+        self.inner.events.retained_bytes()
+    }
+
+    #[must_use]
+    pub fn retained_changes(&self) -> usize {
+        self.inner.events.retained_envelopes()
+    }
+
     pub fn publish_live(&self, event: Event) {
-        self.inner
-            .local_live
-            .send(Envelope {
-                seq: None,
-                live_revision: 0,
-                event: event.clone(),
-            })
-            .ok();
+        self.inner.local_live.send(Envelope {
+            seq: None,
+            live_revision: 0,
+            event: event.clone(),
+        });
         self.relay_live(event);
     }
 
-    pub fn subscribe_local_live(&self) -> broadcast::Receiver<Envelope> {
+    #[must_use]
+    pub fn subscribe_local_live(&self) -> Subscription {
         self.inner.local_live.subscribe()
     }
 
     pub fn relay_live(&self, event: Event) {
         let live_revision = self.inner.live_revision.fetch_add(1, Ordering::AcqRel) + 1;
-        self.inner
-            .events
-            .send(Envelope {
-                seq: None,
-                live_revision,
-                event,
-            })
-            .ok();
+        self.inner.events.send(Envelope {
+            seq: None,
+            live_revision,
+            event,
+        });
+    }
+
+    #[must_use]
+    pub fn queued_write_bytes(&self) -> usize {
+        WRITE_QUEUE_BYTES - self.inner.queued_write_bytes.available_permits()
     }
 
     #[must_use]
@@ -681,7 +700,7 @@ impl Store {
                 if let Some(seq) = envelope.seq {
                     *cursor = (*cursor).max(seq);
                 }
-                self.inner.events.send(envelope).ok();
+                self.inner.events.send(envelope);
             }
         } else {
             *cursor = self.read(read::max_seq).await.map_err(failed)?;
@@ -721,7 +740,17 @@ impl Store {
         E: From<StorageError> + Send + 'static,
         F: FnOnce(&mut Tx<'_>) -> Result<R, E> + Send + 'static,
     {
-        self.write_with(Durability::Background, job).await
+        self.write_with(Durability::Background, SMALL_WRITE_BYTES, job)
+            .await
+    }
+
+    async fn write_carrying<R, E, F>(&self, bytes: usize, job: F) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&mut Tx<'_>) -> Result<R, E> + Send + 'static,
+    {
+        self.write_with(Durability::Background, bytes, job).await
     }
 
     async fn write_acknowledged<R, E, F>(&self, job: F) -> Result<R, E>
@@ -730,20 +759,38 @@ impl Store {
         E: From<StorageError> + Send + 'static,
         F: FnOnce(&mut Tx<'_>) -> Result<R, E> + Send + 'static,
     {
-        self.write_with(Durability::Acknowledged, job).await
+        self.write_with(Durability::Acknowledged, SMALL_WRITE_BYTES, job)
+            .await
     }
 
-    async fn write_with<R, E, F>(&self, durability: Durability, job: F) -> Result<R, E>
+    async fn write_acknowledged_carrying<R, E, F>(&self, bytes: usize, job: F) -> Result<R, E>
     where
         R: Send + 'static,
         E: From<StorageError> + Send + 'static,
         F: FnOnce(&mut Tx<'_>) -> Result<R, E> + Send + 'static,
     {
+        self.write_with(Durability::Acknowledged, bytes, job).await
+    }
+
+    async fn write_with<R, E, F>(&self, durability: Durability, bytes: usize, job: F) -> Result<R, E>
+    where
+        R: Send + 'static,
+        E: From<StorageError> + Send + 'static,
+        F: FnOnce(&mut Tx<'_>) -> Result<R, E> + Send + 'static,
+    {
+        let charged = u32::try_from(bytes.clamp(SMALL_WRITE_BYTES, WRITE_QUEUE_BYTES))
+            .expect("invariant: the write queue's byte budget fits a semaphore");
+        let permit = Arc::clone(&self.inner.queued_write_bytes)
+            .acquire_many_owned(charged)
+            .await
+            .map_err(|_closed| StorageError::WriterStopped)?;
         let (reply, result) = oneshot::channel();
         self.inner
             .jobs
             .send(Box::new(move |writer: &mut Writer| {
-                reply.send(writer.transact(durability, job)).ok();
+                let outcome = writer.transact(durability, job);
+                drop(permit);
+                reply.send(outcome).ok();
             }))
             .await
             .map_err(|_unsent_job| StorageError::WriterStopped)?;

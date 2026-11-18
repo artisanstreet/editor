@@ -71,7 +71,8 @@ impl Store {
         value: serde_json::Value,
     ) -> Result<(), SetSettingError> {
         let saved = key.clone();
-        self.write_acknowledged(move |tx| {
+        let bytes = crate::encoded::len(&value);
+        self.write_acknowledged_carrying(bytes, move |tx| {
             if key == artisan_api::MODEL_CUSTOMIZATIONS_KEY {
                 artisan_api::model_customizations(&value)
                     .map_err(SettingFailure::Customizations)?;
@@ -289,7 +290,7 @@ impl Store {
         base: u64,
         text: String,
     ) -> Result<Result<u64, u64>, SavePromptError> {
-        self.write_acknowledged(move |tx| {
+        self.write_acknowledged_carrying(text.len(), move |tx| {
             let latest = read::prompt_version(tx)?;
             if latest != base {
                 return Ok(Err(latest));
@@ -340,7 +341,8 @@ impl Store {
         request: artisan_api::WriteDraft,
     ) -> Result<artisan_api::DraftWriteResult, SetDraftError> {
         let saved = scope.clone();
-        self.write_acknowledged(move |tx| {
+        let bytes = crate::encoded::len(&request);
+        self.write_acknowledged_carrying(bytes, move |tx| {
             let current = read::draft(tx, &scope)?;
             if current.revision != request.expected_revision {
                 return Ok(artisan_api::DraftWriteResult {

@@ -137,7 +137,8 @@ operation_error!(PendingInputsError(StorageError), "read the pending inputs of t
 impl Store {
     pub async fn upsert_item(&self, new: NewItem) -> Result<Item, UpsertItemError> {
         let (item, thread) = (new.id.clone(), new.thread_id.clone());
-        self.write(move |tx| tx.upsert_item(new))
+        let bytes = crate::encoded::len(&new.kind);
+        self.write_carrying(bytes, move |tx| tx.upsert_item(new))
             .await
             .map_err(|cause| UpsertItemError {
                 item,
@@ -181,7 +182,8 @@ impl Store {
     ) -> Result<(Item, bool), InsertMessageError> {
         let blob_dir = self.inner.blob_dir.clone();
         let (item, thread) = (new.id.clone(), new.thread_id.clone());
-        self.write_acknowledged(move |tx| {
+        let bytes = crate::encoded::len(&new.kind);
+        self.write_acknowledged_carrying(bytes, move |tx| {
             let (item, created) = tx.insert_input(new, &blob_dir)?;
             if created {
                 tx.mark_activity(&item.thread_id, item.seq)?;
@@ -204,7 +206,8 @@ impl Store {
     ) -> Result<(Item, bool, EngineId), SendMessageError> {
         let blob_dir = self.inner.blob_dir.clone();
         let (item, thread) = (message.id.clone(), thread_id.clone());
-        self.write_acknowledged(move |tx| {
+        let bytes = crate::encoded::len(&message);
+        self.write_acknowledged_carrying(bytes, move |tx| {
             tx.send_message(thread_id, message, acceptance, &blob_dir)
         })
         .await

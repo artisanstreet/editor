@@ -50,7 +50,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::broadcast::{self, error::RecvError};
+use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, thiserror::Error)]
@@ -243,7 +243,7 @@ impl ComputerMcp {
             "focused_window":self.desktop.foreground(),"paused":self.paused.load(Ordering::SeqCst)}).to_string()),
             Content::Image { mime_type: "image/png", data: frame.png_base64().map_err(ComputerError::Encode)? }])
     }
-    async fn turned_off(&self, settings: &mut broadcast::Receiver<Envelope>) {
+    async fn turned_off(&self, settings: &mut forge_store::Subscription) {
         loop {
             match settings.recv().await {
                 Ok(Envelope {
@@ -274,7 +274,7 @@ impl ComputerMcp {
     async fn halted(
         &self,
         stop: &CancellationToken,
-        settings: &mut broadcast::Receiver<Envelope>,
+        settings: &mut forge_store::Subscription,
     ) -> Halted {
         tokio::select! {
             () = stop.cancelled() => Halted::RunStopped,

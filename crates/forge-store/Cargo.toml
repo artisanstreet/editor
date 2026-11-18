@@ -37,7 +37,7 @@ memchr = "2.8.3"
 [dev-dependencies]
 divan.workspace = true
 test-support.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [[bench]]
 name = "recall"
