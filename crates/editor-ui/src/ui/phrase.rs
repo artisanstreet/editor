@@ -1,4 +1,4 @@
-use aqua_core::{GpuiTextColor, Transform2D};
+use aqua_core::{GpuiTextColor, Role, Transform2D};
 use aqua_text::{TextStyle, style::FontFeature};
 use aqua_ui::{
     AlignItems, JustifyContent,
@@ -222,11 +222,17 @@ pub fn retained_phrase_or_text(
                 .align(AlignItems::CENTER)
                 .min_width(Length::Px(0.0)),
         )
-        .child(fitting_mask(words.len(), overflow).with_key("mask-start"));
+        .child(
+            fitting_mask(words.len(), overflow)
+                .with_key("mask-start")
+                .aria_hidden(),
+        );
     for (index, word) in words.iter().enumerate() {
         if index > 0 {
             row = row.child(
-                label(" ".to_owned(), &typography, color).with_key(format!("space-{index}")),
+                label(" ".to_owned(), &typography, color)
+                    .with_key(format!("space-{index}"))
+                    .aria_hidden(),
             );
         }
         let content = match &word.motion {
@@ -257,7 +263,8 @@ pub fn retained_phrase_or_text(
                 })
                 .child(content)
                 .build()
-                .with_key(format!("word-{index}")),
+                .with_key(format!("word-{index}"))
+                .aria_hidden(),
         );
     }
     row.child(
@@ -267,10 +274,13 @@ pub fn retained_phrase_or_text(
                     .absolute_at(Some(ellipsis_at.unwrap_or(0.0)), Some(0.0), None, None)
                     .opacity(if ellipsis_at.is_some() { 1.0 } else { 0.0 }),
             )
-            .with_key("ellipsis"),
+            .with_key("ellipsis")
+            .aria_hidden(),
     )
-    .child(mask(false).with_key("mask-end"))
+    .child(mask(false).with_key("mask-end").aria_hidden())
     .build()
+    .role(Role::Text)
+    .aria_label(text)
 }
 
 fn fitting_mask(count: usize, overflow: PhraseOverflow) -> Element {
