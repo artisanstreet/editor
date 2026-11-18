@@ -18,7 +18,7 @@ use authorization::Authorizations;
 use devtools::DevTools;
 use session::BrowserSession;
 
-pub const SIGN_IN_URL: &str = "https://claude.ai/login";
+const SIGN_IN_URL: &str = "https://claude.ai/login";
 const RENEW_URL: &str = "https://claude.ai/new";
 
 const SIGN_IN_TIMEOUT: Duration = Duration::from_mins(10);
@@ -164,7 +164,7 @@ async fn renew_with(
 }
 
 #[must_use]
-pub fn browser_candidates() -> Vec<PathBuf> {
+fn browser_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if cfg!(windows) {
         let roots = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
@@ -215,7 +215,7 @@ pub fn find_browser() -> Option<PathBuf> {
 }
 
 #[must_use]
-pub fn claude_ai_cookies(cookies: &Value) -> Vec<(String, String)> {
+fn claude_ai_cookies(cookies: &Value) -> Vec<(String, String)> {
     cookies
         .as_array()
         .into_iter()
