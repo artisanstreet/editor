@@ -430,6 +430,21 @@ pub fn plan(
             "There is no tool called {name} on the user's machine. Use one of: Read, Write, Edit, Glob, Grep, Bash, TodoWrite, WebFetch, Task, Skill, AskUserQuestion."
         ));
     }
+    if let Some(error) = rules.broken() {
+        let mut reason = String::from(
+            "Every tool is refused until the user repairs a Claude Code settings file, because the permission rules in it could not be read: ",
+        );
+        let mut cause: Option<&dyn std::error::Error> = Some(error);
+        while let Some(error) = cause {
+            write!(reason, "{error}").ok();
+            cause = error.source();
+            if cause.is_some() {
+                reason.push_str(": ");
+            }
+        }
+        reason.push_str(". Tell the user; do not retry.");
+        return Plan::Refuse(reason);
+    }
     let verdict = rules.verdict(call);
     if let Some(Verdict::Deny(reason)) = verdict {
         return Plan::Refuse(reason);
@@ -582,6 +597,16 @@ pub fn preview(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
             },
         ),
     }
+}
+
+#[must_use]
+pub fn refused(call: &Call, cwd: &Path, mcp: &mcp::Servers, reason: &str) -> ItemKind {
+    let mut item = preview(call, cwd, mcp);
+    if let ItemKind::Agent { result, .. } = &mut item {
+        *result = Some(reason.to_owned().into());
+        return item;
+    }
+    finished(item, &Answer::error(reason), None)
 }
 
 /// The `Agent` item a `Task` call becomes.

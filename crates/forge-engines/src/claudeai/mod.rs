@@ -648,7 +648,7 @@ async fn run_call(
                     key,
                     parent: None,
                     status: Status::Declined,
-                    kind: tools::preview(call, &ctx.turn.cwd, &ctx.runtime.mcp),
+                    kind: tools::refused(call, &ctx.turn.cwd, &ctx.runtime.mcp, &reason),
                 },
             )
             .await;

@@ -1617,7 +1617,10 @@ async fn allow_always_holds_for_the_agent_too() {
     let asked: Vec<&str> = log.iter().filter_map(awaiting).collect();
     assert_eq!(asked, ["toolu_1"], "the agent did not ask again");
     let logged = std::fs::read_to_string(&log_file).expect("the log");
-    assert_eq!(logged.split_whitespace().collect::<Vec<_>>(), ["ran", "ran"]);
+    assert_eq!(
+        logged.split_whitespace().collect::<Vec<_>>(),
+        ["ran", "ran"]
+    );
 }
 
 #[tokio::test]
@@ -1749,6 +1752,96 @@ async fn native_compaction_without_a_saved_source_leaf_requires_canonical_fallba
     assert!(error.to_string().contains("saved message UUID"));
     assert!(backend.sent.lock().unwrap().is_empty());
     assert_eq!(*backend.created.lock().unwrap(), 0);
+}
+
+fn write_settings(work: &Path, settings: &str) -> PathBuf {
+    let folder = work.join("home/.claude");
+    std::fs::create_dir_all(&folder).expect("the settings folder");
+    let file = folder.join("settings.json");
+    std::fs::write(&file, settings).expect("the settings");
+    file
+}
+
+#[tokio::test]
+async fn a_settings_file_that_fails_to_load_refuses_tools_until_it_is_repaired() {
+    let work = tempfile::tempdir().expect("a dir");
+    std::fs::write(work.path().join("secret.txt"), "TOPSECRET").expect("the secret");
+    let settings = write_settings(
+        work.path(),
+        r#"{"permissions": {"deny": ["Read(secret.txt)"]"#,
+    );
+    let backend = script(vec![
+        calls(
+            "m1",
+            &[("r1", "Read", json!({ "file_path": "secret.txt" }))],
+        ),
+        answer("m2", "Understood."),
+    ]);
+    let (outcome, log, _) = run(
+        Arc::clone(&backend),
+        turn(work.path(), None, Permissions::Full),
+        nobody(),
+    )
+    .await;
+    assert_eq!(outcome.status, RunStatus::Done);
+    let sent = backend.sent.lock().expect("lock").clone();
+    assert!(
+        !sent[1].prompt.contains("TOPSECRET"),
+        "a policy that failed to load is not an empty policy"
+    );
+    assert!(
+        sent[1].prompt.contains("not valid JSON"),
+        "the model is told why: {}",
+        sent[1].prompt
+    );
+    let shown = log.iter().find_map(|event| {
+        if let EngineEvent::Item {
+            key,
+            status: Status::Declined,
+            kind:
+                ItemKind::Tool {
+                    output: Some(output),
+                    ..
+                },
+            ..
+        } = event
+            && key == "r1"
+        {
+            output.text.inline().map(str::to_owned)
+        } else {
+            None
+        }
+    });
+    let shown = shown.expect("the refused call shows why");
+    assert!(
+        shown.contains(&settings.display().to_string()),
+        "the user sees which file to repair: {shown}"
+    );
+
+    std::fs::write(
+        &settings,
+        r#"{"permissions": {"deny": ["Read(other.txt)"]}}"#,
+    )
+    .expect("the repaired settings");
+    let backend = script(vec![
+        calls(
+            "m1",
+            &[("r1", "Read", json!({ "file_path": "secret.txt" }))],
+        ),
+        answer("m2", "It says TOPSECRET."),
+    ]);
+    let (outcome, _, _) = run(
+        Arc::clone(&backend),
+        turn(work.path(), None, Permissions::Full),
+        nobody(),
+    )
+    .await;
+    assert_eq!(outcome.status, RunStatus::Done);
+    let sent = backend.sent.lock().expect("lock").clone();
+    assert!(
+        sent[1].prompt.contains("TOPSECRET"),
+        "once repaired, tools run again"
+    );
 }
 
 #[cfg(unix)]

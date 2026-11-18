@@ -17,11 +17,13 @@
 mod cmd;
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use globset::GlobMatcher;
 use regex::Regex;
 use serde_json::Value;
 
+use super::files::{self, ReadFileError};
 use super::tools::Call;
 
 /// The most of a settings file that is read.
@@ -48,10 +50,29 @@ pub enum Grammar {
     Cmd,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum LoadSettingsError {
+    #[error("could not read the Claude Code settings file {}", file.display())]
+    Unreadable {
+        file: PathBuf,
+        #[source]
+        source: ReadFileError,
+    },
+    #[error("the Claude Code settings file {} is not valid JSON", file.display())]
+    NotJson {
+        file: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("the Claude Code settings file {} has a malformed `{field}`", file.display())]
+    Malformed { file: PathBuf, field: &'static str },
+}
+
 /// The permission rules of a thread's settings files.
 #[derive(Clone, Default)]
 pub struct Rules {
     grammar: Grammar,
+    broken: Vec<Arc<LoadSettingsError>>,
     allow: Vec<Rule>,
     ask: Vec<Rule>,
     deny: Vec<Rule>,
@@ -169,55 +190,75 @@ impl Rules {
                 root: &root,
                 cwd,
             };
-            rules.read_file(&file, &anchors);
+            if let Err(error) = rules.read_file(&file, &anchors) {
+                let logged: &dyn std::error::Error = &error;
+                tracing::warn!(
+                    error = logged,
+                    "a Claude Code settings file failed to load; tools are refused until it is repaired"
+                );
+                rules.broken.push(Arc::new(error));
+            }
         }
         rules
     }
 
-    fn read_file(&mut self, path: &Path, anchors: &Anchors<'_>) {
-        let Ok(metadata) = std::fs::metadata(path) else {
-            return;
+    fn read_file(&mut self, path: &Path, anchors: &Anchors<'_>) -> Result<(), LoadSettingsError> {
+        let bytes = match files::read_bounded(path, MAX_SETTINGS_BYTES) {
+            Ok(bytes) => bytes,
+            Err(ReadFileError::Open { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(());
+            }
+            Err(source) => {
+                return Err(LoadSettingsError::Unreadable {
+                    file: path.to_path_buf(),
+                    source,
+                });
+            }
         };
-        if metadata.len() > MAX_SETTINGS_BYTES {
-            tracing::warn!(file = %path.display(), "a Claude Code settings file is too large to read");
-            return;
-        }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return;
+        let value = serde_json::from_slice::<Value>(&bytes).map_err(|source| {
+            LoadSettingsError::NotJson {
+                file: path.to_path_buf(),
+                source,
+            }
+        })?;
+        let malformed = |field| LoadSettingsError::Malformed {
+            file: path.to_path_buf(),
+            field,
         };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            tracing::warn!(file = %path.display(), "a Claude Code settings file is not valid JSON");
-            return;
+        let settings = value.as_object().ok_or_else(|| malformed("settings"))?;
+        let Some(permissions) = settings.get("permissions") else {
+            return Ok(());
         };
-        let permissions = &value["permissions"];
-        if permissions["defaultMode"].as_str() == Some("acceptEdits") {
+        let permissions = permissions
+            .as_object()
+            .ok_or_else(|| malformed("permissions"))?;
+        let mode = match permissions.get("defaultMode") {
+            None => None,
+            Some(mode) => Some(
+                mode.as_str()
+                    .ok_or_else(|| malformed("permissions.defaultMode"))?,
+            ),
+        };
+        let allow =
+            rule_texts(permissions.get("allow")).ok_or_else(|| malformed("permissions.allow"))?;
+        let ask = rule_texts(permissions.get("ask")).ok_or_else(|| malformed("permissions.ask"))?;
+        let deny =
+            rule_texts(permissions.get("deny")).ok_or_else(|| malformed("permissions.deny"))?;
+        if mode == Some("acceptEdits") {
             self.accept_edits = true;
         }
         let grammar = self.grammar;
-        push(
-            &mut self.allow,
-            &permissions["allow"],
-            List::Allow,
-            anchors,
-            path,
-            grammar,
-        );
-        push(
-            &mut self.ask,
-            &permissions["ask"],
-            List::Ask,
-            anchors,
-            path,
-            grammar,
-        );
-        push(
-            &mut self.deny,
-            &permissions["deny"],
-            List::Deny,
-            anchors,
-            path,
-            grammar,
-        );
+        push(&mut self.allow, &allow, List::Allow, anchors, path, grammar);
+        push(&mut self.ask, &ask, List::Ask, anchors, path, grammar);
+        push(&mut self.deny, &deny, List::Deny, anchors, path, grammar);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn broken(&self) -> Option<&LoadSettingsError> {
+        self.broken.first().map(AsRef::as_ref)
     }
 
     /// Whether file changes inside the project run without asking
@@ -366,23 +407,26 @@ impl Rules {
     }
 }
 
+fn rule_texts(list: Option<&Value>) -> Option<Vec<&str>> {
+    match list {
+        None => Some(Vec::new()),
+        Some(list) => list.as_array()?.iter().map(Value::as_str).collect(),
+    }
+}
+
 /// Adds one settings file's rules to a list.
 fn push(
     rules: &mut Vec<Rule>,
-    list: &Value,
+    list: &[&str],
     kind: List,
     anchors: &Anchors<'_>,
     file: &Path,
     grammar: Grammar,
 ) {
-    for rule in list.as_array().into_iter().flatten() {
-        if let Some(rule) = rule
-            .as_str()
-            .and_then(|rule| parse(rule, kind, anchors, file, grammar))
-        {
-            rules.push(rule);
-        }
-    }
+    rules.extend(
+        list.iter()
+            .filter_map(|rule| parse(rule, kind, anchors, file, grammar)),
+    );
 }
 
 /// The host a URL names, lowercased and without a trailing dot, so
@@ -1839,6 +1883,73 @@ mod tests {
         assert!(matches!(
             fetch("https://EVIL.example./x"),
             Some(Verdict::Deny(_))
+        ));
+    }
+
+    fn loaded_with(settings: &[u8]) -> Rules {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dir = project.path().join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), settings).unwrap();
+        Rules::load(home.path(), project.path())
+    }
+
+    #[test]
+    fn an_absent_settings_file_is_no_policy_and_no_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let rules = Rules::load(home.path(), project.path());
+        assert!(rules.broken().is_none());
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_read_as_policy_is_a_load_failure() {
+        let oversized = format!(
+            r#"{{"permissions": {{"deny": ["Read"]}}, "pad": "{}"}}"#,
+            " ".repeat(usize::try_from(MAX_SETTINGS_BYTES).unwrap())
+        );
+        for (settings, expected) in [
+            (
+                &br#"{"permissions": {"deny": ["Read"]"#[..],
+                "not valid JSON",
+            ),
+            (br#"["Read"]"#, "malformed `settings`"),
+            (br#"{"permissions": ["Read"]}"#, "malformed `permissions`"),
+            (
+                br#"{"permissions": {"deny": "Read"}}"#,
+                "malformed `permissions.deny`",
+            ),
+            (
+                br#"{"permissions": {"ask": [{"tool": "Read"}]}}"#,
+                "malformed `permissions.ask`",
+            ),
+            (
+                br#"{"permissions": {"defaultMode": 1}}"#,
+                "malformed `permissions.defaultMode`",
+            ),
+            (oversized.as_bytes(), "could not read"),
+        ] {
+            let rules = loaded_with(settings);
+            let error = rules
+                .broken()
+                .unwrap_or_else(|| panic!("{expected}: loaded as if it held no rules"));
+            assert!(
+                error.to_string().contains(expected),
+                "{expected}: said {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settings_path_that_is_a_folder_is_a_load_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".claude/settings.json")).unwrap();
+        let rules = Rules::load(home.path(), project.path());
+        assert!(matches!(
+            rules.broken(),
+            Some(LoadSettingsError::Unreadable { .. })
         ));
     }
 }
