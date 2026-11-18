@@ -1728,6 +1728,35 @@ impl RootViews {
         }
     }
 
+    fn release_sidebar_views(&mut self, ui: &mut UiApp) {
+        self.sidebar_overlays.dispose(ui);
+        if let Some(preview) = self.sidebar_drag.take() {
+            preview.dispose(ui);
+        }
+        self.drag_position = None;
+        self.navigation.dispose();
+        self.transcript_viewport = None;
+        self.mounted_reveals.borrow_mut().rebind(None);
+        self.row_cache.borrow_mut().rebind(None);
+    }
+
+    fn release_workspace_views(&mut self, ui: &mut UiApp) {
+        self.replace_rows(None);
+        self.stored.borrow_mut().drain_cleanup(ui);
+        self.composer_height = None;
+        self.composer_measurement.set(None);
+        self.release_sidebar_views(ui);
+        self.context_reading = None;
+        self.observations.clear();
+        drop(self.media.take());
+        self.dispose_color_menu(ui);
+        if let Some(dialog) = self.settings.take() {
+            dialog.dispose(ui);
+        }
+        self.close_palette(ui);
+        self.close_resource(ui);
+    }
+
     fn sync_sidebar(
         &mut self,
         shell: &mut Shell,
@@ -1737,15 +1766,7 @@ impl RootViews {
     ) -> bool {
         let _tm = crate::shell::application::Tm::new("v.sidebar");
         let Some(workspace) = shell.entry.workspace_mut() else {
-            self.sidebar_overlays.dispose(ui);
-            if let Some(preview) = self.sidebar_drag.take() {
-                preview.dispose(ui);
-            }
-            self.drag_position = None;
-            self.navigation.dispose();
-            self.transcript_viewport = None;
-            self.mounted_reveals.borrow_mut().rebind(None);
-            self.row_cache.borrow_mut().rebind(None);
+            self.release_sidebar_views(ui);
             return false;
         };
         let now = ctx.now().as_secs_f64();
@@ -2895,31 +2916,10 @@ impl SectionViews for RootViews {
             .entry
             .view(&shell.core, &theme, &shell.titlebar, window)
         {
-            self.replace_rows(None);
-            self.stored.borrow_mut().drain_cleanup(ui);
-            self.composer_height = None;
-            self.composer_measurement.set(None);
-            self.sidebar_overlays.dispose(ui);
-            if let Some(preview) = self.sidebar_drag.take() {
-                preview.dispose(ui);
-            }
-            self.drag_position = None;
-            self.navigation.dispose();
-            self.transcript_viewport = None;
-            self.mounted_reveals.borrow_mut().rebind(None);
-            self.row_cache.borrow_mut().rebind(None);
-            self.context_reading = None;
-            self.observations.clear();
-            drop(self.media.take());
+            self.release_workspace_views(ui);
             self.connection.reset();
             self.thread_loading.reset();
             self.thread_landing.reset();
-            self.dispose_color_menu(ui);
-            if let Some(dialog) = self.settings.take() {
-                dialog.dispose(ui);
-            }
-            self.close_palette(ui);
-            self.close_resource(ui);
             self.link_failure.close(ui);
             self.workspace_key = None;
             self.settings_panel = None;
@@ -2928,28 +2928,7 @@ impl SectionViews for RootViews {
         let app_media = Self::app_media(shell, window);
         let workspace = shell.entry.workspace_mut().ok_or(BuildError::NoWorkspace)?;
         if self.workspace_key != Some(workspace.selections.key) {
-            self.replace_rows(None);
-            self.stored.borrow_mut().drain_cleanup(ui);
-            self.composer_height = None;
-            self.composer_measurement.set(None);
-            self.sidebar_overlays.dispose(ui);
-            if let Some(preview) = self.sidebar_drag.take() {
-                preview.dispose(ui);
-            }
-            self.drag_position = None;
-            self.navigation.dispose();
-            self.transcript_viewport = None;
-            self.mounted_reveals.borrow_mut().rebind(None);
-            self.row_cache.borrow_mut().rebind(None);
-            self.context_reading = None;
-            self.observations.clear();
-            drop(self.media.take());
-            self.dispose_color_menu(ui);
-            if let Some(dialog) = self.settings.take() {
-                dialog.dispose(ui);
-            }
-            self.close_palette(ui);
-            self.close_resource(ui);
+            self.release_workspace_views(ui);
             self.workspace_key = Some(workspace.selections.key);
         }
         let screen = match shell.core.workspace_screen() {
