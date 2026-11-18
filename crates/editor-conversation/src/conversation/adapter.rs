@@ -1,5 +1,5 @@
 use super::controller::{Conversation, ScrollAction};
-use super::fold::{self, Row, RunSummary};
+use super::fold::{self, Row, RowKey, RunSummary};
 use super::thread::{AnswerState, ItemUi};
 use super::viewport::Input;
 use artisan_api::{Answer, Item, ItemId, LiveTarget, RunId, Seq};
@@ -179,6 +179,10 @@ impl RowSnapshots {
             agent: conversation.agent.is_some(),
             composer_height,
         })
+    }
+
+    pub fn key(&self, index: usize) -> Option<RowKey> {
+        self.rows.get(index).map(|(row, _)| row.key())
     }
 
     pub fn model(&self, index: usize) -> Option<RowModel> {

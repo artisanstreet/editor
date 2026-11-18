@@ -286,6 +286,7 @@ pub struct RowFactory {
     live: Cell<bool>,
     settled: Rc<RefCell<HashMap<RowKey, u64>>>,
     style_epoch: u64,
+    fingerprints: RefCell<HashMap<usize, (RowKey, Option<u64>)>>,
     unsettled: Cell<bool>,
     content_keyed: Cell<bool>,
 }
@@ -307,13 +308,13 @@ impl RowFingerprint<'_> {
         self.model.gap.to_bits().hash(&mut hasher);
         self.model.end.to_bits().hash(&mut hasher);
         let mut ui: Vec<_> = self.model.ui.iter().collect();
-        ui.sort_by_key(|a| a.0.to_string());
+        ui.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         for (id, state) in ui {
             id.hash(&mut hasher);
             state.hash(&mut hasher);
         }
         let mut answers: Vec<_> = self.model.answers.iter().collect();
-        answers.sort_by_key(|a| a.0.to_string());
+        answers.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         for (id, state) in answers {
             id.hash(&mut hasher);
             state.hash(&mut hasher);
@@ -1298,6 +1299,7 @@ impl RowFactory {
             live: Cell::new(true),
             settled: Rc::default(),
             style_epoch: 0,
+            fingerprints: RefCell::default(),
             unsettled: Cell::new(false),
             content_keyed: Cell::new(false),
         }
@@ -1315,18 +1317,35 @@ impl RowFactory {
     ) -> Self {
         self.settled = settled;
         self.style_epoch = style_epoch;
+        self.fingerprints.get_mut().clear();
         self
     }
 
     fn fingerprint(&self, index: usize, key: &RowKey) -> Option<u64> {
+        if let Some((known, fingerprint)) = self.fingerprints.borrow().get(&index) {
+            return fingerprint.filter(|_| known == key);
+        }
+        let row_key = self.row_key(index)?;
+        let fingerprint = self.compute_fingerprint(index);
+        self.fingerprints
+            .borrow_mut()
+            .insert(index, (row_key.clone(), fingerprint));
+        fingerprint.filter(|_| &row_key == key)
+    }
+
+    fn row_key(&self, index: usize) -> Option<RowKey> {
+        let RowSource::Snapshots { snapshots, .. } = &self.rows else {
+            return None;
+        };
+        snapshots.key(index)
+    }
+
+    fn compute_fingerprint(&self, index: usize) -> Option<u64> {
         let RowSource::Snapshots { snapshots, rows } = &self.rows else {
             return None;
         };
         let model = snapshots.model(index)?;
         let row = rows.get(index)?;
-        if &model.row.key() != key {
-            return None;
-        }
         let body_version = match model.row.semantic() {
             Row::Text { id, slot, .. } => {
                 let key = BodyKey {
@@ -1493,6 +1512,7 @@ impl RowFactory {
             }
         }
         self.rows = RowSource::Snapshots { snapshots, rows };
+        self.fingerprints.get_mut().clear();
         Ok(self)
     }
 
