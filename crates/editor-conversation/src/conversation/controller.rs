@@ -52,6 +52,14 @@ struct ParkedThread {
     row_heights: HashMap<RowKey, f32>,
 }
 
+impl ParkedThread {
+    fn bytes(&self) -> usize {
+        self.view.parked_bytes()
+            + self.projections.resident_bytes()
+            + self.row_heights.capacity() * size_of::<(RowKey, f32)>()
+    }
+}
+
 struct Pending {
     origin: Origin,
     thread: ThreadId,
@@ -414,16 +422,14 @@ impl Conversation {
             return;
         };
         view.abandon_answers();
-        let bytes = view.resident_bytes();
-        self.parked.put(
-            (host.clone(), instance, thread.clone()),
-            ParkedThread {
-                view,
-                projections: std::mem::take(&mut self.projections),
-                row_heights: std::mem::take(&mut self.row_heights),
-            },
-            bytes,
-        );
+        let parked = ParkedThread {
+            view,
+            projections: std::mem::take(&mut self.projections),
+            row_heights: std::mem::take(&mut self.row_heights),
+        };
+        let bytes = parked.bytes();
+        self.parked
+            .put((host.clone(), instance, thread.clone()), parked, bytes);
     }
 
     pub fn close(&mut self, core: &mut Core) {

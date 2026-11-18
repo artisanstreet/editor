@@ -66,13 +66,7 @@ pub struct Projections {
     shapes: HashMap<BodyKey, BodyShape>,
 }
 
-pub fn block_version(
-    signature: u64,
-    seq: u64,
-    running: bool,
-    block: usize,
-    count: usize,
-) -> u64 {
+pub fn block_version(signature: u64, seq: u64, running: bool, block: usize, count: usize) -> u64 {
     let mut hash = DefaultHasher::new();
     signature.hash(&mut hash);
     seq.hash(&mut hash);
@@ -83,6 +77,16 @@ pub fn block_version(
 }
 
 impl Projections {
+    pub(crate) fn resident_bytes(&self) -> usize {
+        self.bodies.capacity() * size_of::<(BodyKey, BodyProjection)>()
+            + self.shapes.capacity() * size_of::<(BodyKey, BodyShape)>()
+            + self
+                .shapes
+                .values()
+                .map(|shape| size_of_val(&*shape.signatures))
+                .sum::<usize>()
+    }
+
     pub fn leaf_count(&self, key: &BodyKey) -> Option<usize> {
         if let Some(shape) = self.shapes.get(key) {
             return Some(shape.signatures.len());
@@ -171,7 +175,11 @@ impl Projections {
                 }
                 continue;
             }
-            let shape_source = if slot.literal() { None } else { source(id, *slot) };
+            let shape_source = if slot.literal() {
+                None
+            } else {
+                source(id, *slot)
+            };
             if let Some(source) = shape_source
                 && let Some(signatures) = self
                     .shape(&key, &source)

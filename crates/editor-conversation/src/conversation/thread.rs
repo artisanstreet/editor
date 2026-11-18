@@ -1,8 +1,8 @@
 use super::viewport::{Effect, Fetch, Input, Jump, State, Viewport};
-use editor_core::ResidentBytes as _;
 use artisan_api::{
     Item, ItemId, ItemsPage, ItemsQuery, LiveTarget, Run, RunId, Seq, ThreadId, WorkSpan,
 };
+use editor_core::ResidentBytes as _;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -126,6 +126,30 @@ impl ThreadView {
 
     pub const fn resident_bytes(&self) -> usize {
         self.resident_bytes
+    }
+
+    pub fn parked_bytes(&self) -> usize {
+        let items = self.items.len() + self.context.len();
+        self.resident_bytes
+            + self
+                .context
+                .values()
+                .map(|item| item.resident_bytes())
+                .sum::<usize>()
+            + self
+                .live
+                .values()
+                .map(|rope| rope.capacity())
+                .sum::<usize>()
+            + items * size_of::<Item>()
+            + self.items.len() * size_of::<(Seq, Arc<Item>)>()
+            + self.context.capacity() * size_of::<(ItemId, Arc<Item>)>()
+            + self.work.len() * size_of::<(Seq, WorkSpan)>()
+            + self.positions.capacity() * size_of::<(ItemId, Seq)>()
+            + self.ui.capacity() * size_of::<(ItemId, ItemUi)>()
+            + self.answers.capacity() * size_of::<(ItemId, AnswerState)>()
+            + self.work_open.capacity() * size_of::<(RunId, bool)>()
+            + self.runs.capacity() * size_of::<(RunId, Run)>()
     }
 
     pub(crate) fn remember_run(&mut self, run: Run) {
