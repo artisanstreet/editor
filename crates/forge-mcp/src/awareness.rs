@@ -636,50 +636,35 @@ async fn read_item(
             thread: thread.to_owned(),
         });
     }
-    let rendered = crate::transcript::render(
-        hub.store(),
-        std::slice::from_ref(&item),
-        &crate::transcript::Options {
-            whole: true,
-            output: arguments
-                .get("include_output")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            unbounded: true,
-        },
-    )
-    .await
-    .map_err(|source| AwarenessError::Render {
-        item: item.id.clone(),
-        source,
-    })?;
+    let output = arguments
+        .get("include_output")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let rendered = crate::transcript::render_item(hub.store(), &item, output)
+        .await
+        .map_err(|source| AwarenessError::Render {
+            item: item.id.clone(),
+            source,
+        })?;
     let offset = arguments.get("offset").and_then(Value::as_u64).unwrap_or(0);
-    let start = usize::try_from(offset).unwrap_or(usize::MAX);
-    if start > rendered.len() || !rendered.is_char_boundary(start) {
-        return Err(AwarenessError::Offset { offset });
-    }
-    let mut end = start
-        .saturating_add(
-            arguments
-                .get("limit")
-                .and_then(Value::as_u64)
-                .unwrap_or(16000)
-                .clamp(1, 64000) as usize,
-        )
-        .min(rendered.len());
-    while end > start && !rendered.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end == start && start < rendered.len() {
-        end = start
-            + rendered[start..]
-                .chars()
-                .next()
-                .expect("invariant: a char boundary before the end starts a character")
-                .len_utf8();
-    }
+    let limit = arguments
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(16000)
+        .clamp(1, 64000);
+    let total = rendered.len();
+    let slice = rendered
+        .slice(offset, limit)
+        .await
+        .map_err(|error| match error {
+            crate::transcript::SliceError::Offset { .. } => AwarenessError::Offset { offset },
+            crate::transcript::SliceError::Render(source) => AwarenessError::Render {
+                item: item.id.clone(),
+                source,
+            },
+        })?;
     Ok(Some(
-        json!({"thread":item.thread_id,"item":item.id,"offset":start,"text":&rendered[start..end],"next_offset":(end<rendered.len()).then_some(end),"total_bytes":rendered.len()}),
+        json!({"thread":item.thread_id,"item":item.id,"offset":offset,"text":slice.text,"next_offset":(slice.end<total).then_some(slice.end),"total_bytes":total}),
     ))
 }
 

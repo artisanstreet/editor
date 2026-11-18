@@ -763,7 +763,6 @@ async fn read_thread(hub: &Hub, thread: &ThreadId, read: Read) -> Result<String>
     let options = Options {
         whole: read.whole,
         output: read.include_output,
-        unbounded: false,
     };
     let (items, older) = if let Some(id) = &read.item {
         let item = store

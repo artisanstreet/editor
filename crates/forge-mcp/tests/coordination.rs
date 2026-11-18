@@ -246,7 +246,8 @@ async fn long_item_continuation_preserves_every_utf8_character() {
             offset = next;
         } else {
             assert_eq!(
-                usize::try_from(page["structuredContent"]["total_bytes"].as_u64().unwrap()).unwrap(),
+                usize::try_from(page["structuredContent"]["total_bytes"].as_u64().unwrap())
+                    .unwrap(),
                 rendered.len()
             );
             break;
@@ -270,4 +271,52 @@ async fn long_item_continuation_preserves_every_utf8_character() {
         )
         .await;
     assert_eq!(invalid["isError"], true);
+}
+
+#[tokio::test]
+async fn a_stored_plan_keeps_its_steps_in_both_read_tools() {
+    let fixture = Fixture::new().await;
+    let steps: Vec<artisan_api::PlanStep> = (0..120)
+        .map(|step| artisan_api::PlanStep {
+            text: format!("step number {step}").into(),
+            status: artisan_api::StepStatus::Pending,
+        })
+        .collect();
+    let item = fixture
+        .hub
+        .store()
+        .upsert_item(forge_store::NewItem {
+            id: artisan_api::ItemId::new(),
+            thread_id: fixture.threads[0].clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::Plan {
+                steps: artisan_api::Collection::Inline(steps),
+                proposal: None,
+                approval: None,
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        &item.kind,
+        artisan_api::ItemKind::Plan {
+            steps: artisan_api::Collection::Stored(_),
+            ..
+        }
+    ));
+    let read = fixture
+        .call(0, "read_thread", json!({"item":item.id}))
+        .await;
+    let text = read["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("step number 0\n"), "{text}");
+    assert!(text.contains("step number 49\n"), "{text}");
+    assert!(text.contains("70 more steps"), "{text}");
+    let whole = fixture
+        .call(0, "read_thread_item", json!({"item":item.id,"limit":64000}))
+        .await;
+    let text = whole["structuredContent"]["text"].as_str().unwrap();
+    assert!(text.contains("step number 119\n"), "{text}");
 }

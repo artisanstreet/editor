@@ -1,15 +1,24 @@
-use artisan_api::{Collection, Item, ItemId, ItemKind, Phase, TextContent, ToolKind};
+use artisan_api::{
+    Collection, CollectionQuery, ContentId, ContentQuery, ContentRef, Item, ItemId, ItemKind,
+    Phase, TextContent, ToolKind,
+};
 use forge_store::Store;
-use std::fmt::Write as _;
 
 const CLIPPED: usize = 4_000;
 const WHOLE: usize = 64 * 1024;
-
-const STRING_WRITE: &str = "invariant: writing to a String cannot fail";
+const LISTED_ENTRIES: u32 = 50;
 
 #[derive(Debug, thiserror::Error)]
-#[error("resolve the stored text")]
-pub struct ResolveError(#[source] forge_store::ResolveTextError);
+pub enum ResolveError {
+    #[error("read a range of stored text")]
+    Range(#[from] forge_store::ContentRangeError),
+    #[error("read a range of a stored collection")]
+    Collection(#[from] forge_store::CollectionRangeError),
+    #[error("stored content {id} is gone")]
+    Gone { id: ContentId },
+    #[error("stored collection {id} stopped at entry {offset}")]
+    Stalled { id: ContentId, offset: u64 },
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("render item {item}")]
@@ -19,44 +28,116 @@ pub struct RenderError {
     source: ResolveError,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SliceError {
+    #[error("offset {offset} is not a UTF-8 boundary of the rendered item")]
+    Offset { offset: u64 },
+    #[error(transparent)]
+    Render(#[from] RenderError),
+}
+
 type Result<T> = std::result::Result<T, ResolveError>;
 
 pub struct Options {
     pub whole: bool,
     pub output: bool,
-    pub unbounded: bool,
 }
 
-pub async fn render(
-    store: &Store,
-    items: &[Item],
-    options: &Options,
-) -> std::result::Result<String, RenderError> {
-    let mut out = String::new();
-    for item in items {
-        out.push_str(
-            &block(store, item, options)
-                .await
-                .map_err(|source| RenderError {
-                    item: item.id.clone(),
-                    source,
-                })?,
-        );
-        out.push('\n');
+#[derive(Clone, Copy)]
+enum Mode {
+    Clipped(usize),
+    Sourced,
+}
+
+enum Segment {
+    Literal(String),
+    Source(ContentRef),
+}
+
+struct Doc<'a> {
+    store: &'a Store,
+    mode: Mode,
+    output: bool,
+    segments: Vec<Segment>,
+}
+
+impl Doc<'_> {
+    fn push_str(&mut self, text: &str) {
+        if let Some(Segment::Literal(last)) = self.segments.last_mut() {
+            last.push_str(text);
+        } else {
+            self.segments.push(Segment::Literal(text.to_owned()));
+        }
     }
-    Ok(out)
+
+    async fn text(&mut self, text: &TextContent) -> Result<()> {
+        match (self.mode, text) {
+            (Mode::Sourced, TextContent::Stored(source)) => {
+                self.segments.push(Segment::Source(source.clone()));
+            }
+            (Mode::Sourced, TextContent::Inline(text)) => self.push_str(text),
+            (Mode::Clipped(limit), TextContent::Inline(text)) => self.push_str(&clip(text, limit)),
+            (Mode::Clipped(limit), TextContent::Stored(source)) => {
+                let prefix = prefix(self.store, source, limit).await?;
+                let omitted = usize::try_from(source.bytes)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(prefix.len());
+                self.push_str(&prefix);
+                if omitted > 0 {
+                    self.push_str(&omission(omitted));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn line(&mut self, lead: &str, text: &TextContent) -> Result<()> {
+        self.push_str(lead);
+        self.text(text).await?;
+        self.push_str("\n");
+        Ok(())
+    }
 }
 
-async fn text(store: &Store, text: &TextContent, options: &Options) -> Result<String> {
-    let resolved = store.resolve_text(text).await.map_err(ResolveError)?;
-    Ok(clip(
-        &resolved,
-        match (options.unbounded, options.whole) {
-            (true, _) => usize::MAX,
-            (_, true) => WHOLE,
-            _ => CLIPPED,
-        },
-    ))
+async fn prefix(store: &Store, source: &ContentRef, limit: usize) -> Result<String> {
+    let wanted = u64::try_from(limit).unwrap_or(u64::MAX).min(source.bytes);
+    let mut text = String::new();
+    let mut offset = 0;
+    while offset < wanted {
+        let range = store
+            .content_range(
+                &source.id,
+                ContentQuery {
+                    offset,
+                    limit: Some(
+                        u32::try_from(wanted - offset)
+                            .unwrap_or(u32::MAX)
+                            .clamp(4, artisan_api::CONTENT_RANGE_BYTES),
+                    ),
+                },
+            )
+            .await?
+            .ok_or_else(|| ResolveError::Gone {
+                id: source.id.clone(),
+            })?;
+        if range.end <= offset {
+            break;
+        }
+        offset = range.end;
+        text.push_str(&range.text);
+    }
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    Ok(text)
+}
+
+fn omission(omitted: usize) -> String {
+    format!(
+        "\n\n_{omitted} more bytes; use read_thread_item with its item ID for byte-range continuation._"
+    )
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -67,11 +148,204 @@ fn clip(text: &str, limit: usize) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!(
-        "{}\n\n_{} more bytes; use read_thread_item with its item ID for byte-range continuation._",
-        &text[..end],
-        text.len() - end
-    )
+    format!("{}{}", &text[..end], omission(text.len() - end))
+}
+
+pub async fn render(
+    store: &Store,
+    items: &[Item],
+    options: &Options,
+) -> std::result::Result<String, RenderError> {
+    let mut doc = Doc {
+        store,
+        mode: Mode::Clipped(if options.whole { WHOLE } else { CLIPPED }),
+        output: options.output,
+        segments: Vec::new(),
+    };
+    for item in items {
+        block(&mut doc, item).await.map_err(|source| RenderError {
+            item: item.id.clone(),
+            source,
+        })?;
+        doc.push_str("\n");
+    }
+    Ok(doc
+        .segments
+        .into_iter()
+        .map(|segment| match segment {
+            Segment::Literal(text) => text,
+            Segment::Source(source) => {
+                unreachable!("clipped renders read stored text {} inline", source.id)
+            }
+        })
+        .collect())
+}
+
+pub struct Rendered<'a> {
+    store: &'a Store,
+    item: ItemId,
+    segments: Vec<Segment>,
+}
+
+pub struct Slice {
+    pub text: String,
+    pub end: u64,
+}
+
+pub async fn render_item<'a>(
+    store: &'a Store,
+    item: &Item,
+    output: bool,
+) -> std::result::Result<Rendered<'a>, RenderError> {
+    let mut doc = Doc {
+        store,
+        mode: Mode::Sourced,
+        output,
+        segments: Vec::new(),
+    };
+    block(&mut doc, item).await.map_err(|source| RenderError {
+        item: item.id.clone(),
+        source,
+    })?;
+    doc.push_str("\n");
+    Ok(Rendered {
+        store,
+        item: item.id.clone(),
+        segments: doc.segments,
+    })
+}
+
+const fn segment_len(segment: &Segment) -> u64 {
+    match segment {
+        Segment::Literal(text) => text.len() as u64,
+        Segment::Source(source) => source.bytes,
+    }
+}
+
+impl Rendered<'_> {
+    pub fn len(&self) -> u64 {
+        self.segments.iter().map(segment_len).sum()
+    }
+
+    pub async fn slice(&self, start: u64, limit: u64) -> std::result::Result<Slice, SliceError> {
+        let total = self.len();
+        if start > total {
+            return Err(SliceError::Offset { offset: start });
+        }
+        let wanted = start.saturating_add(limit.max(1)).min(total);
+        let mut text = String::new();
+        let mut at = 0u64;
+        let mut end = start;
+        for segment in &self.segments {
+            let len = segment_len(segment);
+            let (from, to) = (at, at + len);
+            at = to;
+            if to <= end || from >= wanted.max(end + 1) {
+                continue;
+            }
+            let local = end - from;
+            let room = wanted.saturating_sub(end).max(u64::from(text.is_empty()));
+            let piece = self
+                .piece(segment, local, room)
+                .await?
+                .filter(|piece| piece.start == local)
+                .ok_or(SliceError::Offset { offset: end })?;
+            end = from + piece.end;
+            text.push_str(&piece.text);
+            if end >= wanted || end < to {
+                break;
+            }
+        }
+        Ok(Slice { text, end })
+    }
+
+    async fn piece(
+        &self,
+        segment: &Segment,
+        local: u64,
+        room: u64,
+    ) -> std::result::Result<Option<Piece>, RenderError> {
+        match segment {
+            Segment::Literal(literal) => {
+                let from = usize::try_from(local).expect("invariant: a literal fits in memory");
+                if !literal.is_char_boundary(from) {
+                    return Ok(None);
+                }
+                let mut to = from
+                    .saturating_add(usize::try_from(room).unwrap_or(usize::MAX))
+                    .min(literal.len());
+                while !literal.is_char_boundary(to) {
+                    to -= 1;
+                }
+                if to == from && from < literal.len() {
+                    to = from
+                        + literal[from..]
+                            .chars()
+                            .next()
+                            .expect("invariant: a boundary before the end starts a character")
+                            .len_utf8();
+                }
+                Ok(Some(Piece {
+                    start: local,
+                    end: to as u64,
+                    text: literal[from..to].to_owned(),
+                }))
+            }
+            Segment::Source(source) => {
+                let range = self
+                    .store
+                    .content_range(
+                        &source.id,
+                        ContentQuery {
+                            offset: local,
+                            limit: Some(
+                                u32::try_from(room)
+                                    .unwrap_or(u32::MAX)
+                                    .clamp(4, artisan_api::CONTENT_RANGE_BYTES),
+                            ),
+                        },
+                    )
+                    .await
+                    .map_err(|cause| RenderError {
+                        item: self.item.clone(),
+                        source: cause.into(),
+                    })?
+                    .ok_or_else(|| RenderError {
+                        item: self.item.clone(),
+                        source: ResolveError::Gone {
+                            id: source.id.clone(),
+                        },
+                    })?;
+                let text = within(range.text, usize::try_from(room).unwrap_or(usize::MAX));
+                Ok(Some(Piece {
+                    start: range.start,
+                    end: range.start + text.len() as u64,
+                    text,
+                }))
+            }
+        }
+    }
+}
+
+fn within(mut text: String, room: usize) -> String {
+    if text.len() <= room {
+        return text;
+    }
+    let mut end = room;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == 0 {
+        end = text.chars().next().map_or(0, char::len_utf8);
+    }
+    text.truncate(end);
+    text
+}
+
+struct Piece {
+    start: u64,
+    end: u64,
+    text: String,
 }
 
 pub fn time(ms: i64) -> String {
@@ -105,26 +379,28 @@ fn status_suffix(status: artisan_api::Status) -> String {
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "one transcript block per item kind")]
-async fn block(store: &Store, item: &Item, options: &Options) -> Result<String> {
-    let status = status_suffix(item.status);
-    let head = |kind: &str| {
-        format!(
-            "**{kind}** · {}{status} `{}`\n\n",
-            time(item.created_at),
-            item.id
-        )
-    };
-    Ok(match &item.kind {
+fn head(item: &Item, kind: &str) -> String {
+    format!(
+        "**{kind}** · {}{} `{}`\n\n",
+        time(item.created_at),
+        status_suffix(item.status),
+        item.id
+    )
+}
+
+async fn block(doc: &mut Doc<'_>, item: &Item) -> Result<()> {
+    match &item.kind {
         ItemKind::UserMessage { text: body, .. } => {
-            format!("{}{}\n", head("You"), text(store, body, options).await?)
+            doc.push_str(&head(item, "You"));
+            doc.line("", body).await?;
         }
         ItemKind::AssistantMessage { text: body, phase } => {
             let kind = match phase {
                 Phase::Final => "Reply",
                 Phase::Commentary => "Working note",
             };
-            format!("{}{}\n", head(kind), text(store, body, options).await?)
+            doc.push_str(&head(item, kind));
+            doc.line("", body).await?;
         }
         ItemKind::Tool {
             tool,
@@ -133,16 +409,8 @@ async fn block(store: &Store, item: &Item, options: &Options) -> Result<String> 
             exit_code,
             ..
         } => {
-            tool_block(
-                store,
-                head("Tool"),
-                tool,
-                title.as_deref(),
-                output.as_ref(),
-                *exit_code,
-                options,
-            )
-            .await?
+            doc.push_str(&head(item, "Tool"));
+            tool_block(doc, tool, title.as_deref(), output.as_ref(), *exit_code).await?;
         }
         ItemKind::Agent {
             label,
@@ -153,8 +421,8 @@ async fn block(store: &Store, item: &Item, options: &Options) -> Result<String> 
             model,
             ..
         } => {
-            let mut out = head("Agent");
-            out.push_str(&agent_line(
+            doc.push_str(&head(item, "Agent"));
+            doc.push_str(&agent_line(
                 label.as_deref(),
                 description,
                 *engine,
@@ -162,87 +430,76 @@ async fn block(store: &Store, item: &Item, options: &Options) -> Result<String> 
                 thread.as_ref(),
             ));
             if let Some(result) = result {
-                writeln!(out, "result:\n{}", text(store, result, options).await?)
-                    .expect(STRING_WRITE);
+                doc.line("result:\n", result).await?;
             }
-            out
         }
         ItemKind::Question {
             questions,
             answer_text,
             ..
         } => {
-            question_block(
-                store,
-                head("Question"),
-                questions,
-                answer_text.as_ref(),
-                options,
-            )
-            .await?
+            doc.push_str(&head(item, "Question"));
+            question_block(doc, questions, answer_text.as_ref()).await?;
         }
         ItemKind::Plan {
             steps, proposal, ..
-        } => plan_block(store, head("Plan"), steps, proposal.as_ref(), options).await?,
-        ItemKind::Image { caption, .. } => format!(
-            "{}{}\n",
-            head("Image"),
-            match caption {
-                Some(caption) => text(store, caption, options).await?,
-                None => String::new(),
-            }
-        ),
-        ItemKind::Compaction { summary, .. } => format!(
-            "{}{}\n",
-            head("Compacted"),
-            match summary {
-                Some(summary) => text(store, summary, options).await?,
-                None => String::new(),
-            }
-        ),
+        } => {
+            doc.push_str(&head(item, "Plan"));
+            plan_block(doc, steps, proposal.as_ref()).await?;
+        }
+        ItemKind::Image { caption, .. } => {
+            doc.push_str(&head(item, "Image"));
+            optional_line(doc, caption.as_ref()).await?;
+        }
+        ItemKind::Compaction { summary, .. } => {
+            doc.push_str(&head(item, "Compacted"));
+            optional_line(doc, summary.as_ref()).await?;
+        }
         ItemKind::Notice { text: body, .. } => {
-            format!("{}{}\n", head("Note"), text(store, body, options).await?)
+            doc.push_str(&head(item, "Note"));
+            doc.line("", body).await?;
         }
         ItemKind::Error { message, .. } => {
-            format!(
-                "{}{}\n",
-                head("Error"),
-                text(store, message, options).await?
-            )
+            doc.push_str(&head(item, "Error"));
+            doc.line("", message).await?;
         }
-    })
+    }
+    Ok(())
+}
+
+async fn optional_line(doc: &mut Doc<'_>, text: Option<&TextContent>) -> Result<()> {
+    if let Some(text) = text {
+        doc.line("", text).await
+    } else {
+        doc.push_str("\n");
+        Ok(())
+    }
 }
 
 async fn tool_block(
-    store: &Store,
-    mut out: String,
+    doc: &mut Doc<'_>,
     tool: &ToolKind,
     title: Option<&str>,
     output: Option<&artisan_api::Output>,
     exit_code: Option<i32>,
-    options: &Options,
-) -> Result<String> {
+) -> Result<()> {
     if let Some(title) = title {
-        writeln!(out, "{title}").expect(STRING_WRITE);
+        doc.push_str(title);
+        doc.push_str("\n");
     }
-    out.push_str(&tool_summary(store, tool, options).await?);
+    tool_summary(doc, tool).await?;
     if let Some(code) = exit_code {
-        writeln!(out, "exit code {code}").expect(STRING_WRITE);
+        doc.push_str(&format!("exit code {code}\n"));
     }
     let failed = exit_code.is_some_and(|code| code != 0);
     if let Some(output) = output
-        && (options.output || failed)
+        && (doc.output || failed)
     {
-        writeln!(
-            out,
-            "output:\n{}",
-            text(store, &output.text, options).await?
-        )
-        .expect(STRING_WRITE);
+        doc.line("output:\n", &output.text).await?;
     } else if output.is_some() {
-        out.push_str("_Output left out; include_output=true shows it._\n");
+        doc.push_str("_Output left out; include_output=true shows it._\n");
     }
-    Ok(out)
+    Ok(())
 }
 
 fn agent_line(
@@ -268,55 +525,103 @@ fn agent_line(
     )
 }
 
-async fn question_block(
-    store: &Store,
-    mut out: String,
-    questions: &Collection<artisan_api::Question>,
-    answer_text: Option<&TextContent>,
-    options: &Options,
-) -> Result<String> {
-    if let Collection::Inline(questions) = questions {
-        for question in questions {
-            writeln!(out, "? {}", text(store, &question.text, options).await?).expect(STRING_WRITE);
+async fn entries<T: serde::de::DeserializeOwned + Clone + Send + Sync + 'static>(
+    doc: &Doc<'_>,
+    collection: &Collection<T>,
+) -> Result<(Vec<T>, u64)> {
+    let limit = match doc.mode {
+        Mode::Clipped(_) => Some(LISTED_ENTRIES),
+        Mode::Sourced => None,
+    };
+    match collection {
+        Collection::Inline(entries) => {
+            let shown = limit.map_or(entries.len(), |limit| entries.len().min(limit as usize));
+            Ok((entries[..shown].to_vec(), (entries.len() - shown) as u64))
+        }
+        Collection::Stored(reference) => {
+            let mut records = Vec::new();
+            let mut offset = 0;
+            let wanted = limit.map_or(reference.count, |limit| {
+                reference.count.min(u64::from(limit))
+            });
+            while offset < wanted {
+                let page = doc
+                    .store
+                    .collection_range::<T>(
+                        &reference.source.id,
+                        CollectionQuery {
+                            offset,
+                            limit: Some(
+                                u32::try_from(wanted - offset)
+                                    .unwrap_or(u32::MAX)
+                                    .min(artisan_api::COLLECTION_RANGE_ENTRIES),
+                            ),
+                        },
+                    )
+                    .await?
+                    .ok_or_else(|| ResolveError::Gone {
+                        id: reference.source.id.clone(),
+                    })?;
+                if page.end <= offset {
+                    return Err(ResolveError::Stalled {
+                        id: reference.source.id.clone(),
+                        offset,
+                    });
+                }
+                offset = page.end;
+                records.extend(page.records);
+            }
+            Ok((records, reference.count - offset))
         }
     }
-    if let Some(answer) = answer_text {
-        writeln!(out, "answer: {}", text(store, answer, options).await?).expect(STRING_WRITE);
+}
+
+fn more_entries(doc: &mut Doc<'_>, more: u64, noun: &str) {
+    if more > 0 {
+        doc.push_str(&format!(
+            "_{more} more {noun}; use read_thread_item with its item ID to read them all._\n"
+        ));
     }
-    Ok(out)
+}
+
+async fn question_block(
+    doc: &mut Doc<'_>,
+    questions: &Collection<artisan_api::Question>,
+    answer_text: Option<&TextContent>,
+) -> Result<()> {
+    let (questions, more) = entries(doc, questions).await?;
+    for question in &questions {
+        doc.line("? ", &question.text).await?;
+    }
+    more_entries(doc, more, "questions");
+    if let Some(answer) = answer_text {
+        doc.line("answer: ", answer).await?;
+    }
+    Ok(())
 }
 
 async fn plan_block(
-    store: &Store,
-    mut out: String,
+    doc: &mut Doc<'_>,
     steps: &Collection<artisan_api::PlanStep>,
     proposal: Option<&TextContent>,
-    options: &Options,
-) -> Result<String> {
+) -> Result<()> {
     if let Some(proposal) = proposal {
-        writeln!(out, "{}", text(store, proposal, options).await?).expect(STRING_WRITE);
+        doc.line("", proposal).await?;
     }
-    if let Collection::Inline(steps) = steps {
-        for step in steps {
-            writeln!(
-                out,
-                "- [{:?}] {}",
-                step.status,
-                text(store, &step.text, options).await?
-            )
-            .expect(STRING_WRITE);
-        }
+    let (steps, more) = entries(doc, steps).await?;
+    for step in &steps {
+        doc.line(&format!("- [{:?}] ", step.status), &step.text)
+            .await?;
     }
-    Ok(out)
+    more_entries(doc, more, "steps");
+    Ok(())
 }
 
-async fn tool_summary(store: &Store, tool: &ToolKind, options: &Options) -> Result<String> {
-    Ok(match tool {
-        ToolKind::Shell { command, .. } => {
-            format!("$ {}\n", text(store, command, options).await?)
-        }
-        ToolKind::Read { path, .. } => format!("read {path}\n"),
-        ToolKind::ViewImage { path } => format!("viewed {path}\n"),
+async fn tool_summary(doc: &mut Doc<'_>, tool: &ToolKind) -> Result<()> {
+    match tool {
+        ToolKind::Shell { command, .. } => doc.line("$ ", command).await?,
+        ToolKind::Read { path, .. } => doc.push_str(&format!("read {path}\n")),
+        ToolKind::ViewImage { path } => doc.push_str(&format!("viewed {path}\n")),
         ToolKind::Edit { changes } => {
             let paths: Vec<String> = match changes {
                 Collection::Inline(changes) => {
@@ -324,57 +629,49 @@ async fn tool_summary(store: &Store, tool: &ToolKind, options: &Options) -> Resu
                 }
                 Collection::Stored(stored) => vec![format!("{} files", stored.count)],
             };
-            format!("edited {}\n", paths.join(", "))
+            doc.push_str(&format!("edited {}\n", paths.join(", ")));
         }
-        ToolKind::Search { pattern, path, .. } => format!(
+        ToolKind::Search { pattern, path, .. } => doc.push_str(&format!(
             "searched {pattern}{}\n",
             path.as_deref()
                 .map(|path| format!(" in {path}"))
                 .unwrap_or_default()
-        ),
-        ToolKind::WebFetch { url } => format!("fetched {url}\n"),
-        ToolKind::WebSearch { query } => format!("searched the web for {query}\n"),
+        )),
+        ToolKind::WebFetch { url } => doc.push_str(&format!("fetched {url}\n")),
+        ToolKind::WebSearch { query } => {
+            doc.push_str(&format!("searched the web for {query}\n"));
+        }
         ToolKind::Mcp {
             server,
             tool,
             input,
-        } => format!(
-            "{server}.{tool}{}\n",
-            match input {
-                Some(input) => format!(" {}", text(store, input, options).await?),
-                None => String::new(),
-            }
-        ),
-        ToolKind::Workflow { name, input } => format!(
-            "Workflow{}{}\n",
-            name.as_ref()
-                .map_or_else(String::new, |name| format!(" {name}")),
-            match input {
-                Some(input) => format!(" {}", text(store, input, options).await?),
-                None => String::new(),
-            }
-        ),
-        ToolKind::Other { name, input } => format!(
-            "{name}{}\n",
-            match input {
-                Some(input) => format!(" {}", text(store, input, options).await?),
-                None => String::new(),
-            }
-        ),
+        } => named_input(doc, &format!("{server}.{tool}"), input.as_ref()).await?,
+        ToolKind::Workflow { name, input } => {
+            let name = name
+                .as_ref()
+                .map_or_else(|| "Workflow".to_owned(), |name| format!("Workflow {name}"));
+            named_input(doc, &name, input.as_ref()).await?;
+        }
+        ToolKind::Other { name, input } => named_input(doc, name, input.as_ref()).await?,
         ToolKind::AgentMessage {
             recipient,
             text: body,
             ..
-        } => {
-            format!(
-                "message to {recipient}: {}\n",
-                text(store, body, options).await?
-            )
-        }
+        } => doc.line(&format!("message to {recipient}: "), body).await?,
         ToolKind::Agents {
             action, addresses, ..
-        } => format!("{action:?} agents {}\n", addresses.join(", ")).to_lowercase(),
-    })
+        } => doc.push_str(&format!("{action:?} agents {}\n", addresses.join(", ")).to_lowercase()),
+    }
+    Ok(())
+}
+
+async fn named_input(doc: &mut Doc<'_>, name: &str, input: Option<&TextContent>) -> Result<()> {
+    if let Some(input) = input {
+        doc.line(&format!("{name} "), input).await
+    } else {
+        doc.push_str(&format!("{name}\n"));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
