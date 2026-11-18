@@ -200,17 +200,28 @@ pub struct Failure(anyhow::Error, StatusCode, ErrorCode);
 
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
-        let (status, code) = if error
-            .downcast_ref::<forge_store::ProjectNotFound>()
-            .is_some()
-            || error.downcast_ref::<forge_store::ItemNotFound>().is_some()
-        {
-            (StatusCode::NOT_FOUND, ErrorCode::NotFound)
-        } else if error.downcast_ref::<forge_runs::Refused>().is_some() {
-            (StatusCode::CONFLICT, ErrorCode::Conflict)
-        } else {
-            (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
-        };
+        let (status, code) =
+            if let Some(rejected) = error.downcast_ref::<forge_store::CreateThreadError>() {
+                match rejected {
+                    forge_store::CreateThreadError::ProjectNotFound { .. }
+                    | forge_store::CreateThreadError::ParentNotFound { .. } => {
+                        (StatusCode::NOT_FOUND, ErrorCode::NotFound)
+                    }
+                    forge_store::CreateThreadError::ProjectRemoved { .. } => {
+                        (StatusCode::CONFLICT, ErrorCode::Conflict)
+                    }
+                    forge_store::CreateThreadError::AgentWithoutParent { .. }
+                    | forge_store::CreateThreadError::AgentNotInParent { .. } => {
+                        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+                    }
+                }
+            } else if error.downcast_ref::<forge_store::ItemNotFound>().is_some() {
+                (StatusCode::NOT_FOUND, ErrorCode::NotFound)
+            } else if error.downcast_ref::<forge_runs::Refused>().is_some() {
+                (StatusCode::CONFLICT, ErrorCode::Conflict)
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
+            };
         Self(error, status, code)
     }
 }

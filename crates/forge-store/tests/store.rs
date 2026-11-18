@@ -631,13 +631,10 @@ async fn thread_creation_rejects_a_missing_project_without_writes_and_replays_ex
     };
     let head = store.head();
     let error = store.create_thread(request.clone()).await.unwrap_err();
-    assert_eq!(
-        error
-            .downcast_ref::<forge_store::ProjectNotFound>()
-            .unwrap()
-            .0,
-        missing_project,
-    );
+    assert!(matches!(
+        error.downcast_ref::<forge_store::CreateThreadError>(),
+        Some(forge_store::CreateThreadError::ProjectNotFound { project, .. }) if *project == missing_project
+    ));
     assert_eq!(store.head(), head);
     assert!(store.thread(&request.id).await.unwrap().is_none());
 
@@ -647,6 +644,97 @@ async fn thread_creation_rejects_a_missing_project_without_writes_and_replays_ex
     let existing = store.thread(&thread).await.unwrap().unwrap();
     assert_eq!(store.create_thread(request).await.unwrap(), existing);
     assert_eq!(store.head(), head);
+}
+
+#[tokio::test]
+async fn threads_are_refused_under_removed_projects_and_with_impossible_lineage() {
+    let dir = TempDir::new();
+    let (store, parent) = test_store(&dir.0).await;
+    let project = store.thread(&parent).await.unwrap().unwrap().project_id;
+    let other = add_thread(&store).await;
+    let foreign_agent = ItemId::new();
+    store
+        .upsert_item(NewItem {
+            id: foreign_agent.clone(),
+            thread_id: other,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Running,
+            kind: ItemKind::Agent {
+                name: None,
+                description: "elsewhere".into(),
+                prompt: None,
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: false,
+                result: None,
+                label: None,
+                engine: None,
+                thread: None,
+            },
+        })
+        .await
+        .unwrap();
+    let request = |parent_thread_id: Option<ThreadId>, spawned_by: Option<ItemId>| CreateThread {
+        id: ThreadId::new(),
+        project_id: project.clone(),
+        config: EngineConfig::new(EngineId::Claude),
+        title: None,
+        parent_thread_id,
+        spawned_by,
+    };
+    let refusal = |error: anyhow::Error| match error.downcast::<forge_store::CreateThreadError>() {
+        Ok(rejected) => rejected,
+        Err(other) => panic!("not a typed refusal: {other:#}"),
+    };
+    let head = store.head();
+
+    let mut own_parent = request(None, None);
+    own_parent.parent_thread_id = Some(own_parent.id.clone());
+    assert!(matches!(
+        refusal(store.create_thread(own_parent).await.unwrap_err()),
+        forge_store::CreateThreadError::ParentNotFound { .. }
+    ));
+    assert!(matches!(
+        refusal(
+            store
+                .create_thread(request(Some(ThreadId::new()), None))
+                .await
+                .unwrap_err()
+        ),
+        forge_store::CreateThreadError::ParentNotFound { .. }
+    ));
+    assert!(matches!(
+        refusal(
+            store
+                .create_thread(request(None, Some(ItemId::new())))
+                .await
+                .unwrap_err()
+        ),
+        forge_store::CreateThreadError::AgentWithoutParent { .. }
+    ));
+    assert!(matches!(
+        refusal(
+            store
+                .create_thread(request(Some(parent.clone()), Some(foreign_agent)))
+                .await
+                .unwrap_err()
+        ),
+        forge_store::CreateThreadError::AgentNotInParent { .. }
+    ));
+    assert_eq!(store.head(), head);
+
+    store
+        .create_thread(request(Some(parent), None))
+        .await
+        .unwrap();
+    store.remove_project(&project).await.unwrap();
+    assert!(matches!(
+        refusal(store.create_thread(request(None, None)).await.unwrap_err()),
+        forge_store::CreateThreadError::ProjectRemoved { .. }
+    ));
 }
 
 #[tokio::test]

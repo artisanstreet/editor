@@ -120,11 +120,29 @@ pub struct NewItem {
     pub kind: ItemKind,
 }
 
-/// A requested project does not exist. HTTP can map this canonical rejection
-/// without reading the same project before submitting the operation.
 #[derive(Debug, thiserror::Error)]
-#[error("project {0} not found")]
-pub struct ProjectNotFound(pub ProjectId);
+pub enum CreateThreadError {
+    #[error("create thread {thread}: project {project} not found")]
+    ProjectNotFound {
+        thread: ThreadId,
+        project: ProjectId,
+    },
+    #[error("create thread {thread}: project {project} was removed")]
+    ProjectRemoved {
+        thread: ThreadId,
+        project: ProjectId,
+    },
+    #[error("create thread {thread}: parent thread {parent} not found")]
+    ParentNotFound { thread: ThreadId, parent: ThreadId },
+    #[error("create thread {thread}: agent {agent} needs a parent thread")]
+    AgentWithoutParent { thread: ThreadId, agent: ItemId },
+    #[error("create thread {thread}: {agent} is not an agent of parent thread {parent}")]
+    AgentNotInParent {
+        thread: ThreadId,
+        parent: ThreadId,
+        agent: ItemId,
+    },
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("item {0} not found")]

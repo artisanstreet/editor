@@ -2,11 +2,13 @@
 //! transaction and publishes the resulting envelopes in commit order.
 
 use crate::read::{self, tag, to_body};
-use crate::{CONTINUE_AFTER_RESTART_KEY, MAX_RESTART_CONTINUATIONS, ProjectNotFound, project_name};
+use crate::{
+    CONTINUE_AFTER_RESTART_KEY, CreateThreadError, MAX_RESTART_CONTINUATIONS, project_name,
+};
 use anyhow::{Context, Result};
 use artisan_api::{
-    Continuation, CreateProject, CreateThread, Envelope, Event, Item, ItemId, Project, Run, RunId,
-    RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
+    Continuation, CreateProject, CreateThread, Envelope, Event, Item, ItemId, ItemKind, Project,
+    Run, RunId, RunStatus, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
 };
 use forge_content::ItemTexts as _;
 use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
@@ -139,9 +141,20 @@ impl Tx<'_> {
         if let Some(existing) = read::thread(self, &request.id)? {
             return Ok(existing);
         }
-        if read::project(self, &request.project_id)?.is_none() {
-            return Err(ProjectNotFound(request.project_id).into());
+        let project = read::project(self, &request.project_id)?.ok_or_else(|| {
+            CreateThreadError::ProjectNotFound {
+                thread: request.id.clone(),
+                project: request.project_id.clone(),
+            }
+        })?;
+        if project.removed {
+            return Err(CreateThreadError::ProjectRemoved {
+                thread: request.id,
+                project: request.project_id,
+            }
+            .into());
         }
+        self.check_lineage(&request)?;
         let created_at = self.created_at();
         self.save_thread(Thread {
             id: request.id,
@@ -161,6 +174,45 @@ impl Tx<'_> {
             spawned_by: request.spawned_by,
             parked_until: None,
         })
+    }
+
+    fn check_lineage(&self, request: &CreateThread) -> Result<()> {
+        let thread = &request.id;
+        let Some(parent) = &request.parent_thread_id else {
+            return match &request.spawned_by {
+                None => Ok(()),
+                Some(agent) => Err(CreateThreadError::AgentWithoutParent {
+                    thread: thread.clone(),
+                    agent: agent.clone(),
+                }
+                .into()),
+            };
+        };
+        if parent == thread || read::thread(self, parent)?.is_none() {
+            return Err(CreateThreadError::ParentNotFound {
+                thread: thread.clone(),
+                parent: parent.clone(),
+            }
+            .into());
+        }
+        let Some(agent) = &request.spawned_by else {
+            return Ok(());
+        };
+        let runs_this_thread = read::item(self, agent)?.is_some_and(|item| {
+            item.thread_id == *parent
+                && matches!(&item.kind, ItemKind::Agent { thread: runs, .. }
+                    if runs.as_ref().is_none_or(|runs| runs == thread))
+        });
+        if runs_this_thread {
+            Ok(())
+        } else {
+            Err(CreateThreadError::AgentNotInParent {
+                thread: thread.clone(),
+                parent: parent.clone(),
+                agent: agent.clone(),
+            }
+            .into())
+        }
     }
 
     pub(crate) fn update_thread(

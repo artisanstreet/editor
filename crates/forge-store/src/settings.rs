@@ -125,7 +125,11 @@ impl Store {
             };
             config.model = Some(model.id.clone());
             let customizations = read::setting(tx, artisan_api::MODEL_CUSTOMIZATIONS_KEY)?
-                .as_ref().map(artisan_api::model_customizations).transpose().map_err(anyhow::Error::msg)?.unwrap_or_default();
+                .as_ref()
+                .map(artisan_api::model_customizations)
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or_default();
             config = model.resolve_config(&config, &customizations).effective;
             tx.save_setting(
                 "default_engine_config".into(),
@@ -148,7 +152,11 @@ impl Store {
         let model = model.clone();
         self.write(move |tx| {
             let customizations = read::setting(tx, artisan_api::MODEL_CUSTOMIZATIONS_KEY)?
-                .as_ref().map(artisan_api::model_customizations).transpose().map_err(anyhow::Error::msg)?.unwrap_or_default();
+                .as_ref()
+                .map(artisan_api::model_customizations)
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or_default();
             config = model.resolve_config(&config, &customizations).effective;
             tx.remember_model_config(&config)?;
             Ok(config)

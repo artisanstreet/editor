@@ -350,6 +350,31 @@ async fn discovery_filters_before_pagination_and_can_find_other_parents_children
     assert_eq!(page.workers.len(), 1);
     assert_eq!(page.workers[0].thread.id, threads[0]);
     let child = ThreadId::new();
+    let agent = artisan_api::ItemId::new();
+    store
+        .upsert_item(forge_store::NewItem {
+            id: agent.clone(),
+            thread_id: threads[1].clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: artisan_api::Status::Running,
+            kind: artisan_api::ItemKind::Agent {
+                name: None,
+                description: "review".into(),
+                prompt: None,
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: false,
+                result: None,
+                label: None,
+                engine: Some(EngineId::Codex),
+                thread: Some(child.clone()),
+            },
+        })
+        .await
+        .unwrap();
     store
         .create_thread(CreateThread {
             id: child.clone(),
@@ -357,7 +382,7 @@ async fn discovery_filters_before_pagination_and_can_find_other_parents_children
             config: EngineConfig::new(EngineId::Codex),
             title: None,
             parent_thread_id: Some(threads[1].clone()),
-            spawned_by: Some(artisan_api::ItemId::new()),
+            spawned_by: Some(agent),
         })
         .await
         .unwrap();
