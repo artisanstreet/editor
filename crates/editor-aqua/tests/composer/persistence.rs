@@ -126,6 +126,10 @@ fn rejected_write_unlocks_queued_send_and_retry_preserves_the_message() {
         assert!(lease.read(|state| state.pending()));
 
         lease.retry();
+        let (mut socket, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "GET /drafts/new HTTP/1.1");
+        respond(&mut socket, json!({"revision": 0, "body": null})).await;
+        drop(socket);
         let (mut socket, route, body) = request(&listener, &acceptor).await;
         assert_eq!(route, "PUT /drafts/new HTTP/1.1");
         assert_eq!(body["body"], draft);

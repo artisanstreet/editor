@@ -17,6 +17,9 @@ fn pending_shutdown_tracks_unsaved_edits_and_clears_only_after_save_or_invalidat
     session.written(&request, edited, Err("offline".into()));
     assert!(session.pending());
     session.retry();
+    assert!(matches!(session.next(), Some(Operation::Load)));
+    assert!(session.pending());
+    session.loaded(Ok(DraftSnapshot::default()));
     let Some(Operation::Write { request, edited }) = session.next() else {
         panic!("expected a retried draft write");
     };
@@ -646,6 +649,12 @@ fn draft_write_failure_unlocks_the_queued_send_without_losing_the_draft() {
     assert_eq!(session.body, body);
     assert!(session.pending());
     session.retry();
+    assert!(
+        matches!(session.next(), Some(Operation::Load)),
+        "a save with no answer is checked against Forge before writing again"
+    );
+    session.loaded(Ok(DraftSnapshot::default()));
+    assert!(!session.conflict);
     save_next(&mut session);
     assert_original_submission(&mut session);
 }
@@ -697,24 +706,14 @@ fn a_save_forge_answered_too_late_is_not_shown_as_another_clients_change() {
     };
     session.written(&request, edited, Err("operation timed out".into()));
     session.queue(json!({"text": "typed while Forge was slow, then more"}));
-    let Some(Operation::Write { request, edited }) = session.next() else {
-        panic!("expected the next draft write");
-    };
-    assert_eq!(
-        request.expected_revision, 7,
-        "the next save still builds on the last revision Forge confirmed"
+    assert!(
+        matches!(session.next(), Some(Operation::Load)),
+        "the unanswered save is checked before the next one"
     );
-    session.written(
-        &request,
-        edited,
-        Ok(DraftWriteResult {
-            saved: false,
-            current: DraftSnapshot {
-                revision: 8,
-                body: json!({"text": "typed while Forge was slow"}),
-            },
-        }),
-    );
+    session.loaded(Ok(DraftSnapshot {
+        revision: 8,
+        body: json!({"text": "typed while Forge was slow"}),
+    }));
     assert!(
         !session.conflict,
         "the timed-out save landing late is this client's own draft"
@@ -735,6 +734,31 @@ fn a_save_forge_answered_too_late_is_not_shown_as_another_clients_change() {
 }
 
 #[test]
+fn repeated_unanswered_saves_never_pile_up() {
+    let mut session = DraftSession::new("thread:one".into());
+    session.next();
+    session.loaded(Ok(DraftSnapshot {
+        revision: 3,
+        body: json!({"text": "old"}),
+    }));
+    session.queue(json!({"text": "mine"}));
+    for _ in 0..3 {
+        let Some(Operation::Write { request, edited }) = session.next() else {
+            panic!("expected a draft write");
+        };
+        assert_eq!(request.expected_revision, 3);
+        session.written(&request, edited, Err("offline".into()));
+        session.retry();
+        assert!(matches!(session.next(), Some(Operation::Load)));
+        session.loaded(Ok(DraftSnapshot {
+            revision: 3,
+            body: json!({"text": "old"}),
+        }));
+        assert!(!session.conflict);
+    }
+}
+
+#[test]
 fn another_clients_change_after_a_timed_out_save_still_asks_which_to_keep() {
     let mut session = DraftSession::new("thread:one".into());
     session.next();
@@ -748,24 +772,55 @@ fn another_clients_change_after_a_timed_out_save_still_asks_which_to_keep() {
     };
     session.written(&request, edited, Err("operation timed out".into()));
     session.queue(json!({"text": "mine, edited"}));
-    let Some(Operation::Write { request, edited }) = session.next() else {
-        panic!("expected the next draft write");
-    };
-    session.written(
-        &request,
-        edited,
-        Ok(DraftWriteResult {
-            saved: false,
-            current: DraftSnapshot {
-                revision: 8,
-                body: json!({"text": "written on the other machine"}),
-            },
-        }),
-    );
+    assert!(matches!(session.next(), Some(Operation::Load)));
+    session.loaded(Ok(DraftSnapshot {
+        revision: 8,
+        body: json!({"text": "written on the other machine"}),
+    }));
     assert!(
         session.conflict,
         "a draft this client never sent is another client's change"
     );
+    assert_eq!(session.body, json!({"text": "mine, edited"}));
+}
+
+#[test]
+fn typing_before_the_first_load_asks_which_draft_to_keep() {
+    let mut session = DraftSession::new("thread:one".into());
+    assert!(matches!(session.next(), Some(Operation::Load)));
+    session.queue(json!({"text": "typed before the draft arrived"}));
+    session.loaded(Ok(DraftSnapshot {
+        revision: 4,
+        body: json!({"text": "saved on another machine"}),
+    }));
+    assert!(
+        session.conflict,
+        "the saved draft would be overwritten unseen"
+    );
+    assert!(session.next().is_none());
+    assert_eq!(
+        session.body,
+        json!({"text": "typed before the draft arrived"})
+    );
+    session.use_remote();
+    assert_eq!(session.body, json!({"text": "saved on another machine"}));
+}
+
+#[test]
+fn typing_before_the_first_load_of_an_empty_draft_just_saves() {
+    let mut session = DraftSession::new("thread:one".into());
+    assert!(matches!(session.next(), Some(Operation::Load)));
+    session.queue(json!({"text": "typed early"}));
+    session.loaded(Ok(DraftSnapshot {
+        revision: 2,
+        body: serde_json::Value::Null,
+    }));
+    assert!(!session.conflict);
+    let Some(Operation::Write { request, .. }) = session.next() else {
+        panic!("expected the early text to be saved");
+    };
+    assert_eq!(request.expected_revision, 2);
+    assert_eq!(request.body, json!({"text": "typed early"}));
 }
 
 #[test]

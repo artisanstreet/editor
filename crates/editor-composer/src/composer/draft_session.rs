@@ -48,7 +48,7 @@ pub struct DraftSession {
     pub error: Option<String>,
     pub conflict: bool,
     snapshot: DraftSnapshot,
-    unconfirmed: Vec<Value>,
+    ambiguous: Option<Value>,
     edited: u64,
     saved: u64,
     dirty: bool,
@@ -67,7 +67,7 @@ impl DraftSession {
             error: None,
             conflict: false,
             snapshot: DraftSnapshot::default(),
-            unconfirmed: Vec::new(),
+            ambiguous: None,
             edited: 0,
             saved: 0,
             dirty: false,
@@ -203,7 +203,7 @@ impl DraftSession {
         let posting = self.outgoing.as_ref().is_some_and(|outgoing| {
             outgoing.state == Sending::Queued && self.saved >= outgoing.edited
         });
-        let operation = if !self.loaded {
+        let operation = if !self.loaded || self.ambiguous.is_some() {
             Operation::Load
         } else if self.dirty && !posting {
             Operation::Write {
@@ -236,12 +236,28 @@ impl DraftSession {
         self.busy = false;
         match result {
             Ok(snapshot) => {
+                let landed = self
+                    .ambiguous
+                    .take()
+                    .is_some_and(|body| body == snapshot.body);
+                let unchanged = self.loaded && snapshot.revision == self.snapshot.revision;
+                let unseen = !landed
+                    && !unchanged
+                    && self.dirty
+                    && !snapshot.body.is_null()
+                    && snapshot.body != self.body;
                 if !self.dirty {
                     self.body = snapshot.body.clone();
                 }
                 self.snapshot = snapshot;
-                self.unconfirmed.clear();
                 self.loaded = true;
+                if unseen {
+                    self.conflict = true;
+                    self.fail(
+                        "This draft changed on another client. Choose which version to keep."
+                            .into(),
+                    );
+                }
             }
             Err(error) => self.fail(format!("Couldn't load the draft: {error}")),
         }
@@ -260,22 +276,12 @@ impl DraftSession {
         match result {
             Ok(result) => {
                 let matched = result.saved || result.current.body == request.body;
-                let landed_late = !matched
-                    && result.current.revision == request.expected_revision.saturating_add(1)
-                    && self.unconfirmed.contains(&result.current.body);
                 self.snapshot = result.current;
-                self.unconfirmed.clear();
                 if matched {
                     self.saved = edited;
                     if self.edited == edited {
                         self.dirty = false;
                     }
-                } else if landed_late {
-                    tracing::info!(
-                        scope = %self.scope,
-                        revision = self.snapshot.revision,
-                        "an unanswered draft save had landed; saving again on top of it"
-                    );
                 } else {
                     self.conflict = true;
                     self.fail(
@@ -285,7 +291,7 @@ impl DraftSession {
                 }
             }
             Err(error) => {
-                self.unconfirmed.push(request.body.clone());
+                self.ambiguous = Some(request.body.clone());
                 self.fail(format!("Couldn't save the draft: {error}"));
             }
         }
@@ -313,7 +319,7 @@ impl DraftSession {
                 self.accepted = Some(thread);
                 self.snapshot.revision = self.snapshot.revision.saturating_add(1);
                 self.snapshot.body = Value::Null;
-                self.unconfirmed.clear();
+                self.ambiguous = None;
                 if typed_since {
                     self.dirty = true;
                 } else {
