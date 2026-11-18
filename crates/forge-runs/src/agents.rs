@@ -8,7 +8,7 @@ use forge_store::NewItem;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-pub const MAX_AGENT_DEPTH: usize = 3;
+const MAX_AGENT_DEPTH: usize = 3;
 const LONGEST_WAIT: Duration = Duration::from_mins(9);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +39,7 @@ pub enum AgentState {
 
 impl AgentState {
     #[must_use]
-    pub const fn is_settled(self) -> bool {
+    pub(crate) const fn is_settled(self) -> bool {
         matches!(self, Self::Done | Self::Failed | Self::Cancelled)
     }
 
@@ -354,7 +354,7 @@ pub enum AgentLookupError {
 
 impl AgentLookupError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    const fn class(&self) -> ErrorClass {
         match self {
             Self::Refused { .. } => ErrorClass::Conflict,
             Self::ReadItem(_) | Self::ReadThread(_) => ErrorClass::Internal,

@@ -1,5 +1,5 @@
 use crate::Hub;
-use crate::error::{self, ErrorClass};
+use crate::error::ErrorClass;
 use artisan_api::{CreateProject, ProjectId, Thread, ThreadId, Timestamp};
 use forge_store::{CreateProjectError, ReadProjectError};
 use std::path::{Path, PathBuf};
@@ -20,16 +20,6 @@ pub enum EnsureScratchProjectError {
     Task(#[source] tokio::task::JoinError),
     #[error("register the scratch project")]
     CreateProject(#[source] CreateProjectError),
-}
-
-impl EnsureScratchProjectError {
-    #[must_use]
-    pub fn class(&self) -> ErrorClass {
-        match self {
-            Self::CreateFolder { .. } | Self::Task(_) => ErrorClass::Internal,
-            Self::CreateProject(source) => error::create_project(&source.cause),
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,7 +52,7 @@ pub enum ThreadFolderError {
 
 impl ThreadFolderError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    pub(crate) const fn class(&self) -> ErrorClass {
         match self {
             Self::Task { .. }
             | Self::Scratch { .. }
@@ -134,7 +124,10 @@ impl Hub {
         Ok(())
     }
 
-    pub async fn thread_folder(&self, thread: &Thread) -> Result<PathBuf, ThreadFolderError> {
+    pub(crate) async fn thread_folder(
+        &self,
+        thread: &Thread,
+    ) -> Result<PathBuf, ThreadFolderError> {
         if thread.project_id.is_scratch() {
             let (root, scratch) = (self.scratch_root(), thread.clone());
             return tokio::task::spawn_blocking(move || scratch_folder(&root, &scratch))

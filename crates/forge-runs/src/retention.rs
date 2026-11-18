@@ -1,5 +1,4 @@
 use crate::Hub;
-use crate::error::ErrorClass;
 use artisan_api::{THREAD_RETENTION_DAYS_KEY, Thread, Timestamp};
 use forge_store::{CollectBlobsError, ReadSettingError, RemoveInactiveError};
 use std::collections::HashSet;
@@ -23,15 +22,6 @@ pub enum RemoveInactiveThreadsError {
         #[source]
         source: CollectBlobsError,
     },
-}
-
-impl RemoveInactiveThreadsError {
-    #[must_use]
-    pub const fn class(&self) -> ErrorClass {
-        match self {
-            Self::Days(_) | Self::Remove { .. } | Self::CollectBlobs { .. } => ErrorClass::Internal,
-        }
-    }
 }
 
 impl Hub {

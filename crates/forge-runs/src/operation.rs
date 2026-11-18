@@ -22,7 +22,7 @@ pub enum InputError {
 
 impl InputError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    const fn class(&self) -> ErrorClass {
         match self {
             Self::Text(text) => error::content(&text.cause),
             Self::Command { .. } => ErrorClass::BadRequest,

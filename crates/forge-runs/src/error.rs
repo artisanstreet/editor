@@ -18,7 +18,7 @@ pub enum ErrorClass {
 pub struct Refused(pub String);
 
 #[must_use]
-pub const fn send_rejected(rejected: &SendRejected) -> ErrorClass {
+const fn send_rejected(rejected: &SendRejected) -> ErrorClass {
     match rejected {
         SendRejected::ThreadNotFound(_) => ErrorClass::NotFound,
         SendRejected::IdConflict(_)
@@ -74,7 +74,7 @@ pub const fn content(error: &ContentError) -> ErrorClass {
 }
 
 #[must_use]
-pub const fn input(failure: &InputFailure) -> ErrorClass {
+pub(crate) const fn input(failure: &InputFailure) -> ErrorClass {
     match failure {
         InputFailure::Rejected(rejected) => send_rejected(rejected),
         InputFailure::Write(write) => self::write(write),
@@ -83,7 +83,7 @@ pub const fn input(failure: &InputFailure) -> ErrorClass {
 }
 
 #[must_use]
-pub const fn answer(failure: &AnswerFailure) -> ErrorClass {
+pub(crate) const fn answer(failure: &AnswerFailure) -> ErrorClass {
     match failure {
         AnswerFailure::NotFound => ErrorClass::NotFound,
         AnswerFailure::Refused(_) => ErrorClass::Conflict,
@@ -128,7 +128,7 @@ pub const fn create_thread(error: &CreateThreadError) -> ErrorClass {
 }
 
 #[must_use]
-pub const fn spawn(failure: &SpawnFailure) -> ErrorClass {
+pub(crate) const fn spawn(failure: &SpawnFailure) -> ErrorClass {
     match failure {
         SpawnFailure::Thread(thread) => create_thread(thread),
         SpawnFailure::Input(input) => self::input(input),

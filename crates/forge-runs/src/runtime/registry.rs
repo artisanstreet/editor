@@ -82,8 +82,8 @@ impl Holds {
 
 #[derive(Clone, Debug)]
 pub struct Peer {
-    pub member: Member,
-    pub holds: Holds,
+    pub(crate) member: Member,
+    pub(crate) holds: Holds,
 }
 
 #[derive(Clone, Debug)]
@@ -404,7 +404,7 @@ impl Registry {
 
 impl Generation {
     #[must_use]
-    pub fn phase(&self) -> Phase {
+    fn phase(&self) -> Phase {
         self.overlap.borrow().phase
     }
 
@@ -437,7 +437,7 @@ impl Generation {
     }
 
     #[must_use]
-    pub fn owner(&self, thread: &ThreadId) -> Option<Member> {
+    pub(crate) fn owner(&self, thread: &ThreadId) -> Option<Member> {
         self.overlap
             .borrow()
             .peers
@@ -447,7 +447,7 @@ impl Generation {
     }
 
     #[must_use]
-    pub fn foreign_threads(&self) -> BTreeSet<ThreadId> {
+    pub(crate) fn foreign_threads(&self) -> BTreeSet<ThreadId> {
         self.overlap
             .borrow()
             .peers
@@ -457,11 +457,11 @@ impl Generation {
     }
 
     #[must_use]
-    pub fn peers(&self) -> Vec<Peer> {
+    pub(crate) fn peers(&self) -> Vec<Peer> {
         self.overlap.borrow().peers.values().cloned().collect()
     }
 
-    pub fn track(&self, peers: Vec<Peer>) {
+    pub(crate) fn track(&self, peers: Vec<Peer>) {
         self.overlap.send_modify(|overlap| {
             overlap.peers = peers
                 .into_iter()
@@ -470,7 +470,7 @@ impl Generation {
         });
     }
 
-    pub fn reported(&self, generation: &str, threads: BTreeSet<ThreadId>) {
+    pub(crate) fn reported(&self, generation: &str, threads: BTreeSet<ThreadId>) {
         self.overlap.send_if_modified(|overlap| {
             let Some(peer) = overlap.peers.get_mut(generation) else {
                 return false;
@@ -482,7 +482,7 @@ impl Generation {
         });
     }
 
-    pub fn forget(&self, generation: &str) -> BTreeSet<ThreadId> {
+    pub(crate) fn forget(&self, generation: &str) -> BTreeSet<ThreadId> {
         let mut released = BTreeSet::new();
         self.overlap.send_if_modified(|overlap| {
             overlap

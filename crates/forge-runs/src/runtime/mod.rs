@@ -50,7 +50,7 @@ pub enum Command {
 
 impl Command {
     #[must_use]
-    pub const fn name(&self) -> &'static str {
+    const fn name(&self) -> &'static str {
         match self {
             Self::Health => "health",
             Self::Activate => "activate",
@@ -134,7 +134,7 @@ pub enum PeerError {
 
 impl PeerError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    pub(crate) const fn class(&self) -> ErrorClass {
         match self {
             Self::Rejected { failure, .. } => failure.class,
             Self::Client { .. } | Self::Send { .. } | Self::Decode { .. } => ErrorClass::Internal,
@@ -178,7 +178,7 @@ pub async fn request(member: &Member, command: &Command) -> Result<Value, PeerEr
     }
 }
 
-pub async fn request_as<T: serde::de::DeserializeOwned>(
+pub(crate) async fn request_as<T: serde::de::DeserializeOwned>(
     member: &Member,
     command: &Command,
 ) -> Result<T, PeerError> {
@@ -241,7 +241,7 @@ pub enum ControlError {
 
 impl ControlError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    const fn class(&self) -> ErrorClass {
         match self {
             Self::Accept(error) => error.class(),
             Self::Answer(error) => error.class(),

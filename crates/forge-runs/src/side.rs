@@ -384,10 +384,7 @@ impl Hub {
         Ok(())
     }
 
-    pub(crate) async fn sync_title(
-        &self,
-        thread: &artisan_api::Thread,
-    ) -> Result<(), SyncTitleError> {
+    async fn sync_title(&self, thread: &artisan_api::Thread) -> Result<(), SyncTitleError> {
         let Some(title) = thread.title.clone() else {
             return Ok(());
         };

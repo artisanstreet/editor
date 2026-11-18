@@ -15,7 +15,7 @@ async fn a_damaged_disabled_skills_setting_keeps_skills_out_instead_of_enabling_
         .unwrap();
     hub.store()
         .set_setting(
-            DISABLED_SKILLS_KEY.to_owned(),
+            extensions::DISABLED_SKILLS_KEY.to_owned(),
             serde_json::json!({ "local.review": true }),
         )
         .await

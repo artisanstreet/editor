@@ -34,17 +34,16 @@ mod side;
 
 pub use agents::{
     AgentInfo, AgentLookupError, AgentQueryError, AgentState, AgentViewError, CancelAgentError,
-    MAX_AGENT_DEPTH, MessageAgentError, SendAsAgentError, SpawnAgent, SpawnAgentError,
-    StartThreadError,
+    MessageAgentError, SendAsAgentError, SpawnAgent, SpawnAgentError, StartThreadError,
 };
 pub use approvals::ApprovalError;
 pub use coordination::DeliverMessageError;
 pub use error::{ErrorClass, Refused};
 pub use extensions::{
-    AdoptSkillError, CustomisationError, DISABLED_SKILLS_KEY, DiscardSkillError,
-    EnabledSkillsError, Extensions, GLOBAL_PROMPT_KEY, GlobalPromptError, HomesLockError,
-    InstallSkillError, MarketplaceInstallError, MarketplaceSearchError, ReconcileSkillsError,
-    ResolveGlobalPromptError, SaveGlobalPromptError, SetSkillEnabledError, SkillCatalogError,
+    AdoptSkillError, CustomisationError, DiscardSkillError, EnabledSkillsError, Extensions,
+    GlobalPromptError, HomesLockError, InstallSkillError, MarketplaceInstallError,
+    MarketplaceSearchError, ReconcileSkillsError, ResolveGlobalPromptError, SaveGlobalPromptError,
+    SetSkillEnabledError, SkillCatalogError,
 };
 pub use gateway::COMPUTER_USE_KEY;
 pub use gateway::CallEditorError;
@@ -302,7 +301,7 @@ impl Hub {
     }
 
     #[must_use]
-    pub fn data_dir(&self) -> &std::path::Path {
+    fn data_dir(&self) -> &std::path::Path {
         &self.inner.data_dir
     }
 
@@ -862,7 +861,7 @@ impl Hub {
         Ok(())
     }
 
-    pub async fn cancel_local(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
+    async fn cancel_local(&self, thread_id: &ThreadId) -> Result<(), CancelError> {
         let _admission = self.inner.admission.lock().await;
         self.cancel_owned(thread_id).await
     }
@@ -958,7 +957,7 @@ impl Hub {
         clippy::significant_drop_tightening,
         reason = "both locks are held so the snapshot matches its revision"
     )]
-    pub fn live_snapshot(&self) -> (u64, Vec<Event>) {
+    fn live_snapshot(&self) -> (u64, Vec<Event>) {
         let live = self.lock();
         let suggestions = self.suggestions_lock();
         let mut snapshot: Vec<_> = live
@@ -1061,7 +1060,7 @@ impl Hub {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub(crate) fn keep_unsettled(&self, settlement: forge_store::Settlement) {
+    fn keep_unsettled(&self, settlement: forge_store::Settlement) {
         tracing::error!(
             thread = %settlement.run.thread_id,
             run = %settlement.run.id,
@@ -1493,7 +1492,7 @@ fn sender_line(sender: &artisan_api::Sender) -> String {
     )
 }
 
-pub(crate) fn sort_snapshot(snapshot: &mut [Event]) {
+fn sort_snapshot(snapshot: &mut [Event]) {
     snapshot.sort_by(|left, right| snapshot_key(left).cmp(&snapshot_key(right)));
 }
 

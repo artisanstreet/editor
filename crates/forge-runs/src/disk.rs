@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const GIB: u64 = 1 << 30;
-pub(crate) const WARN: u64 = 10 * GIB;
-pub(crate) const STOP: u64 = 3 * GIB;
+const WARN: u64 = 10 * GIB;
+const STOP: u64 = 3 * GIB;
 const REARM: u64 = 12 * GIB;
 const MARGIN: u64 = GIB;
 const EXHAUSTED: u64 = GIB / 4;

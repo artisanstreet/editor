@@ -16,8 +16,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-pub const DISABLED_SKILLS_KEY: &str = "disabled_skills";
-pub const GLOBAL_PROMPT_KEY: &str = "global_prompt";
+pub(crate) const DISABLED_SKILLS_KEY: &str = "disabled_skills";
+const GLOBAL_PROMPT_KEY: &str = "global_prompt";
 const PROMPT_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -60,16 +60,6 @@ pub enum CustomisationError {
     McpServers(#[source] ReadMcpServersError),
     #[error("read the skills engines launch with")]
     Skills(#[source] SkillCustomisationError),
-}
-
-impl CustomisationError {
-    #[must_use]
-    pub fn class(&self) -> ErrorClass {
-        match self {
-            Self::Prompt(prompt) => prompt.class(),
-            Self::McpServers(_) | Self::Skills(_) => ErrorClass::Internal,
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -122,7 +112,7 @@ pub enum ReconcileSkillsError {
 
 impl ReconcileSkillsError {
     #[must_use]
-    pub const fn class(&self) -> ErrorClass {
+    const fn class(&self) -> ErrorClass {
         match self {
             Self::Customisation(_) | Self::Homes(_) | Self::Reconcile(_) => ErrorClass::Internal,
         }
@@ -596,9 +586,7 @@ impl Extensions {
         }
     }
 
-    pub(crate) async fn skill_customisation(
-        &self,
-    ) -> Result<Customisation, SkillCustomisationError> {
+    async fn skill_customisation(&self) -> Result<Customisation, SkillCustomisationError> {
         Ok(Customisation {
             skills_dir: self.skills_dir(),
             first_party: true,
@@ -883,7 +871,7 @@ impl Extensions {
             .map_err(ReconcileSkillsError::Reconcile)
     }
 
-    pub(crate) async fn launch_prompt(&self) -> Result<Option<String>, GlobalPromptError> {
+    async fn launch_prompt(&self) -> Result<Option<String>, GlobalPromptError> {
         if let Some(text) = self.stored_prompt().await? {
             return Ok(Some(text));
         }

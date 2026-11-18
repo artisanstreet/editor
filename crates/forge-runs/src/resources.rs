@@ -8,7 +8,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-pub const MAX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 
 const SNAPSHOTS_PER_ITEM: usize = 32;
 const KERNEL_RELEASE: &str = "/proc/sys/kernel/osrelease";
@@ -84,7 +84,7 @@ fn has_scheme(source: &str, scheme: &str) -> bool {
 
 impl Written {
     #[must_use]
-    pub fn parse(source: &str) -> Option<Self> {
+    fn parse(source: &str) -> Option<Self> {
         let source = source.trim();
         let remote = ["http://", "https://", "data:"]
             .iter()
@@ -147,7 +147,7 @@ fn block_sources(value: &serde_json::Value, found: &mut Vec<String>) {
     clippy::wildcard_enum_match_arm,
     reason = "only images and fenced blocks carry sources; every other event is prose"
 )]
-pub fn written_sources(markdown: &str) -> Vec<Written> {
+pub(crate) fn written_sources(markdown: &str) -> Vec<Written> {
     let mut found = Vec::new();
     let mut block: Option<String> = None;
     for event in Parser::new(markdown) {
@@ -185,13 +185,13 @@ pub fn written_sources(markdown: &str) -> Vec<Written> {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Host {
-    pub home: Option<PathBuf>,
-    pub windows_drives: Option<PathBuf>,
-    pub wsl_distribution: Option<String>,
+    pub(crate) home: Option<PathBuf>,
+    pub(crate) windows_drives: Option<PathBuf>,
+    pub(crate) wsl_distribution: Option<String>,
 }
 
 #[must_use]
-pub fn automount_root(config: &str) -> PathBuf {
+pub(crate) fn automount_root(config: &str) -> PathBuf {
     let mut automount = false;
     let mut root = None;
     for line in config.lines().map(str::trim) {
@@ -311,7 +311,11 @@ fn inside_wsl(
     }
 }
 
-pub fn host_path(written: &Written, folder: &Path, host: &Host) -> Result<PathBuf, ResourceError> {
+pub(crate) fn host_path(
+    written: &Written,
+    folder: &Path,
+    host: &Host,
+) -> Result<PathBuf, ResourceError> {
     let local = without_scheme(&written.path)?;
     let translated = match host.windows_drives.as_deref() {
         Some(drives) => inside_wsl(&local, drives, host.wsl_distribution.as_deref())?,
@@ -332,14 +336,14 @@ pub fn host_path(written: &Written, folder: &Path, host: &Host) -> Result<PathBu
     })
 }
 
-pub struct Access {
+struct Access {
     root: Option<PathBuf>,
     rules: Rules,
 }
 
 impl Access {
     #[must_use]
-    pub fn load(engine_home: &Path, folder: &Path) -> Self {
+    fn load(engine_home: &Path, folder: &Path) -> Self {
         let root = match std::fs::canonicalize(folder) {
             Ok(root) => Some(without_verbatim_prefix(&root)),
             Err(error) => {
@@ -354,7 +358,7 @@ impl Access {
     }
 
     #[must_use]
-    pub fn permits(&self, resolved: &Path) -> bool {
+    fn permits(&self, resolved: &Path) -> bool {
         self.root
             .as_deref()
             .is_some_and(|root| resolved.starts_with(root))

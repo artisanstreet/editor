@@ -93,7 +93,7 @@ pub(crate) enum Wake {
     Never,
 }
 
-pub(crate) fn wake(parked: Parked, now: Timestamp, stalled: bool) -> Wake {
+fn wake(parked: Parked, now: Timestamp, stalled: bool) -> Wake {
     match parked {
         Parked::Nothing => Wake::Never,
         Parked::Unreadable => Wake::After(RECHECK),

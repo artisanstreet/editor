@@ -316,7 +316,7 @@ impl Mcp {
             .await;
     }
 
-    pub(crate) fn store(&self) -> &Store {
+    fn store(&self) -> &Store {
         &self.store
     }
 

@@ -1326,7 +1326,10 @@ async fn a_skill_turned_off_never_reaches_the_engine() {
         .await
         .unwrap();
     assert_eq!(
-        hub.store().setting(DISABLED_SKILLS_KEY).await.unwrap(),
+        hub.store()
+            .setting(extensions::DISABLED_SKILLS_KEY)
+            .await
+            .unwrap(),
         Some(serde_json::json!(["local.review"])),
         "Forge remembers the skill is off"
     );

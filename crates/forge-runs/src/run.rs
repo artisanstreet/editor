@@ -79,12 +79,12 @@ pub(crate) enum DriveError {
     },
 }
 
-pub(crate) enum Ending {
+enum Ending {
     Finished(Outcome),
     Stopped(Cleanup),
 }
 
-pub(crate) enum Cleanup {
+enum Cleanup {
     Confirmed,
     Failed(String),
     Unconfirmed,

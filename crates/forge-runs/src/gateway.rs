@@ -199,7 +199,7 @@ impl Hub {
         }
     }
 
-    pub fn answer_editor_call(&self, id: &str, reply: EditorReply) -> bool {
+    pub(crate) fn answer_editor_call(&self, id: &str, reply: EditorReply) -> bool {
         let pending = self.gateway_lock().calls.remove(id);
         pending.is_some_and(|pending| pending.answer.send(reply).is_ok())
     }
