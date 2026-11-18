@@ -68,6 +68,7 @@ pub type StyledTokenizer = Rc<dyn Fn(&str) -> Vec<StyledToken>>;
 struct Snapshot {
     text: String,
     selection: Range<usize>,
+    reversed: bool,
 }
 
 pub struct Editor {
@@ -746,6 +747,7 @@ impl Editor {
         Snapshot {
             text: self.text.clone(),
             selection: self.selection.clone(),
+            reversed: self.reversed,
         }
     }
     fn restore(&mut self, snapshot: Snapshot) {
@@ -753,7 +755,7 @@ impl Editor {
         self.paint_revision = self.paint_revision.wrapping_add(1);
         *self.token_cache.get_mut() = None;
         self.selection = snapshot.selection;
-        self.reversed = false;
+        self.reversed = snapshot.reversed;
         self.anchor = None;
         self.marked = None;
         self.drag_origin = None;

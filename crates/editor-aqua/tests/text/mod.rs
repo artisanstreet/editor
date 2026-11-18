@@ -922,3 +922,15 @@ fn prompt_switches_raw_placeholder_paint_to_raw_input_paint() {
     runtime.build_frame().unwrap();
     assert!(runtime.scene().ordered().any(|(_, item)| matches!(item, DisplayItem::PushGpuiSourceTextColor(color) if *color == theme.colors.text.to_reference_text_color())));
 }
+
+#[test]
+fn undo_restores_the_active_end_of_a_backward_selection() {
+    let mut editor = Editor::new("abcdef", Mode::Document);
+    assert!(editor.set_selection(1..3, true));
+    editor.replace_input(None, "x", None);
+    assert!(editor.undo());
+    assert_eq!(editor.selection(), 1..3);
+    assert!(editor.selection_reversed());
+    editor.move_horizontal(false, false, true);
+    assert_eq!(editor.selection(), 0..3);
+}
