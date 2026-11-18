@@ -111,7 +111,10 @@ enum Closed {
     OutputFailed(#[source] Arc<std::io::Error>),
     #[error("the server closed its event stream")]
     EventStream,
-    #[error("the server stopped reading while {} of messages waited for it", size(MAX_QUEUED_BYTES))]
+    #[error(
+        "the server stopped reading while {} of messages waited for it",
+        size(MAX_QUEUED_BYTES)
+    )]
     Backlogged,
 }
 
@@ -191,7 +194,10 @@ impl RequestError {
 enum NotifyError {
     #[error("the server is no longer running")]
     Stopped,
-    #[error("the server stopped reading while {} of messages waited for it", size(MAX_QUEUED_BYTES))]
+    #[error(
+        "the server stopped reading while {} of messages waited for it",
+        size(MAX_QUEUED_BYTES)
+    )]
     Backlogged,
     #[error("{}", reach_error(.0))]
     Unreachable(#[source] reqwest::Error),
@@ -237,6 +243,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a thread's servers stay connected without a turn.
 pub const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
+const MAX_WARM_THREADS: usize = 8;
 /// The most tools all servers together offer.
 const MAX_TOOLS: usize = 256;
 /// The longest tool name claude.ai takes.
@@ -428,7 +435,7 @@ impl Servers {
         connected.name_tools();
         if let Some(thread) = thread {
             let generation = GENERATION.fetch_add(1, Ordering::Relaxed);
-            let replaced = lock(&WARM).insert(
+            let retired = keep_warm(
                 thread.clone(),
                 Warm {
                     config,
@@ -436,7 +443,7 @@ impl Servers {
                     generation,
                 },
             );
-            drop(replaced);
+            drop(retired);
             connected.warm = Some((thread, generation));
         }
         connected
@@ -614,6 +621,27 @@ impl Drop for Servers {
             }
         });
     }
+}
+
+fn keep_warm(thread: String, set: Warm) -> Vec<Warm> {
+    let mut warm = lock(&WARM);
+    let mut retired: Vec<Warm> = warm.insert(thread, set).into_iter().collect();
+    while warm.len() > MAX_WARM_THREADS {
+        let Some(oldest) = warm
+            .iter()
+            .min_by_key(|(_, set)| set.generation)
+            .map(|(thread, _)| thread.clone())
+        else {
+            break;
+        };
+        tracing::info!(
+            thread = oldest,
+            limit = MAX_WARM_THREADS,
+            "more threads keep MCP servers warm than allowed; the longest unused set shuts down"
+        );
+        retired.extend(warm.remove(&oldest));
+    }
+    retired
 }
 
 /// Takes a thread's warm servers if no turn took them since `generation`.
@@ -1332,10 +1360,12 @@ impl Outbox {
             self.bytes.fetch_sub(size, Ordering::AcqRel);
             return Err(Refused::Backlogged);
         }
-        self.sender.send(Queued { text, request }).map_err(|_closed| {
-            self.bytes.fetch_sub(size, Ordering::AcqRel);
-            Refused::Stopped
-        })
+        self.sender
+            .send(Queued { text, request })
+            .map_err(|_closed| {
+                self.bytes.fetch_sub(size, Ordering::AcqRel);
+                Refused::Stopped
+            })
     }
 }
 
@@ -1571,11 +1601,7 @@ impl Drop for Pending<'_> {
 }
 
 /// Writes messages to a stdio server, one line each.
-async fn write_lines(
-    mut stdin: tokio::process::ChildStdin,
-    mut messages: Inbox,
-    rpc: Arc<Rpc>,
-) {
+async fn write_lines(mut stdin: tokio::process::ChildStdin, mut messages: Inbox, rpc: Arc<Rpc>) {
     while let Some(message) = messages.recv().await {
         let written = async {
             stdin.write_all(message.text.as_bytes()).await?;

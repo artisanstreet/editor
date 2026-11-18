@@ -554,6 +554,21 @@ async fn a_thread_keeps_its_servers_between_turns() {
     assert_eq!(starts(), 3, "another thread shares this thread's server");
 }
 
+#[tokio::test]
+async fn only_the_most_recently_used_threads_keep_servers_warm() {
+    let config = vec![fake_stdio("capped", &[])];
+    let threads: Vec<String> = (0..MAX_WARM_THREADS + 4)
+        .map(|n| format!("thread-capped-{n}"))
+        .collect();
+    for thread in &threads {
+        drop(for_thread(thread, Servers::connect(&config, Path::new("."))).await);
+    }
+    let warm = lock(&WARM);
+    assert!(warm.len() <= MAX_WARM_THREADS, "{} warm sets", warm.len());
+    assert!(!warm.contains_key(&threads[0]));
+    assert!(warm.contains_key(&threads[threads.len() - 1]));
+}
+
 /// A Streamable HTTP server for tests that can forget sessions and answer
 /// over a stream it keeps open.
 #[derive(Default)]
