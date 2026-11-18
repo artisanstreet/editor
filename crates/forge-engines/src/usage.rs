@@ -19,7 +19,8 @@ use std::sync::{
     Mutex, PoisonError,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// `claude -p /usage` starts a whole CLI: about 5 s, far more on a busy
 /// machine.
@@ -145,6 +146,26 @@ impl UsageCache {
             }
         }
         slot.last().good.clone()
+    }
+
+    #[must_use]
+    pub fn due_at(&self, engine: EngineId) -> Instant {
+        self.slots
+            .get(&engine)
+            .expect("invariant: the usage cache has a slot for every engine")
+            .last()
+            .attempt
+            .map_or_else(Instant::now, |(at, failed)| {
+                at + if failed { RETRY_AFTER } else { self.ttl }
+            })
+    }
+
+    pub fn unreadable(&self, engine: EngineId) {
+        self.slots
+            .get(&engine)
+            .expect("invariant: the usage cache has a slot for every engine")
+            .last()
+            .attempt = Some((Instant::now(), true));
     }
 
     /// Forgets the reads (after a sign-in change): another account's usage

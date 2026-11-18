@@ -6,6 +6,7 @@ use super::Engines;
 use crate::{Customisation, Launch};
 use artisan_api::{EngineId, SignInState, UsageLimits};
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{} is not installed", engine.display_name())]
@@ -14,8 +15,6 @@ pub struct NotInstalled {
 }
 
 pub(super) const USAGE_TTL: Duration = Duration::from_mins(5);
-/// How often the background refresher looks for due readings.
-const USAGE_TICK: Duration = Duration::from_secs(30);
 
 impl Engines {
     /// Probes whether `engine` is signed in (no model call) and publishes
@@ -39,16 +38,29 @@ impl Engines {
         self.refresh_usage(engine, true).await;
     }
 
-    /// Keeps every engine's usage current in the background, as master's
-    /// Forge did: each is read again once its reading is due (five minutes
-    /// old, or a minute after a failed read). Runs until Forge stops.
     pub async fn keep_usage_fresh(&self) {
-        let mut tick = tokio::time::interval(USAGE_TICK);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut changes = self.subscribe();
         loop {
-            tick.tick().await;
-            for engine in EngineId::ALL {
-                if crate::has_usage_reader(engine) && self.binary(engine).is_some() {
+            let reading: Vec<EngineId> = EngineId::ALL
+                .into_iter()
+                .filter(|engine| crate::has_usage_reader(*engine) && self.binary(*engine).is_some())
+                .collect();
+            let next = reading
+                .iter()
+                .map(|engine| self.inner.usage.due_at(*engine))
+                .min();
+            tokio::select! {
+                () = until(next) => {}
+                change = changes.recv() => match change {
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        unreachable!("invariant: engine statuses outlive the usage refresher that holds the engines")
+                    }
+                },
+            }
+            let now = tokio::time::Instant::now();
+            for engine in reading {
+                if self.inner.usage.due_at(engine) <= now {
                     self.refresh_usage(engine, false).await;
                 }
             }
@@ -97,7 +109,10 @@ impl Engines {
     /// Reads usage when due (or with `force`), and publishes it. `None`
     /// means "usage unavailable": no good read yet.
     pub async fn refresh_usage(&self, engine: EngineId, force: bool) -> Option<UsageLimits> {
-        let lease = self.lease(engine)?;
+        let Some(lease) = self.lease(engine) else {
+            self.inner.usage.unreadable(engine);
+            return None;
+        };
         let usage = self
             .inner
             .usage
@@ -155,3 +170,15 @@ impl Engines {
         )));
     }
 }
+
+async fn until(due: Option<tokio::time::Instant>) {
+    match due {
+        Some(due) => tokio::time::sleep_until(due).await,
+        None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+#[path = "../../tests/manager/accounts.rs"]
+mod tests;

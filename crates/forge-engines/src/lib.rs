@@ -1,7 +1,6 @@
 #![expect(
     clippy::allow_attributes,
     clippy::inconsistent_struct_constructor,
-    clippy::infinite_loop,
     clippy::iter_over_hash_type,
     clippy::let_underscore_untyped,
     clippy::partial_pub_fields,
