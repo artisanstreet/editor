@@ -1,3 +1,4 @@
+use crate::forge::ForgeError;
 use crate::format;
 use crate::server::{Failure, Tool};
 use crate::transcript::{self, Options, RenderError};
@@ -22,7 +23,7 @@ pub enum CallToolError {
     Forge {
         step: &'static str,
         #[source]
-        source: anyhow::Error,
+        source: Box<ForgeError>,
     },
     #[error("thread {thread} disappeared while it was changed")]
     Vanished { thread: ThreadId },
@@ -42,7 +43,7 @@ impl CallToolError {
     pub fn failure(&self) -> Failure<'_> {
         match self {
             Self::Refused(refused) => Failure::Refused(refused.to_string()),
-            Self::Forge { source, .. } => Failure::of_forge(source),
+            Self::Forge { source, .. } => source.failure(),
             Self::Vanished { .. } | Self::Render(_) | Self::Models { .. } | Self::McpServers(_) => {
                 Failure::Broken
             }
@@ -54,10 +55,10 @@ type Result<T, E = CallToolError> = std::result::Result<T, E>;
 
 const STRING_WRITE: &str = "invariant: writing to a String cannot fail";
 
-fn forge<E: Into<anyhow::Error>>(step: &'static str) -> impl FnOnce(E) -> CallToolError {
+fn forge<E: Into<ForgeError>>(step: &'static str) -> impl FnOnce(E) -> CallToolError {
     move |source| CallToolError::Forge {
         step,
-        source: source.into(),
+        source: Box::new(source.into()),
     }
 }
 

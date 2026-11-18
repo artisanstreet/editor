@@ -7,6 +7,7 @@
 )]
 mod awareness;
 mod coordination;
+mod forge;
 mod format;
 mod names;
 pub mod server;
@@ -16,6 +17,7 @@ mod validation;
 
 pub use awareness::AwarenessError;
 pub use coordination::{CoordinationError, ListRecordsError};
+pub use forge::ForgeError;
 pub use server::{Content, Failure, StructuredError, Tool, ToolError, ToolResult, ToolSet};
 pub use tools::CallToolError;
 pub use transcript::{RenderError, ResolveError};
@@ -46,7 +48,7 @@ pub enum ArtisanError {
     Caller {
         thread: ThreadId,
         #[source]
-        source: anyhow::Error,
+        source: forge_store::ReadThreadError,
     },
     #[error(transparent)]
     Awareness(#[from] AwarenessError),
@@ -62,7 +64,7 @@ pub enum ArtisanError {
     Send {
         thread: ThreadId,
         #[source]
-        source: anyhow::Error,
+        source: forge_runs::SendAsAgentError,
     },
 }
 
@@ -70,11 +72,11 @@ impl ToolError for ArtisanError {
     fn failure(&self) -> Failure<'_> {
         match self {
             Self::Refused(refused) => Failure::Refused(refused.to_string()),
-            Self::Caller { source, .. } | Self::Send { source, .. } => Failure::of_forge(source),
+            Self::Send { source, .. } => Failure::classified(source.class(), source),
             Self::Awareness(error) => error.failure(),
             Self::Coordination(error) => error.failure(),
             Self::Tool(error) => error.failure(),
-            Self::Structured(_) | Self::Missing { .. } => Failure::Broken,
+            Self::Caller { .. } | Self::Structured(_) | Self::Missing { .. } => Failure::Broken,
         }
     }
 }
@@ -103,7 +105,7 @@ impl ArtisanMcp {
                 .await
                 .map_err(|source| ArtisanError::Caller {
                     thread: caller.clone(),
-                    source: source.into(),
+                    source,
                 })?;
         if found.is_none() {
             return Err(Refused(

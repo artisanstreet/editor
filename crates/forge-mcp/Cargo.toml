@@ -10,7 +10,6 @@ description = "The Artisan MCP: what an agent can do with Artisan, served to eve
 doctest = false
 
 [dependencies]
-anyhow.workspace = true
 artisan-api.workspace = true
 diagnostics.workspace = true
 forge-runs.workspace = true

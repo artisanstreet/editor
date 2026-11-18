@@ -1,5 +1,6 @@
 use artisan_api::ThreadId;
-use forge_store::coordination::{Conflict, CoordinationFailure};
+use forge_runs::ErrorClass;
+use forge_store::coordination::Conflict;
 use serde_json::{Map, Number, Value, json};
 use std::future::Future;
 
@@ -71,18 +72,14 @@ pub enum Failure<'a> {
     Broken,
 }
 
-impl<'a> Failure<'a> {
-    pub fn of_forge(error: &'a anyhow::Error) -> Self {
-        if let Some(refusal) = forge_runs::refusal(error) {
-            return Self::Refused(refusal);
+impl Failure<'_> {
+    pub fn classified(class: ErrorClass, error: &dyn std::error::Error) -> Self {
+        match class {
+            ErrorClass::NotFound | ErrorClass::Conflict | ErrorClass::BadRequest => {
+                Self::Refused(diagnostics::chain(error))
+            }
+            ErrorClass::Internal => Self::Broken,
         }
-        error
-            .chain()
-            .find_map(|cause| match cause.downcast_ref::<CoordinationFailure>() {
-                Some(CoordinationFailure::Stale(conflict)) => Some(conflict),
-                Some(_) | None => None,
-            })
-            .map_or(Self::Broken, Self::Stale)
     }
 }
 

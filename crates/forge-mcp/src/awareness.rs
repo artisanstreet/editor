@@ -1,9 +1,12 @@
+use crate::forge::{self, ForgeError};
 use crate::server::Failure;
 use crate::transcript::RenderError;
 use crate::{Tool, names};
 use artisan_api::{EngineId, ItemId, ProjectId, ThreadId};
 use forge_runs::Hub;
-use forge_store::coordination::{Content, Query as CoordinationQuery, Record, Resource};
+use forge_store::coordination::{
+    Content, CoordinationFailure, Query as CoordinationQuery, Record, Resource,
+};
 use forge_store::{coordination::normalize_path, discovery};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,7 +22,7 @@ pub enum AwarenessError {
     Forge {
         step: &'static str,
         #[source]
-        source: anyhow::Error,
+        source: Box<ForgeError>,
     },
     #[error("the calling thread {thread} is not found")]
     CallerMissing { thread: ThreadId },
@@ -59,12 +62,12 @@ pub enum AwarenessError {
     Path {
         path: String,
         #[source]
-        source: anyhow::Error,
+        source: CoordinationFailure,
     },
     #[error("{count} relevance resources are too many; use a narrower explicit scope")]
     TooManyResources { count: usize },
     #[error("normalize a resource")]
-    Resource(#[source] anyhow::Error),
+    Resource(#[source] CoordinationFailure),
     #[error("list the coordination records")]
     Records(#[source] crate::coordination::ListRecordsError),
 }
@@ -72,9 +75,8 @@ pub enum AwarenessError {
 impl AwarenessError {
     pub fn failure(&self) -> Failure<'_> {
         match self {
-            Self::Forge { source, .. } | Self::Path { source, .. } | Self::Resource(source) => {
-                Failure::of_forge(source)
-            }
+            Self::Forge { source, .. } => source.failure(),
+            Self::Path { source, .. } | Self::Resource(source) => forge::coordination(source, self),
             Self::Records(error) => error.failure(),
             Self::Arguments(_)
             | Self::Missing { .. }
@@ -95,17 +97,17 @@ impl AwarenessError {
     }
 }
 
-fn forge<E: Into<anyhow::Error>>(step: &'static str) -> impl FnOnce(E) -> AwarenessError {
+fn forge<E: Into<ForgeError>>(step: &'static str) -> impl FnOnce(E) -> AwarenessError {
     move |source| AwarenessError::Forge {
         step,
-        source: source.into(),
+        source: Box::new(source.into()),
     }
 }
 
 fn normalized(path: &str) -> Result<String, AwarenessError> {
     normalize_path(path).map_err(|source| AwarenessError::Path {
         path: path.to_owned(),
-        source: source.into(),
+        source,
     })
 }
 
@@ -1011,7 +1013,7 @@ async fn relevant_context(
         .into_iter()
         .map(Resource::normalize)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| AwarenessError::Resource(source.into()))?;
+        .map_err(AwarenessError::Resource)?;
     Ok((resources, dependencies, records))
 }
 

@@ -1,11 +1,12 @@
 use crate::awareness::{AwarenessError, nullable, object, optional_record_schema, record_schema};
+use crate::forge::{self, ForgeError};
 use crate::server::Failure;
 use crate::{Tool, awareness};
 use artisan_api::{ThreadId, now};
 use forge_runs::Hub;
 use forge_store::coordination::{
-    ClaimState, Content, Intent, MessageState, Query, Record, Resource, Update, WatchState,
-    WorkState,
+    ClaimState, Content, CoordinationFailure, Intent, MessageState, Query, Record, Resource,
+    Update, WatchState, WorkState,
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use std::time::Duration;
 #[derive(Debug, thiserror::Error)]
 pub enum ListRecordsError {
     #[error("list a page of coordination records")]
-    Forge(#[source] anyhow::Error),
+    Forge(#[source] forge_store::coordination::CoordinationListError),
     #[error("read the next page's cursor")]
     Cursor(#[source] serde_json::Error),
 }
@@ -21,7 +22,7 @@ pub enum ListRecordsError {
 impl ListRecordsError {
     pub fn failure(&self) -> Failure<'_> {
         match self {
-            Self::Forge(source) => Failure::of_forge(source),
+            Self::Forge(source) => forge::coordination(&source.cause, self),
             Self::Cursor(_) => Failure::Broken,
         }
     }
@@ -41,7 +42,7 @@ pub enum CoordinationError {
     Forge {
         step: &'static str,
         #[source]
-        source: anyhow::Error,
+        source: Box<ForgeError>,
     },
     #[error("read the cursor")]
     Cursor(#[source] serde_json::Error),
@@ -60,13 +61,14 @@ pub enum CoordinationError {
     #[error("thread {thread} must publish work first")]
     NoWork { thread: ThreadId },
     #[error("normalize a resource")]
-    Resource(#[source] anyhow::Error),
+    Resource(#[source] CoordinationFailure),
 }
 
 impl CoordinationError {
     pub fn failure(&self) -> Failure<'_> {
         match self {
-            Self::Forge { source, .. } | Self::Resource(source) => Failure::of_forge(source),
+            Self::Forge { source, .. } => source.failure(),
+            Self::Resource(source) => forge::coordination(source, self),
             Self::Records(error) => error.failure(),
             Self::Discovery(error) => error.failure(),
             Self::Arguments { .. }
@@ -83,10 +85,10 @@ impl CoordinationError {
 
 type Result<T, E = CoordinationError> = std::result::Result<T, E>;
 
-fn forge<E: Into<anyhow::Error>>(step: &'static str) -> impl FnOnce(E) -> CoordinationError {
+fn forge<E: Into<ForgeError>>(step: &'static str) -> impl FnOnce(E) -> CoordinationError {
     move |source| CoordinationError::Forge {
         step,
-        source: source.into(),
+        source: Box::new(source.into()),
     }
 }
 
@@ -329,7 +331,7 @@ pub async fn all_records(hub: &Hub, mut query: Query) -> Result<Vec<Record>, Lis
             .store()
             .coordination_list(query.clone())
             .await
-            .map_err(|source| ListRecordsError::Forge(source.into()))?;
+            .map_err(ListRecordsError::Forge)?;
         records.extend(page.records);
         match page.next_cursor {
             Some(cursor) => {
@@ -571,7 +573,7 @@ async fn list_records(hub: &Hub, caller: &ThreadId, name: &str, args: Value) -> 
             .into_iter()
             .map(Resource::normalize)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| CoordinationError::Resource(source.into()))?;
+            .map_err(CoordinationError::Resource)?;
         if resources.is_empty() {
             let page = store
                 .coordination_list(query)

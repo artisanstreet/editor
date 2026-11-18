@@ -39,7 +39,7 @@ use desktop::{
     Rect, WindowError, WindowId,
 };
 use forge_mcp::{Content, Failure, Tool, ToolError, ToolSet};
-use forge_runs::{Hub, Refused};
+use forge_runs::{ApprovalError, Hub, Refused};
 use frame::EncodeError;
 use runner::{Halt, Halted, RunError, StepError, View};
 use serde_json::{Value, json};
@@ -60,19 +60,19 @@ pub enum ComputerError {
     #[error(transparent)]
     Halted(#[from] Halted),
     #[error("read the computer use setting")]
-    Setting(#[source] anyhow::Error),
+    Setting(#[source] forge_store::ReadSettingError),
     #[error("ask the user to take over from thread {thread}")]
     Handoff {
         thread: ThreadId,
         #[source]
-        source: anyhow::Error,
+        source: Box<ApprovalError>,
     },
     #[error("ask approval for computer {tool} in thread {thread}")]
     Approval {
         tool: String,
         thread: ThreadId,
         #[source]
-        source: anyhow::Error,
+        source: Box<ApprovalError>,
     },
     #[error("run computer {tool}")]
     Worker {
@@ -135,10 +135,11 @@ impl ToolError for ComputerError {
                 source: StepError::Halted(_),
                 ..
             }) => Failure::Refused(diagnostics::chain(self)),
-            Self::Setting(source)
-            | Self::Handoff { source, .. }
-            | Self::Approval { source, .. } => Failure::of_forge(source),
-            Self::Worker { .. }
+            Self::Handoff { source, .. } | Self::Approval { source, .. } => {
+                Failure::classified(source.class(), &**source)
+            }
+            Self::Setting(_)
+            | Self::Worker { .. }
             | Self::UnknownTool { .. }
             | Self::Display(_)
             | Self::Capture(_)
@@ -210,7 +211,7 @@ impl ComputerMcp {
             .store()
             .setting(forge_runs::COMPUTER_USE_KEY)
             .await
-            .map_err(|source| ComputerError::Setting(source.into()))?
+            .map_err(ComputerError::Setting)?
             .and_then(|v| v.as_bool())
             == Some(true))
     }
@@ -376,7 +377,7 @@ impl ToolSet for ComputerMcp {
                 .await
                 .map_err(|source| ComputerError::Handoff {
                     thread: caller.clone(),
-                    source,
+                    source: Box::new(source),
                 })?;
             self.enabled().await?;
             let this = self.clone();
@@ -408,7 +409,7 @@ impl ToolSet for ComputerMcp {
                 .map_err(|source| ComputerError::Approval {
                     tool: name.to_owned(),
                     thread: caller.clone(),
-                    source,
+                    source: Box::new(source),
                 })?;
         }
         let mut settings = self.hub.store().subscribe();

@@ -9,7 +9,7 @@ const STRING_WRITE: &str = "invariant: writing to a String cannot fail";
 
 #[derive(Debug, thiserror::Error)]
 #[error("resolve the stored text")]
-pub struct ResolveError(#[source] anyhow::Error);
+pub struct ResolveError(#[source] forge_store::ResolveTextError);
 
 #[derive(Debug, thiserror::Error)]
 #[error("render item {item}")]
@@ -48,7 +48,7 @@ pub async fn render(
 }
 
 async fn text(store: &Store, text: &TextContent, options: &Options) -> Result<String> {
-    let resolved = store.resolve_text(text).await.map_err(|source| ResolveError(source.into()))?;
+    let resolved = store.resolve_text(text).await.map_err(ResolveError)?;
     Ok(clip(
         &resolved,
         match (options.unbounded, options.whole) {
