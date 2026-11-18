@@ -310,10 +310,13 @@ impl Editor {
             span.frames.push(frame);
             let observed = self.observation();
             let forge_moved = self.forge_moved();
-            let caught_up =
-                self.app.shell.core.host(&self.host).is_some_and(|host| {
-                    host.is_live() && host.pending_read(&self.thread).is_none()
-                }) && !self.app.shell.core.test_startup_pending();
+            let caught_up = self.app.shell.core.host(&self.host).is_some_and(|host| {
+                host.is_live()
+                    && host.pending_read(&self.thread).is_none()
+                    && host.projects.keys().all(|project| {
+                        host.repository_checked(project) && host.project_icon_checked(project)
+                    })
+            }) && !self.app.shell.core.test_startup_pending();
             let done = caught_up && observed.as_ref().is_some_and(&ready);
             if done && still && !forge_moved {
                 quiet += 1;

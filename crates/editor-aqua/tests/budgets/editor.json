@@ -1,11 +1,11 @@
 {
   "open_window_rebuilds": {
-    "limit": 10,
-    "reason": "opening a 400-item thread rebuilds the window for mounting, navigation, each arriving page, composer sizing and the landing; measured 7 to 9"
+    "limit": 12,
+    "reason": "opening a 400-item thread rebuilds the window for mounting, navigation, host state, composer sizing, the landing and the project's first icon and repository reads, which the measurement now waits for; measured 8 to 11"
   },
   "open_section_refreshes": {
     "limit": 10,
-    "reason": "section refreshes are cheaper than window rebuilds, so moving opening work into them stays within budget; measured 0"
+    "reason": "section refreshes are cheaper than window rebuilds, so moving opening work into them stays within budget; measured 0 to 1"
   },
   "open_retained_kib": {
     "limit": 10000,
@@ -28,8 +28,8 @@
     "reason": "the accessibility tree covers only realized rows, not all 400 items; measured 775"
   },
   "stream_window_rebuilds": {
-    "limit": 36,
-    "reason": "each of the 25 stored updates to a streaming reply currently rebuilds the window once (shell_updates); measured 25 to 32, and the budget only allows it to shrink"
+    "limit": 2,
+    "reason": "stored updates to a streaming reply refresh only the transcript section; measured 0, and the margin covers one late host-wide change landing mid-stream"
   },
   "stream_section_refreshes_per_frame": {
     "limit": 1,
@@ -40,8 +40,8 @@
     "reason": "a streamed chunk republishes only the changed reply's nodes to a screen reader; measured 62"
   },
   "scroll_window_rebuilds": {
-    "limit": 18,
-    "reason": "twenty wheel notches up a 400-item thread rebuild the window only when an older page arrives; measured 7 to 14 depending on when pages land"
+    "limit": 3,
+    "reason": "older pages that arrive while scrolling refresh only the transcript section; measured 1 (views_frame), and the margin covers a late host-wide change"
   },
   "scroll_section_refreshes_per_frame": {
     "limit": 1,
