@@ -919,3 +919,37 @@ async fn an_http_server_is_connected_listed_and_called() {
     );
     server.abort();
 }
+
+#[tokio::test]
+async fn a_server_that_keeps_asking_without_reading_is_disconnected_at_the_byte_budget() {
+    let method = "m".repeat(8 * 1024);
+    let mut flood = Vec::new();
+    for id in 0..4096 {
+        writeln!(
+            flood,
+            "{}",
+            json!({ "jsonrpc": "2.0", "id": id, "method": method })
+        )
+        .expect("a line");
+    }
+    let rpc = Arc::new(Rpc::new());
+    let (_id, reply) = rpc.register();
+    let (outgoing, unread) = Outbox::new();
+    read_lines(
+        std::io::Cursor::new(flood),
+        Arc::clone(&rpc),
+        outgoing.clone(),
+        MAX_MESSAGE_BYTES,
+    )
+    .await;
+    assert!(
+        outgoing.bytes.load(Ordering::Acquire) <= MAX_QUEUED_BYTES,
+        "{} bytes queued for a server that never reads",
+        outgoing.bytes.load(Ordering::Acquire)
+    );
+    assert!(matches!(
+        reply.await,
+        Ok(Err(Undelivered::Closed(Closed::Backlogged)))
+    ));
+    drop(unread);
+}

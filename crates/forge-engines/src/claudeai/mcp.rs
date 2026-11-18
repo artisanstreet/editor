@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -111,6 +111,8 @@ enum Closed {
     OutputFailed(#[source] Arc<std::io::Error>),
     #[error("the server closed its event stream")]
     EventStream,
+    #[error("the server stopped reading while {} of messages waited for it", size(MAX_QUEUED_BYTES))]
+    Backlogged,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -189,6 +191,8 @@ impl RequestError {
 enum NotifyError {
     #[error("the server is no longer running")]
     Stopped,
+    #[error("the server stopped reading while {} of messages waited for it", size(MAX_QUEUED_BYTES))]
+    Backlogged,
     #[error("{}", reach_error(.0))]
     Unreachable(#[source] reqwest::Error),
     #[error("HTTP {status}")]
@@ -252,6 +256,7 @@ const MAX_STDERR: usize = 8 * 1024;
 /// The largest image a result attaches, and the most one result attaches.
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_IMAGES: usize = 8;
+const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 /// Values shorter than this are not redacted from logs: they are flags
 /// (`1`, `true`), not secrets, and redacting them garbles the text.
 const MIN_SECRET_CHARS: usize = 4;
@@ -1287,10 +1292,86 @@ impl Rpc {
 
 /// A server that speaks JSON-RPC as a stream of messages both ways: a stdio
 /// server's pipes, or a legacy HTTP+SSE server's event stream and endpoint.
+struct Queued {
+    text: String,
+    request: Option<u64>,
+}
+
+enum Refused {
+    Backlogged,
+    Stopped,
+}
+
+#[derive(Clone)]
+struct Outbox {
+    sender: mpsc::UnboundedSender<Queued>,
+    bytes: Arc<AtomicUsize>,
+}
+
+impl Outbox {
+    fn new() -> (Self, Inbox) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let bytes = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                sender,
+                bytes: Arc::clone(&bytes),
+            },
+            Inbox { receiver, bytes },
+        )
+    }
+
+    fn send(&self, message: &Value) -> Result<(), Refused> {
+        let text = message.to_string();
+        let request = message
+            .get("method")
+            .and_then(|_| message.get("id"))
+            .and_then(Value::as_u64);
+        let size = text.len();
+        if self.bytes.fetch_add(size, Ordering::AcqRel) + size > MAX_QUEUED_BYTES {
+            self.bytes.fetch_sub(size, Ordering::AcqRel);
+            return Err(Refused::Backlogged);
+        }
+        self.sender.send(Queued { text, request }).map_err(|_closed| {
+            self.bytes.fetch_sub(size, Ordering::AcqRel);
+            Refused::Stopped
+        })
+    }
+}
+
+struct Inbox {
+    receiver: mpsc::UnboundedReceiver<Queued>,
+    bytes: Arc<AtomicUsize>,
+}
+
+impl Inbox {
+    async fn recv(&mut self) -> Option<Queued> {
+        self.receiver.recv().await
+    }
+
+    fn sent(&self, queued: &Queued) {
+        self.bytes.fetch_sub(queued.text.len(), Ordering::AcqRel);
+    }
+}
+
+fn answer(rpc: &Rpc, outgoing: &Outbox, message: &Value) -> bool {
+    match outgoing.send(message) {
+        Ok(()) | Err(Refused::Stopped) => true,
+        Err(Refused::Backlogged) => {
+            tracing::warn!(
+                limit = MAX_QUEUED_BYTES,
+                "an MCP server stopped reading while it kept asking; it is disconnected"
+            );
+            rpc.close(&Closed::Backlogged);
+            false
+        }
+    }
+}
+
 struct Stream {
     rpc: Arc<Rpc>,
     /// Messages to the server, written in order by the writer task.
-    outgoing: mpsc::UnboundedSender<Value>,
+    outgoing: Outbox,
     /// Held so a stdio server is killed when the client goes.
     child: Option<Mutex<crate::process::OwnedChild>>,
     stderr: Arc<Mutex<String>>,
@@ -1323,7 +1404,7 @@ impl Stream {
             .expect("invariant: a server started with piped stdout has its stdout");
         let stderr = Arc::new(Mutex::new(String::new()));
         let rpc = Arc::new(Rpc::new());
-        let (outgoing, messages) = mpsc::unbounded_channel();
+        let (outgoing, messages) = Outbox::new();
         let mut tasks = vec![
             AbortOnDropHandle::new(tokio::spawn(write_lines(stdin, messages, Arc::clone(&rpc)))),
             AbortOnDropHandle::new(tokio::spawn(read_lines(
@@ -1388,7 +1469,7 @@ impl Stream {
             return Err(OpenError::ForeignEndpoint);
         }
         let rpc = Arc::new(Rpc::new());
-        let (outgoing, messages) = mpsc::unbounded_channel();
+        let (outgoing, messages) = Outbox::new();
         let tasks = vec![
             AbortOnDropHandle::new(tokio::spawn(read_events(
                 events,
@@ -1427,14 +1508,25 @@ impl Stream {
             id,
             cancel: method != "initialize",
         };
-        if !self.rpc.alive.load(Ordering::SeqCst)
-            || self
-                .outgoing
-                .send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
-                .is_err()
-        {
+        if !self.rpc.alive.load(Ordering::SeqCst) {
             pending.cancel = false;
             return Err(RequestError::Stopped);
+        }
+        match self
+            .outgoing
+            .send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+        {
+            Ok(()) => {}
+            Err(Refused::Stopped) => {
+                pending.cancel = false;
+                return Err(RequestError::Stopped);
+            }
+            Err(Refused::Backlogged) => {
+                pending.cancel = false;
+                return Err(RequestError::Undelivered(Undelivered::Closed(
+                    Closed::Backlogged,
+                )));
+            }
         }
         let Ok(answered) = tokio::time::timeout_at(deadline, reply).await else {
             return Err(RequestError::TimedOut {
@@ -1450,9 +1542,14 @@ impl Stream {
     }
 
     fn notify(&self, method: &str, params: &Value) -> Result<(), NotifyError> {
-        self.outgoing
-            .send(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
-            .map_err(|_closed| NotifyError::Stopped)
+        match self
+            .outgoing
+            .send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+        {
+            Ok(()) => Ok(()),
+            Err(Refused::Stopped) => Err(NotifyError::Stopped),
+            Err(Refused::Backlogged) => Err(NotifyError::Backlogged),
+        }
     }
 }
 
@@ -1468,7 +1565,7 @@ impl Drop for Pending<'_> {
     fn drop(&mut self) {
         self.stream.rpc.forget(self.id);
         if self.cancel && self.stream.rpc.alive.load(Ordering::SeqCst) {
-            self.stream.outgoing.send(cancelled(self.id)).ok();
+            answer(&self.stream.rpc, &self.stream.outgoing, &cancelled(self.id));
         }
     }
 }
@@ -1476,17 +1573,17 @@ impl Drop for Pending<'_> {
 /// Writes messages to a stdio server, one line each.
 async fn write_lines(
     mut stdin: tokio::process::ChildStdin,
-    mut messages: mpsc::UnboundedReceiver<Value>,
+    mut messages: Inbox,
     rpc: Arc<Rpc>,
 ) {
     while let Some(message) = messages.recv().await {
-        let mut line = message.to_string();
-        line.push('\n');
         let written = async {
-            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(message.text.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
             stdin.flush().await
         }
         .await;
+        messages.sent(&message);
         if let Err(error) = written {
             tracing::debug!("writing to an MCP server: {error}");
             rpc.close(&Closed::Input);
@@ -1501,7 +1598,7 @@ async fn write_lines(
 async fn read_lines(
     stdout: impl AsyncRead + Unpin,
     rpc: Arc<Rpc>,
-    outgoing: mpsc::UnboundedSender<Value>,
+    outgoing: Outbox,
     max_line: usize,
 ) {
     let mut lines = Lines::new(stdout, max_line);
@@ -1512,10 +1609,8 @@ async fn read_lines(
                 let Ok(value) = serde_json::from_slice::<Value>(&line) else {
                     continue;
                 };
-                for message in batch(value) {
-                    if let Some(answer) = rpc.receive(message) {
-                        outgoing.send(answer).ok();
-                    }
+                if !answer_all(&rpc, &outgoing, value) {
+                    break;
                 }
             }
             Ok(Some(Line::Oversized(id))) => {
@@ -1731,17 +1826,22 @@ fn sse_events(response: reqwest::Response) -> Events {
 }
 
 /// Reads a legacy SSE server's event stream: its replies and requests.
-async fn read_events(mut events: Events, rpc: Arc<Rpc>, outgoing: mpsc::UnboundedSender<Value>) {
+fn answer_all(rpc: &Rpc, outgoing: &Outbox, value: Value) -> bool {
+    batch(value)
+        .into_iter()
+        .filter_map(|message| rpc.receive(message))
+        .all(|reply| answer(rpc, outgoing, &reply))
+}
+
+async fn read_events(mut events: Events, rpc: Arc<Rpc>, outgoing: Outbox) {
     while let Some(event) = events.next().await {
         match event {
             Ok(SseEvent::Message(message)) if message.event == "message" => {
                 let Ok(value) = serde_json::from_str::<Value>(&message.data) else {
                     continue;
                 };
-                for message in batch(value) {
-                    if let Some(answer) = rpc.receive(message) {
-                        outgoing.send(answer).ok();
-                    }
+                if !answer_all(&rpc, &outgoing, value) {
+                    return;
                 }
             }
             Ok(SseEvent::Message(_) | SseEvent::Retry(_)) => {}
@@ -1759,20 +1859,17 @@ async fn post_messages(
     client: reqwest::Client,
     endpoint: reqwest::Url,
     headers: HeaderMap,
-    mut messages: mpsc::UnboundedReceiver<Value>,
+    mut messages: Inbox,
     rpc: Arc<Rpc>,
 ) {
     while let Some(message) = messages.recv().await {
-        // Our own requests carry a method and an id; a refused one fails.
-        let id = message
-            .get("method")
-            .and_then(|_| message.get("id"))
-            .and_then(Value::as_u64);
+        messages.sent(&message);
+        let id = message.request;
         let sent = client
             .post(endpoint.clone())
             .headers(headers.clone())
             .header("content-type", "application/json")
-            .body(message.to_string())
+            .body(message.text)
             .send()
             .await;
         let failure = match sent {
