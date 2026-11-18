@@ -27,6 +27,7 @@ pub enum Action {
     CopyPath { generation: u64, text: String },
     CopyFile { generation: u64, text: Arc<str> },
     Dismiss { generation: u64 },
+    Retry { generation: u64 },
 }
 
 struct Prepared {
@@ -155,6 +156,18 @@ impl ViewState {
         );
         match &preview.content {
             None => body = body.child(body_text(&theme, "Reading source…")),
+            Some(Err(error)) if error.retryable() => {
+                let retry = Rc::clone(&emit);
+                body = body.child(
+                    crate::ui::page::notice(&theme, failure(error))
+                        .action(
+                            Button::text("resource-retry", theme, ButtonTone::Neutral, "Retry")
+                                .on_activate(move |_| retry(Action::Retry { generation }))
+                                .build(),
+                        )
+                        .build(),
+                );
+            }
             Some(Err(error)) => body = body.child(body_text(&theme, &failure(error))),
             Some(Ok(content)) => {
                 let full = Arc::clone(content.full());
@@ -222,6 +235,9 @@ fn failure(error: &PreviewError) -> String {
             )
         }
         PreviewError::NotText { .. } => "This resource is not a UTF-8 text file.".to_owned(),
+        PreviewError::HostGone { .. } => {
+            "The Forge holding this resource disconnected. Retry once it is back.".to_owned()
+        }
     }
 }
 

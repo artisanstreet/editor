@@ -1947,7 +1947,8 @@ impl RootViews {
             let generation = match &event {
                 Action::CopyPath { generation, .. }
                 | Action::CopyFile { generation, .. }
-                | Action::Dismiss { generation } => *generation,
+                | Action::Dismiss { generation }
+                | Action::Retry { generation } => *generation,
             };
             if self.resource.as_ref().map(|(current, _)| *current) != Some(generation)
                 || !shell.entry.workspace().is_some_and(|workspace| {
@@ -1973,6 +1974,7 @@ impl RootViews {
                     shell.dismiss_reference();
                     changed = true;
                 }
+                Action::Retry { .. } => changed |= shell.retry_reference(),
             }
         }
         changed

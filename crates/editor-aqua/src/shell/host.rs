@@ -324,6 +324,14 @@ impl Shell {
         self.bind(ctx, window);
     }
 
+    pub fn retry_reference(&mut self) -> bool {
+        let core = &self.core;
+        self.entry
+            .workspace_mut()
+            .and_then(|workspace| workspace.resource_preview.as_mut())
+            .is_some_and(|preview| preview.retry(core))
+    }
+
     pub fn dismiss_reference(&mut self) {
         if let Some(workspace) = self.entry.workspace_mut() {
             workspace.dismiss_reference();

@@ -237,3 +237,60 @@ fn target_line_jump_waits_for_layout_and_aligns_to_start() {
     );
     state.release(&mut app);
 }
+
+#[test]
+fn a_preview_whose_forge_disconnects_says_so_and_retries_on_the_new_connection() {
+    use std::cell::RefCell;
+    use test_support::editor::core::{connect, remote_host, test_core};
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = test_core(directory.path());
+    let config = remote_host("resource-forge");
+    connect(&mut core, &config);
+    let source = |core: &crate::core::Core| {
+        let host = core.host(&config.id).unwrap();
+        (
+            config.id.clone(),
+            host.instance(),
+            host.client.clone(),
+            artisan_api::ThreadId("thread".into()),
+        )
+    };
+    let mut preview = ResourcePreview::new("src/lib.rs".into(), Some(12), Some(source(&core)));
+    assert!(preview.content.is_none());
+    core.remove_host(&config.id).unwrap();
+    assert!(preview.drain(&core));
+    assert!(matches!(
+        preview.content,
+        Some(Err(PreviewError::HostGone { .. }))
+    ));
+
+    let state = ViewState::new(5, SelectionDocumentId(51), SelectionSourceId(52));
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&events);
+    let content = state
+        .content(
+            &preview,
+            ArtisanTheme::resolved(),
+            600.0,
+            Rc::new(move |action| sink.borrow_mut().push(action)),
+        )
+        .unwrap();
+    let mut app = test_support::editor::ui::mounted(800.0, 600.0, content);
+    let said = test_support::editor::ui::painted_texts(&app);
+    assert!(
+        said.iter()
+            .any(|text| text
+                == "The Forge holding this resource disconnected. Retry once it is back."),
+        "{said:?}"
+    );
+    test_support::editor::ui::click(&mut app, "resource-retry");
+    assert_eq!(&*events.borrow(), &[Action::Retry { generation: 5 }]);
+
+    connect(&mut core, &config);
+    assert!(preview.retry(&core));
+    assert!(
+        preview.content.is_none(),
+        "the preview reads the file again"
+    );
+    assert_eq!(preview.target_line, 11);
+}

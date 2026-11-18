@@ -122,7 +122,29 @@ pub enum PreviewError {
         #[source]
         source: std::string::FromUtf8Error,
     },
+    #[error("the Forge {host} that held {path} disconnected before it answered")]
+    HostGone {
+        path: String,
+        host: crate::core::HostId,
+    },
 }
+
+impl PreviewError {
+    #[must_use]
+    pub const fn retryable(&self) -> bool {
+        match self {
+            Self::Read { .. } | Self::HostGone { .. } => true,
+            Self::Unpaired { .. } | Self::NotText { .. } => false,
+        }
+    }
+}
+
+type PreviewSource = (
+    crate::core::HostId,
+    crate::core::HostInstance,
+    crate::core::ForgeClient,
+    artisan_api::ThreadId,
+);
 
 pub struct ResourcePreview {
     pub path: String,
@@ -131,57 +153,79 @@ pub struct ResourcePreview {
     delivery: crate::core::delivery::Delivery<Result<PreviewText, PreviewError>>,
     request: Option<tokio_util::task::AbortOnDropHandle<()>>,
     source: Option<(crate::core::HostId, crate::core::HostInstance)>,
+    thread: Option<artisan_api::ThreadId>,
 }
 
 impl ResourcePreview {
-    pub fn new(
-        path: String,
-        line: Option<u32>,
-        source: Option<(
-            crate::core::HostId,
-            crate::core::HostInstance,
-            crate::core::ForgeClient,
-            artisan_api::ThreadId,
-        )>,
-    ) -> Self {
+    pub fn new(path: String, line: Option<u32>, source: Option<PreviewSource>) -> Self {
         let target_line = line.unwrap_or(1).saturating_sub(1) as usize;
-        let delivery = crate::core::delivery::Delivery::new(std::num::NonZeroUsize::MIN);
-        let mut content = None;
-        let identity = source
+        let mut preview = Self {
+            content: None,
+            delivery: crate::core::delivery::Delivery::new(std::num::NonZeroUsize::MIN),
+            request: None,
+            source: None,
+            thread: None,
+            path,
+            target_line,
+        };
+        preview.start(source);
+        preview
+    }
+
+    fn start(&mut self, source: Option<PreviewSource>) {
+        self.source = source
             .as_ref()
             .map(|(host, instance, _, _)| (host.clone(), *instance));
-        let request = if let Some((_, _, client, thread)) = source {
-            let fetch_path = path.clone();
-            let sender = delivery.sender();
-            Some(tokio_util::task::AbortOnDropHandle::new(
-                crate::core::runtime::runtime().spawn(async move {
-                    let result = match client.resource(&thread, &fetch_path, false, None).await {
-                        Ok(bytes) => String::from_utf8(bytes)
-                            .map(|text| PreviewText::new(text, target_line))
-                            .map_err(|source| PreviewError::NotText {
-                                path: fetch_path,
-                                source,
-                            }),
-                        Err(source) => Err(PreviewError::Read {
+        self.thread = source.as_ref().map(|(_, _, _, thread)| thread.clone());
+        let Some((_, _, client, thread)) = source else {
+            self.request = None;
+            self.content = Some(Err(PreviewError::Unpaired {
+                path: self.path.clone(),
+            }));
+            return;
+        };
+        self.content = None;
+        let fetch_path = self.path.clone();
+        let target_line = self.target_line;
+        let sender = self.delivery.sender();
+        self.request = Some(tokio_util::task::AbortOnDropHandle::new(
+            crate::core::runtime::runtime().spawn(async move {
+                let result = match client.resource(&thread, &fetch_path, false, None).await {
+                    Ok(bytes) => String::from_utf8(bytes)
+                        .map(|text| PreviewText::new(text, target_line))
+                        .map_err(|source| PreviewError::NotText {
                             path: fetch_path,
                             source,
                         }),
-                    };
-                    let _ = sender.send(result).await;
-                }),
-            ))
-        } else {
-            content = Some(Err(PreviewError::Unpaired { path: path.clone() }));
-            None
-        };
-        Self {
-            path,
-            target_line,
-            content,
-            delivery,
-            request,
-            source: identity,
+                    Err(source) => Err(PreviewError::Read {
+                        path: fetch_path,
+                        source,
+                    }),
+                };
+                let _ = sender.send(result).await;
+            }),
+        ));
+    }
+
+    pub fn retry(&mut self, core: &crate::core::Core) -> bool {
+        if !self
+            .content
+            .as_ref()
+            .is_some_and(|content| content.as_ref().is_err_and(PreviewError::retryable))
+        {
+            return false;
         }
+        let source = self
+            .source
+            .as_ref()
+            .map(|(host, _)| host)
+            .zip(self.thread.clone())
+            .and_then(|(host, thread)| {
+                core.host(host)
+                    .map(|data| (host.clone(), data.instance(), data.client.clone(), thread))
+            });
+        self.start(source);
+        true
     }
 
     pub fn wake_mailbox(&self) -> Option<&aqua::mailbox::Mailbox<()>> {
@@ -189,19 +233,28 @@ impl ResourcePreview {
     }
 
     pub fn drain(&mut self, core: &crate::core::Core) -> bool {
-        let Some(result) = self.delivery.drain().into_iter().next() else {
-            return false;
-        };
-        self.request = None;
-        if self
+        let gone = self
             .source
             .as_ref()
-            .is_some_and(|(host, instance)| core.host_if_instance(host, *instance).is_none())
-        {
-            return false;
+            .filter(|(host, instance)| core.host_if_instance(host, *instance).is_none())
+            .map(|(host, _)| host.clone());
+        let delivered = self.delivery.drain().into_iter().next();
+        match (gone, delivered) {
+            (Some(host), _) if self.content.is_none() => {
+                self.request = None;
+                self.content = Some(Err(PreviewError::HostGone {
+                    path: self.path.clone(),
+                    host,
+                }));
+                true
+            }
+            (Some(_), _) | (None, None) => false,
+            (None, Some(result)) => {
+                self.request = None;
+                self.content = Some(result);
+                true
+            }
         }
-        self.content = Some(result);
-        true
     }
 }
 pub mod view;

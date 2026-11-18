@@ -1,6 +1,6 @@
 use artisan_api::ThreadId;
 use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
-use editor_aqua::shell::resource_preview::ResourcePreview;
+use editor_aqua::shell::resource_preview::{PreviewError, ResourcePreview};
 use std::{
     sync::{Arc, mpsc},
     time::Duration,
@@ -44,7 +44,7 @@ fn wait_for_result(preview: &ResourcePreview) {
 }
 
 #[test]
-fn preview_completion_is_discarded_after_host_removal_and_same_id_replacement() {
+fn a_preview_whose_host_goes_away_says_so_instead_of_taking_the_late_answer() {
     let directory = tempfile::tempdir().unwrap();
     let mut core = Core::for_tests(EditorFiles {
         dir: directory.path().to_owned(),
@@ -64,8 +64,11 @@ fn preview_completion_is_discarded_after_host_removal_and_same_id_replacement() 
     wait_for_result(&removed);
     let old = core.host(&config.id).unwrap().instance();
     core.remove_host(&config.id).unwrap();
-    assert!(!removed.drain(&core));
-    assert!(removed.content.is_none());
+    assert!(removed.drain(&core));
+    assert!(matches!(
+        removed.content,
+        Some(Err(PreviewError::HostGone { .. }))
+    ));
 
     core.add_test_host(&config, client(&core, &address));
     let new = core.host(&config.id).unwrap().instance();
@@ -73,6 +76,9 @@ fn preview_completion_is_discarded_after_host_removal_and_same_id_replacement() 
     let mut replaced = pending_preview(&core, &config);
     wait_for_result(&replaced);
     core.add_test_host(&config, client(&core, &address));
-    assert!(!replaced.drain(&core));
-    assert!(replaced.content.is_none());
+    assert!(replaced.drain(&core));
+    assert!(matches!(
+        replaced.content,
+        Some(Err(PreviewError::HostGone { .. }))
+    ));
 }
