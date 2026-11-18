@@ -3,6 +3,17 @@ use test_support::scenario::{Key, Modifiers, NamedKey, Opening, Role, Scenario};
 
 const COMPOSER: &str = "Ask about anything";
 
+#[track_caller]
+fn assert_focus_returns_to_the_composer(editor: &test_support::scenario::Editor, after: &str) {
+    let focused = editor.view(|view| view.focused());
+    assert!(
+        focused
+            .as_ref()
+            .is_some_and(|focused| focused.role == Role::TextInput && !focused.disabled),
+        "focus returns to the composer after {after}, not {focused:?}"
+    );
+}
+
 #[test]
 fn a_revisited_thread_reads_out_its_history_and_offers_the_composer() {
     let mut editor = Scenario::replaying(EngineId::Claude, "reply")
@@ -31,6 +42,8 @@ fn a_message_sent_from_the_composer_streams_its_reply_into_the_thread() {
         })
     );
     editor.click(Role::Button, "Send message");
+    editor.settle("the turn to start", |view| view.shows("Say hello"));
+    assert_focus_returns_to_the_composer(&editor, "Send");
     insta::assert_snapshot!(
         "replied",
         editor.settle_on(
@@ -92,7 +105,8 @@ fn stop_ends_the_turn_and_continue_picks_the_work_back_up() {
                 && view.shows("Stopped after")
         })
     );
-    editor.activate(Role::Button, "Continue where it stopped");
+    assert_focus_returns_to_the_composer(&editor, "Stop");
+    editor.click(Role::Button, "Continue where it stopped");
     insta::assert_snapshot!(
         "continued",
         editor.settle("the continued turn to finish", |view| {
@@ -100,6 +114,7 @@ fn stop_ends_the_turn_and_continue_picks_the_work_back_up() {
                 && view.find(Role::Button, "Stop").is_none()
         })
     );
+    assert_focus_returns_to_the_composer(&editor, "Continue");
     assert_eq!(
         editor.engine().launches(),
         2,

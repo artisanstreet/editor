@@ -2129,13 +2129,18 @@ impl ComposerOwner {
                 } else if composer.send(host) {
                     effects.push(ComposerEffect::EditorChanged);
                 }
+                effects.push(ComposerEffect::FocusEditor);
             }
             ComposerAction::Stop => {
                 if let Some(thread) = composer.stop(host) {
                     effects.push(ComposerEffect::Stopping(host.id.clone(), thread));
                 }
+                effects.push(ComposerEffect::FocusEditor);
             }
-            ComposerAction::Continue => composer.continue_turn(host),
+            ComposerAction::Continue => {
+                composer.continue_turn(host);
+                effects.push(ComposerEffect::FocusEditor);
+            }
             ComposerAction::ClearGoal => composer.clear_goal(host),
             ComposerAction::Unpark => composer.unpark(host),
             ComposerAction::ToggleModel => {

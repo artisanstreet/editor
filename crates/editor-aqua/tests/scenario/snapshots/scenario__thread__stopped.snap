@@ -41,6 +41,5 @@ Label "Reply stopped"
 ComboBox "No model" [collapsed]
   Label "No model"
 ScrollView
-  TextInput "Make anything"
-Group [focused]
-  Button "Continue where it stopped"
+  TextInput "Make anything" [focused]
+Button "Continue where it stopped"

@@ -43,6 +43,5 @@ Label "Reply finished"
 ComboBox "No model" [collapsed]
   Label "No model"
 ScrollView
-  TextInput "Make anything"
-Group [focused]
-  Button "Send message" [disabled]
+  TextInput "Make anything" [focused]
+Button "Send message" [disabled]
