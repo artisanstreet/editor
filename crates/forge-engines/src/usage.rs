@@ -9,7 +9,6 @@
 //!   `opencode stats --json`.
 
 use crate::account::engine_command;
-use anyhow::{Context, Result, bail};
 use artisan_api::{
     EngineId, SpendLine, Timestamp, UsageCadence, UsageLimits, UsageSpend, UsageWindow,
 };
@@ -32,17 +31,29 @@ const CODEX_TIMEOUT: Duration = Duration::from_secs(15);
 const OPENCODE_TIMEOUT: Duration = Duration::from_secs(30);
 const OPENCODE_GO_USAGE: &str = "https://opencode.ai/zen/go/v1/usage";
 
-/// Reads usage without caching. `None` when the engine has no reader or the
-/// read failed.
+#[derive(Debug, thiserror::Error)]
+pub enum ReadUsageError {
+    #[error("read Claude's usage")]
+    Claude(#[source] ReadClaudeUsageError),
+    #[error("read Codex's rate limits")]
+    Codex(#[source] ReadCodexUsageError),
+    #[error("read OpenCode's usage")]
+    OpenCode(#[source] ReadOpenCodeUsageError),
+}
+
 pub async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<UsageLimits> {
     let read = match engine {
         EngineId::Claude => read_claude(binary, home)
             .await
-            .map(|windows| (windows, None)),
+            .map(|windows| (windows, None))
+            .map_err(ReadUsageError::Claude),
         EngineId::Codex => read_codex(binary, home)
             .await
-            .map(|windows| (windows, None)),
-        EngineId::OpenCode => read_opencode(binary, home).await,
+            .map(|windows| (windows, None))
+            .map_err(ReadUsageError::Codex),
+        EngineId::OpenCode => read_opencode(binary, home)
+            .await
+            .map_err(ReadUsageError::OpenCode),
     };
     match read {
         Ok((windows, spend)) if !windows.is_empty() || spend.is_some() => Some(UsageLimits {
@@ -52,7 +63,7 @@ pub async fn read_usage(engine: EngineId, binary: &Path, home: &Path) -> Option<
         }),
         Ok(_) => None,
         Err(error) => {
-            tracing::info!(engine = %engine, home = %home.display(), error = %format!("{error:#}"), "usage unavailable");
+            tracing::info!(engine = %engine, home = %home.display(), error = diagnostics::chain(&error), "usage unavailable");
             None
         }
     }
@@ -149,22 +160,38 @@ impl UsageCache {
 
 // --- Claude ----------------------------------------------------------------
 
-async fn read_claude(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>> {
+#[derive(Debug, thiserror::Error)]
+pub enum ReadClaudeUsageError {
+    #[error("run claude /usage")]
+    Probe(#[source] crate::process::ProbeError),
+    #[error("claude /usage printed no JSON")]
+    NoJson,
+    #[error("decode claude /usage")]
+    Decode(#[source] serde_json::Error),
+    #[error("claude /usage has no result text")]
+    NoResult,
+}
+
+async fn read_claude(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>, ReadClaudeUsageError> {
     let mut command = engine_command(EngineId::Claude, binary, home);
     command
         // MCP servers are no part of `/usage`; starting them took most of
         // its 30 s and timed it out.
         .args(["-p", "/usage", "--output-format", "json", "--strict-mcp-config"])
         .env("TZ", "UTC");
-    let output = crate::process::probe(command, CLAUDE_TIMEOUT, 1024 * 1024).await?;
+    let output = crate::process::probe(command, CLAUDE_TIMEOUT, 1024 * 1024)
+        .await
+        .map_err(ReadClaudeUsageError::Probe)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let start = stdout.find('{').context("claude /usage printed no JSON")?;
-    let end = stdout.rfind('}').context("claude /usage printed no JSON")?;
-    let json: Value =
-        serde_json::from_str(&stdout[start..=end]).context("decoding claude /usage")?;
+    let span = stdout
+        .find('{')
+        .zip(stdout.rfind('}'))
+        .and_then(|(start, end)| stdout.get(start..=end))
+        .ok_or(ReadClaudeUsageError::NoJson)?;
+    let json: Value = serde_json::from_str(span).map_err(ReadClaudeUsageError::Decode)?;
     let text = json["result"]
         .as_str()
-        .context("claude /usage has no result text")?;
+        .ok_or(ReadClaudeUsageError::NoResult)?;
     Ok(parse_claude_usage(text, artisan_api::now()))
 }
 
@@ -260,20 +287,40 @@ fn claude_reset(line: &str, now: Timestamp) -> Option<Timestamp> {
 
 // --- Codex -----------------------------------------------------------------
 
-async fn read_codex(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>> {
-    tokio::time::timeout(CODEX_TIMEOUT, read_codex_inner(binary, home))
-        .await
-        .context("codex rate limits timed out")?
+#[derive(Debug, thiserror::Error)]
+pub enum ReadCodexUsageError {
+    #[error("codex rate limits timed out after {}s", CODEX_TIMEOUT.as_secs())]
+    TimedOut,
+    #[error("ask codex app-server")]
+    Call(#[source] crate::rpc::CallError),
+    #[error("codex is not signed in")]
+    SignedOut,
 }
 
-async fn read_codex_inner(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>> {
-    let mut session =
-        crate::rpc::Session::codex(engine_command(EngineId::Codex, binary, home)).await?;
-    let account = session.call("account/read", json!({})).await?;
+async fn read_codex(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>, ReadCodexUsageError> {
+    tokio::time::timeout(CODEX_TIMEOUT, read_codex_inner(binary, home))
+        .await
+        .map_err(|_elapsed| ReadCodexUsageError::TimedOut)?
+}
+
+async fn read_codex_inner(
+    binary: &Path,
+    home: &Path,
+) -> Result<Vec<UsageWindow>, ReadCodexUsageError> {
+    let mut session = crate::rpc::Session::codex(engine_command(EngineId::Codex, binary, home))
+        .await
+        .map_err(ReadCodexUsageError::Call)?;
+    let account = session
+        .call("account/read", json!({}))
+        .await
+        .map_err(ReadCodexUsageError::Call)?;
     if account["account"].is_null() {
-        bail!("codex is not signed in");
+        return Err(ReadCodexUsageError::SignedOut);
     }
-    let limits = session.call("account/rateLimits/read", json!({})).await?;
+    let limits = session
+        .call("account/rateLimits/read", json!({}))
+        .await
+        .map_err(ReadCodexUsageError::Call)?;
     Ok(parse_codex_limits(&limits))
 }
 
@@ -322,31 +369,73 @@ fn duration_label(minutes: u64) -> String {
 
 // --- OpenCode --------------------------------------------------------------
 
-/// The Go plan's windows and the spend `OpenCode` priced. Either may be
-/// missing (no Go plan, an older `OpenCode`); only both failing fails.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "neither OpenCode Go limits nor spend could be read: {}",
+    diagnostics::chain(go)
+)]
+pub struct ReadOpenCodeUsageError {
+    go: Box<ReadGoUsageError>,
+    #[source]
+    spend: Box<ReadSpendError>,
+}
+
 async fn read_opencode(
     binary: &Path,
     home: &Path,
-) -> Result<(Vec<UsageWindow>, Option<UsageSpend>)> {
+) -> Result<(Vec<UsageWindow>, Option<UsageSpend>), ReadOpenCodeUsageError> {
     let (windows, spend) = tokio::join!(
         read_opencode_go(binary, home),
         read_opencode_spend(binary, home)
     );
     match (windows, spend) {
-        (Err(windows), Err(spend)) => Err(spend.context(format!("{windows:#}"))),
+        (Err(go), Err(spend)) => Err(ReadOpenCodeUsageError {
+            go: Box::new(go),
+            spend: Box::new(spend),
+        }),
         (windows, spend) => {
-            if let Err(error) = &windows {
-                tracing::info!(home = %home.display(), error = %format!("{error:#}"), "OpenCode Go limits unavailable");
-            }
-            if let Err(error) = &spend {
-                tracing::info!(home = %home.display(), error = %format!("{error:#}"), "OpenCode spend unavailable");
-            }
-            Ok((windows.unwrap_or_default(), spend.ok()))
+            let windows = windows.unwrap_or_else(|error| {
+                tracing::info!(home = %home.display(), error = diagnostics::chain(&error), "OpenCode Go limits unavailable");
+                Vec::new()
+            });
+            let spend = match spend {
+                Ok(spend) => Some(spend),
+                Err(error) => {
+                    tracing::info!(home = %home.display(), error = diagnostics::chain(&error), "OpenCode spend unavailable");
+                    None
+                }
+            };
+            Ok((windows, spend))
         }
     }
 }
 
-async fn read_opencode_go(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>> {
+#[derive(Debug, thiserror::Error)]
+pub enum ReadGoUsageError {
+    #[error("list OpenCode credentials")]
+    Run(#[source] crate::account::RunShortError),
+    #[error("listing OpenCode credentials: {stderr}")]
+    Refused { stderr: String },
+    #[error("read OpenCode's credentials")]
+    Credentials(#[source] serde_json::Error),
+    #[error("no OpenCode Console or Go credential")]
+    NoCredential,
+    #[error("build the HTTP client for {OPENCODE_GO_USAGE}")]
+    Client(#[source] reqwest::Error),
+    #[error("ask {OPENCODE_GO_USAGE} for Go usage")]
+    Request(#[source] reqwest::Error),
+    #[error("{OPENCODE_GO_USAGE} answered Go usage with {status}")]
+    Status { status: reqwest::StatusCode },
+    #[error("read Go usage from {OPENCODE_GO_USAGE}")]
+    Body(#[source] reqwest::Error),
+    #[error("decode Go usage from {OPENCODE_GO_USAGE}")]
+    Decode(#[source] serde_json::Error),
+}
+
+async fn read_opencode_go(
+    binary: &Path,
+    home: &Path,
+) -> Result<Vec<UsageWindow>, ReadGoUsageError> {
     let (success, stdout, stderr) = crate::account::run_short(
         EngineId::OpenCode,
         binary,
@@ -354,34 +443,32 @@ async fn read_opencode_go(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>
         &["api", "--standalone", "credential.list"],
         OPENCODE_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(ReadGoUsageError::Run)?;
     if !success {
-        bail!(
-            "listing OpenCode credentials: {}",
-            crate::account::strip_ansi(stderr.trim())
-        );
+        return Err(ReadGoUsageError::Refused {
+            stderr: crate::account::strip_ansi(stderr.trim()),
+        });
     }
-    let listing: Value = serde_json::from_str(&stdout).context("reading OpenCode's credentials")?;
-    let (token, org) = go_credential(&listing, artisan_api::now())
-        .context("no OpenCode Console or Go credential")?;
+    let listing: Value = serde_json::from_str(&stdout).map_err(ReadGoUsageError::Credentials)?;
+    let (token, org) =
+        go_credential(&listing, artisan_api::now()).ok_or(ReadGoUsageError::NoCredential)?;
     let mut request = reqwest::Client::builder()
         .timeout(OPENCODE_TIMEOUT)
-        .build()?
+        .build()
+        .map_err(ReadGoUsageError::Client)?
         .get(OPENCODE_GO_USAGE)
         .bearer_auth(token);
     if let Some(org) = org {
         request = request.header("x-org-id", org);
     }
-    let response = request
-        .send()
-        .await
-        .context("asking opencode.ai for Go usage")?;
+    let response = request.send().await.map_err(ReadGoUsageError::Request)?;
     let status = response.status();
     if !status.is_success() {
-        bail!("opencode.ai answered Go usage with {status}");
+        return Err(ReadGoUsageError::Status { status });
     }
-    let body: Value =
-        serde_json::from_slice(&response.bytes().await?).context("reading Go usage")?;
+    let bytes = response.bytes().await.map_err(ReadGoUsageError::Body)?;
+    let body: Value = serde_json::from_slice(&bytes).map_err(ReadGoUsageError::Decode)?;
     Ok(parse_go_usage(&body))
 }
 
@@ -444,7 +531,25 @@ fn parse_go_usage(body: &Value) -> Vec<UsageWindow> {
     .collect()
 }
 
-async fn read_opencode_spend(binary: &Path, home: &Path) -> Result<UsageSpend> {
+#[derive(Debug, thiserror::Error)]
+pub enum ReadSpendError {
+    #[error("run opencode stats for {days} days")]
+    Run {
+        days: &'static str,
+        #[source]
+        source: crate::account::RunShortError,
+    },
+    #[error("opencode stats for {days} days: {stderr}")]
+    Refused { days: &'static str, stderr: String },
+    #[error("read opencode stats for {days} days")]
+    Decode {
+        days: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+async fn read_opencode_spend(binary: &Path, home: &Path) -> Result<UsageSpend, ReadSpendError> {
     let mut spend = UsageSpend::default();
     let mut models = Vec::new();
     for (days, label) in [("0", "Today"), ("7", "Last 7 days"), ("30", "Last 30 days")] {
@@ -455,14 +560,16 @@ async fn read_opencode_spend(binary: &Path, home: &Path) -> Result<UsageSpend> {
             &["stats", "--standalone", "--json", "--days", days],
             OPENCODE_TIMEOUT,
         )
-        .await?;
+        .await
+        .map_err(|source| ReadSpendError::Run { days, source })?;
         if !success {
-            bail!(
-                "opencode stats: {}",
-                crate::account::strip_ansi(stderr.trim())
-            );
+            return Err(ReadSpendError::Refused {
+                days,
+                stderr: crate::account::strip_ansi(stderr.trim()),
+            });
         }
-        let stats: Value = serde_json::from_str(&stdout).context("reading opencode stats")?;
+        let stats: Value = serde_json::from_str(&stdout)
+            .map_err(|source| ReadSpendError::Decode { days, source })?;
         spend.periods.push(spend_line(label, &stats));
         models = stats["models"].as_array().cloned().unwrap_or_default();
     }

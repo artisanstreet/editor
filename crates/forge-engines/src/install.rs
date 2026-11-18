@@ -1,20 +1,6 @@
-//! Engine installs under `<data>/engines/<engine>/`:
-//!
-//! ```text
-//! versions/<version>/…   the unpacked engine (current and one previous)
-//! current, previous      one version per file
-//! home/                  the engine's HOME
-//! install.lock           held while installing or switching
-//! ```
-//!
-//! `ae` and Forge can both install, so every change happens under the
-//! engine's file lock. Downloads land in `versions/` and are renamed into
-//! place, so a crash never leaves a half-written version as `current`.
-
 use crate::engines::{
     Archive, Artifact, CLAUDE_RELEASES, Feed, NPM_REGISTRY, compare_versions, host_spec,
 };
-use anyhow::{Context, Result, bail, ensure};
 use artisan_api::{EngineId, InstallState};
 use base64::Engine as _;
 use sha2::Digest as _;
@@ -289,30 +275,57 @@ fn read_pointer(path: &Path) -> Option<String> {
     Some(version.to_owned())
 }
 
-/// Versions come from vendor feeds and become directory names.
-pub fn check_version(version: &str) -> Result<()> {
-    ensure!(
-        !version.is_empty()
-            && version.len() <= 64
-            && !version.starts_with('.')
-            && version
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b".-_+".contains(&byte)),
-        "unusable version {version:?}"
-    );
-    Ok(())
+#[derive(Debug, thiserror::Error)]
+#[error("unusable version {version:?}")]
+pub struct UnusableVersion {
+    pub version: String,
 }
 
-fn write_pointer(path: &Path, version: &str) -> Result<()> {
+pub fn check_version(version: &str) -> Result<(), UnusableVersion> {
+    let usable = !version.is_empty()
+        && version.len() <= 64
+        && !version.starts_with('.')
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".-_+".contains(&byte));
+    if usable {
+        Ok(())
+    } else {
+        Err(UnusableVersion {
+            version: version.to_owned(),
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SwitchError {
+    #[error("write {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("replace {}", path.display())]
+    Replace {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+fn write_pointer(path: &Path, version: &str) -> Result<(), SwitchError> {
     let temporary = path.with_extension("tmp");
-    fs::write(&temporary, format!("{version}\n"))
-        .with_context(|| format!("writing {}", temporary.display()))?;
-    fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
+    fs::write(&temporary, format!("{version}\n")).map_err(|source| SwitchError::Write {
+        path: temporary.clone(),
+        source,
+    })?;
+    fs::rename(&temporary, path).map_err(|source| SwitchError::Replace {
+        path: path.to_owned(),
+        source,
+    })
 }
 
-/// Makes `version` current and keeps the old current as previous.
-/// Pruning belongs to the manager, which knows versions leased by live runs.
-pub fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<()> {
+pub fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<(), SwitchError> {
     let dir = layout.engine_dir(engine);
     let current = layout.current(engine);
     if current.as_deref() != Some(version) {
@@ -325,17 +338,40 @@ pub fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<()> {
     Ok(())
 }
 
-/// One standard lock per engine; active use keeps all installed versions available.
-pub fn usage_lock(home: &Path) -> Result<fs::File> {
-    let dir = home.parent().context("engine home has no parent")?;
-    fs::create_dir_all(dir)?;
+#[derive(Debug, thiserror::Error)]
+pub enum UsageLockError {
+    #[error("engine home {} has no parent", home.display())]
+    NoParent { home: PathBuf },
+    #[error("create {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("open the engine usage lock {}", path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+pub fn usage_lock(home: &Path) -> Result<fs::File, UsageLockError> {
+    let dir = home.parent().ok_or_else(|| UsageLockError::NoParent {
+        home: home.to_owned(),
+    })?;
+    fs::create_dir_all(dir).map_err(|source| UsageLockError::Create {
+        path: dir.to_owned(),
+        source,
+    })?;
+    let path = dir.join("usage.lock");
     fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.join("usage.lock"))
-        .context("opening engine usage lock")
+        .open(&path)
+        .map_err(|source| UsageLockError::Open { path, source })
 }
 
 pub fn prune(layout: &Layout, engine: EngineId) {
@@ -364,37 +400,60 @@ pub fn prune(layout: &Layout, engine: EngineId) {
         } else {
             fs::remove_file(&path)
         };
-        // A running engine can pin its files on Windows; the next prune retries.
         if let Err(error) = removed {
             tracing::warn!(%engine, path = %path.display(), %error, "could not remove an old engine version");
         }
     }
 }
 
-/// The engine's install lock, held until the returned file is dropped.
-pub async fn lock(layout: &Layout, engine: EngineId) -> Result<fs::File> {
+#[derive(Debug, thiserror::Error)]
+pub enum LockError {
+    #[error("create {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("open {}", path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("lock {}", path.display())]
+    Lock {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("wait for the install lock task")]
+    Task(#[source] tokio::task::JoinError),
+}
+
+pub async fn lock(layout: &Layout, engine: EngineId) -> Result<fs::File, LockError> {
     let dir = layout.engine_dir(engine);
     tokio::task::spawn_blocking(move || {
-        fs::create_dir_all(dir.join("versions"))
-            .with_context(|| format!("creating {}", dir.display()))?;
+        fs::create_dir_all(dir.join("versions")).map_err(|source| LockError::Create {
+            path: dir.clone(),
+            source,
+        })?;
         let path = dir.join("install.lock");
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        fs2::FileExt::lock_exclusive(&file)
-            .with_context(|| format!("locking {}", path.display()))?;
+            .map_err(|source| LockError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        fs2::FileExt::lock_exclusive(&file).map_err(|source| LockError::Lock { path, source })?;
         Ok(file)
     })
     .await
-    .context("install lock task")?
+    .map_err(LockError::Task)?
 }
 
-// ---------------------------------------------------------------- feeds
-
-/// One downloadable version and the digest the vendor publishes for it.
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub version: String,
@@ -408,71 +467,129 @@ pub enum Expected {
     Sha512(Vec<u8>),
 }
 
-async fn get(http: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
+#[derive(Debug, thiserror::Error)]
+pub enum GetError {
+    #[error("fetch {url}")]
+    Request {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("read {url}")]
+    Body {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("parse {url}")]
+    Json {
+        url: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+async fn get(http: &reqwest::Client, url: &str) -> Result<reqwest::Response, GetError> {
     http.get(url)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .with_context(|| format!("fetching {url}"))
+        .map_err(|source| GetError::Request {
+            url: url.to_owned(),
+            source,
+        })
 }
 
-async fn get_text(http: &reqwest::Client, url: &str) -> Result<String> {
+async fn get_text(http: &reqwest::Client, url: &str) -> Result<String, GetError> {
     get(http, url)
         .await?
         .text()
         .await
-        .with_context(|| format!("reading {url}"))
+        .map_err(|source| GetError::Body {
+            url: url.to_owned(),
+            source,
+        })
 }
 
-async fn get_json(http: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
+async fn get_json(http: &reqwest::Client, url: &str) -> Result<serde_json::Value, GetError> {
     let text = get_text(http, url).await?;
-    serde_json::from_str(&text).with_context(|| format!("parsing {url}"))
+    parse_json(url, &text)
+}
+
+fn parse_json(url: &str, text: &str) -> Result<serde_json::Value, GetError> {
+    serde_json::from_str(text).map_err(|source| GetError::Json {
+        url: url.to_owned(),
+        source,
+    })
 }
 
 fn npm_name(package: &str) -> String {
     package.replace('/', "%2f")
 }
 
-pub async fn latest_version(http: &reqwest::Client, feed: Feed) -> Result<String> {
+#[derive(Debug, thiserror::Error)]
+pub enum LatestVersionError {
+    #[error("ask the feed for the latest version")]
+    Get(#[source] GetError),
+    #[error("{package} has no {tag:?} tag")]
+    NoTag {
+        package: &'static str,
+        tag: &'static str,
+    },
+    #[error("{url} names no version")]
+    NoVersion { url: String },
+    #[error("the feed's latest version is unusable")]
+    Unusable(#[source] UnusableVersion),
+}
+
+pub async fn latest_version(
+    http: &reqwest::Client,
+    feed: Feed,
+) -> Result<String, LatestVersionError> {
     let version = match feed {
         Feed::Claude { .. } => get_text(http, &format!("{CLAUDE_RELEASES}/latest"))
-            .await?
+            .await
+            .map_err(LatestVersionError::Get)?
             .trim()
             .to_owned(),
         Feed::Npm {
             package, dist_tag, ..
         } => {
             let url = format!("{NPM_REGISTRY}/-/package/{}/dist-tags", npm_name(package));
-            let tags = get_json(http, &url).await?;
+            let tags = get_json(http, &url)
+                .await
+                .map_err(LatestVersionError::Get)?;
             tags.get(dist_tag)
                 .and_then(serde_json::Value::as_str)
-                .with_context(|| format!("{package} has no {dist_tag:?} tag"))?
+                .ok_or(LatestVersionError::NoTag {
+                    package,
+                    tag: dist_tag,
+                })?
                 .to_owned()
         }
         Feed::Release { repository, .. } => {
             let url =
                 format!("https://github.com/{repository}/releases/latest/download/manifest.json");
             get_json(http, &url)
-                .await?
+                .await
+                .map_err(LatestVersionError::Get)?
                 .get("version")
                 .and_then(serde_json::Value::as_str)
-                .with_context(|| format!("{url} names no version"))?
+                .ok_or_else(|| LatestVersionError::NoVersion { url: url.clone() })?
                 .to_owned()
         }
     };
-    check_version(&version)?;
+    check_version(&version).map_err(LatestVersionError::Unusable)?;
     Ok(version)
 }
 
-/// The npm package Claude Code also publishes; its version list is the
-/// release list (`downloads.claude.ai` has none).
 const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
-/// The most versions "Choose version" offers.
 pub const MAX_LISTED_VERSIONS: usize = 40;
 
-/// The vendor's published versions on the channel Forge follows, newest
-/// first.
-pub async fn published_versions(http: &reqwest::Client, feed: Feed) -> Result<Vec<String>> {
+pub async fn published_versions(
+    http: &reqwest::Client,
+    feed: Feed,
+) -> Result<Vec<String>, GetError> {
     let (package, channel) = match feed {
         Feed::Claude { .. } => (CLAUDE_NPM_PACKAGE, "latest"),
         Feed::Npm {
@@ -481,7 +598,6 @@ pub async fn published_versions(http: &reqwest::Client, feed: Feed) -> Result<Ve
         Feed::Release { repository, .. } => return release_versions(http, repository).await,
     };
     let url = format!("{NPM_REGISTRY}/{}", npm_name(package));
-    // The abbreviated document: versions without their readmes.
     let text = http
         .get(&url)
         .header(
@@ -491,17 +607,24 @@ pub async fn published_versions(http: &reqwest::Client, feed: Feed) -> Result<Ve
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .with_context(|| format!("fetching {url}"))?
+        .map_err(|source| GetError::Request {
+            url: url.clone(),
+            source,
+        })?
         .text()
         .await
-        .with_context(|| format!("reading {url}"))?;
-    let packument: serde_json::Value =
-        serde_json::from_str(&text).with_context(|| format!("parsing {url}"))?;
+        .map_err(|source| GetError::Body {
+            url: url.clone(),
+            source,
+        })?;
+    let packument = parse_json(&url, &text)?;
     Ok(channel_versions(&packument, channel))
 }
 
-/// The versions a release feed has published, newest first.
-async fn release_versions(http: &reqwest::Client, repository: &str) -> Result<Vec<String>> {
+async fn release_versions(
+    http: &reqwest::Client,
+    repository: &str,
+) -> Result<Vec<String>, GetError> {
     let url = format!(
         "https://api.github.com/repos/{repository}/releases?per_page={MAX_LISTED_VERSIONS}"
     );
@@ -560,27 +683,104 @@ pub fn channel_versions(packument: &serde_json::Value, channel: &str) -> Vec<Str
     versions
 }
 
-pub async fn resolve(http: &reqwest::Client, feed: Feed, version: &str) -> Result<Resolved> {
-    check_version(version)?;
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError {
+    #[error("resolve the version")]
+    Unusable(#[source] UnusableVersion),
+    #[error("fetch the manifest for {version}")]
+    Get {
+        version: String,
+        #[source]
+        source: GetError,
+    },
+    #[error("the manifest {url} names another version than {version}")]
+    OtherVersion { url: String, version: String },
+    #[error("{version} has no {platform} build")]
+    NoBuild {
+        version: String,
+        platform: &'static str,
+    },
+    #[error("the {platform} build of {version} has no {field}")]
+    Missing {
+        version: String,
+        platform: &'static str,
+        field: &'static str,
+    },
+    #[error("{package} {version} points outside the registry: {tarball}")]
+    OutsideRegistry {
+        package: &'static str,
+        version: String,
+        tarball: String,
+    },
+    #[error("decode the npm integrity of {package} {version}")]
+    Integrity {
+        package: &'static str,
+        version: String,
+        #[source]
+        source: base64::DecodeError,
+    },
+}
+
+fn manifest_entry<'a>(
+    manifest: &'a serde_json::Value,
+    url: &str,
+    version: &str,
+    platform: &'static str,
+) -> Result<&'a serde_json::Value, ResolveError> {
+    if manifest.get("version").and_then(serde_json::Value::as_str) != Some(version) {
+        return Err(ResolveError::OtherVersion {
+            url: url.to_owned(),
+            version: version.to_owned(),
+        });
+    }
+    manifest
+        .pointer(&format!("/platforms/{platform}"))
+        .ok_or_else(|| ResolveError::NoBuild {
+            version: version.to_owned(),
+            platform,
+        })
+}
+
+fn missing(version: &str, platform: &'static str, field: &'static str) -> ResolveError {
+    ResolveError::Missing {
+        version: version.to_owned(),
+        platform,
+        field,
+    }
+}
+
+async fn get_manifest(
+    http: &reqwest::Client,
+    url: &str,
+    version: &str,
+) -> Result<serde_json::Value, ResolveError> {
+    get_json(http, url)
+        .await
+        .map_err(|source| ResolveError::Get {
+            version: version.to_owned(),
+            source,
+        })
+}
+
+pub async fn resolve(
+    http: &reqwest::Client,
+    feed: Feed,
+    version: &str,
+) -> Result<Resolved, ResolveError> {
+    check_version(version).map_err(ResolveError::Unusable)?;
     let (url, digest) = match feed {
         Feed::Claude { platform, binary } => {
-            let manifest =
-                get_json(http, &format!("{CLAUDE_RELEASES}/{version}/manifest.json")).await?;
-            ensure!(
-                manifest.get("version").and_then(serde_json::Value::as_str) == Some(version),
-                "the Claude manifest for {version} names another version"
-            );
-            let entry = manifest
-                .pointer(&format!("/platforms/{platform}"))
-                .with_context(|| format!("Claude {version} has no {platform} build"))?;
+            let url = format!("{CLAUDE_RELEASES}/{version}/manifest.json");
+            let manifest = get_manifest(http, &url, version).await?;
+            let entry = manifest_entry(&manifest, &url, version, platform)?;
             let hex = entry
                 .get("checksum")
                 .and_then(serde_json::Value::as_str)
-                .context("no checksum")?;
+                .ok_or_else(|| missing(version, platform, "checksum"))?;
             let size = entry
                 .get("size")
                 .and_then(serde_json::Value::as_u64)
-                .context("no size")?;
+                .ok_or_else(|| missing(version, platform, "size"))?;
             (
                 format!("{CLAUDE_RELEASES}/{version}/{platform}/{binary}"),
                 Expected::Sha256 {
@@ -592,27 +792,31 @@ pub async fn resolve(http: &reqwest::Client, feed: Feed, version: &str) -> Resul
         Feed::Npm {
             package, suffix, ..
         } => {
-            let document = get_json(
-                http,
-                &format!("{NPM_REGISTRY}/{}/{version}{suffix}", npm_name(package)),
-            )
-            .await?;
+            let url = format!("{NPM_REGISTRY}/{}/{version}{suffix}", npm_name(package));
+            let document = get_manifest(http, &url, version).await?;
             let tarball = document
                 .pointer("/dist/tarball")
                 .and_then(serde_json::Value::as_str)
-                .context("no tarball")?;
-            ensure!(
-                tarball.starts_with(&format!("{NPM_REGISTRY}/{package}/-/")),
-                "{package} {version} points outside the registry: {tarball}"
-            );
+                .ok_or_else(|| missing(version, "npm", "tarball"))?;
+            if !tarball.starts_with(&format!("{NPM_REGISTRY}/{package}/-/")) {
+                return Err(ResolveError::OutsideRegistry {
+                    package,
+                    version: version.to_owned(),
+                    tarball: tarball.to_owned(),
+                });
+            }
             let integrity = document
                 .pointer("/dist/integrity")
                 .and_then(serde_json::Value::as_str)
                 .and_then(|value| value.strip_prefix("sha512-"))
-                .context("no sha512 integrity")?;
+                .ok_or_else(|| missing(version, "npm", "sha512 integrity"))?;
             let digest = base64::engine::general_purpose::STANDARD
                 .decode(integrity)
-                .context("decoding the npm integrity")?;
+                .map_err(|source| ResolveError::Integrity {
+                    package,
+                    version: version.to_owned(),
+                    source,
+                })?;
             (tarball.to_owned(), Expected::Sha512(digest))
         }
         Feed::Release {
@@ -627,23 +831,17 @@ pub async fn resolve(http: &reqwest::Client, feed: Feed, version: &str) -> Resul
     })
 }
 
-/// The asset and digest a release feed's manifest lists for `platform`.
 async fn resolve_release(
     http: &reqwest::Client,
     repository: &str,
-    platform: &str,
+    platform: &'static str,
     version: &str,
-) -> Result<(String, Expected)> {
+) -> Result<(String, Expected), ResolveError> {
     let release =
         format!("https://github.com/{repository}/releases/download/{RELEASE_TAG}{version}");
-    let manifest = get_json(http, &format!("{release}/manifest.json")).await?;
-    ensure!(
-        manifest.get("version").and_then(serde_json::Value::as_str) == Some(version),
-        "the {repository} manifest for {version} names another version"
-    );
-    let entry = manifest
-        .pointer(&format!("/platforms/{platform}"))
-        .with_context(|| format!("{repository} {version} has no {platform} build"))?;
+    let url = format!("{release}/manifest.json");
+    let manifest = get_manifest(http, &url, version).await?;
+    let entry = manifest_entry(&manifest, &url, version, platform)?;
     let asset = entry
         .get("asset")
         .and_then(serde_json::Value::as_str)
@@ -653,15 +851,15 @@ async fn resolve_release(
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b".-_".contains(&byte))
         })
-        .context("no usable asset name")?;
+        .ok_or_else(|| missing(version, platform, "usable asset name"))?;
     let hex = entry
         .get("sha256")
         .and_then(serde_json::Value::as_str)
-        .context("no sha256")?;
+        .ok_or_else(|| missing(version, platform, "sha256"))?;
     let size = entry
         .get("size")
         .and_then(serde_json::Value::as_u64)
-        .context("no size")?;
+        .ok_or_else(|| missing(version, platform, "size"))?;
     Ok((
         format!("{release}/{asset}"),
         Expected::Sha256 {
@@ -671,15 +869,81 @@ async fn resolve_release(
     ))
 }
 
-// ---------------------------------------------------------------- download and unpack
-
 enum Hasher {
     Sha256(sha2::Sha256),
     Sha512(sha2::Sha512),
 }
 
-/// Downloads, verifies and unpacks `resolved` into `versions/<version>`.
-/// Call with the install lock held; `report` sees the lifecycle events.
+#[derive(Debug, thiserror::Error)]
+pub enum FetchError {
+    #[error("install {} {version}", engine.display_name())]
+    Unusable {
+        engine: EngineId,
+        version: String,
+        #[source]
+        source: UnusableVersion,
+    },
+    #[error("download {} {version}", engine.display_name())]
+    Download {
+        engine: EngineId,
+        version: String,
+        #[source]
+        source: DownloadError,
+    },
+    #[error("verify {} {version} from {url}", engine.display_name())]
+    Verify {
+        engine: EngineId,
+        version: String,
+        url: String,
+        #[source]
+        source: VerifyError,
+    },
+    #[error("unpack {} {version}", engine.display_name())]
+    Unpack {
+        engine: EngineId,
+        version: String,
+        #[source]
+        source: UnpackError,
+    },
+    #[error("remove the old {} {version} at {}", engine.display_name(), path.display())]
+    RemoveOld {
+        engine: EngineId,
+        version: String,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("move {} {version} into {}", engine.display_name(), path.display())]
+    Place {
+        engine: EngineId,
+        version: String,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("make {} {version} current", engine.display_name())]
+    Switch {
+        engine: EngineId,
+        version: String,
+        #[source]
+        source: SwitchError,
+    },
+    #[error("wait for the {} {version} unpack task", engine.display_name())]
+    Task {
+        engine: EngineId,
+        version: String,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+}
+
+enum PlaceStep {
+    Unpack(UnpackError),
+    RemoveOld(PathBuf, io::Error),
+    Place(PathBuf, io::Error),
+    Switch(SwitchError),
+}
+
 pub async fn fetch(
     layout: &Layout,
     http: &reqwest::Client,
@@ -687,9 +951,13 @@ pub async fn fetch(
     artifact: Artifact,
     resolved: &Resolved,
     report: &(dyn Fn(Event) + Send + Sync),
-) -> Result<()> {
+) -> Result<(), FetchError> {
     let version = &resolved.version;
-    check_version(version)?;
+    check_version(version).map_err(|source| FetchError::Unusable {
+        engine,
+        version: version.clone(),
+        source,
+    })?;
     let versions = layout.versions(engine);
     let download = versions.join(format!(".download-{version}"));
     let staging = versions.join(format!(".staging-{version}"));
@@ -697,11 +965,20 @@ pub async fn fetch(
         version: version.clone(),
     });
     let result = async {
-        let (size, digest) =
-            download_to(http, &resolved.url, &download, &resolved.digest, report).await?;
+        let (size, digest) = download_to(http, &resolved.url, &download, &resolved.digest, report)
+            .await
+            .map_err(|source| FetchError::Download {
+                engine,
+                version: version.clone(),
+                source,
+            })?;
         report(Event::Downloaded);
-        verify(&resolved.digest, size, &digest)
-            .with_context(|| format!("verifying {}", resolved.url))?;
+        verify(&resolved.digest, size, &digest).map_err(|source| FetchError::Verify {
+            engine,
+            version: version.clone(),
+            url: resolved.url.clone(),
+            source,
+        })?;
         let (from, to, target) = (
             download.clone(),
             staging.clone(),
@@ -709,24 +986,95 @@ pub async fn fetch(
         );
         let switching = layout.clone();
         let switching_version = version.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            unpack(artifact, &from, &to)?;
+        let placed = tokio::task::spawn_blocking(move || -> Result<(), PlaceStep> {
+            unpack(artifact, &from, &to).map_err(PlaceStep::Unpack)?;
             if target.exists() {
                 fs::remove_dir_all(&target)
-                    .with_context(|| format!("removing {}", target.display()))?;
+                    .map_err(|source| PlaceStep::RemoveOld(target.clone(), source))?;
             }
-            fs::rename(&to, &target)
-                .with_context(|| format!("moving {} into place", target.display()))?;
-            switch(&switching, engine, &switching_version)
+            fs::rename(&to, &target).map_err(|source| PlaceStep::Place(target.clone(), source))?;
+            switch(&switching, engine, &switching_version).map_err(PlaceStep::Switch)
         })
         .await
-        .context("unpack task")?
+        .map_err(|source| FetchError::Task {
+            engine,
+            version: version.clone(),
+            source,
+        })?;
+        placed.map_err(|step| {
+            let version = version.clone();
+            match step {
+                PlaceStep::Unpack(source) => FetchError::Unpack {
+                    engine,
+                    version,
+                    source,
+                },
+                PlaceStep::RemoveOld(path, source) => FetchError::RemoveOld {
+                    engine,
+                    version,
+                    path,
+                    source,
+                },
+                PlaceStep::Place(path, source) => FetchError::Place {
+                    engine,
+                    version,
+                    path,
+                    source,
+                },
+                PlaceStep::Switch(source) => FetchError::Switch {
+                    engine,
+                    version,
+                    source,
+                },
+            }
+        })
     }
     .await;
-    // Leftovers of this attempt; either may not exist.
-    fs::remove_file(&download).ok();
-    fs::remove_dir_all(&staging).ok();
-    result.with_context(|| format!("installing {} {version}", engine.display_name()))
+    if let Err(error) = fs::remove_file(&download)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(%engine, path = %download.display(), %error, "remove a leftover engine download");
+    }
+    if let Err(error) = fs::remove_dir_all(&staging)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(%engine, path = %staging.display(), %error, "remove a leftover engine staging folder");
+    }
+    result
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DownloadError {
+    #[error("start the download")]
+    Get(#[source] GetError),
+    #[error("{url} is {total} bytes, more than we accept")]
+    TooLarge { url: String, total: u64 },
+    #[error("{url} is larger than we accept")]
+    Oversized { url: String },
+    #[error("create {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("download {url}")]
+    Chunk {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("write {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("sync {}", path.display())]
+    Sync {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 
 async fn download_to(
@@ -735,18 +1083,27 @@ async fn download_to(
     path: &Path,
     expected: &Expected,
     report: &(dyn Fn(Event) + Send + Sync),
-) -> Result<(u64, Vec<u8>)> {
-    let mut response = get(http, url).await?;
+) -> Result<(u64, Vec<u8>), DownloadError> {
+    let mut response = get(http, url).await.map_err(DownloadError::Get)?;
     let total = response.content_length();
-    if let Some(total) = total {
-        ensure!(
-            total <= MAX_DOWNLOAD_BYTES,
-            "{url} is {total} bytes, more than we accept"
-        );
+    if let Some(total) = total
+        && total > MAX_DOWNLOAD_BYTES
+    {
+        return Err(DownloadError::TooLarge {
+            url: url.to_owned(),
+            total,
+        });
     }
+    let write_error = |source| DownloadError::Write {
+        path: path.to_owned(),
+        source,
+    };
     let mut file = tokio::fs::File::create(path)
         .await
-        .with_context(|| format!("creating {}", path.display()))?;
+        .map_err(|source| DownloadError::Create {
+            path: path.to_owned(),
+            source,
+        })?;
     let mut hasher = match expected {
         Expected::Sha256 { .. } => Hasher::Sha256(sha2::Sha256::new()),
         Expected::Sha512(_) => Hasher::Sha512(sha2::Sha512::new()),
@@ -756,29 +1113,34 @@ async fn download_to(
     while let Some(chunk) = response
         .chunk()
         .await
-        .with_context(|| format!("downloading {url}"))?
+        .map_err(|source| DownloadError::Chunk {
+            url: url.to_owned(),
+            source,
+        })?
     {
         received += chunk.len() as u64;
-        ensure!(
-            received <= MAX_DOWNLOAD_BYTES,
-            "{url} is larger than we accept"
-        );
+        if received > MAX_DOWNLOAD_BYTES {
+            return Err(DownloadError::Oversized {
+                url: url.to_owned(),
+            });
+        }
         match &mut hasher {
             Hasher::Sha256(hasher) => hasher.update(&chunk),
             Hasher::Sha512(hasher) => hasher.update(&chunk),
         }
-        file.write_all(&chunk)
-            .await
-            .with_context(|| format!("writing {}", path.display()))?;
+        file.write_all(&chunk).await.map_err(write_error)?;
         if received - reported >= PROGRESS_STEP_BYTES {
             reported = received;
             report(Event::Progress { received, total });
         }
     }
-    file.flush().await?;
+    file.flush().await.map_err(write_error)?;
     file.sync_all()
         .await
-        .with_context(|| format!("syncing {}", path.display()))?;
+        .map_err(|source| DownloadError::Sync {
+            path: path.to_owned(),
+            source,
+        })?;
     report(Event::Progress { received, total });
     let digest = match hasher {
         Hasher::Sha256(hasher) => hasher.finalize().to_vec(),
@@ -787,65 +1149,147 @@ async fn download_to(
     Ok((received, digest))
 }
 
-fn verify(expected: &Expected, size: u64, digest: &[u8]) -> Result<()> {
+#[derive(Debug, thiserror::Error)]
+pub enum VerifyError {
+    #[error("size {size} does not match the published {want}")]
+    Size { size: u64, want: u64 },
+    #[error("SHA-256 {got} does not match the published {want}")]
+    Sha256 { got: String, want: String },
+    #[error("SHA-512 does not match the published integrity")]
+    Sha512,
+}
+
+fn verify(expected: &Expected, size: u64, digest: &[u8]) -> Result<(), VerifyError> {
     match expected {
         Expected::Sha256 { hex, size: want } => {
-            ensure!(
-                size == *want,
-                "size {size} does not match the published {want}"
-            );
+            if size != *want {
+                return Err(VerifyError::Size { size, want: *want });
+            }
             let got = hex::encode(digest);
-            ensure!(
-                got == *hex,
-                "SHA-256 {got} does not match the published {hex}"
-            );
+            if got != *hex {
+                return Err(VerifyError::Sha256 {
+                    got,
+                    want: hex.clone(),
+                });
+            }
         }
-        Expected::Sha512(want) => ensure!(
-            digest == want.as_slice(),
-            "SHA-512 does not match the published integrity"
-        ),
+        Expected::Sha512(want) => {
+            if digest != want.as_slice() {
+                return Err(VerifyError::Sha512);
+            }
+        }
     }
     Ok(())
 }
 
-/// Unpacks the download into `dest` and checks the executable is there.
+#[derive(Debug, thiserror::Error)]
+pub enum UnpackError {
+    #[error("clear {}", path.display())]
+    Clear {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("create {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("move the download to {}", path.display())]
+    Move {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("open {}", path.display())]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("read the archive {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("unsafe archive member {}", member.display())]
+    Unsafe { member: PathBuf },
+    #[error("the archive links {} elsewhere", member.display())]
+    Link { member: PathBuf },
+    #[error("unpack {}", member.display())]
+    Member {
+        member: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("the download has no {entry}")]
+    NoEntry { entry: &'static str },
+    #[error("make {} executable", path.display())]
+    Permissions {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
 #[expect(
     clippy::wildcard_enum_match_arm,
     reason = "every other tar entry type (devices, fifos, GNU and PAX headers) is skipped"
 )]
-fn unpack(artifact: Artifact, download: &Path, dest: &Path) -> Result<()> {
+fn unpack(artifact: Artifact, download: &Path, dest: &Path) -> Result<(), UnpackError> {
+    let create = |path: &Path| {
+        fs::create_dir_all(path).map_err(|source| UnpackError::Create {
+            path: path.to_owned(),
+            source,
+        })
+    };
     if dest.exists() {
-        fs::remove_dir_all(dest)?;
+        fs::remove_dir_all(dest).map_err(|source| UnpackError::Clear {
+            path: dest.to_owned(),
+            source,
+        })?;
     }
-    fs::create_dir_all(dest).with_context(|| format!("creating {}", dest.display()))?;
+    create(dest)?;
     match artifact.archive {
         Archive::Binary => {
             let to = dest.join(artifact.entry);
-            fs::rename(download, &to).or_else(|_| fs::copy(download, &to).map(drop))?;
+            fs::rename(download, &to)
+                .or_else(|_| fs::copy(download, &to).map(drop))
+                .map_err(|source| UnpackError::Move { path: to, source })?;
         }
         Archive::TarGz => {
-            let file = fs::File::open(download)?;
+            let read = |source| UnpackError::Read {
+                path: download.to_owned(),
+                source,
+            };
+            let file = fs::File::open(download).map_err(|source| UnpackError::Open {
+                path: download.to_owned(),
+                source,
+            })?;
             let mut archive =
                 tar::Archive::new(flate2::read::GzDecoder::new(io::BufReader::new(file)));
-            for entry in archive.entries().context("reading the archive")? {
-                let mut entry = entry.context("reading the archive")?;
-                let path = entry.path()?.into_owned();
+            for entry in archive.entries().map_err(read)? {
+                let mut entry = entry.map_err(read)?;
+                let path = entry.path().map_err(read)?.into_owned();
                 let Some(relative) = inside(&path, artifact.strip)? else {
                     continue;
                 };
                 let to = dest.join(&relative);
                 match entry.header().entry_type() {
-                    tar::EntryType::Directory => fs::create_dir_all(&to)?,
+                    tar::EntryType::Directory => create(&to)?,
                     tar::EntryType::Regular | tar::EntryType::Continuous => {
                         if let Some(parent) = to.parent() {
-                            fs::create_dir_all(parent)?;
+                            create(parent)?;
                         }
-                        entry
-                            .unpack(&to)
-                            .with_context(|| format!("unpacking {}", relative.display()))?;
+                        entry.unpack(&to).map_err(|source| UnpackError::Member {
+                            member: relative,
+                            source,
+                        })?;
                     }
                     kind if kind.is_symlink() || kind.is_hard_link() => {
-                        bail!("the archive links {} elsewhere", path.display())
+                        return Err(UnpackError::Link { member: path });
                     }
                     _ => {}
                 }
@@ -853,35 +1297,43 @@ fn unpack(artifact: Artifact, download: &Path, dest: &Path) -> Result<()> {
         }
     }
     let executable = dest.join(artifact.entry);
-    ensure!(
-        executable.is_file(),
-        "the download has no {}",
-        artifact.entry
-    );
+    if !executable.is_file() {
+        return Err(UnpackError::NoEntry {
+            entry: artifact.entry,
+        });
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(&executable)?.permissions().mode();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(mode | 0o755))?;
+        let permissions = |source| UnpackError::Permissions {
+            path: executable.clone(),
+            source,
+        };
+        let mode = fs::metadata(&executable)
+            .map_err(permissions)?
+            .permissions()
+            .mode();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(mode | 0o755))
+            .map_err(permissions)?;
     }
     Ok(())
 }
 
-/// The member's path below `strip`, `None` for members outside it.
-fn inside(path: &Path, strip: &str) -> Result<Option<PathBuf>> {
+fn inside(path: &Path, strip: &str) -> Result<Option<PathBuf>, UnpackError> {
     let Ok(relative) = path.strip_prefix(strip) else {
         return Ok(None);
     };
     if relative.as_os_str().is_empty() {
         return Ok(None);
     }
-    ensure!(
-        relative
-            .components()
-            .all(|part| matches!(part, Component::Normal(_))),
-        "unsafe archive member {}",
-        path.display()
-    );
+    if !relative
+        .components()
+        .all(|part| matches!(part, Component::Normal(_)))
+    {
+        return Err(UnpackError::Unsafe {
+            member: path.to_owned(),
+        });
+    }
     Ok(Some(relative.to_path_buf()))
 }
 
@@ -1125,7 +1577,16 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(format!("{error:#}").contains("SHA-512"), "{error:#}");
+        assert!(
+            matches!(
+                error,
+                crate::InstallError::Fetch(FetchError::Verify {
+                    source: VerifyError::Sha512,
+                    ..
+                })
+            ),
+            "{error}"
+        );
 
         let InstallState::Failed { message } = engines.status(engine).install else {
             panic!("not failed")

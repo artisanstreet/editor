@@ -4,11 +4,15 @@
 
 use super::Engines;
 use crate::{Customisation, Launch};
-use anyhow::{Context, Result};
 use artisan_api::{EngineId, SignInState, UsageLimits};
 use std::time::Duration;
 
-/// How long a usage read is served before asking the engine again.
+#[derive(Debug, thiserror::Error)]
+#[error("{} is not installed", engine.display_name())]
+pub struct NotInstalled {
+    pub engine: EngineId,
+}
+
 pub(super) const USAGE_TTL: Duration = Duration::from_mins(5);
 /// How often the background refresher looks for due readings.
 const USAGE_TICK: Duration = Duration::from_secs(30);
@@ -30,7 +34,7 @@ impl Engines {
         }
         self.check_sign_in(engine).await;
         if let Err(error) = self.refresh_models(engine).await {
-            tracing::info!(%engine, "couldn't list models: {error:#}");
+            tracing::info!(%engine, error = diagnostics::chain(&error), "couldn't list models");
         }
         self.refresh_usage(engine, true).await;
     }
@@ -60,28 +64,19 @@ impl Engines {
         sign_in.state()
     }
 
-    /// Starts the engine's own sign-in. The status moves to `LoggingIn`
-    /// and gains the link and device code as the engine prints them.
-    ///
-    /// # Errors
-    ///
-    /// When the engine isn't installed.
-    pub fn login(&self, engine: EngineId) -> Result<()> {
-        let lease = self
-            .lease(engine)
-            .with_context(|| format!("{} is not installed", engine.display_name()))?;
+    pub fn login(&self, engine: EngineId) -> Result<(), NotInstalled> {
+        let lease = self.lease(engine).ok_or(NotInstalled { engine })?;
         self.follow_sign_in(engine);
         self.invalidate_models(engine);
         self.slot(engine).sign_in.login_leased(lease);
         Ok(())
     }
 
-    /// Passes what the user pasted to a running sign-in (Claude's code).
-    ///
-    /// # Errors
-    ///
-    /// When no sign-in is running for `engine`.
-    pub async fn submit_login_code(&self, engine: EngineId, code: &str) -> Result<()> {
+    pub async fn submit_login_code(
+        &self,
+        engine: EngineId,
+        code: &str,
+    ) -> Result<(), crate::account::SubmitCodeError> {
         self.slot(engine).sign_in.submit_code(code).await
     }
 
@@ -90,13 +85,8 @@ impl Engines {
         self.slot(engine).sign_in.cancel_login();
     }
 
-    /// # Errors
-    ///
-    /// When the engine isn't installed.
-    pub fn logout(&self, engine: EngineId) -> Result<()> {
-        let lease = self
-            .lease(engine)
-            .with_context(|| format!("{} is not installed", engine.display_name()))?;
+    pub fn logout(&self, engine: EngineId) -> Result<(), NotInstalled> {
+        let lease = self.lease(engine).ok_or(NotInstalled { engine })?;
         self.follow_sign_in(engine);
         self.invalidate_models(engine);
         self.slot(engine).sign_in.logout_leased(lease);
@@ -153,7 +143,7 @@ impl Engines {
                                 && matches!(state, SignInState::SignedOut))
                         {
                             if let Err(error) = engines.refresh_models(engine).await {
-                                tracing::info!(%engine, "couldn't refresh models after sign-in: {error:#}");
+                                tracing::info!(%engine, error = diagnostics::chain(&error), "couldn't refresh models after sign-in");
                             }
                         } else {
                             engines.invalidate_models(engine);

@@ -333,11 +333,11 @@ fn sign_in_line(sign_in: &SignInState) -> String {
 }
 
 /// Shows download progress while `work` runs.
-async fn with_progress<T>(
+async fn with_progress<T, E: std::error::Error>(
     engines: &Engines,
     engine: EngineId,
-    work: impl Future<Output = Result<T>>,
-) -> Result<T> {
+    work: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
     let mut statuses = engines.subscribe();
     let bar = ui::Progress::spinner(format!("Installing {}", engine.display_name()));
     let progress = async {
@@ -379,7 +379,7 @@ async fn with_progress<T>(
     };
     match &result {
         Ok(_) => bar.clear(),
-        Err(error) => bar.fail(format!("{error:#}")),
+        Err(error) => bar.fail(diagnostics::chain(error)),
     }
     result
 }

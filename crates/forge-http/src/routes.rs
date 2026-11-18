@@ -1105,7 +1105,8 @@ async fn engine_action(
     use artisan_api::EngineCommand as Command;
     let engines = app.hub.engines().clone();
     if let Command::Use { version } = &command {
-        forge_engines::Engines::validate_version(engine, version).map_err(bad_request)?;
+        forge_engines::Engines::validate_version(engine, version)
+            .map_err(bad_request)?;
     }
     match command {
         Command::Install {} | Command::Update {} | Command::Rollback {} | Command::Use { .. } => {
@@ -1143,18 +1144,22 @@ async fn engine_action(
                         engines.refresh(engine).await;
                     }
                     Err(error) => {
-                        tracing::warn!(%engine, action = label, "engine command failed: {error:#}");
+                        tracing::warn!(%engine, action = label, error = diagnostics::chain(&error), "engine command failed");
                     }
                 }
             });
         }
-        Command::Login {} => engines.login(engine).map_err(bad_request)?,
+        Command::Login {} => engines
+            .login(engine)
+            .map_err(bad_request)?,
         Command::LoginCode { code } => engines
             .submit_login_code(engine, &code)
             .await
             .map_err(bad_request)?,
         Command::CancelLogin {} => engines.cancel_login(engine),
-        Command::Logout {} => engines.logout(engine).map_err(bad_request)?,
+        Command::Logout {} => engines
+            .logout(engine)
+            .map_err(bad_request)?,
         Command::ClaudeAiSignIn { session } => {
             if engine != EngineId::Claude {
                 return Err(bad_request(anyhow::anyhow!(
@@ -1172,11 +1177,16 @@ async fn engine_action(
                     "only Claude signs in to claude.ai"
                 )));
             }
-            engines.claude_ai_sign_out().map_err(bad_request)?;
+            engines
+                .claude_ai_sign_out()
+                .map_err(bad_request)?;
         }
         Command::Refresh {} => engines.refresh(engine).await,
         Command::Versions {} => {
-            engines.list_versions(engine).await.map_err(bad_request)?;
+            engines
+                .list_versions(engine)
+                .await
+                .map_err(bad_request)?;
         }
     }
     Ok(Json(app.hub.engines().status(engine)))

@@ -6,7 +6,6 @@
 //! URL and device code it prints, so the Editor (possibly on another machine)
 //! opens the link.
 
-use anyhow::{Context, Result, bail};
 use artisan_api::{EngineId, SignInState};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -47,19 +46,48 @@ pub fn engine_command(engine: EngineId, binary: &Path, home: &Path) -> Command {
     command
 }
 
-/// Runs a short engine command; returns (success, stdout, stderr).
+#[derive(Debug, thiserror::Error)]
+pub enum RunShortError {
+    #[error("open the usage lock of {}", engine.display_name())]
+    UsageLock {
+        engine: EngineId,
+        #[source]
+        source: crate::install::UsageLockError,
+    },
+    #[error("share the usage lock of {}", engine.display_name())]
+    Share {
+        engine: EngineId,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("run {} {args}", engine.display_name())]
+    Probe {
+        engine: EngineId,
+        args: String,
+        #[source]
+        source: Box<crate::process::ProbeError>,
+    },
+}
+
 pub async fn run_short(
     engine: EngineId,
     binary: &Path,
     home: &Path,
     args: &[&str],
     timeout: Duration,
-) -> Result<(bool, String, String)> {
-    let usage = crate::install::usage_lock(home)?;
-    fs2::FileExt::lock_shared(&usage)?;
+) -> Result<(bool, String, String), RunShortError> {
+    let usage = crate::install::usage_lock(home)
+        .map_err(|source| RunShortError::UsageLock { engine, source })?;
+    fs2::FileExt::lock_shared(&usage).map_err(|source| RunShortError::Share { engine, source })?;
     let mut command = engine_command(engine, binary, home);
     command.args(args);
-    let output = crate::process::probe(command, timeout, 1024 * 1024).await?;
+    let output = crate::process::probe(command, timeout, 1024 * 1024)
+        .await
+        .map_err(|source| RunShortError::Probe {
+            engine,
+            args: args.join(" "),
+            source: Box::new(source),
+        })?;
     Ok((
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -77,10 +105,11 @@ pub async fn check(engine: EngineId, binary: &Path, home: &Path) -> SignInState 
     match run_short(engine, binary, home, args, CHECK_TIMEOUT).await {
         Ok((success, stdout, stderr)) => parse_status(engine, success, &stdout, &stderr),
         Err(error) => {
-            tracing::warn!(engine = %engine, home = %home.display(), error = %format!("{error:#}"), "sign-in check failed");
+            let error = diagnostics::chain(&error);
+            tracing::warn!(engine = %engine, home = %home.display(), error, "sign-in check failed");
             SignInState::Failed {
                 message: format!(
-                    "Couldn't check the {} sign-in: {error:#}",
+                    "Couldn't check the {} sign-in: {error}",
                     engine.display_name()
                 ),
             }
@@ -119,11 +148,7 @@ fn parse_status(engine: EngineId, success: bool, stdout: &str, stderr: &str) -> 
         });
         return SignInState::SignedIn { account };
     }
-    let detail = text
-        .lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty())
-        .unwrap_or("no output");
+    let detail = last_line(&text);
     SignInState::Failed {
         message: format!(
             "{} sign-in status is unavailable: {detail}",
@@ -153,9 +178,10 @@ async fn opencode_sign_in(binary: &Path, home: &Path) -> SignInState {
             }
         }
         Err(error) => {
-            tracing::warn!(home = %home.display(), error = %format!("{error:#}"), "OpenCode sign-in check failed");
+            let error = diagnostics::chain(&error);
+            tracing::warn!(home = %home.display(), error, "OpenCode sign-in check failed");
             SignInState::Failed {
-                message: format!("Couldn't check the OpenCode sign-in: {error:#}"),
+                message: format!("Couldn't check the OpenCode sign-in: {error}"),
             }
         }
     }
@@ -170,9 +196,20 @@ struct Connection {
     credential: Option<String>,
 }
 
-/// The logins `OpenCode` holds, through a private server: its background
-/// service sits on a port shared with the user's own `OpenCode`.
-async fn opencode_connections(binary: &Path, home: &Path) -> Result<Vec<Connection>> {
+#[derive(Debug, thiserror::Error)]
+pub enum OpenCodeConnectionsError {
+    #[error("list OpenCode's integrations")]
+    Run(#[source] RunShortError),
+    #[error("OpenCode could not list its integrations: {stderr}")]
+    Refused { stderr: String },
+    #[error("read OpenCode's integrations")]
+    Decode(#[source] serde_json::Error),
+}
+
+async fn opencode_connections(
+    binary: &Path,
+    home: &Path,
+) -> Result<Vec<Connection>, OpenCodeConnectionsError> {
     let (success, stdout, stderr) = run_short(
         EngineId::OpenCode,
         binary,
@@ -180,12 +217,15 @@ async fn opencode_connections(binary: &Path, home: &Path) -> Result<Vec<Connecti
         &["api", "--standalone", "integration.list"],
         CHECK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(OpenCodeConnectionsError::Run)?;
     if !success {
-        bail!("{}", strip_ansi(stderr.trim()));
+        return Err(OpenCodeConnectionsError::Refused {
+            stderr: strip_ansi(stderr.trim()),
+        });
     }
     let listing: serde_json::Value =
-        serde_json::from_str(&stdout).context("reading OpenCode's integrations")?;
+        serde_json::from_str(&stdout).map_err(OpenCodeConnectionsError::Decode)?;
     Ok(connections(&listing))
 }
 
@@ -223,9 +263,25 @@ fn connections(listing: &serde_json::Value) -> Vec<Connection> {
     found
 }
 
-/// Signs `OpenCode` out of every stored login.
-async fn opencode_logout(binary: &Path, home: &Path) -> Result<()> {
-    for connection in opencode_connections(binary, home).await? {
+#[derive(Debug, thiserror::Error)]
+enum OpenCodeLogoutError {
+    #[error("find OpenCode's logins")]
+    Connections(#[source] OpenCodeConnectionsError),
+    #[error("sign out of {name}")]
+    Run {
+        name: String,
+        #[source]
+        source: RunShortError,
+    },
+    #[error("signing out of {name}: {stderr}")]
+    Refused { name: String, stderr: String },
+}
+
+async fn opencode_logout(binary: &Path, home: &Path) -> Result<(), OpenCodeLogoutError> {
+    for connection in opencode_connections(binary, home)
+        .await
+        .map_err(OpenCodeLogoutError::Connections)?
+    {
         let Some(credential) = &connection.credential else {
             continue;
         };
@@ -242,36 +298,43 @@ async fn opencode_logout(binary: &Path, home: &Path) -> Result<()> {
             ],
             CHECK_TIMEOUT,
         )
-        .await?;
+        .await
+        .map_err(|source| OpenCodeLogoutError::Run {
+            name: connection.name.clone(),
+            source,
+        })?;
         if !success {
-            bail!(
-                "signing out of {}: {}",
-                connection.name,
-                strip_ansi(stderr.trim())
-            );
+            return Err(OpenCodeLogoutError::Refused {
+                name: connection.name,
+                stderr: strip_ansi(stderr.trim()),
+            });
         }
     }
     Ok(())
 }
 
-fn login_args(engine: EngineId) -> Result<&'static [&'static str]> {
-    crate::engines::host_spec(engine)
-        .device_login
-        .with_context(|| {
-            format!(
-                "{} signs in per provider; use its interactive CLI sign-in",
-                engine.display_name()
-            )
-        })
+#[derive(Debug, thiserror::Error)]
+#[error("{} signs in per provider; use its interactive CLI sign-in", engine.display_name())]
+pub struct NoDeviceLogin {
+    pub engine: EngineId,
 }
 
-fn logout_args(engine: EngineId) -> Result<&'static [&'static str]> {
-    crate::engines::host_spec(engine).logout.with_context(|| {
-        format!(
-            "{} signs out per provider; use its interactive CLI",
-            engine.display_name()
-        )
-    })
+#[derive(Debug, thiserror::Error)]
+#[error("{} signs out per provider; use its interactive CLI", engine.display_name())]
+pub struct NoLogout {
+    pub engine: EngineId,
+}
+
+fn login_args(engine: EngineId) -> Result<&'static [&'static str], NoDeviceLogin> {
+    crate::engines::host_spec(engine)
+        .device_login
+        .ok_or(NoDeviceLogin { engine })
+}
+
+fn logout_args(engine: EngineId) -> Result<&'static [&'static str], NoLogout> {
+    crate::engines::host_spec(engine)
+        .logout
+        .ok_or(NoLogout { engine })
 }
 
 /// Finds the sign-in link and the device code in login output so far.
@@ -597,35 +660,26 @@ impl SignIn {
         self.handle(&Event::Login);
     }
 
-    /// Sends what the user pasted (Claude asks for the code shown after
-    /// signing in on the web).
-    ///
-    /// # Errors
-    ///
-    /// When no sign-in is running or it stopped reading input.
     #[expect(
         clippy::significant_drop_tightening,
         reason = "`stdin` borrows from the guard and is written until the end"
     )]
-    pub async fn submit_code(&self, code: &str) -> Result<()> {
+    pub async fn submit_code(&self, code: &str) -> Result<(), SubmitCodeError> {
+        let engine = self.engine;
         let stdin = self
             .lock()
             .login
             .as_ref()
             .map(|login| Arc::clone(&login.stdin))
-            .context("no sign-in in progress")?;
+            .ok_or(SubmitCodeError::NoSignIn { engine })?;
         let mut guard = stdin.lock().await;
-        let stdin = guard
-            .as_mut()
-            .context("the sign-in no longer accepts input")?;
+        let stdin = guard.as_mut().ok_or(SubmitCodeError::Closed { engine })?;
+        let write = |source| SubmitCodeError::Write { engine, source };
         stdin
             .write_all(format!("{}\n", code.trim()).as_bytes())
             .await
-            .context("sending the code to the sign-in")?;
-        stdin
-            .flush()
-            .await
-            .context("sending the code to the sign-in")?;
+            .map_err(write)?;
+        stdin.flush().await.map_err(write)?;
         Ok(())
     }
 
@@ -747,7 +801,7 @@ impl SignIn {
                     }
                     if this.engine == EngineId::OpenCode {
                         if let Err(error) = opencode_logout(&binary, &this.home).await {
-                            tracing::warn!(engine = %this.engine, error = %format!("{error:#}"), "logout failed");
+                            tracing::warn!(engine = %this.engine, error = diagnostics::chain(&error), "logout failed");
                         }
                         this.probe_snapshot(binary, generation, lease).await;
                         return;
@@ -758,7 +812,7 @@ impl SignIn {
                                 run_short(this.engine, &binary, &this.home, args, CHECK_TIMEOUT)
                                     .await
                             {
-                                tracing::warn!(engine = %this.engine, error = %format!("{error:#}"), "logout failed");
+                                tracing::warn!(engine = %this.engine, error = diagnostics::chain(&error), "logout failed");
                             }
                         }
                         Err(error) => {
@@ -793,7 +847,7 @@ impl SignIn {
                 .run_login(binary, lease, stdin, cancel.clone())
                 .await
                 .err()
-                .map(|error| format!("{error:#}"));
+                .map(|error| diagnostics::chain(&error));
             if !cancel.is_cancelled() {
                 if let Some(error) = &error {
                     tracing::warn!(engine = %this.engine, error, "sign-in failed");
@@ -809,26 +863,31 @@ impl SignIn {
         _lease: Option<Arc<crate::BinaryLease>>,
         stdin_slot: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
         cancel: CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<(), LoginError> {
+        let engine = self.engine;
         if cancel.is_cancelled() {
             return Ok(());
         }
-        let usage = crate::install::usage_lock(&self.home)?;
-        fs2::FileExt::lock_shared(&usage)?;
+        let usage = crate::install::usage_lock(&self.home)
+            .map_err(|source| LoginError::UsageLock { engine, source })?;
+        fs2::FileExt::lock_shared(&usage).map_err(|source| LoginError::Share { engine, source })?;
         if cancel.is_cancelled() {
             return Ok(());
         }
-        let args = login_args(self.engine)?;
+        let args = login_args(engine).map_err(LoginError::NoDeviceLogin)?;
         let mut command = engine_command(self.engine, &binary, &self.home);
         command
             .args(args)
             .stdin(Stdio::piped())
             .env("NO_OPEN_BROWSER", "1");
-        // The Editor opens the link, possibly on another machine.
         #[cfg(unix)]
         command.env("BROWSER", "true");
-        let mut child = crate::process::owned_command(command)
-            .with_context(|| format!("starting {} {}", binary.display(), args.join(" ")))?;
+        let mut child =
+            crate::process::owned_command(command).map_err(|source| LoginError::Start {
+                engine,
+                args: args.join(" "),
+                source,
+            })?;
         *stdin_slot.lock().await = child.stdin().take();
         let (chunks, mut received) = mpsc::channel::<String>(16);
         #[expect(
@@ -856,7 +915,7 @@ impl SignIn {
         let status = loop {
             tokio::select! {
                 () = cancel.cancelled() => return Ok(()),
-                () = &mut deadline => bail!("{} sign-in timed out", self.engine.display_name()),
+                () = &mut deadline => return Err(LoginError::TimedOut { engine }),
                 Some(chunk) = received.recv() => {
                     terminal_parser.advance(&mut terminal_text, chunk.as_bytes());
                     let plain = std::mem::take(&mut terminal_text.text);
@@ -875,15 +934,13 @@ impl SignIn {
                         self.handle_login(&Event::Prompt { url: found.0, code: found.1 }, &cancel);
                     }
                 }
-                status = child.wait() => break status.context("waiting for the sign-in")?,
+                status = child.wait() => break status.map_err(|source| LoginError::Wait { engine, source })?,
             }
         };
         child.shutdown();
         if status.success() {
             return Ok(());
         }
-        // The pipes close with the process; keep what it printed last. Pipes
-        // still open after a second are left behind.
         tokio::time::timeout(Duration::from_secs(1), async {
             while let Some(chunk) = received.recv().await {
                 terminal_parser.advance(&mut terminal_text, chunk.as_bytes());
@@ -897,14 +954,67 @@ impl SignIn {
         })
         .await
         .ok();
-        let text = strip_ansi(&output);
-        let detail = text
-            .lines()
-            .map(str::trim)
-            .rfind(|line| !line.is_empty())
-            .unwrap_or("no output");
-        bail!("{} sign-in failed: {detail}", self.engine.display_name())
+        Err(LoginError::Failed {
+            engine,
+            detail: last_line(&strip_ansi(&output)).to_owned(),
+        })
     }
+}
+
+fn last_line(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or("no output")
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SubmitCodeError {
+    #[error("no {} sign-in in progress", engine.display_name())]
+    NoSignIn { engine: EngineId },
+    #[error("the {} sign-in no longer accepts input", engine.display_name())]
+    Closed { engine: EngineId },
+    #[error("send the code to the {} sign-in", engine.display_name())]
+    Write {
+        engine: EngineId,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LoginError {
+    #[error("open the usage lock of {}", engine.display_name())]
+    UsageLock {
+        engine: EngineId,
+        #[source]
+        source: crate::install::UsageLockError,
+    },
+    #[error("share the usage lock of {}", engine.display_name())]
+    Share {
+        engine: EngineId,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    NoDeviceLogin(NoDeviceLogin),
+    #[error("start {} {args}", engine.display_name())]
+    Start {
+        engine: EngineId,
+        args: String,
+        #[source]
+        source: crate::process::SpawnError,
+    },
+    #[error("{} sign-in timed out", engine.display_name())]
+    TimedOut { engine: EngineId },
+    #[error("wait for the {} sign-in", engine.display_name())]
+    Wait {
+        engine: EngineId,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{} sign-in failed: {detail}", engine.display_name())]
+    Failed { engine: EngineId, detail: String },
 }
 
 async fn forward(mut stream: impl AsyncRead + Unpin, chunks: mpsc::Sender<String>) {

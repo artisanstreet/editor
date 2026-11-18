@@ -4,7 +4,6 @@
 //! models the account can't use.
 
 use crate::engines::{ModelSource, host_spec};
-use anyhow::{Context, Result, bail, ensure};
 use artisan_api::{ContextWindow, EffortNote, EngineId, Model, SlashCommand, Speed, Variant};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -38,11 +37,39 @@ pub struct Program<'a> {
     pub home: &'a Path,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("the engine is not installed")]
+pub struct NotInstalled;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ListModelsError {
+    #[error("read the Claude model cache")]
+    ClaudeCache(#[source] tokio::task::JoinError),
+    #[error("neither the published nor the cached Claude catalog is available")]
+    NoClaudeCatalog,
+    #[error(transparent)]
+    NotInstalled(NotInstalled),
+    #[error("ask codex app-server for its models")]
+    CodexCall(#[source] crate::rpc::CallError),
+    #[error("codex model/list omitted data")]
+    CodexNoData,
+    #[error("codex model/list timed out after {}s", DEADLINE.as_secs())]
+    CodexTimedOut,
+    #[error("read the Codex model cache")]
+    CodexCache(#[source] tokio::task::JoinError),
+    #[error("ask OpenCode for its models")]
+    OpenCodeRun(#[source] RunError),
+    #[error("parse OpenCode model.list")]
+    OpenCodeDecode(#[source] serde_json::Error),
+    #[error("opencode listed no models")]
+    OpenCodeEmpty,
+}
+
 pub async fn list(
     engine: EngineId,
     program: Program<'_>,
     http: &reqwest::Client,
-) -> Result<Listing> {
+) -> Result<Listing, ListModelsError> {
     let listing = match host_spec(engine).models {
         ModelSource::ClaudeCatalog => {
             let (listing, commands) =
@@ -51,7 +78,10 @@ pub async fn list(
             match commands {
                 Ok(commands) => listing.commands = Some(commands),
                 Err(error) => {
-                    tracing::debug!(error = format!("{error:#}"), "Claude commands unavailable");
+                    tracing::debug!(
+                        error = diagnostics::chain(&error),
+                        "Claude commands unavailable"
+                    );
                 }
             }
             listing
@@ -64,8 +94,12 @@ pub async fn list(
 
 /// What every engine's listing goes through before the picker sees it.
 fn finish(engine: EngineId, mut listing: Listing) -> Listing {
-    listing.models.retain(|model| !model.id.is_empty() && !model.id.contains(char::is_whitespace));
-    listing.default = listing.default.filter(|id| listing.models.iter().any(|model| &model.id == id));
+    listing
+        .models
+        .retain(|model| !model.id.is_empty() && !model.id.contains(char::is_whitespace));
+    listing.default = listing
+        .default
+        .filter(|id| listing.models.iter().any(|model| &model.id == id));
     for model in &mut listing.models {
         model.name = readable_name(&model.name);
     }
@@ -76,8 +110,8 @@ fn finish(engine: EngineId, mut listing: Listing) -> Listing {
     listing
 }
 
-fn command(program: &Program<'_>) -> Result<tokio::process::Command> {
-    let binary = program.binary.context("not installed")?;
+fn command(program: &Program<'_>) -> Result<tokio::process::Command, NotInstalled> {
+    let binary = program.binary.ok_or(NotInstalled)?;
     let mut command = tokio::process::Command::new(binary);
     command
         .env_remove("CLAUDECODE")
@@ -91,11 +125,33 @@ fn command(program: &Program<'_>) -> Result<tokio::process::Command> {
     Ok(command)
 }
 
-/// Runs a listing subcommand and returns its stdout.
-async fn run(program: &Program<'_>, args: &[&str]) -> Result<String> {
-    let mut command = command(program)?;
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error(transparent)]
+    NotInstalled(NotInstalled),
+    #[error("run `{args}`")]
+    Probe {
+        args: String,
+        #[source]
+        source: crate::process::ProbeError,
+    },
+    #[error("`{args}` failed ({status}): {message}")]
+    Failed {
+        args: String,
+        status: std::process::ExitStatus,
+        message: String,
+    },
+}
+
+async fn run(program: &Program<'_>, args: &[&str]) -> Result<String, RunError> {
+    let mut command = command(program).map_err(RunError::NotInstalled)?;
     command.args(args);
-    let output = crate::process::probe(command, DEADLINE, MAX_OUTPUT_BYTES).await?;
+    let output = crate::process::probe(command, DEADLINE, MAX_OUTPUT_BYTES)
+        .await
+        .map_err(|source| RunError::Probe {
+            args: args.join(" "),
+            source,
+        })?;
     let (status, out, err) = (output.status, output.stdout, output.stderr);
     if !status.success() {
         let stderr = String::from_utf8_lossy(&err);
@@ -105,7 +161,11 @@ async fn run(program: &Program<'_>, args: &[&str]) -> Result<String> {
         } else {
             stderr.trim()
         };
-        bail!("`{}` failed ({status}): {message}", args.join(" "));
+        return Err(RunError::Failed {
+            args: args.join(" "),
+            status,
+            message: message.to_owned(),
+        });
     }
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
@@ -139,49 +199,96 @@ pub const STANDARD_SPEED: &str = "standard";
 
 // ---------------------------------------------------------------- Claude
 
-async fn claude(http: &reqwest::Client, home: &Path) -> Result<Listing> {
-    let published = async {
-        let mut response = http
-            .get(CLAUDE_CATALOG)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)?;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            ensure!(
-                bytes.len().saturating_add(chunk.len()) <= MAX_OUTPUT_BYTES,
-                "Claude catalog exceeds byte budget"
-            );
-            bytes.extend_from_slice(&chunk);
+#[derive(Debug, thiserror::Error)]
+pub enum FetchCatalogError {
+    #[error("fetch {url}")]
+    Request {
+        url: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("{url} exceeds {limit} bytes")]
+    TooLarge { url: &'static str, limit: usize },
+    #[error("decode {url}")]
+    Decode {
+        url: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+async fn fetch_catalog(
+    http: &reqwest::Client,
+    url: &'static str,
+    timeout: Duration,
+    limit: usize,
+) -> Result<Value, FetchCatalogError> {
+    let request = |source| FetchCatalogError::Request { url, source };
+    let mut response = http
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(request)?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(request)? {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(FetchCatalogError::TooLarge { url, limit });
         }
-        anyhow::Ok(serde_json::from_slice::<Value>(&bytes)?)
+        bytes.extend_from_slice(&chunk);
     }
+    serde_json::from_slice(&bytes).map_err(|source| FetchCatalogError::Decode { url, source })
+}
+
+async fn claude(http: &reqwest::Client, home: &Path) -> Result<Listing, ListModelsError> {
+    let published = fetch_catalog(
+        http,
+        CLAUDE_CATALOG,
+        Duration::from_secs(5),
+        MAX_OUTPUT_BYTES,
+    )
     .await;
     let published = match published {
         Ok(value) if value.get("schema_version").and_then(Value::as_u64) == Some(1) => Some(value),
         Ok(_) => None,
         Err(error) => {
-            tracing::debug!(%error, "Claude model catalog unavailable");
+            tracing::debug!(
+                error = diagnostics::chain(&error),
+                "Claude model catalog unavailable"
+            );
             None
         }
     };
     let directory = home.join(".claude/cache/model-catalog");
     let served = tokio::task::spawn_blocking(move || claude_served_cache(&directory))
         .await
-        .context("read Claude model cache")?;
+        .map_err(ListModelsError::ClaudeCache)?;
     let listing = merge_claude(published.as_ref(), served.as_ref());
-    ensure!(
-        !listing.models.is_empty(),
-        "neither the published nor the cached Claude catalog is available"
-    );
+    if listing.models.is_empty() {
+        return Err(ListModelsError::NoClaudeCatalog);
+    }
     Ok(listing)
 }
 
-/// The commands Claude reads, from its `initialize` reply: the same list its
-/// own `/` menu shows, with descriptions. No model turn runs.
-async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>> {
-    let mut command = command(program)?;
+#[derive(Debug, thiserror::Error)]
+pub enum ClaudeCommandsError {
+    #[error(transparent)]
+    NotInstalled(NotInstalled),
+    #[error("start Claude for its commands")]
+    Spawn(#[source] crate::process::SpawnError),
+    #[error("ask Claude to initialize")]
+    Send(#[source] crate::process::SendError),
+    #[error("read Claude's initialize answer")]
+    Read(#[source] crate::process::ReadError),
+    #[error("Claude closed before answering initialize: {stderr}")]
+    Closed { stderr: String },
+    #[error("Claude initialize timed out after {}s", DEADLINE.as_secs())]
+    TimedOut,
+}
+
+async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>, ClaudeCommandsError> {
+    let mut command = command(program).map_err(ClaudeCommandsError::NotInstalled)?;
     command
         .args([
             "-p",
@@ -192,7 +299,7 @@ async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>> {
             "--verbose",
         ])
         .stdin(Stdio::piped());
-    let mut process = crate::process::spawn_probe(command)?;
+    let mut process = crate::process::spawn_probe(command).map_err(ClaudeCommandsError::Spawn)?;
     let reply = tokio::time::timeout(DEADLINE, async {
         process
             .send(&json!({
@@ -200,8 +307,13 @@ async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>> {
                 "request_id": "artisan-commands",
                 "request": { "subtype": "initialize" },
             }))
-            .await?;
-        while let Some(line) = process.next_line().await? {
+            .await
+            .map_err(ClaudeCommandsError::Send)?;
+        while let Some(line) = process
+            .next_line()
+            .await
+            .map_err(ClaudeCommandsError::Read)?
+        {
             let Ok(frame) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
@@ -211,13 +323,12 @@ async fn claude_commands(program: &Program<'_>) -> Result<Vec<SlashCommand>> {
                 return Ok(frame["response"]["response"]["commands"].clone());
             }
         }
-        bail!(
-            "Claude closed before answering initialize: {}",
-            process.stderr_tail()
-        )
+        Err(ClaudeCommandsError::Closed {
+            stderr: process.stderr_tail(),
+        })
     })
     .await
-    .context("Claude initialize timed out")??;
+    .map_err(|_elapsed| ClaudeCommandsError::TimedOut)??;
     Ok(reply
         .as_array()
         .into_iter()
@@ -324,12 +435,19 @@ fn merge_claude(published: Option<&Value>, served: Option<&Value>) -> Listing {
         if let Some(mut model) = claude_model(row)
             && seen.insert(model.id.clone())
         {
-            let account = served.iter().find(|value| value.get("id").and_then(Value::as_str) == Some(model.id.as_str()));
+            let account = served
+                .iter()
+                .find(|value| value.get("id").and_then(Value::as_str) == Some(model.id.as_str()));
             for source in &mut model.evidence.sources {
-                let field = match source.field.as_str() { "images" => "capabilities", field => field };
+                let field = match source.field.as_str() {
+                    "images" => "capabilities",
+                    field => field,
+                };
                 source.source = if account.is_some_and(|value| value.get(field).is_some()) {
                     "claude.account_catalog_cache".into()
-                } else { "claude.published_catalog".into() };
+                } else {
+                    "claude.published_catalog".into()
+                };
             }
             listing.models.push(model);
         }
@@ -402,7 +520,11 @@ fn claude_model(value: &Value) -> Option<Model> {
         })
         .collect();
     Some(Model {
-        evidence: evidence(value, "claude.catalog", &["id", "name", "thinking", "runtime", "fast_mode"]),
+        evidence: evidence(
+            value,
+            "claude.catalog",
+            &["id", "name", "thinking", "runtime", "fast_mode"],
+        ),
         id: id.to_owned(),
         name: value
             .get("name")
@@ -469,23 +591,49 @@ pub const CLAUDE_FAST: &str = "fast";
 
 fn evidence(value: &Value, source: &str, fields: &[&str]) -> artisan_api::ModelEvidence {
     let observed_at = artisan_api::now();
-    let mut sources: Vec<_> = fields.iter().filter(|field| value.get(**field).is_some())
-        .map(|field| artisan_api::FieldSource { field: (*field).into(), source: source.into(), observed_at }).collect();
+    let mut sources: Vec<_> = fields
+        .iter()
+        .filter(|field| value.get(**field).is_some())
+        .map(|field| artisan_api::FieldSource {
+            field: (*field).into(),
+            source: source.into(),
+            observed_at,
+        })
+        .collect();
     let images = match source {
         "claude.catalog" => value.pointer("/capabilities/mm_images"),
         "opencode.model.list" => value.pointer("/capabilities/input"),
         _ => value.get("inputModalities"),
     };
     if images.is_some_and(|value| value.is_boolean() || value.is_array()) {
-        sources.push(artisan_api::FieldSource { field: "images".into(), source: source.into(), observed_at });
+        sources.push(artisan_api::FieldSource {
+            field: "images".into(),
+            source: source.into(),
+            observed_at,
+        });
     }
     artisan_api::ModelEvidence { sources }
 }
 
 fn codex_evidence(value: &Value, has_window: bool) -> artisan_api::ModelEvidence {
-    let mut evidence = evidence(value, "codex.model/list", &["id", "displayName", "supportedReasoningEfforts", "defaultReasoningEffort", "serviceTiers", "additionalSpeedTiers"]);
+    let mut evidence = evidence(
+        value,
+        "codex.model/list",
+        &[
+            "id",
+            "displayName",
+            "supportedReasoningEfforts",
+            "defaultReasoningEffort",
+            "serviceTiers",
+            "additionalSpeedTiers",
+        ],
+    );
     if has_window {
-        evidence.sources.push(artisan_api::FieldSource { field: "context_capacity".into(), source: "codex.models_cache".into(), observed_at: artisan_api::now() });
+        evidence.sources.push(artisan_api::FieldSource {
+            field: "context_capacity".into(),
+            source: "codex.models_cache".into(),
+            observed_at: artisan_api::now(),
+        });
     }
     evidence
 }
@@ -501,9 +649,12 @@ fn text(value: Option<&Value>) -> Option<String> {
 
 // ---------------------------------------------------------------- Codex
 
-async fn codex(program: &Program<'_>) -> Result<Listing> {
+async fn codex(program: &Program<'_>) -> Result<Listing, ListModelsError> {
     let rows = tokio::time::timeout(DEADLINE, async {
-        let mut session = crate::rpc::Session::codex(command(program)?).await?;
+        let command = command(program).map_err(ListModelsError::NotInstalled)?;
+        let mut session = crate::rpc::Session::codex(command)
+            .await
+            .map_err(ListModelsError::CodexCall)?;
         let mut rows = Vec::new();
         let mut cursor = None;
         for _ in 0..16 {
@@ -511,10 +662,13 @@ async fn codex(program: &Program<'_>) -> Result<Listing> {
             if let Some(cursor) = cursor.take() {
                 params["cursor"] = cursor;
             }
-            let result = session.call("model/list", params).await?;
+            let result = session
+                .call("model/list", params)
+                .await
+                .map_err(ListModelsError::CodexCall)?;
             let data = result["data"]
                 .as_array()
-                .context("model/list omitted data")?;
+                .ok_or(ListModelsError::CodexNoData)?;
             rows.extend(data.iter().take(MAX_MODELS - rows.len()).cloned());
             if rows.len() >= MAX_MODELS {
                 break;
@@ -527,14 +681,14 @@ async fn codex(program: &Program<'_>) -> Result<Listing> {
                 break;
             }
         }
-        Ok::<_, anyhow::Error>(rows)
+        Ok(rows)
     })
     .await
-    .context("codex model/list timed out")??;
+    .map_err(|_elapsed| ListModelsError::CodexTimedOut)??;
     let path = program.home.join(".codex/models_cache.json");
     let windows = tokio::task::spawn_blocking(move || codex_context_windows(&path))
         .await
-        .context("read Codex model cache")?;
+        .map_err(ListModelsError::CodexCache)?;
     Ok(codex_listing(&rows, &windows))
 }
 
@@ -716,16 +870,19 @@ const MODELS_DEV_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// How long the digest of it serves before it is fetched again.
 const MODELS_DEV_FRESH: Duration = Duration::from_hours(12);
 
-async fn opencode(program: &Program<'_>, http: &reqwest::Client) -> Result<Listing> {
-    // Private servers: the background service sits on one fixed port
-    // shared with the user's own OpenCode, so whichever starts second fails.
-    let models = run(program, &["api", "--standalone", "model.list"]).await?;
-    let models: Value = serde_json::from_str(&models).context("parse OpenCode model.list")?;
+async fn opencode(
+    program: &Program<'_>,
+    http: &reqwest::Client,
+) -> Result<Listing, ListModelsError> {
+    let models = run(program, &["api", "--standalone", "model.list"])
+        .await
+        .map_err(ListModelsError::OpenCodeRun)?;
+    let models: Value = serde_json::from_str(&models).map_err(ListModelsError::OpenCodeDecode)?;
     let gateways = match run(program, &["api", "--standalone", "integration.list"]).await {
         Ok(text) => serde_json::from_str(&text).ok(),
         Err(error) => {
             tracing::debug!(
-                error = format!("{error:#}"),
+                error = diagnostics::chain(&error),
                 "OpenCode integrations unavailable"
             );
             None
@@ -733,7 +890,9 @@ async fn opencode(program: &Program<'_>, http: &reqwest::Client) -> Result<Listi
     };
     let digest = models_dev(http, program.home).await;
     let listing = opencode_listing(&models, gateways.as_ref(), digest.as_ref());
-    ensure!(!listing.models.is_empty(), "opencode listed no models");
+    if listing.models.is_empty() {
+        return Err(ListModelsError::OpenCodeEmpty);
+    }
     Ok(listing)
 }
 
@@ -787,16 +946,27 @@ fn opencode_listing(models: &Value, gateways: Option<&Value>, digest: Option<&Va
         }
         let known = digest.and_then(|digest| digest.get("models")?.get(&id));
         let variants = opencode_variants(meta);
-        let default_variant = meta.get("defaultVariant").and_then(Value::as_str)
-            .filter(|id| variants.iter().any(|variant| variant.id == *id)).map(str::to_owned);
+        let default_variant = meta
+            .get("defaultVariant")
+            .and_then(Value::as_str)
+            .filter(|id| variants.iter().any(|variant| variant.id == *id))
+            .map(str::to_owned);
         let context = meta.pointer("/limit/context").and_then(Value::as_u64);
         let lab = opencode_lab(meta, known, digest);
         listed.push((
             Model {
                 evidence: {
-                    let mut sources = evidence(meta, "opencode.model.list", &["id", "name", "variants", "limit", "capabilities"]);
+                    let mut sources = evidence(
+                        meta,
+                        "opencode.model.list",
+                        &["id", "name", "variants", "limit", "capabilities"],
+                    );
                     if known.is_some() {
-                        sources.sources.push(artisan_api::FieldSource { field: "description_and_lab".into(), source: "models.dev.digest".into(), observed_at: artisan_api::now() });
+                        sources.sources.push(artisan_api::FieldSource {
+                            field: "description_and_lab".into(),
+                            source: "models.dev.digest".into(),
+                            observed_at: artisan_api::now(),
+                        });
                     }
                     sources
                 },
@@ -987,24 +1157,14 @@ async fn models_dev(http: &reqwest::Client, home: &Path) -> Option<Value> {
     {
         return Some(digest.clone());
     }
-    let fetched = async {
-        let mut response = http
-            .get(MODELS_DEV)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)?;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
-            ensure!(
-                bytes.len().saturating_add(chunk.len()) <= MODELS_DEV_MAX_BYTES,
-                "models.dev catalog exceeds byte budget"
-            );
-            bytes.extend_from_slice(&chunk);
-        }
-        anyhow::Ok(models_dev_digest(&serde_json::from_slice(&bytes)?))
-    }
-    .await;
+    let fetched = fetch_catalog(
+        http,
+        MODELS_DEV,
+        Duration::from_secs(10),
+        MODELS_DEV_MAX_BYTES,
+    )
+    .await
+    .map(|catalog| models_dev_digest(&catalog));
     match fetched {
         Ok(digest) => {
             let bytes = serde_json::to_vec(&digest).unwrap_or_default();
@@ -1020,7 +1180,7 @@ async fn models_dev(http: &reqwest::Client, home: &Path) -> Option<Value> {
             Some(digest)
         }
         Err(error) => {
-            tracing::debug!(error = format!("{error:#}"), "models.dev unavailable");
+            tracing::debug!(error = diagnostics::chain(&error), "models.dev unavailable");
             cached.map(|(digest, _)| digest)
         }
     }
@@ -1475,8 +1635,16 @@ mod tests {
         assert_eq!(listing.models[0].default_variant, None);
         let mut reported = meta;
         reported["data"][0]["defaultVariant"] = json!("thinking");
-        assert_eq!(opencode_listing(&reported, None, None).models[0].default_variant.as_deref(), Some("thinking"));
+        assert_eq!(
+            opencode_listing(&reported, None, None).models[0]
+                .default_variant
+                .as_deref(),
+            Some("thinking")
+        );
         reported["data"][0]["defaultVariant"] = json!("absent");
-        assert_eq!(opencode_listing(&reported, None, None).models[0].default_variant, None);
+        assert_eq!(
+            opencode_listing(&reported, None, None).models[0].default_variant,
+            None
+        );
     }
 }

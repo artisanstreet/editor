@@ -1,6 +1,5 @@
 //! Adapter-owned slash normalization. The client sends literal user text;
 //! the stored message stays as typed and only the engine's prompt changes.
-use anyhow::{Result, bail};
 use artisan_api::{EngineId, SlashCommand};
 
 /// More than any engine lists; the rest are dropped.
@@ -44,13 +43,13 @@ pub fn reported(commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
         .collect()
 }
 
-/// The prompt `engine` reads for `text`, when a command at its start means
-/// something else to it; `None` sends the text as typed.
-///
-/// `/ultrathink` and `/ultracode` hold for the one turn they start: Claude
-/// reads each as a keyword in that prompt, so a message without one runs
-/// without it.
-pub fn normalize_command(engine: EngineId, text: &str) -> Result<Option<String>> {
+#[derive(Debug, thiserror::Error)]
+#[error("Usage: /{keyword} <prompt>")]
+pub struct MissingPrompt {
+    pub keyword: &'static str,
+}
+
+pub fn normalize_command(engine: EngineId, text: &str) -> Result<Option<String>, MissingPrompt> {
     if engine != EngineId::Claude {
         return Ok(None);
     }
@@ -63,7 +62,7 @@ pub fn normalize_command(engine: EngineId, text: &str) -> Result<Option<String>>
     };
     let rest = rest.trim();
     if rest.is_empty() {
-        bail!("Usage: /{keyword} <prompt>");
+        return Err(MissingPrompt { keyword });
     }
     Ok(Some(format!("{keyword}\n{rest}")))
 }
