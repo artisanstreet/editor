@@ -1762,6 +1762,100 @@ fn write_settings(work: &Path, settings: &str) -> PathBuf {
     file
 }
 
+fn starts_a_task(id: &str) -> Reply {
+    calls(
+        "m1",
+        &[(
+            id,
+            "Task",
+            json!({ "description": "Look around", "prompt": "List the files." }),
+        )],
+    )
+}
+
+fn agent_answer() -> Reply {
+    answer("c1", "Two files.")
+}
+
+#[tokio::test]
+async fn a_deny_rule_for_task_starts_no_subagent_even_under_full_access() {
+    let work = tempfile::tempdir().expect("a dir");
+    write_settings(work.path(), r#"{"permissions": {"deny": ["Task"]}}"#);
+    let backend = script(vec![starts_a_task("toolu_t"), answer("m2", "Understood.")]);
+    let (outcome, log, _) = run(
+        Arc::clone(&backend),
+        turn(work.path(), None, Permissions::Full),
+        nobody(),
+    )
+    .await;
+    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(
+        *backend.created.lock().expect("lock"),
+        1,
+        "no subagent conversation is started"
+    );
+    let sent = backend.sent.lock().expect("lock").clone();
+    assert_eq!(sent.len(), 2);
+    assert!(
+        sent[1].prompt.contains("denies this: Task"),
+        "the model is told the rule refused it: {}",
+        sent[1].prompt
+    );
+    assert!(log.iter().any(|event| matches!(
+        event,
+        EngineEvent::Item { key, status: Status::Declined, .. } if key == "toolu_t"
+    )));
+}
+
+#[tokio::test]
+async fn an_ask_rule_for_task_asks_before_any_subagent_starts() {
+    let work = tempfile::tempdir().expect("a dir");
+    write_settings(work.path(), r#"{"permissions": {"ask": ["Task"]}}"#);
+    let declined = script(vec![starts_a_task("toolu_t"), answer("m2", "Understood.")]);
+    let (outcome, log, _) = run(
+        Arc::clone(&declined),
+        turn(work.path(), None, Permissions::Auto),
+        decide(Decision::DenyOnce),
+    )
+    .await;
+    assert_eq!(outcome.status, RunStatus::Done);
+    assert!(
+        log.iter().any(|event| matches!(
+            event,
+            EngineEvent::Item {
+                key,
+                status: Status::AwaitingUser,
+                kind: ItemKind::Tool { approval: Some(_), .. },
+                ..
+            } if key == "toolu_t"
+        )),
+        "the user is shown an approval card for the task"
+    );
+    assert_eq!(
+        *declined.created.lock().expect("lock"),
+        1,
+        "a declined task starts no subagent"
+    );
+
+    let allowed = script(vec![
+        starts_a_task("toolu_t"),
+        agent_answer(),
+        answer("m2", "The agent found two files."),
+    ]);
+    let (outcome, _, _) = run(
+        Arc::clone(&allowed),
+        turn(work.path(), None, Permissions::Auto),
+        decide(Decision::AllowOnce),
+    )
+    .await;
+    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(
+        *allowed.created.lock().expect("lock"),
+        2,
+        "an allowed task runs its subagent"
+    );
+}
+
 #[tokio::test]
 async fn a_settings_file_that_fails_to_load_refuses_tools_until_it_is_repaired() {
     let work = tempfile::tempdir().expect("a dir");

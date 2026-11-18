@@ -626,8 +626,6 @@ async fn run_call(
             "A subagent cannot start subagents of its own. Do this part of the task yourself."
                 .to_owned(),
         )
-    } else if call.name == "Task" {
-        return run_task(call, ctx, inbox, io).await;
     } else {
         let allowed = ctx.scope.allowed();
         tools::plan(
@@ -641,6 +639,7 @@ async fn run_call(
     let cancel = io.cancel.clone();
     let key = tools::item_key(call);
     match plan {
+        Plan::Run if call.name == "Task" => run_task(call, ctx, inbox, io).await,
         Plan::Run => Some(execute(call, ctx, &cancel, io).await),
         Plan::Refuse(reason) => {
             emit(
@@ -661,7 +660,7 @@ async fn run_call(
         Plan::Ask(request) => {
             // The card shows what the call will do, from its input alone:
             // nothing runs until the user allows it.
-            let mut kind = tools::preview(call, &ctx.turn.cwd, &ctx.runtime.mcp);
+            let mut kind = tools::approval_card(call, &ctx.turn.cwd, &ctx.runtime.mcp);
             let options = vec![
                 artisan_api::Decision::AllowOnce,
                 artisan_api::Decision::AllowAlways,
@@ -687,6 +686,9 @@ async fn run_call(
             .await;
             let decision = wait_for_approval(&key, inbox, io).await?;
             ctx.scope.allowed().remember(call, decision);
+            if decision.allows() && call.name == "Task" {
+                return run_task(call, ctx, inbox, io).await;
+            }
             if decision.allows() {
                 return Some(execute(call, ctx, &cancel, io).await);
             }

@@ -609,6 +609,24 @@ pub fn refused(call: &Call, cwd: &Path, mcp: &mcp::Servers, reason: &str) -> Ite
     finished(item, &Answer::error(reason), None)
 }
 
+#[must_use]
+pub fn approval_card(call: &Call, cwd: &Path, mcp: &mcp::Servers) -> ItemKind {
+    let item = preview(call, cwd, mcp);
+    if !matches!(item, ItemKind::Agent { .. }) {
+        return item;
+    }
+    ItemKind::Tool {
+        tool: ToolKind::Other {
+            name: call.name.clone(),
+            input: Some(call.input.to_string().into()),
+        },
+        title: call.input["description"].as_str().map(str::to_owned),
+        output: None,
+        exit_code: None,
+        approval: None,
+    }
+}
+
 /// The `Agent` item a `Task` call becomes.
 #[must_use]
 pub fn agent_kind(call: &Call) -> ItemKind {
