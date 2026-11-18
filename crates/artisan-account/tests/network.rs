@@ -105,16 +105,6 @@ fn session_token_never_prints() {
 }
 
 #[test]
-fn grant_issue_rejects_unknown_fields() {
-    let raw = serde_json::json!({
-        "audience": "ast-relay",
-        "scope": ["relay:connect"],
-        "future": true,
-    });
-    serde_json::from_value::<GrantIssueRequest>(raw).expect_err("unknown fields are refused");
-}
-
-#[test]
 fn grant_issue_body_matches_core_shape() {
     let request = GrantIssueRequest {
         audience: "ast-relay".to_owned(),

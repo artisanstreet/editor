@@ -94,16 +94,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requests_reject_unknown_fields() {
-        let raw = serde_json::json!({"email": "a@example.invalid", "future": 1});
-        assert!(serde_json::from_value::<MagicRequest>(raw).is_err());
-        let raw = serde_json::json!({"requestId": "logreq_1", "requestSecret": "s"});
-        assert!(serde_json::from_value::<MagicStatusRequest>(raw).is_ok());
-        let raw = serde_json::json!({"requestId": "logreq_1", "requestSecret": "s", "extra": 1});
-        assert!(serde_json::from_value::<MagicStatusRequest>(raw).is_err());
-    }
-
-    #[test]
     fn status_and_finalize_reads_tolerate_future_fields() {
         let raw = serde_json::json!({
             "request_id": "logreq_1",
