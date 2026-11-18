@@ -1,5 +1,3 @@
-//! File and folder mappings from the JetBrains Icon Theme 2023+ variants.
-//! Generated from the bundled upstream theme JSON; names are case insensitive.
 use crate::AssetId;
 use std::path::Path;
 
@@ -541,7 +539,6 @@ fn find(table: &[(&str, AssetId)], name: &str) -> Option<AssetId> {
         .find_map(|(key, id)| (*key == name).then_some(*id))
 }
 
-/// Resolve a file by exact name, then its longest matching extension.
 #[must_use]
 pub fn file(path: &Path, dark: bool) -> AssetId {
     let (names, extensions, fallback) = if dark {
@@ -565,7 +562,6 @@ pub fn file(path: &Path, dark: bool) -> AssetId {
     fallback
 }
 
-/// Resolve a named folder, or the theme's generic folder/root icon.
 #[must_use]
 pub fn folder(path: &Path, dark: bool, root: bool) -> AssetId {
     let (names, fallback) = if dark {
@@ -585,53 +581,5 @@ pub fn folder(path: &Path, dark: bool, root: bool) -> AssetId {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_compound_extensions_and_modes_follow_the_theme() {
-        assert_eq!(
-            file(Path::new("Cargo.toml"), false),
-            AssetId::JETBRAINS_2023_CARGO
-        );
-        assert_eq!(
-            file(Path::new("Cargo.toml"), true),
-            AssetId::JETBRAINS_2023_CARGO_DARK
-        );
-        assert_eq!(
-            file(Path::new("src/main.rs"), false),
-            AssetId::JETBRAINS_2023_RUSTFILE
-        );
-        assert_eq!(
-            file(Path::new("component.test.ts"), true),
-            AssetId::JETBRAINS_2023_TSTEST_DARK
-        );
-        assert_eq!(
-            file(Path::new("component.ts"), true),
-            AssetId::JETBRAINS_2023_TYPESCRIPT_DARK
-        );
-        assert_eq!(file(Path::new("unknown.zzz"), false), LIGHT_FILE);
-        assert_eq!(folder(Path::new("unknown"), true, false), DARK_FOLDER);
-        assert_eq!(folder(Path::new("project"), false, true), LIGHT_ROOT);
-    }
-
-    #[test]
-    fn every_bundled_icon_and_mapping_is_in_the_asset_catalog() {
-        let assets: Vec<_> = crate::ALL
-            .iter()
-            .filter(|asset| asset.id.as_str().starts_with("jetbrains.theme2023-"))
-            .collect();
-        assert_eq!(assets.len(), 210);
-        assert!(assets.iter().all(|asset| asset.source.contains("<svg")));
-        for table in [
-            LIGHT_NAMES,
-            LIGHT_EXTENSIONS,
-            LIGHT_FOLDERS,
-            DARK_NAMES,
-            DARK_EXTENSIONS,
-            DARK_FOLDERS,
-        ] {
-            assert!(table.iter().all(|(_, id)| crate::get(*id).id == *id));
-        }
-    }
-}
+#[path = "../tests/file_icons.rs"]
+mod tests;
