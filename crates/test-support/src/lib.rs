@@ -1,4 +1,6 @@
 pub mod poll;
+#[cfg(unix)]
+pub mod sandbox;
 pub mod wait;
 
 #[cfg(any(feature = "tokio", feature = "clock"))]

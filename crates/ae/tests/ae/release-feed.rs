@@ -43,7 +43,7 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
     });
     publish(&directory, &key, "1.0.0");
     let mut command = ae();
-    isolated(&mut command, home.path());
+    isolate(&mut command, home.path());
     let output = command
         .args([
             "install", "--forge", "none", "--editor", "none", "--yes", "--from", &feed,
@@ -59,7 +59,7 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let app = home.path().join("data/artisan-street/ae");
+    let app = App::Ae.dir_under(&artisan_street(home.path()));
     assert_eq!(
         std::fs::read_to_string(app.join("release-feed"))
             .unwrap()
@@ -68,7 +68,7 @@ fn installing_a_remote_feed_keeps_it_for_later_updates() {
     );
     let updated = publish(&directory, &key, "1.1.0");
     let mut command = ae();
-    isolated(&mut command, home.path());
+    isolate(&mut command, home.path());
     let output = command
         .args(["update", "--yes"])
         .env(

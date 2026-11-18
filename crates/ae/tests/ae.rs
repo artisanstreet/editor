@@ -2,9 +2,10 @@
     clippy::unused_result_ok,
     reason = "pre-existing violations that only occur in some builds, cleared in plan.md phase 2"
 )]
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 use artisan_api::PairRequest;
+use artisan_paths::App;
 use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use forge_http::{Identity, ServeConfig, tls};
@@ -12,25 +13,18 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::process::{Command, Output};
+use test_support::sandbox::{artisan_street, isolate};
 
 fn ae() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ae"))
 }
 
-/// An isolated Artisan Street: HOME and the XDG folders in a temp dir.
-fn isolated(command: &mut Command, home: &Path) {
-    command
-        .env("HOME", home.join("home"))
-        .env("XDG_DATA_HOME", home.join("data"))
-        .env("XDG_CONFIG_HOME", home.join("config"));
-}
-
-/// The Editor pairs with a local Forge by running `ae pair --json` while
-/// that Forge is serving; the printed code must pair it.
 #[tokio::test(flavor = "multi_thread")]
 async fn pair_json_beside_a_running_forge_pairs_an_editor() {
     let dir = tempfile::tempdir().unwrap();
-    let data = dir.path().join("data/artisan-street/forge/data");
+    let data = App::Forge
+        .dir_under(&artisan_street(dir.path()))
+        .join("data");
     let server = forge_http::start(ServeConfig {
         data_dir: data.clone(),
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -49,7 +43,7 @@ async fn pair_json_beside_a_running_forge_pairs_an_editor() {
     let output = tokio::task::spawn_blocking(move || {
         let mut command = ae();
         command.args(["pair", "--json"]);
-        isolated(&mut command, &home);
+        isolate(&mut command, &home);
         command.output().unwrap()
     })
     .await
@@ -136,7 +130,7 @@ fn install(home: &Path, from: &Path, key: &SigningKey) -> Output {
             "ARTISAN_RELEASE_PUBLIC_KEY_HEX",
             hex(&key.verifying_key().to_bytes()),
         );
-    isolated(&mut command, home);
+    isolate(&mut command, home);
     command.output().unwrap()
 }
 
@@ -144,7 +138,7 @@ fn install(home: &Path, from: &Path, key: &SigningKey) -> Output {
 fn a_release_installs_through_its_own_ae_and_bad_ones_are_refused() {
     let home = tempfile::tempdir().unwrap();
     let release = home.path().join("release");
-    let app = home.path().join("data/artisan-street/ae");
+    let app = App::Ae.dir_under(&artisan_street(home.path()));
     let key = SigningKey::from_bytes(&[7; 32]);
     let installed = || std::fs::read(app.join("ae")).unwrap_or_default();
 
@@ -226,7 +220,7 @@ fn a_local_build_installs_with_its_version() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let app = home.path().join("data/artisan-street/ae");
+    let app = App::Ae.dir_under(&artisan_street(home.path()));
     assert_eq!(std::fs::read_to_string(app.join("ae")).unwrap(), "ae dev");
     assert_eq!(
         std::fs::read_to_string(app.join("version")).unwrap().trim(),
