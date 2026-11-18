@@ -561,11 +561,11 @@ fn engine_light_flies_on_tab_change_but_not_on_remeasurement() {
     use std::time::{Duration, Instant};
     let now = Instant::now();
     let mut light = EngineLight::default();
-    assert!(light.measure(EngineId::Codex, 4.0, 32.0, now));
+    assert!(light.measure(EngineId::Codex, 4.0, 32.0, now, false));
     assert_eq!(light.frame(now), Some((4.0, false)));
-    assert!(light.measure(EngineId::Codex, 8.0, 32.0, now));
+    assert!(light.measure(EngineId::Codex, 8.0, 32.0, now, false));
     assert_eq!(light.frame(now), Some((8.0, false)));
-    assert!(light.measure(EngineId::Claude, 44.0, 32.0, now));
+    assert!(light.measure(EngineId::Claude, 44.0, 32.0, now, false));
     assert_eq!(light.frame(now), Some((8.0, true)));
     assert!(light.animating());
     assert_eq!(
@@ -704,7 +704,11 @@ fn a_submitted_draft_conflict_unlocks_and_resumes_only_after_resolution() {
         session.conflict(),
         "retrying does not hide the choice between the two versions"
     );
-    assert!(session.error().is_some_and(|error| error.contains("another client")));
+    assert!(
+        session
+            .error()
+            .is_some_and(|error| error.contains("another client"))
+    );
     assert!(!session.sending());
     assert!(session.next().is_none());
     session.keep_local();

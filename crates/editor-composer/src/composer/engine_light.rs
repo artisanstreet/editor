@@ -1,63 +1,69 @@
-use editor_ui::theme::{ArtisanTheme, ThemeMode};
 use aqua::images::{ImageAssets, ImageHandle};
 use aqua_ui::{
     element::{Element, Media},
     style::{Length, Style},
 };
 use artisan_api::EngineId;
+use editor_ui::chrome::glide::{CubicBezier, Glide, Transition};
+use editor_ui::theme::{ArtisanTheme, ThemeMode};
 use std::time::{Duration, Instant};
 
 const LIGHT_WIDTH: f32 = 32.0;
 const LIGHT_HEIGHT: f32 = 24.0;
 const LIGHT_LIFT: f32 = -2.0;
 
+const TRAVEL: Transition = Transition {
+    duration: Duration::from_millis(250),
+    easing: CubicBezier::new(0.22, 1.0, 0.36, 1.0),
+};
+
+#[derive(Debug)]
+struct Lit {
+    engine: EngineId,
+    glide: Glide,
+}
+
 #[derive(Debug, Default)]
 pub struct EngineLight {
-    lit: Option<EngineId>,
-    left: f32,
-    width: f32,
-    flight: Option<(f32, f32, Instant)>,
+    lit: Option<Lit>,
 }
 
 impl EngineLight {
-    pub fn measure(&mut self, engine: EngineId, left: f32, width: f32, now: Instant) -> bool {
-        let moved = self.lit != Some(engine);
-        if !moved && self.left == left && self.width == width {
-            return false;
-        }
-        self.flight = if moved && self.lit.is_some() {
-            Some((
-                light_left(self.left, self.width),
-                light_left(left, width),
-                now,
-            ))
-        } else {
-            None
+    pub fn measure(
+        &mut self,
+        engine: EngineId,
+        left: f32,
+        width: f32,
+        now: Instant,
+        reduced_motion: bool,
+    ) -> bool {
+        let target = light_left(left, width);
+        let glide = match self.lit.take() {
+            Some(lit) if lit.engine == engine => {
+                let unchanged = lit.glide.target().to_bits() == target.to_bits();
+                let glide = match unchanged {
+                    true => lit.glide,
+                    false => Glide::Resting(target),
+                };
+                self.lit = Some(Lit { engine, glide });
+                return !unchanged;
+            }
+            Some(lit) => lit.glide.retarget(target, now, TRAVEL, reduced_motion),
+            None => Glide::Resting(target),
         };
-        self.lit = Some(engine);
-        self.left = left;
-        self.width = width;
+        self.lit = Some(Lit { engine, glide });
         true
     }
+
     pub fn animating(&self) -> bool {
-        self.flight.is_some()
+        self.lit.as_ref().is_some_and(|lit| lit.glide.running())
     }
 
     pub fn frame(&mut self, now: Instant) -> Option<(f32, bool)> {
-        self.lit?;
-        let target = light_left(self.left, self.width);
-        let Some((from, to, started)) = self.flight else {
-            return Some((target, false));
-        };
-        let progress = (now.saturating_duration_since(started).as_secs_f32()
-            / Duration::from_millis(250).as_secs_f32())
-        .clamp(0.0, 1.0);
-        if progress >= 1.0 {
-            self.flight = None;
-            return Some((target, false));
-        }
-        let eased = editor_ui::motion::smooth_out(progress);
-        Some(((to - from).mul_add(eased, from), true))
+        let lit = self.lit.as_mut()?;
+        let left = lit.glide.value(now, TRAVEL);
+        lit.glide = lit.glide.settle(now);
+        Some((left, lit.glide.running()))
     }
 }
 
@@ -159,3 +165,7 @@ fn interpolate(value: f32, stops: &[(f32, f32)]) -> f32 {
 fn byte(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/engine_light.rs"]
+mod tests;

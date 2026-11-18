@@ -2512,6 +2512,7 @@ impl ComposerOwner {
                 index as f32 * (MODEL_BAR_HEIGHT + MODEL_BAR_GAP.px()),
                 MODEL_BAR_HEIGHT,
                 now,
+                self.reduced_motion,
             );
             match light.frame(now) {
                 Some((left, _)) => Some(
