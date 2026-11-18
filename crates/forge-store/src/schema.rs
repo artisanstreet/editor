@@ -1,5 +1,10 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
+use std::path::Path;
+
+mod backup;
+
+pub use backup::{Rollback, RollbackError};
 
 #[cfg(test)]
 #[path = "../tests/schema/model.rs"]
@@ -540,6 +545,10 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
     migrate_to(conn, MIGRATIONS.len())
 }
 
+pub fn roll_back(database: &Path) -> Result<Rollback, RollbackError> {
+    backup::roll_back(database, MIGRATIONS.len())
+}
+
 fn migrate_to(conn: &mut Connection, target: usize) -> Result<()> {
     let version: usize = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -549,6 +558,9 @@ fn migrate_to(conn: &mut Connection, target: usize) -> Result<()> {
             "database schema version {version} is newer than this Forge ({})",
             MIGRATIONS.len()
         );
+    }
+    if version < target {
+        backup::before_migrating(conn, version)?;
     }
     for (index, steps) in MIGRATIONS.iter().enumerate().take(target).skip(version) {
         let next = index + 1;

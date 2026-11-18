@@ -259,12 +259,22 @@ impl Store {
         std::fs::create_dir_all(&blob_dir)
             .with_context(|| format!("create {}", blob_dir.display()))?;
         blobs::name_files(&blob_dir)?;
-        Self::start(
-            dir.join("forge.sqlite3"),
-            blob_dir,
-            dir.join("resources"),
-            true,
-        )
+        let database = dir.join("forge.sqlite3");
+        match schema::roll_back(&database)? {
+            schema::Rollback::Current => {}
+            schema::Rollback::Restored {
+                found,
+                restored,
+                aside,
+            } => tracing::warn!(
+                database = %database.display(),
+                found,
+                restored,
+                aside = %aside.display(),
+                "rolled the database back to the schema this Forge supports; newer data was set aside"
+            ),
+        }
+        Self::start(database, blob_dir, dir.join("resources"), true)
     }
 
     pub fn join(dir: &Path) -> Result<Self> {
