@@ -26,7 +26,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_ComboBoxControlTypeId, UIA_CustomControlTypeId, UIA_DocumentControlTypeId,
     UIA_EditControlTypeId, UIA_ExpandCollapsePatternId, UIA_GroupControlTypeId,
     UIA_HyperlinkControlTypeId, UIA_ImageControlTypeId, UIA_InvokePatternId, UIA_ListControlTypeId,
-    UIA_ListItemControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId,
+    UIA_ListItemControlTypeId, UIA_MenuControlTypeId, UIA_MenuItemControlTypeId, UIA_PATTERN_ID,
     UIA_PaneControlTypeId, UIA_ProgressBarControlTypeId, UIA_RadioButtonControlTypeId,
     UIA_ScrollBarControlTypeId, UIA_SliderControlTypeId, UIA_TabControlTypeId,
     UIA_TabItemControlTypeId, UIA_TextControlTypeId, UIA_TogglePatternId, UIA_ValuePatternId,
@@ -241,18 +241,21 @@ unsafe fn write_tree(
     }
 }
 
-unsafe fn find(
+unsafe fn find<P: windows::core::Interface>(
     walker: &IUIAutomationTreeWalker,
     element: &IUIAutomationElement,
     name: &str,
-) -> Result<Option<IUIAutomationElement>, String> {
+    pattern: UIA_PATTERN_ID,
+) -> Result<Option<P>, String> {
     unsafe {
-        if element.CurrentName().map_err(|error| native(&error))? == name {
-            return Ok(Some(element.clone()));
+        if element.CurrentName().map_err(|error| native(&error))? == name
+            && let Some(found) = absent(element.GetCurrentPatternAs::<P>(pattern))?
+        {
+            return Ok(Some(found));
         }
         let mut child = absent(walker.GetFirstChildElement(element))?;
         while let Some(current) = child {
-            if let Some(found) = find(walker, &current, name)? {
+            if let Some(found) = find(walker, &current, name, pattern)? {
                 return Ok(Some(found));
             }
             child = absent(walker.GetNextSiblingElement(&current))?;
@@ -267,33 +270,37 @@ unsafe fn answer(client: &IUIAutomation, hwnd: isize, request: &Request) -> Repl
             .ElementFromHandle(HWND(hwnd as *mut core::ffi::c_void))
             .map_err(|error| native(&error))?;
         let walker = client.ControlViewWalker().map_err(|error| native(&error))?;
-        let target = |name: &str| {
-            find(&walker, &root, name)?
-                .ok_or_else(|| format!("UI Automation has no element named {name:?}"))
-        };
+        let missing = |name: &str| format!("UI Automation has no element named {name:?}");
         match request {
             Request::Tree => {
                 let mut out = String::new();
                 write_tree(&mut out, &walker, &root, 0)?;
                 Ok(out)
             }
-            Request::Invoke { name } => target(name)?
-                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-                .and_then(|pattern| pattern.Invoke())
-                .map(|()| String::new())
-                .map_err(|error| native(&error)),
-            Request::Expand { name } => target(name)?
-                .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                    UIA_ExpandCollapsePatternId,
-                )
-                .and_then(|pattern| pattern.Expand())
-                .map(|()| String::new())
-                .map_err(|error| native(&error)),
-            Request::Toggle { name } => target(name)?
-                .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-                .and_then(|pattern| pattern.Toggle())
-                .map(|()| String::new())
-                .map_err(|error| native(&error)),
+            Request::Invoke { name } => {
+                find::<IUIAutomationInvokePattern>(&walker, &root, name, UIA_InvokePatternId)?
+                    .ok_or_else(|| missing(name))?
+                    .Invoke()
+                    .map(|()| String::new())
+                    .map_err(|error| native(&error))
+            }
+            Request::Expand { name } => find::<IUIAutomationExpandCollapsePattern>(
+                &walker,
+                &root,
+                name,
+                UIA_ExpandCollapsePatternId,
+            )?
+            .ok_or_else(|| missing(name))?
+            .Expand()
+            .map(|()| String::new())
+            .map_err(|error| native(&error)),
+            Request::Toggle { name } => {
+                find::<IUIAutomationTogglePattern>(&walker, &root, name, UIA_TogglePatternId)?
+                    .ok_or_else(|| missing(name))?
+                    .Toggle()
+                    .map(|()| String::new())
+                    .map_err(|error| native(&error))
+            }
         }
     }
 }

@@ -425,7 +425,7 @@ fn claude(
         "settings-switch-enhanced-claude",
         *theme,
         on,
-        "switch enhanced claude",
+        "claude.ai mode",
     )
     .on_change(move |checked| {
         change(ViewAction::ClaudeTransport(

@@ -8,6 +8,13 @@ fn line<'a>(tree: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("UI Automation has no element named {quoted}:\n{tree}"))
 }
 
+fn toggle<'a>(tree: &'a str, name: &str) -> &'a str {
+    let quoted = format!("{name:?}");
+    tree.lines()
+        .find(|line| line.contains(&quoted) && line.contains("checked"))
+        .unwrap_or_else(|| panic!("UI Automation has no toggle named {quoted}:\n{tree}"))
+}
+
 #[test]
 fn a_screen_reader_reads_the_draft_sends_it_and_hears_the_streamed_reply() {
     let mut editor = Scenario::replaying(EngineId::Claude, "reply")
@@ -48,14 +55,15 @@ fn a_screen_reader_opens_settings_from_the_account_menu_and_flips_a_switch() {
     });
     editor.uia_invoke(&uia, "Settings");
     let before = editor.uia_settle(&uia, "the settings dialog", |tree| {
-        tree.contains("\"switch show all models\"")
+        tree.lines()
+            .any(|line| line.contains("\"Show all models\"") && line.contains("checked"))
     });
     assert!(
-        line(&before, "switch show all models").contains("unchecked"),
+        toggle(&before, "Show all models").contains("unchecked"),
         "Show all models starts off:\n{before}"
     );
-    editor.uia_toggle(&uia, "switch show all models");
+    editor.uia_toggle(&uia, "Show all models");
     editor.uia_settle(&uia, "the switch to turn on", |tree| {
-        line(tree, "switch show all models").contains("[checked")
+        toggle(tree, "Show all models").contains("[checked")
     });
 }

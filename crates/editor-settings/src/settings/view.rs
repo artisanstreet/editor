@@ -636,7 +636,7 @@ fn notifications(
         .get("notifications")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
-    let control = Switch::new("settings-switch-notify", *theme, enabled, "switch notify")
+    let control = Switch::new("settings-switch-notify", *theme, enabled, "Notify me")
         .on_change(move |enabled| emit(ViewAction::SetNotifications(enabled)))
         .build();
     let row = ui::row(
@@ -1041,7 +1041,7 @@ fn performance(
         "settings-lower-refresh-rate",
         *theme,
         lowered,
-        "lower refresh rate",
+        "Lower refresh rate",
     )
     .on_change({
         let emit = Rc::clone(&emit);
@@ -1063,7 +1063,7 @@ fn performance(
         "settings-monitor-refresh-rate",
         *theme,
         monitor_sync,
-        "match monitor refresh rate",
+        "Match monitor refresh rate",
     )
     .on_change(move |enabled| emit(ViewAction::SetVsync(enabled)))
     .build();
@@ -1217,7 +1217,7 @@ fn appearance(
         "settings-switch-dark-mode",
         *theme,
         theme.colors.mode.is_dark(),
-        "switch dark mode",
+        "Dark mode",
     )
     .on_change(move |enabled| send(ViewAction::SetDarkMode(enabled)))
     .build();
@@ -1260,7 +1260,7 @@ fn appearance(
             .get(artisan_api::SHOW_ALL_MODELS_KEY)
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
-        "switch show all models",
+        "Show all models",
     )
     .on_change(move |enabled| show_models(ViewAction::SetShowAllModels(enabled)))
     .build();
@@ -1268,7 +1268,7 @@ fn appearance(
         "settings-switch-outline-text",
         *theme,
         checked,
-        "switch outline text",
+        "Outline text rendering",
     )
     .on_change(move |enabled| emit(ViewAction::SetOutlineText(enabled)))
     .build();

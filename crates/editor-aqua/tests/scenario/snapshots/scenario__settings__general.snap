@@ -6,7 +6,7 @@ Dialog "Settings"
   ScrollView
     Group "Editor"
       Label "Editor"
-    Button "General" [expanded]
+    Button "General" [selected]
       Label "General"
     Button "Appearance"
       Label "Appearance"
@@ -24,19 +24,19 @@ Dialog "Settings"
       Label "About"
     Group "Forge"
       Label "Forge"
-    Button "Threads" [collapsed]
+    Button "Threads"
       Label "Threads"
-    Button "Extensions" [collapsed]
+    Button "Extensions"
       Label "Extensions"
     Group "Engines"
       Label "Engines"
-    Button "Claude Code" [collapsed]
+    Button "Claude Code"
       Label "Claude Code"
       Label "Sign in"
-    Button "Codex" [collapsed]
+    Button "Codex"
       Label "Codex"
       Label "Install"
-    Button "OpenCode" [collapsed]
+    Button "OpenCode"
       Label "OpenCode"
       Label "Install"
   Button "Close settings"
@@ -47,7 +47,7 @@ Dialog "Settings"
     Group "Dark mode"
       Label "Dark mode"
       Label "Whether to draw Artisan Editor in a dark theme."
-      Switch "switch dark mode" [checked]
+      Switch "Dark mode" [checked]
     Group "Fonts"
       Label "Fonts"
       Label "Choose the fonts Artisan Editor uses."
@@ -56,11 +56,11 @@ Dialog "Settings"
     Group "Outline text rendering"
       Label "Outline text rendering"
       Label "Unhinted grayscale glyphs with no gamma or contrast correction, so letters keep their designed shapes. Turn off if text looks too soft or thin."
-      Switch "switch outline text" [checked]
+      Switch "Outline text rendering" [checked]
     Group "Show all models"
       Label "Show all models"
       Label "List every Claude and Codex model in the model picker, not only the latest of each class."
-      Switch "switch show all models" [unchecked]
+      Switch "Show all models" [unchecked]
     Group "Hide bad model options"
       Label "Hide bad model options"
       Label "Hide Max and Ultra for Claude and Codex, plus Light and Extra High for Opus 5.5. Your current selection is kept."
@@ -75,13 +75,13 @@ Dialog "Settings"
     Group "Notify me"
       Label "Notify me"
       Label "Uses your system's notifications to tell you when a thread finishes, needs attention or fails."
-      Switch "switch notify" [checked]
+      Switch "Notify me" [checked]
     Label "Performance"
     Group "Lower refresh rate"
       Label "Lower refresh rate"
       Label "Caps animation and scrolling at 60 frames per second to save power."
-      Switch "lower refresh rate" [unchecked]
+      Switch "Lower refresh rate" [unchecked]
     Group "Match monitor refresh rate"
       Label "Match monitor refresh rate"
       Label "Synchronizes presentation to the current monitor. With both limits off, rendering is uncapped."
-      Switch "match monitor refresh rate" [checked]
+      Switch "Match monitor refresh rate" [checked]

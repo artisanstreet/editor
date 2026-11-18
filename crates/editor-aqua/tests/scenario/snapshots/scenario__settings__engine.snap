@@ -6,7 +6,7 @@ Dialog "Settings"
   ScrollView
     Group "Editor"
       Label "Editor"
-    Button "General" [collapsed]
+    Button "General"
       Label "General"
     Button "Account"
       Label "Account"
@@ -16,13 +16,13 @@ Dialog "Settings"
       Label "About"
     Group "Forge"
       Label "Forge"
-    Button "Threads" [collapsed]
+    Button "Threads"
       Label "Threads"
-    Button "Extensions" [collapsed]
+    Button "Extensions"
       Label "Extensions"
     Group "Engines"
       Label "Engines"
-    Button "Claude Code" [expanded, focused]
+    Button "Claude Code" [selected, focused]
       Label "Claude Code"
       Label "Sign in"
     Button "Installation"
@@ -31,10 +31,10 @@ Dialog "Settings"
       Label "Account"
     Button "claude.ai mode"
       Label "claude.ai mode"
-    Button "Codex" [collapsed]
+    Button "Codex"
       Label "Codex"
       Label "Install"
-    Button "OpenCode" [collapsed]
+    Button "OpenCode"
       Label "OpenCode"
       Label "Install"
   Button "Close settings"
@@ -66,7 +66,7 @@ Dialog "Settings"
     Group "claude.ai mode"
       Label "claude.ai mode"
       Label "Run Claude through claude.ai with local files, commands, skills, MCP servers and subagents. Turn this off to use Claude Code."
-      Switch "switch enhanced claude" [unchecked]
+      Switch "claude.ai mode" [unchecked]
     Group "claude.ai session"
       Label "claude.ai session"
       Label "Not signed in. Signing in opens claude.ai in a browser window; it closes by itself once you're in."

@@ -6,7 +6,7 @@ Dialog "Settings"
   ScrollView
     Group "Editor"
       Label "Editor"
-    Button "General" [collapsed]
+    Button "General"
       Label "General"
     Button "Account"
       Label "Account"
@@ -16,19 +16,19 @@ Dialog "Settings"
       Label "About"
     Group "Forge"
       Label "Forge"
-    Button "Threads" [collapsed]
+    Button "Threads"
       Label "Threads"
-    Button "Extensions" [collapsed]
+    Button "Extensions"
       Label "Extensions"
     Group "Engines"
       Label "Engines"
-    Button "Claude Code" [collapsed]
+    Button "Claude Code"
       Label "Claude Code"
       Label "Sign in"
-    Button "Codex" [collapsed]
+    Button "Codex"
       Label "Codex"
       Label "Install"
-    Button "OpenCode" [collapsed]
+    Button "OpenCode"
       Label "OpenCode"
       Label "Install"
   Button "Close settings"

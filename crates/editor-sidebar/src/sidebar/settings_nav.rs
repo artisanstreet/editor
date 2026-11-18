@@ -216,11 +216,7 @@ pub fn build(
                         .build(),
                 );
             }
-            let row = row.build();
-            column = column.child(match has_children {
-                true => row.aria_expanded(entry.expanded),
-                false => row,
-            });
+            column = column.child(row.build().aria_selected(page == current));
             if entry.expanded && !entry.children.is_empty() {
                 let progress = motion.progress(now, reduced);
                 let total_height = children_height(entry.children.len());
