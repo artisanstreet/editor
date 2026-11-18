@@ -216,7 +216,7 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
             );
         }
         hub.runtime_changed();
-        let members = match generation.registry.peers() {
+        let members = match generation.registry.list_peers().await {
             Ok(members) => members,
             Err(error) => {
                 tracing::debug!(
@@ -249,12 +249,15 @@ async fn relay_peer(hub: Hub, member: Member, stop: CancellationToken) {
             () = stop.cancelled() => break,
             () = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
-        if hub.generation().is_none_or(|generation| {
-            generation
-                .registry
-                .peers()
-                .is_ok_and(|members| !members.iter().any(|candidate| candidate.id == member.id))
-        }) {
+        let Some(generation) = hub.generation() else {
+            break;
+        };
+        if generation
+            .registry
+            .list_peers()
+            .await
+            .is_ok_and(|members| !members.iter().any(|candidate| candidate.id == member.id))
+        {
             break;
         }
     }

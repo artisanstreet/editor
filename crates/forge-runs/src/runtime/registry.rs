@@ -165,6 +165,12 @@ pub enum RegistryFileError {
     },
     #[error("generation {generation} is already registered")]
     AlreadyRegistered { generation: String },
+    #[error("list the generations in {path} off the async workers")]
+    Task {
+        path: PathBuf,
+        #[source]
+        source: tokio::task::JoinError,
+    },
 }
 
 pub fn read<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, RegistryFileError> {
@@ -353,6 +359,16 @@ impl Registry {
             }
         }
         Ok(members)
+    }
+
+    pub async fn list_peers(&self) -> Result<Vec<Member>, RegistryFileError> {
+        let registry = self.clone();
+        tokio::task::spawn_blocking(move || registry.peers())
+            .await
+            .map_err(|source| RegistryFileError::Task {
+                path: self.root.join("generations"),
+                source,
+            })?
     }
 
     pub fn register(&self, mut member: Member) -> Result<Generation, RegistryFileError> {

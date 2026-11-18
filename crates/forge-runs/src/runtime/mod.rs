@@ -457,7 +457,8 @@ impl crate::Hub {
         }
         let alive = generation
             .registry
-            .peers()
+            .list_peers()
+            .await
             .map_err(FollowPeersError::Peers)?;
         for peer in tracked {
             let id = &peer.member.id;
