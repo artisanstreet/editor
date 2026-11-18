@@ -544,7 +544,10 @@ mod tests {
             async move { watch_authorization(&store, &device, "certificate", revocations).await }
         });
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(!watcher.is_finished(), "a paired device's stream stays open");
+        assert!(
+            !watcher.is_finished(),
+            "a paired device's stream stays open"
+        );
         forge_store::admin::Admin::open(directory.path())
             .unwrap()
             .revoke_device(device.as_str())
