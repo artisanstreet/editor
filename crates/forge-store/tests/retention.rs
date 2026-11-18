@@ -347,3 +347,36 @@ async fn retention_takes_a_removed_threads_coordination_with_it() {
         "{changes:?}"
     );
 }
+
+#[tokio::test]
+async fn one_pass_removes_every_idle_family_and_keeps_a_busy_chain_whole() {
+    let (_dir, store, project) = open().await;
+    let mut idle = HashSet::new();
+    for _ in 0..12 {
+        idle.insert(add_thread(&store, &project, None).await);
+    }
+    let mut parent = add_thread(&store, &project, None).await;
+    idle.insert(parent.clone());
+    for _ in 0..4 {
+        parent = add_thread(&store, &project, Some(&parent)).await;
+        idle.insert(parent.clone());
+    }
+    let busy_head = add_thread(&store, &project, None).await;
+    let busy_tail = add_thread(&store, &project, Some(&busy_head)).await;
+    store
+        .upsert_item(message(&busy_tail, Status::AwaitingUser, Vec::new()))
+        .await
+        .unwrap();
+
+    let removed: HashSet<ThreadId> = store
+        .remove_inactive_threads(now() + 60_000, HashSet::new(), 8)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+
+    assert_eq!(removed, idle);
+    assert!(store.thread(&busy_head).await.unwrap().is_some());
+    assert!(store.thread(&busy_tail).await.unwrap().is_some());
+}
