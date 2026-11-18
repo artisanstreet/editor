@@ -10,6 +10,7 @@
 //! catches the browser's redirect.
 
 use anyhow::{Context, Result, anyhow, bail};
+use artisan_api::Secret;
 use base64::Engine as _;
 use reqwest::{StatusCode, Url, header};
 use serde::{Deserialize, Serialize};
@@ -50,15 +51,15 @@ pub struct Discovery {
 pub struct Client {
     pub client_id: String,
     #[serde(default)]
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Secret>,
     pub redirect_uri: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
-    pub access_token: String,
+    pub access_token: Secret,
     #[serde(default)]
-    pub refresh_token: Option<String>,
+    pub refresh_token: Option<Secret>,
     /// Milliseconds since the epoch, when the server said.
     #[serde(default)]
     pub expires_at: Option<i64>,
@@ -75,15 +76,15 @@ impl Tokens {
 /// The PKCE secret, its challenge, and the `state` for one flow.
 #[derive(Clone, Debug)]
 pub struct Pkce {
-    pub verifier: String,
+    pub verifier: Secret,
     pub challenge: String,
     pub state: String,
 }
 
 impl Pkce {
     pub fn new() -> Result<Self> {
-        let verifier = random(32)?;
-        let challenge = b64(&Sha256::digest(verifier.as_bytes()));
+        let verifier = Secret::new(random(32)?);
+        let challenge = b64(&Sha256::digest(verifier.expose().as_bytes()));
         Ok(Self {
             verifier,
             challenge,
@@ -330,7 +331,7 @@ pub async fn register(
             .as_str()
             .context("registering Artisan: no client_id in the answer")?
             .to_owned(),
-        client_secret: answer["client_secret"].as_str().map(str::to_owned),
+        client_secret: answer["client_secret"].as_str().map(Secret::from),
         redirect_uri: redirect_uri.to_owned(),
     })
 }
@@ -374,7 +375,7 @@ pub async fn exchange(
         ("resource", discovery.resource.as_str()),
     ];
     if let Some(secret) = &client.client_secret {
-        form.push(("client_secret", secret));
+        form.push(("client_secret", secret.expose()));
     }
     tokens(http, discovery, &form, None, now).await
 }
@@ -394,7 +395,7 @@ pub async fn refresh(
         ("resource", discovery.resource.as_str()),
     ];
     if let Some(secret) = &client.client_secret {
-        form.push(("client_secret", secret));
+        form.push(("client_secret", secret.expose()));
     }
     tokens(http, discovery, &form, Some(refresh_token), now).await
 }
@@ -418,13 +419,13 @@ async fn tokens(
     let access_token = answer["access_token"]
         .as_str()
         .context("getting a token: no access_token in the answer")?
-        .to_owned();
+        .into();
     Ok(Tokens {
         access_token,
         refresh_token: answer["refresh_token"]
             .as_str()
-            .map(str::to_owned)
-            .or_else(|| previous_refresh.map(str::to_owned)),
+            .or(previous_refresh)
+            .map(Secret::from),
         expires_at: answer["expires_in"]
             .as_i64()
             .map(|seconds| now + seconds * 1000),
@@ -487,9 +488,9 @@ mod tests {
         let pkce = Pkce::new().unwrap();
         assert_eq!(
             pkce.challenge,
-            b64(&Sha256::digest(pkce.verifier.as_bytes()))
+            b64(&Sha256::digest(pkce.verifier.expose().as_bytes()))
         );
-        assert!(pkce.verifier.len() >= 43);
+        assert!(pkce.verifier.expose().len() >= 43);
         assert_ne!(pkce.state, Pkce::new().unwrap().state);
     }
 

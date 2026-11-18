@@ -29,7 +29,7 @@ struct Flow {
     url: String,
     discovery: Discovery,
     client: Client,
-    verifier: String,
+    verifier: artisan_api::Secret,
     authorize_url: String,
     started: Instant,
 }
@@ -197,7 +197,7 @@ impl Hub {
             &flow.discovery,
             &flow.client,
             code,
-            &flow.verifier,
+            flow.verifier.expose(),
             artisan_api::now(),
         )
         .await
@@ -357,7 +357,7 @@ impl Hub {
         };
         let now = artisan_api::now();
         if !saved.tokens.stale(now) {
-            return Ok(Some(saved.tokens.access_token));
+            return Ok(Some(saved.tokens.access_token.expose().to_owned()));
         }
         let Some(refresh_token) = saved.tokens.refresh_token.clone() else {
             self.mcp_sign_out(name).await?;
@@ -367,7 +367,7 @@ impl Hub {
             self.engines().http(),
             &saved.discovery,
             &saved.client,
-            &refresh_token,
+            refresh_token.expose(),
             now,
         )
         .await
@@ -383,7 +383,7 @@ impl Hub {
                         serde_json::to_string(&saved)?,
                     )
                     .await?;
-                Ok(kept.then_some(saved.tokens.access_token))
+                Ok(kept.then(|| saved.tokens.access_token.expose().to_owned()))
             }
             // Refused: the grant is gone, so the card asks again.
             Err(error) if error.downcast_ref::<mcp_oauth::Rejected>().is_some() => {
@@ -394,7 +394,7 @@ impl Hub {
             // Out of reach: try the old token; the next launch refreshes again.
             Err(error) => {
                 tracing::warn!(server = %name, "refreshing an MCP token: {error:#}");
-                Ok(Some(saved.tokens.access_token))
+                Ok(Some(saved.tokens.access_token.expose().to_owned()))
             }
         }
     }

@@ -13,11 +13,10 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixT
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// A certificate and its private key, stored base64.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Identity {
     pub certificate: String,
-    pub key: String,
+    pub key: crate::Secret,
 }
 
 impl Identity {
@@ -27,7 +26,7 @@ impl Identity {
             .context("generate a certificate")?;
         Ok(Self {
             certificate: STANDARD.encode(certified.cert.der()),
-            key: STANDARD.encode(certified.signing_key.serialize_der()),
+            key: crate::Secret::new(STANDARD.encode(certified.signing_key.serialize_der())),
         })
     }
 
@@ -41,7 +40,7 @@ impl Identity {
 
     pub fn key_der(&self) -> Result<PrivateKeyDer<'static>> {
         Ok(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            STANDARD.decode(&self.key).context("decode key")?,
+            STANDARD.decode(self.key.expose()).context("decode key")?,
         )))
     }
 }

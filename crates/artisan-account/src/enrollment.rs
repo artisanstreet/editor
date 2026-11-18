@@ -8,12 +8,22 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
-/// A local Ed25519 machine keypair.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct MachineKeypair {
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
     public: [u8; 32],
+}
+
+impl std::fmt::Debug for MachineKeypair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MachineKeypair")
+            .field("secret", &"redacted")
+            .field("public", &self.public_b64u())
+            .finish()
+    }
 }
 
 impl MachineKeypair {
@@ -27,7 +37,7 @@ impl MachineKeypair {
         anyhow::ensure!(secret != [0_u8; 32], "the machine key is all zeros");
         let key = ed25519_dalek::SigningKey::from_bytes(&secret);
         Ok(Self {
-            secret,
+            secret: Zeroizing::new(secret),
             public: key.verifying_key().to_bytes(),
         })
     }
@@ -44,7 +54,7 @@ impl MachineKeypair {
     }
 
     #[must_use]
-    pub const fn secret(&self) -> &[u8; 32] {
+    pub fn secret(&self) -> &[u8; 32] {
         &self.secret
     }
 }

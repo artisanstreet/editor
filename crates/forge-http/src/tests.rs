@@ -99,7 +99,7 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
         .unwrap();
     let forge_key = crate::identity(&store).await.unwrap().key;
     assert!(
-        !body.contains(&forge_key),
+        !body.contains(forge_key.expose()),
         "Forge's private key never reaches a client"
     );
     let state: State = serde_json::from_str(&body).unwrap();

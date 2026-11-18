@@ -16,37 +16,24 @@ use crate::signin::{
     MagicRequestResponse, MagicStatusRequest, MagicStatusResponse,
 };
 
-/// Opaque session token. Never logged or displayed; redacted `Debug`,
-/// zeroed on drop.
 #[derive(Clone, PartialEq, Eq)]
-pub struct SessionToken(Vec<u8>);
+pub struct SessionToken(artisan_api::Secret);
 
 impl SessionToken {
     #[must_use]
-    #[expect(
-        clippy::missing_const_for_fn,
-        reason = "String::into_bytes is not const; token owns its bytes"
-    )]
     pub fn new(token: String) -> Self {
-        Self(token.into_bytes())
+        Self(artisan_api::Secret::new(token))
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
-        // Only ever constructed from `&str`; the fallback is unreachable.
-        std::str::from_utf8(&self.0).unwrap_or("")
+        self.0.expose()
     }
 }
 
 impl std::fmt::Debug for SessionToken {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("SessionToken(redacted)")
-    }
-}
-
-impl Drop for SessionToken {
-    fn drop(&mut self) {
-        self.0.fill(0);
     }
 }
 
