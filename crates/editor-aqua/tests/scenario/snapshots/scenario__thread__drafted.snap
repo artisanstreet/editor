@@ -30,5 +30,5 @@ Group "Artisan Editor"
   ComboBox "No model" [collapsed]
     Label "No model"
   ScrollView
-    TextInput "Ask about anything" value="Say hello" [focused]
+    TextInput "Message" value="Say hello" [focused]
   Button "Send message"

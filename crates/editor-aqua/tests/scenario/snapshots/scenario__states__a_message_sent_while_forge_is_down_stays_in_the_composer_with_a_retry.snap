@@ -34,5 +34,5 @@ Group "Artisan Editor"
     Button "Try again"
       Label "Try again"
   ScrollView
-    TextInput "Make anything" value="Say hello"
+    TextInput "Message" value="Say hello"
   Button "Send message"

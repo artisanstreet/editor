@@ -18,7 +18,7 @@ fn a_message_sent_while_forge_is_down_stays_in_the_composer_with_a_retry() {
         .open(Opening::Thread("thread-a"));
     editor.shows("No messages yet.");
     editor.stop_forge();
-    editor.click(Role::TextInput, "Ask about anything");
+    editor.click(Role::TextInput, "Message");
     editor.type_text("Say hello");
     editor.press(Key::Named(NamedKey::Enter), Modifiers::NONE);
     insta::assert_snapshot!(editor.settle("the failure to show", |view| {

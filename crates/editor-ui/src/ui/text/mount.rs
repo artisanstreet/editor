@@ -505,13 +505,14 @@ impl EditorController {
         inset: bool,
     ) -> Element {
         let framing = Framing { mode, bare, inset };
-        self.keyed(key.into(), theme, placeholder, framing, None)
+        self.keyed(key.into(), theme, placeholder, placeholder, framing, None)
     }
 
     pub fn prompt_with_scroll_edges(
         &self,
         key: impl Into<aqua_ui::element::Key>,
         theme: &ArtisanTheme,
+        name: &str,
         placeholder: &str,
         edges: &EdgeBands,
     ) -> Element {
@@ -520,13 +521,14 @@ impl EditorController {
             bare: false,
             inset: false,
         };
-        self.keyed(key.into(), theme, placeholder, framing, Some(edges))
+        self.keyed(key.into(), theme, name, placeholder, framing, Some(edges))
     }
 
     fn keyed(
         &self,
         key: aqua_ui::element::Key,
         theme: &ArtisanTheme,
+        name: &str,
         placeholder: &str,
         Framing { mode, bare, inset }: Framing,
         edges: Option<&EdgeBands>,
@@ -534,7 +536,7 @@ impl EditorController {
         *self.text_key.borrow_mut() = Some(key.clone());
         let show_notice = self.state.borrow().limit_notice();
         let leaf = self
-            .element_with_chrome(mode, theme, placeholder, bare, inset)
+            .named_leaf(mode, theme, name, placeholder, bare, inset)
             .with_key(key);
         let mut root = UiBox::new()
             .style(Style::new().axis(Axis::Column).min_width(px(0.0)))
@@ -563,6 +565,18 @@ impl EditorController {
         &self,
         mode: Mode,
         theme: &ArtisanTheme,
+        placeholder: &str,
+        bare: bool,
+        inset: bool,
+    ) -> Element {
+        self.named_leaf(mode, theme, placeholder, placeholder, bare, inset)
+    }
+
+    fn named_leaf(
+        &self,
+        mode: Mode,
+        theme: &ArtisanTheme,
+        name: &str,
         placeholder: &str,
         bare: bool,
         inset: bool,
@@ -661,8 +675,11 @@ impl EditorController {
             .build()
             .focusable(!disabled)
             .disabled(disabled);
-        if !placeholder.is_empty() {
-            element = element.aria_label(placeholder);
+        if !name.is_empty() {
+            element = element.aria_label(name);
+        }
+        if name != placeholder && !placeholder.is_empty() && !has_suggestion {
+            element = element.aria_description(placeholder);
         }
         for kind in [
             InputKind::KeyDown,

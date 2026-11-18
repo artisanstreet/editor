@@ -35,5 +35,5 @@ Group "Artisan Editor"
   ComboBox "No model" [collapsed]
     Label "No model"
   ScrollView
-    TextInput "Make anything" [focused]
+    TextInput "Message" [focused]
   Button "Continue where it stopped"

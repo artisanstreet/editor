@@ -22,5 +22,5 @@ Group "Artisan Editor" [focused]
   ComboBox "Project" [collapsed]
     Label "Project"
   ScrollView
-    TextInput "Ask about anything"
+    TextInput "Message"
   Button "Send message" [disabled]

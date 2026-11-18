@@ -1,7 +1,7 @@
 use artisan_api::EngineId;
 use test_support::scenario::{Key, Modifiers, NamedKey, Opening, Role, Scenario};
 
-const COMPOSER: &str = "Ask about anything";
+const COMPOSER: &str = "Message";
 
 #[track_caller]
 fn assert_focus_returns_to_the_composer(editor: &test_support::scenario::Editor, after: &str) {

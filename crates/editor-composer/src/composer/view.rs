@@ -107,6 +107,8 @@ pub enum ComposerAction {
 
 pub type Dispatch = Rc<dyn Fn(ComposerAction)>;
 
+pub const PROMPT_NAME: &str = "Message";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Primary {
     Send,
@@ -2740,6 +2742,7 @@ impl ComposerOwner {
                 prompt: self.editor.prompt_with_scroll_edges(
                     "composer-prompt",
                     &theme,
+                    PROMPT_NAME,
                     placeholder,
                     &self.prompt_edges(&theme),
                 ),

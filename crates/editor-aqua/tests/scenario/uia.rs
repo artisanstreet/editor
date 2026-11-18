@@ -13,11 +13,11 @@ fn a_screen_reader_reads_the_draft_sends_it_and_hears_the_streamed_reply() {
     let mut editor = Scenario::replaying(EngineId::Claude, "reply")
         .thread("thread-a", "Greeting")
         .open(Opening::Thread("thread-a"));
-    editor.click(Role::TextInput, "Ask about anything");
+    editor.click(Role::TextInput, "Message");
     editor.type_text("Say hello");
     let uia = editor.read_through_uia();
     editor.uia_settle(&uia, "the draft in the composer", |tree| {
-        line(tree, "Ask about anything").contains("value=\"Say hello\"")
+        line(tree, "Message").contains("value=\"Say hello\"")
             && !line(tree, "Send message").contains("disabled")
     });
     editor.uia_invoke(&uia, "Send message");

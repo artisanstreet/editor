@@ -1042,6 +1042,50 @@ fn prompt_keeps_its_name_while_a_suggestion_replaces_the_placeholder() {
 }
 
 #[test]
+fn prompt_keeps_its_name_as_the_placeholder_rotates() {
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::ui::scroll_edge::{EdgeBands, ScrollEdges};
+    use editor_aqua::ui::text::mount::EditorController;
+    use editor_aqua::ui::theme::ArtisanTheme;
+
+    let controller = EditorController::new(Editor::new("", Mode::Prompt), |_| {});
+    let theme = ArtisanTheme::resolved();
+    let edges = EdgeBands {
+        scroll: "prompt-scroll",
+        top: "prompt-top",
+        bottom: "prompt-bottom",
+        color: theme.colors.surface,
+        edges: ScrollEdges::default(),
+    };
+    let build = |placeholder: &str| {
+        controller.prompt_with_scroll_edges("prompt", &theme, "Message", placeholder, &edges)
+    };
+    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    runtime.mount(|_| build("Ask about anything")).unwrap();
+    runtime.set_viewport(240.0, 160.0, 1.0);
+    let mut read = Vec::new();
+    for placeholder in ["Ask about anything", "Make anything"] {
+        runtime.refresh(vec![build(placeholder)]).unwrap();
+        runtime.build_frame().unwrap();
+        read.extend(
+            runtime
+                .tree()
+                .emit_semantics()
+                .into_iter()
+                .filter(|node| node.role == aqua_core::Role::TextField)
+                .map(|node| (node.label, node.description)),
+        );
+    }
+    assert_eq!(
+        read,
+        [
+            ("Message".to_owned(), Some("Ask about anything".to_owned())),
+            ("Message".to_owned(), Some("Make anything".to_owned())),
+        ]
+    );
+}
+
+#[test]
 fn native_text_service_queries_live_selection_and_invalidates_after_edit() {
     use aqua_text::{SharedFonts, SharedRuns};
     use editor_aqua::ui::text::mount::EditorController;

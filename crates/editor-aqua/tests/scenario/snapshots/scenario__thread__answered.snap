@@ -38,5 +38,5 @@ Group "Artisan Editor"
   ComboBox "No model" [collapsed]
     Label "No model"
   ScrollView
-    TextInput "Make anything"
+    TextInput "Message"
   Button "Send message" [disabled]
