@@ -13,8 +13,6 @@ Group "Artisan Editor"
     ListItem
       Button "Echo" [selected]
         Label "Echo"
-  Button "Search threads"
-  Button "New thread"
   Button "Test" [collapsed]
     Label "Test"
   Group "Project / Echo"

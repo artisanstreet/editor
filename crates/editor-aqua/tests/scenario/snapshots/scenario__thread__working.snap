@@ -13,8 +13,6 @@ Group "Artisan Editor"
     ListItem
       Button "Parser" [selected]
         Label "Parser"
-  Button "Search threads"
-  Button "New thread"
   Button "Test" [collapsed]
     Label "Test"
   Group "Project / Parser"

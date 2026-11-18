@@ -13,8 +13,6 @@ Group "Artisan Editor"
     ListItem
       Button "Greeting" [selected]
         Label "Greeting"
-  Button "Search threads"
-  Button "New thread"
   Button "Test" [collapsed]
     Label "Test"
   Group "Project / Greeting"

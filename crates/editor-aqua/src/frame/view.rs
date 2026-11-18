@@ -186,24 +186,21 @@ fn tree_view(width: f32, search: Option<Element>, tree: Option<Element>) -> Elem
         .build();
     match reveal > 0.0 {
         true => column,
-        false => column.exclude_from_hit_testing(),
+        false => column.exclude_from_hit_testing().aria_hidden(),
     }
 }
 
 fn rail_view(theme: &ArtisanTheme, width: f32, emit: &Rc<dyn Fn(Event)>) -> Element {
     let shown = 1.0 - reveal(width);
     let anchor = search_anchor();
-    let rail = UiBox::new()
-        .style(
-            Style::new()
-                .absolute_at(Some(anchor.left), Some(anchor.top), None, None)
-                .opacity(shown),
-        )
-        .child(crate::frame::search::rail(theme, emit))
-        .build();
+    let rail = UiBox::new().style(
+        Style::new()
+            .absolute_at(Some(anchor.left), Some(anchor.top), None, None)
+            .opacity(shown),
+    );
     match shown > 0.0 {
-        true => rail,
-        false => rail.exclude_from_hit_testing(),
+        true => rail.child(crate::frame::search::rail(theme, emit)).build(),
+        false => rail.build().exclude_from_hit_testing(),
     }
 }
 

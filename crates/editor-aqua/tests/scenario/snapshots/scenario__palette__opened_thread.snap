@@ -16,8 +16,6 @@ Group "Artisan Editor" [focused]
     ListItem
       Button "Greeting"
         Label "Greeting"
-  Button "Search threads"
-  Button "New thread"
   Button "Test" [collapsed]
     Label "Test"
   Group "Project / Parser rewrite"

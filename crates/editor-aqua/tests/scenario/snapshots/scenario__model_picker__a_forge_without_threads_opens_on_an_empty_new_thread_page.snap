@@ -9,8 +9,6 @@ Group "Artisan Editor" [focused]
   Label "No threads yet."
   Button "New thread"
     Label "New thread"
-  Button "Search threads"
-  Button "New thread"
   Button "Test" [collapsed]
     Label "Test"
   Button "Minimize window"
