@@ -189,3 +189,113 @@ fn a_failed_side_offers_retry_that_refetches_only_that_side() {
         Some(Failure::Fetch(MediaFailure::Unreachable))
     );
 }
+
+#[test]
+fn the_comparison_frame_is_a_named_slider_or_switch_that_assistive_tech_operates() {
+    use aqua_core::Role;
+    use aqua_text::{SharedFonts, SharedRuns};
+    use aqua_ui::tree::{AccessibilityRequest, ActionEvent, ActionKind};
+    use std::cell::RefCell;
+    let model: ImageCompare = serde_json::from_str(
+        r#"{"before":{"src":"","label":"Old"},"after":{"src":"","label":"New"}}"#,
+    )
+    .unwrap();
+    let mut state = CompareState::new(&model, fetcher(), Images::new());
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let render = |state: &CompareState| {
+        let sink = Rc::clone(&actions);
+        let view = state
+            .view(
+                &model,
+                crate::ui::theme::ArtisanTheme::resolved(),
+                "compare",
+                800.0,
+                Rc::new(move |action| sink.borrow_mut().push(action)),
+            )
+            .unwrap();
+        let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+        app.mount(|_| view).unwrap();
+        app.set_viewport(900.0, 700.0, 1.0);
+        app.build_frame().unwrap();
+        app
+    };
+    let frame = |app: &aqua::UiApp, role: Role, label: &str| {
+        app.tree()
+            .emit_semantics()
+            .into_iter()
+            .find(|node| node.role == role && node.label == label)
+            .unwrap_or_else(|| panic!("no {role:?} named {label:?}"))
+    };
+    let fire = |app: &aqua::UiApp, node, kind, request| {
+        app.tree().fire_action(ActionEvent {
+            source: None,
+            node,
+            kind,
+            text: None,
+            focused: None,
+            request,
+        });
+    };
+    let app = render(&state);
+    let slider = frame(&app, Role::Slider, "Split between Old and New");
+    assert!(slider.focusable);
+    assert_eq!(
+        slider
+            .numeric_range
+            .map(|range| (range.min, range.max, range.value)),
+        Some((0.0, 100.0, 50.0))
+    );
+    for request in [
+        AccessibilityRequest::SetValue(30.0),
+        AccessibilityRequest::Increment,
+    ] {
+        fire(
+            &app,
+            slider.node,
+            ActionKind::AccessibilityRequest,
+            Some(request),
+        );
+    }
+    let emitted = actions.borrow_mut().split_off(0);
+    assert_eq!(
+        emitted,
+        vec![
+            Action::Split(0.3),
+            Action::Key {
+                key: Key::Named(NamedKey::Right),
+                shift: false
+            }
+        ]
+    );
+    for action in emitted {
+        assert!(state.dispatch(action));
+    }
+    let app = render(&state);
+    let slider = frame(&app, Role::Slider, "Split between Old and New");
+    assert_eq!(
+        slider.numeric_range.map(|range| range.value.round()),
+        Some(35.0)
+    );
+    assert!(state.dispatch(Action::Mode(3)));
+    let app = render(&state);
+    frame(&app, Role::Slider, "Blend from Old to New");
+    assert!(state.dispatch(Action::Mode(2)));
+    let app = render(&state);
+    let switch = frame(&app, Role::Switch, "Show New instead of Old");
+    assert_eq!(switch.checked, Some(false));
+    fire(&app, switch.node, ActionKind::AccessibilityActivate, None);
+    let emitted = actions.borrow_mut().split_off(0);
+    assert_eq!(
+        emitted,
+        vec![Action::Key {
+            key: Key::Named(NamedKey::Enter),
+            shift: false
+        }]
+    );
+    for action in emitted {
+        assert!(state.dispatch(action));
+    }
+    let app = render(&state);
+    let switch = frame(&app, Role::Switch, "Show New instead of Old");
+    assert_eq!(switch.checked, Some(true));
+}

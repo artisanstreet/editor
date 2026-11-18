@@ -68,7 +68,19 @@ pub(crate) enum Action {
     Move { x: f32, width: f32 },
     Release,
     Key { key: Key, shift: bool },
+    Split(f32),
     Retry(Side),
+}
+
+#[derive(Clone)]
+struct Interaction {
+    mode: Mode,
+    split: f32,
+    showing_after: bool,
+    consent: bool,
+    before: String,
+    after: String,
+    emit: Rc<dyn Fn(Action)>,
 }
 
 pub(crate) struct CompareState {
@@ -290,6 +302,11 @@ impl CompareState {
             },
             Action::Move { x, width } => self.dragging && self.follow(x, width),
             Action::Release => std::mem::take(&mut self.dragging),
+            Action::Split(split) => {
+                split.is_finite()
+                    && matches!(self.mode, Mode::Slider | Mode::Blend)
+                    && self.set_split(split)
+            }
             Action::Key { key, shift } => {
                 let step = if shift { 0.01 } else { 0.05 };
                 match (self.mode, key) {
@@ -338,9 +355,15 @@ impl CompareState {
         let before_label = model.before.label_or("Before");
         let after_label = model.after.label_or("After");
         let view = if self.mode == Mode::SideBySide {
-            let consent = self
-                .waits_for_consent()
-                .then(|| (self.mode, self.split, true, emit.clone()));
+            let consent = self.waits_for_consent().then(|| Interaction {
+                mode: self.mode,
+                split: self.split,
+                showing_after: self.showing_after,
+                consent: true,
+                before: before_label.clone(),
+                after: after_label.clone(),
+                emit: emit.clone(),
+            });
             let width = available_width.min(max_width * 2.0 + 8.0);
             let half = ((width - 8.0) / 2.0).max(0.0);
             UiBox::new()
@@ -366,6 +389,15 @@ impl CompareState {
         } else {
             let width = available_width.min(max_width);
             let height = width / aspect;
+            let interaction = Interaction {
+                mode: self.mode,
+                split: self.split,
+                showing_after: self.showing_after,
+                consent: self.waits_for_consent(),
+                before: before_label.clone(),
+                after: after_label.clone(),
+                emit: emit.clone(),
+            };
             let mut layers = Vec::new();
             match self.mode {
                 Mode::Slider => {
@@ -430,12 +462,7 @@ impl CompareState {
                 aspect,
                 UiBox::new().build(),
                 layers,
-                Some((
-                    self.mode,
-                    self.split,
-                    self.waits_for_consent(),
-                    emit.clone(),
-                )),
+                Some(interaction),
             );
             frame.with_key(format!("{id}-frame"))
         };
@@ -730,7 +757,7 @@ fn frame(
     aspect: f32,
     base: aqua_ui::element::Element,
     layers: Vec<aqua_ui::element::Element>,
-    interactive: Option<(Mode, f32, bool, Rc<dyn Fn(Action)>)>,
+    interactive: Option<Interaction>,
 ) -> aqua_ui::element::Element {
     use aqua_ui::{input::EventPhase, style::Style};
     let mut children = vec![base];
@@ -740,13 +767,49 @@ fn frame(
             .width(aqua_ui::style::Length::Px(width))
             .height(aqua_ui::style::Length::Px(width / aspect)),
     );
-    let Some((mode, split, consent, emit)) = interactive else {
+    let Some(interaction) = interactive else {
         return root;
     };
+    let Interaction {
+        mode,
+        split,
+        consent,
+        ref emit,
+        ..
+    } = interaction;
+    let emit = Rc::clone(emit);
     let press = Rc::clone(&emit);
     let drag = Rc::clone(&emit);
     let release = Rc::clone(&emit);
-    root.focusable(true)
+    let request = Rc::clone(&emit);
+    let activate = Rc::clone(&emit);
+    described(root, &interaction)
+        .on_accessibility_request(move |access| {
+            let action = match access {
+                aqua_ui::tree::AccessibilityRequest::SetValue(percent) => {
+                    Action::Split((percent / 100.0) as f32)
+                }
+                aqua_ui::tree::AccessibilityRequest::Increment => Action::Key {
+                    key: Key::Named(NamedKey::Right),
+                    shift: false,
+                },
+                aqua_ui::tree::AccessibilityRequest::Decrement => Action::Key {
+                    key: Key::Named(NamedKey::Left),
+                    shift: false,
+                },
+                aqua_ui::tree::AccessibilityRequest::ShowContextMenu => return,
+            };
+            request(action);
+        })
+        .on_accessibility_activate(move || {
+            if consent || mode == Mode::Toggle {
+                activate(Action::Key {
+                    key: Key::Named(NamedKey::Enter),
+                    shift: false,
+                });
+            }
+        })
+        .focusable(true)
         .cursor(if consent || mode == Mode::Toggle {
             aqua_core::CursorIcon::Pointer
         } else {
@@ -822,6 +885,48 @@ fn frame(
                 ..InputResponse::handled()
             }
         })
+}
+
+fn described(
+    root: aqua_ui::element::Element,
+    interaction: &Interaction,
+) -> aqua_ui::element::Element {
+    let Interaction {
+        mode,
+        split,
+        showing_after,
+        consent,
+        before,
+        after,
+        ..
+    } = interaction;
+    let percent = f64::from(*split) * 100.0;
+    let range = aqua_core::NumericRangeSemantics {
+        min: 0.0,
+        max: 100.0,
+        value: percent,
+        step: 5.0,
+    };
+    match (consent, mode) {
+        (true, _) => root
+            .role(aqua_core::Role::Button)
+            .aria_label(format!("Compare {before} and {after}. Load remote images")),
+        (false, Mode::Slider) => root
+            .role(aqua_core::Role::Slider)
+            .aria_label(format!("Split between {before} and {after}"))
+            .aria_range(range)
+            .aria_value(format!("{percent:.0}% {before}")),
+        (false, Mode::Blend) => root
+            .role(aqua_core::Role::Slider)
+            .aria_label(format!("Blend from {before} to {after}"))
+            .aria_range(range)
+            .aria_value(format!("{percent:.0}% {after}")),
+        (false, Mode::Toggle) => root
+            .role(aqua_core::Role::Switch)
+            .aria_label(format!("Show {after} instead of {before}"))
+            .aria_checked(*showing_after),
+        (false, Mode::SideBySide) => root,
+    }
 }
 
 #[cfg(test)]
