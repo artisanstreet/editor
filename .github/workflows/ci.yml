@@ -70,6 +70,8 @@ jobs:
           if grep -q 'skipped' dev.log; then echo 'dev launcher tests were skipped' >&2; exit 1; fi
       - name: Vendored highlighting provenance
         run: python3 vendor/highlighting/verify.py
+      - name: Vendored Mermaid provenance
+        run: python3 vendor/mermaid-rs-renderer/verify.py
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 60

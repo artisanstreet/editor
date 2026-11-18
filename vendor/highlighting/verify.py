@@ -9,7 +9,7 @@ provenance = json.loads((root / 'PROVENANCE.json').read_text())
 expected = {entry['path']: entry['sha256'] for entry in provenance['retained_files']}
 actual = {
     str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-    for package in ('syntect', 'onig')
+    for package in ('syntect', 'onig', 'onig_sys')
     for path in (root / package).rglob('*')
     if path.is_file()
 }

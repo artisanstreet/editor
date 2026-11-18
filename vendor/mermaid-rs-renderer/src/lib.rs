@@ -73,23 +73,10 @@
 //! - Pure Rust, no browser or Node.js required
 //! - ~3ms cold start vs ~2500ms for mermaid-cli
 //! - ~15MB memory vs ~300MB for mermaid-cli
-//! - SVG and PNG output (PNG via resvg)
+//! - SVG output
 //! - Customizable themes and layout configuration
 //!
-//! ## Cargo Features
-//!
-//! - **`cli`** (default) - CLI binary support. Disable for library-only usage.
-//! - **`png`** (default) - PNG output via resvg. Disable for SVG-only usage.
-//!
-//! For minimal dependencies (e.g., embedding in other tools like Zola):
-//!
-//! ```toml
-//! [dependencies]
-//! mermaid-rs-renderer = { version = "0.2.2", default-features = false }
-//! ```
 
-#[cfg(feature = "cli")]
-pub mod cli;
 pub mod config;
 mod edge_geometry;
 pub mod error;
@@ -116,8 +103,6 @@ pub use layout::{
     compute_layout_with_metrics,
 };
 pub use parser::{ParseOutput, parse_mermaid};
-#[cfg(feature = "png")]
-pub use render::write_output_png;
 pub use render::{SvgDimensions, measure_svg_dimensions, render_svg, write_output_svg};
 pub use theme::Theme;
 
@@ -386,9 +371,6 @@ pub fn render_with_detailed_timing(
     })
 }
 
-// Re-export cli::run for the binary
-#[cfg(feature = "cli")]
-pub use cli::run;
 
 #[cfg(test)]
 mod tests {

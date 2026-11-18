@@ -36,6 +36,7 @@ members = [
 exclude = [
     "vendor/highlighting/syntect",
     "vendor/highlighting/onig",
+    "vendor/highlighting/onig_sys",
     "vendor/highlighting/validation",
     "vendor/mermaid-rs-renderer",
 ]
@@ -259,3 +260,4 @@ significant_drop_tightening = "allow"
 [patch.crates-io]
 syntect = { path = "vendor/highlighting/syntect" }
 onig = { path = "vendor/highlighting/onig" }
+onig_sys = { path = "vendor/highlighting/onig_sys" }

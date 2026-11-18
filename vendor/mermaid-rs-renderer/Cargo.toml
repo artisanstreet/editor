@@ -5,11 +5,6 @@ version = "0.3.1"
 license = "MIT"
 description = "Mermaid renderer, vendored without font database, CLI and PNG output"
 
-[features]
-cli = []
-png = []
-default = []
-
 [lib]
 name = "mermaid_rs_renderer"
 path = "src/lib.rs"

@@ -1,6 +1,4 @@
 use crate::config::LayoutConfig;
-#[cfg(feature = "png")]
-use crate::config::RenderConfig;
 use crate::layout::label_placement::{
     edge_endpoint_label_position, edge_label_padding, endpoint_label_padding,
 };
@@ -5811,40 +5809,6 @@ pub fn write_output_svg(svg: &str, output: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "png")]
-pub fn write_output_png(
-    svg: &str,
-    output: &Path,
-    render_cfg: &RenderConfig,
-    theme: &Theme,
-) -> Result<()> {
-    let mut opt = usvg::Options {
-        font_family: primary_font(&theme.font_family),
-        default_size: usvg::Size::from_wh(render_cfg.width, render_cfg.height)
-            .unwrap_or(usvg::Size::from_wh(800.0, 600.0).unwrap()),
-        ..Default::default()
-    };
-
-    opt.fontdb_mut().load_system_fonts();
-
-    let tree = usvg::Tree::from_str(svg, &opt)?;
-    let size = tree.size().to_int_size();
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
-        .ok_or_else(|| anyhow::anyhow!("Failed to allocate pixmap"))?;
-    if let Some(color) = parse_hex_color(&theme.background) {
-        pixmap.fill(color);
-    }
-
-    let mut pixmap_mut = pixmap.as_mut();
-    resvg::render(
-        &tree,
-        resvg::tiny_skia::Transform::default(),
-        &mut pixmap_mut,
-    );
-    pixmap.save_png(output)?;
-    Ok(())
-}
-
 fn escape_xml(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -5852,38 +5816,6 @@ fn escape_xml(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
-}
-
-#[cfg(feature = "png")]
-fn parse_hex_color(input: &str) -> Option<resvg::tiny_skia::Color> {
-    let color = input.trim();
-    let hex = color.strip_prefix('#')?;
-    if !hex.is_ascii() {
-        return None;
-    }
-    let (r, g, b, a) = match hex.len() {
-        3 => {
-            let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
-            let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
-            let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
-            (r, g, b, 255)
-        }
-        6 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            (r, g, b, 255)
-        }
-        8 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-            (r, g, b, a)
-        }
-        _ => return None,
-    };
-    Some(resvg::tiny_skia::Color::from_rgba8(r, g, b, a))
 }
 
 fn link_attrs(link: &crate::ir::NodeLink) -> String {
@@ -5972,16 +5904,6 @@ fn arrowhead_svg(point: (f32, f32), angle_deg: f32, stroke: &str, stroke_width: 
         half = half,
         neg_half = -half,
     )
-}
-
-#[cfg(feature = "png")]
-fn primary_font(fonts: &str) -> String {
-    fonts
-        .split(',')
-        .map(|s| s.trim().trim_matches('"'))
-        .find(|s| !s.is_empty())
-        .unwrap_or("Inter")
-        .to_string()
 }
 
 fn shape_svg(node: &crate::layout::NodeLayout, theme: &Theme, config: &LayoutConfig) -> String {
@@ -6608,34 +6530,4 @@ mod tests {
         assert!(svg.contains("h120.00"));
     }
 
-    #[cfg(feature = "png")]
-    #[test]
-    fn parse_hex_color_rejects_multibyte_utf8() {
-        // 3-byte char
-        assert_eq!(parse_hex_color("#\u{1000}"), None);
-        // 2-byte char inside a 6-byte string
-        assert_eq!(parse_hex_color("#a\u{00FF}bcd"), None);
-        // 2-byte char inside an 8-byte string
-        assert_eq!(parse_hex_color("#abcde\u{0100}f"), None);
-    }
-
-    #[cfg(feature = "png")]
-    #[test]
-    fn parse_hex_color_valid_colors() {
-        let c = parse_hex_color("#fff").unwrap();
-        assert_eq!(c.red(), 1.0);
-        assert_eq!(c.green(), 1.0);
-        assert_eq!(c.blue(), 1.0);
-
-        let c = parse_hex_color("#ff0000").unwrap();
-        assert_eq!(c.red(), 1.0);
-        assert_eq!(c.green(), 0.0);
-        assert_eq!(c.blue(), 0.0);
-
-        let c = parse_hex_color("#00ff0080").unwrap();
-        assert_eq!(c.red(), 0.0);
-        assert_eq!(c.green(), 1.0);
-        assert_eq!(c.blue(), 0.0);
-        assert_eq!(c.alpha(), 128.0 / 255.0);
-    }
 }
