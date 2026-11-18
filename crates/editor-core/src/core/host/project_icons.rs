@@ -78,10 +78,13 @@ impl HostData {
         }
     }
     pub fn project_icons_failed(&self) -> bool {
-        self.project_icons
-            .entries
-            .values()
-            .any(|entry| entry.failed)
+        self.project_icons.entries.values().any(|entry| {
+            entry.failed
+                || entry
+                    .hash
+                    .as_ref()
+                    .is_some_and(|hash| matches!(self.image(hash), Some(BlobImage::Failed(_))))
+        })
     }
     pub fn load_project_icon(&mut self, project: &ProjectId) {
         if !self.projects.contains_key(project) || !self.is_live() {
@@ -129,9 +132,16 @@ impl HostData {
             .insert(project, (generation, AbortOnDropHandle::new(task)));
     }
     pub fn retry_project_icons(&mut self) {
+        let mut failed_images = Vec::new();
         for entry in self.project_icons.entries.values_mut() {
             if entry.failed {
                 entry.checked = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+            }
+            failed_images.extend(entry.hash.clone());
+        }
+        for hash in failed_images {
+            if matches!(self.image(&hash), Some(BlobImage::Failed(_))) {
+                self.load_image(hash, true);
             }
         }
         self.pending_events.push(HostEvent::Changed);

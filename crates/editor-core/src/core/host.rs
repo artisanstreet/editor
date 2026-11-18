@@ -356,6 +356,19 @@ impl TestHostTransitions {
             "host closed before the image transition was delivered"
         );
     }
+    pub async fn image_failure(&self, hash: artisan_api::BlobHash, generation: u64, error: &str) {
+        assert!(
+            self.sender
+                .send(HostMessage::Completion(HostCompletion::DecodedImage(
+                    hash,
+                    generation,
+                    Err(error.to_owned()),
+                )))
+                .await
+                .is_ok(),
+            "host closed before the image failure was delivered"
+        );
+    }
 }
 
 #[derive(Clone)]

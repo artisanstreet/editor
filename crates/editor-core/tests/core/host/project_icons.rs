@@ -137,3 +137,60 @@ fn an_evicted_project_icon_frees_its_pixels() {
             .is_none()
     );
 }
+
+#[test]
+fn retrying_project_icons_reloads_an_icon_whose_image_failed() {
+    let mut forge = forge();
+    let host = forge.host.clone();
+    let project = ProjectId("project".into());
+    let sender = forge
+        .core
+        .host(&host)
+        .expect("host")
+        .test_transition_sender();
+    runtime().block_on(sender.event(Event::Project {
+        project: Project {
+            id: project.clone(),
+            path: "/work/project".into(),
+            name: "project".into(),
+            seq: 1,
+            created_at: 0,
+            removed: false,
+        },
+    }));
+    wait_until("the project arrives", Duration::from_secs(10), || {
+        forge.core.drain_with(|_, _| {});
+        forge
+            .core
+            .host(&host)
+            .expect("host")
+            .projects
+            .contains_key(&project)
+    });
+    let icon = BlobHash("icon".into());
+    let generation = forge
+        .core
+        .host_mut(&host)
+        .expect("host")
+        .test_begin_image(icon.clone());
+    runtime().block_on(sender.image_failure(icon.clone(), generation, "connection reset"));
+    wait_until("the icon image fails", Duration::from_secs(10), || {
+        forge.core.drain_with(|_, _| {});
+        matches!(
+            forge.core.host(&host).expect("host").image(&icon),
+            Some(BlobImage::Failed(_))
+        )
+    });
+    let data = forge.core.host_mut(&host).expect("host");
+    data.test_project_icon(project, icon.clone());
+    assert!(
+        data.project_icons_failed(),
+        "the sidebar offers Retry for an icon whose image failed"
+    );
+    data.retry_project_icons();
+    assert!(
+        matches!(data.image(&icon), Some(BlobImage::Loading)),
+        "Retry downloads the failed icon image again"
+    );
+    assert!(!data.project_icons_failed());
+}
