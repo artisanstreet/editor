@@ -1236,20 +1236,29 @@ mod adoption_failure_tests {
     const SKILL: &str =
         "---\nname: recoverable\ndescription: adoption fixture\n---\nKeep every instruction.\n";
 
-    fn permission_failures_are_enforced() -> bool {
+    fn require_enforced_permissions() {
         let status = fs::read_to_string("/proc/self/status").unwrap();
-        if status.lines().any(|line| line.starts_with("Uid:\t0\t")) {
-            eprintln!("permission failure fixture skipped for root privileges");
-            return false;
-        }
-        true
+        assert!(
+            !status.lines().any(|line| line.starts_with("Uid:\t0\t")),
+            "this fixture makes a folder read-only, which root ignores; run it as an unprivileged user"
+        );
+    }
+
+    fn other_filesystem_than(path: &Path) -> tempfile::TempDir {
+        use std::os::unix::fs::MetadataExt as _;
+        let other = tempfile::tempdir_in("/dev/shm")
+            .expect("this fixture needs /dev/shm for a second filesystem");
+        assert_ne!(
+            fs::metadata(other.path()).unwrap().dev(),
+            fs::metadata(path).unwrap().dev(),
+            "this fixture needs /dev/shm on a different filesystem than the temporary directory"
+        );
+        other
     }
 
     #[test]
     fn a_later_backup_failure_restores_every_original_and_allows_normal_retry() {
-        if !permission_failures_are_enforced() {
-            return;
-        }
+        require_enforced_permissions();
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().join("claude");
         let codex = dir.path().join("codex");
@@ -1305,11 +1314,9 @@ mod adoption_failure_tests {
 
     #[test]
     fn cross_device_partial_delete_failure_restores_content_before_retry() {
-        if !permission_failures_are_enforced() {
-            return;
-        }
+        require_enforced_permissions();
         let source_root = tempfile::tempdir().unwrap();
-        let backup_root = tempfile::tempdir_in("/dev/shm").unwrap();
+        let backup_root = other_filesystem_than(source_root.path());
         let source = source_root.path().join("recoverable");
         let backup = backup_root.path().join("backup");
         fs::create_dir(&source).unwrap();
