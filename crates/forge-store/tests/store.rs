@@ -577,7 +577,9 @@ async fn abandoned_pairing_codes_do_not_pile_up() {
 
     let stored: i64 = rusqlite::Connection::open(dir.0.join("forge.sqlite3"))
         .unwrap()
-        .query_row("SELECT count(*) FROM pair_codes", [], |row| row.get(0))
+        .query_row(include_str!("store/count_pair_codes.sql"), [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(stored, 2);
 }
@@ -614,21 +616,21 @@ async fn old_permission_choices_become_auto_or_full() {
     conn.execute_batch(include_str!("fixtures/schema-v3.sql"))
         .unwrap();
     conn.execute(
-        "ATTACH DATABASE ?1 AS seed",
+        include_str!("store/attach_seed.sql"),
         [seed.0.join("forge.sqlite3").to_str().unwrap()],
     )
     .unwrap();
-    conn.execute_batch("INSERT INTO projects SELECT id,seq,body FROM seed.projects; INSERT INTO threads SELECT id,seq,body FROM seed.threads; DETACH DATABASE seed;").unwrap();
+    conn.execute_batch(include_str!("store/copy_seed.sql"))
+        .unwrap();
     for (thread, approvals) in [(&asks, "on_request"), (&never_asks, "never")] {
         conn.execute(
-            "UPDATE threads SET body = json_set(json_remove(body, '$.config.permissions'),
-                 '$.config.access', 'workspace', '$.config.approvals', ?2) WHERE id = ?1",
+            include_str!("store/legacy_thread_permissions.sql"),
             rusqlite::params![thread.to_string(), approvals],
         )
         .unwrap();
     }
     conn.execute(
-        "INSERT OR REPLACE INTO kv (key, seq, value) VALUES ('default_engine_config', 0, ?1)",
+        include_str!("store/legacy_default_config.sql"),
         [r#"{"engine":"codex","model":null,"effort":null,"access":"full","approvals":"never","options":{}}"#],
     )
     .unwrap();
@@ -799,10 +801,10 @@ async fn a_checkpoint_a_reader_held_back_finishes_once_the_reader_lets_go() {
     let logical = || {
         let conn = rusqlite::Connection::open(&database).unwrap();
         let pages: u64 = conn
-            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .query_row(include_str!("store/page_count.sql"), [], |row| row.get(0))
             .unwrap();
         let size: u64 = conn
-            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .query_row(include_str!("store/page_size.sql"), [], |row| row.get(0))
             .unwrap();
         pages * size
     };
@@ -810,7 +812,7 @@ async fn a_checkpoint_a_reader_held_back_finishes_once_the_reader_lets_go() {
     let reader = rusqlite::Connection::open(&database).unwrap();
     reader.execute_batch("BEGIN").unwrap();
     let _: i64 = reader
-        .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
+        .query_row(include_str!("store/count_items.sql"), [], |row| row.get(0))
         .unwrap();
     for index in 0..600 {
         store
@@ -933,11 +935,8 @@ async fn pairing_failure_does_not_consume_the_invitation() {
         .await
         .unwrap();
     let conn = rusqlite::Connection::open(dir.0.join("forge.sqlite3")).unwrap();
-    conn.execute_batch(
-        "CREATE TRIGGER reject_device BEFORE INSERT ON authorized_keys
-        BEGIN SELECT RAISE(ABORT, 'injected device failure'); END;",
-    )
-    .unwrap();
+    conn.execute_batch(include_str!("store/reject_device_trigger.sql"))
+        .unwrap();
     assert!(
         store
             .pair_device("invite".into(), "Laptop".into(), "certificate".into())

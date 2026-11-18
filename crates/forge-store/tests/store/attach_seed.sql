@@ -1,0 +1,1 @@
+ATTACH DATABASE ?1 AS seed;

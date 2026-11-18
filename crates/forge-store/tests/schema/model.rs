@@ -12,18 +12,16 @@ fn remembered_model_configs_keep_full_access() {
             "access":"full","approvals":"on_request","options":{"permission_mode":"auto"}},
     });
     conn.execute(
-        "INSERT INTO kv VALUES ('model_engine_configs',7,?1)",
+        include_str!("model/insert_model_configs.sql"),
         [configs.to_string()],
     )
     .unwrap();
     migrate(&mut conn).unwrap();
     migrate(&mut conn).unwrap();
     let (seq, value): (i64, String) = conn
-        .query_row(
-            "SELECT seq,value FROM kv WHERE key='model_engine_configs'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        .query_row(include_str!("model/model_configs.sql"), [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .unwrap();
     let value: Value = serde_json::from_str(&value).unwrap();
     let config = |model: &str| {

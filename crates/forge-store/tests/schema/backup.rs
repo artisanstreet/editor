@@ -9,11 +9,8 @@ fn open(path: &Path) -> Connection {
 }
 
 fn remember(conn: &Connection, key: &str) {
-    conn.execute(
-        "INSERT INTO kv (key, seq, value) VALUES (?1, 0, '\"kept\"')",
-        [key],
-    )
-    .expect("write a setting");
+    conn.execute(include_str!("backup/remember.sql"), [key])
+        .expect("write a setting");
 }
 
 fn version(path: &Path) -> usize {
@@ -26,7 +23,7 @@ fn version(path: &Path) -> usize {
 fn keys(path: &Path) -> Vec<String> {
     let conn = Connection::open(path).expect("open the database");
     let mut select = conn
-        .prepare("SELECT key FROM kv ORDER BY key")
+        .prepare(include_str!("backup/keys.sql"))
         .expect("prepare");
     select
         .query_map([], |row| row.get(0))

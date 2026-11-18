@@ -94,23 +94,21 @@ async fn large_item_emits_once_reuses_source_and_ranges_ignore_item_json() {
     assert!(serde_json::to_vec(&page).unwrap().len() < 4096);
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM content", [], |row| row
+        conn.query_row(include_str!("content/count_content.sql"), [], |row| row
             .get::<_, u64>(0))
             .unwrap(),
         1
     );
     assert_eq!(
-        conn.query_row("SELECT count(*) FROM item_content", [], |row| row
-            .get::<_, u64>(0))
-            .unwrap(),
+        conn.query_row(include_str!("content/count_item_content.sql"), [], |row| {
+            row.get::<_, u64>(0)
+        })
+        .unwrap(),
         1
     );
     // Source reads depend only on the indexed chunk table, not Item decoding.
-    conn.execute(
-        "UPDATE items SET body='{\"invalid_item_schema\":true}' WHERE id=?1",
-        [last.id.as_str()],
-    )
-    .unwrap();
+    conn.execute(include_str!("content/corrupt_item.sql"), [last.id.as_str()])
+        .unwrap();
     let mut reconstructed = String::new();
     let mut offset = 0;
     while offset < source.bytes {
@@ -187,7 +185,7 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
     drop(store);
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
     conn.execute(
-        "UPDATE items SET body=?2 WHERE id=?1",
+        include_str!("content/replace_item_body.sql"),
         rusqlite::params![item.id.as_str(), serde_json::to_string(&legacy).unwrap()],
     )
     .unwrap();
@@ -305,7 +303,7 @@ async fn goal_summary_reads_a_bounded_prefix_and_preserves_full_source_identity(
     };
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
     conn.execute(
-        "DELETE FROM content_chunks WHERE content_id=?1 AND start>1024",
+        include_str!("content/drop_tail_chunks.sql"),
         [source.id.as_str()],
     )
     .unwrap();

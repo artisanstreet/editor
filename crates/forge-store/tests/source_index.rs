@@ -142,7 +142,7 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
     let metadata_id = page.index.metadata.id.as_str();
     assert_eq!(
         conn.query_row(
-            "SELECT COUNT(*) FROM content_dependencies WHERE parent_id=?1 AND child_id=?2",
+            include_str!("source_index/count_dependency.sql"),
             [source.id.as_str(), metadata_id],
             |row| row.get::<_, u64>(0)
         )
@@ -150,7 +150,7 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         1
     );
     let first_count: u64 = conn
-        .query_row("SELECT COUNT(*) FROM source_index_leaves", [], |row| {
+        .query_row(include_str!("source_index/count_leaves.sql"), [], |row| {
             row.get(0)
         })
         .unwrap();
@@ -167,14 +167,15 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM source_index_leaves", [], |row| row
+        conn.query_row(include_str!("source_index/count_leaves.sql"), [], |row| row
             .get::<_, u64>(0))
             .unwrap(),
         first_count,
         "cached immutable topology is not duplicated"
     );
     // Item JSON corruption cannot make topology reads deserialize its owner.
-    conn.execute("UPDATE items SET body='{}'", []).unwrap();
+    conn.execute(include_str!("source_index/corrupt_items.sql"), [])
+        .unwrap();
     assert!(
         store
             .source_index(
@@ -215,24 +216,29 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
             .await
             .is_err()
     );
-    conn.execute("DELETE FROM items", []).unwrap();
-    conn.execute("DELETE FROM content WHERE id=?1", [source.id.as_str()])
+    conn.execute(include_str!("source_index/delete_items.sql"), [])
         .unwrap();
+    conn.execute(
+        include_str!("source_index/delete_content.sql"),
+        [source.id.as_str()],
+    )
+    .unwrap();
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM source_index_leaves", [], |row| row
+        conn.query_row(include_str!("source_index/count_leaves.sql"), [], |row| row
             .get::<_, u64>(0))
             .unwrap(),
         0
     );
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM source_indexes", [], |row| row
-            .get::<_, u64>(0))
-            .unwrap(),
+        conn.query_row(include_str!("source_index/count_indexes.sql"), [], |row| {
+            row.get::<_, u64>(0)
+        })
+        .unwrap(),
         0
     );
     assert!(
         conn.query_row(
-            "SELECT unreferenced_at FROM content WHERE id=?1",
+            include_str!("source_index/unreferenced_at.sql"),
             [metadata_id],
             |row| row.get::<_, Option<i64>>(0)
         )
@@ -382,7 +388,7 @@ async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
     // Both interpretations share content chunks and dependency ownership.
     let count: u64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM source_indexes WHERE source_id=?1",
+            include_str!("source_index/count_source_indexes.sql"),
             [source.id.as_str()],
             |r| r.get(0),
         )
