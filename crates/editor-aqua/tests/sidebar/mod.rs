@@ -600,6 +600,46 @@ fn settlement_moves_to_history_and_new_activity_returns_to_inbox() {
 }
 
 #[test]
+fn scrolling_history_to_its_end_loads_older_threads_after_the_inbox_reports_its_own_position() {
+    use editor_aqua::sidebar::geometry::{PageState, PaneDistances, PaneViewports, ThreadPane};
+
+    let state = PageState {
+        loading: false,
+        loaded: true,
+        failed: false,
+        scrolled: true,
+        at_latest: true,
+        has_older: true,
+        history_open: true,
+        history_empty: false,
+    };
+    let mut viewports = PaneViewports::default();
+    viewports.report(
+        ThreadPane::History,
+        PaneDistances {
+            viewport_height: 300.0,
+            above: 900.0,
+            below: 0.0,
+        },
+    );
+    viewports.report(
+        ThreadPane::Inbox,
+        PaneDistances {
+            viewport_height: 400.0,
+            above: 0.0,
+            below: 2000.0,
+        },
+    );
+    assert_eq!(
+        viewports.direction(state),
+        Some(PageDirection::Older),
+        "the inbox's position must not replace where History was scrolled"
+    );
+    viewports.forget(ThreadPane::History);
+    assert_eq!(viewports.direction(state), None);
+}
+
+#[test]
 fn message_search_results_do_not_follow_a_switch_to_another_host() {
     use artisan_api::{
         ItemId, TextHit,

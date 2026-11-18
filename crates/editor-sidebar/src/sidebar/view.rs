@@ -11,6 +11,7 @@ use editor_assets::AssetId;
 
 use super::{
     controller::{PickerIdentity, Sidebar, ThreadMenu},
+    geometry::ThreadPane,
     row::{MenuAction, menu_actions},
 };
 use editor_core::{Core, HostId, HostInstance, Screen};
@@ -92,6 +93,7 @@ pub enum ViewAction {
     ThreadViewport {
         host: HostId,
         instance: HostInstance,
+        pane: ThreadPane,
         viewport: aqua_ui::collection_runtime::CollectionViewport,
         visible_projects: Vec<ProjectId>,
     },
@@ -161,11 +163,19 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
         ViewAction::ThreadViewport {
             host,
             instance,
+            pane,
             viewport,
             visible_projects,
         } => {
             let before = visible_load_state(sidebar, core);
-            sidebar.report_thread_viewport(core, host, *instance, *viewport, visible_projects);
+            sidebar.report_thread_viewport(
+                core,
+                host,
+                *instance,
+                *pane,
+                *viewport,
+                visible_projects,
+            );
             return before != visible_load_state(sidebar, core);
         }
         ViewAction::ThreadWheel { host, instance } => {
@@ -377,10 +387,18 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
         ViewAction::ThreadViewport {
             host,
             instance,
+            pane,
             viewport,
             visible_projects,
         } => {
-            sidebar.report_thread_viewport(core, &host, instance, viewport, &visible_projects);
+            sidebar.report_thread_viewport(
+                core,
+                &host,
+                instance,
+                pane,
+                viewport,
+                &visible_projects,
+            );
         }
         ViewAction::ThreadWheel { host, instance } => {
             if sidebar
@@ -725,7 +743,7 @@ fn thread_entries(
     core: &Core,
     viewport_height: f32,
     entries: Vec<super::geometry::Entry>,
-    scroller: &'static str,
+    pane: ThreadPane,
     render: Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
@@ -787,12 +805,13 @@ fn thread_entries(
                 viewport_emit(ViewAction::ThreadViewport {
                     host: viewport_host.clone(),
                     instance,
+                    pane,
                     viewport,
                     visible_projects,
                 });
             })
             .build()
-            .with_key(scroller)
+            .with_key(pane.scroller())
             .on_input(InputKind::Scroll, EventPhase::Bubble, move |_| {
                 wheel_emit(ViewAction::ThreadWheel {
                     host: host_id.clone(),
@@ -832,7 +851,7 @@ pub fn thread_list_view(
         theme,
         viewport_height,
         super::geometry::entries(&sidebar.lists, sidebar.history_visible()),
-        "sidebar-threads",
+        ThreadPane::Inbox,
         visuals,
         emit,
     )
@@ -844,7 +863,7 @@ pub fn thread_entries_view(
     theme: ArtisanTheme,
     viewport_height: f32,
     entries: Vec<super::geometry::Entry>,
-    scroller: &'static str,
+    pane: ThreadPane,
     visuals: ThreadVisualFactory,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
@@ -972,7 +991,7 @@ pub fn thread_entries_view(
         core,
         viewport_height,
         row_entries,
-        scroller,
+        pane,
         renderer,
         emit,
     )

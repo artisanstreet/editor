@@ -7,7 +7,7 @@ use editor_core::delivery::Delivery;
 use editor_core::host::ThreadPageDirection;
 use editor_core::{CompletionKey, CompletionSlot, Core, HostId, HostInstance, Screen};
 
-use super::geometry::{PageDirection, PagePosition, page_direction};
+use super::geometry::{PageDirection, PageState, PaneDistances, PaneViewports, ThreadPane};
 use super::list::{Lists, lists};
 use super::picker::FolderPicker;
 use super::row::rename_value;
@@ -89,7 +89,7 @@ pub struct Sidebar {
     working_pulses: std::rc::Rc<
         std::cell::RefCell<std::collections::HashMap<ThreadId, editor_ui::motion::WorkingPulse>>,
     >,
-    pub thread_viewport: Option<aqua_ui::collection_runtime::CollectionViewport>,
+    thread_viewports: PaneViewports,
     pub error: Option<String>,
     pub menu: Option<ThreadMenu>,
     pub menu_generation: u64,
@@ -274,7 +274,7 @@ impl Sidebar {
             settings_motion: super::settings_nav::NavMotion::default(),
             threads_edges: editor_ui::scroll_edge::ScrollEdges::default(),
             working_pulses: std::rc::Rc::default(),
-            thread_viewport: None,
+            thread_viewports: PaneViewports::default(),
             error: None,
             menu: None,
             menu_generation: 0,
@@ -370,7 +370,7 @@ impl Sidebar {
             self.menu = None;
             self.rename = None;
             self.error = None;
-            self.thread_viewport = None;
+            self.thread_viewports = PaneViewports::default();
             self.text_search.cancel();
             self.text_hits = None;
         }
@@ -659,10 +659,7 @@ impl Sidebar {
         });
     }
 
-    pub fn slide_threads(&self, core: &mut Core, position: &PagePosition) {
-        let Some(direction) = page_direction(position) else {
-            return;
-        };
+    fn slide_threads(&self, core: &mut Core, direction: PageDirection) {
         let Some(host) = self
             .host
             .as_ref()
@@ -685,6 +682,7 @@ impl Sidebar {
         core: &mut Core,
         host_id: &HostId,
         instance: HostInstance,
+        pane: ThreadPane,
         viewport: aqua_ui::collection_runtime::CollectionViewport,
         visible_projects: &[ProjectId],
     ) {
@@ -694,23 +692,24 @@ impl Sidebar {
         {
             return;
         }
-        self.thread_viewport = Some(viewport);
+        self.thread_viewports.report(
+            pane,
+            PaneDistances {
+                viewport_height: viewport.viewport_height,
+                above: viewport.distance_from_start,
+                below: viewport.distance_from_end,
+            },
+        );
         self.load_visible_projects(core, visible_projects);
         self.page_at_viewport(core, false);
     }
 
     pub fn page_at_viewport(&self, core: &mut Core, scrolled: bool) {
-        let Some(viewport) = self.thread_viewport else {
-            return;
-        };
         let Some(host) = self.host_data(core) else {
             return;
         };
         let page = host.thread_page(false);
-        let position = PagePosition {
-            viewport_height: viewport.viewport_height,
-            above: viewport.distance_from_start,
-            below: viewport.distance_from_end,
+        let direction = self.thread_viewports.direction(PageState {
             loading: page.is_loading(),
             loaded: page.is_loaded(),
             failed: page.error().is_some(),
@@ -719,13 +718,18 @@ impl Sidebar {
             has_older: page.has_older(),
             history_open: self.history_open,
             history_empty: self.lists.history.is_empty(),
-        };
-        self.slide_threads(core, &position);
+        });
+        if let Some(direction) = direction {
+            self.slide_threads(core, direction);
+        }
     }
 
     pub fn toggle_history(&mut self, core: &mut Core) {
         self.history_motion = Some((std::time::Instant::now(), self.history_fraction));
         self.history_open = !self.history_open;
+        if !self.history_open {
+            self.thread_viewports.forget(ThreadPane::History);
+        }
         if !self.history_open
             && let Some(host) = self
                 .host

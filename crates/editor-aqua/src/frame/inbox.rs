@@ -1,6 +1,7 @@
 use crate::core::Core;
 use crate::sidebar::{
     controller::Sidebar,
+    geometry::ThreadPane,
     view::{self, ViewAction},
 };
 use crate::ui::kit::TextRole;
@@ -56,7 +57,7 @@ pub fn view(
         theme,
         height,
         inbox_entries,
-        "sidebar-threads",
+        ThreadPane::Inbox,
         visuals.clone(),
         Rc::clone(&emit),
     );
@@ -105,7 +106,7 @@ pub fn view(
             theme,
             history_height,
             history_entries,
-            "sidebar-history-threads",
+            ThreadPane::History,
             visuals,
             Rc::clone(&emit),
         );

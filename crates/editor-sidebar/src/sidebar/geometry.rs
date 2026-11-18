@@ -159,6 +159,84 @@ pub struct PagePosition {
     pub history_empty: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageState {
+    pub loading: bool,
+    pub loaded: bool,
+    pub failed: bool,
+    pub scrolled: bool,
+    pub at_latest: bool,
+    pub has_older: bool,
+    pub history_open: bool,
+    pub history_empty: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadPane {
+    Inbox,
+    History,
+}
+
+impl ThreadPane {
+    pub const fn scroller(self) -> &'static str {
+        match self {
+            Self::Inbox => "sidebar-threads",
+            Self::History => "sidebar-history-threads",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneDistances {
+    pub viewport_height: f32,
+    pub above: f32,
+    pub below: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PaneViewports {
+    inbox: Option<PaneDistances>,
+    history: Option<PaneDistances>,
+}
+
+impl PaneViewports {
+    const fn slot(&mut self, pane: ThreadPane) -> &mut Option<PaneDistances> {
+        match pane {
+            ThreadPane::Inbox => &mut self.inbox,
+            ThreadPane::History => &mut self.history,
+        }
+    }
+
+    pub const fn report(&mut self, pane: ThreadPane, distances: PaneDistances) {
+        *self.slot(pane) = Some(distances);
+    }
+
+    pub const fn forget(&mut self, pane: ThreadPane) {
+        *self.slot(pane) = None;
+    }
+
+    pub fn direction(&self, state: PageState) -> Option<PageDirection> {
+        self.inbox
+            .into_iter()
+            .chain(self.history)
+            .find_map(|distances| {
+                page_direction(&PagePosition {
+                    viewport_height: distances.viewport_height,
+                    above: distances.above,
+                    below: distances.below,
+                    loading: state.loading,
+                    loaded: state.loaded,
+                    failed: state.failed,
+                    scrolled: state.scrolled,
+                    at_latest: state.at_latest,
+                    has_older: state.has_older,
+                    history_open: state.history_open,
+                    history_empty: state.history_empty,
+                })
+            })
+    }
+}
+
 pub fn page_direction(page: &PagePosition) -> Option<PageDirection> {
     if page.viewport_height <= 0.0
         || page.loading
