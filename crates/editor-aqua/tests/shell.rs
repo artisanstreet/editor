@@ -27,6 +27,8 @@ mod gating;
 mod host;
 #[path = "shell/lifetime.rs"]
 mod lifetime;
+#[path = "shell/link_failure.rs"]
+mod link_failure;
 #[path = "shell/live_throttle.rs"]
 mod live_throttle;
 #[path = "shell/menu_keys.rs"]

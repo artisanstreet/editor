@@ -111,6 +111,7 @@ pub struct RootViews {
     #[cfg(feature = "qualification")]
     qualification_paint: crate::qualification::observation::PaintCollector,
     settings: Option<crate::ui::dialog::DialogHost>,
+    link_failure: crate::shell::link_failure::LinkFailureDialog,
     settings_panel: Option<(Element, f32)>,
     settings_dismissed: Rc<Cell<bool>>,
     workspace_key: Option<u64>,
@@ -1481,6 +1482,8 @@ impl RootViews {
                             error = %::diagnostics::chain(&error),
                             "could not open URL"
                         );
+                        self.link_failure.show(url, &error);
+                        changed = true;
                     }
                 }
                 ConversationAction::Color(scope, request) => {
@@ -2302,6 +2305,7 @@ impl RootViews {
                             error = %::diagnostics::chain(&error),
                             "could not open repository URL"
                         );
+                        self.link_failure.show(url, &error);
                     }
                 }
                 Command::Settle {
@@ -2926,6 +2930,7 @@ impl SectionViews for RootViews {
             }
             self.close_palette(ui);
             self.close_resource(ui);
+            self.link_failure.close(ui);
             self.workspace_key = None;
             self.settings_panel = None;
             return Ok(entry);
@@ -3377,6 +3382,7 @@ impl SectionViews for RootViews {
         })();
         self.mount_palette(shell, ui);
         self.mount_resource(shell, ui);
+        self.link_failure.mount(ui, shell.preferences.theme());
         if self.sync_image_preview(shell, ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_preview");
             self.conversation_invalidated.set(true);
@@ -3885,11 +3891,20 @@ impl SectionViews for RootViews {
             | self.dispatch_resource(shell, ui, ctx)
             | self.dispatch_conversation(shell, ui, ctx, window)
             | self.sync_sidebar(shell, ui, ctx, window);
+        let link_changed = match self.link_failure.drain(ui) {
+            Some(crate::shell::link_failure::Effect::CopyUrl(url)) => {
+                if let Err(error) = ctx.clipboard().set_text(url) {
+                    tracing::warn!(%error, "could not copy the link that failed to open");
+                }
+                true
+            }
+            None => false,
+        };
         if self.settings_dismissed.replace(false) {
             shell.core.close_settings();
             true
         } else {
-            palette_changed
+            palette_changed | link_changed
         }
     }
 }
