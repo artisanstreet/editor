@@ -1,11 +1,11 @@
 use crate::conversation::content::SourceField;
-use editor_ui::kit::{IconSize, Space, Spaced, TextRole};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::AlignItems;
 use aqua_ui::element::{Box as UiBox, Element};
 use aqua_ui::style::{Length, Style};
 use artisan_api::{Item, ItemKind, NoticeKind, TextContent};
 use editor_assets::AssetId;
+use editor_ui::kit::{IconSize, Space, Spaced, TextRole};
+use editor_ui::theme::ArtisanTheme;
 
 pub fn render<E>(
     item: &Item,
@@ -25,6 +25,7 @@ pub fn render<E>(
         ),
         NoticeKind::Info => (AssetId::TABLER_BELL, String::new()),
         NoticeKind::YouShouldKnow { .. } => (AssetId::TABLER_SPARKLES, String::new()),
+        NoticeKind::Unsandboxed { .. } => (AssetId::TABLER_SHIELD_LOCK, String::new()),
     };
     let muted = theme.colors.text_muted.to_reference_text_color();
     let content = match text {

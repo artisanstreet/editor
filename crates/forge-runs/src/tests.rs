@@ -39,6 +39,8 @@ mod resume;
 mod retention_tests;
 #[path = "../tests/runtime/registry.rs"]
 mod runtime_registry;
+#[path = "../tests/sandbox/coverage.rs"]
+mod sandbox_coverage;
 #[path = "../tests/scratch/folders.rs"]
 mod scratch_folders;
 use artisan_api::{
@@ -133,7 +135,19 @@ async fn fixture_with_parts(
     harness_for: HarnessFor,
     disk: disk::Probe,
 ) -> Fixture {
-    fixture_in(engine, harness_for, disk, false).await
+    fixture_in(engine, harness_for, disk, sandbox::Host::Enforced, false).await
+}
+
+async fn fixture_on_host(script: Script, host: sandbox::Host) -> Fixture {
+    let harness: Arc<dyn Harness> = Arc::new(Scripted(script));
+    fixture_in(
+        EngineId::Claude,
+        Arc::new(move |_| Arc::clone(&harness)),
+        disk::Probe::system(),
+        host,
+        false,
+    )
+    .await
 }
 
 async fn fixture_in_generation(script: Script) -> Fixture {
@@ -142,6 +156,7 @@ async fn fixture_in_generation(script: Script) -> Fixture {
         EngineId::Claude,
         Arc::new(move |_| Arc::clone(&harness)),
         disk::Probe::system(),
+        sandbox::Host::Enforced,
         true,
     )
     .await
@@ -151,6 +166,7 @@ async fn fixture_in(
     engine: EngineId,
     harness_for: HarnessFor,
     disk: disk::Probe,
+    host: sandbox::Host,
     managed: bool,
 ) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
@@ -174,7 +190,15 @@ async fn fixture_in(
         generation.set_phase(runtime::Phase::Active);
         generation
     });
-    let hub = Hub::build(store, engines, data.clone(), harness_for, disk, generation);
+    let hub = Hub::build(
+        store,
+        engines,
+        data.clone(),
+        harness_for,
+        disk,
+        host,
+        generation,
+    );
     let project = hub
         .store()
         .create_project(CreateProject {

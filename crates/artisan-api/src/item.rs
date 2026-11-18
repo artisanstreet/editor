@@ -528,6 +528,19 @@ pub enum NoticeKind {
         /// than something to understand.
         heads_up: bool,
     },
+    Unsandboxed {
+        reason: UnsandboxedReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnsandboxedReason {
+    KernelWithoutLandlock,
+    Windows,
+    MacOs,
+    OtherOs,
+    StartedWithFullAccess,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

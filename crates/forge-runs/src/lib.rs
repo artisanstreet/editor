@@ -38,6 +38,7 @@ pub mod resources;
 mod retention;
 mod run;
 pub mod runtime;
+mod sandbox;
 mod scratch;
 mod side;
 
@@ -125,6 +126,7 @@ struct Inner {
     approvals: Mutex<HashMap<ItemId, approvals::OwnApproval>>,
     /// How runs read the free space where they work.
     disk: disk::Probe,
+    sandbox: sandbox::Host,
 }
 
 const RUN_CAPACITY: usize = 8;
@@ -241,6 +243,7 @@ impl Hub {
             data_dir,
             harness_for,
             disk::Probe::system(),
+            forge_isolation::support().into(),
             None,
         )
     }
@@ -258,6 +261,7 @@ impl Hub {
             data_dir,
             harness_for,
             disk::Probe::system(),
+            forge_isolation::support().into(),
             Some(generation),
         )
     }
@@ -272,6 +276,7 @@ impl Hub {
         data_dir: PathBuf,
         harness_for: HarnessFor,
         disk: disk::Probe,
+        sandbox: sandbox::Host,
         generation: Option<runtime::Generation>,
     ) -> Self {
         let extensions = Extensions::new(store.clone(), engines.clone(), data_dir.clone());
@@ -301,6 +306,7 @@ impl Hub {
                 agent_waiters: Mutex::new(HashMap::new()),
                 approvals: Mutex::new(HashMap::new()),
                 disk,
+                sandbox,
             }),
         };
         hub.forward_engine_status();

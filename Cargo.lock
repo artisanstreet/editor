@@ -2322,6 +2322,7 @@ dependencies = [
  "dirs",
  "forge-content",
  "forge-engines",
+ "forge-isolation",
  "forge-store",
  "fs2",
  "futures",

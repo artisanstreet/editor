@@ -520,6 +520,11 @@ async fn execute(
     // Preserve the effective launch choices, including the account's Claude
     // transport and any normalized model settings, for later handoff forks.
     run.config = Some(turn.config.clone());
+    let mut coverage = crate::sandbox::Coverage::new(hub.inner.sandbox, turn.config.permissions);
+    if let Some(reason) = coverage.observe(turn.config.permissions) {
+        announce_unsandboxed(hub, &run.thread_id, &run.id, reason).await;
+    }
+    let (covered_thread, covered_run) = (run.thread_id.clone(), run.id.clone());
     // A send can land after the live slot is claimed but before pending inputs
     // are read. Filter that same ID from the steer channel exactly once.
     let mut delivered: HashSet<_> = initial_ids.iter().cloned().collect();
@@ -562,6 +567,9 @@ async fn execute(
                 }
                 let waiting = match &input {
                     Input::SetPermissions(permissions) => {
+                        if let Some(reason) = coverage.observe(*permissions) {
+                            announce_unsandboxed(hub, &covered_thread, &covered_run, reason).await;
+                        }
                         approvals_lock(&approvals).set(*permissions)
                     }
                     Input::Steer(_) | Input::Answer { .. } | Input::ClearGoal => Vec::new(),
@@ -805,6 +813,35 @@ async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) 
         );
     }
     true
+}
+
+async fn announce_unsandboxed(
+    hub: &Hub,
+    thread: &ThreadId,
+    run: &RunId,
+    reason: artisan_api::UnsandboxedReason,
+) {
+    let notice = new_item(
+        ItemId::new(),
+        thread,
+        Some(run),
+        None,
+        None,
+        Status::Done,
+        ItemKind::Notice {
+            kind: artisan_api::NoticeKind::Unsandboxed { reason },
+            text: crate::sandbox::notice(reason).into(),
+        },
+    );
+    if let Err(error) = hub.store().upsert_item(notice).await {
+        tracing::warn!(
+            %thread,
+            %run,
+            ?reason,
+            "store the notice that the run isn't sandboxed: {}",
+            diagnostics::chain(&error)
+        );
+    }
 }
 
 pub(crate) async fn prepare(
