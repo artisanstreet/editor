@@ -2222,17 +2222,7 @@ impl ComposerOwner {
             }
             ComposerAction::AxisKey { axis, key } => {
                 if composer.picker.axis == Some(axis) {
-                    if let Some(preview) = composer
-                        .picker
-                        .pane_config(host, composer.effective_config(host))
-                    {
-                        let model = host.engines.get(&preview.engine).and_then(|status| {
-                            preview
-                                .model
-                                .as_ref()
-                                .and_then(|id| status.models.iter().find(|model| &model.id == id))
-                        });
-                        let options = composer.picker.axis_options(axis, &preview, model);
+                    if let Some(options) = axis_options(&composer, host, axis) {
                         let selected = options
                             .iter()
                             .position(|option| option.selected)
@@ -2242,17 +2232,13 @@ impl ComposerOwner {
                                 self.tooltip.borrow_mut().clear();
                                 if let Some(option) = options.into_iter().nth(index) {
                                     if composer.metadata_ready(host) && composer.draft_editable() {
-                                        let config = option.apply;
-                                        composer.apply_permissions(host, config.permissions);
-                                        composer.config = Some(config.clone());
-                                        composer.edited();
                                         let host_id = host.id.clone();
-                                        let instance = host.instance();
-                                        if let Some(host) =
-                                            core.host_mut_if_instance(&host_id, instance)
-                                        {
-                                            host.remember_model_config(config);
-                                        }
+                                        choose_axis_config(
+                                            &mut composer,
+                                            core,
+                                            &host_id,
+                                            option.apply,
+                                        );
                                     }
                                 }
                             }
@@ -2269,33 +2255,12 @@ impl ComposerOwner {
                 if !composer.metadata_ready(host) || !composer.draft_editable() {
                     return effects;
                 }
-                if let Some(preview) = composer
-                    .picker
-                    .pane_config(host, composer.effective_config(host))
+                if let Some(option) = axis_options(&composer, host, axis)
+                    .and_then(|options| options.into_iter().nth(index))
                 {
-                    let model = host.engines.get(&preview.engine).and_then(|status| {
-                        preview
-                            .model
-                            .as_ref()
-                            .and_then(|id| status.models.iter().find(|model| &model.id == id))
-                    });
-                    if let Some(option) = composer
-                        .picker
-                        .axis_options(axis, &preview, model)
-                        .into_iter()
-                        .nth(index)
-                    {
-                        self.tooltip.borrow_mut().clear();
-                        let config = option.apply;
-                        composer.apply_permissions(host, config.permissions);
-                        composer.config = Some(config.clone());
-                        composer.edited();
-                        let host_id = host.id.clone();
-                        let instance = host.instance();
-                        if let Some(host) = core.host_mut_if_instance(&host_id, instance) {
-                            host.remember_model_config(config);
-                        }
-                    }
+                    self.tooltip.borrow_mut().clear();
+                    let host_id = host.id.clone();
+                    choose_axis_config(&mut composer, core, &host_id, option.apply);
                 }
             }
             ComposerAction::ChooseProject(id) => composer.choose_project(id),
@@ -3942,6 +3907,41 @@ pub fn project_tab(
                     .build(),
             ))
         }
+    }
+}
+
+fn axis_options(
+    composer: &super::controller::Composer,
+    host: &editor_core::HostData,
+    axis: super::picker::Axis,
+) -> Option<Vec<super::picker::AxisOption>> {
+    let preview = composer
+        .picker
+        .pane_config(host, composer.effective_config(host))?;
+    let model = host.engines.get(&preview.engine).and_then(|status| {
+        preview
+            .model
+            .as_ref()
+            .and_then(|id| status.models.iter().find(|model| &model.id == id))
+    });
+    Some(composer.picker.axis_options(axis, &preview, model))
+}
+
+fn choose_axis_config(
+    composer: &mut super::controller::Composer,
+    core: &mut editor_core::Core,
+    host_id: &editor_core::HostId,
+    config: artisan_api::EngineConfig,
+) {
+    let host = core
+        .host(host_id)
+        .expect("invariant: the composer's host stays in the store while it dispatches");
+    let instance = host.instance();
+    composer.apply_permissions(host, config.permissions);
+    composer.config = Some(config.clone());
+    composer.edited();
+    if let Some(host) = core.host_mut_if_instance(host_id, instance) {
+        host.remember_model_config(config);
     }
 }
 
