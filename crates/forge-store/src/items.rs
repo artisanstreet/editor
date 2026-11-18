@@ -1,13 +1,14 @@
 //! Items: engine output, accepted input, answers and transcript pages.
 
+use crate::writer::Tx;
 use crate::{
     ItemNotFound, NewItem, PendingInputs, Refused, SendRejected, Store, collection, content,
     fresh_item, read,
 };
 use anyhow::{Context, Result, ensure};
 use artisan_api::{
-    EngineId, Item, ItemId, ItemKind, ItemsPage, ItemsQuery, Run, RunId, RunStatus, SendMessage,
-    Seq, Status, ThreadId,
+    CreateThread, EngineId, Item, ItemId, ItemKind, ItemsPage, ItemsQuery, Run, RunId, RunStatus,
+    SendMessage, Seq, Status, Thread, ThreadId,
 };
 use rusqlite::{OptionalExtension as _, params};
 
@@ -24,113 +25,11 @@ pub struct Acceptance {
 }
 
 impl Store {
-    /// Inserts the item or updates it by id. Position and creation time never
-    /// change, and a terminal status never reopens.
     pub async fn upsert_item(&self, new: NewItem) -> Result<Item> {
         let (id, thread_id) = (new.id.clone(), new.thread_id.clone());
-        self.write(move |tx| {
-            let native_id = new.native_id.clone();
-            let old = read::item(tx, &new.id)?;
-            let mut new = new;
-            // Name agents on every upsert: adapters can first stream a tool
-            // and only later recognise it as an agent. Keep a name already
-            // reserved for this item before choosing another one.
-            if let ItemKind::Agent { label, .. } = &mut new.kind
-                && label.as_ref().is_none_or(|label| label.trim().is_empty())
-            {
-                *label = old.as_ref().and_then(|item| match &item.kind {
-                    ItemKind::Agent { label, .. } => label
-                        .as_ref()
-                        .filter(|label| !label.trim().is_empty())
-                        .cloned(),
-                    ItemKind::UserMessage { .. }
-                    | ItemKind::AssistantMessage { .. }
-                    | ItemKind::Tool { .. }
-                    | ItemKind::Question { .. }
-                    | ItemKind::Plan { .. }
-                    | ItemKind::Image { .. }
-                    | ItemKind::Compaction { .. }
-                    | ItemKind::Notice { .. }
-                    | ItemKind::Error { .. } => None,
-                });
-                if label.is_none() {
-                    let taken = read::agent_labels(tx, &new.thread_id)?;
-                    *label = Some(artisan_api::choose_agent_name(
-                        new.id.as_str(),
-                        taken.iter().map(String::as_str),
-                    ));
-                }
-            }
-            let item = if let Some(old) = old {
-                ensure!(
-                    old.thread_id == new.thread_id,
-                    "item belongs to thread {}",
-                    old.thread_id
-                );
-                let mut kind = new.kind;
-                // Engines don't know Artisan's name for a subagent, and an
-                // agent adopted by a later process no longer knows its
-                // prompt: keep them.
-                if let (
-                    ItemKind::Agent {
-                        label,
-                        prompt,
-                        agent_id,
-                        context_used,
-                        model,
-                        ..
-                    },
-                    ItemKind::Agent {
-                        label: old_label,
-                        prompt: old_prompt,
-                        agent_id: old_agent_id,
-                        context_used: old_context,
-                        model: old_model,
-                        ..
-                    },
-                ) = (&mut kind, &old.kind)
-                {
-                    for (slot, old) in [
-                        (label, old_label),
-                        (agent_id, old_agent_id),
-                        (model, old_model),
-                    ] {
-                        if slot.is_none() {
-                            slot.clone_from(old);
-                        }
-                    }
-                    if prompt.is_none() {
-                        prompt.clone_from(old_prompt);
-                    }
-                    if context_used.is_none() {
-                        *context_used = *old_context;
-                    }
-                }
-                let item = Item {
-                    id: old.id.clone(),
-                    thread_id: old.thread_id.clone(),
-                    position: old.position,
-                    seq: old.seq,
-                    // An item stays in the run that made it: a resumed agent
-                    // reports from a later run, but its row stays where it
-                    // was launched, in its own turn.
-                    run_id: old.run_id.clone().or(new.run_id),
-                    parent_id: new.parent_id.or_else(|| old.parent_id.clone()),
-                    status: old.next_status(new.status),
-                    created_at: old.created_at,
-                    updated_at: old.updated_at,
-                    kind,
-                };
-                tx.save_item(item, Some(old))?
-            } else {
-                let created_at = tx.created_at();
-                tx.save_item(fresh_item(new, created_at), None)?
-            };
-            tx.set_native_id(&item.id, native_id.as_deref())?;
-            Ok(item)
-        })
-        .await
-        .with_context(|| format!("upsert item {id} in thread {thread_id}"))
+        self.write(move |tx| tx.upsert_item(new))
+            .await
+            .with_context(|| format!("upsert item {id} in thread {thread_id}"))
     }
 
     /// A subagent an earlier run left stopped is working again in `run`
@@ -171,8 +70,6 @@ impl Store {
         .await
     }
 
-    /// Accepts a message once. A replay changes nothing; the first accept
-    /// applies its config and `acceptance` in the same commit.
     pub async fn send_message(
         &self,
         thread_id: ThreadId,
@@ -181,40 +78,28 @@ impl Store {
         acceptance: Acceptance,
     ) -> Result<(Item, bool, EngineId)> {
         let blob_dir = self.inner.blob_dir.clone();
+        self.write(move |tx| tx.send_message(thread_id, message, steer, acceptance, &blob_dir))
+            .await
+    }
+
+    pub async fn spawn_agent(
+        &self,
+        agent: NewItem,
+        child: CreateThread,
+        prompt: SendMessage,
+        acceptance: Acceptance,
+    ) -> Result<(Item, Thread, Item)> {
+        let blob_dir = self.inner.blob_dir.clone();
+        let (agent_id, parent) = (agent.id.clone(), agent.thread_id.clone());
         self.write(move |tx| {
-            let mut thread = read::thread(tx, &thread_id)?
-                .ok_or_else(|| SendRejected::ThreadNotFound(thread_id.clone()))?;
-            let engine = thread.config.engine;
-            let (item, created) = tx.insert_input(
-                NewItem {
-                    id: message.id,
-                    thread_id,
-                    run_id: None,
-                    parent_id: None,
-                    native_id: None,
-                    status: Status::Running,
-                    kind: ItemKind::UserMessage {
-                        text: message.text.into(),
-                        images: message.images,
-                        steer,
-                        from_agent: acceptance.from_agent.clone(),
-                        sender: acceptance.sender.clone(),
-                    },
-                },
-                &blob_dir,
-            )?;
-            if created {
-                if let Some(config) = message.config {
-                    thread.config = config;
-                }
-                if thread.title.is_none() {
-                    thread.title = acceptance.title;
-                }
-                tx.accept_command(thread, item.seq, acceptance.remember_config, message.draft)?;
-            }
-            Ok((item, created, engine))
+            let agent = tx.upsert_item(agent)?;
+            let child = tx.create_thread(child)?;
+            let (prompt, _, _) =
+                tx.send_message(child.id.clone(), prompt, false, acceptance, &blob_dir)?;
+            Ok((agent, child, prompt))
         })
         .await
+        .with_context(|| format!("spawn agent {agent_id} of thread {parent}"))
     }
 
     /// Delivery acknowledgment is atomic for the entire initial batch or one steer.
@@ -677,5 +562,140 @@ impl Store {
         let blob_dir = self.inner.blob_dir.clone();
         self.read(move |conn| read::pending_inputs(conn, &thread, &blob_dir))
             .await
+    }
+}
+
+impl Tx<'_> {
+    pub(crate) fn upsert_item(&mut self, mut new: NewItem) -> Result<Item> {
+        let native_id = new.native_id.clone();
+        let old = read::item(self, &new.id)?;
+        if let ItemKind::Agent { label, .. } = &mut new.kind
+            && label.as_ref().is_none_or(|label| label.trim().is_empty())
+        {
+            *label = old.as_ref().and_then(|item| match &item.kind {
+                ItemKind::Agent { label, .. } => label
+                    .as_ref()
+                    .filter(|label| !label.trim().is_empty())
+                    .cloned(),
+                ItemKind::UserMessage { .. }
+                | ItemKind::AssistantMessage { .. }
+                | ItemKind::Tool { .. }
+                | ItemKind::Question { .. }
+                | ItemKind::Plan { .. }
+                | ItemKind::Image { .. }
+                | ItemKind::Compaction { .. }
+                | ItemKind::Notice { .. }
+                | ItemKind::Error { .. } => None,
+            });
+            if label.is_none() {
+                let taken = read::agent_labels(self, &new.thread_id)?;
+                *label = Some(artisan_api::choose_agent_name(
+                    new.id.as_str(),
+                    taken.iter().map(String::as_str),
+                ));
+            }
+        }
+        let item = if let Some(old) = old {
+            ensure!(
+                old.thread_id == new.thread_id,
+                "item belongs to thread {}",
+                old.thread_id
+            );
+            let mut kind = new.kind;
+            if let (
+                ItemKind::Agent {
+                    label,
+                    prompt,
+                    agent_id,
+                    context_used,
+                    model,
+                    ..
+                },
+                ItemKind::Agent {
+                    label: old_label,
+                    prompt: old_prompt,
+                    agent_id: old_agent_id,
+                    context_used: old_context,
+                    model: old_model,
+                    ..
+                },
+            ) = (&mut kind, &old.kind)
+            {
+                for (slot, old) in [
+                    (label, old_label),
+                    (agent_id, old_agent_id),
+                    (model, old_model),
+                ] {
+                    if slot.is_none() {
+                        slot.clone_from(old);
+                    }
+                }
+                if prompt.is_none() {
+                    prompt.clone_from(old_prompt);
+                }
+                if context_used.is_none() {
+                    *context_used = *old_context;
+                }
+            }
+            let item = Item {
+                id: old.id.clone(),
+                thread_id: old.thread_id.clone(),
+                position: old.position,
+                seq: old.seq,
+                run_id: old.run_id.clone().or(new.run_id),
+                parent_id: new.parent_id.or_else(|| old.parent_id.clone()),
+                status: old.next_status(new.status),
+                created_at: old.created_at,
+                updated_at: old.updated_at,
+                kind,
+            };
+            self.save_item(item, Some(old))?
+        } else {
+            let created_at = self.created_at();
+            self.save_item(fresh_item(new, created_at), None)?
+        };
+        self.set_native_id(&item.id, native_id.as_deref())?;
+        Ok(item)
+    }
+
+    pub(crate) fn send_message(
+        &mut self,
+        thread_id: ThreadId,
+        message: SendMessage,
+        steer: bool,
+        acceptance: Acceptance,
+        blob_dir: &std::path::Path,
+    ) -> Result<(Item, bool, EngineId)> {
+        let mut thread = read::thread(self, &thread_id)?
+            .ok_or_else(|| SendRejected::ThreadNotFound(thread_id.clone()))?;
+        let engine = thread.config.engine;
+        let (item, created) = self.insert_input(
+            NewItem {
+                id: message.id,
+                thread_id,
+                run_id: None,
+                parent_id: None,
+                native_id: None,
+                status: Status::Running,
+                kind: ItemKind::UserMessage {
+                    text: message.text.into(),
+                    images: message.images,
+                    steer,
+                    from_agent: acceptance.from_agent.clone(),
+                    sender: acceptance.sender.clone(),
+                },
+            },
+            blob_dir,
+        )?;
+        if created {
+            if let Some(config) = message.config {
+                thread.config = config;
+            }
+            if thread.title.is_none() {
+                thread.title = acceptance.title;
+            }
+            self.accept_command(thread, item.seq, acceptance.remember_config, message.draft)?;
+        }
+        Ok((item, created, engine))
     }
 }

@@ -289,61 +289,58 @@ impl Hub {
         let (config, warnings) = resolve(&thread.config, &request, &self.engines().status(engine))?;
         let child = ThreadId::new();
         let agent = ItemId::new();
-        store
-            .create_thread(CreateThread {
-                id: child.clone(),
-                project_id: thread.project_id.clone(),
-                config: config.clone(),
-                title: Some(task.clone()),
-                parent_thread_id: Some(parent.clone()),
-                spawned_by: Some(agent.clone()),
-            })
-            .await?;
         let run_id = store
             .latest_run(parent)
             .await?
             .filter(|run| run.status == RunStatus::Running)
             .map(|run| run.id);
         store
-            .upsert_item(NewItem {
-                id: agent.clone(),
-                thread_id: parent.clone(),
-                run_id,
-                parent_id: None,
-                native_id: None,
-                status: Status::Running,
-                kind: ItemKind::Agent {
-                    name: Some(engine.display_name().to_owned()),
-                    description: task.clone().into(),
-                    prompt: Some(request.prompt.clone().into()),
-                    agent_id: None,
-                    context_used: None,
-                    model: config.model.clone(),
-                    background: request.background,
-                    result: None,
-                    label: None,
-                    engine: Some(engine),
-                    thread: Some(child.clone()),
+            .spawn_agent(
+                NewItem {
+                    id: agent.clone(),
+                    thread_id: parent.clone(),
+                    run_id,
+                    parent_id: None,
+                    native_id: None,
+                    status: Status::Running,
+                    kind: ItemKind::Agent {
+                        name: Some(engine.display_name().to_owned()),
+                        description: task.clone().into(),
+                        prompt: Some(request.prompt.clone().into()),
+                        agent_id: None,
+                        context_used: None,
+                        model: config.model.clone(),
+                        background: request.background,
+                        result: None,
+                        label: None,
+                        engine: Some(engine),
+                        thread: Some(child.clone()),
+                    },
                 },
-            })
+                CreateThread {
+                    id: child.clone(),
+                    project_id: thread.project_id.clone(),
+                    config: config.clone(),
+                    title: Some(task.clone()),
+                    parent_thread_id: Some(parent.clone()),
+                    spawned_by: Some(agent.clone()),
+                },
+                SendMessage {
+                    id: ItemId::new(),
+                    text: request.prompt,
+                    images: Vec::new(),
+                    config: None,
+                    draft: None,
+                },
+                forge_store::Acceptance {
+                    title: None,
+                    remember_config: false,
+                    from_agent: None,
+                    sender: Some(sender(&thread)),
+                },
+            )
             .await?;
-        self.accept_message(
-            &child,
-            SendMessage {
-                id: ItemId::new(),
-                text: request.prompt,
-                images: Vec::new(),
-                config: None,
-                draft: None,
-            },
-            forge_store::Acceptance {
-                title: None,
-                remember_config: false,
-                from_agent: None,
-                sender: Some(sender(&thread)),
-            },
-        )
-        .await?;
+        self.resume_pending();
         self.agents_moved();
         Ok(AgentInfo {
             agent,
