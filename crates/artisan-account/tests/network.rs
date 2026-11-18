@@ -1,6 +1,8 @@
 #![cfg(test)]
 
-use artisan_account::network::{AccountProfile, CoreSessionClient, SessionToken};
+use artisan_account::network::{
+    AccountProfile, CoreSessionClient, GrantIssueRequest, Jwk, SessionToken,
+};
 use axum::http::{HeaderMap, StatusCode, Uri, header::AUTHORIZATION};
 use axum::routing::get;
 use std::sync::{Arc, Mutex};
@@ -91,4 +93,54 @@ async fn an_unavailable_profile_does_not_discard_a_valid_account() {
     let profile = read_profile(404, "{}").await;
     assert_eq!(profile.account_id, "account");
     assert_eq!(profile.username, None);
+}
+
+#[test]
+fn session_token_never_prints() {
+    let token = SessionToken::new("STUB-SESSION-SECRET".to_owned());
+    let rendered = format!("{token:?}");
+    assert!(!rendered.contains("STUB-SESSION-SECRET"), "{rendered}");
+    assert!(rendered.contains("redacted"));
+    assert_eq!(token.as_str(), "STUB-SESSION-SECRET");
+}
+
+#[test]
+fn grant_issue_rejects_unknown_fields() {
+    let raw = serde_json::json!({
+        "audience": "ast-relay",
+        "scope": ["relay:connect"],
+        "future": true,
+    });
+    serde_json::from_value::<GrantIssueRequest>(raw).expect_err("unknown fields are refused");
+}
+
+#[test]
+fn grant_issue_body_matches_core_shape() {
+    let request = GrantIssueRequest {
+        audience: "ast-relay".to_owned(),
+        scope: vec!["relay:connect".to_owned(), "forge:execute".to_owned()],
+        ttl_seconds: Some(300),
+        target_machine_id: Some("mch_11111111111111111111111111".to_owned()),
+        cnf: Some(Jwk {
+            kty: "OKP".to_owned(),
+            crv: "Ed25519".to_owned(),
+            x: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
+        }),
+    };
+    let body = serde_json::to_value(&request).expect("encode");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "audience": "ast-relay",
+            "scope": ["relay:connect", "forge:execute"],
+            "ttlSeconds": 300,
+            "targetMachineId": "mch_11111111111111111111111111",
+            "cnf": {
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            },
+        })
+    );
+    assert!(body["cnf"].get("jwk").is_none(), "{body}");
 }

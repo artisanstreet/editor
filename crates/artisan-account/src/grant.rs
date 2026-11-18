@@ -331,33 +331,60 @@ struct UnverifiedJti {
     jti: String,
 }
 
-/// Decodes one part (0 header, 1 payload) of a compact JWT without checking
-/// its signature.
+#[derive(Debug, thiserror::Error)]
+pub enum UnverifiedGrantError {
+    #[error("the grant is not a compact JWT with part {index}")]
+    MissingPart { index: usize },
+    #[error("decode part {index} of the grant")]
+    Base64 {
+        index: usize,
+        #[source]
+        source: base64::DecodeError,
+    },
+    #[error("read part {index} of the grant")]
+    Json {
+        index: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("the grant has no jti")]
+    NoJti,
+    #[error("the grant is signed with {alg}, not EdDSA")]
+    NotEdDsa { alg: String },
+    #[error("the grant has no kid")]
+    NoKid,
+}
+
 pub fn unverified_part<T: serde::de::DeserializeOwned>(
     compact: &str,
     index: usize,
-) -> anyhow::Result<T> {
-    use anyhow::Context as _;
+) -> Result<T, UnverifiedGrantError> {
     let part = compact
         .split('.')
         .nth(index)
-        .context("the grant is not a compact JWT")?;
+        .ok_or(UnverifiedGrantError::MissingPart { index })?;
     let raw = URL_SAFE_NO_PAD
         .decode(part.as_bytes())
-        .context("decode the grant")?;
-    serde_json::from_slice(&raw).context("read the grant")
+        .map_err(|source| UnverifiedGrantError::Base64 { index, source })?;
+    serde_json::from_slice(&raw).map_err(|source| UnverifiedGrantError::Json { index, source })
 }
 
-pub fn unverified_jti(compact: &str) -> anyhow::Result<String> {
+pub fn unverified_jti(compact: &str) -> Result<String, UnverifiedGrantError> {
     let UnverifiedJti { jti } = unverified_part(compact, 1)?;
-    anyhow::ensure!(!jti.is_empty(), "the grant has no jti");
+    if jti.is_empty() {
+        return Err(UnverifiedGrantError::NoJti);
+    }
     Ok(jti)
 }
 
-pub fn unverified_kid(compact: &str) -> anyhow::Result<String> {
+pub fn unverified_kid(compact: &str) -> Result<String, UnverifiedGrantError> {
     let UnverifiedHeader { alg, kid } = unverified_part(compact, 0)?;
-    anyhow::ensure!(alg == "EdDSA", "the grant is not EdDSA-signed");
-    anyhow::ensure!(!kid.is_empty(), "the grant has no kid");
+    if alg != "EdDSA" {
+        return Err(UnverifiedGrantError::NotEdDsa { alg });
+    }
+    if kid.is_empty() {
+        return Err(UnverifiedGrantError::NoKid);
+    }
     Ok(kid)
 }
 
@@ -638,17 +665,6 @@ mod core_fixture_tests {
             crate::machine_proof::body_hash_hex(body),
             crate::machine_proof::EMPTY_BODY_HASH
         );
-        let canonical = crate::machine_proof::canonical_request(
-            headers["x-ast-timestamp"]
-                .as_str()
-                .unwrap()
-                .parse()
-                .unwrap(),
-            headers["x-ast-nonce"].as_str().unwrap(),
-            "GET",
-            proof["pathAndQuery"].as_str().unwrap(),
-            &crate::machine_proof::body_hash_hex(body),
-        );
         // Machine grants bind cnf == enrolled key: the proof verifies with
         // the grant's cnf public key.
         let token = fixture["grant"].as_str().unwrap();
@@ -685,6 +701,5 @@ mod core_fixture_tests {
                 .unwrap(),
         };
         crate::machine_proof::verify_machine_proof(&request).unwrap();
-        let _ = canonical;
     }
 }

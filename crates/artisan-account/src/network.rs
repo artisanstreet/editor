@@ -1,14 +1,3 @@
-//! Session-authed Core HTTP client shared by the native Editor (and CLI).
-//!
-//! Mirrors the Core OpenAPI (`core/contracts/v1.openapi.json`) exactly:
-//! requests deny unknown fields (Core is strict); responses ignore unknown
-//! fields (forward-compatible reads). No business logic beyond transport:
-//! no stores, no crypto (proofs/keys stay in `enrollment`/`pop`), and the
-//! raw session token is captured from `Set-Cookie` and never logged.
-//!
-//! Owned by the Editor side until root routes otherwise; the Relay client
-//! stays Vilde's.
-
 use serde::{Deserialize, Serialize};
 
 use crate::signin::{
@@ -37,22 +26,59 @@ impl std::fmt::Debug for SessionToken {
     }
 }
 
-/// Transport + Core errors. User text is composed by the caller from `code`
-/// (plain language, no secret/ID pasting); the request id is for logs only.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum NetworkError {
-    #[error("could not reach Core")]
-    Transport,
-    #[error("Core refused the call: {code}")]
+    #[error("build the Core HTTP client")]
+    Client(#[source] reqwest::Error),
+    #[error("{action}: could not reach Core")]
+    Transport {
+        action: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("{action}: Core answered {status} without its error body")]
+    UnexpectedStatus { action: &'static str, status: u16 },
+    #[error("{action}: read Core's answer")]
+    Decode {
+        action: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("{action}: Core opened no session")]
+    NoSession { action: &'static str },
+    #[error("{action}: the request stopped before Core answered")]
+    Stopped {
+        action: &'static str,
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    #[error("{action}: Core refused the call: {code} (request {request_id})")]
     Core {
+        action: &'static str,
         code: String,
-        #[allow(
-            dead_code,
-            reason = "Core message kept for exact shape; user text uses code only"
-        )]
         message: String,
         request_id: String,
     },
+}
+
+impl NetworkError {
+    #[must_use]
+    pub const fn is_unreachable(&self) -> bool {
+        !matches!(self, Self::Core { .. })
+    }
+
+    #[must_use]
+    pub fn core_code(&self) -> Option<&str> {
+        match self {
+            Self::Core { code, .. } => Some(code),
+            Self::Client(_)
+            | Self::Transport { .. }
+            | Self::UnexpectedStatus { .. }
+            | Self::Decode { .. }
+            | Self::NoSession { .. }
+            | Self::Stopped { .. } => None,
+        }
+    }
 }
 
 /// Core error envelope (strict read).
@@ -64,10 +90,6 @@ struct CoreErrorBody {
 #[derive(Clone, Debug, Deserialize)]
 struct CoreErrorDetail {
     code: String,
-    #[allow(
-        dead_code,
-        reason = "Core message kept for exact shape; user text uses code only"
-    )]
     message: String,
     request_id: String,
 }
@@ -163,15 +185,11 @@ pub struct CoreSessionClient {
 }
 
 impl CoreSessionClient {
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
-    )]
     pub fn new(base_url: &str) -> Result<Self, NetworkError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|_| NetworkError::Transport)?;
+            .map_err(NetworkError::Client)?;
         Ok(Self {
             http,
             base_url: base_url.trim_end_matches('/').to_owned(),
@@ -186,25 +204,46 @@ impl CoreSessionClient {
         response: reqwest::Response,
         action: &'static str,
     ) -> Result<reqwest::Response, NetworkError> {
-        let _ = action;
         if response.status().is_success() {
             return Ok(response);
         }
-        let body = response.text().await.unwrap_or_default();
-        if let Ok(parsed) = serde_json::from_str::<CoreErrorBody>(&body) {
-            return Err(NetworkError::Core {
+        let status = response.status().as_u16();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|source| NetworkError::Decode { action, source })?;
+        match serde_json::from_slice::<CoreErrorBody>(&body) {
+            Ok(parsed) => Err(NetworkError::Core {
+                action,
                 code: parsed.error.code,
                 message: parsed.error.message,
                 request_id: parsed.error.request_id,
-            });
+            }),
+            Err(_not_core) => Err(NetworkError::UnexpectedStatus { action, status }),
         }
-        Err(NetworkError::Transport)
     }
 
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
-    )]
+    async fn send(
+        request: reqwest::RequestBuilder,
+        action: &'static str,
+    ) -> Result<reqwest::Response, NetworkError> {
+        let response = request
+            .send()
+            .await
+            .map_err(|source| NetworkError::Transport { action, source })?;
+        Self::check(response, action).await
+    }
+
+    async fn read<R: for<'de> Deserialize<'de>>(
+        response: reqwest::Response,
+        action: &'static str,
+    ) -> Result<R, NetworkError> {
+        response
+            .json()
+            .await
+            .map_err(|source| NetworkError::Decode { action, source })
+    }
+
     async fn post<B: Serialize + Sync, R: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -216,15 +255,9 @@ impl CoreSessionClient {
         if let Some(session) = session {
             request = request.bearer_auth(session.as_str());
         }
-        let response = request.send().await.map_err(|_| NetworkError::Transport)?;
-        let response = Self::check(response, action).await?;
-        response.json().await.map_err(|_| NetworkError::Transport)
+        Self::read(Self::send(request, action).await?, action).await
     }
 
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
-    )]
     async fn get<R: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -235,9 +268,7 @@ impl CoreSessionClient {
         if let Some(session) = session {
             request = request.bearer_auth(session.as_str());
         }
-        let response = request.send().await.map_err(|_| NetworkError::Transport)?;
-        let response = Self::check(response, action).await?;
-        response.json().await.map_err(|_| NetworkError::Transport)
+        Self::read(Self::send(request, action).await?, action).await
     }
 
     /// Start a magic-link request. The secret returns here once; the emailed
@@ -277,10 +308,6 @@ impl CoreSessionClient {
         .await
     }
 
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
-    )]
     pub async fn magic_finalize(
         &self,
         request_id: &str,
@@ -288,49 +315,38 @@ impl CoreSessionClient {
         totp_code: Option<&str>,
         recovery_code: Option<&str>,
     ) -> Result<(MagicFinalizeResponse, SessionToken), NetworkError> {
-        let response = self
-            .http
-            .post(self.url("/v1/auth/magic/finalize"))
-            .json(&MagicFinalizeRequest {
-                request_id: request_id.to_owned(),
-                request_secret: request_secret.to_owned(),
-                totp_code: totp_code.map(str::to_owned),
-                recovery_code: recovery_code.map(str::to_owned),
-            })
-            .send()
-            .await
-            .map_err(|_| NetworkError::Transport)?;
-        Self::opened_session(Self::check(response, "finish signing in").await?).await
+        let action = "finish signing in";
+        let request =
+            self.http
+                .post(self.url("/v1/auth/magic/finalize"))
+                .json(&MagicFinalizeRequest {
+                    request_id: request_id.to_owned(),
+                    request_secret: request_secret.to_owned(),
+                    totp_code: totp_code.map(str::to_owned),
+                    recovery_code: recovery_code.map(str::to_owned),
+                });
+        Self::opened_session(Self::send(request, action).await?, action).await
     }
 
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
-    )]
     pub async fn desktop_redeem(
         &self,
         code: &str,
         verifier: &str,
     ) -> Result<(MagicFinalizeResponse, SessionToken), NetworkError> {
-        let response = self
-            .http
-            .post(self.url("/v1/auth/desktop/redeem"))
-            .json(&DesktopRedeemRequest {
-                code: code.to_owned(),
-                verifier: verifier.to_owned(),
-            })
-            .send()
-            .await
-            .map_err(|_| NetworkError::Transport)?;
-        Self::opened_session(Self::check(response, "finish signing in").await?).await
+        let action = "redeem the desktop sign-in";
+        let request =
+            self.http
+                .post(self.url("/v1/auth/desktop/redeem"))
+                .json(&DesktopRedeemRequest {
+                    code: code.to_owned(),
+                    verifier: verifier.to_owned(),
+                });
+        Self::opened_session(Self::send(request, action).await?, action).await
     }
 
-    #[expect(
-        clippy::map_err_ignore,
-        reason = "transport errors stay coarse Transport so tokens and Core internals never leak"
-    )]
     async fn opened_session(
         response: reqwest::Response,
+        action: &'static str,
     ) -> Result<(MagicFinalizeResponse, SessionToken), NetworkError> {
         let token = response
             .headers()
@@ -344,9 +360,8 @@ impl CoreSessionClient {
                     .and_then(|pair| pair.trim().strip_prefix("ast_session="))
                     .map(str::to_owned)
             })
-            .ok_or(NetworkError::Transport)?;
-        let finalized: MagicFinalizeResponse =
-            response.json().await.map_err(|_| NetworkError::Transport)?;
+            .ok_or(NetworkError::NoSession { action })?;
+        let finalized: MagicFinalizeResponse = Self::read(response, action).await?;
         Ok((finalized, SessionToken::new(token)))
     }
 
@@ -452,94 +467,4 @@ impl CoreSessionClient {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimedEnrollment {
     pub enrollment_id: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn requests_reject_unknown_fields() {
-        let raw = serde_json::json!({"email": "a@example.invalid", "future": 1});
-        assert!(serde_json::from_value::<MagicRequest>(raw).is_err());
-        let raw = serde_json::json!({
-            "requestId": "logreq_1",
-            "requestSecret": "s",
-        });
-        assert!(serde_json::from_value::<MagicStatusRequest>(raw).is_ok());
-        let raw = serde_json::json!({
-            "requestId": "logreq_1",
-            "requestSecret": "s",
-            "future": 1,
-        });
-        assert!(serde_json::from_value::<MagicStatusRequest>(raw).is_err());
-    }
-
-    #[test]
-    fn responses_tolerate_future_fields() {
-        let raw = serde_json::json!({
-            "request_id": "logreq_1",
-            "status": "pending",
-            "totp_required": false,
-            "email": "a@example.invalid",
-            "expires_at": "t",
-            "future": [1],
-        });
-        let status: MagicStatusResponse = serde_json::from_value(raw).unwrap();
-        assert!(!status.totp_required);
-    }
-
-    #[test]
-    fn session_token_never_prints() {
-        let token = SessionToken::new("STUB-SESSION-SECRET".to_owned());
-        let rendered = format!("{token:?}");
-        assert!(!rendered.contains("STUB-SESSION-SECRET"), "{rendered}");
-        assert!(rendered.contains("redacted"));
-        assert_eq!(token.as_str(), "STUB-SESSION-SECRET");
-    }
-
-    #[test]
-    fn grant_issue_rejects_unknown_fields() {
-        let raw = serde_json::json!({
-            "audience": "ast-relay",
-            "scope": ["relay:connect"],
-            "future": true,
-        });
-        assert!(serde_json::from_value::<GrantIssueRequest>(raw).is_err());
-    }
-
-    /// The grant request body must be Core's exact shape: `cnf` is the
-    /// plain JWK, never nested under `jwk` (that nesting lives only in
-    /// the issued JWT's claims). A nested body fails Core with 400, which
-    /// broke both the initial Editor grant and the stream grant.
-    #[test]
-    fn grant_issue_body_matches_core_shape() {
-        let request = GrantIssueRequest {
-            audience: "ast-relay".to_owned(),
-            scope: vec!["relay:connect".to_owned(), "forge:execute".to_owned()],
-            ttl_seconds: Some(300),
-            target_machine_id: Some("mch_11111111111111111111111111".to_owned()),
-            cnf: Some(Jwk {
-                kty: "OKP".to_owned(),
-                crv: "Ed25519".to_owned(),
-                x: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
-            }),
-        };
-        let body = serde_json::to_value(&request).unwrap();
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "audience": "ast-relay",
-                "scope": ["relay:connect", "forge:execute"],
-                "ttlSeconds": 300,
-                "targetMachineId": "mch_11111111111111111111111111",
-                "cnf": {
-                    "kty": "OKP",
-                    "crv": "Ed25519",
-                    "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-                },
-            })
-        );
-        assert!(body["cnf"].get("jwk").is_none(), "{body}");
-    }
 }

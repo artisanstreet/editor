@@ -14,7 +14,6 @@
     clippy::let_underscore_must_use,
     clippy::let_underscore_untyped,
     clippy::manual_let_else,
-    clippy::match_same_arms,
     clippy::needless_pass_by_ref_mut,
     clippy::needless_pass_by_value,
     clippy::nonminimal_bool,

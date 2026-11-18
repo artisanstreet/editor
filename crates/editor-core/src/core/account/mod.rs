@@ -169,7 +169,10 @@ impl TestAccountTransitions {
             self.sender
                 .send(Message::Synced(
                     self.generation,
-                    Err(NetworkError::Transport),
+                    Err(NetworkError::UnexpectedStatus {
+                        action: "sync the account",
+                        status: 503,
+                    }),
                     applied
                 ))
                 .await
@@ -437,10 +440,8 @@ impl Account {
                         _ => SignInStatus::Expired,
                     }
                 });
-                let done = !matches!(
-                    &result,
-                    Err(NetworkError::Transport) | Ok(SignInStatus::Waiting)
-                );
+                let done = !matches!(&result, Ok(SignInStatus::Waiting))
+                    && !result.as_ref().is_err_and(NetworkError::is_unreachable);
                 let (applied, acknowledged) = tokio::sync::oneshot::channel();
                 if sender
                     .send(Message::Status(
@@ -775,7 +776,7 @@ impl Account {
                 {
                     acknowledgement = Some(applied);
                     match result {
-                        Err(NetworkError::Transport) => {}
+                        Err(error) if error.is_unreachable() => {}
                         Err(error) => self.fail_sign_in(&error),
                         Ok(SignInStatus::Waiting) => {}
                         Ok(SignInStatus::Approved {
@@ -831,7 +832,9 @@ impl Account {
                         },
                     }
                 }
-                Message::BrowserFailed(generation, message) if generation == self.sign_generation => {
+                Message::BrowserFailed(generation, message)
+                    if generation == self.sign_generation =>
+                {
                     self.sign_in = None;
                     self.phase = AccountPhase::Error { message };
                     self.changed();
@@ -914,16 +917,14 @@ pub fn is_session_invalid(error: &NetworkError) -> bool {
     matches!(error, NetworkError::Core { code, .. } if matches!(code.as_str(), "unauthorized" | "gone"))
 }
 fn plain_failure(error: &NetworkError) -> String {
-    match error {
-        NetworkError::Core { code, .. } => match code.as_str() {
-            "bad_request" => "Core could not use that request. Check the email address.",
-            "unauthorized" => "That sign-in link is invalid or already used.",
-            "forbidden" => "The email link is not approved yet, or the second factor is missing.",
-            "gone" => "That sign-in request expired. Request a new link.",
-            "rate_limited" => "Too many attempts. Wait a while and try again.",
-            _ => "Core could not do that right now. Try again in a bit.",
-        },
-        NetworkError::Transport => "Could not reach Core. Check the connection and try again.",
+    match error.core_code() {
+        Some("bad_request") => "Core could not use that request. Check the email address.",
+        Some("unauthorized") => "That sign-in link is invalid or already used.",
+        Some("forbidden") => "The email link is not approved yet, or the second factor is missing.",
+        Some("gone") => "That sign-in request expired. Request a new link.",
+        Some("rate_limited") => "Too many attempts. Wait a while and try again.",
+        Some(_) => "Core could not do that right now. Try again in a bit.",
+        None => "Could not reach Core. Check the connection and try again.",
     }
     .to_owned()
 }

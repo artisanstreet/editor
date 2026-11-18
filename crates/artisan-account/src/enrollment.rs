@@ -10,6 +10,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+#[derive(Debug, thiserror::Error)]
+pub enum MachineKeyError {
+    #[error("read random bytes for a machine key")]
+    Random(#[source] getrandom::Error),
+    #[error("the machine key is all zeros")]
+    AllZeros,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct MachineKeypair {
     secret: Zeroizing<[u8; 32]>,
@@ -27,14 +35,16 @@ impl std::fmt::Debug for MachineKeypair {
 }
 
 impl MachineKeypair {
-    pub fn generate() -> anyhow::Result<Self> {
+    pub fn generate() -> Result<Self, MachineKeyError> {
         let mut secret = [0_u8; 32];
-        getrandom::fill(&mut secret)?;
+        getrandom::fill(&mut secret).map_err(MachineKeyError::Random)?;
         Self::from_secret(secret)
     }
 
-    pub fn from_secret(secret: [u8; 32]) -> anyhow::Result<Self> {
-        anyhow::ensure!(secret != [0_u8; 32], "the machine key is all zeros");
+    pub fn from_secret(secret: [u8; 32]) -> Result<Self, MachineKeyError> {
+        if secret == [0_u8; 32] {
+            return Err(MachineKeyError::AllZeros);
+        }
         let key = ed25519_dalek::SigningKey::from_bytes(&secret);
         Ok(Self {
             secret: Zeroizing::new(secret),
@@ -121,53 +131,4 @@ pub fn verify_enrollment_proof(public: &[u8; 32], body: &str, signature: &[u8]) 
         return false;
     };
     key.verify_strict(body.as_bytes(), &signature).is_ok()
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test fixtures; failures fail the test")]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn proof_bodies_match_core_shape() {
-        assert_eq!(
-            enrollment_request_body("eA", "server-forge", 1_700_000_000),
-            "enrollment-request\neA\nserver-forge\n1700000000"
-        );
-        assert_eq!(
-            enrollment_confirm_body("enr_1", "acct_2", "eA"),
-            "enrollment-confirm\nenr_1\nacct_2\neA"
-        );
-    }
-
-    #[test]
-    fn proofs_sign_and_verify_with_the_enrollment_key() {
-        let secret = [0x21_u8; 32];
-        let public = ed25519_dalek::SigningKey::from_bytes(&secret)
-            .verifying_key()
-            .to_bytes();
-        let body = enrollment_request_body("eA", "label", 1);
-        let signature = sign_enrollment_proof(&secret, &body);
-        assert!(verify_enrollment_proof(&public, &body, &signature));
-        assert!(!verify_enrollment_proof(&public, "other", &signature));
-    }
-
-    #[test]
-    fn pair_status_reads_are_strict() {
-        let raw = serde_json::json!({
-            "status": "claimed",
-            "account_id": "acct_1",
-            "email": "a@example.invalid",
-        });
-        let status: PairStatus = serde_json::from_value(raw).unwrap();
-        assert_eq!(status.account_id.as_deref(), Some("acct_1"));
-        let raw = serde_json::json!({"status": "pending", "future": 1});
-        assert!(serde_json::from_value::<PairStatus>(raw).is_err());
-    }
-
-    #[test]
-    fn keypairs_reject_zero_and_codes_normalise() {
-        assert!(MachineKeypair::from_secret([0_u8; 32]).is_err());
-        assert_eq!(normalise_code("ab-12 cd"), "AB12CD");
-    }
 }

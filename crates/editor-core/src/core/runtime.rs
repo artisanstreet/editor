@@ -26,7 +26,10 @@ pub async fn run_http<T: Send + 'static>(
         Ok(result) => result,
         Err(error) => {
             tracing::warn!("Core request task did not finish: {error}");
-            Err(artisan_account::network::NetworkError::Transport)
+            Err(artisan_account::network::NetworkError::Stopped {
+                action: "call Core",
+                source: error,
+            })
         }
     }
 }
