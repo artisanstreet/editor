@@ -106,13 +106,7 @@ impl<V: Clone + Eq> SelectState<V> {
         self.motion.hide();
     }
 
-    pub fn key(
-        &mut self,
-        key: &str,
-        modified: bool,
-        now: Instant,
-        entries: &[SelectEntry<V>],
-    ) -> SelectKeyResult<V> {
+    pub fn key(&mut self, key: &str, entries: &[SelectEntry<V>]) -> SelectKeyResult<V> {
         let none = || SelectKeyResult {
             handled: false,
             commit: None,
@@ -177,27 +171,56 @@ impl<V: Clone + Eq> SelectState<V> {
             }
             "home" => 0,
             "end" => enabled.len() - 1,
-            key if key.chars().count() == 1 && !modified => {
-                if now.duration_since(self.typed_at) > Duration::from_secs(1) {
-                    self.query.clear();
-                }
-                self.typed_at = now;
-                self.query.push_str(&key.to_lowercase());
-                enabled
-                    .iter()
-                    .position(|index| {
-                        entries[*index]
-                            .label
-                            .to_lowercase()
-                            .starts_with(&self.query)
-                    })
-                    .unwrap_or(current)
-            }
             _ => return none(),
         };
+        self.highlight(entries, enabled[target])
+    }
+
+    pub fn type_text(
+        &mut self,
+        text: &str,
+        now: Instant,
+        entries: &[SelectEntry<V>],
+    ) -> SelectKeyResult<V> {
+        let typed = typeahead_form(text);
+        if text.chars().any(char::is_control) || typed.trim().is_empty() && self.query.is_empty() {
+            return SelectKeyResult {
+                handled: false,
+                commit: None,
+                reveal: None,
+            };
+        }
+        if now.duration_since(self.typed_at) > Duration::from_secs(1) {
+            self.query.clear();
+        }
+        self.typed_at = now;
+        self.query.push_str(&typed);
+        let enabled = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.disabled);
+        let matched = enabled
+            .clone()
+            .find(|(_, entry)| typeahead_form(&entry.label).starts_with(&self.query))
+            .or_else(|| {
+                enabled
+                    .clone()
+                    .find(|(_, entry)| Some(&entry.value) == self.highlighted.as_ref())
+            })
+            .or_else(|| enabled.clone().next());
+        match matched {
+            Some((index, _)) => self.highlight(entries, index),
+            None => SelectKeyResult {
+                handled: false,
+                commit: None,
+                reveal: None,
+            },
+        }
+    }
+
+    fn highlight(&mut self, entries: &[SelectEntry<V>], index: usize) -> SelectKeyResult<V> {
         self.set_open(true);
         self.keyed = true;
-        let index = enabled[target];
         self.highlighted = Some(entries[index].value.clone());
         SelectKeyResult {
             handled: true,
@@ -205,6 +228,26 @@ impl<V: Clone + Eq> SelectState<V> {
             reveal: Some(index),
         }
     }
+}
+
+fn select_key_name(key: &InputKey) -> Option<&'static str> {
+    match key {
+        InputKey::Named(NamedKey::Escape) => Some("escape"),
+        InputKey::Named(NamedKey::Tab) => Some("tab"),
+        InputKey::Named(NamedKey::Enter) => Some("enter"),
+        InputKey::Char(' ') => Some("space"),
+        InputKey::Named(NamedKey::Down) => Some("down"),
+        InputKey::Named(NamedKey::Up) => Some("up"),
+        InputKey::Named(NamedKey::Home) => Some("home"),
+        InputKey::Named(NamedKey::End) => Some("end"),
+        _ => None,
+    }
+}
+
+fn typeahead_form(text: &str) -> String {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize(&text.to_lowercase())
+        .into_owned()
 }
 
 use aqua_core::{InputEvent, Key as InputKey, NamedKey, Role};
@@ -352,54 +395,51 @@ impl<V: Clone + Eq + 'static> Select<V> {
             let entries = self.entries;
             let change = self.change;
             let open_change = self.open_change;
-            trigger = trigger.on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
-                    return InputResponse::default();
-                };
-                let name = match key.key {
-                    InputKey::Named(NamedKey::Escape) => "escape".to_owned(),
-                    InputKey::Named(NamedKey::Tab) => "tab".to_owned(),
-                    InputKey::Named(NamedKey::Enter) => "enter".to_owned(),
-                    InputKey::Char(' ') => "space".to_owned(),
-                    InputKey::Named(NamedKey::Down) => "down".to_owned(),
-                    InputKey::Named(NamedKey::Up) => "up".to_owned(),
-                    InputKey::Named(NamedKey::Home) => "home".to_owned(),
-                    InputKey::Named(NamedKey::End) => "end".to_owned(),
-                    InputKey::Char(character) => character.to_string(),
-                    _ => return InputResponse::default(),
-                };
-                let (result, before, after) = {
-                    let mut state = state.borrow_mut();
-                    let before = state.open;
-                    let result = state.key(
-                        &name,
-                        key.modifiers.contains(aqua_core::Modifiers::CONTROL)
-                            || key.modifiers.contains(aqua_core::Modifiers::ALT)
-                            || key.modifiers.contains(aqua_core::Modifiers::LOGO),
-                        Instant::now(),
-                        &entries,
-                    );
-                    (result, before, state.open)
-                };
-                if before != after {
-                    if let Some(change) = &open_change {
-                        change(after);
+            for kind in [InputKind::KeyDown, InputKind::TextInput, InputKind::Ime] {
+                let state = Rc::clone(&state);
+                let entries = Rc::clone(&entries);
+                let change = change.clone();
+                let open_change = open_change.clone();
+                trigger = trigger.on_input(kind, EventPhase::Bubble, move |event| {
+                    let now = Instant::now();
+                    let (result, before, after) = {
+                        let mut state = state.borrow_mut();
+                        let before = state.open;
+                        let result = match &event.input {
+                            RoutedInput::Native(InputEvent::KeyDown(key)) => {
+                                match select_key_name(&key.key) {
+                                    Some(name) => state.key(name, &entries),
+                                    None => return InputResponse::default(),
+                                }
+                            }
+                            RoutedInput::Native(
+                                InputEvent::TextInput { text }
+                                | InputEvent::Ime(aqua_core::ImeEvent::Commit { text }),
+                            ) => state.type_text(text, now, &entries),
+                            _ => return InputResponse::default(),
+                        };
+                        (result, before, state.open)
+                    };
+                    if before != after {
+                        if let Some(change) = &open_change {
+                            change(after);
+                        }
                     }
-                }
-                if let Some(value) = result.commit {
-                    if let Some(change) = &change {
-                        change(value);
+                    if let Some(value) = result.commit {
+                        if let Some(change) = &change {
+                            change(value);
+                        }
                     }
-                }
-                if result.handled {
-                    InputResponse {
-                        stop_propagation: true,
-                        ..InputResponse::handled()
+                    if result.handled {
+                        InputResponse {
+                            stop_propagation: true,
+                            ..InputResponse::handled()
+                        }
+                    } else {
+                        InputResponse::default()
                     }
-                } else {
-                    InputResponse::default()
-                }
-            });
+                });
+            }
         }
         trigger
     }

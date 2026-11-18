@@ -1819,6 +1819,7 @@ dependencies = [
  "futures",
  "glam",
  "gltf",
+ "icu_normalizer",
  "image",
  "mermaid-rs-renderer",
  "palette",

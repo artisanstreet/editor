@@ -42,6 +42,8 @@ mod page;
 mod phrase;
 #[path = "ui/popover.rs"]
 mod popover;
+#[path = "ui/select.rs"]
+mod select;
 #[expect(
     clippy::disallowed_types,
     reason = "test fixture driving the raw aqua text and element APIs, not view code"

@@ -104,6 +104,7 @@ url = "=2.5.8"
 regex = "=1.13.1"
 data-url = "=0.3.2"
 unicode-width = "=0.2.2"
+icu_normalizer = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
 vte = { version = "=0.15.0", default-features = false }
 anyhow = "=1.0.104"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }

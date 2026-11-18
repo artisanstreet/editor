@@ -42,6 +42,7 @@ mermaid-rs-renderer.workspace = true
 usvg = { version = "0.48.1", default-features = false, features = ["text"] }
 vte.workspace = true
 unicode-width.workspace = true
+icu_normalizer.workspace = true
 ufbx.workspace = true
 stl_io.workspace = true
 ply-rs-bw.workspace = true
