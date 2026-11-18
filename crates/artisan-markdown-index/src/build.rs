@@ -112,24 +112,15 @@ pub fn build_from(
                 .filter(|item| item.previous.is_none())
                 .map(|item| item.source_start)
         {
-            let context = LeafContext {
-                lists: lists
-                    .iter()
-                    .zip(items.iter())
-                    .map(|(list, item)| ListLevel {
-                        source_start: list.source_start,
-                        number: list.start.map(|start| start.saturating_add(list.ordinal)),
-                        task: item.task,
-                        first: item.first,
-                    })
-                    .collect(),
-                quote_depth,
-                table_alignments: alignments.clone(),
-                table_source,
-                spacing: std::mem::take(&mut spacing),
-            };
             let context_id = intern_context(
-                context,
+                leaf_context(
+                    &lists,
+                    &items,
+                    quote_depth,
+                    &alignments,
+                    table_source,
+                    std::mem::take(&mut spacing),
+                ),
                 &mut result.contexts,
                 &mut contexts,
                 &mut admission_bytes,
@@ -261,24 +252,15 @@ pub fn build_from(
             if let Some(shape) = shape {
                 record_spacing(&mut root_previous, &mut items, &mut spacing, shape);
             }
-            let context = LeafContext {
-                lists: lists
-                    .iter()
-                    .zip(items.iter())
-                    .map(|(list, item)| ListLevel {
-                        source_start: list.source_start,
-                        number: list.start.map(|start| start.saturating_add(list.ordinal)),
-                        task: item.task,
-                        first: item.first,
-                    })
-                    .collect(),
-                quote_depth,
-                table_alignments: alignments.clone(),
-                table_source,
-                spacing: std::mem::take(&mut spacing),
-            };
             let context_id = intern_context(
-                context,
+                leaf_context(
+                    &lists,
+                    &items,
+                    quote_depth,
+                    &alignments,
+                    table_source,
+                    std::mem::take(&mut spacing),
+                ),
                 &mut result.contexts,
                 &mut contexts,
                 &mut admission_bytes,
@@ -409,6 +391,32 @@ fn record_spacing(
         in_item,
     });
 }
+fn leaf_context(
+    lists: &[OpenList],
+    items: &[OpenItem],
+    quote_depth: usize,
+    alignments: &[TableAlignment],
+    table_source: Option<usize>,
+    spacing: Vec<LeafSpacing>,
+) -> LeafContext {
+    LeafContext {
+        lists: lists
+            .iter()
+            .zip(items.iter())
+            .map(|(list, item)| ListLevel {
+                source_start: list.source_start,
+                number: list.start.map(|start| start.saturating_add(list.ordinal)),
+                task: item.task,
+                first: item.first,
+            })
+            .collect(),
+        quote_depth,
+        table_alignments: alignments.to_vec(),
+        table_source,
+        spacing,
+    }
+}
+
 fn intern_context(
     context: LeafContext,
     owned: &mut Vec<LeafContext>,
