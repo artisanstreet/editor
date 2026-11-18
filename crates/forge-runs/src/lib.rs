@@ -141,7 +141,8 @@ struct LiveRun {
     cancel_through: Arc<AtomicU64>,
     /// Streaming text, reasoning, shell output and progress, by target.
     live: HashMap<LiveTarget, LivePreview>,
-    live_bytes: usize,
+    foreground_bytes: usize,
+    terminal_bytes: usize,
     phase: Phase,
 }
 
@@ -150,6 +151,60 @@ enum Phase {
     Working,
     Stopping,
     ContinueAfterStop,
+}
+
+const LIVE_TARGET_BYTES: usize = 256 * 1024;
+const LIVE_FOREGROUND_BYTES: usize = 2 * 1024 * 1024;
+const LIVE_TERMINAL_BYTES: usize = 1024 * 1024;
+const LIVE_TARGETS: usize = 128;
+
+const fn terminal(target: &LiveTarget) -> bool {
+    matches!(
+        target,
+        LiveTarget::Shell { .. } | LiveTarget::Progress { .. }
+    )
+}
+
+fn keep_newest(text: &mut String, bytes: usize) -> usize {
+    let mut cut = text.len().saturating_sub(bytes);
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    text.drain(..cut);
+    cut
+}
+
+impl LiveRun {
+    fn terminal_share(&self, admitting: bool) -> usize {
+        let terminals = self.live.keys().filter(|target| terminal(target)).count() + usize::from(admitting);
+        LIVE_TARGET_BYTES.min(LIVE_TERMINAL_BYTES / terminals.max(1))
+    }
+
+    fn shrink_terminals(&mut self, share: usize) {
+        for (target, preview) in &mut self.live {
+            if terminal(target) && preview.text.len() > share {
+                let dropped = keep_newest(&mut preview.text, share);
+                preview.coverage.start = preview.coverage.start.saturating_add(dropped as u64);
+                self.terminal_bytes = self.terminal_bytes.saturating_sub(dropped);
+            }
+        }
+    }
+
+    fn release(&mut self, target: &LiveTarget, bytes: usize) {
+        if terminal(target) {
+            self.terminal_bytes = self.terminal_bytes.saturating_sub(bytes);
+        } else {
+            self.foreground_bytes = self.foreground_bytes.saturating_sub(bytes);
+        }
+    }
+
+    fn hold(&mut self, target: &LiveTarget, bytes: usize) {
+        if terminal(target) {
+            self.terminal_bytes += bytes;
+        } else {
+            self.foreground_bytes += bytes;
+        }
+    }
 }
 
 /// The guess at a thread's next message, kept until the thread runs again.
@@ -1122,7 +1177,8 @@ impl Hub {
                 engine: None,
                 cancel_through: Arc::clone(&cancel_through),
                 live: HashMap::new(),
-                live_bytes: 0,
+                foreground_bytes: 0,
+                terminal_bytes: 0,
                 phase: Phase::Working,
             },
         );
@@ -1259,7 +1315,6 @@ impl Hub {
         })
     }
 
-    /// Records live text and publishes it.
     #[expect(
         clippy::significant_drop_tightening,
         reason = "published under the lock, so updates reach clients in the order they were recorded"
@@ -1271,16 +1326,25 @@ impl Hub {
         mut text: String,
         mut append: bool,
     ) {
-        const TARGET_BYTES: usize = 256 * 1024;
-        const RUN_BYTES: usize = 2 * 1024 * 1024;
-        const TARGETS: usize = 128;
         let mut live = self.lock();
         let Some(run) = live.get_mut(thread_id) else {
             return;
         };
-        if !run.live.contains_key(&target) && run.live.len() >= TARGETS {
+        let admitting = !run.live.contains_key(&target);
+        if admitting && run.live.len() >= LIVE_TARGETS {
             return;
         }
+        let is_terminal = terminal(&target);
+        let limit = if is_terminal {
+            let share = run.terminal_share(admitting);
+            run.shrink_terminals(share);
+            share
+        } else {
+            let before = run.live.get(&target).map_or(0, |preview| preview.text.len());
+            LIVE_TARGET_BYTES.min(
+                LIVE_FOREGROUND_BYTES.saturating_sub(run.foreground_bytes.saturating_sub(before)),
+            )
+        };
         let preview = run.live.entry(target.clone()).or_default();
         let incoming_bytes = text.len() as u64;
         preview.coverage.total = if append {
@@ -1293,35 +1357,19 @@ impl Hub {
         }
         let buffer = &mut preview.text;
         let before = buffer.len();
-        let limit =
-            TARGET_BYTES.min(RUN_BYTES.saturating_sub(run.live_bytes.saturating_sub(before)));
         if append && before + text.len() <= limit {
             buffer.push_str(&text);
-        } else if append
-            && matches!(
-                target,
-                LiveTarget::Shell { .. } | LiveTarget::Progress { .. }
-            )
-        {
-            // Terminal previews retain their latest bytes. Publish one replacement,
-            // so the client drops the same prefix instead of accumulating it forever.
-            if text.len() >= limit {
-                let mut start = text.len().saturating_sub(limit);
-                while !text.is_char_boundary(start) {
-                    start += 1;
-                }
-                buffer.clear();
-                buffer.push_str(&text[start..]);
+        } else if append && is_terminal {
+            let window = limit / 2;
+            if text.len() >= window {
+                keep_newest(&mut text, window);
+                buffer.clone_from(&text);
             } else {
-                let mut discard = (before + text.len()).saturating_sub(limit);
-                while !buffer.is_char_boundary(discard) {
-                    discard += 1;
-                }
-                buffer.drain(..discard);
+                keep_newest(buffer, window - text.len());
                 buffer.push_str(&text);
+                text.clone_from(buffer);
             }
             preview.coverage.start = preview.coverage.total.saturating_sub(buffer.len() as u64);
-            text.clone_from(buffer);
             append = false;
         } else {
             let available = if append {
@@ -1340,8 +1388,11 @@ impl Hub {
                 buffer.clone_from(&text);
             }
         }
-        run.live_bytes = run.live_bytes.saturating_sub(before) + buffer.len();
-        if text.capacity() > TARGET_BYTES * 2 {
+        let after = buffer.len();
+        let coverage = preview.coverage;
+        run.release(&target, before);
+        run.hold(&target, after);
+        if text.capacity() > LIVE_TARGET_BYTES * 2 {
             text.shrink_to_fit();
         }
         self.inner.store.publish_live(Event::Live {
@@ -1349,7 +1400,7 @@ impl Hub {
             target,
             text,
             append,
-            coverage: preview.coverage,
+            coverage,
         });
     }
 
@@ -1368,9 +1419,9 @@ impl Hub {
     /// Drops memory-only text for a target that ended.
     fn forget_live(&self, thread_id: &ThreadId, target: &LiveTarget) {
         if let Some(run) = self.lock().get_mut(thread_id)
-            && let Some(text) = run.live.remove(target)
+            && let Some(preview) = run.live.remove(target)
         {
-            run.live_bytes = run.live_bytes.saturating_sub(text.text.len());
+            run.release(target, preview.text.len());
         }
     }
 

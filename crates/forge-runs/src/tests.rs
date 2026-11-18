@@ -3414,6 +3414,108 @@ async fn live_previews_report_missing_bytes_without_unbounded_sse_frames() {
     fixture.settled().await;
 }
 
+async fn running_fixture() -> Fixture {
+    let started = Arc::new(Notify::new());
+    let script_started = Arc::clone(&started);
+    let fixture = fixture(Arc::new(move |_turn, mut io| {
+        let started = Arc::clone(&script_started);
+        Box::pin(async move {
+            started.notify_one();
+            tokio::select! {
+                _ = io.inbox.recv() => Outcome::done(),
+                () = io.cancel.cancelled() => Outcome::cancelled(),
+            }
+        })
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("start"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), started.notified())
+        .await
+        .expect("the engine starts");
+    fixture
+}
+
+fn previewed(fixture: &Fixture, target: &LiveTarget) -> String {
+    fixture
+        .hub
+        .live_snapshot()
+        .1
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Live {
+                target: shown,
+                text,
+                ..
+            } if &shown == target => Some(text),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn busy_background_shells_never_starve_the_reply_streaming_beside_them() {
+    let fixture = running_fixture().await;
+    let output = "o".repeat(300 * 1024);
+    for _ in 0..8 {
+        let shell = LiveTarget::Shell {
+            item_id: ItemId::new(),
+        };
+        fixture
+            .hub
+            .publish_live(&fixture.thread_id, shell, output.clone(), true);
+    }
+    let reply = LiveTarget::Text {
+        item_id: ItemId::new(),
+    };
+    fixture
+        .hub
+        .publish_live(&fixture.thread_id, reply.clone(), "Here is".into(), true);
+    fixture
+        .hub
+        .publish_live(&fixture.thread_id, reply.clone(), " the answer".into(), true);
+    assert_eq!(previewed(&fixture, &reply), "Here is the answer");
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    fixture.settled().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_shell_preview_is_not_resent_whole_for_every_small_chunk() {
+    let fixture = running_fixture().await;
+    let mut events = fixture.hub.store().subscribe();
+    let shell = LiveTarget::Shell {
+        item_id: ItemId::new(),
+    };
+    let mut published = 0;
+    let mut drain = |events: &mut forge_store::Subscription| {
+        while let Ok(envelope) = events.try_recv() {
+            if let Event::Live { text, .. } = envelope.event {
+                published += text.len();
+            }
+        }
+    };
+    fixture
+        .hub
+        .publish_live(&fixture.thread_id, shell.clone(), "s".repeat(256 * 1024), true);
+    drain(&mut events);
+    for n in 0..2000 {
+        fixture
+            .hub
+            .publish_live(&fixture.thread_id, shell.clone(), format!("line {n:>94}\n"), true);
+        drain(&mut events);
+    }
+    assert!(
+        published < 2 * 1024 * 1024,
+        "{published} bytes published for 256 KiB of output and 200 KiB of new lines"
+    );
+    assert!(previewed(&fixture, &shell).ends_with(&format!("line {:>94}\n", 1999)));
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    fixture.settled().await;
+}
+
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn large_saved_question_validates_selected_identity_without_expanding_options() {
