@@ -607,11 +607,27 @@ fn checkpoint_when_due(
         if pending < CHECKPOINT_AFTER_COMMITS && since.elapsed() < CHECKPOINT_AFTER {
             continue;
         }
-        if let Err(error) = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_row| Ok(())) {
-            tracing::warn!("checkpoint the store: {error:#}");
+        let progress = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        });
+        match progress {
+            Ok((0, log_frames, checkpointed_frames)) if checkpointed_frames >= log_frames => {
+                checkpointed = committed;
+                waiting_since = None;
+            }
+            Ok((busy, log_frames, checkpointed_frames)) => tracing::debug!(
+                busy,
+                log_frames,
+                checkpointed_frames,
+                pending,
+                "store checkpoint was partial; it stays pending"
+            ),
+            Err(error) => tracing::warn!(pending, "checkpoint the store: {error:#}"),
         }
-        checkpointed = committed;
-        waiting_since = None;
     }
 }
 

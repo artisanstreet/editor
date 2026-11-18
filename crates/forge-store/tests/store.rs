@@ -12,6 +12,7 @@ use artisan_api::{
 };
 use forge_store::{Acceptance, BlobRejected, NewItem, Store};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 struct TempDir(PathBuf);
 
@@ -782,6 +783,53 @@ async fn a_run_stays_in_the_thread_it_started_in() {
     assert!(error.downcast_ref::<forge_store::RunMoved>().is_some());
     assert_eq!(store.latest_run(&thread).await.unwrap(), Some(started));
     assert_eq!(store.latest_run(&other).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkpoint_a_reader_held_back_finishes_once_the_reader_lets_go() {
+    let dir = TempDir::new();
+    let (store, thread) = test_store(&dir.0).await;
+    let database = dir.0.join("forge.sqlite3");
+    let on_disk = || std::fs::metadata(&database).unwrap().len();
+    let logical = || {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let pages: u64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap();
+        let size: u64 = conn
+            .query_row("PRAGMA page_size", [], |row| row.get(0))
+            .unwrap();
+        pages * size
+    };
+    let before = on_disk();
+    let reader = rusqlite::Connection::open(&database).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM items", [], |row| row.get(0))
+        .unwrap();
+    for index in 0..600 {
+        store
+            .upsert_item(message(&thread, &format!("held-{index}"), "x"))
+            .await
+            .unwrap();
+    }
+    test_support::wait::wait_until(
+        "a checkpoint up to the reader",
+        Duration::from_secs(30),
+        || on_disk() > before,
+    );
+    assert!(
+        on_disk() < logical(),
+        "the reader held the newer commits back"
+    );
+
+    reader.execute_batch("COMMIT").unwrap();
+
+    test_support::wait::wait_until(
+        "the held-back commits to reach the database file",
+        Duration::from_secs(30),
+        || on_disk() >= logical(),
+    );
 }
 
 #[tokio::test]

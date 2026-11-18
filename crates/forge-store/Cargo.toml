@@ -33,6 +33,7 @@ fff-grep = "=0.9.6"
 memchr = "2.8.3"
 
 [dev-dependencies]
+test-support.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
