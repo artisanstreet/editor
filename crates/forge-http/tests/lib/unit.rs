@@ -1,6 +1,3 @@
-//! A client's view over real mutual TLS: pairing, auth, sending, and the
-//! event stream resuming after a seq.
-
 use super::*;
 use artisan_api::{
     CreateProject, CreateThread, EngineConfig, EngineId, Envelope, Event, ItemId, PairRequest,
@@ -85,7 +82,6 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
     let invite = invite(&store).await.unwrap();
     let editor = device(&invite.forge_certificate, address);
 
-    // Not paired yet.
     let refused = editor.http.get(editor.url("/state")).send().await.unwrap();
     assert_eq!(refused.status(), 401);
 
@@ -217,7 +213,6 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
         .unwrap();
     assert!(sent.status().is_success());
 
-    // Claude Code isn't installed in this Forge, so the run fails — and says why.
     let stream = editor
         .http
         .get(editor.url(&format!("/events?since={since}")))
@@ -248,7 +243,6 @@ async fn a_paired_device_sends_a_message_and_follows_the_run() {
     );
     assert!(seqs.first().is_some_and(|first| *first > since));
 
-    // Resuming after the last seq replays nothing old.
     let last = *seqs.last().unwrap();
     let stream = editor
         .http
@@ -450,9 +444,6 @@ async fn rich_resources_use_the_paired_forge_project_and_reject_non_regular_file
     }
 }
 
-/// What an Editor shows for a refused request comes from these messages
-/// and codes: a missing thing is 404 and named once, a stale answer is a
-/// conflict, and settings with their own route cannot be written raw.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
@@ -579,7 +570,6 @@ async fn refusals_name_what_is_missing_or_stale_and_only_switches_save_raw() {
         .unwrap();
     assert_eq!(garbled.status(), 400);
 
-    // The Behaviour card's switches and Claude's transport save too.
     for key in [
         "summary_titles",
         "continue_after_restart",
@@ -671,7 +661,7 @@ async fn a_failing_store_answers_content_reads_as_internal_while_bad_ranges_stay
     let error: artisan_api::ApiError = rejected.json().await.unwrap();
     assert_eq!(error.code, artisan_api::ErrorCode::BadRequest);
     let disk = rusqlite::Connection::open(dir.path().join("forge").join("forge.sqlite3")).unwrap();
-    disk.execute_batch("ALTER TABLE content RENAME TO content_elsewhere")
+    disk.execute_batch(include_str!("hide_content.sql"))
         .unwrap();
     for path in [
         format!("/content/{source}/index?format=markdown"),
@@ -704,7 +694,6 @@ async fn remote_editors_get_item_pages_zstd_compressed_but_events_stay_plain() {
             .build()
             .unwrap()
     };
-    // The Editor's client on a remote host, and one that shows the wire.
     let (editor, wire) = (client(true), client(false));
     let url = |path: &str| format!("https://localhost:{}{path}", address.port());
     let pair = PairRequest {
@@ -777,7 +766,6 @@ async fn remote_editors_get_item_pages_zstd_compressed_but_events_stay_plain() {
     assert_eq!(page.items.len(), 40);
     assert_eq!(page.items, expected.items);
 
-    // The event stream flushes every event, so it is never compressed.
     let events = wire
         .get(url("/events?since=0"))
         .header("accept-encoding", "zstd")
@@ -915,7 +903,6 @@ async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
     let marker = Arc::new(());
     let owner = Arc::downgrade(&marker);
     let harness_for: forge_runs::HarnessFor = Arc::new(move |engine| {
-        // Owns the marker, so dropping the harness releases it.
         let _ = &marker;
         forge_engines::harness(engine)
     });
@@ -978,8 +965,6 @@ async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
         std::fs::write(root.join("current"), "1.0.0").unwrap();
         binary
     };
-    // These are this fixture's own CLI processes under its temporary engine
-    // homes. Claude cannot finish its sign-in probe until the test releases it.
     let claude = install(
         "claude",
         "#!/bin/sh\n: > \"$0.started\"\nwhile [ ! -e \"$0.release\" ]; do sleep 0.02; done\nprintf '{\"loggedIn\":false}'\n",
@@ -1008,19 +993,13 @@ async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
         }
     })
     .await;
-    // Release even on a failed assertion so teardown cannot leave this
-    // fixture's blocked probe alive. No active Forge is involved.
     std::fs::write(marker(&claude, ".release"), "").unwrap();
     drop(server);
     result.expect("Codex startup refresh must begin before slow Claude finishes");
 }
 
-/// An engine as the gateway test scripts it. Codex agents answer with what
-/// they were asked; a Claude thread asked to "recall" uses the Artisan MCP it
-/// was launched with, and answers with what the tools said.
 struct McpScripted;
 
-/// Posts one JSON-RPC request to the Artisan MCP and returns its result.
 async fn mcp(
     http: &reqwest::Client,
     url: &str,
@@ -1040,7 +1019,6 @@ async fn mcp(
     reply["result"].clone()
 }
 
-/// The ids a tool's markdown names in code spans.
 fn ids(text: &str) -> Vec<String> {
     text.split('`')
         .skip(1)
@@ -1050,7 +1028,6 @@ fn ids(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The text a tool call answered.
 async fn tool(
     http: &reqwest::Client,
     url: &str,
@@ -1099,8 +1076,6 @@ impl forge_engines::Harness for McpScripted {
                 )
                 .await;
                 assert_eq!(hello["serverInfo"]["name"], "artisan");
-                // The engine reports its own call, as Claude does; recall
-                // must not find it.
                 io.emit(EngineEvent::Item {
                     key: "search".to_owned(),
                     parent: None,
@@ -1274,8 +1249,6 @@ async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway
         "the Codex agent's reply comes back: {waited}"
     );
 
-    // The parent keeps an Agent item naming the harness and the agent's own
-    // thread, which the Agents panel shows while it works.
     let items = store
         .transcript_page(
             &asking.id,
@@ -1311,8 +1284,6 @@ async fn a_thread_recalls_another_thread_and_runs_a_codex_agent_over_the_gateway
         "the agent starts from its prompt alone"
     );
 
-    // A background agent's result wakes the parent as the agent's report,
-    // which the Editor shows as the agent's, not as the user's message.
     let background = store.create_thread(new_thread()).await.unwrap();
     hub.send_message(&background.id, send("background"))
         .await

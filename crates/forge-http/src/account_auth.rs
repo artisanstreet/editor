@@ -281,8 +281,6 @@ pub mod tests {
         )
     }
 
-    /// Independent verification: unknown kid refetches, wrong scope and
-    /// wrong binding are refused without trusting Relay.
     #[tokio::test]
     async fn tunnel_grants_verify_against_core_jwks() {
         let (issuer_key, x) = issuer();
@@ -304,7 +302,6 @@ pub mod tests {
             .await
             .unwrap();
         assert_eq!(claims.sub, sub);
-        // Missing forge:execute is refused.
         let routed = grant_token(&issuer_key, sub, mid, &[Scope::RelayConnect]);
         assert!(
             verifier
@@ -312,7 +309,6 @@ pub mod tests {
                 .await
                 .is_err()
         );
-        // Cross-machine binding is refused.
         assert!(
             verifier
                 .verify_channel_grant(

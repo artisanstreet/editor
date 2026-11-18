@@ -1,13 +1,8 @@
-//! Skills and the global prompt use the same typed HTTP failure mapping as
-//! the ordinary Forge routes.
-
 use crate::routes::{App, Result};
 use artisan_api::{CatalogSkill, GlobalPrompt, ResolvePrompt, SavePrompt, Skill};
 use axum::Json;
 use axum::extract::{Path, State};
 
-/// The skills a `$name` mention can name: Artisan's own and the user's,
-/// less the ones turned off.
 pub async fn skills(State(app): State<App>) -> Result<Json<Vec<Skill>>> {
     Ok(Json(app.hub.extensions().enabled_skills().await?))
 }
@@ -16,7 +11,6 @@ pub async fn catalog(State(app): State<App>) -> Result<Json<Vec<CatalogSkill>>> 
     Ok(Json(app.hub.extensions().skill_catalog().await?))
 }
 
-/// `enable`, `disable`, `adopt` or `discard`.
 pub async fn skill_action(
     State(app): State<App>,
     Path((id, action)): Path<(String, artisan_api::SkillAction)>,
@@ -39,7 +33,6 @@ pub struct MarketplaceQuery {
     q: String,
 }
 
-/// skills.sh's skills for `?q=`.
 pub async fn marketplace_search(
     State(app): State<App>,
     axum::extract::Query(query): axum::extract::Query<MarketplaceQuery>,
@@ -49,7 +42,6 @@ pub async fn marketplace_search(
     ))
 }
 
-/// Installs a listed skill; answers the catalog after.
 pub async fn marketplace_install(
     State(app): State<App>,
     Json(install): Json<artisan_api::InstallListing>,
@@ -62,7 +54,6 @@ pub async fn marketplace_install(
     ))
 }
 
-/// Starts signing in an HTTP MCP server; answers the page to open.
 pub async fn mcp_sign_in_start(
     State(app): State<App>,
     Json(start): Json<artisan_api::McpSignInStart>,
@@ -75,7 +66,6 @@ pub async fn mcp_sign_in_start(
     ))
 }
 
-/// The code the browser's redirect brought back; answers the server's name.
 pub async fn mcp_sign_in_finish(
     State(app): State<App>,
     Json(finish): Json<artisan_api::McpSignInFinish>,

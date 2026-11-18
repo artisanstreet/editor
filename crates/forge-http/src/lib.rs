@@ -785,4 +785,5 @@ mod generation_tests;
 #[path = "../tests/replay.rs"]
 mod replay;
 #[cfg(test)]
+#[path = "../tests/lib/unit.rs"]
 mod tests;

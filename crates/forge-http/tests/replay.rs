@@ -6,8 +6,8 @@ use artisan_api::{
     ThreadId, ToolKind,
 };
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::time::Duration;
 use test_support::replay::ReplayingEngine;
 
