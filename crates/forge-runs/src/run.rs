@@ -947,41 +947,6 @@ async fn parent_of(
 async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -> Result<()> {
     let store = hub.store();
     let thread_id = run.thread_id.clone();
-    let event = if let EngineEvent::Image {
-        key,
-        parent,
-        path,
-        caption,
-    } = event
-    {
-        use tokio::io::AsyncReadExt as _;
-        let file = tokio::fs::File::open(&path)
-            .await
-            .with_context(|| format!("read generated image {}", path.display()))?;
-        let mut bytes = Vec::new();
-        file.take((forge_store::MAX_BLOB_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .await?;
-        anyhow::ensure!(
-            bytes.len() <= forge_store::MAX_BLOB_BYTES,
-            "generated image exceeds encoded size limit"
-        );
-        let blob = store
-            .put_image(bytes)
-            .await
-            .context("store generated image")?;
-        EngineEvent::Item {
-            key,
-            parent,
-            status: Status::Done,
-            kind: ItemKind::Image {
-                blob: blob.hash,
-                caption: caption.map(Into::into),
-            },
-        }
-    } else {
-        event
-    };
     match event {
         EngineEvent::Session { id } => {
             if run.session_id.as_deref() != Some(&id) {
@@ -1026,145 +991,28 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             key,
             parent,
             status,
-            mut kind,
+            kind,
+        } => apply_item(hub, run, items, key, parent, status, kind).await?,
+        EngineEvent::Image {
+            key,
+            parent,
+            path,
+            caption,
         } => {
-            if matches!(kind, ItemKind::Error { .. }) {
-                items.errored = true;
-            }
-            // Forge stores the agent an `agent_spawn` call starts; the call
-            // itself would only repeat it.
-            if items.hidden.contains(&key) || spawns_agent(&kind) {
-                items.hidden.insert(key);
-                return Ok(());
-            }
-            // A message to an agent names the agent's item: the engine
-            // knows it only by its own address (Claude's `agentId`).
-            if let ItemKind::Tool {
-                tool:
-                    ToolKind::AgentMessage {
-                        recipient,
-                        target: target @ None,
-                        ..
-                    },
-                ..
-            } = &mut kind
-            {
-                *target = store.agent_by_address(&thread_id, recipient).await?;
-            }
-            if let ItemKind::Tool {
-                tool:
-                    ToolKind::Agents {
-                        addresses, targets, ..
-                    },
-                ..
-            } = &mut kind
-                && targets.is_empty()
-            {
-                for address in addresses.iter() {
-                    if let Some(agent) = store.agent_by_address(&thread_id, address).await? {
-                        targets.push(agent);
-                    }
-                }
-            }
-            // An Artisan call that names a thread or agents by id shows
-            // their titles instead.
-            if let ItemKind::Tool {
-                tool: ToolKind::Mcp { server, input, .. },
-                title: title @ None,
-                ..
-            } = &mut kind
-                && server == forge_engines::ARTISAN_MCP
-                && let Some(input) = input.as_ref().and_then(|input| input.inline())
-            {
-                *title = artisan_title(store, input).await?;
-            }
-            let parent_id = match parent {
-                Some(parent) => Some(parent_of(store, run, items, &parent).await?),
-                None => None,
-            };
-            // An agent this run didn't start (resumed from an earlier
-            // process) is the one stored under its tool id.
-            let id = if matches!(kind, ItemKind::Agent { .. }) {
-                parent_of(store, run, items, &key).await?
-            } else {
-                items.id(&key)
-            };
-            if matches!(kind, ItemKind::Agent { .. })
-                && status == Status::Running
-                && items
-                    .by_key
-                    .get(&key)
-                    .is_some_and(|tracked| tracked.status.is_terminal())
-                && let Some(item) = store.reopen_agent(&id, &run.id).await?
-                && let Some(tracked) = items.by_key.get_mut(&key)
-            {
-                tracked.status = item.status;
-            }
-            let tracked = items
-                .by_key
-                .get_mut(&key)
-                .with_context(|| format!("item {id} is not tracked"))?;
-            let first = !tracked.persisted;
-            tracked.parent = parent_id.clone().or_else(|| tracked.parent.clone());
-            tracked.persisted = true;
-            // Reasoning precedes what it decided: a new top-level item
-            // (text, a tool) means the thinking it showed is over.
-            if first && tracked.parent.is_none() {
-                hub.clear_live(
-                    &thread_id,
-                    LiveTarget::Reasoning {
-                        run_id: run.id.clone(),
-                    },
-                );
-            }
-            let finished_text =
-                status.is_terminal() && matches!(kind, ItemKind::AssistantMessage { .. });
-            let shown = if finished_text && let ItemKind::AssistantMessage { text, .. } = &kind {
-                text.inline()
-                    .map(crate::resources::written_sources)
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            let shell_done = status.is_terminal() && matches!(kind, ItemKind::Tool { .. });
-            if status.is_terminal() && !tracked.status.is_terminal() {
-                items.weighed.finished(&kind, status);
-            }
-            hub.snapshot_resources(&thread_id, &id, shown).await;
-            let saved = store
-                .upsert_item(new_item(
-                    id.clone(),
-                    &thread_id,
-                    Some(&run.id),
-                    tracked.parent.clone(),
-                    Some(key),
-                    status,
-                    kind,
-                ))
-                .await?;
-            let asked =
-                (tracked.status == Status::AwaitingUser) != (saved.status == Status::AwaitingUser);
-            tracked.status = saved.status;
-            if asked {
-                hub.agent_attention(&thread_id).await;
-            }
-            if finished_text {
-                hub.forget_live(
-                    &thread_id,
-                    &LiveTarget::Text {
-                        item_id: id.clone(),
-                    },
-                );
-            }
-            if shell_done {
-                hub.forget_live(
-                    &thread_id,
-                    &LiveTarget::Shell {
-                        item_id: id.clone(),
-                    },
-                );
-                hub.forget_live(&thread_id, &LiveTarget::Progress { item_id: id });
-            }
+            let blob = store_image(hub, &path).await?;
+            apply_item(
+                hub,
+                run,
+                items,
+                key,
+                parent,
+                Status::Done,
+                ItemKind::Image {
+                    blob,
+                    caption: caption.map(Into::into),
+                },
+            )
+            .await?;
         }
         EngineEvent::Status { key, status } => {
             if items.hidden.contains(&key) {
@@ -1229,7 +1077,179 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
                 .map_or_else(|| vec![id], |(_, ids)| ids);
             store.accept_inputs(thread_id, run.id.clone(), ids).await?;
         }
-        EngineEvent::Image { .. } => unreachable!("normalized before dispatch"),
+    }
+    Ok(())
+}
+
+async fn store_image(hub: &Hub, path: &std::path::Path) -> Result<artisan_api::BlobHash> {
+    use tokio::io::AsyncReadExt as _;
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("read generated image {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((forge_store::MAX_BLOB_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+    anyhow::ensure!(
+        bytes.len() <= forge_store::MAX_BLOB_BYTES,
+        "generated image exceeds encoded size limit"
+    );
+    Ok(hub
+        .store()
+        .put_image(bytes)
+        .await
+        .context("store generated image")?
+        .hash)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one item's normalization, agent naming and storage stay together"
+)]
+async fn apply_item(
+    hub: &Hub,
+    run: &Run,
+    items: &mut Work,
+    key: String,
+    parent: Option<String>,
+    status: Status,
+    mut kind: ItemKind,
+) -> Result<()> {
+    let store = hub.store();
+    let thread_id = run.thread_id.clone();
+    if matches!(kind, ItemKind::Error { .. }) {
+        items.errored = true;
+    }
+    // Forge stores the agent an `agent_spawn` call starts; the call
+    // itself would only repeat it.
+    if items.hidden.contains(&key) || spawns_agent(&kind) {
+        items.hidden.insert(key);
+        return Ok(());
+    }
+    // A message to an agent names the agent's item: the engine
+    // knows it only by its own address (Claude's `agentId`).
+    if let ItemKind::Tool {
+        tool:
+            ToolKind::AgentMessage {
+                recipient,
+                target: target @ None,
+                ..
+            },
+        ..
+    } = &mut kind
+    {
+        *target = store.agent_by_address(&thread_id, recipient).await?;
+    }
+    if let ItemKind::Tool {
+        tool: ToolKind::Agents {
+            addresses, targets, ..
+        },
+        ..
+    } = &mut kind
+        && targets.is_empty()
+    {
+        for address in addresses.iter() {
+            if let Some(agent) = store.agent_by_address(&thread_id, address).await? {
+                targets.push(agent);
+            }
+        }
+    }
+    // An Artisan call that names a thread or agents by id shows
+    // their titles instead.
+    if let ItemKind::Tool {
+        tool: ToolKind::Mcp { server, input, .. },
+        title: title @ None,
+        ..
+    } = &mut kind
+        && server == forge_engines::ARTISAN_MCP
+        && let Some(input) = input.as_ref().and_then(|input| input.inline())
+    {
+        *title = artisan_title(store, input).await?;
+    }
+    let parent_id = match parent {
+        Some(parent) => Some(parent_of(store, run, items, &parent).await?),
+        None => None,
+    };
+    // An agent this run didn't start (resumed from an earlier
+    // process) is the one stored under its tool id.
+    let id = if matches!(kind, ItemKind::Agent { .. }) {
+        parent_of(store, run, items, &key).await?
+    } else {
+        items.id(&key)
+    };
+    if matches!(kind, ItemKind::Agent { .. })
+        && status == Status::Running
+        && items
+            .by_key
+            .get(&key)
+            .is_some_and(|tracked| tracked.status.is_terminal())
+        && let Some(item) = store.reopen_agent(&id, &run.id).await?
+        && let Some(tracked) = items.by_key.get_mut(&key)
+    {
+        tracked.status = item.status;
+    }
+    let tracked = items
+        .by_key
+        .get_mut(&key)
+        .with_context(|| format!("item {id} is not tracked"))?;
+    let first = !tracked.persisted;
+    tracked.parent = parent_id.clone().or_else(|| tracked.parent.clone());
+    tracked.persisted = true;
+    // Reasoning precedes what it decided: a new top-level item
+    // (text, a tool) means the thinking it showed is over.
+    if first && tracked.parent.is_none() {
+        hub.clear_live(
+            &thread_id,
+            LiveTarget::Reasoning {
+                run_id: run.id.clone(),
+            },
+        );
+    }
+    let finished_text = status.is_terminal() && matches!(kind, ItemKind::AssistantMessage { .. });
+    let shown = if finished_text && let ItemKind::AssistantMessage { text, .. } = &kind {
+        text.inline()
+            .map(crate::resources::written_sources)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let shell_done = status.is_terminal() && matches!(kind, ItemKind::Tool { .. });
+    if status.is_terminal() && !tracked.status.is_terminal() {
+        items.weighed.finished(&kind, status);
+    }
+    hub.snapshot_resources(&thread_id, &id, shown).await;
+    let saved = store
+        .upsert_item(new_item(
+            id.clone(),
+            &thread_id,
+            Some(&run.id),
+            tracked.parent.clone(),
+            Some(key),
+            status,
+            kind,
+        ))
+        .await?;
+    let asked = (tracked.status == Status::AwaitingUser) != (saved.status == Status::AwaitingUser);
+    tracked.status = saved.status;
+    if asked {
+        hub.agent_attention(&thread_id).await;
+    }
+    if finished_text {
+        hub.forget_live(
+            &thread_id,
+            &LiveTarget::Text {
+                item_id: id.clone(),
+            },
+        );
+    }
+    if shell_done {
+        hub.forget_live(
+            &thread_id,
+            &LiveTarget::Shell {
+                item_id: id.clone(),
+            },
+        );
+        hub.forget_live(&thread_id, &LiveTarget::Progress { item_id: id });
     }
     Ok(())
 }
