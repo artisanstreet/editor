@@ -177,26 +177,68 @@ pub fn prepare(conn: &Connection, id: &ContentId, format: SourceIndexFormat) -> 
         leaves,
     }))
 }
-pub fn persist(conn: &Connection, prepared: PreparedIndex) -> Result<Option<SourceIndexHeader>> {
+pub const LEAVES_PER_WRITE: usize = 2048;
+
+pub enum Staging {
+    Published,
+    Gone,
+    Staged,
+}
+
+fn source_present(conn: &Connection, source: &ContentRef) -> Result<bool> {
+    Ok(conn.query_row(
+        include_str!("sql/sources/present.sql"),
+        params![source.id.as_str(), source.bytes, source.lines],
+        |row| row.get(0),
+    )?)
+}
+
+pub fn stage(conn: &Connection, prepared: &PreparedIndex, batch: usize) -> Result<Staging> {
+    if header(conn, &prepared.source.id, prepared.format)?.is_some() {
+        return Ok(Staging::Published);
+    }
+    if !source_present(conn, &prepared.source)? {
+        return Ok(Staging::Gone);
+    }
+    let mut insert = conn.prepare_cached(include_str!("sql/sources/stage_leaf.sql"))?;
+    for leaf in prepared
+        .leaves
+        .iter()
+        .skip(batch * LEAVES_PER_WRITE)
+        .take(LEAVES_PER_WRITE)
+    {
+        insert.execute(params![
+            prepared.source.id.as_str(),
+            artisan_api::SOURCE_INDEX_VERSION,
+            leaf.ordinal,
+            leaf.source_start,
+            leaf.source_end,
+            leaf.metadata_start,
+            leaf.metadata_end,
+            prepared.format.as_str()
+        ])?;
+    }
+    Ok(Staging::Staged)
+}
+
+impl PreparedIndex {
+    #[must_use]
+    pub fn batches(&self) -> usize {
+        self.leaves.len().div_ceil(LEAVES_PER_WRITE)
+    }
+}
+
+pub fn publish(conn: &Connection, prepared: &PreparedIndex) -> Result<Option<SourceIndexHeader>> {
     if let Some(existing) = header(conn, &prepared.source.id, prepared.format)? {
         return Ok(Some(existing));
     }
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM content WHERE id=?1 AND bytes=?2 AND lines=?3)",
-        params![
-            prepared.source.id.as_str(),
-            prepared.source.bytes,
-            prepared.source.lines
-        ],
-        |row| row.get(0),
-    )?;
-    if !exists {
+    if !source_present(conn, &prepared.source)? {
         return Ok(None);
     }
     let metadata_ref = crate::content::store_source(conn, &prepared.metadata)?;
     if metadata_ref.id == prepared.source.id {
         return Err(SourceIndexError::SelfOwned {
-            source_id: prepared.source.id,
+            source_id: prepared.source.id.clone(),
         });
     }
     conn.execute(
@@ -212,20 +254,6 @@ pub fn persist(conn: &Connection, prepared: PreparedIndex) -> Result<Option<Sour
             prepared.leaves.len() as u64, prepared.format.as_str()
         ],
     )?;
-    let mut insert=conn.prepare_cached("INSERT INTO source_index_leaves(source_id,version,ordinal,source_start,source_end,metadata_start,metadata_end,format) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?;
-    for leaf in prepared.leaves {
-        insert.execute(params![
-            prepared.source.id.as_str(),
-            artisan_api::SOURCE_INDEX_VERSION,
-            leaf.ordinal,
-            leaf.source_start,
-            leaf.source_end,
-            leaf.metadata_start,
-            leaf.metadata_end,
-            prepared.format.as_str()
-        ])?;
-    }
-    drop(insert);
     header(conn, &prepared.source.id, prepared.format)
 }
 pub fn range(

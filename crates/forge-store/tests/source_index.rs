@@ -372,3 +372,107 @@ async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
         .unwrap();
     assert_eq!(count, 2);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn other_writes_go_through_while_a_large_source_is_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/staged-index".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+            spawned_by: None,
+        })
+        .await
+        .unwrap();
+    let text = "x\n".repeat(100_000);
+    let saved = store
+        .upsert_item(NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id.clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::AssistantMessage {
+                text: text.into(),
+                phase: Phase::Final,
+            },
+        })
+        .await
+        .unwrap();
+    let ItemKind::AssistantMessage {
+        text: TextContent::Stored(source),
+        ..
+    } = saved.kind
+    else {
+        panic!("stored source")
+    };
+    let indexing = tokio::spawn({
+        let store = store.clone();
+        let id = source.id.clone();
+        async move {
+            store
+                .source_index(
+                    &id,
+                    SourceIndexQuery {
+                        format: artisan_api::SourceIndexFormat::Literal,
+                        offset: None,
+                        limit: Some(1),
+                    },
+                )
+                .await
+        }
+    });
+    let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
+    let staged_unpublished = || {
+        let staged: i64 = conn
+            .query_row(include_str!("source_index/count_leaves.sql"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let published: i64 = conn
+            .query_row(
+                include_str!("source_index/count_source_indexes.sql"),
+                [source.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        staged > 0 && published == 0
+    };
+    test_support::wait::wait_until(
+        "a committed part of the index before it is published",
+        std::time::Duration::from_secs(60),
+        staged_unpublished,
+    );
+    store
+        .upsert_item(NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::AssistantMessage {
+                text: "written while indexing".into(),
+                phase: Phase::Final,
+            },
+        })
+        .await
+        .unwrap();
+    let page = indexing.await.unwrap().unwrap().unwrap();
+    assert_eq!(page.index.leaves, 100_001);
+    assert_eq!(page.leaves.len(), 1);
+    assert_eq!(page.leaves[0].ordinal, 100_000);
+}

@@ -84,16 +84,39 @@ impl Store {
             source_index::Prepared::Missing => return Ok(None),
             source_index::Prepared::Indexed => {}
             source_index::Prepared::Built(prepared) => {
-                self.write(move |tx| {
-                    let _permit = permit;
-                    source_index::persist(tx, prepared)
-                })
-                .await?;
+                if !self.persist_index(prepared, permit).await? {
+                    return Ok(None);
+                }
             }
         }
         let id = id.clone();
         self.read(move |conn| source_index::range(conn, &id, &query))
             .await
+    }
+
+    async fn persist_index(
+        &self,
+        prepared: source_index::PreparedIndex,
+        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<bool, SourceIndexError> {
+        let prepared = Arc::new(prepared);
+        for batch in 0..prepared.batches() {
+            let staging = Arc::clone(&prepared);
+            let staged = self
+                .write(move |tx| source_index::stage(tx, &staging, batch))
+                .await?;
+            match staged {
+                source_index::Staging::Staged => {}
+                source_index::Staging::Published => return Ok(true),
+                source_index::Staging::Gone => return Ok(false),
+            }
+        }
+        self.write(move |tx| {
+            let _permit = permit;
+            source_index::publish(tx, &prepared)
+        })
+        .await
+        .map(|published| published.is_some())
     }
 
     pub async fn collection_range<T: serde::de::DeserializeOwned + Send + 'static>(
