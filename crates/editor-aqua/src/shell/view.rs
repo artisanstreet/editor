@@ -171,28 +171,18 @@ pub fn conversation_virtual(
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     above_composer: Option<Element>,
 ) -> Result<Element, BuildError> {
-    if workspace.conversation.agent.is_some() {
-        return Ok(crate::conversation::view::layout_batched_thread_element(
-            &workspace.conversation,
-            estimated_height,
-            row,
-            revision,
-            viewport,
-            initial_height,
-            overlays,
-            None,
-            drawer,
-            viewport_width,
-        ));
-    }
-    let card = measured_composer(
-        workspace,
-        core,
-        theme,
-        parts,
-        composer_measurement,
-        above_composer,
-    )?;
+    let card = if workspace.conversation.agent.is_some() {
+        None
+    } else {
+        Some(measured_composer(
+            workspace,
+            core,
+            theme,
+            parts,
+            composer_measurement,
+            above_composer,
+        )?)
+    };
     Ok(crate::conversation::view::layout_batched_thread_element(
         &workspace.conversation,
         estimated_height,
@@ -201,7 +191,7 @@ pub fn conversation_virtual(
         viewport,
         initial_height,
         overlays,
-        Some(card),
+        card,
         drawer,
         viewport_width,
     ))
