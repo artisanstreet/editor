@@ -43,7 +43,22 @@ pub enum Item {
     Listing(ListingRow),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ItemKey {
+    Skill(String),
+    Server(String),
+    Listing(String),
+}
+
 impl Item {
+    pub fn key(&self) -> ItemKey {
+        match self {
+            Self::Skill(row) => ItemKey::Skill(row.id.clone()),
+            Self::Server(row) => ItemKey::Server(row.name.clone()),
+            Self::Listing(row) => ItemKey::Listing(row.id.clone()),
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::Skill(row) => &row.name,

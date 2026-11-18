@@ -399,7 +399,7 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     }
     assert_eq!(controller.page.query, "p");
     assert!(controller.page.search_deadline().is_none());
-    assert_eq!(controller.page.selected, 0);
+    assert_eq!(controller.page.selected_index(), Some(0));
     let key_event = |key| {
         InputEvent::KeyDown(KeyEvent {
             key: InputKey::Named(key),
@@ -411,14 +411,14 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
     for action in events.borrow_mut().drain(..) {
         view::dispatch(&mut controller, &mut core, action);
     }
-    assert_eq!(controller.page.selected, 1);
+    assert_eq!(controller.page.selected_index(), Some(1));
     assert!(controller.selected_entry_key().is_some());
     app.handle_input(&key_event(NamedKey::Escape));
     for action in events.borrow_mut().drain(..) {
         view::dispatch(&mut controller, &mut core, action);
     }
     assert!(controller.page.query.is_empty());
-    assert_eq!(controller.page.selected, 0);
+    assert_eq!(controller.page.selected_index(), Some(0));
     app.handle_input(&InputEvent::TextInput { text: "p".into() });
     for action in events.borrow_mut().drain(..) {
         view::dispatch(&mut controller, &mut core, action);
@@ -428,6 +428,52 @@ fn mounted_search_routes_keyboard_selection_and_escape() {
         view::dispatch(&mut controller, &mut core, action);
     }
     assert_eq!(core.screen(), &Screen::Settings(SettingsPage::Extensions));
+}
+
+fn discovered(id: &str) -> Item {
+    Item::Skill(presentation::SkillRow {
+        id: id.into(),
+        name: id.into(),
+        description: String::new(),
+        size: String::new(),
+        enabled: false,
+        origin: artisan_api::SkillOrigin::Discovered,
+        marks: Vec::new(),
+        attention: None,
+        found_in: None,
+    })
+}
+
+#[test]
+fn enter_installs_the_skill_that_is_painted_selected_after_the_catalog_shrinks() {
+    use editor_aqua::marketplace::{Action, Entry, ListKey, Operation, entries};
+
+    let mut page = Marketplace::default();
+    page.set_shown(true);
+    page.sync_host(Some(HostId("host".into())), &[], &[]);
+    page.items = vec![
+        discovered("pdf-a"),
+        discovered("pdf-b"),
+        discovered("pdf-c"),
+    ];
+    let now = Instant::now();
+    page.set_query("pdf".into(), now);
+    assert!(page.list_key(ListKey::Down, now).is_none());
+    assert!(page.list_key(ListKey::Down, now).is_none());
+    page.items.remove(1);
+    let painted = entries(&page).into_iter().find_map(|entry| match entry {
+        Entry::Item {
+            item,
+            selected: true,
+            ..
+        } => Some(item.name().to_owned()),
+        _ => None,
+    });
+    assert_eq!(painted.as_deref(), Some("pdf-c"));
+    assert!(matches!(
+        page.list_key(ListKey::Accept, now),
+        Some(Action::Operation(Operation::Skill { id, .. })) if id == "pdf-c"
+    ));
 }
 
 #[test]

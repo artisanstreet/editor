@@ -4,7 +4,7 @@ pub mod view;
 
 use artisan_api::{CatalogSkill, Listing, McpServer, SkillAction};
 use editor_core::{ForgeClient, HostId, Screen, SettingsPage, client::CallError};
-use presentation::{Item, Kind};
+use presentation::{Item, ItemKey, Kind};
 use std::time::{Duration, Instant};
 
 pub const REMOTE_SEARCH_DELAY: Duration = Duration::from_millis(250);
@@ -88,7 +88,7 @@ pub struct Marketplace {
     pub generation: u64,
     pub query: String,
     pub kind: Kind,
-    pub selected: usize,
+    selected: Option<ItemKey>,
     pub found_open: bool,
     pub focus_search: bool,
     pub items: Vec<Item>,
@@ -132,7 +132,7 @@ impl Marketplace {
             return;
         }
         self.query = query;
-        self.selected = 0;
+        self.selected = None;
         self.restart_search(now);
     }
 
@@ -197,7 +197,7 @@ impl Marketplace {
 
     pub fn set_kind(&mut self, kind: Kind) {
         self.kind = kind;
-        self.selected = 0;
+        self.selected = None;
     }
 
     pub fn results(&self) -> Vec<Item> {
@@ -222,14 +222,40 @@ impl Marketplace {
             .collect()
     }
 
+    pub fn selected_index(&self) -> Option<usize> {
+        self.resolve_selection(&self.results())
+    }
+
+    fn resolve_selection(&self, results: &[Item]) -> Option<usize> {
+        if results.is_empty() {
+            return None;
+        }
+        Some(
+            self.selected
+                .as_ref()
+                .and_then(|key| results.iter().position(|item| &item.key() == key))
+                .unwrap_or(0),
+        )
+    }
+
+    fn select(&mut self, results: &[Item], index: Option<usize>) {
+        self.selected = index.and_then(|index| results.get(index)).map(Item::key);
+    }
+
     pub fn list_key(&mut self, key: ListKey, now: Instant) -> Option<Action> {
         let results = self.results();
+        let current = self.resolve_selection(&results);
         match key {
-            ListKey::Up => self.selected = self.selected.saturating_sub(1),
-            ListKey::Down => {
-                self.selected = (self.selected + 1).min(results.len().saturating_sub(1))
+            ListKey::Up => self.select(&results, current.map(|index| index.saturating_sub(1))),
+            ListKey::Down => self.select(
+                &results,
+                current.map(|index| (index + 1).min(results.len() - 1)),
+            ),
+            ListKey::Accept => {
+                return current
+                    .and_then(|index| results.get(index))
+                    .and_then(Self::act);
             }
-            ListKey::Accept => return results.get(self.selected).and_then(Self::act),
             ListKey::Dismiss => self.set_query(String::new(), now),
         }
         None
@@ -337,14 +363,14 @@ pub fn entries(page: &Marketplace) -> Vec<Entry> {
         );
     };
     if !page.query.trim().is_empty() {
-        let selected = page.selected.min(results.len().saturating_sub(1));
+        let selected = page.resolve_selection(&results);
         let (local, remote): (Vec<&Item>, Vec<&Item>) = results
             .iter()
             .partition(|item| !matches!(item, Item::Listing(_)));
         let local_count = local.len();
         if !local.is_empty() {
             entries.push(Entry::Group("On this host".to_owned()));
-            group(&mut entries, local, Some(selected));
+            group(&mut entries, local, selected);
         }
         match &page.listings {
             Remote::Searching => {
@@ -353,7 +379,11 @@ pub fn entries(page: &Marketplace) -> Vec<Entry> {
             Remote::Failed(error) => entries.push(Entry::Group(error.clone())),
             Remote::Found(_) if !remote.is_empty() => {
                 entries.push(Entry::Group("skills.sh".to_owned()));
-                group(&mut entries, remote, selected.checked_sub(local_count));
+                group(
+                    &mut entries,
+                    remote,
+                    selected.and_then(|selected| selected.checked_sub(local_count)),
+                );
             }
             Remote::Found(_) | Remote::Idle => {}
         }
