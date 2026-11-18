@@ -32,7 +32,6 @@ impl Edge {
 }
 
 const WHITE: Oklch = Oklch::new(1.0, 0.0, 0.0);
-const BLACK: Oklch = Oklch::new(0.0, 0.0, 0.0);
 
 pub struct Surfaces {
     pub bg: Oklch,
@@ -44,20 +43,15 @@ pub struct Surfaces {
 impl Surfaces {
     #[must_use]
     pub fn of(theme: &ArtisanTheme) -> Self {
-        let (bg, inner, ink, ink_dim) = match theme.colors.mode.is_dark() {
+        let colors = &theme.colors;
+        let (bg, inner) = match colors.mode.is_dark() {
             true => (
-                Oklch::new(0.1757, 0.0, 0.0),
-                Oklch::new(0.21, 0.0, 0.0).animate_to(WHITE, 0.06),
-                WHITE,
-                Oklch::new(0.709, 0.0, 0.0),
+                colors.background,
+                colors.surface.animate_to(colors.white, 0.06),
             ),
-            false => (
-                WHITE,
-                theme.colors.raised,
-                BLACK,
-                Oklch::new(0.551, 0.027, 264.364),
-            ),
+            false => (colors.white, colors.raised),
         };
+        let (ink, ink_dim) = (colors.text, colors.text_muted);
         Self {
             bg,
             inner,

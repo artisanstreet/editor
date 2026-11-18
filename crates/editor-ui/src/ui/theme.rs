@@ -435,6 +435,8 @@ mod polar {
     pub const GRAY_300: Lch = (0.872, 0.01, 258.338);
     pub const GRAY_400: Lch = (0.707, 0.022, 261.325);
     pub const GRAY_500: Lch = (0.551, 0.027, 264.364);
+    pub const SLATE_MUTED: Lch = (0.47, 0.03, 260.0);
+    pub const SLATE_FAINT: Lch = (0.53, 0.027, 264.364);
     pub const GRAY_600: Lch = (0.446, 0.03, 256.802);
     pub const GRAY_900: Lch = (0.21, 0.034, 264.665);
 
@@ -557,7 +559,8 @@ impl ColorTokens {
             INDIGO_700, INDIGO_800, INDIGO_900, INDIGO_950, PANEL, PINK_400, PINK_600, POLAR_50,
             POLAR_100, POLAR_300, POLAR_400, POLAR_500, POLAR_600, POLAR_700, POLAR_800, POLAR_900,
             POLAR_950, PURPLE_300, PURPLE_400, PURPLE_600, PURPLE_700, RED_50, RED_300, RED_400,
-            RED_500, RED_600, RED_700, RED_950, SKY_400, SKY_700, WHITE, under_panel,
+            RED_500, RED_600, RED_700, RED_950, SKY_400, SKY_700, SLATE_FAINT, SLATE_MUTED, WHITE,
+            under_panel,
         };
         let dark = mode.is_dark();
         let pick = |light: (f32, f32, f32), dark_value: (f32, f32, f32)| {
@@ -616,7 +619,7 @@ impl ColorTokens {
             border: scale.border,
             text: scale.text,
         };
-        let text_faint = pick(GRAY_400, POLAR_500);
+        let text_faint = pick(SLATE_FAINT, POLAR_400);
         let ansi = if dark {
             [
                 POLAR_700,
@@ -682,10 +685,10 @@ impl ColorTokens {
             line: pick(under_panel(GRAY_200), POLAR_700),
             line_strong: pick(under_panel(GRAY_300), POLAR_600),
             text: pick(BLACK, WHITE),
-            text_muted: pick(GRAY_500, POLAR_300),
+            text_muted: pick(SLATE_MUTED, POLAR_300),
             text_muted_glass: pick(GRAY_500, GLASS_INK_DIM),
             text_faint,
-            ring: pick(BLUE_300, BLUE_700),
+            ring: token(BLUE_500),
             text_selection: pick(BLUE_100, BLUE_900),
             primary: pick(BLACK, WHITE),
             primary_hover: pick(POLAR_600, POLAR_50),
