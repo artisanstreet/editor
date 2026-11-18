@@ -764,11 +764,15 @@ fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
         .map(|tokens| ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", tokens.to_string()))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[path = "../tests/claude/scenario.rs"]
+mod scenario;
+
+#[cfg(test)]
 #[path = "../tests/claude/cancellation.rs"]
 mod cancellation_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "../tests/claude/background.rs"]
 mod background_tests;
 
@@ -824,185 +828,65 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn protocol_output_errors_fail_even_after_a_successful_result() {
-        use crate::{Harness as _, Launch, RunIo, Turn, UserInput};
-        use artisan_api::{EngineConfig, EngineId, RunStatus, ThreadId};
-        use std::os::unix::fs::PermissionsExt as _;
+        use crate::fake_engine;
+        use artisan_api::RunStatus;
         for (after_result, malformed) in
             [(false, false), (true, false), (false, true), (true, true)]
         {
             let directory = tempfile::tempdir().unwrap();
-            let binary = directory.path().join("fake-claude");
-            let earlier = if after_result {
-                "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\",\"usage\":{}}'\n"
-            } else {
-                ""
-            };
-            let output = if malformed {
-                "printf '%s\\n' '{broken-json'\n".to_owned()
-            } else {
-                format!(
-                    "head -c {} /dev/zero\nprintf '\\n'\n",
-                    crate::process::MAX_LINE_BYTES + 1
-                )
-            };
-            let parent_pid = directory.path().join("parent-pid");
-            let child_pid = directory.path().join("child-pid");
-            std::fs::write(
-                &binary,
-                format!("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$ARTISAN_TEST_PARENT_PID\"\nsleep 30 & child=$!\nprintf '%s\\n' \"$child\" > \"$ARTISAN_TEST_CHILD_PID\"\nread -r input\n{earlier}{output}wait\n"),
-            )
-            .unwrap();
-            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let turn = Turn {
-                trace_dir: None,
-                thread_id: ThreadId::from("protocol-error"),
-                engine: EngineId::Claude,
-                binary,
-                home: directory.path().join("home"),
-                cwd: directory.path().into(),
-                config: EngineConfig::new(EngineId::Claude),
-                session_id: Some("existing".into()),
-                input: UserInput {
-                    text: "go".into(),
-                    ..Default::default()
-                },
-                launch: Launch {
-                    env: vec![
-                        (
-                            "ARTISAN_TEST_PARENT_PID".into(),
-                            parent_pid.to_string_lossy().into_owned(),
-                        ),
-                        (
-                            "ARTISAN_TEST_CHILD_PID".into(),
-                            child_pid.to_string_lossy().into_owned(),
-                        ),
-                    ],
-                    ..Launch::default()
-                },
-            };
-            let (_sender, inbox) = tokio::sync::mpsc::channel(8);
-            let (events, mut received) = tokio::sync::mpsc::channel(256);
-            let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
-            let outcome = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                super::ClaudeHarness.run(
-                    turn,
-                    RunIo {
-                        inbox,
-                        events,
-                        cancel: tokio_util::sync::CancellationToken::new(),
-                    },
-                ),
-            )
-            .await
-            .expect("protocol failure must not await a blocked process");
+            let after = after_result.to_string();
+            let oversized = (crate::process::MAX_LINE_BYTES + 1).to_string();
+            let mut env = vec![("ARTISAN_TEST_AFTER_RESULT", after.as_str())];
+            if !malformed {
+                env.push(("ARTISAN_TEST_LINE_BYTES", &oversized));
+            }
+            let mut running = super::scenario::start(super::scenario::turn(
+                directory.path(),
+                "claude-protocol-error",
+                &env,
+            ));
+            let outcome = running
+                .outcome(std::time::Duration::from_secs(5))
+                .await
+                .expect("protocol failure must not await a blocked process");
             assert_eq!(outcome.status(), RunStatus::Failed);
             assert!(outcome.error().unwrap().contains(if malformed {
                 "protocol JSON"
             } else {
                 "wrote a line over"
             }));
-            for (path, parent) in [(parent_pid, true), (child_pid, false)] {
-                let pid = std::fs::read_to_string(path).unwrap();
-                tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                    loop {
-                        let mut command = tokio::process::Command::new("ps");
-                        command.args(["-o", "stat=", "-p", pid.trim()]);
-                        let state =
-                            crate::process::probe(command, std::time::Duration::from_secs(3), 1024)
-                                .await
-                                .unwrap();
-                        let state = String::from_utf8_lossy(&state.stdout);
-                        if state.trim().is_empty() || (!parent && state.trim().starts_with('Z')) {
-                            break;
-                        }
-                        // A delivered SIGKILL still needs the scheduler to stop
-                        // descendants; prove they stop rather than accepting R.
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .expect("owned process is reaped and its descendant stops");
+            for marker in ["parent", "child"] {
+                assert!(
+                    fake_engine::ended(directory.path(), marker).await,
+                    "the owned process and its descendant stop"
+                );
             }
-            drain.await.unwrap();
+            #[cfg(unix)]
+            assert!(
+                fake_engine::reaped(directory.path(), "parent"),
+                "the owned process is reaped"
+            );
+            running.drained().await;
         }
     }
 
-    /// A background agent outlives the turn's `result`: input stays open
-    /// until it reports back, or the CLI would kill it mid-work. The fake
-    /// CLI fails the run if its input closes while the agent works.
-    #[cfg(unix)]
     #[tokio::test]
     async fn input_stays_open_while_a_background_agent_works() {
-        use crate::{Harness as _, Launch, RunIo, Turn, UserInput};
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("claude");
-        std::fs::write(
-            &fake,
-            r#"#!/usr/bin/env bash
-read -r line
-echo '{"type":"user","isReplay":true,"message":{"content":"go"}}'
-echo '{"type":"system","subtype":"init","session_id":"s1","model":"m"}'
-echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent"}]}'
-echo '{"type":"result","subtype":"success","result":"started","usage":{}}'
-sleep 1
-read -r -t 0.05 rest; code=$?
-if [ "$code" -eq 1 ]; then
-  echo '{"type":"result","subtype":"error_during_execution","errors":["input closed while the agent worked"],"usage":{}}'
-  exit 0
-fi
-echo '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
-echo '{"type":"result","subtype":"success","result":"agent reported","usage":{}}'
-cat > /dev/null
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Tracing is explicitly enabled for this diagnostic fixture.
-        let home = dir.path().join("data/engines/claude/home");
-        std::fs::create_dir_all(&home).unwrap();
-        let turn = Turn {
-            trace_dir: Some(dir.path().join("data/traces")),
-            thread_id: artisan_api::ThreadId::from("thread"),
-            engine: artisan_api::EngineId::Claude,
-            binary: fake,
-            home,
-            cwd: dir.path().to_owned(),
-            config: artisan_api::EngineConfig::new(artisan_api::EngineId::Claude),
-            session_id: Some("s1".into()),
-            input: UserInput {
-                text: "go".into(),
-                ..UserInput::default()
-            },
-            launch: Launch::default(),
-        };
-        let (_steers, inbox) = tokio::sync::mpsc::channel(8);
-        let (events, mut received) = tokio::sync::mpsc::channel(256);
-        let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
-        let io = RunIo {
-            inbox,
-            events,
-            cancel: tokio_util::sync::CancellationToken::new(),
-        };
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            super::ClaudeHarness.run(turn, io),
-        )
-        .await
-        .expect("the run ends once the agent reported");
-        drain.abort();
+        let mut turn = super::scenario::turn(dir.path(), "claude-background-agent", &[]);
+        turn.trace_dir = Some(dir.path().join("data/traces"));
+        let mut running = super::scenario::start(turn);
+        let outcome = running
+            .outcome(std::time::Duration::from_secs(20))
+            .await
+            .expect("the run ends once the agent reported");
         assert_eq!(
             outcome.status(),
             artisan_api::RunStatus::Done,
             "{outcome:?}"
         );
-
-        // The trace says what Claude wrote and why input stayed open, then
-        // closed: what an agent killed mid-work is read back from.
         let traces = dir.path().join("data/traces");
         let mut trace = String::new();
         for _ in 0..200 {
@@ -1030,74 +914,15 @@ cat > /dev/null
         }
     }
 
-    /// An agent's report starts a follow-up turn that outlasts the settle
-    /// grace and launches the next agent. Closing input mid-turn made the
-    /// CLI kill that agent ten minutes later.
-    #[cfg(unix)]
     #[tokio::test]
     async fn input_stays_open_through_a_long_turn_after_an_agent_reports() {
-        use crate::{Harness as _, Launch, RunIo, Turn, UserInput};
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("claude");
-        std::fs::write(
-            &fake,
-            r#"#!/usr/bin/env bash
-read -r line
-echo '{"type":"user","isReplay":true,"message":{"content":"go"}}'
-echo '{"type":"system","subtype":"init","session_id":"s1","model":"m"}'
-echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent"}]}'
-echo '{"type":"result","subtype":"success","result":"started","usage":{}}'
-echo '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
-echo '{"type":"assistant","message":{"id":"m2","role":"assistant","content":[{"type":"text","text":"Reading the report."}]}}'
-sleep 1
-read -r -t 0.05 rest; code=$?
-if [ "$code" -eq 1 ]; then
-  echo '{"type":"result","subtype":"error_during_execution","errors":["input closed mid-turn"],"usage":{}}'
-  exit 0
-fi
-echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a2","task_type":"local_agent"}]}'
-echo '{"type":"result","subtype":"success","result":"launched the next agent","usage":{}}'
-echo '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
-echo '{"type":"result","subtype":"success","result":"agent reported","usage":{}}'
-cat > /dev/null
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let home = dir.path().join("data/engines/claude/home");
-        std::fs::create_dir_all(&home).unwrap();
-        let turn = Turn {
-            trace_dir: None,
-            thread_id: artisan_api::ThreadId::from("thread"),
-            engine: artisan_api::EngineId::Claude,
-            binary: fake,
-            home,
-            cwd: dir.path().to_owned(),
-            config: artisan_api::EngineConfig::new(artisan_api::EngineId::Claude),
-            session_id: Some("s1".into()),
-            input: UserInput {
-                text: "go".into(),
-                ..UserInput::default()
-            },
-            launch: Launch::default(),
-        };
-        let (_steers, inbox) = tokio::sync::mpsc::channel(8);
-        let (events, mut received) = tokio::sync::mpsc::channel(256);
-        let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
-        let io = RunIo {
-            inbox,
-            events,
-            cancel: tokio_util::sync::CancellationToken::new(),
-        };
-        // The grace (300 ms under test) elapses during the turn's 1 s pause.
-        let outcome = tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            super::ClaudeHarness.run(turn, io),
-        )
-        .await
-        .expect("the run ends once the second agent reported");
-        drain.abort();
+        let mut running =
+            super::scenario::start(super::scenario::turn(dir.path(), "claude-long-turn", &[]));
+        let outcome = running
+            .outcome(std::time::Duration::from_secs(20))
+            .await
+            .expect("the run ends once the second agent reported");
         assert_eq!(
             outcome.status(),
             artisan_api::RunStatus::Done,
@@ -1105,37 +930,10 @@ cat > /dev/null
         );
     }
 
-    /// A side query answers from a fork: a tool the fork reaches for is
-    /// refused by its hook, even in a full-access thread, the thread's own
-    /// transcript is left alone and the fork's is deleted.
-    #[cfg(unix)]
     #[tokio::test]
     async fn a_side_query_answers_from_a_fork_and_leaves_the_thread_alone() {
-        use crate::{Harness as _, Launch, Turn, UserInput};
-        use std::os::unix::fs::PermissionsExt as _;
+        use crate::Harness as _;
         let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("claude");
-        std::fs::write(
-            &fake,
-            r#"#!/usr/bin/env bash
-case " $* " in *" --resume s1 "*) ;; *) exit 3;; esac
-case " $* " in *" --fork-session "*) ;; *) exit 3;; esac
-case " $* " in *" --dangerously-skip-permissions "*) ;; *) exit 4;; esac
-projects="$CLAUDE_CONFIG_DIR/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')"
-read -r init
-case "$init" in *'"PreToolUse"'*'"hookCallbackIds"'*) ;; *) exit 6;; esac
-read -r line
-echo '{"type":"system","subtype":"init","session_id":"f1","model":"m"}'
-echo '{}' > "$projects/f1.jsonl"
-echo '{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback","callback_id":"artisan-side-refuse-tools","input":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}}}'
-read -r answer
-case "$answer" in *'"permissionDecision":"deny"'*) ;; *) exit 5;; esac
-echo '{"type":"result","subtype":"success","is_error":false,"session_id":"f1","result":" Ship it. ","usage":{"input_tokens":10,"cache_read_input_tokens":9000,"cache_creation_input_tokens":0,"output_tokens":4}}'
-cat > /dev/null
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let home = dir.path().join("home");
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -1147,23 +945,10 @@ cat > /dev/null
         let projects = home.join(".claude").join("projects").join(project);
         std::fs::create_dir_all(&projects).unwrap();
         std::fs::write(projects.join("s1.jsonl"), "{}\n").unwrap();
-        let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
-        config.permissions = artisan_api::Permissions::Full;
-        let turn = Turn {
-            trace_dir: None,
-            thread_id: artisan_api::ThreadId::from("thread"),
-            engine: artisan_api::EngineId::Claude,
-            binary: fake,
-            home,
-            cwd,
-            config,
-            session_id: Some("s1".into()),
-            input: UserInput {
-                text: "What next?".into(),
-                ..UserInput::default()
-            },
-            launch: Launch::default(),
-        };
+        let mut turn = super::scenario::turn(&cwd, "claude-side-fork", &[]);
+        turn.home = home;
+        turn.config.permissions = artisan_api::Permissions::Full;
+        turn.input.text = "What next?".into();
         let reply = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             super::ClaudeHarness.side_query(turn, tokio_util::sync::CancellationToken::new()),

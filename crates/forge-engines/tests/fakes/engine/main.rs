@@ -1,3 +1,4 @@
+mod claude;
 mod codex;
 
 use std::fs::{File, OpenOptions};
@@ -10,6 +11,13 @@ fn main() -> ExitCode {
     let scenario = std::env::var("ARTISAN_FAKE").unwrap_or_default();
     match scenario.as_str() {
         "codex-app-server" => codex::app_server(),
+        "claude-interrupt" => claude::interrupt(),
+        "claude-closes-output" => claude::closes_output(),
+        "claude-monitor-steer" => claude::monitor_steer(),
+        "claude-protocol-error" => claude::protocol_error(),
+        "claude-background-agent" => claude::background_agent(),
+        "claude-long-turn" => claude::long_turn(),
+        "claude-side-fork" => claude::side_fork(),
         "hold" => hold(),
         unknown => {
             writeln!(
@@ -53,6 +61,10 @@ fn read_line() -> Option<String> {
         .read_line(&mut line)
         .expect("the harness writes UTF-8 lines");
     (read > 0).then(|| line.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+fn drain_input() {
+    while read_line().is_some() {}
 }
 
 fn touch(path: impl AsRef<Path>) {
