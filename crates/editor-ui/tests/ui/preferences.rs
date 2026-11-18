@@ -40,6 +40,23 @@ fn windows_accessibility_settings_reach_the_theme_unless_overridden() {
     assert_eq!(overridden.typography.scale, 1.25);
 }
 
+#[test]
+fn windows_text_size_and_high_contrast_reach_the_theme() {
+    use aqua::prelude::{OsPreferences, PrefState, PreferenceSource, TextScale};
+    let os = OsPreferences {
+        reduce_motion: PrefState::On,
+        reduce_transparency: PrefState::Unknown,
+        high_contrast: PrefState::On,
+        text_scale: TextScale::from_percent(150),
+        theme: Default::default(),
+        source: PreferenceSource::WindowsSystem,
+    };
+    let theme = preferences(SystemAccess::from_os(&os)).theme();
+    assert_eq!(theme.colors.contrast, Contrast::High);
+    assert_eq!(theme.interaction.motion, Motion::Reduced);
+    assert_eq!(theme.typography.scale, 1.5);
+}
+
 fn label_height(theme: &ArtisanTheme) -> f32 {
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::element::Box as UiBox;

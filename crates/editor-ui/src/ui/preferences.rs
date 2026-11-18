@@ -44,6 +44,17 @@ impl Default for SystemAccess {
     }
 }
 
+impl SystemAccess {
+    #[must_use]
+    pub fn from_os(prefs: &aqua::prelude::OsPreferences) -> Self {
+        Self {
+            reduced_motion: prefs.reduce_motion.is_on(),
+            high_contrast: prefs.high_contrast.is_on(),
+            text_scale: prefs.text_scale.factor(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Preferences {
     pub theme: ThemeMode,

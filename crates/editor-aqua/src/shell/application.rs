@@ -179,6 +179,18 @@ impl ShellApplication<crate::shell::root::RootViews> {
 }
 
 impl<V: SectionViews> ShellApplication<V> {
+    fn apply_motion_policy(&mut self, ctx: &AppCtx<'_>) {
+        let policy = match self.shell.preferences.motion() {
+            editor_ui::theme::Motion::Reduced => aqua_ui::motion::ReducedMotion::Reduce,
+            editor_ui::theme::Motion::Full => aqua_ui::motion::ReducedMotion::Full,
+        };
+        self.ui
+            .ui_mut()
+            .host_mut()
+            .motion_mut()
+            .set_reduced_motion(policy, ctx.now().as_secs_f64());
+    }
+
     fn refresh_sections(
         &mut self,
         ctx: &mut AppCtx<'_>,
@@ -375,18 +387,7 @@ impl<V: SectionViews> ShellApplication<V> {
             begin_theme_transition(ctx, id, dark, reduced);
         }
         if updates.preferences_changed {
-            if let Some(reduced) = self.shell.preferences.reduced_motion {
-                let policy = if reduced {
-                    aqua_ui::motion::ReducedMotion::Reduce
-                } else {
-                    aqua_ui::motion::ReducedMotion::Full
-                };
-                self.ui
-                    .ui_mut()
-                    .host_mut()
-                    .motion_mut()
-                    .set_reduced_motion(policy, ctx.now().as_secs_f64());
-            }
+            self.apply_motion_policy(ctx);
             if let Err(error) = self.shell.apply_preferences(ctx, id) {
                 tracing::error!(
                     error = %::diagnostics::chain(&error),
@@ -842,6 +843,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             );
             set_window_scale(ui, window.scale_factor as f32);
         }
+        self.shell.preferences.system =
+            editor_ui::preferences::SystemAccess::from_os(ctx.system_preferences());
         self.shell.bind(ctx, id);
         if let Some(updates) = self.initial.take() {
             self.update(ctx, id, updates);
@@ -1092,6 +1095,15 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 self.drain(ctx, id, rebuild);
             }
             WindowEvent::ScaleChanged(..) => self.drain(ctx, id, true),
+            WindowEvent::ThemeChanged(..) => {
+                let system =
+                    editor_ui::preferences::SystemAccess::from_os(ctx.system_preferences());
+                if self.shell.preferences.system != system {
+                    self.shell.preferences.system = system;
+                    self.apply_motion_policy(ctx);
+                    self.drain(ctx, id, true);
+                }
+            }
             WindowEvent::Focused(_, focused) => {
                 self.drain(ctx, id, true);
                 if *focused {
