@@ -279,6 +279,7 @@ pub struct Mcp {
     flows: Mutex<Flows>,
     http: mcp_oauth::Http,
     writes: tokio::sync::Mutex<()>,
+    reachability: Arc<crate::mcp_reach::Reachability>,
 }
 
 impl Mcp {
@@ -288,7 +289,31 @@ impl Mcp {
             flows: Mutex::default(),
             http: mcp_oauth::Http::new(),
             writes: tokio::sync::Mutex::new(()),
+            reachability: Arc::default(),
         }
+    }
+
+    pub(crate) fn reachability(&self) -> &crate::mcp_reach::Reachability {
+        &self.reachability
+    }
+
+    pub fn warm_servers(&self) {
+        let (store, reachability) = (self.store.clone(), Arc::clone(&self.reachability));
+        drop(tokio::spawn(async move {
+            match read_mcp_servers(&store).await {
+                Ok(servers) => reachability.warm(&servers),
+                Err(error) => tracing::warn!(
+                    error = diagnostics::chain(&error),
+                    "read the MCP servers to check they answer"
+                ),
+            }
+        }));
+    }
+
+    pub async fn watch_server_changes(&self) {
+        Arc::clone(&self.reachability)
+            .watch_config(self.store.clone())
+            .await;
     }
 
     pub(crate) fn store(&self) -> &Store {

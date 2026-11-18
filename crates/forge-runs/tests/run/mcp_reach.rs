@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 async fn turn_servers(fixture: &Fixture, seen: &Mutex<Vec<String>>) -> Vec<String> {
     seen.lock().unwrap().clear();
@@ -14,8 +15,7 @@ async fn turn_servers(fixture: &Fixture, seen: &Mutex<Vec<String>>) -> Vec<Strin
     names
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_turn_starts_without_servers_that_do_not_answer() {
+async fn recording_fixture() -> (Fixture, Arc<Mutex<Vec<String>>>) {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&seen);
     let fixture = fixture(Arc::new(move |turn, _| {
@@ -28,34 +28,113 @@ async fn a_turn_starts_without_servers_that_do_not_answer() {
         Box::pin(async { Outcome::done() })
     }))
     .await;
-    let up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let vacated = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let down = vacated.local_addr().unwrap();
-    drop(vacated);
+    (fixture, seen)
+}
+
+fn counting(listener: tokio::net::TcpListener) -> Arc<AtomicUsize> {
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&connections);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    connections
+}
+
+async fn configure(
+    fixture: &Fixture,
+    up: std::net::SocketAddr,
+    down: std::net::SocketAddr,
+    local: &str,
+) {
     fixture
         .hub
         .store()
         .set_setting(
             "mcp_servers".to_owned(),
             serde_json::json!([
-                { "name": "up", "url": format!("http://{}/mcp", up.local_addr().unwrap()) },
+                { "name": "up", "url": format!("http://{up}/mcp") },
                 { "name": "down", "url": format!("http://{down}/mcp") },
-                { "name": "local", "command": "server" },
+                { "name": "local", "command": local },
             ]),
         )
         .await
         .unwrap();
+}
 
+async fn vacated() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    address
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cold_turn_starts_without_servers_that_do_not_answer() {
+    let (fixture, seen) = recording_fixture().await;
+    let up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    configure(
+        &fixture,
+        up.local_addr().unwrap(),
+        vacated().await,
+        "server",
+    )
+    .await;
     assert_eq!(
         turn_servers(&fixture, &seen).await,
         ["local", "up"],
         "a server nobody listens on is left out; command servers always start"
     );
+}
 
-    let _revived = tokio::net::TcpListener::bind(down).await.unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_trusts_a_fresh_check_and_a_config_change_checks_again() {
+    let (fixture, seen) = recording_fixture().await;
+    let watcher = fixture.hub.clone();
+    tokio::spawn(async move { watcher.mcp().watch_server_changes().await });
+    let up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_address = up.local_addr().unwrap();
+    let up_connections = counting(up);
+    let down = vacated().await;
+    configure(&fixture, up_address, down, "server").await;
+    test_support::wait::eventually(
+        "the changed MCP servers to be checked",
+        Duration::from_secs(10),
+        || async { fixture.hub.mcp().reachability().probed(2) },
+    )
+    .await;
+    let checked = up_connections.load(Ordering::SeqCst);
+
+    let down_connections = counting(tokio::net::TcpListener::bind(down).await.unwrap());
+    assert_eq!(
+        turn_servers(&fixture, &seen).await,
+        ["local", "up"],
+        "a fresh check that found the server silent stands for the turn"
+    );
+    assert_eq!(
+        (
+            up_connections.load(Ordering::SeqCst),
+            down_connections.load(Ordering::SeqCst)
+        ),
+        (checked, 0),
+        "a turn with a fresh check waits on no server"
+    );
+
+    configure(&fixture, up_address, down, "other-server").await;
+    test_support::wait::eventually(
+        "a config change to check the servers again",
+        Duration::from_secs(10),
+        || async {
+            down_connections.load(Ordering::SeqCst) > 0
+                && fixture.hub.mcp().reachability().probed(2)
+        },
+    )
+    .await;
     assert_eq!(
         turn_servers(&fixture, &seen).await,
         ["down", "local", "up"],
-        "a server that answers again is back on the next turn"
+        "a server that answers again is back once the servers are checked again"
     );
 }
