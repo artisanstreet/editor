@@ -1,13 +1,4 @@
-//! Background shell commands for the claude.ai transport.
-//!
-//! Claude Code keeps a background command running between tool rounds and
-//! lets the model read its output with `BashOutput` and stop it with
-//! `KillShell`. The claude.ai transport has no engine process to hold them,
-//! so this module does: each command runs in its own process group, its
-//! unread output is buffered, and the run's cancellation ends every shell
-//! it started.
-
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,50 +9,101 @@ use process_wrap::tokio::ChildWrapper;
 use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 
-/// The most unread output one shell keeps: past it, the oldest goes.
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
-/// How much of a pipe is read at once.
 const READ_CHUNK: usize = 16 * 1024;
+const MAX_RUNNING_SHELLS: usize = 16;
+const MAX_KEPT_SHELLS: usize = 64;
 
-/// The last shell id handed out, across every run in the process, so an id
-/// from an earlier turn never reads another command's output.
 static LAST_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// The background shells one run started.
 #[derive(Default)]
 pub struct Shells {
     shells: Mutex<HashMap<String, Arc<Shell>>>,
 }
 
 struct Shell {
+    number: usize,
     state: Mutex<ShellState>,
     cancel: CancellationToken,
 }
 
 #[derive(Default)]
 struct ShellState {
-    /// Output the model has not been shown yet: the newest of it, bounded.
-    unread: String,
-    /// Bytes of unread output dropped for the bound since the last read.
-    dropped: usize,
+    unread: Unread,
     ended: Option<Ended>,
 }
 
-/// How a shell stopped.
+#[derive(Default)]
+struct Unread {
+    chunks: VecDeque<String>,
+    bytes: usize,
+    dropped: usize,
+}
+
+impl Unread {
+    fn push(&mut self, text: &str) {
+        self.chunks.push_back(text.to_owned());
+        self.bytes += text.len();
+        let mut excess = self.bytes.saturating_sub(MAX_OUTPUT_BYTES);
+        while excess > 0
+            && let Some(front) = self.chunks.front_mut()
+        {
+            let cut = if front.len() <= excess {
+                let whole = front.len();
+                self.chunks.pop_front();
+                whole
+            } else {
+                let cut = front.ceil_char_boundary(excess);
+                front.drain(..cut);
+                cut
+            };
+            self.bytes -= cut;
+            self.dropped += cut;
+            excess = excess.saturating_sub(cut);
+        }
+    }
+
+    fn take(&mut self) -> (usize, String) {
+        let mut text = String::with_capacity(self.bytes);
+        for chunk in self.chunks.drain(..) {
+            text.push_str(&chunk);
+        }
+        self.bytes = 0;
+        (std::mem::take(&mut self.dropped), text)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Ended {
-    /// It exited with this code.
     Code(i32),
-    /// It ended without a code (a signal).
     WithoutCode,
-    /// The user or the run stopped it.
     Stopped,
 }
 
 impl Shells {
-    /// Starts `command` in `cwd` and returns the id the model uses to read
-    /// or stop it.
     pub fn start(&self, command: &str, cwd: &Path) -> Result<String, String> {
+        let mut shells = self
+            .shells
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let running = shells.values().filter(|shell| shell.running()).count();
+        if running >= MAX_RUNNING_SHELLS {
+            return Err(format!(
+                "This turn already runs {MAX_RUNNING_SHELLS} background shells, the most it may. Stop one with KillShell, or wait for one to finish, before starting another."
+            ));
+        }
+        let mut finished: Vec<(usize, String)> = shells
+            .iter()
+            .filter(|(_, shell)| !shell.running())
+            .map(|(id, shell)| (shell.number, id.clone()))
+            .collect();
+        finished.sort_unstable();
+        for (_, id) in finished
+            .into_iter()
+            .take((shells.len() + 1).saturating_sub(MAX_KEPT_SHELLS))
+        {
+            shells.remove(&id);
+        }
         let mut shell = command_line(command);
         shell
             .current_dir(cwd)
@@ -72,20 +114,17 @@ impl Shells {
             .map_err(|error| format!("The command could not start: {error:#}"))?;
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();
-        let id = format!("bash-{}", LAST_ID.fetch_add(1, Ordering::Relaxed) + 1);
+        let number = LAST_ID.fetch_add(1, Ordering::Relaxed) + 1;
+        let id = format!("bash-{number}");
         let shell = Arc::new(Shell {
+            number,
             state: Mutex::new(ShellState::default()),
             cancel: CancellationToken::new(),
         });
-        self.shells
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(id.clone(), Arc::clone(&shell));
+        shells.insert(id.clone(), Arc::clone(&shell));
+        drop(shells);
         tokio::spawn(async move {
             let legacy = legacy_encoding().await;
-            // The shell's exit is recorded when the shell exits, not when
-            // its pipes close: a command it left running (`server &`) holds
-            // them open. Its output is read on until then.
             let watch = async {
                 let ended = tokio::select! {
                     status = leader(&mut *child).wait() => status.ok().and_then(|status| status.code()).map_or(Ended::WithoutCode, Ended::Code),
@@ -103,28 +142,24 @@ impl Shells {
                 pump(stdout, &shell, legacy),
                 pump(stderr, &shell, legacy)
             );
-            // Dropping the child ends whatever the command left running in
-            // its process group (its job object on Windows).
             drop(child);
         });
         Ok(id)
     }
 
-    /// The shell's new output since the last read, and where it stands.
     pub fn read(&self, id: &str) -> Result<String, String> {
         let shell = self.find(id)?;
         let mut state = shell.lock();
         let mut out = String::new();
-        if state.dropped > 0 {
+        let (dropped, unread) = state.unread.take();
+        if dropped > 0 {
             writeln!(
                 out,
-                "[{} bytes of output were dropped before they were read; the newest follows]",
-                state.dropped
+                "[{dropped} bytes of output were dropped before they were read; the newest follows]"
             )
             .ok();
-            state.dropped = 0;
         }
-        out.push_str(&std::mem::take(&mut state.unread));
+        out.push_str(&unread);
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
@@ -140,7 +175,6 @@ impl Shells {
         Ok(out)
     }
 
-    /// Stops a shell and everything it started.
     pub fn kill(&self, id: &str) -> Result<String, String> {
         let shell = self.find(id)?;
         if shell.cancel.is_cancelled() {
@@ -176,9 +210,6 @@ impl Drop for Shells {
     }
 }
 
-/// The command's own process, under the wrappers that own its group.
-/// Waiting on it waits for the shell alone; the group's wait would also
-/// wait for everything the shell left running.
 fn leader(child: &mut dyn ChildWrapper) -> &mut dyn ChildWrapper {
     let inner: *const dyn ChildWrapper = child.inner();
     if std::ptr::addr_eq(inner, std::ptr::from_ref::<dyn ChildWrapper>(child)) {
@@ -187,8 +218,6 @@ fn leader(child: &mut dyn ChildWrapper) -> &mut dyn ChildWrapper {
     leader(child.inner_mut())
 }
 
-/// Reads one pipe into the shell's buffer until it ends or the shell is
-/// stopped.
 async fn pump(
     stream: Option<impl tokio::io::AsyncRead + Unpin>,
     shell: &Shell,
@@ -218,26 +247,18 @@ impl Shell {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Keeps new output, dropping the oldest unread output past the bound.
     fn append(&self, text: &str) {
         if text.is_empty() {
             return;
         }
-        let mut state = self.lock();
-        state.unread.push_str(text);
-        if state.unread.len() > MAX_OUTPUT_BYTES {
-            let cut = state
-                .unread
-                .ceil_char_boundary(state.unread.len() - MAX_OUTPUT_BYTES);
-            state.unread.drain(..cut);
-            state.dropped += cut;
-        }
+        self.lock().unread.push(text);
+    }
+
+    fn running(&self) -> bool {
+        !self.cancel.is_cancelled() && self.lock().ended.is_none()
     }
 }
 
-/// A pipe's bytes as text, as they come: a character split across two
-/// reads waits for its rest instead of becoming U+FFFD.
-///
 #[cfg(windows)]
 pub(super) fn command_line(command: &str) -> tokio::process::Command {
     let mut shell = tokio::process::Command::new("cmd");
@@ -254,16 +275,9 @@ pub(super) fn command_line(command: &str) -> tokio::process::Command {
     shell
 }
 
-/// cmd and console programs on Windows write in the OEM code page, while
-/// newer tools (git, node, cargo) write UTF-8 whatever it is. Forcing
-/// `chcp 65001` would need a console the command may not have, and would
-/// change what the user's command runs in; instead a pipe is read as UTF-8
-/// until it holds something UTF-8 cannot be, and from there in the OEM
-/// code page, when `encoding_rs` knows it.
 pub(super) struct Decoder {
     utf8: encoding_rs::Decoder,
     legacy: Option<&'static Encoding>,
-    /// The legacy decoder, once the pipe proved not to be UTF-8.
     fallback: Option<encoding_rs::Decoder>,
 }
 
@@ -276,7 +290,6 @@ impl Decoder {
         }
     }
 
-    /// The text `bytes` complete; `last` at the end of the pipe.
     pub(super) fn push(&mut self, mut bytes: &[u8], last: bool) -> String {
         let mut out = String::new();
         loop {
@@ -315,9 +328,6 @@ impl Decoder {
     }
 }
 
-/// The code page a command's non-UTF-8 output is read in: the OEM code
-/// page on Windows, when `encoding_rs` has it (866, 874, 932, 936, 949,
-/// 950 and the 125x pages; not 437 or 850, whose ASCII still reads right).
 #[allow(clippy::unused_async, reason = "Windows path awaits spawn_blocking")]
 pub(super) async fn legacy_encoding() -> Option<&'static Encoding> {
     #[cfg(windows)]
@@ -337,8 +347,6 @@ pub(super) async fn legacy_encoding() -> Option<&'static Encoding> {
     }
 }
 
-/// The system's OEM code page, from the registry (`GetOEMCP` would need
-/// unsafe code, which the workspace forbids).
 #[cfg(windows)]
 fn oem_code_page() -> Option<&'static Encoding> {
     use std::os::windows::process::CommandExt as _;
@@ -361,7 +369,6 @@ fn oem_code_page() -> Option<&'static Encoding> {
     code_page(page)
 }
 
-/// The `encoding_rs` encoding of a Windows code page, when it has one.
 #[cfg_attr(not(windows), allow(dead_code, reason = "only used on Windows"))]
 fn code_page(page: u16) -> Option<&'static Encoding> {
     Some(match page {
@@ -390,8 +397,6 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Reads the shell until it has ended, or gives up after a while: what
-    /// it printed, and how it ended.
     #[cfg(unix)]
     async fn read_to_end(shells: &Shells, id: &str) -> String {
         let mut seen = String::new();
@@ -463,7 +468,6 @@ mod tests {
     async fn a_shell_that_leaves_a_command_running_still_reports_its_exit() {
         let work = tempfile::tempdir().unwrap();
         let shells = Shells::default();
-        // The sleep keeps the shell's output pipes open after it exits.
         let id = shells
             .start("sleep 30 & echo started", work.path())
             .unwrap();
@@ -477,14 +481,12 @@ mod tests {
     async fn the_newest_output_is_kept_past_the_bound_and_the_loss_said_once() {
         let work = tempfile::tempdir().unwrap();
         let shells = Shells::default();
-        // 300 000 bytes, a newline and `tail-marker\n`: 300 013 bytes.
         let id = shells
             .start(
                 "head -c 300000 /dev/zero | tr '\\0' a; echo; echo tail-marker",
                 work.path(),
             )
             .unwrap();
-        // Nothing is read while it prints, so all of it is unread.
         tokio::time::sleep(Duration::from_secs(1)).await;
         let read = read_to_end(&shells, &id).await;
         assert!(
@@ -502,6 +504,36 @@ mod tests {
         );
         let again = shells.read(&id).unwrap();
         assert_eq!(again, "[exit code 0]", "the loss is reported once");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_runs_a_bounded_number_of_shells_and_forgets_the_oldest_finished() {
+        let work = tempfile::tempdir().unwrap();
+        let shells = Shells::default();
+        let running: Vec<String> = (0..MAX_RUNNING_SHELLS)
+            .map(|_| shells.start("sleep 30", work.path()).unwrap())
+            .collect();
+        let refused = shells.start("sleep 30", work.path()).unwrap_err();
+        assert!(refused.contains("KillShell"), "{refused}");
+        shells.kill(&running[0]).unwrap();
+        let replacement = shells.start("sleep 30", work.path()).unwrap();
+        for id in running.iter().skip(1).chain([&replacement]) {
+            shells.kill(id).unwrap();
+        }
+        let mut finished = Vec::new();
+        for _ in 0..200 {
+            let id = shells.start("sleep 30", work.path()).unwrap();
+            shells.kill(&id).unwrap();
+            finished.push(id);
+        }
+        assert!(
+            shells.shells.lock().unwrap().len() <= MAX_KEPT_SHELLS,
+            "{} shells kept",
+            shells.shells.lock().unwrap().len()
+        );
+        assert!(shells.read(&finished[199]).is_ok());
+        assert!(shells.read(&finished[0]).is_err());
     }
 
     #[cfg(unix)]
@@ -535,7 +567,6 @@ mod tests {
                 .is_ok_and(|status| status.success())
         };
         assert!(alive(&pid));
-        // The run's end drops its shells.
         drop(shells);
         let mut gone = false;
         for _ in 0..100 {
@@ -564,7 +595,6 @@ mod tests {
     fn output_that_is_not_utf8_is_read_in_the_legacy_code_page() {
         let mut decoder = Decoder::new(Some(encoding_rs::IBM866));
         let mut text = decoder.push(b"ok ", false);
-        // "Привет" in code page 866.
         text.push_str(&decoder.push(b"\x8f\xe0\xa8\xa2\xa5\xe2", true));
         assert_eq!(text, "ok Привет");
     }
