@@ -100,6 +100,7 @@ pub enum ComposerAction {
     ContinueQuestionnaire,
     RetryQuestionnaire,
     RetryQuestionPage,
+    QuestionBack,
     OpenQuestionSource(artisan_api::ContentRef),
 }
 
@@ -182,7 +183,9 @@ pub fn model_trigger(
             )
         },
     );
-    let details = config.map(|config| model_details(config, model)).unwrap_or_default();
+    let details = config
+        .map(|config| model_details(config, model))
+        .unwrap_or_default();
     let mut trigger = Trigger::new("composer-model", theme, TriggerSize::Sm, name)
         .on_activate(move || dispatch(ComposerAction::ToggleModel));
     if !details.is_empty() {
@@ -207,10 +210,12 @@ fn model_details(
 ) -> Vec<String> {
     let context = model
         .and_then(|model| config.context_window_override().or(model.context_window))
-        .map(|context| match context >= 1_000_000 && context.is_multiple_of(1_000_000) {
-            true => format!("{}M", context / 1_000_000),
-            false => format!("{}K", context / 1_000),
-        });
+        .map(
+            |context| match context >= 1_000_000 && context.is_multiple_of(1_000_000) {
+                true => format!("{}M", context / 1_000_000),
+                false => format!("{}K", context / 1_000),
+            },
+        );
     let compaction = config
         .compaction_window_override()
         .map(|compaction| format!("{}K compact", compaction / 1_000));
@@ -265,12 +270,6 @@ pub fn controls(primary: Element) -> Element {
         .build()
         .with_key("composer-controls")
 }
-
-
-
-
-
-
 
 pub const MENTION_SCROLL: &str = "composer-mention-scroll";
 
@@ -435,24 +434,6 @@ pub fn questionnaire(
     let active = panel.active()?;
     let muted = theme.colors.text_muted;
     let surface = Surface::Composer;
-    let Some(question) = question else {
-        let mut loading = UiBox::new().layout("column").spaced(Space::S8).child(
-            TextRole::Label
-                .text(&theme, load_error.unwrap_or("Loading question…").to_owned())
-                .wrap(true)
-                .build(),
-        );
-        if load_error.is_some() {
-            let action = Rc::clone(&dispatch);
-            loading = loading.child(
-                Button::text("question-page-retry", theme, ButtonTone::Neutral, "Retry")
-                    .within(surface)
-                    .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
-                    .build(),
-            );
-        }
-        return Some(loading.build());
-    };
     let sending = panel.sending.is_some();
     let action = Rc::clone(&dispatch);
     let dismiss = IconButton::new(
@@ -479,7 +460,9 @@ pub fn questionnaire(
                     TextRole::Caption
                         .text(
                             &theme,
-                            question.header.clone().unwrap_or_else(|| "Question".into()),
+                            question
+                                .and_then(|question| question.header.clone())
+                                .unwrap_or_else(|| "Question".into()),
                         )
                         .gpui_source_color(muted.to_reference_text_color())
                         .wrap(false)
@@ -489,17 +472,97 @@ pub fn questionnaire(
         )
         .child(dismiss)
         .build();
-    let text = match &question.text {
-        artisan_api::TextContent::Inline(text) => {
-            TextRole::Label.text(&theme, text.clone()).wrap(true).build()
+    let card = match question {
+        Some(question) => question_card(
+            theme,
+            panel,
+            active,
+            question,
+            stored_options,
+            source_view,
+            header,
+            &dispatch,
+        ),
+        None => {
+            let mut loading = UiBox::new()
+                .layout("column")
+                .spaced(Space::S8)
+                .child(header)
+                .child(
+                    TextRole::Label
+                        .text(&theme, load_error.unwrap_or("Loading question…").to_owned())
+                        .wrap(true)
+                        .build(),
+                );
+            if load_error.is_some() {
+                let action = Rc::clone(&dispatch);
+                loading = loading.child(
+                    Button::text("question-page-retry", theme, ButtonTone::Neutral, "Retry")
+                        .within(surface)
+                        .on_activate(move |_| action(ComposerAction::RetryQuestionPage))
+                        .build(),
+                );
+            }
+            loading.build()
         }
+    };
+    Some(
+        Scroll::new()
+            .layout("column")
+            .width(Length::Pct(100.0))
+            .style(Style::new().max_height(Length::Px(QUESTIONNAIRE_MAX_HEIGHT)))
+            .child(
+                UiBox::new()
+                    .layout("column")
+                    .width(Length::Pct(100.0))
+                    .spaced(Space::S8)
+                    .child(card)
+                    .child(other_questionnaires(
+                        theme, panel, active, sending, &dispatch,
+                    ))
+                    .build(),
+            )
+            .build()
+            .with_key("composer-questionnaire"),
+    )
+}
+
+const QUESTIONNAIRE_MAX_HEIGHT: f32 = 280.0;
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a loaded question card needs the panel, its question and the parts mounted around it"
+)]
+fn question_card(
+    theme: ArtisanTheme,
+    panel: &super::questionnaire::QuestionnairePanel,
+    active: &super::questionnaire::ComposerQuestionnaire,
+    question: &artisan_api::Question,
+    stored_options: Option<Element>,
+    source_view: Option<Element>,
+    header: Element,
+    dispatch: &Dispatch,
+) -> Element {
+    let muted = theme.colors.text_muted;
+    let surface = Surface::Composer;
+    let sending = panel.sending.is_some();
+    let text = match &question.text {
+        artisan_api::TextContent::Inline(text) => TextRole::Label
+            .text(&theme, text.clone())
+            .wrap(true)
+            .build(),
         artisan_api::TextContent::Stored(source) => {
             let source = source.clone();
-            let action = Rc::clone(&dispatch);
-            Button::text("question-source", theme, ButtonTone::Quiet, "Read full question")
-                .within(surface)
-                .on_activate(move |_| action(ComposerAction::OpenQuestionSource(source.clone())))
-                .build()
+            let action = Rc::clone(dispatch);
+            Button::text(
+                "question-source",
+                theme,
+                ButtonTone::Quiet,
+                "Read full question",
+            )
+            .within(surface)
+            .on_activate(move |_| action(ComposerAction::OpenQuestionSource(source.clone())))
+            .build()
         }
     };
     let mut card = UiBox::new()
@@ -515,7 +578,10 @@ pub fn questionnaire(
         for (index, option) in options.iter().enumerate() {
             let selected = panel.ticked.contains(&option.id);
             let marker = match question.multi_select && selected {
-                true => IconSize::Md.glyph(AssetId::TABLER_CHECK, theme.colors.text.to_reference_paint()),
+                true => IconSize::Md.glyph(
+                    AssetId::TABLER_CHECK,
+                    theme.colors.text.to_reference_paint(),
+                ),
                 false => TextRole::Label
                     .text(&theme, (index + 1).to_string())
                     .gpui_source_color(muted.to_reference_text_color())
@@ -525,7 +591,12 @@ pub fn questionnaire(
             let mut text = UiBox::new()
                 .layout("column")
                 .style(Style::new().flex_grow(1.0).min_width(Length::Pct(0.0)))
-                .child(TextRole::Label.text(&theme, option.label.clone()).wrap(true).build());
+                .child(
+                    TextRole::Label
+                        .text(&theme, option.label.clone())
+                        .wrap(true)
+                        .build(),
+                );
             if let Some(description) = &option.description {
                 let value = match description {
                     artisan_api::TextContent::Inline(text) => text.clone(),
@@ -546,7 +617,7 @@ pub fn questionnaire(
             let id = option.id.clone();
             let multi = question.multi_select;
             let step = panel.step;
-            let action = Rc::clone(&dispatch);
+            let action = Rc::clone(dispatch);
             let body = UiBox::new()
                 .padded(Space::S8)
                 .spaced(Space::S8)
@@ -587,7 +658,7 @@ pub fn questionnaire(
             rows = rows.child(row);
             if let Some(artisan_api::TextContent::Stored(source)) = &option.description {
                 let source = source.clone();
-                let action = Rc::clone(&dispatch);
+                let action = Rc::clone(dispatch);
                 rows = rows.child(
                     Button::text(
                         format!("question-description-{index}"),
@@ -613,15 +684,29 @@ pub fn questionnaire(
         } else {
             "Send answers"
         };
-        let action = Rc::clone(&dispatch);
+        let action = Rc::clone(dispatch);
         rows = rows.child(
-            Button::text("composer-question-continue", theme, ButtonTone::Primary, text)
-                .within(surface)
-                .on_activate(move |_| action(ComposerAction::ContinueQuestionnaire))
-                .build(),
+            Button::text(
+                "composer-question-continue",
+                theme,
+                ButtonTone::Primary,
+                text,
+            )
+            .within(surface)
+            .on_activate(move |_| action(ComposerAction::ContinueQuestionnaire))
+            .build(),
         );
     }
     card = card.child(rows.build());
+    if panel.can_go_back() {
+        let action = Rc::clone(dispatch);
+        card = card.child(
+            Button::text("composer-question-back", theme, ButtonTone::Quiet, "Back")
+                .within(surface)
+                .on_activate(move |_| action(ComposerAction::QuestionBack))
+                .build(),
+        );
+    }
     if sending {
         card = card.child(
             TextRole::Caption
@@ -630,7 +715,7 @@ pub fn questionnaire(
                 .build(),
         );
     } else if let Some(error) = &panel.error {
-        let action = Rc::clone(&dispatch);
+        let action = Rc::clone(dispatch);
         card = card
             .child(
                 TextRole::Label
@@ -640,12 +725,29 @@ pub fn questionnaire(
                     .build(),
             )
             .child(
-                Button::text("composer-question-retry", theme, ButtonTone::Neutral, "Retry answer")
-                    .within(surface)
-                    .on_activate(move |_| action(ComposerAction::RetryQuestionnaire))
-                    .build(),
+                Button::text(
+                    "composer-question-retry",
+                    theme,
+                    ButtonTone::Neutral,
+                    "Retry answer",
+                )
+                .within(surface)
+                .on_activate(move |_| action(ComposerAction::RetryQuestionnaire))
+                .build(),
             );
     }
+    card.build()
+}
+
+fn other_questionnaires(
+    theme: ArtisanTheme,
+    panel: &super::questionnaire::QuestionnairePanel,
+    active: &super::questionnaire::ComposerQuestionnaire,
+    sending: bool,
+    dispatch: &Dispatch,
+) -> Element {
+    let muted = theme.colors.text_muted;
+    let surface = Surface::Composer;
     let mut stack = UiBox::new().layout("column").spaced(Space::S2);
     for (position, other) in panel
         .visible()
@@ -667,7 +769,7 @@ pub fn questionnaire(
                 },
             );
         let item = other.item.clone();
-        let action = Rc::clone(&dispatch);
+        let action = Rc::clone(dispatch);
         let mut row = RowItem::new(
             format!("composer-questionnaire-{position}"),
             theme,
@@ -689,16 +791,7 @@ pub fn questionnaire(
         }
         stack = stack.child(row.build());
     }
-    Some(
-        UiBox::new()
-            .layout("column")
-            .width(Length::Pct(100.0))
-            .spaced(Space::S8)
-            .child(card.build())
-            .child(stack.build())
-            .build()
-            .with_key("composer-questionnaire"),
-    )
+    stack.build()
 }
 
 fn choice(row: Element, selected: bool, sending: bool) -> Element {
@@ -981,11 +1074,23 @@ pub fn goal_label(
     }
     if !safety {
         let (id, label, action) = if note {
-            ("composer-note-close", "Close note", ComposerAction::CloseNote)
+            (
+                "composer-note-close",
+                "Close note",
+                ComposerAction::CloseNote,
+            )
         } else if goal.state == State::Parked {
-            ("composer-park-cancel", "Cancel the parked run", ComposerAction::Unpark)
+            (
+                "composer-park-cancel",
+                "Cancel the parked run",
+                ComposerAction::Unpark,
+            )
         } else {
-            ("composer-goal-clear", "Clear goal", ComposerAction::ClearGoal)
+            (
+                "composer-goal-clear",
+                "Clear goal",
+                ComposerAction::ClearGoal,
+            )
         };
         row = row.child(
             IconButton::new(
@@ -1084,12 +1189,14 @@ fn picker_tooltip_surface(
             theme.colors.destructive_text
         }
         .to_reference_text_color();
-        spans.push(StyledSpan::new(advisory.clone(), style.clone()).gpui_source_color([
-            color.hue_degrees,
-            color.saturation,
-            color.lightness,
-            color.alpha,
-        ]));
+        spans.push(
+            StyledSpan::new(advisory.clone(), style.clone()).gpui_source_color([
+                color.hue_degrees,
+                color.saturation,
+                color.lightness,
+                color.alpha,
+            ]),
+        );
         if !tooltip.text.is_empty() {
             spans.push(StyledSpan::new(" ", style.clone()));
         }
@@ -1213,9 +1320,9 @@ impl ComposerVisible {
 impl ComposerRest {
     fn capture(composer: &super::controller::Composer) -> Self {
         let mut picker = composer.picker.clone();
-        picker.axis_cursor = picker.axis_cursor.filter(|cursor| {
-            matches!(cursor, super::picker::AxisCursor::Keys(_))
-        });
+        picker.axis_cursor = picker
+            .axis_cursor
+            .filter(|cursor| matches!(cursor, super::picker::AxisCursor::Keys(_)));
         Self {
             picker,
             mention: (
@@ -1435,7 +1542,6 @@ impl ComposerOwner {
             content: picker_tooltip_surface(&theme, &tooltip, width, fixed),
         })
     }
-
 
     pub fn dispose_popups(&mut self, app: &mut aqua::UiApp) {
         self.tooltip.borrow_mut().clear();
@@ -1761,7 +1867,10 @@ impl ComposerOwner {
             (&mut self.project_popup, ComposerAction::ClosePicker),
         ] {
             if let Some(popup) = popup {
-                if popup.is_open(app) && !popup.is_closing() && popup.request_dismissal(app, event)? {
+                if popup.is_open(app)
+                    && !popup.is_closing()
+                    && popup.request_dismissal(app, event)?
+                {
                     (self.dispatch)(close);
                     return Ok(true);
                 }
@@ -1886,9 +1995,7 @@ impl ComposerOwner {
         let effects = self.dispatch(core, action, question);
         let after = ComposerVisible::capture(&self.controller.borrow());
         let changed = match typed {
-            true => {
-                !self.last_visible.borrow().same_chrome(&after) || !before.same_chrome(&after)
-            }
+            true => !self.last_visible.borrow().same_chrome(&after) || !before.same_chrome(&after),
             false => before != after || *self.last_visible.borrow() != after,
         } || tooltip_before != self.tooltip.borrow().revision()
             || self.model_scroll.borrow().jumping();
@@ -2150,7 +2257,9 @@ impl ComposerOwner {
                             .as_ref()
                             .and_then(|id| status.models.iter().find(|model| &model.id == id))
                     });
-                    if let Some(option) = composer.picker.axis_options(axis, &preview, model)
+                    if let Some(option) = composer
+                        .picker
+                        .axis_options(axis, &preview, model)
                         .into_iter()
                         .nth(index)
                     {
@@ -2240,6 +2349,13 @@ impl ComposerOwner {
                 composer.editor.borrow_mut().set_text(&text);
                 self.send_answer(host, answer, composer.generation());
                 effects.push(ComposerEffect::EditorChanged);
+            }
+            ComposerAction::QuestionBack => {
+                let mut text = composer.editor.borrow().text().to_owned();
+                if composer.questionnaire.back(&mut text) {
+                    composer.editor.borrow_mut().set_text(&text);
+                    effects.push(ComposerEffect::EditorChanged);
+                }
             }
             ComposerAction::RetryQuestionnaire => {
                 let answer = composer.questionnaire.retry();
@@ -2551,7 +2667,11 @@ impl ComposerOwner {
             .session
             .as_ref()
             .and_then(|session| {
-                session.read(|state| state.error().map(|error| (error.to_owned(), state.conflict())))
+                session.read(|state| {
+                    state
+                        .error()
+                        .map(|error| (error.to_owned(), state.conflict()))
+                })
             })
             .map(|(error, conflict)| {
                 draft_error(
@@ -2841,7 +2961,10 @@ pub fn project_menu(
                     .child(
                         Scroll::new()
                             .width(Length::Pct(100.0))
-                            .height((count.min(PROJECT_ROWS_SHOWN) as f32) * row.height().unwrap_or_default())
+                            .height(
+                                (count.min(PROJECT_ROWS_SHOWN) as f32)
+                                    * row.height().unwrap_or_default(),
+                            )
                             .child(rows.build())
                             .build()
                             .with_key(PROJECT_SCROLL),
@@ -3028,7 +3151,9 @@ fn model_menu_tab(
             vec![
                 item(
                     tab.cutout(shape, header, MODEL_PANE_INSET),
-                    GpuiPathStyle::Fill { rule: FillRule::EvenOdd },
+                    GpuiPathStyle::Fill {
+                        rule: FillRule::EvenOdd,
+                    },
                     fill,
                 ),
                 item(
@@ -3059,7 +3184,11 @@ fn model_engine_bar(
     let mut bar = UiBox::new()
         .height(MODEL_BAR_HEIGHT)
         .spaced(MODEL_BAR_GAP)
-        .style(Style::new().flex_shrink(0.0).margin(Length::Px(MODEL_PANE_INSET)));
+        .style(
+            Style::new()
+                .flex_shrink(0.0)
+                .margin(Length::Px(MODEL_PANE_INSET)),
+        );
     if let Some(engine_light) = engine_light {
         bar = bar.child(engine_light);
     }
@@ -3077,7 +3206,9 @@ fn model_engine_bar(
                 "Signing in…" => format!("Signing in to {name}…"),
                 "Checking…" => format!("Checking {name}…"),
                 "No models" => format!("{name} hasn't reported any models."),
-                "Discovering models…" | "Discovery failed" => status.discovery.description(artisan_api::now()),
+                "Discovering models…" | "Discovery failed" => {
+                    status.discovery.description(artisan_api::now())
+                }
                 _ => unreachable!(),
             }
         });
@@ -3447,7 +3578,8 @@ pub fn model_menu(
     } = frame;
     let sheet = Surface::Picker(Picker::Sheet);
     let pane_radius = Radius::Panel.px();
-    let engines = super::picker::offered_engines(host, current.as_ref().map(|config| config.engine));
+    let engines =
+        super::picker::offered_engines(host, current.as_ref().map(|config| config.engine));
     let model_icon = picker.pane_config(host, current.clone()).map(|config| {
         host.engines
             .get(&config.engine)
@@ -3487,7 +3619,11 @@ pub fn model_menu(
         }
         buttons = buttons.child(
             side.build()
-                .style(Style::new().height(Length::Px(item_height)).flex_shrink(0.0))
+                .style(
+                    Style::new()
+                        .height(Length::Px(item_height))
+                        .flex_shrink(0.0),
+                )
                 .aria_label(format!("{}: {}", item.label, item.value))
                 .aria_selected(target == pane),
         );
@@ -3527,9 +3663,9 @@ pub fn model_menu(
                     .iter()
                     .find(|model| config.model.as_ref() == Some(&model.id))
             });
-            let options = config.as_ref().map_or_else(Vec::new, |config| {
-                picker.axis_options(axis, config, model)
-            });
+            let options = config
+                .as_ref()
+                .map_or_else(Vec::new, |config| picker.axis_options(axis, config, model));
             pane_body = pane_body.child(model_axis_pane(
                 theme,
                 axis,
@@ -3541,9 +3677,20 @@ pub fn model_menu(
     }
     let key_dispatch = Rc::clone(&dispatch);
     let resolution_note = current.as_ref().and_then(|config| {
-        let model = host.engines.get(&config.engine)?.models.iter().find(|model| config.model.as_ref() == Some(&model.id))?;
+        let model = host
+            .engines
+            .get(&config.engine)?
+            .models
+            .iter()
+            .find(|model| config.model.as_ref() == Some(&model.id))?;
         let changes = model.resolve_config(config, &picker.customizations).changes;
-        (!changes.is_empty()).then(|| changes.into_iter().map(|change| format!("{}: {}", change.axis.title(), change.reason)).collect::<Vec<_>>().join(" "))
+        (!changes.is_empty()).then(|| {
+            changes
+                .into_iter()
+                .map(|change| format!("{}: {}", change.axis.title(), change.reason))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
     });
     let mut children = vec![
         UiBox::new()
@@ -3552,10 +3699,19 @@ pub fn model_menu(
                 &theme,
                 tab,
                 pane_radius,
-                if pane.is_none() { MODEL_BAR_HEIGHT + MODEL_PANE_INSET } else { 0.0 },
+                if pane.is_none() {
+                    MODEL_BAR_HEIGHT + MODEL_PANE_INSET
+                } else {
+                    0.0
+                },
             ))
             .child(buttons.build())
-            .child(UiBox::new().width(MODEL_ITEM_GUTTER).style(Style::new().flex_shrink(0.0)).build())
+            .child(
+                UiBox::new()
+                    .width(MODEL_ITEM_GUTTER)
+                    .style(Style::new().flex_shrink(0.0))
+                    .build(),
+            )
             .child(pane_body.build())
             .build(),
     ];
@@ -3573,7 +3729,9 @@ pub fn model_menu(
         .build(&theme, children)
         .style(
             Style::new()
-                .width(Length::Px(MODEL_MENU_WIDTH.min(viewport.w - MENU_VIEWPORT_MARGIN)))
+                .width(Length::Px(
+                    MODEL_MENU_WIDTH.min(viewport.w - MENU_VIEWPORT_MARGIN),
+                ))
                 .padding_insets(aqua_core::Insets {
                     left: MODEL_ITEM_GUTTER,
                     ..aqua_core::Insets::uniform(sheet.padding_px())
@@ -3619,7 +3777,6 @@ fn model_item_height(count: usize) -> f32 {
     let count = count.max(1) as f32;
     MODEL_ITEM_HEIGHT.min((MODEL_PANE_HEIGHT - (count - 1.0) * MODEL_ITEM_GAP) / count)
 }
-
 
 fn lab_icon(lab: &str) -> Option<AssetId> {
     Some(match lab {
@@ -3709,3 +3866,7 @@ pub fn project_tab(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/composer/view.rs"]
+mod tests;

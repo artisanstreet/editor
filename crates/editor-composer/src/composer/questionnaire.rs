@@ -206,6 +206,28 @@ impl QuestionnairePanel {
         Some((item, Answer::Question { answers }))
     }
 
+    pub fn can_go_back(&self) -> bool {
+        self.step > 0 && self.sending.is_none()
+    }
+
+    pub fn back(&mut self, text: &mut String) -> bool {
+        if !self.can_go_back() {
+            return false;
+        }
+        self.step -= 1;
+        self.error = None;
+        self.ticked.clear();
+        text.clear();
+        match self.recorded.get(&self.step) {
+            Some(QuestionAnswer::Choices { ids }) => {
+                self.ticked = ids.inline().map(<[String]>::to_vec).unwrap_or_default();
+            }
+            Some(QuestionAnswer::Text { text: answer }) => answer.clone_into(text),
+            None => {}
+        }
+        true
+    }
+
     pub fn dismiss(&mut self, text: &mut String) -> Option<(ItemId, Answer)> {
         if self.sending.is_some() {
             return None;
