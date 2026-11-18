@@ -40,7 +40,7 @@ pub struct SearchRequest {
     serial: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operation {
     Listing(String),
     Skill { id: String, action: SkillAction },
@@ -94,7 +94,7 @@ pub struct Marketplace {
     pub focus_search: bool,
     pub items: Vec<Item>,
     pub listings: Remote,
-    pub pending: Option<String>,
+    pub pending: Option<Operation>,
     pub notice: Option<String>,
     pub shown: bool,
     search_serial: u64,
@@ -284,10 +284,7 @@ impl Marketplace {
         if self.pending.is_some() || self.host.is_none() {
             return None;
         }
-        let id = match &operation {
-            Operation::Listing(id) | Operation::Skill { id, .. } => id,
-        };
-        self.pending = Some(id.clone());
+        self.pending = Some(operation.clone());
         self.notice = None;
         Some(OperationRequest {
             operation,

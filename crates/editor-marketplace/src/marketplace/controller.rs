@@ -41,7 +41,7 @@ pub(crate) struct ViewSnapshot {
     kind: super::presentation::Kind,
     entries: Vec<super::Entry>,
     items: Vec<super::presentation::Item>,
-    pending: Option<String>,
+    pending: Option<Operation>,
     notice: Option<String>,
     found_open: bool,
     prompt_hovered: bool,

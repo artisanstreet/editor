@@ -642,3 +642,36 @@ fn a_failed_skills_sh_search_says_why_and_tries_the_same_query_again() {
     assert_eq!(controller.page.query, "pdf");
     assert!(controller.search_key().is_some());
 }
+
+#[test]
+fn a_quarantined_skill_being_installed_says_so_on_its_row() {
+    use artisan_api::SkillAction;
+    use editor_aqua::core::{Core, EditorFiles};
+    use editor_aqua::marketplace::Operation;
+    use std::rc::Rc;
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().join("editor"),
+    })
+    .unwrap();
+    let mut controller = marketplace_host(&mut core);
+    controller.page.items = vec![discovered("pdf-tools"), discovered("csv-tools")];
+    controller.page.found_open = true;
+    controller
+        .page
+        .begin_operation(Operation::Skill {
+            id: "pdf-tools".into(),
+            action: SkillAction::Adopt,
+        })
+        .unwrap();
+    let texts = test_support::editor::ui::painted_texts(&marketplace_app(
+        &controller,
+        &core,
+        Rc::new(|_| {}),
+    ));
+    assert_eq!(
+        texts.iter().filter(|text| *text == "Installing…").count(),
+        1,
+        "{texts:?}"
+    );
+}

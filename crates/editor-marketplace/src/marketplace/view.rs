@@ -189,7 +189,7 @@ pub fn build(
                     .build(
                         &theme,
                         *selected,
-                        item_row(&theme, item, *selected, pending.as_deref(), emit.clone()),
+                        item_row(&theme, item, *selected, pending.as_ref(), emit.clone()),
                     )
                     .debug_selector(item.selector()),
             };
@@ -520,7 +520,7 @@ fn item_row(
     theme: &ArtisanTheme,
     item: &Item,
     selected: bool,
-    pending: Option<&str>,
+    pending: Option<&Operation>,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let (icon, meta, description, marks, attention) = match item {
@@ -675,7 +675,7 @@ fn control(
     theme: &ArtisanTheme,
     item: &Item,
     selected: bool,
-    pending: Option<&str>,
+    pending: Option<&Operation>,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Element {
     let selector = item.selector();
@@ -702,10 +702,22 @@ fn control(
             })
             .build();
             let id = row.id.clone();
+            let title = match pending {
+                Some(Operation::Skill {
+                    id: pending,
+                    action: SkillAction::Adopt,
+                }) if pending == &row.id => "Installing…",
+                Some(Operation::Skill {
+                    id: pending,
+                    action: SkillAction::Discard,
+                }) if pending == &row.id => "Discarding…",
+                _ if selected => "Install ↵",
+                _ => "Install",
+            };
             let adopt = install(
                 theme,
                 format!("{selector}-install"),
-                if selected { "Install ↵" } else { "Install" },
+                title,
                 selected,
                 disabled,
                 move || {
@@ -745,7 +757,7 @@ fn control(
         }
         Item::Listing(row) => {
             let id = row.id.clone();
-            let title = if pending == Some(row.id.as_str()) {
+            let title = if pending == Some(&Operation::Listing(row.id.clone())) {
                 "Installing…"
             } else if selected {
                 "Install ↵"
