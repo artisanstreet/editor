@@ -1,10 +1,10 @@
-use super::focus_ring;
+use super::{Activation, activatable, focus_ring, pressable};
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Radius, concentric};
-use crate::ui::theme::{ArtisanTheme, Opacity};
-use aqua_core::{CursorIcon, Role, Transform2D};
+use crate::ui::theme::ArtisanTheme;
+use aqua_core::CursorIcon;
 use aqua_ui::element::{Button, Element, Key};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::tree::ActionEvent;
@@ -180,35 +180,23 @@ impl IconButton {
             self.size.glyph().px(),
             rest.to_reference_paint(),
         ));
-        if self.disabled {
-            button = button.opacity(Opacity::Disabled.alpha());
-        } else if let Some(handler) = self.on_activate {
-            button = button.on_activate_event(handler);
-        }
-        let element = button
-            .build()
-            .with_key(self.key)
-            .role(Role::Button)
-            .aria_label(self.label)
-            .gpui_keyboard_activation()
-            .disabled(self.disabled)
-            .focusable(!self.disabled);
-        if self.disabled {
-            return element.aria_description("Unavailable");
-        }
-        let hover =
-            Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color());
-        let element = live::track(
-            element
-                .cursor(CursorIcon::Pointer)
-                .focus_visible_style(focus_ring(&theme))
-                .hover_style(hover),
-        );
-        match theme.reduced_motion() {
-            true => element,
-            false => {
-                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, 1.0)))
-            }
-        }
+        let activation = Activation {
+            key: self.key,
+            label: self.label,
+            disabled: self.disabled,
+            on_activate: self.on_activate,
+            debug_selector: None,
+        };
+        activatable(button, activation, |element| {
+            let hover =
+                Style::new().gpui_source_text_color(theme.colors.text.to_reference_text_color());
+            let element = live::track(
+                element
+                    .cursor(CursorIcon::Pointer)
+                    .focus_visible_style(focus_ring(&theme))
+                    .hover_style(hover),
+            );
+            pressable(element, &theme, 1.0)
+        })
     }
 }

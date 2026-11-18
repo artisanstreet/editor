@@ -2,12 +2,13 @@ pub mod special;
 
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::chrome::card::{POLAR_INK, polar_face, soft};
+use crate::ui::kit::control::{Activation, activatable, focus_ring, pressable};
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{Elevation, IconSize, Radius, Space, TextRole, concentric};
-use crate::ui::theme::{ArtisanTheme, Cast, Oklch, Opacity};
+use crate::ui::theme::{ArtisanTheme, Cast, Oklch};
 use aqua::ShadowLayer;
-use aqua_core::{CursorIcon, DisplayItem, Insets, Role, Transform2D};
+use aqua_core::{CursorIcon, DisplayItem, Insets};
 use aqua_text::overflow::OverflowMode;
 use aqua_ui::element::{Button as UiButton, Canvas, Element, Key, Text};
 use aqua_ui::style::{Length, Style};
@@ -271,54 +272,28 @@ impl Button {
         let label = self.label.words().to_owned();
         let tone = self.tone;
         let lift = soft(&theme, Cast::LIFT);
-        if self.disabled {
-            root = root.opacity(Opacity::Disabled.alpha());
-        } else if let Some(handler) = self.on_activate {
-            root = root.on_activate_event(handler);
-        }
-        let element = root
-            .build()
-            .with_key(self.key)
-            .role(Role::Button)
-            .aria_label(label)
-            .gpui_keyboard_activation()
-            .disabled(self.disabled)
-            .focusable(!self.disabled);
-        let element = match self.debug_selector {
-            Some(selector) => element.debug_selector(selector),
-            None => element,
+        let activation = Activation {
+            key: self.key,
+            label,
+            disabled: self.disabled,
+            on_activate: self.on_activate,
+            debug_selector: self.debug_selector,
         };
-        if self.disabled {
-            return element.aria_description("Unavailable");
-        }
-        let focus = Style::new()
-            .border_of(1.0, theme.colors.ring.to_paint())
-            .shadows(vec![ShadowLayer {
-                dx: 0.0,
-                dy: 0.0,
-                blur: 0.0,
-                spread: theme.interaction.focus_ring_width,
-                inset: false,
-                color: theme.colors.ring.at(Opacity::FocusRing).to_paint(),
-            }]);
-        let hover = match tone {
-            ButtonTone::Neutral | ButtonTone::Quiet => Style::new(),
-            ButtonTone::Primary => Style::new().shadows(lift),
-            ButtonTone::Special => Style::new().opacity(0.94),
-        };
-        let element = element
-            .cursor(CursorIcon::Pointer)
-            .focus_visible_style(focus)
-            .hover_style(hover);
-        let element = match fills {
-            true => live::track(element),
-            false => element,
-        };
-        match theme.reduced_motion() {
-            true => element,
-            false => {
-                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
-            }
-        }
+        activatable(root, activation, |element| {
+            let hover = match tone {
+                ButtonTone::Neutral | ButtonTone::Quiet => Style::new(),
+                ButtonTone::Primary => Style::new().shadows(lift),
+                ButtonTone::Special => Style::new().opacity(0.94),
+            };
+            let element = element
+                .cursor(CursorIcon::Pointer)
+                .focus_visible_style(focus_ring(&theme))
+                .hover_style(hover);
+            let element = match fills {
+                true => live::track(element),
+                false => element,
+            };
+            pressable(element, &theme, PRESS)
+        })
     }
 }

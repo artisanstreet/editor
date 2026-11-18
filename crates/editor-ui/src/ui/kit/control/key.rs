@@ -1,9 +1,9 @@
-use super::focus_ring;
+use super::{Activation, activatable, focus_ring, pressable};
 use crate::ui::asset::source_asset_glyph;
 use crate::ui::chrome::card::{POLAR_INK, Surfaces, key_face, polar_face};
 use crate::ui::kit::tokens::{IconSize, Radius};
-use crate::ui::theme::{ArtisanTheme, Opacity};
-use aqua_core::{CursorIcon, Role, Transform2D};
+use crate::ui::theme::ArtisanTheme;
+use aqua_core::CursorIcon;
 use aqua_ui::element::{Box as UiBox, Button, Canvas, Element, Key as NodeKey};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::tree::ActionEvent;
@@ -122,7 +122,7 @@ impl Key {
                 .build(),
             false => key_face(&theme, radius, edge),
         };
-        let mut button = Button::new()
+        let button = Button::new()
             .style(
                 Style::new()
                     .width(width)
@@ -140,30 +140,18 @@ impl Key {
                     .exclude_from_hit_testing(),
             )
             .child(content);
-        if self.disabled {
-            button = button.opacity(Opacity::Disabled.alpha());
-        } else if let Some(handler) = self.on_activate {
-            button = button.on_activate_event(handler);
-        }
-        let element = button
-            .build()
-            .with_key(self.key)
-            .role(Role::Button)
-            .aria_label(self.label)
-            .gpui_keyboard_activation()
-            .disabled(self.disabled)
-            .focusable(!self.disabled);
-        if self.disabled {
-            return element.aria_description("Unavailable");
-        }
-        let element = element
-            .cursor(CursorIcon::Pointer)
-            .focus_visible_style(focus_ring(&theme));
-        match theme.reduced_motion() {
-            true => element,
-            false => {
-                element.pressed_style(Style::new().transform(Transform2D::translate(0.0, PRESS)))
-            }
-        }
+        let activation = Activation {
+            key: self.key,
+            label: self.label,
+            disabled: self.disabled,
+            on_activate: self.on_activate,
+            debug_selector: None,
+        };
+        activatable(button, activation, |element| {
+            let element = element
+                .cursor(CursorIcon::Pointer)
+                .focus_visible_style(focus_ring(&theme));
+            pressable(element, &theme, PRESS)
+        })
     }
 }
