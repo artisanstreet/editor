@@ -17,8 +17,10 @@ use aqua_ui::{
     element::{Box as UiBox, Media, Text},
     input::{EventPhase, InputKind, InputResponse, RoutedInput},
     style::{Length, Style},
+    tree::AccessibilityRequest,
 };
 
+use super::super::{menu_anchor, opens_context_menu};
 use super::{ImageBlock, gallery_rows};
 use crate::ui::{
     media::{
@@ -55,6 +57,7 @@ pub(crate) struct ImageState {
     fetcher: MediaFetcher,
     sources: Vec<MediaSource>,
     loaded: Vec<Loaded>,
+    anchors: Vec<Rc<Cell<Option<aqua_core::Point>>>>,
     waiters: Vec<u64>,
     wake: aqua::mailbox::Mailbox<()>,
 }
@@ -64,6 +67,7 @@ impl ImageState {
         let sources: Vec<_> = block.images.iter().map(|image| image.src.clone()).collect();
         let mut state = Self {
             loaded: sources.iter().map(|_| Loaded::Loading).collect(),
+            anchors: sources.iter().map(|_| Rc::new(Cell::new(None))).collect(),
             waiters: sources
                 .iter()
                 .map(|_| NEXT_WAITER.fetch_add(1, Ordering::Relaxed))
@@ -204,36 +208,101 @@ impl ImageState {
                     .with_key(format!("{id}-image-{index}"))
                     .role(aqua_core::Role::Image)
                     .aria_label(alt.to_owned());
+                let activation = match loaded {
+                    Loaded::Ready(image) => Some(Action::Open {
+                        index: slot,
+                        image: image.clone(),
+                    }),
+                    Loaded::Failed(ImageError::NeedsConsent) => Some(Action::AllowRemote),
+                    Loaded::Loading | Loaded::Failed(_) => None,
+                };
+                let presses = matches!(loaded, Loaded::Ready(_));
+                let pressed = Rc::new(Cell::new(None));
+                let down = Rc::clone(&pressed);
+                let anchor = Rc::clone(&self.anchors[index]);
+                let key_anchor = Rc::clone(&anchor);
+                let entered = Rc::clone(&anchor);
+                let keyed = Rc::clone(&emit);
+                let requested = Rc::clone(&emit);
                 let copied = Rc::clone(&emit);
-                frame = frame.on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
-                    if let RoutedInput::Native(InputEvent::PointerDown(
-                        pointer,
-                        PointerButton::Secondary,
-                    )) = &event.input
-                    {
-                        copied(Action::CopyPath {
-                            index: slot,
-                            position: pointer.position,
+                frame =
+                    frame
+                        .on_input(InputKind::PointerEnter, EventPhase::Bubble, move |event| {
+                            entered.set(Some(menu_anchor(event.bounds)));
+                            InputResponse::default()
+                        })
+                        .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
+                            let position = menu_anchor(event.bounds);
+                            key_anchor.set(Some(position));
+                            let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
+                                return InputResponse::default();
+                            };
+                            let action = if opens_context_menu(key) {
+                                Some(Action::CopyPath {
+                                    index: slot,
+                                    position,
+                                })
+                            } else if matches!(
+                                key.key,
+                                aqua_core::Key::Char(' ')
+                                    | aqua_core::Key::Named(aqua_core::NamedKey::Enter)
+                            ) {
+                                activation.clone()
+                            } else {
+                                None
+                            };
+                            let Some(action) = action else {
+                                return InputResponse::default();
+                            };
+                            keyed(action);
+                            InputResponse {
+                                stop_propagation: true,
+                                ..InputResponse::handled()
+                            }
+                        })
+                        .on_accessibility_request(move |request| {
+                            if request == AccessibilityRequest::ShowContextMenu {
+                                requested(Action::CopyPath {
+                                    index: slot,
+                                    position: anchor.get().unwrap_or(aqua_core::Point::ZERO),
+                                });
+                            }
+                        })
+                        .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
+                            match &event.input {
+                                RoutedInput::Native(InputEvent::PointerDown(
+                                    pointer,
+                                    PointerButton::Secondary,
+                                )) => {
+                                    copied(Action::CopyPath {
+                                        index: slot,
+                                        position: pointer.position,
+                                    });
+                                    InputResponse {
+                                        stop_propagation: true,
+                                        ..InputResponse::handled()
+                                    }
+                                }
+                                RoutedInput::Native(InputEvent::PointerDown(
+                                    pointer,
+                                    PointerButton::Primary,
+                                )) if presses => {
+                                    down.set(Some(pointer.contact));
+                                    InputResponse {
+                                        focus: aqua_ui::input::FocusRequest::Focus,
+                                        ..InputResponse::capture()
+                                    }
+                                }
+                                _ => InputResponse::default(),
+                            }
                         });
-                        InputResponse {
-                            stop_propagation: true,
-                            ..InputResponse::handled()
-                        }
-                    } else {
-                        InputResponse::default()
-                    }
-                });
                 match loaded {
                     Loaded::Ready(image) => {
                         let image = image.clone();
-                        let pressed = Rc::new(Cell::new(None));
-                        let down = Rc::clone(&pressed);
                         let cancelled = Rc::clone(&pressed);
                         let activate = Rc::clone(&emit);
                         let access = Rc::clone(&emit);
                         let accessible_image = image.clone();
-                        let key_image = image.clone();
-                        let key_emit = Rc::clone(&emit);
                         frame = frame
                             .role(aqua_core::Role::Button)
                             .aria_label(format!("{alt}. Open image preview"))
@@ -245,35 +314,37 @@ impl ImageState {
                                     image: accessible_image.clone(),
                                 })
                             })
-                            .on_input(InputKind::PointerDown, EventPhase::Bubble, move |event| {
-                                if let RoutedInput::Native(InputEvent::PointerDown(pointer, PointerButton::Primary)) = &event.input {
-                                    down.set(Some(pointer.contact));
-                                    InputResponse { focus: aqua_ui::input::FocusRequest::Focus, ..InputResponse::capture() }
-                                } else { InputResponse::default() }
-                            })
                             .on_input(InputKind::PointerCancel, EventPhase::Bubble, move |_| {
                                 cancelled.set(None);
-                                InputResponse { pointer_capture: aqua_ui::input::CaptureRequest::Release, ..InputResponse::default() }
-                            })
-                            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                                if matches!(&event.input, RoutedInput::Native(InputEvent::KeyDown(key)) if matches!(key.key, aqua_core::Key::Char(' ') | aqua_core::Key::Named(aqua_core::NamedKey::Enter))) {
-                                    key_emit(Action::Open { index: slot, image: key_image.clone() });
-                                    InputResponse { stop_propagation: true, ..InputResponse::handled() }
-                                } else { InputResponse::default() }
+                                InputResponse {
+                                    pointer_capture: aqua_ui::input::CaptureRequest::Release,
+                                    ..InputResponse::default()
+                                }
                             })
                             .on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
                                 let pressed = pressed.take();
-                                if let RoutedInput::Native(InputEvent::PointerUp(pointer, PointerButton::Primary)) = &event.input {
-                                    if pressed == Some(pointer.contact) && event.bounds.contains(pointer.position) {
-                                        activate(Action::Open { index: slot, image: image.clone() });
+                                if let RoutedInput::Native(InputEvent::PointerUp(
+                                    pointer,
+                                    PointerButton::Primary,
+                                )) = &event.input
+                                {
+                                    if pressed == Some(pointer.contact)
+                                        && event.bounds.contains(pointer.position)
+                                    {
+                                        activate(Action::Open {
+                                            index: slot,
+                                            image: image.clone(),
+                                        });
                                     }
                                 }
-                                InputResponse { pointer_capture: aqua_ui::input::CaptureRequest::Release, ..InputResponse::default() }
+                                InputResponse {
+                                    pointer_capture: aqua_ui::input::CaptureRequest::Release,
+                                    ..InputResponse::default()
+                                }
                             });
                     }
                     Loaded::Failed(ImageError::NeedsConsent) => {
                         let click = Rc::clone(&emit);
-                        let key = Rc::clone(&emit);
                         let access = Rc::clone(&emit);
                         frame = frame
                             .role(aqua_core::Role::Button)
@@ -281,12 +352,6 @@ impl ImageState {
                             .focusable(true)
                             .cursor(aqua_core::CursorIcon::Pointer)
                             .on_accessibility_activate(move || access(Action::AllowRemote))
-                            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                                if matches!(&event.input, RoutedInput::Native(InputEvent::KeyDown(pressed)) if matches!(pressed.key, aqua_core::Key::Char(' ') | aqua_core::Key::Named(aqua_core::NamedKey::Enter))) {
-                                    key(Action::AllowRemote);
-                                    InputResponse { stop_propagation: true, ..InputResponse::handled() }
-                                } else { InputResponse::default() }
-                            })
                             .on_input(InputKind::PointerUp, EventPhase::Bubble, move |event| {
                                 if matches!(
                                     &event.input,

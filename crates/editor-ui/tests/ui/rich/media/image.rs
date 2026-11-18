@@ -156,3 +156,85 @@ fn a_failed_image_offers_a_keyboard_reachable_retry_button() {
     app.handle_input(&InputEvent::KeyUp(enter));
     assert!(matches!(actions.borrow().as_slice(), [Action::Retry(0)]));
 }
+
+#[test]
+fn the_copy_path_menu_opens_from_the_keyboard_and_assistive_tech() {
+    use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
+    use aqua_text::{SharedFonts, SharedRuns};
+    use aqua_ui::tree::{ActionEvent, ActionKind};
+    use std::cell::RefCell;
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(2, 1)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let bytes: Arc<[u8]> = encoded.into_inner().into();
+    let fetcher = MediaFetcher::new("test", move |_| {
+        let bytes = Arc::clone(&bytes);
+        Box::pin(async move { Ok(bytes) })
+    })
+    .owned_by(&[1], 1);
+    let block: ImageBlock = serde_json::from_str(r#"{"src":"chart.png","alt":"Chart"}"#).unwrap();
+    let loader = Images::new();
+    let assets = aqua::images::ImageAssets::new(aqua::images::ImageAssetBudget::editor());
+    let mut state = ImageState::new(&block, fetcher, loader.clone());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !matches!(state.loaded[0], Loaded::Ready(_)) {
+        loader.drain(&assets);
+        state.refresh();
+        assert!(Instant::now() < deadline, "the image loads in time");
+        std::thread::yield_now();
+    }
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&actions);
+    let view = state
+        .view(
+            &block,
+            ArtisanTheme::resolved(),
+            "gallery",
+            400.0,
+            Rc::new(move |action| sink.borrow_mut().push(action)),
+        )
+        .unwrap();
+    let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| view).unwrap();
+    app.set_viewport(500.0, 400.0, 1.0);
+    app.build_frame().unwrap();
+    assert!(app.focus_key("gallery-image-0"));
+    let copies = |actions: &RefCell<Vec<Action>>| {
+        actions
+            .borrow()
+            .iter()
+            .filter(|action| matches!(action, Action::CopyPath { index: 0, .. }))
+            .count()
+    };
+    for (key, modifiers) in [
+        (Key::Named(NamedKey::Function(10)), Modifiers::SHIFT),
+        (Key::Named(NamedKey::ContextMenu), Modifiers::default()),
+        (Key::Named(NamedKey::Function(10)), Modifiers::default()),
+    ] {
+        let event = KeyEvent {
+            key,
+            modifiers,
+            repeat: false,
+        };
+        app.handle_input(&InputEvent::KeyDown(event));
+        app.handle_input(&InputEvent::KeyUp(event));
+    }
+    assert_eq!(copies(&actions), 2);
+    let frame = app
+        .tree()
+        .emit_semantics()
+        .into_iter()
+        .find(|node| node.label == "Chart. Open image preview")
+        .unwrap();
+    app.tree().fire_action(ActionEvent {
+        source: None,
+        node: frame.node,
+        kind: ActionKind::AccessibilityRequest,
+        text: None,
+        focused: None,
+        request: Some(AccessibilityRequest::ShowContextMenu),
+    });
+    assert_eq!(copies(&actions), 3);
+    assert_eq!(actions.borrow().len(), 3);
+}

@@ -1,3 +1,4 @@
+use super::super::{menu_anchor, opens_context_menu};
 use super::{ModelBlock, Shading};
 use crate::ui::media::{
     model::{
@@ -16,6 +17,7 @@ use aqua_ui::{
     element::{Element, Media, ui},
     input::{CaptureRequest, EventPhase, FocusRequest, InputKind, InputResponse, RoutedInput},
     style::{Length, Style},
+    tree::AccessibilityRequest,
 };
 use editor_core::{delivery::Delivery, runtime};
 use std::{
@@ -508,6 +510,11 @@ impl ModelBlock {
         let key_state = state.clone();
         let key_id = id.to_owned();
         let key_invalidate = services.invalidate.clone();
+        let key_copy = services.copy.clone();
+        let key_source = self.src.raw().to_owned();
+        let request_copy = services.copy.clone();
+        let request_source = self.src.raw().to_owned();
+        let request_bounds = bounds.clone();
         let canvas = drawing
             .with_key(format!("{id}-frame"))
             .focusable(true)
@@ -615,10 +622,25 @@ impl ModelBlock {
                     ..InputResponse::handled()
                 }
             })
+            .on_accessibility_request(move |request| {
+                if request == AccessibilityRequest::ShowContextMenu {
+                    let anchor = request_bounds
+                        .get()
+                        .map_or(aqua_core::Point::ZERO, menu_anchor);
+                    request_copy(anchor, &request_source);
+                }
+            })
             .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
                 let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
                     return InputResponse::default();
                 };
+                if opens_context_menu(key) {
+                    key_copy(menu_anchor(event.bounds), &key_source);
+                    return InputResponse {
+                        stop_propagation: true,
+                        ..InputResponse::handled()
+                    };
+                }
                 if !key_state
                     .0
                     .borrow_mut()
