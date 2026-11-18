@@ -56,7 +56,7 @@ fn shared_completion_notifies_waiters_and_lasts_until_last_owner() {
     ));
     cache.retain_owners(&[]);
     assert_eq!(released.load(Ordering::SeqCst), 1);
-    cache.clear();
+    cache.close();
     assert_eq!(released.load(Ordering::SeqCst), 1);
 }
 
@@ -193,7 +193,7 @@ fn lru_and_byte_budget_release_evicted_results_once() {
         cache.load::<Image>(&owner, &"huge".into(), 64 * 1024 * 1024, 51, wake(&count)),
         Load::Pending
     ));
-    cache.clear();
+    cache.close();
     assert_eq!(released.load(Ordering::SeqCst), 32);
 }
 
@@ -225,7 +225,7 @@ fn fetcher_retention_and_clear_operate_on_the_shared_thread_cache() {
     }));
     fetcher.retain_resources(&[vec![3]]);
     assert_eq!(released.load(Ordering::SeqCst), 0);
-    fetcher.clear_resources();
+    fetcher.close_resources();
     assert_eq!(released.load(Ordering::SeqCst), 1);
     assert!(matches!(
         second

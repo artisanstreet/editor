@@ -286,7 +286,7 @@ impl ResourceCache {
         }
     }
 
-    pub fn clear(&self) {
+    pub fn close(&self) {
         let mut state = self.state();
         state.closed = true;
         let entries = std::mem::take(&mut state.entries);

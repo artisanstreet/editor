@@ -58,7 +58,7 @@ struct ConversationMedia {
 
 impl Drop for ConversationMedia {
     fn drop(&mut self) {
-        self.fetcher.clear_resources();
+        self.fetcher.close_resources();
         self.models.drain();
         self.audio.drain();
     }

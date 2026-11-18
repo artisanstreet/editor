@@ -153,8 +153,8 @@ impl MediaFetcher {
         self.resources.retain_owners(owners);
     }
 
-    pub fn clear_resources(&self) {
-        self.resources.clear();
+    pub fn close_resources(&self) {
+        self.resources.close();
     }
 
     pub fn provider(&self) -> MediaProvider {
