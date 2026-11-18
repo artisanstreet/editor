@@ -3,12 +3,11 @@ use crate::frame::sign_in::card::{body, framed, header, wordmark};
 use crate::ui::chrome::card::{hex, key_face};
 use crate::ui::kit::surface::{self, Tone, tint};
 use crate::ui::kit::{
-    Button, ButtonTone, Density, IconSize, Radius, Row, RowItem, Space, Spaced, Surface,
-    TextRole,
+    Button, ButtonTone, Density, IconSize, Radius, Row, RowItem, Space, Spaced, Surface, TextRole,
 };
 use crate::ui::theme::{ArtisanTheme, Oklch};
 use aqua_core::DisplayItem;
-use aqua_ui::element::{Box as UiBox, Canvas, Element, Text};
+use aqua_ui::element::{Box as UiBox, Canvas, Element, Scroll, Text};
 use aqua_ui::style::{Length, Style};
 use aqua_ui::{AlignItems, JustifyContent};
 use std::rc::Rc;
@@ -18,6 +17,7 @@ pub const WINDOW: (f64, f64) = (480.0, 640.0);
 pub const SPIN_STEPS: u32 = 24;
 const WIDTH: f32 = 400.0;
 const ROOMY_ROWS: usize = 4;
+const VISIBLE_ROWS: u16 = 8;
 
 pub struct Props<'a> {
     pub setup: &'a Setup,
@@ -32,7 +32,9 @@ pub fn screen(theme: &ArtisanTheme, props: &Props<'_>) -> Element {
         State::Installing { plan, line } => vec![working(theme, props, plan, line)],
         State::Failed { error, .. } => failed(theme, props, &::diagnostics::chain(error)),
         State::Done { .. } => {
-            vec![wrapped(TextRole::Label.text(theme, "Opening Artisan Editor…"))]
+            vec![wrapped(
+                TextRole::Label.text(theme, "Opening Artisan Editor…"),
+            )]
         }
     };
     let card = UiBox::new()
@@ -40,7 +42,10 @@ pub fn screen(theme: &ArtisanTheme, props: &Props<'_>) -> Element {
         .width(WIDTH)
         .child(framed(
             theme,
-            header(AlignItems::END, vec![wordmark(theme), heading(theme, props.setup)]),
+            header(
+                AlignItems::END,
+                vec![wordmark(theme), heading(theme, props.setup)],
+            ),
             vec![body(content).spaced(Space::S16).build()],
         ))
         .build()
@@ -103,34 +108,70 @@ fn choosing(theme: &ArtisanTheme, props: &Props<'_>, choices: &Choices) -> Vec<E
         .spaced(Space::S12)
         .style(Style::new().align(AlignItems::CENTER))
         .child(folder)
-        .children(matches!(choices.location(), Location::Movable { .. }).then(|| {
-            Button::text("artisan-setup-change", *theme, ButtonTone::Neutral, "Change…")
+        .children(
+            matches!(choices.location(), Location::Movable { .. }).then(|| {
+                Button::text(
+                    "artisan-setup-change",
+                    *theme,
+                    ButtonTone::Neutral,
+                    "Change…",
+                )
                 .on_activate(move |_| change(Choice::ChangeLocation))
                 .build()
-        }))
+            }),
+        )
         .build();
     let roomy = choices.machines().len() <= ROOMY_ROWS;
-    let machines = UiBox::new()
+    let gap = if roomy { Space::S8 } else { Space::S4 };
+    let rows = UiBox::new()
         .layout("column")
-        .spaced(if roomy { Space::S8 } else { Space::S4 })
-        .children(choices.machines().iter().enumerate().map(|(index, machine)| {
-            machine_row(
-                theme,
-                machine,
-                index,
-                machine == choices.selected(),
-                roomy,
-                &props.emit,
-            )
-        }))
+        .spaced(gap)
+        .children(
+            choices
+                .machines()
+                .iter()
+                .enumerate()
+                .map(|(index, machine)| {
+                    machine_row(
+                        theme,
+                        machine,
+                        index,
+                        machine == choices.selected(),
+                        roomy,
+                        &props.emit,
+                    )
+                }),
+        )
         .build();
+    let row_height = Row::ListItem(Density::Regular)
+        .height()
+        .expect("invariant: list rows have a fixed height");
+    let visible = f32::from(VISIBLE_ROWS);
+    let machines = Scroll::new()
+        .layout("column")
+        .preserve_offset(true)
+        .style(
+            Style::new()
+                .max_height(Length::Px(
+                    row_height * visible + gap.px() * (visible - 1.0),
+                ))
+                .flex_shrink(0.0),
+        )
+        .child(rows)
+        .build()
+        .with_key("artisan-setup-machines");
     let install = UiBox::new()
         .layout("row")
         .style(Style::new().justify(JustifyContent::END))
         .child(
-            Button::text("artisan-setup-install", *theme, ButtonTone::Primary, "Install")
-                .on_activate(move |_| begin(Choice::Started))
-                .build(),
+            Button::text(
+                "artisan-setup-install",
+                *theme,
+                ButtonTone::Primary,
+                "Install",
+            )
+            .on_activate(move |_| begin(Choice::Started))
+            .build(),
         )
         .build();
     vec![
@@ -189,7 +230,11 @@ fn machine_row(
 
 fn radio(theme: &ArtisanTheme, selected: bool) -> Element {
     let ink = theme.colors.text;
-    let ring = if selected { ink } else { theme.colors.text_muted };
+    let ring = if selected {
+        ink
+    } else {
+        theme.colors.text_muted
+    };
     let dot = if selected {
         format!(r#"<circle cx="8" cy="8" r="3.5" fill="{}"/>"#, hex(ink))
     } else {
@@ -241,7 +286,11 @@ fn working(theme: &ArtisanTheme, props: &Props<'_>, plan: &InstallPlan, line: &s
         InstallPlan::Fresh { .. } => "Installing…",
         InstallPlan::Update { .. } => "Updating…",
     };
-    let detail = if line.is_empty() { "Getting ready" } else { line };
+    let detail = if line.is_empty() {
+        "Getting ready"
+    } else {
+        line
+    };
     UiBox::new()
         .layout("row")
         .spaced(Space::S12)
@@ -263,14 +312,22 @@ fn failed(theme: &ArtisanTheme, props: &Props<'_>, message: &str) -> Vec<Element
     let retry = Rc::clone(&props.emit);
     vec![
         wrapped(TextRole::LabelStrong.text(theme, "Setup couldn't finish")),
-        colored(TextRole::Label.text(theme, message.to_owned()), tint(theme, Tone::Danger)),
+        colored(
+            TextRole::Label.text(theme, message.to_owned()),
+            tint(theme, Tone::Danger),
+        ),
         UiBox::new()
             .layout("row")
             .style(Style::new().justify(JustifyContent::END))
             .child(
-                Button::text("artisan-setup-retry", *theme, ButtonTone::Neutral, "Try again")
-                    .on_activate(move |_| retry(Choice::Started))
-                    .build(),
+                Button::text(
+                    "artisan-setup-retry",
+                    *theme,
+                    ButtonTone::Neutral,
+                    "Try again",
+                )
+                .on_activate(move |_| retry(Choice::Started))
+                .build(),
             )
             .build(),
     ]

@@ -147,3 +147,20 @@ fn an_install_that_already_has_a_folder_does_not_offer_another() {
     );
     assert_eq!(setup.apply(Event::Chose(Choice::ChangeLocation)), None);
 }
+
+#[test]
+fn dozens_of_distros_scroll_inside_the_window_and_keep_install_reachable() {
+    let names: Vec<String> = (0..30).map(|index| format!("Distro-{index}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (mut app, heard) = shown(&with_distros(&names));
+    assert!(card_fits(&app), "thirty machines fit the window");
+    let list = rect(&app, "artisan-setup-machines");
+    let install = rect(&app, "artisan-setup-install");
+    assert!(
+        install.y >= list.y + list.h,
+        "Install stays below the scrolling list"
+    );
+    click(&mut app, "artisan-setup-machine-1");
+    click(&mut app, "artisan-setup-install");
+    assert_eq!(*heard.borrow(), [Choice::Selected(1), Choice::Started]);
+}
