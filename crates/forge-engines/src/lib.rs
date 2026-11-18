@@ -50,6 +50,7 @@ mod question;
 mod reasoning;
 mod retained;
 mod rpc;
+mod sandbox;
 pub mod trace;
 #[cfg(test)]
 mod transcript_tests;

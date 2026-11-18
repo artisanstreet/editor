@@ -12,6 +12,7 @@
 //! [`IDLE_TIMEOUT`] without a turn shuts them down, and one that died is
 //! started again.
 
+use crate::sandbox::Sandbox;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -366,7 +367,7 @@ impl Servers {
     /// recorded and left out; the run carries on without it. Inside
     /// [`for_thread`], the thread's servers from its last turn are reused
     /// when their config is unchanged.
-    pub async fn connect(servers: &[McpServer], cwd: &Path) -> Self {
+    pub async fn connect(servers: &[McpServer], cwd: &Path, sandbox: &Sandbox) -> Self {
         let thread = THREAD.try_with(Clone::clone).ok();
         let mut seen = HashSet::new();
         let servers: Vec<&McpServer> = servers
@@ -382,7 +383,7 @@ impl Servers {
                 true
             })
             .collect();
-        let config = fingerprint(&servers, cwd);
+        let config = fingerprint(&servers, cwd, sandbox);
         let mut warm: HashMap<String, Arc<Client>> = HashMap::new();
         if let Some(thread) = &thread {
             let previous = lock(&WARM).remove(thread);
@@ -403,16 +404,18 @@ impl Servers {
                 }
             }
         }
-        let started =
-            futures::future::join_all(
-                servers
-                    .iter()
-                    .filter(|server| !warm.contains_key(&server.name))
-                    .map(|server| async move {
-                        (server.name.clone(), connect_client(server, cwd).await)
-                    }),
-            )
-            .await;
+        let started = futures::future::join_all(
+            servers
+                .iter()
+                .filter(|server| !warm.contains_key(&server.name))
+                .map(|server| async move {
+                    (
+                        server.name.clone(),
+                        connect_client(server, cwd, sandbox).await,
+                    )
+                }),
+        )
+        .await;
         let mut started: HashMap<String, Result<Client, String>> = started.into_iter().collect();
         let mut connected = Self::default();
         for server in &servers {
@@ -659,9 +662,10 @@ fn take_warm(thread: &str, generation: u64) -> Option<Warm> {
 
 /// What a set of servers was started from: two turns with the same
 /// fingerprint can share them.
-fn fingerprint(servers: &[&McpServer], cwd: &Path) -> String {
+fn fingerprint(servers: &[&McpServer], cwd: &Path, sandbox: &Sandbox) -> String {
     let mut hash = Sha256::new();
     hash.update(cwd.to_string_lossy().as_bytes());
+    hash.update([u8::from(sandbox.confined())]);
     for server in servers {
         hash.update([0]);
         hash.update(serde_json::to_vec(server).unwrap_or_default());
@@ -671,12 +675,16 @@ fn fingerprint(servers: &[&McpServer], cwd: &Path) -> String {
 
 /// Starts one server and lists its tools. `Err` is the short reason the
 /// model and the user are told; the log has the detail.
-async fn connect_client(server: &McpServer, cwd: &Path) -> Result<Client, String> {
+async fn connect_client(
+    server: &McpServer,
+    cwd: &Path,
+    sandbox: &Sandbox,
+) -> Result<Client, String> {
     let resolved = resolve(server, &|name| std::env::var(name).ok()).inspect_err(|reason| {
         tracing::warn!(server = %server.name, step = "reading its config", "an MCP server could not start: {reason}");
     })?;
     let deadline = Instant::now() + CONNECT_TIMEOUT;
-    let transport = Transport::open(&resolved, cwd, deadline)
+    let transport = Transport::open(&resolved, cwd, deadline, sandbox)
         .await
         .map_err(|error| {
             tracing::warn!(
@@ -1177,7 +1185,12 @@ enum Transport {
 }
 
 impl Transport {
-    async fn open(server: &Resolved, cwd: &Path, deadline: Instant) -> Result<Self, OpenError> {
+    async fn open(
+        server: &Resolved,
+        cwd: &Path,
+        deadline: Instant,
+        sandbox: &Sandbox,
+    ) -> Result<Self, OpenError> {
         match &server.url {
             Some(url) if server.sse => Ok(Self::Stream(
                 Stream::sse(url, header_map(&server.headers)?, deadline).await?,
@@ -1186,7 +1199,12 @@ impl Transport {
                 url,
                 header_map(&server.headers)?,
             )?))),
-            None => Ok(Self::Stream(Stream::stdio(server, cwd, MAX_MESSAGE_BYTES)?)),
+            None => Ok(Self::Stream(Stream::stdio(
+                server,
+                cwd,
+                MAX_MESSAGE_BYTES,
+                sandbox,
+            )?)),
         }
     }
 
@@ -1410,7 +1428,12 @@ struct Stream {
 }
 
 impl Stream {
-    fn stdio(server: &Resolved, cwd: &Path, max_line: usize) -> Result<Self, OpenError> {
+    fn stdio(
+        server: &Resolved,
+        cwd: &Path,
+        max_line: usize,
+        sandbox: &Sandbox,
+    ) -> Result<Self, OpenError> {
         let mut command = tokio::process::Command::new(&server.command);
         command
             .args(&server.args)
@@ -1420,9 +1443,11 @@ impl Stream {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child =
-            crate::process::owned_command(command).map_err(|source| OpenError::Spawn {
-                command: server.command.clone(),
-                source,
+            crate::process::owned_command(command, sandbox.clone()).map_err(|source| {
+                OpenError::Spawn {
+                    command: server.command.clone(),
+                    source,
+                }
             })?;
         let stdin = child
             .stdin()

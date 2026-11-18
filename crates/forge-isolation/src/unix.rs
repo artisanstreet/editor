@@ -48,7 +48,7 @@ fn open_lifeline() -> rustix::io::Result<Lifeline> {
     })
 }
 
-pub fn contain(command: &mut std::process::Command) {
+pub fn contain(command: &mut std::process::Command, sandbox: Option<crate::Ruleset>) {
     #[cfg(target_os = "linux")]
     let engines = crate::linux::engines_membership();
     let forge_alive = lifeline();
@@ -60,6 +60,9 @@ pub fn contain(command: &mut std::process::Command) {
         rustix::process::nice(ENGINE_NICENESS).ok();
         if let Some(forge_alive) = forge_alive {
             lead_group_watched_by(forge_alive)?;
+        }
+        if let Some(ruleset) = &sandbox {
+            ruleset.restrict_self()?;
         }
         Ok(())
     };

@@ -882,8 +882,8 @@ impl SignIn {
             .env("NO_OPEN_BROWSER", "1");
         #[cfg(unix)]
         command.env("BROWSER", "true");
-        let mut child =
-            crate::process::owned_command(command).map_err(|source| LoginError::Start {
+        let mut child = crate::process::owned_command(command, crate::sandbox::Sandbox::Open)
+            .map_err(|source| LoginError::Start {
                 engine,
                 args: args.join(" "),
                 source,

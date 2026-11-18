@@ -283,7 +283,7 @@ enum Step {
 
 impl Run {
     async fn run(&mut self, turn: &Turn) -> Result<Outcome, RunError> {
-        let (method, params) = thread_params(turn);
+        let (method, params) = thread_params(turn, ProjectGuard::of(turn));
         match self.call(method, params).await {
             Ok(Some(_)) => {}
             Ok(None) => return Ok(Outcome::Cancelled),
@@ -563,9 +563,10 @@ impl Run {
                 .flat_map(|queued| user_input(&queued.input))
                 .collect();
             let mut params = json!({ "threadId": thread, "input": input });
-            turn_overrides(turn, &mut params);
+            let guard = ProjectGuard::of(turn);
+            turn_overrides(turn, guard, &mut params);
             if let Some(permissions) = self.permissions {
-                access_overrides(permissions, &mut params);
+                access_overrides(permissions, guard, &mut params);
             }
             let request = self.decoder.request("turn/start", params);
             let acknowledges = queued
@@ -672,9 +673,25 @@ impl Run {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ProjectGuard {
+    Codex,
+    Forge,
+}
+
+impl ProjectGuard {
+    fn of(turn: &Turn) -> Self {
+        if crate::sandbox::forge_confines(turn.config.permissions, forge_isolation::support()) {
+            Self::Forge
+        } else {
+            Self::Codex
+        }
+    }
+}
+
 /// `thread/start`, or `thread/resume` for a known session, with the run's
 /// model, sandbox and approval policy.
-fn thread_params(turn: &Turn) -> (&'static str, Value) {
+fn thread_params(turn: &Turn, guard: ProjectGuard) -> (&'static str, Value) {
     let config = &turn.config;
     let mut settings = Map::new();
     settings.insert("model_reasoning_summary".to_owned(), json!("auto"));
@@ -694,15 +711,18 @@ fn thread_params(turn: &Turn) -> (&'static str, Value) {
         "cwd": turn.cwd,
         "config": settings,
     });
-    match config.permissions {
-        // Codex's own Auto: sandboxed to the project, with what it would
-        // ask about reviewed by its automatic reviewer first.
-        Permissions::Auto => {
+    match (config.permissions, guard) {
+        (Permissions::Auto, ProjectGuard::Codex) => {
             params["approvalPolicy"] = json!("on-request");
             params["approvalsReviewer"] = json!("auto_review");
             params["sandbox"] = json!("workspace-write");
         }
-        Permissions::Full => {
+        (Permissions::Auto, ProjectGuard::Forge) => {
+            params["approvalPolicy"] = json!("on-request");
+            params["approvalsReviewer"] = json!("auto_review");
+            params["sandbox"] = json!("danger-full-access");
+        }
+        (Permissions::Full, _) => {
             params["approvalPolicy"] = json!("never");
             params["sandbox"] = json!("danger-full-access");
         }
@@ -726,7 +746,7 @@ fn thread_params(turn: &Turn) -> (&'static str, Value) {
 
 /// What a turn sets for itself and the turns after it: the thread may have
 /// been loaded by an earlier run with other settings.
-fn turn_overrides(turn: &Turn, params: &mut Value) {
+fn turn_overrides(turn: &Turn, guard: ProjectGuard, params: &mut Value) {
     let config = &turn.config;
     params["cwd"] = json!(turn.cwd);
     if let Some(model) = non_empty(config.model.as_deref()) {
@@ -737,18 +757,23 @@ fn turn_overrides(turn: &Turn, params: &mut Value) {
     }
     // `serviceTier` can't go back to standard; this one can, per turn.
     params["serviceTierForTurn"] = json!(service_tier(config).unwrap_or("default"));
-    access_overrides(config.permissions, params);
+    access_overrides(config.permissions, guard, params);
 }
 
 /// The same access choices as `thread_params`, in `turn/start`'s shapes.
-fn access_overrides(permissions: Permissions, params: &mut Value) {
-    match permissions {
-        Permissions::Auto => {
+fn access_overrides(permissions: Permissions, guard: ProjectGuard, params: &mut Value) {
+    match (permissions, guard) {
+        (Permissions::Auto, ProjectGuard::Codex) => {
             params["approvalPolicy"] = json!("on-request");
             params["approvalsReviewer"] = json!("auto_review");
             params["sandboxPolicy"] = json!({ "type": "workspaceWrite" });
         }
-        Permissions::Full => {
+        (Permissions::Auto, ProjectGuard::Forge) => {
+            params["approvalPolicy"] = json!("on-request");
+            params["approvalsReviewer"] = json!("auto_review");
+            params["sandboxPolicy"] = json!({ "type": "dangerFullAccess" });
+        }
+        (Permissions::Full, _) => {
             params["approvalPolicy"] = json!("never");
             params["sandboxPolicy"] = json!({ "type": "dangerFullAccess" });
         }

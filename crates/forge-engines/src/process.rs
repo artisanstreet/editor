@@ -1,4 +1,5 @@
 use crate::Turn;
+use crate::sandbox::Sandbox;
 use crate::trace::{Kind, Secrets, Trace};
 use artisan_api::{EngineId, ThreadId};
 use process_wrap::tokio::{ChildWrapper, CommandWrap, CommandWrapper, KillOnDrop};
@@ -19,6 +20,13 @@ pub enum SpawnError {
         thread: ThreadId,
         #[source]
         source: artisan_paths::private::PrivateFileError,
+    },
+    #[error("sandbox {engine} thread {thread}")]
+    Sandbox {
+        engine: EngineId,
+        thread: ThreadId,
+        #[source]
+        source: Box<crate::sandbox::SandboxError>,
     },
     #[error("start {}", program.display())]
     Start {
@@ -176,18 +184,25 @@ pub(crate) fn spawn_in(
                 |started| started.trace,
             )
         });
-    let mut process = spawn_command(command, trace)?;
+    let sandbox =
+        crate::sandbox::Sandbox::for_turn(turn).map_err(|source| SpawnError::Sandbox {
+            engine: turn.engine,
+            thread: turn.thread_id.clone(),
+            source: Box::new(source),
+        })?;
+    let mut process = spawn_command(command, trace, sandbox)?;
     process.gateway = gateway;
     Ok(process)
 }
 
 pub(crate) fn spawn_probe(command: Command) -> Result<EngineProcess, SpawnError> {
-    spawn_command(command, Trace::default())
+    spawn_command(command, Trace::default(), Sandbox::Open)
 }
 
 pub(crate) struct OwnedChild {
     child: Box<dyn ChildWrapper>,
     armed: bool,
+    _sandbox: Sandbox,
 }
 impl std::ops::Deref for OwnedChild {
     type Target = dyn ChildWrapper;
@@ -216,11 +231,11 @@ impl Drop for OwnedChild {
 }
 
 #[derive(Debug)]
-struct Isolated;
+struct Isolated(Sandbox);
 
 impl CommandWrapper for Isolated {
     fn pre_spawn(&mut self, command: &mut Command, _core: &CommandWrap) -> std::io::Result<()> {
-        forge_isolation::contain(command.as_std_mut());
+        forge_isolation::contain(command.as_std_mut(), self.0.ruleset());
         Ok(())
     }
 
@@ -237,25 +252,37 @@ impl CommandWrapper for Isolated {
     }
 }
 
-pub(crate) fn owned_command(command: Command) -> Result<OwnedChild, SpawnError> {
+pub(crate) fn owned_command(
+    mut command: Command,
+    sandbox: Sandbox,
+) -> Result<OwnedChild, SpawnError> {
     let program = PathBuf::from(command.as_std().get_program());
+    sandbox.prepare(&mut command);
     let mut command = CommandWrap::from(command);
     command.wrap(KillOnDrop);
-    command.wrap(Isolated);
+    command.wrap(Isolated(sandbox.clone()));
     #[cfg(unix)]
     command.wrap(process_wrap::tokio::ProcessGroup::leader());
     #[cfg(windows)]
     command.wrap(process_wrap::tokio::JobObject);
     command
         .spawn()
-        .map(|child| OwnedChild { child, armed: true })
+        .map(|child| OwnedChild {
+            child,
+            armed: true,
+            _sandbox: sandbox,
+        })
         .map_err(|source| SpawnError::Start { program, source })
 }
 
-fn spawn_command(mut command: Command, trace: Trace) -> Result<EngineProcess, SpawnError> {
+fn spawn_command(
+    mut command: Command,
+    trace: Trace,
+    sandbox: Sandbox,
+) -> Result<EngineProcess, SpawnError> {
     let program = PathBuf::from(command.as_std().get_program());
     command.stdout(Stdio::piped());
-    let mut child = owned_command(command)?;
+    let mut child = owned_command(command, sandbox)?;
     trace.record(Kind::Note, &format!("started (pid {:?})", child.id()));
     let stdin = child.stdin().take().map(|stdin| StdinWriter {
         program: program.clone(),
@@ -503,7 +530,7 @@ mod reform_tests {
         command
             .args(["-c", "sleep 30 & echo ready; wait"])
             .stdout(Stdio::piped());
-        let mut child = owned_command(command).unwrap();
+        let mut child = owned_command(command, Sandbox::Open).unwrap();
         let mut pipe = BufReader::new(child.stdout().take().unwrap());
         let mut ready = String::new();
         pipe.read_line(&mut ready).await.unwrap();
@@ -570,7 +597,7 @@ mod windows_owner_tests {
         let mut command = Command::new("powershell.exe");
         command.args(["-NoProfile", "-NonInteractive", "-Command", "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/c ping -n 30 127.0.0.1 >NUL' -NoNewWindow -PassThru; Write-Output 'ready'; Wait-Process -Id $child.Id"])
             .stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = owned_command(command).unwrap();
+        let mut child = owned_command(command, Sandbox::Open).unwrap();
         let mut pipe = BufReader::new(child.stdout().take().unwrap());
         let mut ready = String::new();
         tokio::time::timeout(

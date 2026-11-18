@@ -84,6 +84,7 @@ semver = "=1.0.28"
 palette = "0.7"
 rustix = "=1.1.6"
 notify = "=8.2.0"
+landlock = "=0.4.7"
 windows = "=0.62.2"
 aqua = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }
 aqua-core = { git = "https://github.com/artisanstreet/aqua", rev = "e6fea72caf258e066a94c91b57355b891ffa541e" }

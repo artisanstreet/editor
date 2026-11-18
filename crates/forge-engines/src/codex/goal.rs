@@ -61,7 +61,7 @@ pub(super) async fn clear_goal(turn: Turn) -> Result<(), ClearGoalError> {
         .await
         .map_err(ClearGoalError::Attach)?;
     let clear = async {
-        let (method, params) = thread_params(&turn);
+        let (method, params) = thread_params(&turn, super::ProjectGuard::of(&turn));
         call(&mut conn, 1, method, params).await?;
         call(
             &mut conn,

@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use super::files::{self, ReadFileError};
 use super::rules::{Rules, Verdict, changes_files, url_host};
 use super::{mcp, shells, skills};
+use crate::sandbox::Sandbox;
 
 /// The most of a tool's output the model is sent.
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
@@ -98,12 +99,13 @@ pub struct Runtime {
     pub mcp: mcp::Servers,
     pub shells: shells::Shells,
     pub rules: Rules,
+    pub sandbox: Sandbox,
 }
 
 impl Runtime {
     /// Reads the run's skills and rules and connects its MCP servers: the
     /// launch's (Forge's own included) and the project's `.mcp.json`.
-    pub async fn build(home: &Path, cwd: &Path, servers: &[McpServer]) -> Self {
+    pub async fn build(home: &Path, cwd: &Path, servers: &[McpServer], sandbox: Sandbox) -> Self {
         let mut servers = servers.to_vec();
         for project in mcp::project_servers(cwd) {
             if !servers.iter().any(|known| known.name == project.name) {
@@ -112,9 +114,10 @@ impl Runtime {
         }
         Self {
             skills: skills::discover(home, cwd),
-            mcp: mcp::Servers::connect(&servers, cwd).await,
+            mcp: mcp::Servers::connect(&servers, cwd, &sandbox).await,
             shells: shells::Shells::default(),
             rules: Rules::load(home, cwd),
+            sandbox,
         }
     }
 }
@@ -668,7 +671,7 @@ pub async fn execute(
             let answer = match call.input["command"].as_str() {
                 Some(command) if !command.trim().is_empty() => runtime
                     .shells
-                    .start(command, cwd)
+                    .start(command, cwd, &runtime.sandbox)
                     .map_or_else(Answer::error, |id| {
                         Answer::ok(format!(
                             "Command running in the background with ID {id}. Read it with BashOutput, stop it with KillShell."
@@ -679,7 +682,7 @@ pub async fn execute(
             let item = finished(preview(call, cwd, &runtime.mcp), &answer, None);
             return (answer, item);
         }
-        "Bash" => return bash(call, cwd, cancel, &runtime.mcp).await,
+        "Bash" => return bash(call, cwd, cancel, runtime).await,
         "BashOutput" => call.input["bash_id"].as_str().map_or_else(
             || Answer::error("BashOutput needs the shell's bash_id."),
             |id| {
@@ -1775,9 +1778,9 @@ async fn bash(
     call: &Call,
     cwd: &Path,
     cancel: &CancellationToken,
-    mcp: &mcp::Servers,
+    runtime: &Runtime,
 ) -> (Answer, ItemKind) {
-    let item = preview(call, cwd, mcp);
+    let item = preview(call, cwd, &runtime.mcp);
     let command = command_of(call);
     if command.trim().is_empty() {
         let answer = Answer::error("Bash needs a command.");
@@ -1793,7 +1796,7 @@ async fn bash(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = match crate::process::owned_command(shell) {
+    let mut child = match crate::process::owned_command(shell, runtime.sandbox.clone()) {
         Ok(child) => child,
         Err(error) => {
             let answer = Answer::error(format!("The command could not start: {error:#}"));
@@ -1940,6 +1943,7 @@ mod tests {
             mcp: mcp::Servers::default(),
             shells: shells::Shells::default(),
             rules: Rules::default(),
+            sandbox: crate::sandbox::Sandbox::Open,
         }
     }
 

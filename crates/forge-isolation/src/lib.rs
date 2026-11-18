@@ -10,6 +10,7 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code, reason = "setiopolicy_np is a C call")]
 mod macos;
+mod sandbox;
 #[cfg(unix)]
 #[allow(unsafe_code, reason = "pre_exec runs between fork and exec")]
 mod unix;
@@ -51,13 +52,15 @@ pub const fn protect_forge() -> Vec<Outcome> {
     Vec::new()
 }
 
+pub use sandbox::{Landlock, Ruleset, RulesetError, Support, Unavailable, support};
+
 #[cfg(unix)]
-pub fn contain(command: &mut std::process::Command) {
-    unix::contain(command);
+pub fn contain(command: &mut std::process::Command, sandbox: Option<&Ruleset>) {
+    unix::contain(command, sandbox.cloned());
 }
 
 #[cfg(not(unix))]
-pub const fn contain(_command: &mut std::process::Command) {}
+pub const fn contain(_command: &mut std::process::Command, _sandbox: Option<&Ruleset>) {}
 
 #[cfg(windows)]
 pub fn started(process_id: u32) {

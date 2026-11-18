@@ -40,6 +40,8 @@ pub enum SideQueryError {
     UnknownStop { reason: String },
     #[error("claude.ai's stream ended without an answer to the side query")]
     NoAnswer,
+    #[error("sandbox the side query's tools")]
+    Sandbox(#[source] Box<crate::sandbox::SandboxError>),
     #[error("releasing claude.ai's side query completion")]
     Stop(#[source] StopCompletionError),
 }
@@ -72,9 +74,11 @@ async fn context(backend: &dyn Backend, turn: &Turn) -> Result<SummaryContext, S
             .ok_or_else(|| SideQueryError::NoSavedMessage {
                 session: session.clone(),
             })?;
+        let sandbox = crate::sandbox::Sandbox::for_turn(turn)
+            .map_err(|source| SideQueryError::Sandbox(Box::new(source)))?;
         let runtime = mcp::for_thread(
             turn.thread_id.as_str(),
-            tools::Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers),
+            tools::Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers, sandbox),
         )
         .await;
         return Ok(SummaryContext {

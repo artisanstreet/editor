@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::sandbox::Sandbox;
 use encoding_rs::{DecoderResult, Encoding};
 use process_wrap::tokio::ChildWrapper;
 use tokio::io::AsyncReadExt as _;
@@ -81,7 +82,7 @@ enum Ended {
 }
 
 impl Shells {
-    pub fn start(&self, command: &str, cwd: &Path) -> Result<String, String> {
+    pub fn start(&self, command: &str, cwd: &Path, sandbox: &Sandbox) -> Result<String, String> {
         let mut shells = self
             .shells
             .lock()
@@ -110,7 +111,7 @@ impl Shells {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let mut child = crate::process::owned_command(shell)
+        let mut child = crate::process::owned_command(shell, sandbox.clone())
             .map_err(|error| format!("The command could not start: {error:#}"))?;
         let stdout = child.stdout().take();
         let stderr = child.stderr().take();
@@ -418,7 +419,11 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let shells = Shells::default();
         let id = shells
-            .start("echo hello; sleep 0.2; echo done; exit 3", work.path())
+            .start(
+                "echo hello; sleep 0.2; echo done; exit 3",
+                work.path(),
+                &crate::sandbox::Sandbox::Open,
+            )
             .unwrap();
         let mut first = String::new();
         for _ in 0..100 {
@@ -441,7 +446,13 @@ mod tests {
     async fn killing_a_shell_stops_it_and_says_so() {
         let work = tempfile::tempdir().unwrap();
         let shells = Shells::default();
-        let id = shells.start("echo up; sleep 30", work.path()).unwrap();
+        let id = shells
+            .start(
+                "echo up; sleep 30",
+                work.path(),
+                &crate::sandbox::Sandbox::Open,
+            )
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(shells.kill(&id).unwrap().contains("stopped"));
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -454,10 +465,14 @@ mod tests {
     async fn an_id_from_another_turn_never_reads_this_turns_shell() {
         let work = tempfile::tempdir().unwrap();
         let earlier = Shells::default();
-        let old = earlier.start("echo old", work.path()).unwrap();
+        let old = earlier
+            .start("echo old", work.path(), &crate::sandbox::Sandbox::Open)
+            .unwrap();
         drop(earlier);
         let shells = Shells::default();
-        let id = shells.start("echo new", work.path()).unwrap();
+        let id = shells
+            .start("echo new", work.path(), &crate::sandbox::Sandbox::Open)
+            .unwrap();
         assert_ne!(id, old, "ids are not reused across turns");
         let error = shells.read(&old).unwrap_err();
         assert!(error.contains("end with the turn"), "{error}");
@@ -469,7 +484,11 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let shells = Shells::default();
         let id = shells
-            .start("sleep 30 & echo started", work.path())
+            .start(
+                "sleep 30 & echo started",
+                work.path(),
+                &crate::sandbox::Sandbox::Open,
+            )
             .unwrap();
         let read = read_to_end(&shells, &id).await;
         assert!(read.contains("started"), "{read}");
@@ -485,6 +504,7 @@ mod tests {
             .start(
                 "head -c 300000 /dev/zero | tr '\\0' a; echo; echo tail-marker",
                 work.path(),
+                &crate::sandbox::Sandbox::Open,
             )
             .unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -512,18 +532,28 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let shells = Shells::default();
         let running: Vec<String> = (0..MAX_RUNNING_SHELLS)
-            .map(|_| shells.start("sleep 30", work.path()).unwrap())
+            .map(|_| {
+                shells
+                    .start("sleep 30", work.path(), &crate::sandbox::Sandbox::Open)
+                    .unwrap()
+            })
             .collect();
-        let refused = shells.start("sleep 30", work.path()).unwrap_err();
+        let refused = shells
+            .start("sleep 30", work.path(), &crate::sandbox::Sandbox::Open)
+            .unwrap_err();
         assert!(refused.contains("KillShell"), "{refused}");
         shells.kill(&running[0]).unwrap();
-        let replacement = shells.start("sleep 30", work.path()).unwrap();
+        let replacement = shells
+            .start("sleep 30", work.path(), &crate::sandbox::Sandbox::Open)
+            .unwrap();
         for id in running.iter().skip(1).chain([&replacement]) {
             shells.kill(id).unwrap();
         }
         let mut finished = Vec::new();
         for _ in 0..200 {
-            let id = shells.start("sleep 30", work.path()).unwrap();
+            let id = shells
+                .start("sleep 30", work.path(), &crate::sandbox::Sandbox::Open)
+                .unwrap();
             shells.kill(&id).unwrap();
             finished.push(id);
         }
@@ -542,7 +572,11 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let shells = Shells::default();
         let id = shells
-            .start("sleep 30 & echo $!; wait", work.path())
+            .start(
+                "sleep 30 & echo $!; wait",
+                work.path(),
+                &crate::sandbox::Sandbox::Open,
+            )
             .unwrap();
         let mut pid = String::new();
         for _ in 0..100 {

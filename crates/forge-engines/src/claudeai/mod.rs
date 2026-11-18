@@ -252,10 +252,13 @@ enum Read {
 /// Runs a turn on `backend`, building what the run's tools share first:
 /// the skills, MCP servers and permission rules of the turn's machine.
 pub async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
-    // The thread's MCP servers stay connected for its next turn.
+    let sandbox = match crate::sandbox::Sandbox::for_turn(&turn) {
+        Ok(sandbox) => sandbox,
+        Err(error) => return Outcome::failed(diagnostics::chain(&error)),
+    };
     let runtime = mcp::for_thread(
         turn.thread_id.as_str(),
-        tools::Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers),
+        tools::Runtime::build(&turn.home, &turn.cwd, &turn.launch.mcp_servers, sandbox),
     )
     .await;
     drive_with(&runtime, backend, turn, io).await

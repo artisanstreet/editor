@@ -18,10 +18,7 @@ fn fake_engine() -> PathBuf {
     fake
 }
 
-struct FakeCodex {
-    spawns: PathBuf,
-    input: PathBuf,
-}
+struct FakeCodex;
 
 impl Harness for FakeCodex {
     fn run(&self, mut turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
@@ -30,11 +27,11 @@ impl Harness for FakeCodex {
             ("ARTISAN_FAKE".to_owned(), "codex-app-server".to_owned()),
             (
                 "ARTISAN_TEST_SPAWNS".to_owned(),
-                self.spawns.display().to_string(),
+                turn.home.join("spawns").display().to_string(),
             ),
             (
                 "ARTISAN_TEST_INPUT".to_owned(),
-                self.input.display().to_string(),
+                turn.home.join("input").display().to_string(),
             ),
         ]);
         forge_engines::harness(EngineId::Codex).run(turn, io)
@@ -61,14 +58,10 @@ async fn agent_settles(fixture: &Fixture, agent: &ItemId) -> AgentInfo {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn messaging_a_finished_codex_agent_whose_session_is_held_elsewhere_fails_it_visibly() {
-    let fakes = tempfile::tempdir().unwrap();
-    let spawns = fakes.path().join("spawns");
-    let harness: Arc<dyn Harness> = Arc::new(FakeCodex {
-        spawns: spawns.clone(),
-        input: fakes.path().join("input"),
-    });
+    let harness: Arc<dyn Harness> = Arc::new(FakeCodex);
     let fixture =
         fixture_with_engine_harness(EngineId::Codex, Arc::new(move |_| Arc::clone(&harness))).await;
+    let spawns = fixture.hub.engines().home(EngineId::Codex).join("spawns");
     let spawned = fixture
         .hub
         .spawn_agent(
