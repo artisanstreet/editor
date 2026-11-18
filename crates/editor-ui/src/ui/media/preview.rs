@@ -133,30 +133,21 @@ impl Preview {
         image: ImageHandle,
         now: Instant,
     ) -> Option<Self> {
-        (index < sources.len()).then(|| Self {
-            generation,
-            opener_key: None,
-            host,
-            instance,
-            content: Content::Gallery {
-                fetcher,
-                loader,
-                sources,
-                index,
-            },
-            image: Some(image),
-            failure: None,
-            outgoing: None,
-            started: now,
-            slide_started: None,
-            closing: None,
-            forward: true,
-            press: None,
-            swipe_offset: 0.0,
-            zoom: 1.0,
-            pan: aqua_core::Point { x: 0.0, y: 0.0 },
-            waiter: NEXT_WAITER.fetch_add(1, Ordering::Relaxed),
-            wake: aqua::mailbox::Mailbox::new(NonZeroUsize::MIN),
+        (index < sources.len()).then(|| {
+            Self::opened(
+                generation,
+                None,
+                host,
+                instance,
+                Content::Gallery {
+                    fetcher,
+                    loader,
+                    sources,
+                    index,
+                },
+                image,
+                now,
+            )
         })
     }
 
@@ -168,12 +159,32 @@ impl Preview {
         opener_key: String,
         now: Instant,
     ) -> Self {
-        Self {
+        Self::opened(
             generation,
-            opener_key: Some(opener_key),
+            Some(opener_key),
             host,
             instance,
-            content: Content::ReadyOnly,
+            Content::ReadyOnly,
+            image,
+            now,
+        )
+    }
+
+    fn opened(
+        generation: u64,
+        opener_key: Option<String>,
+        host: HostId,
+        instance: HostInstance,
+        content: Content,
+        image: ImageHandle,
+        now: Instant,
+    ) -> Self {
+        Self {
+            generation,
+            opener_key,
+            host,
+            instance,
+            content,
             image: Some(image),
             failure: None,
             outgoing: None,
@@ -524,36 +535,13 @@ impl Preview {
                 .transform(transform),
         );
         stage = stage.child(if let Some(image) = &self.image {
-            UiBox::new()
-                .width(width)
-                .height(height)
-                .opacity(slide)
-                .style(
-                    Style::new()
-                        .absolute_at(
-                            Some(8.0 * if self.forward { 1.0 } else { -1.0 } * (1.0 - slide)),
-                            Some(0.0),
-                            None,
-                            None,
-                        )
-                        .content_blur(3.0 * (1.0 - slide)),
-                )
-                .child(
-                    UiBox::new()
-                        .width(width)
-                        .height(height)
-                        .radius(FRAME.radius_px())
-                        .clip(true)
-                        .child(
-                            Media::new(image.clone())
-                                .width(width)
-                                .height(height)
-                                .fit(aqua_core::image::ImageFit::Contain)
-                                .build(),
-                        )
-                        .build(),
-                )
-                .build()
+            sliding_image(
+                image,
+                width,
+                height,
+                slide,
+                8.0 * if self.forward { 1.0 } else { -1.0 } * (1.0 - slide),
+            )
         } else {
             UiBox::new()
                 .width(width)
@@ -595,38 +583,13 @@ impl Preview {
                 progress(*started)
             };
             if outgoing < 1.0 {
-                stage = stage.child(
-                    UiBox::new()
-                        .width(width)
-                        .height(height)
-                        .opacity(1.0 - outgoing)
-                        .style(
-                            Style::new()
-                                .absolute_at(
-                                    Some(8.0 * if *forward { -1.0 } else { 1.0 } * outgoing),
-                                    Some(0.0),
-                                    None,
-                                    None,
-                                )
-                                .content_blur(3.0 * outgoing),
-                        )
-                        .child(
-                            UiBox::new()
-                                .width(width)
-                                .height(height)
-                                .radius(FRAME.radius_px())
-                                .clip(true)
-                                .child(
-                                    Media::new(image.clone())
-                                        .width(width)
-                                        .height(height)
-                                        .fit(aqua_core::image::ImageFit::Contain)
-                                        .build(),
-                                )
-                                .build(),
-                        )
-                        .build(),
-                );
+                stage = stage.child(sliding_image(
+                    image,
+                    width,
+                    height,
+                    1.0 - outgoing,
+                    8.0 * if *forward { -1.0 } else { 1.0 } * outgoing,
+                ));
             }
         }
         let pressing = Rc::clone(&emit);
@@ -861,3 +824,31 @@ fn track(element: Element, emit: &Rc<dyn Fn(Action)>, viewport: Size) -> Element
 #[cfg(all(test, feature = "test-support"))]
 #[path = "../../../tests/ui/media/preview.rs"]
 mod tests;
+
+fn sliding_image(image: &ImageHandle, width: f32, height: f32, shown: f32, offset: f32) -> Element {
+    UiBox::new()
+        .width(width)
+        .height(height)
+        .opacity(shown)
+        .style(
+            Style::new()
+                .absolute_at(Some(offset), Some(0.0), None, None)
+                .content_blur(3.0 * (1.0 - shown)),
+        )
+        .child(
+            UiBox::new()
+                .width(width)
+                .height(height)
+                .radius(FRAME.radius_px())
+                .clip(true)
+                .child(
+                    Media::new(image.clone())
+                        .width(width)
+                        .height(height)
+                        .fit(aqua_core::image::ImageFit::Contain)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
