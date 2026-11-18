@@ -83,6 +83,7 @@ pub enum ComposerAction {
     RetryDraft,
     KeepDraft,
     LoadOtherDraft,
+    RetryModelChoice,
     RetryThreadSettings,
     CloseNote,
     ClearGoal,
@@ -804,10 +805,14 @@ pub fn composer_card(theme: ArtisanTheme, nested: bool, parts: CardParts) -> Ele
     frame(theme, nested, card).with_key("composer")
 }
 
+pub enum ComposerFailure<'a> {
+    Draft { error: &'a str, conflict: bool },
+    ModelChoice { error: &'a str },
+}
+
 pub fn draft_error(
     theme: ArtisanTheme,
-    error: &str,
-    conflict: bool,
+    failure: ComposerFailure<'_>,
     dispatch: Dispatch,
 ) -> Element {
     let surface = Surface::Composer;
@@ -818,17 +823,41 @@ pub fn draft_error(
             .on_activate(move |_| dispatch(action.clone()))
             .build()
     };
-    let actions = match conflict {
-        true => UiBox::new()
-            .spaced(Space::S8)
-            .child(choice("draft-keep-local", "Keep my draft", ComposerAction::KeepDraft))
-            .child(choice(
-                "draft-use-remote",
-                "Load other draft",
-                ComposerAction::LoadOtherDraft,
-            ))
-            .build(),
-        false => choice("draft-retry", "Retry", ComposerAction::RetryDraft),
+    let (error, actions) = match failure {
+        ComposerFailure::Draft {
+            error,
+            conflict: true,
+        } => (
+            error,
+            UiBox::new()
+                .spaced(Space::S8)
+                .child(choice(
+                    "draft-keep-local",
+                    "Keep my draft",
+                    ComposerAction::KeepDraft,
+                ))
+                .child(choice(
+                    "draft-use-remote",
+                    "Load other draft",
+                    ComposerAction::LoadOtherDraft,
+                ))
+                .build(),
+        ),
+        ComposerFailure::Draft {
+            error,
+            conflict: false,
+        } => (
+            error,
+            choice("draft-retry", "Retry", ComposerAction::RetryDraft),
+        ),
+        ComposerFailure::ModelChoice { error } => (
+            error,
+            choice(
+                "model-choice-retry",
+                "Retry",
+                ComposerAction::RetryModelChoice,
+            ),
+        ),
     };
     UiBox::new()
         .layout("column")
@@ -2180,6 +2209,13 @@ impl ComposerOwner {
                     session.use_remote();
                 }
             }
+            ComposerAction::RetryModelChoice => {
+                let host_id = host.id.clone();
+                let instance = host.instance();
+                if let Some(host) = core.host_mut_if_instance(&host_id, instance) {
+                    host.retry_preferences();
+                }
+            }
             ComposerAction::RetryThreadSettings => {
                 effects.push(ComposerEffect::RetryThreadSettings)
             }
@@ -2518,7 +2554,23 @@ impl ComposerOwner {
                 session.read(|state| state.error.clone().map(|error| (error, state.conflict)))
             })
             .map(|(error, conflict)| {
-                draft_error(theme, &error, conflict, Rc::clone(&self.dispatch))
+                draft_error(
+                    theme,
+                    ComposerFailure::Draft {
+                        error: &error,
+                        conflict,
+                    },
+                    Rc::clone(&self.dispatch),
+                )
+            })
+            .or_else(|| {
+                host.preference_failure().map(|error| {
+                    draft_error(
+                        theme,
+                        ComposerFailure::ModelChoice { error },
+                        Rc::clone(&self.dispatch),
+                    )
+                })
             });
         composer_card(
             theme,

@@ -1088,7 +1088,9 @@ impl HostData {
                     }
                 }
                 HostCompletion::Preference(generation, choice, preference, result) => {
-                    self.finish_preference(generation, choice, preference, result);
+                    if self.finish_preference(generation, choice, preference, result) {
+                        events.push(HostEvent::Changed);
+                    }
                 }
                 HostCompletion::WslProbe(generation, target, result) => {
                     if self.finish_wsl_probe(generation, target, result) {

@@ -14,9 +14,19 @@ pub(in crate::core) enum Preference {
     ModelGroup { engine: EngineId, group: ModelGroup },
 }
 #[derive(Default)]
+enum Writer {
+    #[default]
+    Idle,
+    Writing {
+        _task: AbortOnDropHandle<()>,
+    },
+    Failed(String),
+}
+
+#[derive(Default)]
 pub(super) struct Preferences {
     pending: VecDeque<(Choice, Preference)>,
-    writer: Option<AbortOnDropHandle<()>>,
+    writer: Writer,
     generation: u64,
 }
 
@@ -54,13 +64,26 @@ impl HostData {
             },
         );
     }
+    pub fn preference_failure(&self) -> Option<&str> {
+        match &self.preferences.writer {
+            Writer::Failed(error) => Some(error),
+            Writer::Idle | Writer::Writing { .. } => None,
+        }
+    }
+    pub fn retry_preferences(&mut self) {
+        if matches!(self.preferences.writer, Writer::Failed(_)) {
+            self.preferences.writer = Writer::Idle;
+            self.pending_events.push(super::HostEvent::Changed);
+        }
+        self.pump_preferences();
+    }
     fn remember_preference(&mut self, choice: Choice, preference: Preference) {
         self.preferences.pending.retain(|(key, _)| key != &choice);
         self.preferences.pending.push_back((choice, preference));
-        self.pump_preferences();
+        self.retry_preferences();
     }
     fn pump_preferences(&mut self) {
-        if self.preferences.writer.is_some() {
+        if !matches!(self.preferences.writer, Writer::Idle) {
             return;
         }
         let Some((choice, preference)) = self.preferences.pending.front().cloned() else {
@@ -83,7 +106,9 @@ impl HostData {
                 ))
                 .await;
         });
-        self.preferences.writer = Some(AbortOnDropHandle::new(task));
+        self.preferences.writer = Writer::Writing {
+            _task: AbortOnDropHandle::new(task),
+        };
     }
     pub(super) fn finish_preference(
         &mut self,
@@ -91,17 +116,21 @@ impl HostData {
         choice: Choice,
         preference: Preference,
         result: anyhow::Result<()>,
-    ) {
+    ) -> bool {
         if self.preferences.generation != generation {
-            return;
+            return false;
         }
-        self.preferences.writer = None;
         if let Err(error) = result {
             tracing::warn!(host = %self.id, ?choice, "Forge didn't remember the picker choice: {error:#}");
+            self.preferences.writer =
+                Writer::Failed(format!("Couldn't save the model choice: {error:#}"));
+            return true;
         }
+        self.preferences.writer = Writer::Idle;
         if self.preferences.pending.front() == Some(&(choice, preference)) {
             self.preferences.pending.pop_front();
         }
         self.pump_preferences();
+        false
     }
 }
