@@ -102,3 +102,44 @@ async fn a_state_file_from_before_pending_reports_keeps_its_synced_servers() {
     assert_eq!(servers.len(), 1);
     assert_eq!(servers[0].command, "srv");
 }
+
+#[tokio::test]
+async fn a_bundle_with_too_many_skill_files_installs_nothing() {
+    let files: Vec<serde_json::Value> = (0..5000)
+        .map(|n| serde_json::json!({ "path": format!("f{n}.md"), "content_base64": "eA" }))
+        .collect();
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "format": "ast-editor-config/1",
+        "skills": [{ "name": "wide", "bundle": { "files": files } }],
+        "global_prompt": "synced prompt",
+    }))
+    .unwrap();
+    let (base, stub, _server) = stub_server(false, Some(manifest)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let hub = test_hub(dir.path());
+    let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
+    assert!(
+        matches!(&result, Err(SyncConfigError::Apply { source, .. }) if matches!(**source, ApplyManifestError::TooManyFiles { .. })),
+        "{result:?}"
+    );
+    assert_eq!(hub.store().setting("global_prompt").await.unwrap(), None);
+    assert_eq!(statuses(&stub), [serde_json::json!("failed")]);
+}
+
+#[tokio::test]
+async fn an_oversized_manifest_is_refused_before_it_is_read_whole() {
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "format": "ast-editor-config/1",
+        "global_prompt": "p".repeat(65 * 1024 * 1024),
+    }))
+    .unwrap();
+    let (base, _stub, _server) = stub_server(false, Some(manifest)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let hub = test_hub(dir.path());
+    let result = sync_config(&test_client(), &base, MACHINE, &SECRET, &hub, dir.path()).await;
+    assert!(
+        matches!(result, Err(SyncConfigError::ManifestTooLarge { .. })),
+        "{result:?}"
+    );
+    assert_eq!(hub.store().setting("global_prompt").await.unwrap(), None);
+}

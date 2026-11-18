@@ -166,6 +166,8 @@ pub enum SyncConfigError {
         #[source]
         source: reqwest::Error,
     },
+    #[error("the bundle's manifest is larger than {limit} bytes")]
+    ManifestTooLarge { limit: usize },
     #[error("Core answered 304 but this Forge has applied no bundle")]
     NotModifiedWithoutBundle,
     #[error("Core has no config bundle yet")]
@@ -219,6 +221,10 @@ pub enum ApplyManifestError {
     Parse(#[source] serde_json::Error),
     #[error("unknown manifest format {format}")]
     Format { format: String },
+    #[error("the bundle carries {files} skill files; the limit is {limit}")]
+    TooManyFiles { files: usize, limit: usize },
+    #[error("the bundle's skill files decode to about {bytes} bytes; the limit is {limit}")]
+    TooManyBytes { bytes: usize, limit: usize },
     #[error("install skill {skill} from the bundle")]
     InstallSkill {
         skill: String,
@@ -533,7 +539,7 @@ pub async fn sync_config(
         return current(&core, data_dir, file, SyncConfigError::NoBundle).await;
     }
     let manifest_step = "fetch the bundle's manifest";
-    let bytes = core
+    let mut response = core
         .get(manifest_step, &config_manifest_path(bundle.version))?
         .send()
         .await
@@ -545,13 +551,30 @@ pub async fn sync_config(
         .map_err(|source| SyncConfigError::Refused {
             step: manifest_step,
             source,
-        })?
-        .bytes()
+        })?;
+    let too_large = SyncConfigError::ManifestTooLarge {
+        limit: MAX_MANIFEST_BYTES,
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MANIFEST_BYTES as u64)
+    {
+        return Err(too_large);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
         .map_err(|source| SyncConfigError::Read {
             step: manifest_step,
             source,
-        })?;
+        })?
+    {
+        if bytes.len() + chunk.len() > MAX_MANIFEST_BYTES {
+            return Err(too_large);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     let applied = apply_manifest(hub, &bytes, &bundle.content_hash, data_dir, &file).await;
     let Applied {
         changed,
@@ -647,6 +670,36 @@ struct Applied {
     kept_local: Vec<LocalMcpServerKept>,
 }
 
+const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BUNDLE_FILES: usize = 4096;
+const MAX_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
+
+fn admit_bundles(manifest: &EditorManifest) -> Result<(), ApplyManifestError> {
+    let files: Vec<&SkillBundleFile> = manifest
+        .skills
+        .iter()
+        .filter_map(|skill| skill.bundle.as_ref())
+        .flat_map(|bundle| &bundle.files)
+        .collect();
+    if files.len() > MAX_BUNDLE_FILES {
+        return Err(ApplyManifestError::TooManyFiles {
+            files: files.len(),
+            limit: MAX_BUNDLE_FILES,
+        });
+    }
+    let bytes: usize = files
+        .iter()
+        .map(|file| file.content_base64.len() / 4 * 3 + 3)
+        .sum();
+    if bytes > MAX_BUNDLE_BYTES {
+        return Err(ApplyManifestError::TooManyBytes {
+            bytes,
+            limit: MAX_BUNDLE_BYTES,
+        });
+    }
+    Ok(())
+}
+
 async fn apply_manifest(
     hub: &forge_runs::Hub,
     bytes: &[u8],
@@ -676,6 +729,7 @@ async fn apply(
     file: &SyncFile,
 ) -> Result<Applied, ApplyManifestError> {
     let destinations = mcp_destinations(&manifest.mcp_servers)?;
+    admit_bundles(manifest)?;
     let mut staged = Vec::new();
     for skill in &manifest.skills {
         if let Some(bundle) = &skill.bundle {
