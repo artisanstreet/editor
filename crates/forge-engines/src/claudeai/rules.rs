@@ -14,6 +14,8 @@
 //! resolved path, anchored the way Claude Code anchors them; and `Read`
 //! and `Edit` rules govern their families of tools.
 
+mod cmd;
+
 use std::path::{Component, Path, PathBuf};
 
 use globset::GlobMatcher;
@@ -38,9 +40,18 @@ pub enum Verdict {
     Deny(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Grammar {
+    #[cfg_attr(not(windows), default)]
+    Posix,
+    #[cfg_attr(windows, default)]
+    Cmd,
+}
+
 /// The permission rules of a thread's settings files.
 #[derive(Clone, Default)]
 pub struct Rules {
+    grammar: Grammar,
     allow: Vec<Rule>,
     ask: Vec<Rule>,
     deny: Vec<Rule>,
@@ -122,6 +133,11 @@ impl Rules {
     /// trusted folder's.
     #[must_use]
     pub fn load(home: &Path, cwd: &Path) -> Self {
+        Self::load_for(home, cwd, Grammar::default())
+    }
+
+    #[must_use]
+    pub fn load_for(home: &Path, cwd: &Path, grammar: Grammar) -> Self {
         let mut project: Vec<_> = cwd.ancestors().take_while(|dir| *dir != home).collect();
         if let Some(root) = project.iter().position(|dir| dir.join(".git").exists()) {
             project.truncate(root + 1);
@@ -132,6 +148,7 @@ impl Rules {
             .last()
             .map_or_else(|| cwd.to_path_buf(), |dir| dir.to_path_buf());
         let mut rules = Self {
+            grammar,
             home: home.to_path_buf(),
             cwd: cwd.to_path_buf(),
             root: root.clone(),
@@ -176,20 +193,30 @@ impl Rules {
         if permissions["defaultMode"].as_str() == Some("acceptEdits") {
             self.accept_edits = true;
         }
+        let grammar = self.grammar;
         push(
             &mut self.allow,
             &permissions["allow"],
             List::Allow,
             anchors,
             path,
+            grammar,
         );
-        push(&mut self.ask, &permissions["ask"], List::Ask, anchors, path);
+        push(
+            &mut self.ask,
+            &permissions["ask"],
+            List::Ask,
+            anchors,
+            path,
+            grammar,
+        );
         push(
             &mut self.deny,
             &permissions["deny"],
             List::Deny,
             anchors,
             path,
+            grammar,
         );
     }
 
@@ -312,8 +339,12 @@ impl Rules {
         let tool = call.name.as_str();
         Facts {
             tool,
-            shell: (tool == "Bash")
-                .then(|| Shell::parse(call.input["command"].as_str().unwrap_or_default())),
+            shell: (tool == "Bash").then(|| {
+                Shell::parse(
+                    call.input["command"].as_str().unwrap_or_default(),
+                    self.grammar,
+                )
+            }),
             paths: call_path(call)
                 .map(|raw| self.candidates(raw))
                 .unwrap_or_default(),
@@ -336,11 +367,18 @@ impl Rules {
 }
 
 /// Adds one settings file's rules to a list.
-fn push(rules: &mut Vec<Rule>, list: &Value, kind: List, anchors: &Anchors<'_>, file: &Path) {
+fn push(
+    rules: &mut Vec<Rule>,
+    list: &Value,
+    kind: List,
+    anchors: &Anchors<'_>,
+    file: &Path,
+    grammar: Grammar,
+) {
     for rule in list.as_array().into_iter().flatten() {
         if let Some(rule) = rule
             .as_str()
-            .and_then(|rule| parse(rule, kind, anchors, file))
+            .and_then(|rule| parse(rule, kind, anchors, file, grammar))
         {
             rules.push(rule);
         }
@@ -459,6 +497,7 @@ impl Rule {
                     shell
                         .commands
                         .iter()
+                        .chain(&shell.aliases)
                         .any(|command| program_forms(command).iter().any(|form| self.fits(form)))
                 })
             }
@@ -532,7 +571,13 @@ impl Rule {
 /// Parses one rule. A spec this transport cannot read never matches in
 /// `allow`, and covers the whole tool in `deny` and `ask`: a rule meant to
 /// narrow what runs must not silently stop narrowing.
-fn parse(text: &str, kind: List, anchors: &Anchors<'_>, file: &Path) -> Option<Rule> {
+fn parse(
+    text: &str,
+    kind: List,
+    anchors: &Anchors<'_>,
+    file: &Path,
+    grammar: Grammar,
+) -> Option<Rule> {
     let text = text.trim();
     if text.is_empty() {
         return None;
@@ -546,7 +591,7 @@ fn parse(text: &str, kind: List, anchors: &Anchors<'_>, file: &Path) -> Option<R
     }
     let spec = match (tool, spec) {
         (_, None) => Some(Spec::Any),
-        ("Bash", Some(Some(spec))) => bash_spec(spec),
+        ("Bash", Some(Some(spec))) => bash_spec(spec, grammar),
         (
             "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "Glob" | "Grep",
             Some(Some(spec)),
@@ -574,15 +619,15 @@ fn parse(text: &str, kind: List, anchors: &Anchors<'_>, file: &Path) -> Option<R
 }
 
 /// A Bash spec: `cmd`, `cmd:*`, `cmd *`, or a wildcard anywhere.
-fn bash_spec(spec: &str) -> Option<Spec> {
+fn bash_spec(spec: &str, grammar: Grammar) -> Option<Spec> {
     if let Some(prefix) = spec.strip_suffix(":*") {
-        return one_command(prefix).map(Spec::Prefix);
+        return one_command(prefix, grammar).map(Spec::Prefix);
     }
     if let Some(prefix) = spec
         .strip_suffix(" *")
         .filter(|prefix| !prefix.contains('*'))
     {
-        return one_command(prefix).map(Spec::Prefix);
+        return one_command(prefix, grammar).map(Spec::Prefix);
     }
     if spec.contains('*') {
         let spec = spec.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -593,12 +638,12 @@ fn bash_spec(spec: &str) -> Option<Spec> {
             .join(".*");
         return Regex::new(&format!("^{pattern}$")).ok().map(Spec::Pattern);
     }
-    one_command(spec).map(Spec::Exact)
+    one_command(spec, grammar).map(Spec::Exact)
 }
 
 /// The words of a spec that is one plain command.
-fn one_command(text: &str) -> Option<Vec<String>> {
-    let shell = Shell::parse(text);
+fn one_command(text: &str, grammar: Grammar) -> Option<Vec<String>> {
+    let shell = Shell::parse(text, grammar);
     match shell.commands.as_slice() {
         [command] if shell.complete => Some(command.clone()),
         _ => None,
@@ -783,6 +828,7 @@ struct Shell {
     /// keywords dropped. Commands inside `$(…)`, backticks, `<(…)`,
     /// `bash -c`, `eval` and `find -exec` are commands of their own.
     commands: Vec<Vec<String>>,
+    aliases: Vec<Vec<String>>,
     /// False when part of the line could not be read (an unclosed quote,
     /// a program named by a variable, a loop header, a substitution inside
     /// `${…}`): an `allow` rule then cannot vouch for the line.
@@ -790,12 +836,16 @@ struct Shell {
 }
 
 impl Shell {
-    fn parse(text: &str) -> Self {
+    fn parse(text: &str, grammar: Grammar) -> Self {
         let mut shell = Self {
             commands: Vec::new(),
+            aliases: Vec::new(),
             complete: true,
         };
-        parse_into(text, 0, &mut shell);
+        match grammar {
+            Grammar::Posix => parse_into(text, 0, &mut shell),
+            Grammar::Cmd => cmd::parse(text, 0, &mut shell),
+        }
         shell
     }
 }

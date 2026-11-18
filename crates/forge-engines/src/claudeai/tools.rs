@@ -1741,15 +1741,7 @@ async fn bash(
         .as_u64()
         .map_or(DEFAULT_COMMAND_TIMEOUT, Duration::from_millis)
         .min(MAX_COMMAND_TIMEOUT);
-    let mut shell = if cfg!(windows) {
-        let mut shell = tokio::process::Command::new("cmd");
-        shell.arg("/C").arg(command);
-        shell
-    } else {
-        let mut shell = tokio::process::Command::new("sh");
-        shell.arg("-c").arg(command);
-        shell
-    };
+    let mut shell = shells::command_line(command);
     shell
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())

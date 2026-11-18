@@ -62,15 +62,7 @@ impl Shells {
     /// Starts `command` in `cwd` and returns the id the model uses to read
     /// or stop it.
     pub fn start(&self, command: &str, cwd: &Path) -> Result<String, String> {
-        let mut shell = if cfg!(windows) {
-            let mut shell = tokio::process::Command::new("cmd");
-            shell.arg("/C").arg(command);
-            shell
-        } else {
-            let mut shell = tokio::process::Command::new("sh");
-            shell.arg("-c").arg(command);
-            shell
-        };
+        let mut shell = command_line(command);
         shell
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
@@ -246,6 +238,22 @@ impl Shell {
 /// A pipe's bytes as text, as they come: a character split across two
 /// reads waits for its rest instead of becoming U+FFFD.
 ///
+#[cfg(windows)]
+pub(super) fn command_line(command: &str) -> tokio::process::Command {
+    let mut shell = tokio::process::Command::new("cmd");
+    shell
+        .raw_arg("/D /V:OFF /S /C")
+        .raw_arg(format!("\"{command}\""));
+    shell
+}
+
+#[cfg(not(windows))]
+pub(super) fn command_line(command: &str) -> tokio::process::Command {
+    let mut shell = tokio::process::Command::new("sh");
+    shell.arg("-c").arg(command);
+    shell
+}
+
 /// cmd and console programs on Windows write in the OEM code page, while
 /// newer tools (git, node, cargo) write UTF-8 whatever it is. Forcing
 /// `chcp 65001` would need a console the command may not have, and would
