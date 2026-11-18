@@ -2,7 +2,11 @@ use crate::core::{delivery::Delivery, media_http, runtime};
 use crate::ui::media::source::{self, MediaBytes, MediaLoadError, MediaSource};
 use aqua::images::{ImageAssets, ImageHandle, ImageStatus, ImageSubscription};
 use aqua::mailbox::Mailbox;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::NonZeroUsize,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio_util::task::AbortOnDropHandle;
 
 struct Fetched {
@@ -27,7 +31,19 @@ enum Phase {
     },
     Failed {
         url: String,
+        error: AvatarError,
+        at: Instant,
     },
+}
+
+const RELOAD_AFTER: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum AvatarError {
+    #[error("fetch the avatar")]
+    Fetch(#[source] MediaLoadError),
+    #[error("decode the avatar")]
+    Decode,
 }
 
 impl Phase {
@@ -37,7 +53,7 @@ impl Phase {
             Self::Fetching { url, .. }
             | Self::Decoding { url, .. }
             | Self::Ready { url, .. }
-            | Self::Failed { url } => Some(url),
+            | Self::Failed { url, .. } => Some(url),
         }
     }
 }
@@ -70,8 +86,23 @@ impl Avatar {
         }
     }
 
-    pub fn want(&mut self, url: Option<&str>) {
-        if self.phase.url() == url {
+    #[must_use]
+    pub const fn failure(&self) -> Option<AvatarError> {
+        match &self.phase {
+            Phase::Failed { error, .. } => Some(*error),
+            Phase::Absent
+            | Phase::Fetching { .. }
+            | Phase::Decoding { .. }
+            | Phase::Ready { .. } => None,
+        }
+    }
+
+    pub fn want(&mut self, url: Option<&str>, now: Instant) {
+        let reload = matches!(
+            &self.phase,
+            Phase::Failed { at, .. } if now.saturating_duration_since(*at) >= RELOAD_AFTER
+        );
+        if self.phase.url() == url && !reload {
             return;
         }
         self.phase = url.map_or(Phase::Absent, |url| {
@@ -89,7 +120,7 @@ impl Avatar {
         });
     }
 
-    pub fn drain(&mut self, assets: &ImageAssets) -> bool {
+    pub fn drain(&mut self, assets: &ImageAssets, now: Instant) -> bool {
         let mut changed = false;
         for fetched in self.delivery.drain() {
             if self.phase.url() != Some(fetched.url.as_str()) {
@@ -101,7 +132,8 @@ impl Avatar {
                     _subscription: assets.subscribe(self.delivery.waker()),
                     image: Arc::new(image),
                 },
-                Ok(Err(_)) | Err(_) => Phase::Failed { url: fetched.url },
+                Ok(Err(_)) => Self::failed(fetched.url, AvatarError::Decode, now),
+                Err(error) => Self::failed(fetched.url, AvatarError::Fetch(error), now),
             };
             changed = true;
         }
@@ -119,11 +151,19 @@ impl Avatar {
                 Phase::Decoding { url, .. },
             ) => {
                 changed = true;
-                Phase::Failed { url }
+                Self::failed(url, AvatarError::Decode, now)
             }
             (_, phase) => phase,
         };
         self.phase = next;
         changed
+    }
+
+    fn failed(url: String, error: AvatarError, at: Instant) -> Phase {
+        tracing::warn!(
+            error = %::diagnostics::chain(&error),
+            "the account avatar failed to load"
+        );
+        Phase::Failed { url, error, at }
     }
 }

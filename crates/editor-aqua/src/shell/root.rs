@@ -2472,7 +2472,7 @@ impl RootViews {
             }
             _ => None,
         };
-        self.avatar.want(url);
+        self.avatar.want(url, std::time::Instant::now());
         self.account_snapshot(shell)
     }
 
@@ -2739,7 +2739,7 @@ impl SectionViews for RootViews {
             .sidebar
             .take_events(std::time::Instant::now(), Self::reduced(ui));
         self.apply_account_effects(shell, ctx, window, Self::reduced(ui));
-        let pictured = self.avatar.drain(shell.images());
+        let pictured = self.avatar.drain(shell.images(), std::time::Instant::now());
         self.schedule_sidebar(ctx, window);
         changed | pictured
     }

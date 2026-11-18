@@ -39,5 +39,7 @@ mod seam_motion;
 #[path = "frame/sidebar.rs"]
 mod sidebar;
 
+#[path = "frame/avatar.rs"]
+mod avatar;
 #[path = "frame/inbox.rs"]
 mod inbox;
