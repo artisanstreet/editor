@@ -14,7 +14,63 @@ struct Channel {
 enum StreamMsg {
     Frame(Vec<u8>),
     End { reason: &'static str },
+    Expired,
     Response(artisan_api::TunnelResponse),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ChannelAuthorization {
+    Unverified,
+    LacksExecuteScope,
+    Expired,
+    Granted,
+}
+
+fn channel_authorization(
+    claims: Option<&artisan_account::GrantClaims>,
+    now: i64,
+) -> ChannelAuthorization {
+    match claims {
+        None => ChannelAuthorization::Unverified,
+        Some(claims) if !claims.scope.contains(&artisan_account::Scope::ForgeExecute) => {
+            ChannelAuthorization::LacksExecuteScope
+        }
+        Some(claims) if claims.exp <= now => ChannelAuthorization::Expired,
+        Some(_) => ChannelAuthorization::Granted,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Outgoing {
+    Deliver,
+    Close { reason: &'static str },
+}
+
+fn outgoing(
+    name: &str,
+    msg: &StreamMsg,
+    channels: &HashMap<String, Channel>,
+    now: i64,
+) -> Outgoing {
+    let Some(channel) = channels.get(name) else {
+        return Outgoing::Deliver;
+    };
+    if matches!(msg, StreamMsg::Expired) {
+        return Outgoing::Close {
+            reason: "grant-expired",
+        };
+    }
+    match channel_authorization(channel.claims.as_ref(), now) {
+        ChannelAuthorization::Granted => Outgoing::Deliver,
+        ChannelAuthorization::Expired => Outgoing::Close {
+            reason: "grant-expired",
+        },
+        ChannelAuthorization::Unverified | ChannelAuthorization::LacksExecuteScope => {
+            Outgoing::Close {
+                reason: "unauthorized",
+            }
+        }
+    }
 }
 
 struct SendWindow {
@@ -180,7 +236,9 @@ pub async fn serve_channel(
                 .await?;
             }
             Some((name, msg)) = stream_rx.recv() => {
-                if let Err(error) = handle_stream_msg(&name, msg, &mut channels, &mut streams, &mut windows, &mut sink).await {
+                if let Outgoing::Close { reason } = outgoing(&name, &msg, &channels, now_sec()) {
+                    close_channel(&name, reason, &mut channels, &mut streams, &mut reassembly, &mut windows, &mut sink).await?;
+                } else if let Err(error) = handle_stream_msg(&name, msg, &mut channels, &mut streams, &mut windows, &mut sink).await {
                     tracing::debug!(channel = %name, "Relay channel failed: {error:#}");
                     close_channel(&name, "channel-failed", &mut channels, &mut streams, &mut reassembly, &mut windows, &mut sink).await?;
                 }
@@ -417,14 +475,13 @@ async fn handle_channel_bytes(
         return Ok(());
     }
     let plaintext = channel.noise.receive_data(raw)?;
-    let Some(claims) = channel.claims.as_ref() else {
-        anyhow::bail!("no verified grant on this channel");
-    };
-    if !claims.scope.contains(&artisan_account::Scope::ForgeExecute) {
-        anyhow::bail!("grant lacks the forge:execute scope");
-    }
-    if claims.exp <= now_sec() {
-        anyhow::bail!("grant expired mid-channel");
+    match channel_authorization(channel.claims.as_ref(), now_sec()) {
+        ChannelAuthorization::Unverified => anyhow::bail!("no verified grant on this channel"),
+        ChannelAuthorization::LacksExecuteScope => {
+            anyhow::bail!("grant lacks the forge:execute scope")
+        }
+        ChannelAuthorization::Expired => anyhow::bail!("grant expired mid-channel"),
+        ChannelAuthorization::Granted => {}
     }
     if let Ok(chunk) = serde_json::from_slice::<artisan_api::TunnelChunk>(&plaintext) {
         if let Some(reassembled) = reassembly.feed(name, &chunk)? {
@@ -538,8 +595,25 @@ async fn subscribe(
         send_response(name, &response, channels, windows, sink).await?;
         return Ok(());
     }
+    let Some(expires_at) = channels
+        .get(name)
+        .and_then(|channel| channel.claims.as_ref())
+        .map(|claims| claims.exp)
+    else {
+        let response = artisan_api::TunnelResponse::error(
+            &request.id,
+            401,
+            "no verified grant on this channel",
+        );
+        send_response(name, &response, channels, windows, sink).await?;
+        return Ok(());
+    };
+    let expiry = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(
+            expires_at.saturating_sub(now_sec()).max(0).cast_unsigned(),
+        );
     let stream_id = name.to_owned();
-    let (sender, mut receiver) =
+    let (sender, receiver) =
         tokio::sync::mpsc::channel::<artisan_api::Envelope>(artisan_api::STREAM_QUEUE_ENVELOPES);
     let pump_app = app.clone();
     let response = artisan_api::TunnelResponse::ok(
@@ -553,26 +627,12 @@ async fn subscribe(
             .ok();
     });
     let pump = tokio_util::task::AbortOnDropHandle::new(pump);
-    let tx = stream_tx.clone();
-    let name_owned = name.to_owned();
-    let forwarder = tokio::spawn(async move {
-        while let Some(envelope) = receiver.recv().await {
-            let frame = serde_json::json!({
-                "$event": {"stream": name_owned, "envelope": envelope},
-            });
-            let bytes = serde_json::to_vec(&frame).unwrap_or_default();
-            if tx
-                .send((name_owned.clone(), StreamMsg::Frame(bytes)))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-        tx.send((name_owned, StreamMsg::End { reason: "closed" }))
-            .await
-            .ok();
-    });
+    let forwarder = tokio::spawn(forward_stream(
+        name.to_owned(),
+        receiver,
+        stream_tx.clone(),
+        expiry,
+    ));
     streams.insert(
         name.to_owned(),
         Stream {
@@ -581,6 +641,35 @@ async fn subscribe(
         },
     );
     Ok(())
+}
+
+async fn forward_stream(
+    name: String,
+    mut receiver: tokio::sync::mpsc::Receiver<artisan_api::Envelope>,
+    tx: tokio::sync::mpsc::Sender<(String, StreamMsg)>,
+    expiry: tokio::time::Instant,
+) {
+    let end = loop {
+        let envelope = tokio::select! {
+            () = tokio::time::sleep_until(expiry) => break StreamMsg::Expired,
+            envelope = receiver.recv() => envelope,
+        };
+        let Some(envelope) = envelope else {
+            break StreamMsg::End { reason: "closed" };
+        };
+        let frame = serde_json::json!({
+            "$event": {"stream": name, "envelope": envelope},
+        });
+        let bytes = serde_json::to_vec(&frame).expect("invariant: a JSON value always serializes");
+        if tx
+            .send((name.clone(), StreamMsg::Frame(bytes)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    };
+    tx.send((name, end)).await.ok();
 }
 
 fn next_transfer_id() -> u64 {
@@ -607,6 +696,9 @@ async fn handle_stream_msg(
         StreamMsg::End { reason } => {
             streams.remove(name);
             serde_json::to_vec(&serde_json::json!({"$event": {"stream": name, "end": reason}}))?
+        }
+        StreamMsg::Expired => {
+            unreachable!("invariant: channel {name} closes on expiry before delivery")
         }
     };
     send_payload(name, &bytes, channels, windows, sink).await
@@ -1225,5 +1317,78 @@ mod tests {
         assert_eq!(window.acked_high, Some(2));
         window.on_ack(9);
         assert_eq!(window.acked_high, Some(2));
+    }
+
+    fn claims(exp: i64) -> artisan_account::GrantClaims {
+        serde_json::from_value(serde_json::json!({
+            "v": 1,
+            "iss": "https://core.example.invalid",
+            "aud": "ast-relay",
+            "sub": ACCOUNT,
+            "mid": MACHINE,
+            "role": "client",
+            "cnf": {"jwk": {"kty": "OKP", "crv": "Ed25519", "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
+            "scope": ["relay:connect", "forge:execute"],
+            "iat": exp - 300,
+            "exp": exp,
+            "jti": "tkn-editor-test-0002",
+        }))
+        .unwrap()
+    }
+
+    fn open_channel(exp: i64) -> HashMap<String, Channel> {
+        let noise = NoiseChannel::responder(&[0x12_u8; 32], None, ctx("ch1")).unwrap();
+        [(
+            "ch1".to_owned(),
+            Channel {
+                noise,
+                claims: Some(claims(exp)),
+                account: ACCOUNT.into(),
+                machine: MACHINE.into(),
+            },
+        )]
+        .into()
+    }
+
+    #[test]
+    fn events_queued_before_the_grant_expired_close_the_channel_instead_of_sending() {
+        let channels = open_channel(1_700_000_100);
+        let queued = StreamMsg::Frame(b"{}".to_vec());
+        assert_eq!(
+            outgoing("ch1", &queued, &channels, 1_700_000_099),
+            Outgoing::Deliver
+        );
+        assert_eq!(
+            outgoing("ch1", &queued, &channels, 1_700_000_100),
+            Outgoing::Close {
+                reason: "grant-expired"
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_tunneled_stream_ends_when_its_grant_expires() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let expiry = tokio::time::Instant::now() + std::time::Duration::from_secs(200);
+        let forwarder = tokio::spawn(forward_stream("ch1".into(), receiver, tx, expiry));
+        sender
+            .send(artisan_api::Envelope {
+                seq: Some(1),
+                live_revision: 0,
+                event: artisan_api::Event::Reset,
+            })
+            .await
+            .unwrap();
+        let first = rx.recv().await.unwrap();
+        assert!(matches!(first, (name, StreamMsg::Frame(_)) if name == "ch1"));
+        let last = tokio::time::timeout(std::time::Duration::from_secs(600), rx.recv())
+            .await
+            .expect("an expired grant kept its event stream open")
+            .unwrap();
+        assert!(matches!(last.1, StreamMsg::Expired));
+        assert!(tokio::time::Instant::now() >= expiry);
+        forwarder.await.unwrap();
+        drop(sender);
     }
 }
