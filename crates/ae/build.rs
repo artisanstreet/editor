@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     artisan_payload::embed("ARTISAN_FORGE_PAYLOAD", "forge.gz")?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let files =
