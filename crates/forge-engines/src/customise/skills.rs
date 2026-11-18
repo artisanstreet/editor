@@ -6,8 +6,8 @@
 //! skills folder, which Forge only reports until the user adopts them.
 
 use super::{COPY_MARKER, Entry, inspect, paths, skill_metadata, skill_metadata_in};
-use super::{Customisation, copy_dir, import_folder, read_skill_header, write_if_changed};
-use anyhow::{Context, Result, bail};
+use super::{Customisation, ImportError, copy_dir, import_folder, read_skill_header};
+use super::{discard_leftover, remove_file_if_present, write_if_changed};
 use artisan_api::{CatalogSkill, EngineId, SkillEngineState, SkillEngineStatus, SkillOrigin};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -23,20 +23,58 @@ struct CatalogBudget {
     bytes: usize,
 }
 impl CatalogBudget {
-    fn admit(&mut self, bytes: usize) -> Result<()> {
+    fn admit(&mut self, bytes: usize) -> Result<(), ReadSkillsError> {
         self.records += 1;
         self.bytes = self.bytes.saturating_add(bytes);
         if self.records > MAX_CATALOG_RECORDS || self.bytes > MAX_CATALOG_METADATA_BYTES {
-            bail!(
-                "skill catalog requires paging: records={}/{} metadata_bytes={}/{}",
-                self.records,
-                MAX_CATALOG_RECORDS,
-                self.bytes,
-                MAX_CATALOG_METADATA_BYTES
-            );
+            return Err(ReadSkillsError::Paging {
+                records: self.records,
+                bytes: self.bytes,
+            });
         }
         Ok(())
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReadSkillsError {
+    #[error(
+        "skill catalog requires paging: records={records}/{MAX_CATALOG_RECORDS} metadata_bytes={bytes}/{MAX_CATALOG_METADATA_BYTES}"
+    )]
+    Paging { records: usize, bytes: usize },
+    #[error("write Artisan's skills into {}", path.display())]
+    WriteFirstParty {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("read first-party skill {folder}")]
+    ReadFirstParty {
+        folder: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("invalid first-party skill metadata: {folder}")]
+    FirstPartyMetadata { folder: String },
+    #[error("read managed skills {}", path.display())]
+    ReadManaged {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("read {engine} native skills {}", path.display())]
+    ReadNative {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("inspect managed skill {}", path.display())]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
 }
 fn catalog_metadata(skill: &CatalogSkill) -> usize {
     skill.id.len()
@@ -255,17 +293,21 @@ fn first_party(skills_dir: &Path, materialize: bool) -> io::Result<Vec<(String, 
     Ok(placed)
 }
 
-/// The skills Forge manages, first-party first, then the user's by folder.
-fn managed(c: &Customisation) -> Result<Vec<Managed>> {
+fn place_first_party(
+    skills_dir: &Path,
+    materialize: bool,
+) -> Result<Vec<(String, PathBuf)>, ReadSkillsError> {
+    first_party(skills_dir, materialize).map_err(|source| ReadSkillsError::WriteFirstParty {
+        path: first_party_root(skills_dir),
+        source,
+    })
+}
+
+fn managed(c: &Customisation) -> Result<Vec<Managed>, ReadSkillsError> {
     let mut skills = Vec::new();
     let mut budget = CatalogBudget::default();
     if c.first_party {
-        let placed = first_party(&c.skills_dir, false).with_context(|| {
-            format!(
-                "writing Artisan's skills into {}",
-                first_party_root(&c.skills_dir).display()
-            )
-        })?;
+        let placed = place_first_party(&c.skills_dir, false)?;
         for (folder_name, folder) in placed {
             let text = match read_skill_header(&folder.join("SKILL.md")) {
                 Ok(text) => text,
@@ -273,15 +315,21 @@ fn managed(c: &Customisation) -> Result<Vec<Managed>> {
                     .iter()
                     .find(|skill| skill.folder == folder_name)
                     .and_then(|skill| skill.files.iter().find(|(path, _)| *path == "SKILL.md"))
-                    .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
-                    .context("first-party skill has no embedded metadata")?,
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("read first-party skill {folder_name}"));
+                    .map_or_else(
+                        || panic!("invariant: first-party skill {folder_name} embeds its SKILL.md"),
+                        |(_, bytes)| String::from_utf8_lossy(bytes).into_owned(),
+                    ),
+                Err(source) => {
+                    return Err(ReadSkillsError::ReadFirstParty {
+                        folder: folder_name,
+                        source,
+                    });
                 }
             };
-            let (name, description) = skill_metadata(&text)
-                .with_context(|| format!("invalid first-party skill metadata: {folder_name}"))?;
+            let (name, description) =
+                skill_metadata(&text).ok_or_else(|| ReadSkillsError::FirstPartyMetadata {
+                    folder: folder_name.clone(),
+                })?;
             budget.admit(name.len() + description.len() + folder.as_os_str().len())?;
             let id = first_party_id(&folder_name);
             skills.push(Managed {
@@ -296,18 +344,18 @@ fn managed(c: &Customisation) -> Result<Vec<Managed>> {
         }
     }
     let mut users = Vec::new();
+    let read_managed = |source| ReadSkillsError::ReadManaged {
+        path: c.skills_dir.clone(),
+        source,
+    };
     let entries = match fs::read_dir(&c.skills_dir) {
         Ok(entries) => Some(entries),
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("read managed skills {}", c.skills_dir.display()));
-        }
+        Err(error) => return Err(read_managed(error)),
     };
     if let Some(entries) = entries {
         for entry in entries {
-            let entry = entry
-                .with_context(|| format!("read managed skill entry {}", c.skills_dir.display()))?;
+            let entry = entry.map_err(read_managed)?;
             let folder_name = entry.file_name().to_string_lossy().into_owned();
             if folder_name.starts_with('.') || !entry.path().is_dir() {
                 continue;
@@ -338,11 +386,9 @@ fn managed(c: &Customisation) -> Result<Vec<Managed>> {
     Ok(skills)
 }
 
-/// What every engine's skills folder should link: enabled skills by folder
-/// name.
-pub(super) fn wanted(c: &Customisation) -> Result<BTreeMap<String, PathBuf>> {
+pub(super) fn wanted(c: &Customisation) -> Result<BTreeMap<String, PathBuf>, ReadSkillsError> {
     if c.first_party {
-        first_party(&c.skills_dir, true)?;
+        place_first_party(&c.skills_dir, true)?;
     }
     Ok(managed(c)?
         .into_iter()
@@ -354,13 +400,7 @@ pub(super) fn wanted(c: &Customisation) -> Result<BTreeMap<String, PathBuf>> {
         .collect())
 }
 
-/// The skills Forge puts into the engines, by name: Artisan's own and the
-/// user's, less the ones turned off. A `$name` mention names one of these.
-///
-/// # Errors
-///
-/// When Artisan's own skills can't be written out.
-pub fn enabled_skills(c: &Customisation) -> Result<Vec<artisan_api::Skill>> {
+pub fn enabled_skills(c: &Customisation) -> Result<Vec<artisan_api::Skill>, ReadSkillsError> {
     let mut skills: Vec<artisan_api::Skill> = managed(c)?
         .into_iter()
         .filter(|skill| skill.enabled && !skill.shadowed)
@@ -393,7 +433,7 @@ fn discovered(
     owned: &[PathBuf],
     cached: bool,
     wanted_folder: Option<&str>,
-) -> Result<Vec<Found>> {
+) -> Result<Vec<Found>, ReadSkillsError> {
     let mut found = Vec::new();
     let mut budget = CatalogBudget::default();
     // Between passes a foreign skill can still sit in the engine's folder;
@@ -411,18 +451,18 @@ fn discovered(
     });
     for (engine, skills) in folders {
         let engine = &engine;
+        let read_native = |source| ReadSkillsError::ReadNative {
+            engine: *engine,
+            path: skills.clone(),
+            source,
+        };
         let entries = match fs::read_dir(&skills) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("read {engine} native skills {}", skills.display()));
-            }
+            Err(error) => return Err(read_native(error)),
         };
         for entry in entries {
-            let entry = entry.with_context(|| {
-                format!("read {engine} native skill entry {}", skills.display())
-            })?;
+            let entry = entry.map_err(read_native)?;
             let folder_name = entry.file_name().to_string_lossy().into_owned();
             let path = entry.path();
             if wanted_folder.is_some_and(|wanted| wanted != folder_name) {
@@ -624,21 +664,15 @@ pub(super) fn measure_inner(folder: &Path, cached: bool) -> io::Result<(String, 
     Ok(value)
 }
 
-/// Read-only catalog of managed and discovered skills and their actual engine state.
-/// Mutation/installation calls reconcile_skills explicitly.
-///
-/// # Errors
-///
-/// When Artisan's own skills can't be written out.
 pub fn skill_catalog(
     homes: &[(EngineId, Option<PathBuf>)],
     c: &Customisation,
-) -> Result<Vec<CatalogSkill>> {
+) -> Result<Vec<CatalogSkill>, ReadSkillsError> {
     let managed = managed(c)?;
     let owned = owned_roots(&c.skills_dir);
     let mut catalog: Vec<CatalogSkill> = managed
         .iter()
-        .map(|skill| -> Result<CatalogSkill> {
+        .map(|skill| -> Result<CatalogSkill, ReadSkillsError> {
             let (file_count, byte_count) = if skill.origin == SkillOrigin::FirstParty
                 && fs::symlink_metadata(&skill.folder)
                     .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
@@ -651,7 +685,12 @@ pub fn skill_catalog(
                             .file_name()
                             .is_some_and(|name| name == source.folder)
                     })
-                    .context("missing embedded first-party skill")?;
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "invariant: first-party skill {} is embedded",
+                            skill.folder.display()
+                        )
+                    });
                 (
                     u32::try_from(source.files.len()).unwrap_or(u32::MAX),
                     source
@@ -661,8 +700,10 @@ pub fn skill_catalog(
                         .sum(),
                 )
             } else {
-                counts(&skill.folder)
-                    .with_context(|| format!("inspect managed skill {}", skill.folder.display()))?
+                counts(&skill.folder).map_err(|source| ReadSkillsError::Inspect {
+                    path: skill.folder.clone(),
+                    source,
+                })?
             };
             Ok(CatalogSkill {
                 id: skill.id.clone(),
@@ -678,7 +719,7 @@ pub fn skill_catalog(
                     .collect(),
             })
         })
-        .collect::<Result<_>>()?;
+        .collect::<Result<_, _>>()?;
     let mut budget = CatalogBudget::default();
     for skill in &catalog {
         budget.admit(catalog_metadata(skill))?;
@@ -762,7 +803,7 @@ fn discovered_entries(
     homes: &[(EngineId, Option<PathBuf>)],
     quarantine: &Path,
     owned: &[PathBuf],
-) -> Result<Vec<CatalogSkill>> {
+) -> Result<Vec<CatalogSkill>, ReadSkillsError> {
     let mut groups: BTreeMap<(String, String), Vec<Found>> = BTreeMap::new();
     for found in discovered(homes, Some(quarantine), owned, true, None)? {
         groups
@@ -816,12 +857,23 @@ fn discovered_id(folder_name: &str, digest: &str) -> String {
     format!("discovered.{folder_name}.{}", &digest[..12])
 }
 
-/// Every copy of the skill `id` names, quarantined or still in an engine.
+#[derive(Debug, thiserror::Error)]
+pub enum FindSkillError {
+    #[error("invalid discovered skill identity {id:?}")]
+    InvalidId { id: String },
+    #[error("look for the skill {id}")]
+    Read {
+        id: String,
+        #[source]
+        source: ReadSkillsError,
+    },
+}
+
 fn found_copies(
     homes: &[(EngineId, Option<PathBuf>)],
     c: &Customisation,
     id: &str,
-) -> Result<Vec<Found>> {
+) -> Result<Vec<Found>, FindSkillError> {
     let (wanted_folder, _digest) = id
         .strip_prefix("discovered.")
         .and_then(|id| id.rsplit_once('.'))
@@ -830,88 +882,156 @@ fn found_copies(
                 && digest.len() == 12
                 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
-        .context("invalid discovered skill identity")?;
+        .ok_or_else(|| FindSkillError::InvalidId { id: id.to_owned() })?;
     let quarantine = quarantine_root(&c.skills_dir);
     let owned = owned_roots(&c.skills_dir);
     Ok(
-        discovered(homes, Some(&quarantine), &owned, false, Some(wanted_folder))?
+        discovered(homes, Some(&quarantine), &owned, false, Some(wanted_folder))
+            .map_err(|source| FindSkillError::Read {
+                id: id.to_owned(),
+                source,
+            })?
             .into_iter()
             .filter(|found| discovered_id(&found.folder_name, &found.digest) == id)
             .collect(),
     )
 }
 
-/// Deletes every copy of a quarantined skill. Returns its name.
-///
-/// # Errors
-///
-/// When the skill is gone or a copy can't be deleted.
+#[derive(Debug, thiserror::Error)]
+pub enum DiscardSkillError {
+    #[error(transparent)]
+    Find(FindSkillError),
+    #[error("That skill is no longer in quarantine.")]
+    Gone { id: String },
+    #[error("deleting {}", path.display())]
+    Delete {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+fn forget_quarantine_marker(copy: &Found) {
+    if let Some(parent) = copy.folder.parent() {
+        let marker = quarantined_at(parent, &copy.folder_name);
+        if let Err(error) = remove_file_if_present(&marker) {
+            tracing::warn!(marker = %marker.display(), %error, "couldn't remove a quarantine marker");
+        }
+    }
+}
+
 pub fn discard_skill(
     homes: &[(EngineId, Option<PathBuf>)],
     c: &Customisation,
     id: &str,
-) -> Result<String> {
-    let copies = found_copies(homes, c, id)?;
+) -> Result<String, DiscardSkillError> {
+    let copies = found_copies(homes, c, id).map_err(DiscardSkillError::Find)?;
     let Some(first) = copies.first() else {
-        bail!("That skill is no longer in quarantine.");
+        return Err(DiscardSkillError::Gone { id: id.to_owned() });
     };
     let name = first.name.clone();
     for copy in &copies {
-        super::remove_entry(&copy.folder)
-            .with_context(|| format!("deleting {}", copy.folder.display()))?;
-        if let Some(parent) = copy.folder.parent() {
-            // The quarantine marker may never have been written.
-            fs::remove_file(quarantined_at(parent, &copy.folder_name)).ok();
-        }
+        super::remove_entry(&copy.folder).map_err(|source| DiscardSkillError::Delete {
+            path: copy.folder.clone(),
+            source,
+        })?;
+        forget_quarantine_marker(copy);
     }
     Ok(name)
 }
 
-/// Installs a quarantined skill, or one still in an engine's folder.
-///
-/// Copies it into the user's skills folder and moves every identical copy
-/// into `<data>/extensions/backups`, so Forge's link takes its place.
-/// Returns the folder name.
-///
-/// # Errors
-///
-/// When the skill is gone or changed, its name is taken, or copying fails.
+#[derive(Debug, thiserror::Error)]
+pub enum AdoptSkillError {
+    #[error(transparent)]
+    Find(FindSkillError),
+    #[error("That skill is no longer in quarantine.")]
+    Gone { id: String },
+    #[error("Artisan already manages a skill named {name}.")]
+    Taken { name: String },
+    #[error("creating {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("copy the skill {name}")]
+    Import {
+        name: String,
+        #[source]
+        source: ImportError,
+    },
+    #[error("backing up {}'s skill {name}", engine.display_name())]
+    Backup {
+        engine: EngineId,
+        name: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("publishing adopted skill {name}")]
+    Publish {
+        name: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{stranded}")]
+    Stranded {
+        stranded: String,
+        #[source]
+        source: Box<Self>,
+    },
+}
+
 pub fn adopt_skill(
     homes: &[(EngineId, Option<PathBuf>)],
     c: &Customisation,
     id: &str,
-) -> Result<String> {
-    let copies = found_copies(homes, c, id)?;
+) -> Result<String, AdoptSkillError> {
+    let copies = found_copies(homes, c, id).map_err(AdoptSkillError::Find)?;
     let Some(first) = copies.first() else {
-        bail!("That skill is no longer in quarantine.");
+        return Err(AdoptSkillError::Gone { id: id.to_owned() });
     };
     let name = first.folder_name.clone();
     let taken = c.skills_dir.join(&name).exists()
         || (c.first_party && FIRST_PARTY.iter().any(|skill| skill.folder == name));
     if taken {
-        bail!("Artisan already manages a skill named {name}.");
+        return Err(AdoptSkillError::Taken { name });
     }
-    fs::create_dir_all(&c.skills_dir)
-        .with_context(|| format!("creating {}", c.skills_dir.display()))?;
+    fs::create_dir_all(&c.skills_dir).map_err(|source| AdoptSkillError::Create {
+        path: c.skills_dir.clone(),
+        source,
+    })?;
     let staging = c
         .skills_dir
         .join(format!(".adopt-{name}-{}", artisan_api::now()));
-    fs::create_dir(&staging).context("creating skill adoption staging")?;
+    fs::create_dir(&staging).map_err(|source| AdoptSkillError::Create {
+        path: staging.clone(),
+        source,
+    })?;
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let result = (|| -> Result<()> {
-        import_folder(&first.folder, &staging, &name)?;
+    let result = (|| -> Result<(), AdoptSkillError> {
+        import_folder(&first.folder, &staging, &name).map_err(|source| {
+            AdoptSkillError::Import {
+                name: name.clone(),
+                source,
+            }
+        })?;
         let backups = backups_root(&c.skills_dir);
         let stamp = artisan_api::now();
         for copy in &copies {
             let to = backups.join(format!("{}-{name}-{stamp}", copy.engine));
-            move_folder(&copy.folder, &to).with_context(|| {
-                format!("backing up {}'s skill {name}", copy.engine.display_name())
+            move_folder(&copy.folder, &to).map_err(|source| AdoptSkillError::Backup {
+                engine: copy.engine,
+                name: name.clone(),
+                source,
             })?;
             moved.push((copy.folder.clone(), to));
         }
-        fs::rename(staging.join(&name), c.skills_dir.join(&name))
-            .context("publishing adopted skill")?;
-        Ok(())
+        fs::rename(staging.join(&name), c.skills_dir.join(&name)).map_err(|source| {
+            AdoptSkillError::Publish {
+                name: name.clone(),
+                source,
+            }
+        })
     })();
     if let Err(error) = result {
         let mut rollback_errors = Vec::new();
@@ -924,53 +1044,101 @@ pub fn adopt_skill(
                 ));
             }
         }
-        fs::remove_dir_all(&staging).ok();
+        discard_leftover(&staging);
         if rollback_errors.is_empty() {
             return Err(error);
         }
-        return Err(error.context(rollback_errors.join("; ")));
+        return Err(AdoptSkillError::Stranded {
+            stranded: rollback_errors.join("; "),
+            source: Box::new(error),
+        });
     }
-    fs::remove_dir_all(staging).ok();
+    discard_leftover(&staging);
     for copy in &copies {
-        if let Some(parent) = copy.folder.parent() {
-            // The quarantine marker may never have been written.
-            fs::remove_file(quarantined_at(parent, &copy.folder_name)).ok();
-        }
+        forget_quarantine_marker(copy);
     }
     Ok(name)
 }
 
-/// Copies a skill folder into Forge's skills folder, so Forge keeps it in
-/// every engine, and returns its name. `replace` swaps out the user's skill
-/// of the same name, which goes to the backups first.
-///
-/// # Errors
-///
-/// Phrased for the agent or user: no `SKILL.md`, a name Artisan already
-/// uses, a folder inside an engine's skills folder, or a failed copy.
+#[derive(Debug, thiserror::Error)]
+pub enum InstallSkillError {
+    #[error("{} isn't a folder Forge can read", path.display())]
+    Unreadable {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{} needs a SKILL.md that starts with YAML front matter", path.display())]
+    NoSkillFile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("SKILL.md's front matter needs a `name` without spaces or slashes")]
+    BadName { path: PathBuf },
+    #[error("{name} is one of Artisan's own skills; pick another name.")]
+    FirstPartyName { name: String },
+    #[error("{name} is already installed.")]
+    AlreadyInstalled { name: String },
+    #[error(
+        "{} is inside an engine's skills folder, where Artisan removes what it didn't put. Write the skill in another folder and install that.",
+        path.display()
+    )]
+    InsideEngine { path: PathBuf },
+    #[error("Artisan already has a skill named {name}; pass replace to update it.")]
+    Exists { name: String },
+    #[error("creating {}", path.display())]
+    Create {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("copying {}", path.display())]
+    Copy {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("backing up the old {name}")]
+    Backup {
+        name: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("placing the skill {name}")]
+    Place {
+        name: String,
+        #[source]
+        source: io::Error,
+    },
+}
+
 pub fn install_skill(
     homes: &[(EngineId, Option<PathBuf>)],
     c: &Customisation,
     from: &Path,
     replace: bool,
-) -> Result<String> {
+) -> Result<String, InstallSkillError> {
     let from = from
         .canonicalize()
-        .with_context(|| format!("{} isn't a folder Forge can read", from.display()))?;
-    let text = read_skill_header(&from.join("SKILL.md")).with_context(|| {
-        format!(
-            "{} needs a SKILL.md that starts with YAML front matter",
-            from.display()
-        )
+        .map_err(|source| InstallSkillError::Unreadable {
+            path: from.to_owned(),
+            source,
+        })?;
+    let text = read_skill_header(&from.join("SKILL.md")).map_err(|source| {
+        InstallSkillError::NoSkillFile {
+            path: from.clone(),
+            source,
+        }
     })?;
-    let (name, _) = skill_metadata(&text)
-        .context("SKILL.md's front matter needs a `name` without spaces or slashes")?;
+    let (name, _) =
+        skill_metadata(&text).ok_or_else(|| InstallSkillError::BadName { path: from.clone() })?;
     if c.first_party && FIRST_PARTY.iter().any(|skill| skill.folder == name) {
-        bail!("{name} is one of Artisan's own skills; pick another name.");
+        return Err(InstallSkillError::FirstPartyName { name });
     }
     let inside = |root: &Path| root.canonicalize().is_ok_and(|root| from.starts_with(root));
     if inside(&c.skills_dir) {
-        bail!("{name} is already installed.");
+        return Err(InstallSkillError::AlreadyInstalled { name });
     }
     let engine_skills = homes
         .iter()
@@ -978,37 +1146,45 @@ pub fn install_skill(
         .map(|paths| paths.skills);
     for skills in engine_skills {
         if inside(&skills) {
-            bail!(
-                "{} is inside an engine's skills folder, where Artisan removes what it didn't put. Write the skill in another folder and install that.",
-                from.display()
-            );
+            return Err(InstallSkillError::InsideEngine { path: from });
         }
     }
     let to = c.skills_dir.join(&name);
     if to.exists() && !replace {
-        bail!("Artisan already has a skill named {name}; pass replace to update it.");
+        return Err(InstallSkillError::Exists { name });
     }
-    fs::create_dir_all(&c.skills_dir)
-        .with_context(|| format!("creating {}", c.skills_dir.display()))?;
+    fs::create_dir_all(&c.skills_dir).map_err(|source| InstallSkillError::Create {
+        path: c.skills_dir.clone(),
+        source,
+    })?;
     let stamp = artisan_api::now();
     let staging = c.skills_dir.join(format!(".install-{name}-{stamp}"));
     let backup = backups_root(&c.skills_dir).join(format!("{name}-{stamp}"));
-    let result = (|| -> Result<()> {
-        copy_dir(&from, &staging).with_context(|| format!("copying {}", from.display()))?;
+    let result = (|| -> Result<(), InstallSkillError> {
+        copy_dir(&from, &staging).map_err(|source| InstallSkillError::Copy {
+            path: from.clone(),
+            source,
+        })?;
         let replaced = to.exists();
         if replaced {
-            move_folder(&to, &backup).with_context(|| format!("backing up the old {name}"))?;
+            move_folder(&to, &backup).map_err(|source| InstallSkillError::Backup {
+                name: name.clone(),
+                source,
+            })?;
         }
-        if let Err(error) = fs::rename(&staging, &to) {
+        if let Err(source) = fs::rename(&staging, &to) {
             if replaced && let Err(restore) = move_folder(&backup, &to) {
                 tracing::warn!(skill = %name, backup = %backup.display(), %restore, "couldn't restore the old skill; it stays in the backups");
             }
-            return Err(error).context("placing the skill");
+            return Err(InstallSkillError::Place {
+                name: name.clone(),
+                source,
+            });
         }
         Ok(())
     })();
     if result.is_err() {
-        fs::remove_dir_all(&staging).ok();
+        discard_leftover(&staging);
     }
     result.map(|()| name)
 }
@@ -1117,7 +1293,7 @@ mod managed_count_tests {
             ..Customisation::default()
         };
         let error = skill_catalog(&[], &settings).unwrap_err();
-        assert!(format!("{error:#}").contains("links"));
+        assert!(matches!(error, ReadSkillsError::Inspect { .. }), "{error}");
     }
 }
 
@@ -1169,7 +1345,7 @@ mod admission_tests {
             &settings(&folder.path().join("managed")),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("metadata_bytes="));
+        assert!(matches!(error, ReadSkillsError::Paging { .. }), "{error}");
         assert!(native.join("skill-99/SKILL.md").exists());
     }
     #[test]
@@ -1381,7 +1557,7 @@ mod install_tests {
 
         skill(&draft, "Second");
         let error = install_skill(&homes, &config, &draft, false).unwrap_err();
-        assert!(format!("{error:#}").contains("pass replace"));
+        assert!(matches!(error, InstallSkillError::Exists { .. }), "{error}");
         install_skill(&homes, &config, &draft, true).unwrap();
         let installed = config.skills_dir.join("release-notes/SKILL.md");
         assert!(fs::read_to_string(installed).unwrap().contains("Second"));
@@ -1406,7 +1582,10 @@ mod install_tests {
 
         let error =
             install_skill(&[(EngineId::Claude, Some(home))], &config, &native, false).unwrap_err();
-        assert!(format!("{error:#}").contains("Write the skill in another folder"));
+        assert!(
+            matches!(error, InstallSkillError::InsideEngine { .. }),
+            "{error}"
+        );
         assert!(!config.skills_dir.join("release-notes").exists());
     }
 }

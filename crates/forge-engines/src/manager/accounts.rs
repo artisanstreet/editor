@@ -117,13 +117,11 @@ impl Engines {
         usage
     }
 
-    /// Writes the prompt and skill links into the engine home and returns
-    /// the launch arguments for MCP servers. Call right before each spawn.
-    ///
-    /// # Errors
-    ///
-    /// When the engine home can't be written.
-    pub fn materialize(&self, engine: EngineId, customisation: &Customisation) -> Result<Launch> {
+    pub fn materialize(
+        &self,
+        engine: EngineId,
+        customisation: &Customisation,
+    ) -> Result<Launch, crate::MaterializeError> {
         crate::materialize(engine, &self.home(engine), customisation)
     }
 

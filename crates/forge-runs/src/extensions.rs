@@ -93,16 +93,18 @@ impl Hub {
     pub async fn skill_catalog(&self) -> Result<Vec<CatalogSkill>> {
         let customisation = self.skill_customisation().await?;
         let homes = self.engine_homes();
-        self.on_homes(move || forge_engines::skill_catalog(&homes, &customisation))
-            .await?
+        Ok(self
+            .on_homes(move || forge_engines::skill_catalog(&homes, &customisation))
+            .await??)
     }
 
     /// The skills a `$name` mention can name: the ones Forge puts into the
     /// engines.
     pub async fn enabled_skills(&self) -> Result<Vec<artisan_api::Skill>> {
         let customisation = self.skill_customisation().await?;
-        self.on_homes(move || forge_engines::enabled_skills(&customisation))
-            .await?
+        Ok(self
+            .on_homes(move || forge_engines::enabled_skills(&customisation))
+            .await??)
     }
 
     /// Turns a skill Forge manages on or off in every engine.
@@ -133,7 +135,7 @@ impl Hub {
             .await?;
         if let Err(error) = adopted {
             // The customise layer phrases its refusals for the user.
-            return Err(refused(format!("{error:#}")));
+            return Err(refused(diagnostics::chain(&error)));
         }
         self.reconcile_skills().await?;
         self.store().bump_revision("skills_revision".into()).await?;
@@ -144,7 +146,12 @@ impl Hub {
     pub async fn marketplace_search(&self, query: &str) -> Result<Vec<artisan_api::Listing>> {
         forge_engines::search_skills(self.engines().http(), forge_engines::SKILLS_SH_URL, query)
             .await
-            .map_err(|error| refused(format!("Couldn't search skills.sh: {error:#}")))
+            .map_err(|error| {
+                refused(format!(
+                    "Couldn't search skills.sh: {}",
+                    diagnostics::chain(&error)
+                ))
+            })
     }
 
     /// Fetches a listed skill from its repository and installs it like
@@ -157,7 +164,7 @@ impl Hub {
         let fetched = forge_engines::fetch_skill(self.engines().http(), id, &scratch).await;
         let installed = match fetched {
             Ok(folder) => self.install_skill(folder, false).await.map(drop),
-            Err(error) => Err(refused(format!("{error:#}"))),
+            Err(error) => Err(refused(diagnostics::chain(&error))),
         };
         // Best effort: a leftover scratch folder is harmless.
         tokio::fs::remove_dir_all(&scratch).await.ok();
@@ -174,7 +181,7 @@ impl Hub {
             .on_homes(move || forge_engines::discard_skill(&homes, &customisation, &id))
             .await?;
         if let Err(error) = discarded {
-            return Err(refused(format!("{error:#}")));
+            return Err(refused(diagnostics::chain(&error)));
         }
         self.store().bump_revision("skills_revision".into()).await?;
         self.skill_catalog().await
@@ -189,7 +196,7 @@ impl Hub {
             .on_homes(move || forge_engines::install_skill(&homes, &customisation, &from, replace))
             .await?;
         // The customise layer phrases its refusals for the caller.
-        let name = installed.map_err(|error| refused(format!("{error:#}")))?;
+        let name = installed.map_err(|error| refused(diagnostics::chain(&error)))?;
         self.store()
             .set_skill_enabled(format!("local.{name}"), true)
             .await?;
@@ -201,8 +208,9 @@ impl Hub {
     pub async fn reconcile_skills(&self) -> Result<()> {
         let customisation = self.skill_customisation().await?;
         let homes = self.engine_homes();
-        self.on_homes(move || forge_engines::reconcile_skills(&homes, &customisation))
-            .await?
+        Ok(self
+            .on_homes(move || forge_engines::reconcile_skills(&homes, &customisation))
+            .await??)
     }
 
     /// The prompt engines get at launch; `None` while the user must still

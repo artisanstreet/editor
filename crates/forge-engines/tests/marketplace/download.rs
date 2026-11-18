@@ -28,8 +28,8 @@ async fn an_endless_archive_stops_at_the_limit() {
     )
     .await;
     let error = downloaded.expect_err("an endless archive is refused");
-    assert_eq!(
-        error.to_string(),
-        "owner/repo is too large to install from."
+    assert!(
+        matches!(&error, FetchSkillError::TooLarge { repository } if repository == "owner/repo"),
+        "{error}"
     );
 }

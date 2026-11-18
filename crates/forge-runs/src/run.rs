@@ -434,10 +434,7 @@ async fn execute(
     inbox.close();
     cancel.cancel();
     let mut outcome = outcome;
-    if !adapter_finished
-        && outcome == Outcome::Cancelled
-        && !hub.inner.shutdown.is_cancelled()
-    {
+    if !adapter_finished && outcome == Outcome::Cancelled && !hub.inner.shutdown.is_cancelled() {
         match announce_stop(hub, run, items).await {
             Ok(stopped) => *run = stopped,
             Err(error) => {
@@ -633,7 +630,7 @@ pub async fn prepare(
     let owner = hub.clone();
     let mut launch = tokio::task::spawn_blocking(move || {
         let _homes = owner.homes_lock()?;
-        owner.engines().materialize(engine, &customisation)
+        anyhow::Ok(owner.engines().materialize(engine, &customisation)?)
     })
     .await
     .context("prepare engine home task")??;

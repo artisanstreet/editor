@@ -9,7 +9,6 @@
 //! `config.toml`).
 
 use crate::Launch;
-use anyhow::{Context, Result};
 use artisan_api::EngineId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -25,7 +24,10 @@ pub use prompt::{
     PromptApplied, PromptFile, apply_prompt, inspect_prompt, normalize_prompt, prompt_digest,
     read_prompt_file,
 };
-pub use skills::{adopt_skill, discard_skill, enabled_skills, install_skill, skill_catalog};
+pub use skills::{
+    AdoptSkillError, DiscardSkillError, FindSkillError, InstallSkillError, ReadSkillsError,
+    adopt_skill, discard_skill, enabled_skills, install_skill, skill_catalog,
+};
 
 /// Marks a skill folder Forge copied (where symlinks are unavailable).
 const COPY_MARKER: &str = ".artisan-skill";
@@ -77,26 +79,68 @@ fn paths(engine: EngineId, home: &Path) -> Option<Paths> {
     })
 }
 
-/// Explicit skill mutation/install boundary; catalog reads never call this.
-pub fn reconcile_skills(homes: &[(EngineId, Option<PathBuf>)], c: &Customisation) -> Result<()> {
-    let wanted = skills::wanted(c)?;
+#[derive(Debug, thiserror::Error)]
+pub enum ReconcileSkillsError {
+    #[error("prepare the skills")]
+    Wanted(#[source] ReadSkillsError),
+    #[error("linking {engine} skills into {}", path.display())]
+    Link {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+pub fn reconcile_skills(
+    homes: &[(EngineId, Option<PathBuf>)],
+    c: &Customisation,
+) -> Result<(), ReconcileSkillsError> {
+    let wanted = skills::wanted(c).map_err(ReconcileSkillsError::Wanted)?;
     let owned = skills::owned_roots(&c.skills_dir);
     for (engine, home) in homes {
         if let Some(paths) = home.as_deref().and_then(|home| paths(*engine, home)) {
             skills::quarantine_foreign(*engine, &paths.skills, &c.skills_dir, &owned);
-            sync_skills(&paths.skills, &wanted, &owned)
-                .with_context(|| format!("linking {engine} skills"))?;
+            sync_skills(&paths.skills, &wanted, &owned).map_err(|source| {
+                ReconcileSkillsError::Link {
+                    engine: *engine,
+                    path: paths.skills.clone(),
+                    source,
+                }
+            })?;
         }
     }
     Ok(())
 }
 
-/// Brings `home` in line with `c` and returns how to pass MCP servers.
-///
-/// # Errors
-///
-/// When the prompt, a skill link or the MCP config file can't be written.
-pub fn materialize(engine: EngineId, home: &Path, c: &Customisation) -> Result<Launch> {
+#[derive(Debug, thiserror::Error)]
+pub enum MaterializeError {
+    #[error("preparing the skills for {engine}")]
+    Wanted {
+        engine: EngineId,
+        #[source]
+        source: ReadSkillsError,
+    },
+    #[error("linking {engine} skills into {}", path.display())]
+    Link {
+        engine: EngineId,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("passing MCP servers to {engine}")]
+    Launch {
+        engine: EngineId,
+        #[source]
+        source: LaunchError,
+    },
+}
+
+pub fn materialize(
+    engine: EngineId,
+    home: &Path,
+    c: &Customisation,
+) -> Result<Launch, MaterializeError> {
     if let Some(paths) = paths(engine, home) {
         if let Some(prompt) = &c.prompt {
             match apply_prompt(engine, home, prompt, false) {
@@ -110,14 +154,17 @@ pub fn materialize(engine: EngineId, home: &Path, c: &Customisation) -> Result<L
             }
         }
         let wanted =
-            skills::wanted(c).with_context(|| format!("preparing the skills for {engine}"))?;
+            skills::wanted(c).map_err(|source| MaterializeError::Wanted { engine, source })?;
         let owned = skills::owned_roots(&c.skills_dir);
-        // An engine only reads skills Artisan installed.
         skills::quarantine_foreign(engine, &paths.skills, &c.skills_dir, &owned);
-        sync_skills(&paths.skills, &wanted, &owned)
-            .with_context(|| format!("linking {engine} skills into {}", paths.skills.display()))?;
+        sync_skills(&paths.skills, &wanted, &owned).map_err(|source| MaterializeError::Link {
+            engine,
+            path: paths.skills.clone(),
+            source,
+        })?;
     }
-    launch(engine, home, &c.mcp_servers).with_context(|| format!("passing MCP servers to {engine}"))
+    launch(engine, home, &c.mcp_servers)
+        .map_err(|source| MaterializeError::Launch { engine, source })
 }
 
 fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -190,6 +237,14 @@ fn remove_file_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
+    }
+}
+
+fn discard_leftover(path: &Path) {
+    if let Err(error) = fs::remove_dir_all(path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %path.display(), %error, "couldn't remove a leftover skill folder");
     }
 }
 
@@ -356,20 +411,118 @@ fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
 
 // --- launch channels -------------------------------------------------------
 
-fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch> {
+#[derive(Debug, thiserror::Error)]
+pub enum LaunchError {
+    #[error("remove {}", path.display())]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("encode {}", path.display())]
+    EncodeJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("encode {}", path.display())]
+    EncodeToml {
+        path: PathBuf,
+        #[source]
+        source: toml::ser::Error,
+    },
+    #[error("write {}", path.display())]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: artisan_paths::private::PrivateFileError,
+    },
+    #[error("read {}", path.display())]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("reading {}", path.display())]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("MCP server names must be nonempty and unique: {name:?}")]
+    ServerName { name: String },
+}
+
+fn codex_server(server: &McpServer) -> toml::Table {
+    let mut entry = toml::Table::new();
+    if let Some(url) = &server.url {
+        entry.insert("url".into(), url.clone().into());
+        if !server.headers.is_empty() {
+            entry.insert(
+                "http_headers".into(),
+                toml::Value::Table(
+                    server
+                        .headers
+                        .iter()
+                        .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+                        .collect(),
+                ),
+            );
+        }
+    } else {
+        entry.insert("command".into(), server.command.clone().into());
+        entry.insert(
+            "args".into(),
+            toml::Value::Array(
+                server
+                    .args
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::String)
+                    .collect(),
+            ),
+        );
+        entry.insert(
+            "env".into(),
+            toml::Value::Table(
+                server
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), toml::Value::String(value.clone())))
+                    .collect(),
+            ),
+        );
+    }
+    entry
+}
+
+fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch, LaunchError> {
     let mut launch = Launch {
         mcp_servers: servers.to_vec(),
         ..Launch::default()
     };
     match engine {
         EngineId::Claude => {
-            // A file, not an inline argument, so env values stay out of `ps`.
             let path = home.join(".artisan/claude-mcp.json");
             if servers.is_empty() {
-                remove_file_if_present(&path)?;
+                remove_file_if_present(&path).map_err(|source| LaunchError::Remove {
+                    path: path.clone(),
+                    source,
+                })?;
             } else {
                 let config = json!({ "mcpServers": claude_servers(servers) });
-                write_private_if_changed(&path, serde_json::to_string_pretty(&config)?.as_bytes())?;
+                let text = serde_json::to_string_pretty(&config).map_err(|source| {
+                    LaunchError::EncodeJson {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                write_private_if_changed(&path, text.as_bytes()).map_err(|source| {
+                    LaunchError::Write {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
                 launch.args = vec![
                     "--mcp-config".to_owned(),
                     path.to_string_lossy().into_owned(),
@@ -379,65 +532,30 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
         EngineId::Codex => {
             let path = home.join(".codex/config.toml");
             let mut config: toml::Table = match fs::read_to_string(&path) {
-                Ok(text) => {
-                    toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?
-                }
+                Ok(text) => toml::from_str(&text).map_err(|source| LaunchError::Parse {
+                    path: path.clone(),
+                    source,
+                })?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => toml::Table::new(),
-                Err(error) => return Err(error.into()),
+                Err(source) => return Err(LaunchError::Read { path, source }),
             };
             let mut entries = toml::Table::new();
             for server in servers {
-                anyhow::ensure!(
-                    !server.name.is_empty() && !entries.contains_key(&server.name),
-                    "MCP server names must be nonempty and unique"
-                );
-                let mut entry = toml::Table::new();
-                if let Some(url) = &server.url {
-                    entry.insert("url".into(), url.clone().into());
-                    if !server.headers.is_empty() {
-                        entry.insert(
-                            "http_headers".into(),
-                            toml::Value::Table(
-                                server
-                                    .headers
-                                    .iter()
-                                    .map(|(key, value)| {
-                                        (key.clone(), toml::Value::String(value.clone()))
-                                    })
-                                    .collect(),
-                            ),
-                        );
-                    }
-                } else {
-                    entry.insert("command".into(), server.command.clone().into());
-                    entry.insert(
-                        "args".into(),
-                        toml::Value::Array(
-                            server
-                                .args
-                                .iter()
-                                .cloned()
-                                .map(toml::Value::String)
-                                .collect(),
-                        ),
-                    );
-                    entry.insert(
-                        "env".into(),
-                        toml::Value::Table(
-                            server
-                                .env
-                                .iter()
-                                .map(|(key, value)| {
-                                    (key.clone(), toml::Value::String(value.clone()))
-                                })
-                                .collect(),
-                        ),
-                    );
+                if server.name.is_empty() || entries.contains_key(&server.name) {
+                    return Err(LaunchError::ServerName {
+                        name: server.name.clone(),
+                    });
                 }
-                entries.insert(server.name.clone(), entry.into());
+                entries.insert(server.name.clone(), codex_server(server).into());
             }
             config.insert("mcp_servers".into(), entries.into());
-            write_private_if_changed(&path, toml::to_string_pretty(&config)?.as_bytes())?;
+            let text =
+                toml::to_string_pretty(&config).map_err(|source| LaunchError::EncodeToml {
+                    path: path.clone(),
+                    source,
+                })?;
+            write_private_if_changed(&path, text.as_bytes())
+                .map_err(|source| LaunchError::Write { path, source })?;
         }
         EngineId::OpenCode => {
             if !servers.is_empty() {
@@ -554,18 +672,36 @@ pub fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
 
 // --- imports ---------------------------------------------------------------
 
-fn import_folder(from: &Path, skills_dir: &Path, name: &str) -> Result<bool> {
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    #[error("copying {} into {}", from.display(), to.display())]
+    Copy {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("placing {}", path.display())]
+    Place {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+fn import_folder(from: &Path, skills_dir: &Path, name: &str) -> Result<bool, ImportError> {
     let to = skills_dir.join(name);
     if to.exists() {
         return Ok(false);
     }
-    // Copy beside the destination, then rename, so a half copy never looks like a skill.
     let staging = skills_dir.join(format!(".import-{name}"));
-    // A leftover of an interrupted import, usually absent.
-    fs::remove_dir_all(&staging).ok();
-    copy_dir(from, &staging)
-        .with_context(|| format!("copying {} into {}", from.display(), skills_dir.display()))?;
-    fs::rename(&staging, &to).with_context(|| format!("placing {}", to.display()))?;
+    discard_leftover(&staging);
+    copy_dir(from, &staging).map_err(|source| ImportError::Copy {
+        from: from.to_owned(),
+        to: skills_dir.to_owned(),
+        source,
+    })?;
+    fs::rename(&staging, &to).map_err(|source| ImportError::Place { path: to, source })?;
     Ok(true)
 }
 

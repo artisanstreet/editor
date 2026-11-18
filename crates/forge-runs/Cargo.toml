@@ -12,6 +12,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 artisan-api.workspace = true
+diagnostics.workspace = true
 forge-content.workspace = true
 forge-engines.workspace = true
 forge-store.workspace = true
