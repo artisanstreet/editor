@@ -114,31 +114,44 @@ impl Fence {
         if ranges.is_empty() || shown.ends_with('\n') {
             ranges.push(start..start);
         }
-        let mut lines = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let line_tokens = tokens
-                .iter()
-                .filter_map(|(token, kind)| {
-                    let start = token.start.max(range.start);
-                    let end = token.end.min(range.end);
-                    (start < end).then(|| (start - range.start..end - range.start, *kind))
-                })
-                .collect();
-            let line_colors = swatches
-                .iter()
-                .filter(|color| color.range.start >= range.start && color.range.end <= range.end)
-                .map(|color| Swatch {
+        let mut line_tokens: Vec<Vec<(Range<usize>, CodeTokenKind)>> =
+            vec![Vec::new(); ranges.len()];
+        for (token, kind) in &tokens {
+            let first = ranges.partition_point(|range| range.end <= token.start);
+            for (line, range) in ranges.iter().enumerate().skip(first) {
+                if range.start >= token.end {
+                    break;
+                }
+                let start = token.start.max(range.start);
+                let end = token.end.min(range.end);
+                if start < end {
+                    line_tokens[line].push((start - range.start..end - range.start, *kind));
+                }
+            }
+        }
+        let mut line_colors: Vec<Vec<Swatch>> = vec![Vec::new(); ranges.len()];
+        for color in &swatches {
+            let line = ranges.partition_point(|range| range.end < color.range.start);
+            if let Some(range) = ranges
+                .get(line)
+                .filter(|range| color.range.start >= range.start && color.range.end <= range.end)
+            {
+                line_colors[line].push(Swatch {
                     range: color.range.start - range.start..color.range.end - range.start,
                     slot: color.slot.start - range.start..color.slot.end - range.start,
                     value: color.value.clone(),
-                })
-                .collect();
-            lines.push(Line {
-                text: Arc::from(&shown[range]),
-                tokens: line_tokens,
-                colors: line_colors,
-            });
+                });
+            }
         }
+        let lines: Vec<Line> = ranges
+            .into_iter()
+            .zip(line_tokens.into_iter().zip(line_colors))
+            .map(|(range, (tokens, colors))| Line {
+                text: Arc::from(&shown[range]),
+                tokens,
+                colors,
+            })
+            .collect();
         let widest = lines
             .iter()
             .enumerate()
