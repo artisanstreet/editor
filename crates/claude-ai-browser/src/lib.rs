@@ -163,7 +163,6 @@ async fn renew_with(
     Ok(renewed)
 }
 
-/// The browsers that can sign in, most likely first.
 #[must_use]
 pub fn browser_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -210,14 +209,11 @@ pub fn browser_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-/// The browser to sign in with, if this device has one.
 #[must_use]
 pub fn find_browser() -> Option<PathBuf> {
     browser_candidates().into_iter().find(|path| path.is_file())
 }
 
-/// The cookies that belong to claude.ai, out of everything a browser holds.
-/// Other sites' cookies never leave the browser.
 #[must_use]
 pub fn claude_ai_cookies(cookies: &Value) -> Vec<(String, String)> {
     cookies
