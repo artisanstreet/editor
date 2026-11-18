@@ -43,8 +43,8 @@ pub fn display_name(path: &Path) -> String {
 
 pub struct StreamDecoder {
     source: Box<dyn Source + Send>,
-    pub(crate) channels: usize,
-    pub(crate) rate: u32,
+    channels: usize,
+    rate: u32,
     pub(crate) duration: Option<Duration>,
     input_channels: usize,
 }

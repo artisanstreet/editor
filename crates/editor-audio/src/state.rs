@@ -57,11 +57,7 @@ impl Inner {
         self.generation
     }
 
-    pub(crate) fn loaded(
-        &mut self,
-        generation: u64,
-        decoded: Result<Audio, String>,
-    ) -> Option<Format> {
+    fn loaded(&mut self, generation: u64, decoded: Result<Audio, String>) -> Option<Format> {
         if generation != self.generation {
             return None;
         }
