@@ -287,6 +287,8 @@ pub struct RowFactory {
     settled: Rc<RefCell<HashMap<RowKey, u64>>>,
     style_epoch: u64,
     fingerprints: RefCell<HashMap<usize, (RowKey, Option<u64>)>>,
+    live_texts: RefCell<HashMap<usize, (std::sync::Arc<ropey::Rope>, Rc<str>)>>,
+    inline_texts: RefCell<HashMap<(artisan_api::ItemId, artisan_api::Seq), Rc<str>>>,
     unsettled: Cell<bool>,
     content_keyed: Cell<bool>,
 }
@@ -1300,6 +1302,8 @@ impl RowFactory {
             settled: Rc::default(),
             style_epoch: 0,
             fingerprints: RefCell::default(),
+            live_texts: RefCell::default(),
+            inline_texts: RefCell::default(),
             unsettled: Cell::new(false),
             content_keyed: Cell::new(false),
         }
@@ -1331,6 +1335,24 @@ impl RowFactory {
             .borrow_mut()
             .insert(index, (row_key.clone(), fingerprint));
         fingerprint.filter(|_| &row_key == key)
+    }
+
+    fn live_text(&self, rope: &std::sync::Arc<ropey::Rope>) -> Rc<str> {
+        let at = std::sync::Arc::as_ptr(rope) as usize;
+        self.live_texts
+            .borrow_mut()
+            .entry(at)
+            .or_insert_with(|| (rope.clone(), Rc::from(rope.to_string())))
+            .1
+            .clone()
+    }
+
+    fn inline_text(&self, item: &artisan_api::Item, text: &str) -> Rc<str> {
+        self.inline_texts
+            .borrow_mut()
+            .entry((item.id.clone(), item.seq))
+            .or_insert_with(|| Rc::from(text))
+            .clone()
     }
 
     fn row_key(&self, index: usize) -> Option<RowKey> {
@@ -2152,7 +2174,7 @@ impl RowFactory {
                 };
                 self.content_keyed
                     .set(shape_count.is_some() && live.is_none());
-                let live_source = live.as_ref().map(|binding| binding.text.to_string());
+                let live_source = live.as_ref().map(|binding| self.live_text(&binding.text));
                 let source = live_source
                     .as_deref()
                     .or(saved)
@@ -2685,13 +2707,13 @@ impl RowFactory {
                 item_seq: item.map(|item| item.seq),
                 source: snapshot_live
                     .as_ref()
-                    .map(|live| Rc::from(live.text.to_string()))
+                    .map(|live| self.live_text(&live.text))
                     .or_else(|| {
                         item.and_then(|item| match &item.kind {
                             ItemKind::AssistantMessage {
                                 text: TextContent::Inline(source),
                                 ..
-                            } => Some(Rc::from(source.as_str())),
+                            } => Some(self.inline_text(item, source)),
                             _ => None,
                         })
                     }),
