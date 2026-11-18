@@ -43,8 +43,8 @@ impl State {
     }
 }
 
-use editor_core::{ForgeClient, delivery::Delivery, runtime::runtime};
 use aqua::images::{ImageAssets, ImageHandle, ImageStatus};
+use editor_core::{ForgeClient, delivery::Delivery, runtime::runtime};
 use std::{
     hash::{Hash, Hasher},
     num::NonZeroUsize,
@@ -59,40 +59,77 @@ pub enum Source {
     Clipboard(aqua_ui::input::PasteImage),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ReadImageError {
+    #[error("Images must be at most 32 MiB")]
+    TooLarge,
+    #[error("the pasted {width}×{height} image is too large to encode")]
+    ClipboardExtent {
+        width: usize,
+        height: usize,
+        #[source]
+        source: std::num::TryFromIntError,
+    },
+    #[error("encode the pasted image")]
+    Clipboard(#[source] image::ImageError),
+    #[error("read {}", path.display())]
+    File {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PrepareImageError {
+    #[error(transparent)]
+    Read(#[from] ReadImageError),
+    #[error(transparent)]
+    Encode(#[from] super::encode::EncodeError),
+}
+
 impl Source {
-    fn read(&self) -> anyhow::Result<Vec<u8>> {
-        use anyhow::Context as _;
+    fn read(&self) -> Result<Vec<u8>, ReadImageError> {
         use std::io::Read as _;
         let bytes = match self {
             Self::Bytes(bytes) => bytes.clone(),
             Self::Clipboard(image) => {
                 use image::ImageEncoder as _;
+                let extent = |source| ReadImageError::ClipboardExtent {
+                    width: image.width(),
+                    height: image.height(),
+                    source,
+                };
                 let mut bytes = Vec::new();
-                image::codecs::png::PngEncoder::new(&mut bytes).write_image(
-                    image.rgba(),
-                    u32::try_from(image.width())?,
-                    u32::try_from(image.height())?,
-                    image::ExtendedColorType::Rgba8,
-                )?;
+                image::codecs::png::PngEncoder::new(&mut bytes)
+                    .write_image(
+                        image.rgba(),
+                        u32::try_from(image.width()).map_err(extent)?,
+                        u32::try_from(image.height()).map_err(extent)?,
+                        image::ExtendedColorType::Rgba8,
+                    )
+                    .map_err(ReadImageError::Clipboard)?;
                 bytes
             }
             Self::Path(path) => {
-                let file = std::fs::File::open(path)
-                    .with_context(|| format!("read {}", path.display()))?;
-                anyhow::ensure!(
-                    file.metadata()?.len() <= super::encode::MAX_INPUT_BYTES as u64,
-                    "Images must be at most 32 MiB"
-                );
+                let failed = |source| ReadImageError::File {
+                    path: path.clone(),
+                    source,
+                };
+                let file = std::fs::File::open(path).map_err(failed)?;
+                if file.metadata().map_err(failed)?.len() > super::encode::MAX_INPUT_BYTES as u64 {
+                    return Err(ReadImageError::TooLarge);
+                }
                 let mut bytes = Vec::new();
                 file.take((super::encode::MAX_INPUT_BYTES + 1) as u64)
-                    .read_to_end(&mut bytes)?;
+                    .read_to_end(&mut bytes)
+                    .map_err(failed)?;
                 bytes
             }
         };
-        anyhow::ensure!(
-            bytes.len() <= super::encode::MAX_INPUT_BYTES,
-            "Images must be at most 32 MiB"
-        );
+        if bytes.len() > super::encode::MAX_INPUT_BYTES {
+            return Err(ReadImageError::TooLarge);
+        }
         Ok(bytes)
     }
 }
@@ -121,18 +158,17 @@ impl PendingUpload {
     pub async fn upload(self) -> Result<BlobHash, String> {
         let origin = self.origin;
         let webp = tokio::task::spawn_blocking(move || {
-            origin
-                .read()
-                .and_then(|bytes| super::encode::to_webp(&bytes))
+            let bytes = origin.read()?;
+            Ok::<_, PrepareImageError>(super::encode::to_webp(&bytes)?)
         })
         .await
         .map_err(|error| error.to_string())?
-        .map_err(|error| format!("{error:#}"))?;
+        .map_err(|error| diagnostics::chain(&error))?;
         self.client
             .put_blob(webp)
             .await
             .map(|blob| blob.hash)
-            .map_err(|error| format!("{error:#}"))
+            .map_err(|error| diagnostics::chain(&error))
     }
 }
 
@@ -216,7 +252,7 @@ impl Attachments {
             })
             .await
             .map_err(|error| error.to_string())
-            .and_then(|result| result.map_err(|error| format!("{error:#}")));
+            .and_then(|result| result.map_err(|error| diagnostics::chain(&error)));
             let _ = sender.send(Completion::Read(key, result)).await;
         });
         if let Some(item) = self.items.last_mut() {
@@ -254,7 +290,7 @@ impl Attachments {
             let result = client
                 .blob(&hash)
                 .await
-                .map_err(|error| format!("{error:#}"));
+                .map_err(|error| diagnostics::chain(&error));
             let _ = sender.send(Completion::Restored(key, result)).await;
         });
     }
@@ -331,13 +367,9 @@ impl Attachments {
                         item.source = Some(source);
                         item.preview = placeholder.and_then(|image| {
                             let (width, height) = image.dimensions();
-                            aqua::images::DecodedImage::from_rgba(
-                                width,
-                                height,
-                                image.into_raw(),
-                            )
-                            .ok()
-                            .and_then(|image| assets.insert(image).ok())
+                            aqua::images::DecodedImage::from_rgba(width, height, image.into_raw())
+                                .ok()
+                                .and_then(|image| assets.insert(image).ok())
                         });
                         item.shown = true;
                         let sender = self.delivery.sender();
@@ -356,7 +388,9 @@ impl Attachments {
                                 })
                                 .await
                                 .map_err(|error| error.to_string())
-                                .and_then(|result| result.map_err(|error| format!("{error:#}"))),
+                                .and_then(|result| {
+                                    result.map_err(|error| diagnostics::chain(&error))
+                                }),
                                 Err(error) => Err(error.to_string()),
                             };
                             let _ = sender.send(Completion::Converted(key, result)).await;
@@ -428,7 +462,7 @@ impl Attachments {
                                 .put_blob(bytes)
                                 .await
                                 .map(|blob| blob.hash)
-                                .map_err(|error| format!("{error:#}"));
+                                .map_err(|error| diagnostics::chain(&error));
                             let _ = sender.send(Completion::Uploaded(key, result)).await;
                         });
                         item.task = Some(task.abort_handle());

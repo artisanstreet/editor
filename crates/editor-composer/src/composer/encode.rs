@@ -1,4 +1,3 @@
-use anyhow::{Context as _, Result, anyhow};
 use aqua_media::decode::StillFormat;
 use image::{
     AnimationDecoder as _, DynamicImage, GenericImageView as _, ImageDecoder as _, ImageFormat,
@@ -12,35 +11,78 @@ const MAX_PIXELS: u64 = 16_000_000;
 const MAX_FRAMES: usize = 120;
 const MAX_ANIMATION_BYTES: usize = 64 * 1024 * 1024;
 
-pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>> {
-    anyhow::ensure!(
-        bytes.len() <= MAX_INPUT_BYTES,
-        "Images must be at most 32 MiB"
-    );
-    let format = aqua_media::decode::still::sniff(bytes).context(
-        "This image format isn't supported; use PNG, JPEG, WebP, GIF, BMP, TIFF, ICO, AVIF or HEIC",
-    )?;
+#[derive(Debug, thiserror::Error)]
+pub enum EncodeError {
+    #[error("Images must be at most 32 MiB")]
+    TooLarge { bytes: usize },
+    #[error(
+        "This image format isn't supported; use PNG, JPEG, WebP, GIF, BMP, TIFF, ICO, AVIF or HEIC"
+    )]
+    Unsupported,
+    #[error("Images must have at most 16 million pixels")]
+    TooManyPixels { width: u32, height: u32 },
+    #[error("Animations must have at most {MAX_FRAMES} frames")]
+    TooManyFrames,
+    #[error("Animation pixels exceed 64 MiB")]
+    AnimationTooLarge,
+    #[error("the GIF has no frames")]
+    NoFrames,
+    #[error("decode the GIF")]
+    Gif(#[source] image::ImageError),
+    #[error("limit the GIF decoder")]
+    Limits(#[source] image::ImageError),
+    #[error("decode a GIF frame")]
+    Frame(#[source] image::ImageError),
+    #[error("read image dimensions")]
+    Dimensions(#[source] image::ImageError),
+    #[error("decode the image")]
+    Decode(#[source] image::ImageError),
+    #[error("decode the image")]
+    Media(#[source] aqua_media::decode::MediaError),
+    #[error("decode the image: {width}×{height} pixels do not fill an image")]
+    Pixels { width: u32, height: u32 },
+    #[error("initialise the WebP encoder")]
+    Encoder,
+    #[error("encode a {width}×{height} WebP: {failure:?}")]
+    Still {
+        width: u32,
+        height: u32,
+        failure: webp::WebPEncodingError,
+    },
+    #[error("encode an animated {width}×{height} WebP: {failure:?}")]
+    Animation {
+        width: u32,
+        height: u32,
+        failure: webp::AnimEncodeError,
+    },
+}
+
+pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>, EncodeError> {
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(EncodeError::TooLarge { bytes: bytes.len() });
+    }
+    let format = aqua_media::decode::still::sniff(bytes).ok_or(EncodeError::Unsupported)?;
     match (format, container(format)) {
         (StillFormat::Gif, _) => {
             let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
-                .context("decode the GIF")?;
+                .map_err(EncodeError::Gif)?;
             check_dimensions(decoder.dimensions())?;
-            decoder.set_limits(decode_limits())?;
+            decoder
+                .set_limits(decode_limits())
+                .map_err(EncodeError::Limits)?;
             let mut frames = Vec::new();
             let mut retained = 0usize;
             for frame in decoder.into_frames() {
-                anyhow::ensure!(
-                    frames.len() < MAX_FRAMES,
-                    "Animations must have at most {MAX_FRAMES} frames"
-                );
-                let frame = frame.context("decode a GIF frame")?;
+                if frames.len() >= MAX_FRAMES {
+                    return Err(EncodeError::TooManyFrames);
+                }
+                let frame = frame.map_err(EncodeError::Frame)?;
                 let delay = frame.delay();
                 let image = resize(DynamicImage::ImageRgba8(frame.into_buffer())).to_rgba8();
                 retained = retained.saturating_add(image.len());
-                anyhow::ensure!(
-                    retained <= MAX_ANIMATION_BYTES,
-                    "Animation pixels exceed 64 MiB"
-                );
+                if retained > MAX_ANIMATION_BYTES {
+                    return Err(EncodeError::AnimationTooLarge);
+                }
                 frames.push(image::Frame::from_parts(image, 0, 0, delay));
             }
             if frames.len() == 1 {
@@ -52,12 +94,12 @@ pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>> {
             let mut reader =
                 image::ImageReader::with_format(std::io::Cursor::new(bytes), container);
             reader.limits(decode_limits());
-            let mut decoder = reader.into_decoder().context("read image dimensions")?;
+            let mut decoder = reader.into_decoder().map_err(EncodeError::Dimensions)?;
             check_dimensions(decoder.dimensions())?;
             let orientation = decoder
                 .orientation()
                 .unwrap_or(image::metadata::Orientation::NoTransforms);
-            let mut image = DynamicImage::from_decoder(decoder).context("decode the image")?;
+            let mut image = DynamicImage::from_decoder(decoder).map_err(EncodeError::Decode)?;
             image.apply_orientation(orientation);
             if format == StillFormat::WebP && fits(&image) {
                 return Ok(bytes.to_vec());
@@ -80,14 +122,15 @@ fn container(format: StillFormat) -> Option<ImageFormat> {
     }
 }
 
-fn transcoded(bytes: &[u8], long_edge: u32) -> Result<DynamicImage> {
-    check_dimensions(aqua_media::decode::still::dimensions(bytes)?)?;
+fn transcoded(bytes: &[u8], long_edge: u32) -> Result<DynamicImage, EncodeError> {
+    check_dimensions(aqua_media::decode::still::dimensions(bytes).map_err(EncodeError::Media)?)?;
     #[expect(
         clippy::cast_precision_loss,
         reason = "edges are far below f32's exact integer range"
     )]
     let detail = aqua_media::decode::Detail::covering(long_edge as f32);
-    let still = aqua_media::decode::decode_still(bytes, detail, MAX_PIXELS * 4)?;
+    let still = aqua_media::decode::decode_still(bytes, detail, MAX_PIXELS * 4)
+        .map_err(EncodeError::Media)?;
     let (width, height) = (still.image.width(), still.image.height());
     let opaque = still
         .image
@@ -98,7 +141,7 @@ fn transcoded(bytes: &[u8], long_edge: u32) -> Result<DynamicImage> {
         .all(|pixel| pixel[3] == u8::MAX);
     let image = image::RgbaImage::from_raw(width, height, still.image.pixels().to_vec())
         .map(DynamicImage::ImageRgba8)
-        .context("decode the image")?;
+        .ok_or(EncodeError::Pixels { width, height })?;
     Ok(if opaque {
         DynamicImage::ImageRgb8(image.into_rgb8())
     } else {
@@ -138,12 +181,12 @@ fn decode_limits() -> image::Limits {
     limits
 }
 
-fn check_dimensions((width, height): (u32, u32)) -> Result<()> {
-    anyhow::ensure!(
-        width > 0 && height > 0 && u64::from(width) * u64::from(height) <= MAX_PIXELS,
-        "Images must have at most 16 million pixels"
-    );
-    Ok(())
+fn check_dimensions((width, height): (u32, u32)) -> Result<(), EncodeError> {
+    if width > 0 && height > 0 && u64::from(width) * u64::from(height) <= MAX_PIXELS {
+        Ok(())
+    } else {
+        Err(EncodeError::TooManyPixels { width, height })
+    }
 }
 
 fn fits(image: &DynamicImage) -> bool {
@@ -158,9 +201,8 @@ fn resize(image: DynamicImage) -> DynamicImage {
     }
 }
 
-fn config(lossless: bool) -> Result<webp::WebPConfig> {
-    let mut config =
-        webp::WebPConfig::new().map_err(|()| anyhow!("initialise the WebP encoder"))?;
+fn config(lossless: bool) -> Result<webp::WebPConfig, EncodeError> {
+    let mut config = webp::WebPConfig::new().map_err(|()| EncodeError::Encoder)?;
     config.quality = QUALITY;
     config.use_sharp_yuv = 1;
     if lossless {
@@ -170,7 +212,7 @@ fn config(lossless: bool) -> Result<webp::WebPConfig> {
     Ok(config)
 }
 
-fn encode(image: &DynamicImage) -> Result<Vec<u8>> {
+fn encode(image: &DynamicImage) -> Result<Vec<u8>, EncodeError> {
     let (width, height) = image.dimensions();
     let pixels;
     let encoder = if image.color().has_alpha() {
@@ -182,7 +224,11 @@ fn encode(image: &DynamicImage) -> Result<Vec<u8>> {
     };
     let lossy = encoder
         .encode_advanced(&config(false)?)
-        .map_err(|error| anyhow!("encode a {width}×{height} WebP: {error:?}"))?;
+        .map_err(|failure| EncodeError::Still {
+            width,
+            height,
+            failure,
+        })?;
     let lossless = encoder.encode_advanced(&config(true)?).ok();
     Ok(match lossless {
         Some(lossless) if lossless.len() < lossy.len() => lossless.to_vec(),
@@ -190,7 +236,7 @@ fn encode(image: &DynamicImage) -> Result<Vec<u8>> {
     })
 }
 
-fn encode_animation(frames: Vec<image::Frame>) -> Result<Vec<u8>> {
+fn encode_animation(frames: Vec<image::Frame>) -> Result<Vec<u8>, EncodeError> {
     let mut timestamp = 0_i32;
     let frames: Vec<(image::RgbaImage, i32)> = frames
         .into_iter()
@@ -209,7 +255,7 @@ fn encode_animation(frames: Vec<image::Frame>) -> Result<Vec<u8>> {
     let (width, height) = frames
         .first()
         .map(|(image, _)| image.dimensions())
-        .context("the GIF has no frames")?;
+        .ok_or(EncodeError::NoFrames)?;
     let config = config(false)?;
     let mut encoder = webp::AnimEncoder::new(width, height, &config);
     encoder.set_loop_count(0);
@@ -223,6 +269,10 @@ fn encode_animation(frames: Vec<image::Frame>) -> Result<Vec<u8>> {
     }
     let animation = encoder
         .try_encode()
-        .map_err(|error| anyhow!("encode an animated {width}×{height} WebP: {error:?}"))?;
+        .map_err(|failure| EncodeError::Animation {
+            width,
+            height,
+            failure,
+        })?;
     Ok(animation.to_vec())
 }
