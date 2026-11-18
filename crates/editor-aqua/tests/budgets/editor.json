@@ -1,0 +1,58 @@
+{
+  "open_window_rebuilds": {
+    "limit": 10,
+    "reason": "opening a 400-item thread rebuilds the window for mounting, navigation, each arriving page, composer sizing and the landing; measured 7 to 9"
+  },
+  "open_section_refreshes": {
+    "limit": 10,
+    "reason": "section refreshes are cheaper than window rebuilds, so moving opening work into them stays within budget; measured 0"
+  },
+  "open_retained_kib": {
+    "limit": 10000,
+    "reason": "launching into a 400-item thread retains about 6.9 MiB of heap (Editor plus the in-process Forge); the rest is headroom for allocator and font differences between machines"
+  },
+  "idle_window_rebuilds": {
+    "limit": 0,
+    "reason": "a settled thread with no input and no new items must not rebuild or refresh anything"
+  },
+  "idle_frames_requested": {
+    "limit": 0,
+    "reason": "a settled thread must not request frames or animation deadlines, or the Editor burns CPU while idle"
+  },
+  "idle_access_nodes_published": {
+    "limit": 0,
+    "reason": "a connected screen reader must receive nothing while the window is unchanged"
+  },
+  "rest_access_nodes": {
+    "limit": 850,
+    "reason": "the accessibility tree covers only realized rows, not all 400 items; measured 775"
+  },
+  "stream_window_rebuilds": {
+    "limit": 36,
+    "reason": "each of the 25 stored updates to a streaming reply currently rebuilds the window once (shell_updates); measured 25 to 32, and the budget only allows it to shrink"
+  },
+  "stream_section_refreshes_per_frame": {
+    "limit": 1,
+    "reason": "a frame refreshes the transcript at most once"
+  },
+  "stream_access_nodes_published_per_frame": {
+    "limit": 80,
+    "reason": "a streamed chunk republishes only the changed reply's nodes to a screen reader; measured 62"
+  },
+  "scroll_window_rebuilds": {
+    "limit": 18,
+    "reason": "twenty wheel notches up a 400-item thread rebuild the window only when an older page arrives; measured 7 to 14 depending on when pages land"
+  },
+  "scroll_section_refreshes_per_frame": {
+    "limit": 1,
+    "reason": "a frame refreshes the transcript at most once"
+  },
+  "scroll_access_nodes_examined_per_frame": {
+    "limit": 1500,
+    "reason": "each scrolled frame hands the screen-reader bridge the realized rows only; measured 1360"
+  },
+  "scroll_access_nodes_published_per_frame": {
+    "limit": 260,
+    "reason": "a scrolled frame republishes only the nodes that moved into or out of view; measured 223"
+  }
+}

@@ -62,6 +62,32 @@ impl RebuildStats {
     }
 }
 
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    pub rebuilds: u32,
+    pub reasons: BTreeMap<&'static str, u32>,
+    pub events: BTreeMap<&'static str, u32>,
+}
+
+#[cfg(feature = "test-support")]
+impl Tally {
+    #[must_use]
+    pub fn event(&self, kind: &str) -> u32 {
+        self.events.get(kind).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static TALLY: RefCell<Tally> = RefCell::new(Tally::default());
+}
+
+#[cfg(feature = "test-support")]
+pub fn take_tally() -> Tally {
+    TALLY.with(|tally| std::mem::take(&mut *tally.borrow_mut()))
+}
+
 thread_local! {
     static NOTES: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     static STATS: RefCell<RebuildStats> = RefCell::new(RebuildStats::default());
@@ -81,6 +107,8 @@ fn now() -> Duration {
 }
 
 pub fn record_event(kind: &'static str) {
+    #[cfg(feature = "test-support")]
+    TALLY.with(|tally| *tally.borrow_mut().events.entry(kind).or_default() += 1);
     if enabled() {
         if let Some(report) = STATS.with(|stats| stats.borrow_mut().event(now(), kind)) {
             tracing::info!(target: "rebuild_stats", "{report}");
@@ -106,6 +134,14 @@ impl Drop for Span {
 }
 
 pub fn record_rebuild(reasons: &[&'static str]) {
+    #[cfg(feature = "test-support")]
+    TALLY.with(|tally| {
+        let mut tally = tally.borrow_mut();
+        tally.rebuilds += 1;
+        for reason in reasons {
+            *tally.reasons.entry(reason).or_default() += 1;
+        }
+    });
     if enabled() {
         if let Some(report) = STATS.with(|stats| stats.borrow_mut().rebuild(now(), reasons)) {
             tracing::info!(target: "rebuild_stats", "{report}");
