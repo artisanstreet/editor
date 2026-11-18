@@ -101,6 +101,10 @@ pub async fn serve(config: ServeConfig, stop: impl Future<Output = ()>) -> Resul
 /// service manager's stop timeout (30 s).
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+const HANDSHAKES_IN_FLIGHT: usize = 64;
+
 /// A bound, not yet serving Forge.
 pub struct Server {
     listener: TcpListener,
@@ -349,6 +353,7 @@ impl Server {
     /// interrupted, and carries on when Forge starts again.
     pub async fn run_until(self, stop_requested: impl Future<Output = ()>) -> Result<()> {
         let connections = TaskTracker::new();
+        let handshakes = Arc::new(tokio::sync::Semaphore::new(HANDSHAKES_IN_FLIGHT));
         let store = self.store.clone();
         let hub = self.hub.clone();
         let stop = self.shutdown.clone();
@@ -398,11 +403,19 @@ impl Server {
                     continue;
                 }
             };
+            let handshake = match Arc::clone(&handshakes).try_acquire_owned() {
+                Ok(handshake) => handshake,
+                Err(refused) => {
+                    tracing::debug!(%peer, "refused a connection: {refused}");
+                    drop(socket);
+                    continue;
+                }
+            };
             let acceptor = self.acceptor.clone();
             let app = self.app.clone();
             let drain = self.drain.clone();
             connections.spawn(async move {
-                serve_connection(socket, peer, acceptor, app, drain).await;
+                serve_connection(socket, peer, acceptor, handshake, app, drain).await;
             });
         }
         tracing::info!("stopping: settling live runs");
@@ -420,17 +433,31 @@ impl Server {
     }
 }
 
-async fn serve_connection(
-    socket: tokio::net::TcpStream,
+async fn serve_connection<Socket>(
+    socket: Socket,
     peer: SocketAddr,
     acceptor: tokio_rustls::TlsAcceptor,
+    handshake: tokio::sync::OwnedSemaphorePermit,
     app: axum::Router,
     drain: CancellationToken,
-) {
+) where
+    Socket: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let stream = tokio::select! {
-        ()=drain.cancelled()=>return,
-        result=acceptor.accept(socket)=>match result {Ok(stream)=>stream,Err(error)=>{tracing::debug!(%peer,"TLS handshake failed: {error}");return;}}
+        () = drain.cancelled() => return,
+        result = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(socket)) => match result {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                tracing::debug!(%peer, "TLS handshake failed: {error}");
+                return;
+            }
+            Err(elapsed) => {
+                tracing::debug!(%peer, "TLS handshake failed: {elapsed}");
+                return;
+            }
+        }
     };
+    drop(handshake);
     let Some(certificate) = stream
         .get_ref()
         .1

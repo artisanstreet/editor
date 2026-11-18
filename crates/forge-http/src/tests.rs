@@ -681,6 +681,47 @@ async fn remote_editors_get_item_pages_zstd_compressed_but_events_stay_plain() {
     assert!(events.headers().get("content-encoding").is_none());
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_client_that_never_finishes_tls_is_dropped_and_frees_its_slot() {
+    let identity = Identity::generate("artisan-forge").unwrap();
+    let acceptor =
+        tokio_rustls::TlsAcceptor::from(Arc::new(tls::server_config(&identity).unwrap()));
+    let handshakes = Arc::new(tokio::sync::Semaphore::new(1));
+    let (_silent_client, socket) = tokio::io::duplex(4096);
+    let connection = serve_connection(
+        socket,
+        "192.0.2.7:50000".parse().unwrap(),
+        acceptor,
+        Arc::clone(&handshakes).try_acquire_owned().unwrap(),
+        axum::Router::new(),
+        CancellationToken::new(),
+    );
+    tokio::time::timeout(Duration::from_secs(600), connection)
+        .await
+        .expect("a silent client held its TLS handshake open forever");
+    assert_eq!(handshakes.available_permits(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connections_beyond_the_handshake_bound_are_refused() {
+    use tokio::io::AsyncReadExt as _;
+    let (_dir, address, _store) = forge().await;
+    let mut silent = Vec::new();
+    for _ in 0..HANDSHAKES_IN_FLIGHT {
+        silent.push(tokio::net::TcpStream::connect(address).await.unwrap());
+    }
+    let mut refused = tokio::net::TcpStream::connect(address).await.unwrap();
+    let mut byte = [0_u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), refused.read(&mut byte))
+        .await
+        .expect("a connection past the bound waited for a handshake slot");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a refused connection is closed: {read:?}"
+    );
+    drop(silent);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn private_images_are_never_stored_by_shared_caches() {
     let (_dir, address, store) = forge().await;
