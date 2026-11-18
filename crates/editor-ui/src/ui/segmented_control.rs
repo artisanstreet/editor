@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::rc::Rc;
 
 use aqua_core::{InputEvent, Key as InputKey, NamedKey, Oklch, Role};
@@ -38,8 +39,6 @@ pub struct SegmentedControl<T: Clone + Eq + 'static> {
     options: Vec<Segment<T>>,
     disabled: bool,
     change: Option<Change<T>>,
-    focus_change: Option<Rc<dyn Fn(usize)>>,
-    focus_request: Option<Rc<std::cell::Cell<Option<(aqua_core::NodeId, usize)>>>>,
 }
 
 impl<T: Clone + Eq + 'static> SegmentedControl<T> {
@@ -58,8 +57,6 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
             options: vec![first],
             disabled: false,
             change: None,
-            focus_change: None,
-            focus_request: None,
         }
     }
     pub fn options(mut self, options: impl IntoIterator<Item = Segment<T>>) -> Self {
@@ -144,53 +141,54 @@ impl<T: Clone + Eq + 'static> SegmentedControl<T> {
                 .role(Role::RadioButton)
                 .aria_label(option.label)
                 .aria_checked(chosen)
+                .focusable(false)
                 .disabled(self.disabled);
+            if chosen {
+                item = item.aria_active_descendant();
+            }
             if !self.disabled {
-                item = live::track(item)
-                    .cursor(aqua_core::CursorIcon::Pointer)
-                    .tab_index(if chosen { 0 } else { -1 })
-                    .focus_visible_style(focus_ring(&theme));
-                let values = values.clone();
-                let change = self.change.clone();
-                let focus_change = self.focus_change.clone();
-                let focus_request = self.focus_request.clone();
-                item = item.on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
-                    let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
-                        return InputResponse::default();
-                    };
-                    let next = match key.key {
-                        InputKey::Named(NamedKey::Left | NamedKey::Up) => {
-                            if index == 0 {
-                                count - 1
-                            } else {
-                                index - 1
-                            }
-                        }
-                        InputKey::Named(NamedKey::Right | NamedKey::Down) => (index + 1) % count,
-                        InputKey::Named(NamedKey::Home) => 0,
-                        InputKey::Named(NamedKey::End) => count - 1,
-                        _ => return InputResponse::default(),
-                    };
-                    if let Some(change) = &change {
-                        change(values[next].clone());
-                    }
-                    if let Some(focus) = &focus_change {
-                        focus(next);
-                    }
-                    if let Some(request) = &focus_request {
-                        request.set(Some((event.current_target, next)));
-                    }
-                    InputResponse {
-                        stop_propagation: true,
-                        ..InputResponse::handled()
-                    }
-                });
+                item = live::track(item).cursor(aqua_core::CursorIcon::Pointer);
             }
             root = root.child(item);
         }
-        root.build()
+        let group = root
+            .build()
             .with_key(self.id)
             .role(Role::RadioGroup)
             .aria_label(self.label)
+            .focusable(!self.disabled);
+        if self.disabled {
+            return group;
+        }
+        let current = Rc::new(Cell::new(selected));
+        let change = self.change;
+        group
+            .tab_index(0)
+            .focus_visible_style(focus_ring(&theme))
+            .on_input(InputKind::KeyDown, EventPhase::Bubble, move |event| {
+                let RoutedInput::Native(InputEvent::KeyDown(key)) = &event.input else {
+                    return InputResponse::default();
+                };
+                let at = current.get();
+                let next = match key.key {
+                    InputKey::Named(NamedKey::Left | NamedKey::Up) => (at + count - 1) % count,
+                    InputKey::Named(NamedKey::Right | NamedKey::Down) => (at + 1) % count,
+                    InputKey::Named(NamedKey::Home) => 0,
+                    InputKey::Named(NamedKey::End) => count - 1,
+                    _ => return InputResponse::default(),
+                };
+                current.set(next);
+                if let Some(change) = &change {
+                    change(values[next].clone());
+                }
+                InputResponse {
+                    stop_propagation: true,
+                    ..InputResponse::handled()
+                }
+            })
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/ui/segmented_control.rs"]
+mod tests;
