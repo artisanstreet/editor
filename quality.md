@@ -178,7 +178,7 @@ Target weight: most tests in layers 1 and 3, a small set of very valuable layer 
   - `Screen::from_link`, `parse_pairing`, `parse_wsl_verbose`.
   - The `mcp_sign_in::callback` state check (security relevant).
   - `connection::follow` and `backoff`.
-  - `merge_thread_page`, `prune_threads`, `RangeState`.
+  - `merge_thread_page`, `prune_threads`. `RangeState` failure, stale completion, retry and readiness are already covered by `editor-aqua/tests/conversation/stored_rows.rs`.
   - Sidebar `row_state` and `splices`; marketplace labels.
 - Use `proptest` for parsers and folds:
   - Any chunking of a transcript decodes to the same items.
