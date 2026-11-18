@@ -4915,6 +4915,84 @@ async fn switching_to_full_access_allows_the_card_that_waits() {
     fixture.hub.shutdown();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_thread_withdraws_the_approval_its_run_waits_on() {
+    let fixture = fixture(Arc::new(|_turn, io| {
+        Box::pin(async move {
+            io.cancel.cancelled().await;
+            Outcome::cancelled()
+        })
+    }))
+    .await;
+    let thread = fixture.thread_id.clone();
+    fixture
+        .hub
+        .send_message(&thread, message("tidy up"))
+        .await
+        .unwrap();
+    fixture
+        .wait_for(|items| texts(items).contains(&("tidy up".to_owned(), Status::Done)))
+        .await;
+    let asking = tokio::spawn({
+        let (hub, thread) = (fixture.hub.clone(), thread.clone());
+        async move {
+            hub.ask_approval(&thread, "project_remove", "Remove the project".into())
+                .await
+        }
+    });
+    let card = approval_card(&fixture.hub, &thread).await;
+
+    fixture.hub.cancel(&thread).await.unwrap();
+
+    let refused = tokio::time::timeout(Duration::from_secs(10), asking)
+        .await
+        .expect("the stop answers the card")
+        .unwrap()
+        .unwrap_err();
+    assert!(
+        matches!(refused, ApprovalError::Unanswered { .. }),
+        "{refused}"
+    );
+    let card = fixture.hub.store().item(&card.id).await.unwrap().unwrap();
+    assert_eq!(card.status, Status::Cancelled);
+    fixture.settled().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_whose_asker_went_away_is_withdrawn() {
+    let fixture = fixture(Arc::new(|_turn, _io| Box::pin(async { Outcome::done() }))).await;
+    let thread = fixture.thread_id.clone();
+    let asking = tokio::spawn({
+        let (hub, thread) = (fixture.hub.clone(), thread.clone());
+        async move {
+            hub.ask_approval(&thread, "project_remove", "Remove the project".into())
+                .await
+        }
+    });
+    let card = approval_card(&fixture.hub, &thread).await;
+
+    asking.abort();
+
+    test_support::wait::eventually(
+        "the abandoned card to be withdrawn",
+        Duration::from_secs(10),
+        || async {
+            fixture
+                .hub
+                .store()
+                .item(&card.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                == Status::Cancelled
+        },
+    )
+    .await;
+    assert!(fixture.hub.inner.approvals.lock().unwrap().is_empty());
+    fixture.hub.shutdown();
+}
+
 /// Each run records its prompt and session; run `n` (from 0) ends as
 /// `outcomes[n]`, and once they run out, replies and finishes.
 fn failing_then_done(asked: &Asked, outcomes: Vec<Outcome>) -> Script {
