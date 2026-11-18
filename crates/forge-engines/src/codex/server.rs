@@ -239,7 +239,7 @@ async fn initialize(process: &mut EngineProcess) -> Result<()> {
             if let Some(error) = frame.get("error") {
                 bail!("{error}");
             }
-            return process.send(&json!({ "method": "initialized" })).await;
+            return Ok(process.send(&json!({ "method": "initialized" })).await?);
         }
     }
     bail!("Codex exited before answering initialize")
@@ -540,7 +540,8 @@ impl Actor {
         self.process
             .send(&json!({ "id": id, "method": "thread/unsubscribe",
             "params": { "threadId": thread } }))
-            .await
+            .await?;
+        Ok(())
     }
 
     fn closed(&mut self, thread: &str) {

@@ -1,20 +1,50 @@
-//! JSON-RPC request correlation and bounded stdio for short provider probes.
-//! Provider event normalization remains in each adapter.
-
-use crate::process::{self, EngineProcess};
-use anyhow::{Context, Result, bail};
+use crate::process::{self, EngineProcess, ReadError, SendError, SpawnError};
 use serde_json::{Value, json};
+
+const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum CallError {
+    #[error("start the RPC probe")]
+    Spawn(#[source] SpawnError),
+    #[error("send {method}")]
+    Send {
+        method: String,
+        #[source]
+        source: SendError,
+    },
+    #[error("read the answer to {method}")]
+    Read {
+        method: String,
+        #[source]
+        source: ReadError,
+    },
+    #[error("the answer to {method} is over {MAX_RESPONSE_BYTES} bytes")]
+    Oversized { method: String },
+    #[error("decode the answer to {method}")]
+    Decode {
+        method: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{method} was refused: {error}")]
+    Refused { method: String, error: Value },
+    #[error("the answer to {method} has no result")]
+    NoResult { method: String },
+    #[error("the engine closed stdout while answering {method}: {stderr}")]
+    Closed { method: String, stderr: String },
+}
 
 pub struct Session {
     process: EngineProcess,
     next_id: u64,
 }
 impl Session {
-    pub(crate) async fn codex(mut command: tokio::process::Command) -> Result<Self> {
+    pub(crate) async fn codex(mut command: tokio::process::Command) -> Result<Self, CallError> {
         command
             .args(["app-server", "--stdio"])
             .stdin(std::process::Stdio::piped());
-        let process = process::spawn_probe(command)?;
+        let process = process::spawn_probe(command).map_err(CallError::Spawn)?;
         let mut session = Self {
             process,
             next_id: 0,
@@ -31,37 +61,65 @@ impl Session {
         session
             .process
             .send(&json!({ "method": "initialized", "params": {} }))
-            .await?;
+            .await
+            .map_err(|source| CallError::Send {
+                method: "initialized".to_owned(),
+                source,
+            })?;
         Ok(session)
     }
 
-    pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub(crate) async fn call(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
         self.next_id += 1;
         let id = self.next_id;
         self.process
             .send(&json!({ "id": id, "method": method, "params": params }))
-            .await?;
-        while let Some(line) = self.process.next_line().await? {
-            anyhow::ensure!(
-                line.len() <= 4 * 1024 * 1024,
-                "RPC probe response exceeds 4 MiB"
-            );
-            let message: Value = serde_json::from_str(&line).context("decoding RPC response")?;
+            .await
+            .map_err(|source| CallError::Send {
+                method: method.to_owned(),
+                source,
+            })?;
+        loop {
+            let line = self
+                .process
+                .next_line()
+                .await
+                .map_err(|source| CallError::Read {
+                    method: method.to_owned(),
+                    source,
+                })?;
+            let Some(line) = line else {
+                return Err(CallError::Closed {
+                    method: method.to_owned(),
+                    stderr: self.process.stderr_tail(),
+                });
+            };
+            if line.len() > MAX_RESPONSE_BYTES {
+                return Err(CallError::Oversized {
+                    method: method.to_owned(),
+                });
+            }
+            let mut message: Value =
+                serde_json::from_str(&line).map_err(|source| CallError::Decode {
+                    method: method.to_owned(),
+                    source,
+                })?;
             if message.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
-            if let Some(error) = message.get("error") {
-                bail!("{method}: {error}");
+            if let Some(error) = message.get_mut("error") {
+                return Err(CallError::Refused {
+                    method: method.to_owned(),
+                    error: error.take(),
+                });
             }
             return message
-                .get("result")
-                .cloned()
-                .context("RPC response omitted result");
+                .get_mut("result")
+                .map(Value::take)
+                .ok_or_else(|| CallError::NoResult {
+                    method: method.to_owned(),
+                });
         }
-        bail!(
-            "engine closed stdout while awaiting {method}: {}",
-            self.process.stderr_tail()
-        )
     }
 }
 

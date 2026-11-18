@@ -218,8 +218,8 @@ fn turn_end(case: &str) -> crate::Outcome {
 #[test]
 fn a_turn_failed_at_capacity_can_be_retried() {
     let outcome = turn_end("overloaded");
-    assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
-    assert_eq!(outcome.retry, Some(crate::Retry::Overloaded));
+    assert_eq!(outcome.status(), artisan_api::RunStatus::Failed);
+    assert_eq!(outcome.retry(), Some(crate::Retry::Overloaded));
 }
 
 /// A used-up plan fails the turn until the limit resets; Codex doesn't
@@ -227,9 +227,9 @@ fn a_turn_failed_at_capacity_can_be_retried() {
 #[test]
 fn a_turn_failed_on_the_usage_limit_waits_for_the_reset() {
     let outcome = turn_end("usage-limit");
-    assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
+    assert_eq!(outcome.status(), artisan_api::RunStatus::Failed);
     assert_eq!(
-        outcome.retry,
+        outcome.retry(),
         Some(crate::Retry::UsageLimit { resets_at: None })
     );
 }
@@ -237,7 +237,7 @@ fn a_turn_failed_on_the_usage_limit_waits_for_the_reset() {
 /// A policy refusal is never retried.
 #[test]
 fn a_refused_turn_is_not_retried() {
-    assert_eq!(turn_end("notices").retry, None);
+    assert_eq!(turn_end("notices").retry(), None);
 }
 
 #[test]
@@ -449,7 +449,7 @@ fn opaque_web_actions_do_not_invent_execution_errors_or_fail_the_turn() {
     assert!(
         steps
             .iter()
-            .any(|step| matches!(step, Step::TurnEnd(outcome) if outcome.status == artisan_api::RunStatus::Done && outcome.error.is_none()))
+            .any(|step| matches!(step, Step::TurnEnd(outcome) if outcome.status() == artisan_api::RunStatus::Done && outcome.error().is_none()))
     );
 }
 

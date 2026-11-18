@@ -1108,11 +1108,7 @@ impl ClaudeDecoder {
                 None => Outcome::failed(message),
             }
         } else if self.refused {
-            Outcome {
-                status: RunStatus::Refused,
-                error: None,
-                retry: None,
-            }
+            Outcome::Refused
         } else {
             Outcome::done()
         };

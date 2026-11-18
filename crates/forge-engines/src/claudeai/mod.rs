@@ -88,11 +88,11 @@ impl Harness for ClaudeAiHarness {
         &self,
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, anyhow::Result<crate::SideReply>> {
-        Box::pin(side::compact(turn, cancel))
+    ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
+        Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
     }
 
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
         <crate::claude::ClaudeHarness as Harness>::set_title(
             &crate::claude::ClaudeHarness,
             turn,
@@ -104,8 +104,8 @@ impl Harness for ClaudeAiHarness {
         &self,
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, anyhow::Result<crate::SideReply>> {
-        Box::pin(side::compact(turn, cancel))
+    ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
+        Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
     }
 
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
@@ -143,7 +143,7 @@ pub async fn run(turn: Turn, io: RunIo) -> Outcome {
     };
     let thread = turn.thread_id.clone();
     let outcome = Box::pin(drive(&transport, turn, io)).await;
-    if let Some(error) = &outcome.error {
+    if let Some(error) = &outcome.error() {
         tracing::warn!(thread = %thread, "claude.ai run failed: {error}");
     }
     outcome
@@ -911,7 +911,7 @@ async fn run_task(
     if let Some(conversation) = forwarded.conversation.take() {
         delete_conversation(ctx, call, &conversation).await;
     }
-    let answer = match outcome.status {
+    let answer = match outcome.status() {
         artisan_api::RunStatus::Cancelled => return None,
         artisan_api::RunStatus::Done => Answer {
             text: forwarded
@@ -925,7 +925,7 @@ async fn run_task(
         | artisan_api::RunStatus::Refused => Answer {
             text: format!(
                 "The agent failed: {}",
-                outcome.error.as_deref().unwrap_or("no reason given")
+                outcome.error().unwrap_or("no reason given")
             ),
             is_error: true,
         },

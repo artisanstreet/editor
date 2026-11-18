@@ -20,11 +20,11 @@ async fn a_failed_cancellation_stop_is_reported_as_failed_without_retry() {
         cancel,
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Failed);
-    assert_eq!(outcome.retry, None);
+    assert_eq!(outcome.status(), RunStatus::Failed);
+    assert_eq!(outcome.retry(), None);
     assert!(
         outcome
-            .error
+            .error()
             .unwrap()
             .contains("Could not stop claude.ai completion")
     );

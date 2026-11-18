@@ -5,7 +5,7 @@
 //! JSON shapes, handshakes) stays behind this boundary.
 
 use artisan_api::{
-    Answer, EngineConfig, EngineId, ItemId, ItemKind, McpServer, RunStatus, Status, ThreadId,
+    Answer, EngineConfig, EngineId, ItemId, ItemKind, McpServer, RunOutcome, RunStatus, Status, ThreadId,
     Timestamp, Usage,
 };
 use futures::future::BoxFuture;
@@ -166,59 +166,108 @@ pub enum LiveKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Outcome {
-    pub status: RunStatus,
-    pub error: Option<String>,
-    /// Why a failed turn may go through later with no change from the user.
+pub enum Outcome {
+    Done,
+    Cancelled,
+    Refused,
+    Failed(Failure),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub message: String,
     pub retry: Option<Retry>,
 }
 
-/// A failure that passes by itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Retry {
-    /// The provider was at capacity or briefly unavailable (overloaded,
-    /// 5xx, a dropped connection) and the engine gave up retrying.
     Overloaded,
-    /// The account ran out of usage; `resets_at` when the engine said.
     UsageLimit { resets_at: Option<Timestamp> },
 }
 
 impl Outcome {
     #[must_use]
     pub const fn done() -> Self {
-        Self {
-            status: RunStatus::Done,
-            error: None,
-            retry: None,
-        }
+        Self::Done
     }
 
     #[must_use]
     pub const fn cancelled() -> Self {
-        Self {
-            status: RunStatus::Cancelled,
-            error: None,
-            retry: None,
-        }
+        Self::Cancelled
     }
 
     #[must_use]
     pub fn failed(message: impl Into<String>) -> Self {
-        Self {
-            status: RunStatus::Failed,
-            error: Some(message.into()),
+        Self::Failed(Failure {
+            message: message.into(),
             retry: None,
+        })
+    }
+
+    #[must_use]
+    pub fn retryable(message: impl Into<String>, retry: Retry) -> Self {
+        Self::Failed(Failure {
+            message: message.into(),
+            retry: Some(retry),
+        })
+    }
+
+    #[must_use]
+    pub const fn run_outcome(&self) -> RunOutcome {
+        match self {
+            Self::Done => RunOutcome::Done,
+            Self::Cancelled => RunOutcome::Cancelled,
+            Self::Refused => RunOutcome::Refused,
+            Self::Failed(_) => RunOutcome::Failed,
         }
     }
 
-    /// A failure that passes by itself, as `retry` says.
     #[must_use]
-    pub fn retryable(message: impl Into<String>, retry: Retry) -> Self {
-        Self {
-            retry: Some(retry),
-            ..Self::failed(message)
+    pub const fn status(&self) -> RunStatus {
+        self.run_outcome().status()
+    }
+
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.failure().map(|failure| failure.message.as_str())
+    }
+
+    #[must_use]
+    pub fn retry(&self) -> Option<Retry> {
+        self.failure().and_then(|failure| failure.retry)
+    }
+
+    #[must_use]
+    pub const fn failure(&self) -> Option<&Failure> {
+        match self {
+            Self::Failed(failure) => Some(failure),
+            Self::Done | Self::Cancelled | Self::Refused => None,
         }
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SideQueryError {
+    #[error("{engine} has no side queries")]
+    Unsupported { engine: EngineId },
+    #[error("the side query on {engine} thread {thread} was cancelled")]
+    Cancelled { engine: EngineId, thread: ThreadId },
+    #[error(transparent)]
+    Unconverted(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetTitleError {
+    #[error(transparent)]
+    Unconverted(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClearGoalError {
+    #[error("{engine} can't clear a goal")]
+    Unsupported { engine: EngineId },
+    #[error(transparent)]
+    Unconverted(#[from] anyhow::Error),
 }
 
 /// The channels of one live run.
@@ -258,7 +307,11 @@ pub trait Harness: Send + Sync {
 
     /// Persists Forge's generated title in the native session,
     /// without prompting it or changing its continuation.
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn set_title(
+        &self,
+        turn: Turn,
+        title: String,
+    ) -> BoxFuture<'static, Result<(), SetTitleError>> {
         let _ = (turn, title);
         Box::pin(async { Ok(()) })
     }
@@ -271,9 +324,10 @@ pub trait Harness: Send + Sync {
         &self,
         turn: Turn,
         cancel: CancellationToken,
-    ) -> BoxFuture<'static, anyhow::Result<SideReply>> {
-        let _ = (turn, cancel);
-        Box::pin(async { anyhow::bail!("this engine has no side queries") })
+    ) -> BoxFuture<'static, Result<SideReply, SideQueryError>> {
+        let _ = cancel;
+        let engine = turn.engine;
+        Box::pin(async move { Err(SideQueryError::Unsupported { engine }) })
     }
 
     /// Summarizes source history without advancing the caller's continuation.
@@ -283,13 +337,19 @@ pub trait Harness: Send + Sync {
         &self,
         turn: Turn,
         cancel: CancellationToken,
-    ) -> BoxFuture<'static, anyhow::Result<SideReply>> {
+    ) -> BoxFuture<'static, Result<SideReply, SideQueryError>> {
         self.side_query(turn, cancel)
     }
 
     /// Clears `turn.session_id`'s goal while no run has the session.
-    fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, anyhow::Result<()>> {
-        let _ = turn;
-        Box::pin(async { anyhow::bail!("this engine can't clear a goal") })
+    fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, Result<(), ClearGoalError>> {
+        let engine = turn.engine;
+        Box::pin(async move { Err(ClearGoalError::Unsupported { engine }) })
     }
+}
+
+pub(crate) async fn bridge<T, E: From<anyhow::Error>>(
+    work: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> Result<T, E> {
+    work.await.map_err(E::from)
 }

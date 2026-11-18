@@ -318,7 +318,8 @@ impl Hub {
         .await?;
         (self.inner.harness_for)(engine)
             .set_title(turn, title)
-            .await
+            .await?;
+        Ok(())
     }
 
     /// After a finished turn: asks the engine what the user is likely to

@@ -28,7 +28,7 @@ const RESET_SLACK: Duration = FIRST_RETRY.saturating_mul(2);
 /// When the failed `run` should be picked up again, if it should.
 pub async fn plan(hub: &Hub, run: &Run, outcome: &Outcome) -> Option<Park> {
     let now = artisan_api::now();
-    match outcome.retry? {
+    match outcome.retry()? {
         Retry::Overloaded => {
             if !hub.enabled(RETRY_WHEN_OVERLOADED_KEY).await {
                 return None;

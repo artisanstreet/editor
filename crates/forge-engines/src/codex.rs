@@ -51,8 +51,8 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 pub struct CodexHarness;
 
 impl Harness for CodexHarness {
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move {
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
+        Box::pin(crate::harness::bridge(async move {
             let session = turn
                 .session_id
                 .as_ref()
@@ -72,15 +72,15 @@ impl Harness for CodexHarness {
             .await
             .context("naming the Codex thread timed out")??;
             Ok(())
-        })
+        }))
     }
 
     fn compact(
         &self,
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, Result<crate::SideReply>> {
-        Box::pin(side::compact(turn, cancel))
+    ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
+        Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
     }
 
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
@@ -119,12 +119,12 @@ impl Harness for CodexHarness {
         &self,
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, Result<SideReply>> {
-        Box::pin(side::side_query(turn, cancel))
+    ) -> BoxFuture<'static, Result<SideReply, crate::SideQueryError>> {
+        Box::pin(crate::harness::bridge(side::side_query(turn, cancel)))
     }
 
-    fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, Result<()>> {
-        Box::pin(goal::clear_goal(turn))
+    fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, Result<(), crate::ClearGoalError>> {
+        Box::pin(crate::harness::bridge(goal::clear_goal(turn)))
     }
 }
 

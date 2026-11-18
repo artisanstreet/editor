@@ -130,17 +130,13 @@ pub async fn drive(
         run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
         outcome = Outcome::failed(format!("persist cancellation: {error:#}"));
     }
-    // Forge stopping ends a run unfinished, not cancelled by the user, so
-    // it can carry on after the restart.
-    if hub.inner.shutdown.is_cancelled() && outcome.status == RunStatus::Cancelled {
-        outcome.status = RunStatus::Interrupted;
-    }
-    let status = outcome.status;
+    let ended = ending(&outcome, hub.inner.shutdown.is_cancelled());
+    let status = ended.status();
     hub.attention_lock()
         .entry(thread_id.clone())
         .or_default()
         .add(&items.weighed);
-    finish(hub, &mut run, &items, outcome).await?;
+    finish(hub, &mut run, &items, outcome, ended).await?;
     if let Some(home) = &claude_ai_home
         && claude_ai_before.as_ref() != Some(&forge_engines::claudeai::Session::state(home))
     {
@@ -439,7 +435,7 @@ async fn execute(
     cancel.cancel();
     let mut outcome = outcome;
     if !adapter_finished
-        && outcome.status == RunStatus::Cancelled
+        && outcome == Outcome::Cancelled
         && !hub.inner.shutdown.is_cancelled()
     {
         match announce_stop(hub, run, items).await {
@@ -455,7 +451,7 @@ async fn execute(
         loop {
             tokio::select! {
                 stopped = &mut adapter_outcome => {
-                    if stopped.status == RunStatus::Failed && outcome.status != RunStatus::Failed {
+                    if stopped.failure().is_some() && outcome.failure().is_none() {
                         outcome = stopped;
                     }
                     break;
@@ -1267,13 +1263,30 @@ async fn announce_stop(hub: &Hub, run: &Run, items: &Work) -> Result<Run> {
     Ok(stopped)
 }
 
-async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Result<()> {
-    let open = open_items(items);
-    if let Some(error) = &outcome.error {
-        tracing::warn!(thread = %run.thread_id, run = %run.id, "run ended {:?}: {error}", outcome.status);
+const fn ending(outcome: &Outcome, shutting_down: bool) -> RunOutcome {
+    match outcome.run_outcome() {
+        RunOutcome::Cancelled if shutting_down => RunOutcome::Interrupted,
+        ended @ (RunOutcome::Done
+        | RunOutcome::Cancelled
+        | RunOutcome::Failed
+        | RunOutcome::Interrupted
+        | RunOutcome::Refused) => ended,
     }
-    let note = match (&outcome.error, outcome.status) {
-        (Some(error), RunStatus::Failed) if !items.errored => Some(new_item(
+}
+
+async fn finish(
+    hub: &Hub,
+    run: &mut Run,
+    items: &Work,
+    outcome: Outcome,
+    ended: RunOutcome,
+) -> Result<()> {
+    let open = open_items(items);
+    if let Some(error) = outcome.error() {
+        tracing::warn!(thread = %run.thread_id, run = %run.id, "run ended {ended:?}: {error}");
+    }
+    let note = match outcome.error() {
+        Some(error) if !items.errored => Some(new_item(
             ItemId::new(),
             &run.thread_id,
             Some(&run.id),
@@ -1282,24 +1295,21 @@ async fn finish(hub: &Hub, run: &mut Run, items: &Work, outcome: Outcome) -> Res
             Status::Done,
             ItemKind::Error {
                 kind: artisan_api::ErrorKind::Execution,
-                message: error.clone().into(),
+                message: error.to_owned().into(),
                 retryable: false,
             },
         )),
-        _ => None,
+        Some(_) | None => None,
     };
-    let park = if outcome.status == RunStatus::Failed {
-        crate::park::plan(hub, run, &outcome).await
-    } else {
-        None
+    let park = match outcome.failure() {
+        Some(_) => crate::park::plan(hub, run, &outcome).await,
+        None => None,
     };
-    let ended = RunOutcome::of(outcome.status).unwrap_or_else(|| {
-        unreachable!(
-            "invariant: run {} of thread {} ended with a running outcome",
-            run.id, run.thread_id
-        )
-    });
-    run.finish(ended, outcome.error, artisan_api::now());
+    run.finish(
+        ended,
+        outcome.error().map(str::to_owned),
+        artisan_api::now(),
+    );
     let settlement = forge_store::Settlement {
         run: run.clone(),
         open,

@@ -48,20 +48,20 @@ const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(process::MAX_LINE_BYTES)
 pub struct OpenCodeHarness;
 
 impl Harness for OpenCodeHarness {
-    fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, Result<()>> {
-        Box::pin(goal::clear_goal(turn))
+    fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, Result<(), crate::ClearGoalError>> {
+        Box::pin(crate::harness::bridge(goal::clear_goal(turn)))
     }
 
     fn side_query(
         &self,
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, Result<crate::SideReply>> {
-        Box::pin(side::side_query(turn, cancel))
+    ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
+        Box::pin(crate::harness::bridge(side::side_query(turn, cancel)))
     }
 
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move {
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
+        Box::pin(crate::harness::bridge(async move {
             let session = turn
                 .session_id
                 .as_deref()
@@ -85,15 +85,15 @@ impl Harness for OpenCodeHarness {
             server.kill().await;
             server.wait().await;
             result
-        })
+        }))
     }
 
     fn compact(
         &self,
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, Result<crate::SideReply>> {
-        Box::pin(side::compact(turn, cancel))
+    ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
+        Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
     }
 
     fn run(&self, turn: Turn, mut io: RunIo) -> BoxFuture<'static, Outcome> {
@@ -155,7 +155,7 @@ fn spawn(turn: &Turn, password: &str, config_dir: &Path) -> Result<EngineProcess
     );
     launch.launch.env = env;
     let args = ["serve", "--hostname", "127.0.0.1", "--port", "0"].map(str::to_owned);
-    process::spawn(&launch, &args)
+    Ok(process::spawn(&launch, &args)?)
 }
 
 /// Waits for `opencode server listening on http://127.0.0.1:<port>`.

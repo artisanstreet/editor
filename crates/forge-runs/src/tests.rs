@@ -51,7 +51,7 @@ impl Harness for Scripted {
         &self,
         _turn: Turn,
         _cancel: CancellationToken,
-    ) -> BoxFuture<'static, anyhow::Result<forge_engines::SideReply>> {
+    ) -> BoxFuture<'static, Result<forge_engines::SideReply, forge_engines::SideQueryError>> {
         Box::pin(async {
             Ok(forge_engines::SideReply {
                 text: "## Objective\n- Continue the task.".to_owned(),
@@ -86,7 +86,7 @@ impl Harness for Unscripted {
         &self,
         _turn: Turn,
         _cancel: CancellationToken,
-    ) -> BoxFuture<'static, anyhow::Result<forge_engines::SideReply>> {
+    ) -> BoxFuture<'static, Result<forge_engines::SideReply, forge_engines::SideQueryError>> {
         Box::pin(async {
             Ok(forge_engines::SideReply {
                 text: "## Objective\n- Continue the task.".to_owned(),
@@ -3315,7 +3315,7 @@ impl Harness for Asking {
         &self,
         turn: Turn,
         _cancel: CancellationToken,
-    ) -> BoxFuture<'static, anyhow::Result<forge_engines::SideReply>> {
+    ) -> BoxFuture<'static, Result<forge_engines::SideReply, forge_engines::SideQueryError>> {
         self.asked.lock().unwrap().push(turn.input.text.clone());
         let text = (self.side)(&turn);
         Box::pin(async move {
@@ -5097,9 +5097,9 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
         }
         fn compact(
             &self,
-            _turn: Turn,
+            turn: Turn,
             cancel: CancellationToken,
-        ) -> BoxFuture<'static, anyhow::Result<forge_engines::SideReply>> {
+        ) -> BoxFuture<'static, Result<forge_engines::SideReply, forge_engines::SideQueryError>> {
             let entered = Arc::clone(&self.entered);
             let cleaned = Arc::clone(&self.cleaned);
             Box::pin(async move {
@@ -5107,7 +5107,10 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
                 cancel.cancelled().await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 cleaned.store(true, std::sync::atomic::Ordering::SeqCst);
-                anyhow::bail!("cancelled after discarding the fork")
+                Err(forge_engines::SideQueryError::Cancelled {
+                    engine: turn.engine,
+                    thread: turn.thread_id,
+                })
             })
         }
     }
@@ -5164,7 +5167,7 @@ impl Harness for BackgroundTitle {
         &self,
         turn: Turn,
         cancel: CancellationToken,
-    ) -> BoxFuture<'static, anyhow::Result<forge_engines::SideReply>> {
+    ) -> BoxFuture<'static, Result<forge_engines::SideReply, forge_engines::SideQueryError>> {
         let release = Arc::clone(&self.release_title);
         let started = Arc::clone(&self.title_started);
         Box::pin(async move {
@@ -5179,12 +5182,19 @@ impl Harness for BackgroundTitle {
                     text: r#"{"title":"Sidebar title generation"}"#.to_owned(),
                     ..Default::default()
                 }),
-                () = cancel.cancelled() => anyhow::bail!("title cancelled with working turn"),
+                () = cancel.cancelled() => Err(forge_engines::SideQueryError::Cancelled {
+                    engine: turn.engine,
+                    thread: turn.thread_id,
+                }),
             }
         })
     }
 
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn set_title(
+        &self,
+        turn: Turn,
+        title: String,
+    ) -> BoxFuture<'static, Result<(), forge_engines::SetTitleError>> {
         self.names
             .lock()
             .unwrap()

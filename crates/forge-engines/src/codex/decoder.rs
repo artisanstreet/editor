@@ -556,14 +556,10 @@ impl Decoder {
                         Some(error) if error.codex_error_info.is_some() => error.retry(),
                         _ => self.last_retry,
                     };
-                    Outcome {
-                        status: if refused {
-                            RunStatus::Refused
-                        } else {
-                            RunStatus::Failed
-                        },
-                        error: Some(message),
-                        retry: retry.filter(|_| !refused),
+                    match (refused, retry) {
+                        (true, _) => Outcome::Refused,
+                        (false, Some(retry)) => Outcome::retryable(message, retry),
+                        (false, None) => Outcome::failed(message),
                     }
                 }
                 TurnStatus::Completed | TurnStatus::Ended => {

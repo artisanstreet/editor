@@ -283,8 +283,8 @@ async fn two_threads_release_every_tool_completion_before_continuing() {
             nobody()
         ),
     );
-    assert_eq!(first.0.status, RunStatus::Done);
-    assert_eq!(second.0.status, RunStatus::Done);
+    assert_eq!(first.0.status(), RunStatus::Done);
+    assert_eq!(second.0.status(), RunStatus::Done);
     assert_eq!(backend.sent.lock().expect("lock").len(), 10);
     assert_eq!(backend.stopped.lock().expect("lock").len(), 8);
     assert!(backend.active.lock().expect("lock").is_empty());
@@ -309,8 +309,8 @@ async fn a_failed_stop_prevents_tools_and_another_completion() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Failed);
-    assert_eq!(outcome.retry, Some(crate::Retry::Overloaded));
+    assert_eq!(outcome.status(), RunStatus::Failed);
+    assert_eq!(outcome.retry(), Some(crate::Retry::Overloaded));
     assert!(!marker.exists(), "the tool must wait for server cleanup");
     assert_eq!(backend.sent.lock().expect("lock").len(), 1);
 }
@@ -334,7 +334,7 @@ async fn cancellation_releases_the_server_completion() {
         cancel,
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Cancelled);
+    assert_eq!(outcome.status(), RunStatus::Cancelled);
     assert_eq!(backend.stopped.lock().expect("lock").len(), 1);
     assert!(backend.active.lock().expect("lock").is_empty());
 }
@@ -349,7 +349,7 @@ async fn a_closed_connection_does_not_leave_the_server_completion_running() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.retry, Some(crate::Retry::Overloaded));
+    assert_eq!(outcome.retry(), Some(crate::Retry::Overloaded));
     assert_eq!(backend.stopped.lock().expect("lock").len(), 1);
     assert!(backend.active.lock().expect("lock").is_empty());
 }
@@ -420,13 +420,13 @@ async fn provider_limits_show_the_correct_error_for_http_and_both_stream_event_s
                 nobody(),
             )
             .await;
-            assert_eq!(outcome.status, RunStatus::Failed);
+            assert_eq!(outcome.status(), RunStatus::Failed);
             assert_eq!(
-                outcome.error.as_deref(),
+                outcome.error(),
                 Some(message),
                 "provider limit: {limit}"
             );
-            assert_eq!(outcome.retry, Some(retry), "provider limit: {limit}");
+            assert_eq!(outcome.retry(), Some(retry), "provider limit: {limit}");
         }
     }
 }
@@ -476,7 +476,7 @@ async fn the_message_is_delivered_once_so_forge_does_not_run_it_again() {
     let turn = turn(work.path(), None, Permissions::Auto);
     let message = turn.input.id.clone();
     let (outcome, log, _) = run(Arc::clone(&backend), turn, nobody()).await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert_eq!(accepted(&log), vec![message]);
     let sent = backend.sent.lock().expect("lock").clone();
     assert!(
@@ -529,7 +529,7 @@ async fn nothing_runs_before_the_user_allows_it_and_a_denied_call_never_runs() {
         user,
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert!(!marker.exists(), "a declined command never runs");
     assert!(log.iter().any(|event| matches!(event, EngineEvent::Item { key, status: Status::Declined, .. } if key == "toolu_1")));
     let sent = backend.sent.lock().expect("lock").clone();
@@ -553,7 +553,7 @@ async fn an_allowed_call_runs_exactly_once() {
         decide(Decision::AllowOnce),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let logged = std::fs::read_to_string(&log_file).expect("the log");
     assert_eq!(logged.split_whitespace().collect::<Vec<_>>(), ["once"]);
 }
@@ -574,7 +574,7 @@ async fn parallel_calls_are_all_answered_and_marked_as_tool_output() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert_eq!(sent.len(), 2, "both calls go back in one message");
     assert!(sent[1].prompt.contains("tool_use_id=\"toolu_a\"") && sent[1].prompt.contains("alpha"));
@@ -612,7 +612,7 @@ async fn tool_results_follow_the_users_message_so_the_model_keeps_the_question()
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert_eq!(
         sent[0].parent.as_deref(),
@@ -666,7 +666,7 @@ async fn claude_ai_s_own_tools_are_never_refused_in_the_user_s_name() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert_eq!(
         backend.sent.lock().expect("lock").len(),
         1,
@@ -690,8 +690,8 @@ async fn a_connector_tool_stops_the_turn_unless_access_is_full() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Failed);
-    assert!(outcome.error.unwrap_or_default().contains("send_email"));
+    assert_eq!(outcome.status(), RunStatus::Failed);
+    assert!(outcome.error().unwrap_or_default().contains("send_email"));
 }
 
 #[tokio::test]
@@ -722,7 +722,7 @@ async fn a_steer_during_the_tools_goes_with_their_results() {
     let turn = turn(work.path(), None, Permissions::Auto);
     let message = turn.input.id.clone();
     let (outcome, log, _) = run(Arc::clone(&backend), turn, user).await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert!(
         sent[1].prompt.contains("alpha"),
@@ -742,7 +742,7 @@ async fn a_gone_conversation_hands_the_message_back_for_a_fresh_session() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert!(
         accepted(&log).is_empty(),
         "the message waits for the fresh session"
@@ -763,9 +763,9 @@ async fn a_browser_check_is_a_short_retryable_error() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Failed);
-    assert!(outcome.retry.is_some());
-    let error = outcome.error.unwrap_or_default();
+    assert_eq!(outcome.status(), RunStatus::Failed);
+    assert!(outcome.retry().is_some());
+    let error = outcome.error().unwrap_or_default();
     assert!(error.contains("browser check") && !error.contains('<'));
 }
 
@@ -798,7 +798,7 @@ async fn stopping_the_turn_stops_a_running_command() {
         cancel,
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Cancelled);
+    assert_eq!(outcome.status(), RunStatus::Cancelled);
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }
 
@@ -811,7 +811,7 @@ async fn images_are_uploaded_and_go_with_the_message() {
     let mut turn = turn(work.path(), None, Permissions::Auto);
     turn.input.images = vec![image.clone()];
     let (outcome, _, _) = run(Arc::clone(&backend), turn, nobody()).await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert_eq!(*backend.uploads.lock().expect("lock"), vec![image]);
     assert_eq!(
         backend.sent.lock().expect("lock")[0].files,
@@ -864,7 +864,7 @@ async fn a_live_turn_reads_a_file_and_reports_it() {
     }
     let outcome = running.await.expect("the turn");
     eprintln!("outcome: {outcome:?}\nsaid: {said}");
-    assert_eq!(outcome.status, RunStatus::Done, "{outcome:?}");
+    assert_eq!(outcome.status(), RunStatus::Done, "{outcome:?}");
     assert_eq!(accepted, 1, "the message is delivered once");
     assert!(
         said.contains("artisan-live-4417"),
@@ -896,7 +896,7 @@ async fn a_skill_is_listed_and_loaded_only_when_called() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert!(
         sent[0].tools.iter().any(|tool| tool["name"] == "Skill"),
@@ -958,7 +958,7 @@ async fn todos_become_one_plan_item_replaced_in_place() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let plans: Vec<(String, Vec<artisan_api::PlanStep>)> = log
         .iter()
         .filter_map(|event| {
@@ -1025,7 +1025,7 @@ async fn a_task_runs_its_own_conversation_and_reports_back() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert_eq!(
         sent.len(),
@@ -1129,7 +1129,7 @@ async fn a_subagent_cannot_start_subagents_of_its_own() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert_eq!(sent.len(), 4, "no third conversation is started");
     assert!(
@@ -1185,7 +1185,7 @@ async fn a_subagent_s_approval_reaches_the_user_and_its_tool_runs() {
         decide(Decision::AllowOnce),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert!(marker.exists(), "the approved command ran");
     assert!(
         log.iter().any(|event| matches!(
@@ -1229,7 +1229,7 @@ async fn a_background_shell_is_read_and_stopped() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert_eq!(sent.len(), 4);
     assert!(
@@ -1295,7 +1295,7 @@ async fn an_allow_rule_runs_a_command_without_asking() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert!(
         !log.iter().any(|event| matches!(
             event,
@@ -1338,7 +1338,7 @@ async fn a_deny_rule_refuses_even_under_full_access() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert!(!marker.exists(), "a denied command never runs");
     assert!(log.iter().any(|event| matches!(
         event,
@@ -1372,7 +1372,7 @@ async fn a_launch_mcp_server_is_offered_and_its_tool_runs() {
         ..artisan_api::McpServer::default()
     }];
     let (outcome, log, _) = run(Arc::clone(&backend), turn, nobody()).await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert!(
         sent[0]
@@ -1465,7 +1465,7 @@ async fn an_mcp_image_goes_to_claude_ai_with_the_results() {
         &[("FAKE_TOOLS", "image")],
     )];
     let (outcome, _, _) = run(Arc::clone(&backend), turn, nobody()).await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert_eq!(
         sent[1].files,
@@ -1524,7 +1524,7 @@ async fn stopping_the_turn_during_a_task_stops_the_agent_s_completion() {
         cancel,
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Cancelled);
+    assert_eq!(outcome.status(), RunStatus::Cancelled);
     assert!(
         backend
             .stopped
@@ -1579,7 +1579,7 @@ async fn lowering_access_before_a_task_applies_to_the_agent() {
         user,
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert!(
         log.iter()
             .any(|event| awaiting(event) == Some("toolu_t:toolu_b")),
@@ -1613,7 +1613,7 @@ async fn allow_always_holds_for_the_agent_too() {
         decide(Decision::AllowAlways),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let asked: Vec<&str> = log.iter().filter_map(awaiting).collect();
     assert_eq!(asked, ["toolu_1"], "the agent did not ask again");
     let logged = std::fs::read_to_string(&log_file).expect("the log");
@@ -1653,7 +1653,7 @@ async fn compaction_branches_from_the_source_leaf_and_resumes_the_original_branc
     assert!(backend.active.lock().unwrap().is_empty());
     source.input.text = "Continue from my original branch".into();
     let (outcome, _, _) = run(Arc::clone(&backend), source.clone(), nobody()).await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().unwrap().clone();
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[0].parent.as_deref(), Some("original-leaf"));
@@ -1788,7 +1788,7 @@ async fn a_deny_rule_for_task_starts_no_subagent_even_under_full_access() {
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert_eq!(
         *backend.created.lock().expect("lock"),
         1,
@@ -1818,7 +1818,7 @@ async fn an_ask_rule_for_task_asks_before_any_subagent_starts() {
         decide(Decision::DenyOnce),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert!(
         log.iter().any(|event| matches!(
             event,
@@ -1848,7 +1848,7 @@ async fn an_ask_rule_for_task_asks_before_any_subagent_starts() {
         decide(Decision::AllowOnce),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     assert_eq!(
         *allowed.created.lock().expect("lock"),
         2,
@@ -1877,7 +1877,7 @@ async fn a_settings_file_that_fails_to_load_refuses_tools_until_it_is_repaired()
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert!(
         !sent[1].prompt.contains("TOPSECRET"),
@@ -1930,7 +1930,7 @@ async fn a_settings_file_that_fails_to_load_refuses_tools_until_it_is_repaired()
         nobody(),
     )
     .await;
-    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.status(), RunStatus::Done);
     let sent = backend.sent.lock().expect("lock").clone();
     assert!(
         sent[1].prompt.contains("TOPSECRET"),

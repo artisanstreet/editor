@@ -78,7 +78,7 @@ fi
         .expect("the run ends once the steer is answered and the monitor is gone")
         .unwrap();
     drain.abort();
-    assert_eq!(outcome.status, RunStatus::Done, "{:?}", outcome.error);
+    assert_eq!(outcome.status(), RunStatus::Done, "{:?}", outcome.error());
     assert!(
         !dir.path().join("input_closed_under_the_monitor").exists(),
         "input must stay open while the monitor runs"

@@ -226,7 +226,7 @@ async fn threads_share_one_app_server_across_turns_without_crosstalk() {
         run(fixture.turn("hello", None)),
     );
     assert_eq!(
-        (spawned.status, plain.status),
+        (spawned.status(), plain.status()),
         (artisan_api::RunStatus::Done, artisan_api::RunStatus::Done)
     );
     let (a_thread, b_thread) = (session(&a), session(&b));
@@ -251,7 +251,7 @@ async fn threads_share_one_app_server_across_turns_without_crosstalk() {
     let mut again = fixture.turn("again", Some(&a_thread));
     again.config.model = Some("second-model".into());
     let (outcome, events) = run(again).await;
-    assert_eq!(outcome.status, artisan_api::RunStatus::Done);
+    assert_eq!(outcome.status(), artisan_api::RunStatus::Done);
     let seen = format!("{events:?}");
     assert!(
         seen.contains(&format!("reply on {a_thread} to again")),
@@ -274,7 +274,7 @@ async fn threads_share_one_app_server_across_turns_without_crosstalk() {
 async fn a_changed_codex_config_starts_a_fresh_app_server() {
     let fixture = Fixture::new();
     let (first, events) = run(fixture.turn("hello", None)).await;
-    assert_eq!(first.status, artisan_api::RunStatus::Done);
+    assert_eq!(first.status(), artisan_api::RunStatus::Done);
     let thread = session(&events);
     let config = fixture.root.join("home/.codex/config.toml");
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -284,7 +284,7 @@ async fn a_changed_codex_config_starts_a_fresh_app_server() {
     )
     .unwrap();
     let (second, events) = run(fixture.turn("again", Some(&thread))).await;
-    assert_eq!(second.status, artisan_api::RunStatus::Done);
+    assert_eq!(second.status(), artisan_api::RunStatus::Done);
     assert!(format!("{events:?}").contains(&format!("reply on {thread} to again")));
     assert_eq!(fixture.spawns(), 2);
 }
@@ -297,7 +297,7 @@ async fn an_approval_reaches_only_the_thread_that_asked() {
         run(fixture.turn("slow", None)),
     );
     assert_eq!(
-        (asked.status, other.status),
+        (asked.status(), other.status()),
         (artisan_api::RunStatus::Done, artisan_api::RunStatus::Done)
     );
     let (a_thread, b_thread) = (session(&a), session(&b));
@@ -339,7 +339,7 @@ async fn retired_server_releases_a_thread_while_another_run_continues() {
     let config = fixture.root.join("home/.codex/config.toml");
     std::fs::write(&config, "# changed launch\n").unwrap();
     let (outcome, events) = run(fixture.turn("again", Some(&thread))).await;
-    assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
+    assert_eq!(outcome.status(), artisan_api::RunStatus::Done, "{outcome:?}");
     assert!(format!("{events:?}").contains(&format!("reply on {thread} to again")));
     assert_eq!(fixture.spawns(), 2);
     assert!(
@@ -348,7 +348,7 @@ async fn retired_server_releases_a_thread_while_another_run_continues() {
     );
     let (outcome, _) = other.await.unwrap();
     assert_eq!(
-        outcome.status,
+        outcome.status(),
         artisan_api::RunStatus::Done,
         "the other turn completes normally"
     );
@@ -368,7 +368,7 @@ async fn changing_context_window_releases_the_previous_writer() {
         .options
         .insert("context_window".into(), serde_json::json!(100_000));
     let (outcome, _) = run(again).await;
-    assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
+    assert_eq!(outcome.status(), artisan_api::RunStatus::Done, "{outcome:?}");
     assert_eq!(fixture.spawns(), 2);
     drop(other);
 }
@@ -379,10 +379,10 @@ async fn quotes_backslashes_and_unicode_reach_codex_and_come_back_intact() {
     let said = r#"say "hi" \ to Bjørn ✓"#;
     let (outcome, events) = run(fixture.turn(said, None)).await;
     assert_eq!(
-        outcome.status,
+        outcome.status(),
         artisan_api::RunStatus::Done,
         "{:?}",
-        outcome.error
+        outcome.error()
     );
     let thread = session(&events);
     let expected = format!("reply on {thread} to {said}");

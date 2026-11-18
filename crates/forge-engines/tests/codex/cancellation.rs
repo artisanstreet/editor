@@ -30,7 +30,7 @@ async fn cancellation_during_turn_start_waits_for_its_id_and_interrupts_it() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(outcome.status, artisan_api::RunStatus::Cancelled);
+    assert_eq!(outcome.status(), artisan_api::RunStatus::Cancelled);
     let input = read(&fixture.root.join("input"));
     let interrupt: serde_json::Value = input
         .lines()
@@ -89,8 +89,8 @@ async fn an_unconfirmed_interrupt_fails_and_unsubscribes_instead_of_claiming_can
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
-    assert!(outcome.error.unwrap().contains("did not confirm"));
+    assert_eq!(outcome.status(), artisan_api::RunStatus::Failed);
+    assert!(outcome.error().unwrap().contains("did not confirm"));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while !read(&fixture.root.join("input")).contains("thread/unsubscribe") {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -137,7 +137,7 @@ async fn a_deferred_interrupt_receives_its_full_confirmation_grace() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(outcome.status, artisan_api::RunStatus::Cancelled);
+    assert_eq!(outcome.status(), artisan_api::RunStatus::Cancelled);
     let input = read(&fixture.root.join("input"));
     let interrupt: serde_json::Value = input
         .lines()

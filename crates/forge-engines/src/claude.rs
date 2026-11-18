@@ -51,8 +51,8 @@ const SIDE_QUERY_LIMIT: Duration = Duration::from_secs(120);
 pub struct ClaudeHarness;
 
 impl Harness for ClaudeHarness {
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<()>> {
-        Box::pin(async move {
+    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
+        Box::pin(crate::harness::bridge(async move {
             let session = turn
                 .session_id
                 .as_deref()
@@ -76,14 +76,14 @@ impl Harness for ClaudeHarness {
             let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
             file.write_all(&record)?;
             Ok(())
-        })
+        }))
     }
 
     fn compact(
         &self,
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'static, Result<SideReply>> {
+    ) -> BoxFuture<'static, Result<SideReply, crate::SideQueryError>> {
         // Route by the source session when present: switching transports must
         // summarize the session being left, not try to resume it elsewhere.
         let native = turn.session_id.as_deref().map_or_else(
@@ -97,9 +97,9 @@ impl Harness for ClaudeHarness {
             |id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX),
         );
         if native {
-            Box::pin(crate::claudeai::compact(turn, cancel))
+            Box::pin(crate::harness::bridge(crate::claudeai::compact(turn, cancel)))
         } else {
-            Box::pin(side::compact(turn, cancel))
+            Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
         }
     }
 
@@ -111,7 +111,7 @@ impl Harness for ClaudeHarness {
         &self,
         turn: Turn,
         cancel: CancellationToken,
-    ) -> BoxFuture<'static, Result<SideReply>> {
+    ) -> BoxFuture<'static, Result<SideReply, crate::SideQueryError>> {
         // A session made on claude.ai is asked there: Claude Code cannot
         // resume it.
         if turn.session_id.as_deref().map_or_else(
@@ -121,9 +121,9 @@ impl Harness for ClaudeHarness {
             },
             |id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX),
         ) {
-            Box::pin(crate::claudeai::side_query(turn, cancel))
+            Box::pin(crate::harness::bridge(crate::claudeai::side_query(turn, cancel)))
         } else {
-            Box::pin(side::side_query(turn, cancel))
+            Box::pin(crate::harness::bridge(side::side_query(turn, cancel)))
         }
     }
 }
@@ -249,7 +249,7 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
         }
         if outcome
             .as_ref()
-            .is_some_and(|outcome: &Outcome| outcome.status != artisan_api::RunStatus::Done)
+            .is_some_and(|outcome: &Outcome| *outcome != Outcome::Done)
         {
             break;
         }
@@ -299,7 +299,7 @@ async fn drive(
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(error) => {
-                        return Err(error.context("reading Claude output"));
+                        return Err(anyhow::Error::new(error).context("reading Claude output"));
                     }
                 };
                 for event in decoder.feed(&line)? {
@@ -736,8 +736,8 @@ mod tests {
             )
             .await
             .expect("protocol failure must not await a blocked process");
-            assert_eq!(outcome.status, RunStatus::Failed);
-            assert!(outcome.error.unwrap().contains(if malformed {
+            assert_eq!(outcome.status(), RunStatus::Failed);
+            assert!(outcome.error().unwrap().contains(if malformed {
                 "protocol JSON"
             } else {
                 "exceeds"
@@ -832,7 +832,7 @@ cat > /dev/null
         .await
         .expect("the run ends once the agent reported");
         drain.abort();
-        assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
+        assert_eq!(outcome.status(), artisan_api::RunStatus::Done, "{outcome:?}");
 
         // The trace says what Claude wrote and why input stayed open, then
         // closed: what an agent killed mid-work is read back from.
@@ -931,7 +931,7 @@ cat > /dev/null
         .await
         .expect("the run ends once the second agent reported");
         drain.abort();
-        assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
+        assert_eq!(outcome.status(), artisan_api::RunStatus::Done, "{outcome:?}");
     }
 
     /// A side query answers from a fork: a tool the fork reaches for is
@@ -1155,9 +1155,9 @@ cat > /dev/null
     #[test]
     fn a_turn_the_usage_limit_rejected_waits_for_the_reset_it_named() {
         let outcome = turn_end("usage-limit");
-        assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
+        assert_eq!(outcome.status(), artisan_api::RunStatus::Failed);
         assert_eq!(
-            outcome.retry,
+            outcome.retry(),
             Some(crate::Retry::UsageLimit {
                 resets_at: Some(1_791_931_800_000)
             })
@@ -1168,8 +1168,8 @@ cat > /dev/null
     #[test]
     fn an_overloaded_turn_can_be_retried() {
         let outcome = turn_end("overloaded");
-        assert_eq!(outcome.status, artisan_api::RunStatus::Failed);
-        assert_eq!(outcome.retry, Some(crate::Retry::Overloaded));
+        assert_eq!(outcome.status(), artisan_api::RunStatus::Failed);
+        assert_eq!(outcome.retry(), Some(crate::Retry::Overloaded));
     }
 
     /// A foreground command past its timeout moves to the background
