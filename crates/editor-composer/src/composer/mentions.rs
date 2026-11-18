@@ -106,6 +106,24 @@ pub struct Mentions {
     dismissed: Option<(usize, String)>,
 }
 
+fn offered_threads<'a, T>(
+    newest_first: impl IntoIterator<Item = (T, &'a str, bool)>,
+) -> (Vec<(T, &'a str)>, Vec<String>) {
+    let mut titles = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut offered = Vec::new();
+    let mut offered_titles = std::collections::HashSet::new();
+    for (thread, title, archived) in newest_first {
+        if seen.insert(title) {
+            titles.push(title.to_owned());
+        }
+        if !archived && offered_titles.insert(title) {
+            offered.push((thread, title));
+        }
+    }
+    (offered, titles)
+}
+
 impl Mentions {
     pub fn refresh(
         &mut self,
@@ -163,16 +181,12 @@ impl Mentions {
         threads.sort_by(|(a, _), (b, _)| {
             (b.activity_seq, b.seq, &b.id).cmp(&(a.activity_seq, a.seq, &a.id))
         });
-        let mut titles = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for (thread, title) in threads {
-            if !seen.insert(title) {
-                continue;
-            }
-            titles.push(title.to_owned());
-            if thread.archived {
-                continue;
-            }
+        let (offered, titles) = offered_threads(
+            threads
+                .into_iter()
+                .map(|(thread, title)| (thread, title, thread.archived)),
+        );
+        for (thread, title) in offered {
             rows.push(Row::new(
                 Kind::Thread,
                 title.to_owned(),
