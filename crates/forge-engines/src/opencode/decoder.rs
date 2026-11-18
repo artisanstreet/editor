@@ -6,7 +6,6 @@
 //! OpenCode 2.1.0 (see `transcripts/opencode`).
 
 use crate::{EngineEvent, LiveKind};
-use anyhow::Context as _;
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Collection, Decision, ErrorKind, FileChange, FileOp, ItemId,
     ItemKind, NoticeKind, Output, Phase, Question, QuestionOption, SearchMode, Status, ToolKind,
@@ -60,6 +59,29 @@ pub struct Reply {
     pub method: Method,
     pub path: String,
     pub body: Option<Value>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("decode OpenCode protocol JSON")]
+    Json(#[source] serde_json::Error),
+    #[error("an OpenCode event must be an object")]
+    NotObject,
+    #[error("an OpenCode event is missing its type")]
+    NoType,
+    #[error("decode an OpenCode event's identity")]
+    Identity(#[source] serde_json::Error),
+    #[error("an OpenCode event's id is empty")]
+    EmptyId,
+}
+
+pub enum Answered {
+    Reply {
+        reply: Reply,
+        events: Vec<EngineEvent>,
+    },
+    Invalid(Vec<EngineEvent>),
+    Unexpected,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,11 +182,9 @@ enum Pending {
     },
 }
 
-/// A form field asked as one question.
 struct FormField {
     key: String,
     kind: FieldKind,
-    /// Option label → the value OpenCode wants back.
     values: HashMap<String, String>,
 }
 
@@ -174,6 +194,7 @@ enum FieldKind {
     Choice,
     Choices,
     Boolean,
+    Integer,
     Number,
 }
 
@@ -286,24 +307,23 @@ impl Decoder {
         out
     }
 
-    /// One SSE `data:` payload.
-    pub fn feed(&mut self, data: &str) -> anyhow::Result<Vec<EngineEvent>> {
+    pub fn feed(&mut self, data: &str) -> Result<Vec<EngineEvent>, DecodeError> {
         #[derive(serde::Deserialize)]
         struct Identity<'a> {
             id: &'a str,
         }
-        let event: Value = serde_json::from_str(data).context("decoding OpenCode protocol JSON")?;
-        anyhow::ensure!(
-            event.is_object(),
-            "OpenCode protocol frame must be an object"
-        );
-        anyhow::ensure!(
-            event["type"].is_string(),
-            "OpenCode event is missing its type"
-        );
-        let identity = <Identity as serde::Deserialize>::deserialize(&event)
-            .context("decoding OpenCode event identity")?;
-        anyhow::ensure!(!identity.id.trim().is_empty(), "OpenCode event ID is empty");
+        let event: Value = serde_json::from_str(data).map_err(DecodeError::Json)?;
+        if !event.is_object() {
+            return Err(DecodeError::NotObject);
+        }
+        if !event["type"].is_string() {
+            return Err(DecodeError::NoType);
+        }
+        let identity =
+            <Identity as serde::Deserialize>::deserialize(&event).map_err(DecodeError::Identity)?;
+        if identity.id.trim().is_empty() {
+            return Err(DecodeError::EmptyId);
+        }
         let events = self.feed_raw(&event);
         let events = self.reasoning_summary.normalize(events, false);
         let mut events = crate::retained::settle(self, events);
@@ -554,30 +574,55 @@ impl Decoder {
         out
     }
 
-    /// Answers the approval or question on item `key`: the events to emit
-    /// now and the request that tells OpenCode.
-    pub fn answer(&mut self, key: &str, answer: &Answer) -> Option<(Reply, Vec<EngineEvent>)> {
-        let (reply, events) = self.answer_raw(key, answer)?;
-        Some((reply, crate::retained::settle(self, events)))
+    pub fn answer(&mut self, key: &str, answer: &Answer) -> Answered {
+        match self.answer_raw(key, answer) {
+            Answered::Reply { reply, events } => Answered::Reply {
+                reply,
+                events: crate::retained::settle(self, events),
+            },
+            refused @ (Answered::Invalid(_) | Answered::Unexpected) => refused,
+        }
     }
 
-    fn answer_raw(&mut self, key: &str, answer: &Answer) -> Option<(Reply, Vec<EngineEvent>)> {
-        let native = if let Answer::Question { answers } = answer {
-            let tool = self.tools.get(key)?;
-            let ItemKind::Question { questions, .. } = &tool.kind else {
-                return None;
-            };
-            match crate::question::native_collection_answers(questions, answers) {
-                Ok(native) => native,
+    fn form_answer(
+        &self,
+        key: &str,
+        answers: &[Option<artisan_api::QuestionAnswer>],
+    ) -> Result<Option<Map<String, Value>>, String> {
+        let Some(tool) = self.tools.get(key) else {
+            return Ok(None);
+        };
+        let ItemKind::Question { questions, .. } = &tool.kind else {
+            return Ok(None);
+        };
+        let native = crate::question::native_collection_answers(questions, answers)?;
+        let Some(Pending::Form { fields, .. }) = self.pending.get(key) else {
+            return Ok(None);
+        };
+        fields
+            .iter()
+            .zip(&native)
+            .filter_map(|(field, answer)| Some((field, answer.as_ref()?)))
+            .map(|(field, answer)| Ok((field.key.clone(), field.value(answer)?)))
+            .collect::<Result<Map<String, Value>, String>>()
+            .map(Some)
+    }
+
+    fn answer_raw(&mut self, key: &str, answer: &Answer) -> Answered {
+        let form_answer = match answer {
+            Answer::Question { answers } => match self.form_answer(key, answers) {
+                Ok(Some(form_answer)) => Some(form_answer),
+                Ok(None) => return Answered::Unexpected,
                 Err(message) => {
                     tracing::warn!(key, message, "invalid answer; request remains pending");
-                    return None;
+                    return Answered::Invalid(vec![crate::question::invalid_answer(key, message)]);
                 }
-            }
-        } else {
-            Vec::new()
+            },
+            Answer::Approval { .. } => None,
         };
-        let pending = self.pending.remove(key)?;
+        let Some(pending) = self.pending.remove(key) else {
+            return Answered::Unexpected;
+        };
         let mut out = Vec::new();
         let reply = match (pending, answer) {
             (Pending::Permission { session, request }, Answer::Approval { decision }) => {
@@ -611,7 +656,7 @@ impl Decoder {
                 Pending::Form {
                     session,
                     form,
-                    fields,
+                    fields: _,
                 },
                 Answer::Question { answers },
             ) => {
@@ -637,13 +682,9 @@ impl Decoder {
                         body: None,
                     }
                 } else {
-                    let answer: Map<String, Value> = fields
-                        .iter()
-                        .zip(&native)
-                        .filter_map(|(field, answer)| {
-                            Some((field.key.clone(), field.value(answer.as_ref()?)))
-                        })
-                        .collect();
+                    let answer = form_answer.unwrap_or_else(|| {
+                        unreachable!("invariant: form {form} for item {key} was validated before it was answered")
+                    });
                     Reply {
                         method: Method::Post,
                         path: format!("/api/session/{session}/form/{form}/reply"),
@@ -654,10 +695,10 @@ impl Decoder {
             (pending, _) => {
                 tracing::warn!(key, "answer does not match what OpenCode asked");
                 self.pending.insert(key.to_owned(), pending);
-                return None;
+                return Answered::Unexpected;
             }
         };
-        Some((reply, out))
+        Answered::Reply { reply, events: out }
     }
 
     /// A child session of a followed one: followed from now on, under the
@@ -1086,7 +1127,7 @@ impl Decoder {
             Some("always") => Decision::AllowAlways,
             _ => Decision::DenyOnce,
         };
-        if let Some((_, events)) = self.answer(&key, &Answer::Approval { decision }) {
+        if let Answered::Reply { events, .. } = self.answer(&key, &Answer::Approval { decision }) {
             out.extend(events);
         }
     }
@@ -1200,7 +1241,7 @@ impl Decoder {
                 Some(artisan_api::QuestionAnswer::Text { text })
             })
             .collect();
-        if let Some((_, events)) = self.answer(&key, &Answer::Question { answers }) {
+        if let Answered::Reply { events, .. } = self.answer(&key, &Answer::Question { answers }) {
             out.extend(events);
         }
     }
@@ -1244,7 +1285,8 @@ fn form_question(field: NativeField) -> Option<(Question, FormField)> {
                 })
                 .into(),
         ),
-        "number" | "integer" => (FieldKind::Number, Vec::new()),
+        "integer" => (FieldKind::Integer, Vec::new()),
+        "number" => (FieldKind::Number, Vec::new()),
         _ => return None,
     };
     if text.trim().is_empty() || options.iter().any(|option| option.label.trim().is_empty()) {
@@ -1281,20 +1323,25 @@ fn form_question(field: NativeField) -> Option<(Question, FormField)> {
 }
 
 impl FormField {
-    /// The value OpenCode wants for the chosen labels or typed text.
-    fn value(&self, answer: &[String]) -> Value {
+    fn value(&self, answer: &[String]) -> Result<Value, String> {
         let value = |label: &String| self.values.get(label).unwrap_or(label).clone();
+        let text = answer.first().map(String::as_str).unwrap_or_default().trim();
         match self.kind {
-            FieldKind::Choices => Value::from(answer.iter().map(value).collect::<Vec<_>>()),
-            FieldKind::Boolean => Value::from(answer.first().is_some_and(|label| label == "Yes")),
-            FieldKind::Number => {
-                let text = answer.first().map(String::as_str).unwrap_or_default();
-                text.trim()
-                    .parse::<f64>()
-                    .map_or_else(|_| Value::from(text), Value::from)
-            }
+            FieldKind::Choices => Ok(Value::from(answer.iter().map(value).collect::<Vec<_>>())),
+            FieldKind::Boolean => Ok(Value::from(
+                answer.first().is_some_and(|label| label == "Yes"),
+            )),
+            FieldKind::Integer => text
+                .parse::<i64>()
+                .map(Value::from)
+                .map_err(|error| format!("{} needs a whole number, not {text:?}: {error}", self.key)),
+            FieldKind::Number => match text.parse::<f64>().map(serde_json::Number::from_f64) {
+                Ok(Some(number)) => Ok(Value::Number(number)),
+                Ok(None) => Err(format!("{} needs a finite number, not {text:?}", self.key)),
+                Err(error) => Err(format!("{} needs a number, not {text:?}: {error}", self.key)),
+            },
             FieldKind::Text | FieldKind::Choice => {
-                Value::from(answer.first().map(value).unwrap_or_default())
+                Ok(Value::from(answer.first().map(value).unwrap_or_default()))
             }
         }
     }

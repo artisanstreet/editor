@@ -111,7 +111,7 @@ fn replay(case: &str) -> Vec<Step> {
         let mut events = match decoder.feed(line) {
             Ok(events) => events,
             Err(error) => {
-                steps.push(Step::ProtocolError(format!("{error:#}")));
+                steps.push(Step::ProtocolError(diagnostics::chain(&error)));
                 continue;
             }
         };
@@ -146,7 +146,10 @@ fn replay(case: &str) -> Vec<Step> {
             _ => None,
         };
         if let Some((key, answer)) = asked
-            && let Some((reply, answered)) = decoder.answer(key, &answer)
+            && let super::decoder::Answered::Reply {
+                reply,
+                events: answered,
+            } = decoder.answer(key, &answer)
         {
             events.extend(answered);
             steps.extend(

@@ -1,8 +1,32 @@
 use super::decoder::{Decoder, Goal};
-use super::{Api, READY_TIMEOUT, emit_all, password, ready, spawn, write_agents};
+use super::{Api, ApiError, ServerError, connect, emit_all, prepare};
 use crate::{RunIo, Turn};
-use anyhow::{Context as _, Result};
+use artisan_api::ThreadId;
 use serde_json::{Value, json};
+
+#[derive(Debug, thiserror::Error)]
+pub enum GoalError {
+    #[error("send the goal command")]
+    Command(#[source] ApiError),
+    #[error("read the goal")]
+    Read(#[source] ApiError),
+    #[error("decode the goal")]
+    Decode(#[source] serde_json::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ClearGoalError {
+    #[error("thread {thread} has no OpenCode session")]
+    NoSession { thread: ThreadId },
+    #[error("start the OpenCode server")]
+    Server(#[source] ServerError),
+    #[error("clear the goal of OpenCode session {session}")]
+    Clear {
+        session: String,
+        #[source]
+        source: ApiError,
+    },
+}
 
 pub(super) fn argument(text: &str) -> Option<&str> {
     let text = text.trim_start();
@@ -10,7 +34,12 @@ pub(super) fn argument(text: &str) -> Option<&str> {
     (name == "/goal").then(|| rest.trim())
 }
 
-pub(super) async fn command(api: &Api, session: &str, text: &str, files: &[Value]) -> Result<()> {
+pub(super) async fn command(
+    api: &Api,
+    session: &str,
+    text: &str,
+    files: &[Value],
+) -> Result<(), ApiError> {
     api.post(
         &format!("/api/session/{session}/command"),
         Some(&json!({ "name": "goal", "text": text, "files": files, "delivery": "steer" })),
@@ -25,15 +54,16 @@ pub(super) async fn refresh(
     decoder: &mut Decoder,
     io: &RunIo,
     await_change: bool,
-) -> Result<()> {
-    let value = api
+) -> Result<(), GoalError> {
+    let mut value = api
         .post(
             "/api/rpc/opencode.goal/get",
             Some(&json!({ "input": { "sessionID": session } })),
         )
-        .await?;
-    let goal = serde_json::from_value::<Option<Goal>>(value["output"].clone())
-        .context("decoding OpenCode goal")?;
+        .await
+        .map_err(GoalError::Read)?;
+    let goal = serde_json::from_value::<Option<Goal>>(value["output"].take())
+        .map_err(GoalError::Decode)?;
     if await_change {
         decoder.await_goal_change(goal.clone());
     }
@@ -41,18 +71,24 @@ pub(super) async fn refresh(
     Ok(())
 }
 
-pub(super) async fn clear_goal(turn: Turn) -> Result<()> {
+pub(super) async fn clear_goal(turn: Turn) -> Result<(), ClearGoalError> {
     let session = turn
         .session_id
-        .as_deref()
-        .context("clearing a goal needs an OpenCode session")?;
-    let password = password()?;
-    let config_dir = write_agents(&turn.home, &turn.launch.readable)?;
-    let mut server = spawn(&turn, &password, &config_dir)?;
+        .clone()
+        .ok_or_else(|| ClearGoalError::NoSession {
+            thread: turn.thread_id.clone(),
+        })?;
+    let (mut server, password) = prepare(&turn).map_err(ClearGoalError::Server)?;
     let result = async {
-        let base = tokio::time::timeout(READY_TIMEOUT, ready(&mut server)).await??;
-        let api = Api::new(base, password)?;
-        command(&api, session, "clear", &[]).await
+        let api = connect(&mut server, password)
+            .await
+            .map_err(ClearGoalError::Server)?;
+        command(&api, &session, "clear", &[])
+            .await
+            .map_err(|source| ClearGoalError::Clear {
+                session: session.clone(),
+                source,
+            })
     }
     .await;
     server.kill().await;
