@@ -70,23 +70,15 @@ pub struct RemoveSessionError {
 /// runs on several threads write their cookies back at once.
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 
-/// The session as Forge keeps it.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
-    /// claude.ai's cookies, name and value.
     pub cookies: Vec<(String, String)>,
-    /// The browser's user agent. Cloudflare's clearance is bound to it.
     pub user_agent: String,
-    /// The organization the session is signed in to.
     pub org_uuid: String,
-    /// The account, as claude.ai named it when the session was checked.
     #[serde(default)]
     pub account: Option<String>,
-    /// claude.ai asked for a browser check; the session works again once a
-    /// browser renews it.
     #[serde(default)]
     pub needs_renewal: bool,
-    /// claude.ai no longer takes the session, and why.
     #[serde(default)]
     pub expired: Option<String>,
 }
@@ -226,13 +218,6 @@ impl Session {
             .map_err(|source| SaveSessionError::Write { path, source })
     }
 
-    /// Changes the session on disk: reads what is there now, so another
-    /// run's cookies are not lost, applies `change`, and writes it back.
-    /// Nothing happens when there is no session (the user signed out).
-    ///
-    /// # Errors
-    ///
-    /// Returns the error if the file cannot be read or written.
     pub fn update(home: &Path, change: impl FnOnce(&mut Self)) -> Result<(), UpdateSessionError> {
         let _guard = FILE_LOCK
             .lock()
@@ -240,7 +225,11 @@ impl Session {
         let Some(mut session) = Self::load(home).map_err(UpdateSessionError::Load)? else {
             return Ok(());
         };
+        let before = session.clone();
         change(&mut session);
+        if session == before {
+            return Ok(());
+        }
         session.write(home).map_err(UpdateSessionError::Save)
     }
 

@@ -20,6 +20,7 @@ mod files;
 mod mcp;
 mod rules;
 mod session;
+mod session_writer;
 mod shells;
 mod side;
 mod skills;

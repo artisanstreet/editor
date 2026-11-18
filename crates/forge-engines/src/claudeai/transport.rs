@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use sse_core::{SseDecoder, SseEvent, SseStream, SseStreamError};
 
 use super::session::{LoadSessionError, Session, cookie_change};
+use super::session_writer::{SessionChange, SessionWriter};
 use crate::process::MAX_LINE_BYTES;
 
 /// Where claude.ai lives.
@@ -514,8 +515,8 @@ const READ_SLACK: usize = 32;
 /// A client for claude.ai's chat API.
 pub struct Transport {
     client: reqwest::Client,
-    home: PathBuf,
     session: Mutex<Session>,
+    writer: SessionWriter,
 }
 
 impl Transport {
@@ -554,8 +555,8 @@ impl Transport {
             })?;
         Ok(Self {
             client,
-            home: home.to_owned(),
             session: Mutex::new(session),
+            writer: SessionWriter::new(home),
         })
     }
 
@@ -597,7 +598,7 @@ impl Transport {
                 path: path.to_owned(),
                 source,
             })?;
-        self.keep_cookies(&response);
+        self.keep_cookies(response.headers());
         let status = response.status();
         if status.is_success() {
             return Ok(response);
@@ -637,13 +638,11 @@ impl Transport {
         })
     }
 
-    /// Writes the cookies a response set back to the session.
-    fn keep_cookies(&self, response: &reqwest::Response) {
+    fn keep_cookies(&self, headers: &reqwest::header::HeaderMap) {
         let Some(now) = chrono::DateTime::from_timestamp_millis(artisan_api::now()) else {
             return;
         };
-        let changes: Vec<_> = response
-            .headers()
+        let changes: Vec<_> = headers
             .get_all(reqwest::header::SET_COOKIE)
             .iter()
             .filter_map(|value| value.to_str().ok())
@@ -652,26 +651,25 @@ impl Transport {
         if changes.is_empty() {
             return;
         }
-        self.session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .apply(&changes);
-        if let Err(error) = Session::update(&self.home, |session| session.apply(&changes)) {
-            tracing::warn!(
-                "keeping claude.ai's cookies failed: {}",
-                diagnostics::chain(&error)
-            );
+        let new_cookies = {
+            let mut session = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let before = session.cookies.clone();
+            session.apply(&changes);
+            session.cookies != before
+        };
+        if new_cookies {
+            self.writer.submit(SessionChange::Cookies(changes));
         }
     }
 
-    /// A refusal that is about the session marks it, so the Editor can say
-    /// so and turns go to Claude Code until it is fixed.
     fn record(&self, refusal: &Refusal) {
-        let change: Box<dyn FnOnce(&mut Session)> = match refusal {
-            Refusal::Challenge => Box::new(|session| session.needs_renewal = true),
+        let change = match refusal {
+            Refusal::Challenge => SessionChange::NeedsRenewal,
             Refusal::SignedOut(message) => {
-                let reason = format!("claude.ai signed it out: {message}");
-                Box::new(move |session| session.expired = Some(reason))
+                SessionChange::Expired(format!("claude.ai signed it out: {message}"))
             }
             Refusal::ConversationGone
             | Refusal::UsageLimit { .. }
@@ -679,12 +677,7 @@ impl Transport {
             | Refusal::Overloaded(_)
             | Refusal::Other(_) => return,
         };
-        if let Err(error) = Session::update(&self.home, change) {
-            tracing::warn!(
-                "marking the claude.ai session failed: {}",
-                diagnostics::chain(&error)
-            );
-        }
+        self.writer.submit(change);
     }
 
     /// Asks claude.ai for something, and gives back the answer.
@@ -864,7 +857,7 @@ impl Backend for Transport {
                     conversation: conversation.to_owned(),
                     source,
                 })?;
-            self.keep_cookies(&response);
+            self.keep_cookies(response.headers());
             let status = response.status();
             // Gone already is as good as deleted.
             if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
