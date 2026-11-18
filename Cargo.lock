@@ -1678,6 +1678,7 @@ dependencies = [
  "artisan-account",
  "artisan-api",
  "artisan-paths",
+ "axum",
  "base64 0.22.1",
  "claude-ai-browser",
  "diagnostics",

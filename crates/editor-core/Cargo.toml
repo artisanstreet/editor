@@ -35,8 +35,9 @@ thiserror.workspace = true
 getrandom.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 editor-core = { path = ".", features = ["test-support"] }
-test-support = { workspace = true, features = ["tokio"] }
+test-support = { workspace = true, features = ["tokio", "http"] }
 
 [lints]
 workspace = true

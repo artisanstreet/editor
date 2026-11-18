@@ -1,3 +1,5 @@
+#[path = "core/connection.rs"]
+mod connection;
 #[path = "core/hosts.rs"]
 mod hosts;
 #[path = "core/mcp_sign_in.rs"]

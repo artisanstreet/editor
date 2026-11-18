@@ -92,6 +92,15 @@ impl ForgeClient {
         })
     }
 
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn plain_for_tests(base: &str) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            transport: Transport::Direct(base.to_owned()),
+        }
+    }
+
     #[must_use]
     pub const fn is_relay(&self) -> bool {
         matches!(self.transport, Transport::Relay(_))

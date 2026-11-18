@@ -1,5 +1,4 @@
 #![expect(
-    clippy::allow_attributes,
     clippy::clone_on_ref_ptr,
     clippy::collapsible_if,
     clippy::default_trait_access,
