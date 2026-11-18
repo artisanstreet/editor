@@ -91,3 +91,61 @@ done
         drain.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn cancellation_still_ends_a_cli_that_closed_its_output_but_lives_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("claude");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nread -r input\nexec >&-\ntouch closed\nsleep 60\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let turn = Turn {
+        thread_id: ThreadId::new(),
+        engine: EngineId::Claude,
+        binary,
+        home: dir.path().join("home"),
+        cwd: dir.path().to_owned(),
+        config: EngineConfig::new(EngineId::Claude),
+        session_id: Some("existing".to_owned()),
+        input: UserInput {
+            text: "work".to_owned(),
+            ..Default::default()
+        },
+        launch: Launch::default(),
+        trace_dir: None,
+    };
+    let (_inputs, inbox) = mpsc::channel(8);
+    let (events, mut received) = mpsc::channel(256);
+    let cancel = CancellationToken::new();
+    let running = tokio::spawn(ClaudeHarness.run(
+        turn,
+        RunIo {
+            inbox,
+            events,
+            cancel: cancel.clone(),
+        },
+    ));
+    let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !dir.path().join("closed").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    cancel.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), running)
+        .await
+        .expect("Stop ends the run even after the CLI closed its output")
+        .unwrap();
+    assert_eq!(
+        outcome.status(),
+        RunStatus::Cancelled,
+        "{:?}",
+        outcome.error()
+    );
+    drain.await.unwrap();
+}

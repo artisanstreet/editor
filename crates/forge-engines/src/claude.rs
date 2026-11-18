@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 /// How long an interrupted turn may take to wind down before it is killed.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+const EXIT_GRACE: Duration = Duration::from_secs(5);
 /// How long input stays open after the last background agent ends with no
 /// follow-up turn. The ending agent queues one whose frames arrive well
 /// inside this; it only bounds the case where none comes.
@@ -350,14 +351,14 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
                 ));
             }
         };
-        let code = engine.wait().await;
+        let (code, cancelled) = reap(&mut engine, &io.cancel, finished.cancelled).await;
         for event in decoder.finish() {
             io.emit(event).await;
         }
         if let Some(id) = decoder.session() {
             session = Some(id.to_owned());
         }
-        if finished.cancelled {
+        if cancelled {
             return Outcome::cancelled();
         }
         if let Some(result) = decoder.take_outcome() {
@@ -403,6 +404,21 @@ fn exited_without_result(code: Option<i32>, stderr: &str) -> Outcome {
 
 struct Finished {
     cancelled: bool,
+}
+
+async fn reap(
+    engine: &mut EngineProcess,
+    cancel: &CancellationToken,
+    cancelling: bool,
+) -> (Option<i32>, bool) {
+    let cancelled = tokio::select! {
+        code = engine.wait() => return (code, cancelling),
+        () = cancel.cancelled() => true,
+        () = tokio::time::sleep(EXIT_GRACE) => cancelling,
+    };
+    engine.note("the output closed but the process lives on: killing it");
+    engine.kill().await;
+    (None, cancelled)
 }
 
 /// Pumps one process until its stdout closes.
