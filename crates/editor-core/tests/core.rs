@@ -8,6 +8,8 @@ mod media_http;
 mod pages;
 #[path = "core/host/preferences.rs"]
 mod preferences;
+#[path = "core/host/project_icons.rs"]
+mod project_icons;
 #[path = "core/screen.rs"]
 mod screen;
 #[path = "core/host/settings.rs"]

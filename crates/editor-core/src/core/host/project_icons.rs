@@ -12,7 +12,6 @@ struct Entry {
     hash: Option<BlobHash>,
     checked: Instant,
     failed: bool,
-    image: Option<Arc<ImageHandle>>,
 }
 impl Entry {
     fn expire(&mut self) {
@@ -58,12 +57,24 @@ impl ProjectIcons {
     }
 }
 impl HostData {
+    #[cfg(feature = "test-support")]
+    pub fn test_project_icon(&mut self, project: ProjectId, hash: BlobHash) {
+        self.project_icons.generation = self.project_icons.generation.wrapping_add(1);
+        let generation = self.project_icons.generation;
+        let task = crate::core::runtime::runtime().spawn(std::future::pending());
+        self.project_icons
+            .reading
+            .insert(project.clone(), (generation, AbortOnDropHandle::new(task)));
+        assert!(
+            self.finish_project_icon(project, generation, Ok(Some(hash))),
+            "invariant: the test icon read is current"
+        );
+    }
     pub fn project_icon(&self, project: &ProjectId) -> Option<Arc<ImageHandle>> {
-        let entry = self.project_icons.entries.get(project)?;
-        let hash = entry.hash.as_ref()?;
-        match self.image(hash) {
-            Some(BlobImage::Ready(image)) => Some(image),
-            _ => entry.image.clone(),
+        let hash = self.project_icons.entries.get(project)?.hash.as_ref()?;
+        match self.image(hash)? {
+            BlobImage::Ready(image) => Some(image),
+            BlobImage::Loading | BlobImage::Failed(_) => None,
         }
     }
     pub fn project_icons_failed(&self) -> bool {
@@ -83,14 +94,7 @@ impl HostData {
             .get(project)
             .and_then(|entry| entry.hash.clone());
         if let Some(hash) = hash {
-            match self.image(&hash) {
-                Some(BlobImage::Ready(image)) => {
-                    if let Some(entry) = self.project_icons.entries.get_mut(project) {
-                        entry.image = Some(image);
-                    }
-                }
-                _ => self.load_image(hash, false),
-            }
+            self.load_image(hash, false);
         }
         if let Some(entry) = self.project_icons.entries.get(project) {
             let fresh = entry.fresh(now);
@@ -156,16 +160,12 @@ impl HostData {
                 last.as_ref().and_then(|entry| entry.hash.clone())
             }
         };
-        let image = last
-            .filter(|last| last.hash == hash)
-            .and_then(|last| last.image);
         self.project_icons.entries.insert(
             project.clone(),
             Entry {
                 hash: hash.clone(),
                 checked: Instant::now(),
                 failed,
-                image,
             },
         );
         self.project_icons.order.retain(|id| id != &project);
