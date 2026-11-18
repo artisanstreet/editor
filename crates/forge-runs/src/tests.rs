@@ -27,12 +27,12 @@ mod live_snapshot;
 mod mcp_auth_tests;
 #[path = "../tests/run/mcp_reach.rs"]
 mod mcp_reach_tests;
-#[path = "../tests/run/resume.rs"]
-mod resume;
 #[path = "../tests/resources/paths.rs"]
 mod resource_paths;
 #[path = "../tests/resources/snapshot.rs"]
 mod resource_snapshots;
+#[path = "../tests/run/resume.rs"]
+mod resume;
 #[path = "../tests/retention/removal.rs"]
 mod retention_tests;
 #[path = "../tests/runtime/registry.rs"]
@@ -1825,6 +1825,108 @@ async fn a_nonblocking_question_can_be_answered_after_its_engine_exits() {
             .iter()
             .any(|item| item.preview() == Some("Using blue"))
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_earlier_runs_question_is_answered_on_itself_while_another_run_works() {
+    let steered = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&steered);
+    let fixture = fixture(Arc::new(move |turn, mut io| {
+        let seen = Arc::clone(&seen);
+        Box::pin(async move {
+            if turn.input.text == "Ask me a question" {
+                io.emit(EngineEvent::Item {
+                    key: "async-question".into(),
+                    parent: None,
+                    status: Status::AwaitingUser,
+                    kind: ItemKind::Question {
+                        answer_text: None,
+                        blocking: false,
+                        questions: vec![artisan_api::Question {
+                            id: "colour".into(),
+                            header: None,
+                            text: "Which colour?".into(),
+                            multi_select: false,
+                            options: vec![artisan_api::QuestionOption {
+                                id: "option-0".into(),
+                                label: "Blue".into(),
+                                description: None,
+                            }]
+                            .into(),
+                        }]
+                        .into(),
+                        answers: None,
+                    },
+                })
+                .await;
+                return Outcome::done();
+            }
+            loop {
+                tokio::select! {
+                    () = io.cancel.cancelled() => return Outcome::cancelled(),
+                    input = io.inbox.recv() => match input {
+                        Some(input) => seen.lock().unwrap().push(format!("{input:?}")),
+                        None => return Outcome::done(),
+                    },
+                }
+            }
+        })
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("Ask me a question"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let question = fixture
+        .items()
+        .await
+        .into_iter()
+        .find(|item| matches!(item.kind, ItemKind::Question { .. }))
+        .unwrap();
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("keep working"))
+        .await
+        .unwrap();
+    fixture
+        .wait_for(|items| texts(items).contains(&("keep working".to_owned(), Status::Done)))
+        .await;
+
+    fixture
+        .hub
+        .answer(
+            &question.id,
+            Answer::Question {
+                answers: vec![Some(artisan_api::QuestionAnswer::Choices {
+                    ids: vec!["option-0".into()].into(),
+                })],
+            },
+        )
+        .await
+        .unwrap();
+
+    let answered = fixture
+        .hub
+        .store()
+        .item(&question.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            answered.kind,
+            ItemKind::Question {
+                answers: Some(_),
+                ..
+            }
+        ),
+        "the answer is saved on the question, not handed to the newer run"
+    );
+    assert!(steered.lock().unwrap().is_empty());
+    fixture.hub.cancel(&fixture.thread_id).await.unwrap();
+    fixture.settled().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

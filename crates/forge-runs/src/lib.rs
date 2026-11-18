@@ -134,6 +134,7 @@ const UNSETTLED_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// One live run's handles and memory-only text.
 struct LiveRun {
+    id: RunId,
     inbox: mpsc::Sender<Input>,
     cancel: CancellationToken,
     engine: Option<EngineId>,
@@ -466,6 +467,7 @@ impl Hub {
         let inbox = self
             .lock()
             .get(&item.thread_id)
+            .filter(|run| item.run_id.as_ref() == Some(&run.id))
             .map(|run| run.inbox.clone());
         if inbox.is_none()
             && matches!(
@@ -1074,6 +1076,7 @@ impl Hub {
         self.lock().insert(
             thread_id.clone(),
             LiveRun {
+                id: run_id.clone(),
                 inbox,
                 cancel: cancel.clone(),
                 engine: None,
