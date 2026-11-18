@@ -50,16 +50,16 @@ the options). Hovering a column highlights it.
 
 ### code-ref
 
-A pointer into the code. `ref` (required), `excerpt`, `language`, `note`.
+A pointer into the code. `ref` (required), `excerpt`, `note`.
 The excerpt is numbered from the ref's first line; the path opens the file.
 
 ```artisan-code-ref
-{ "ref": "src/dispatch/support.ts:12-16", "language": "ts", "excerpt": "export function ciDispatchMachineSupport(label, machine) {\n  if (machine.os !== 'ubuntu') return false;\n  return machine.cpus < 96;\n}", "note": "The only gate both paths share." }
+{ "ref": "src/dispatch/support.ts:12-16", "excerpt": "export function ciDispatchMachineSupport(label, machine) {\n  if (machine.os !== 'ubuntu') return false;\n  return machine.cpus < 96;\n}", "note": "The only gate both paths share." }
 ```
 
 ### annotated-code
 
-Code with numbered notes under it. `code` (required), `language`, `path`,
+Code with numbered notes under it. `code` (required), `path`,
 `start_line` (default 1), `notes: [{ lines: 4 | "3-5", text }]`. Hovering a
 note highlights its lines.
 
