@@ -47,5 +47,9 @@ harness = false
 name = "text_search"
 harness = false
 
+[[bench]]
+name = "retention"
+harness = false
+
 [lints]
 workspace = true
