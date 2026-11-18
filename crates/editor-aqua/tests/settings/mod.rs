@@ -29,6 +29,25 @@ fn mcp_validation_and_legacy_transport() {
 }
 
 #[test]
+fn mcp_program_is_trimmed_and_blank_programs_are_refused() {
+    let fields = ServerFields {
+        name: "local".into(),
+        command: "  /opt/My Tools/server  ".into(),
+        ..ServerFields::default()
+    };
+    assert_eq!(fields.parse(None).unwrap().command, "/opt/My Tools/server");
+    let blank = ServerFields {
+        name: "local".into(),
+        command: "   ".into(),
+        ..ServerFields::default()
+    };
+    assert_eq!(
+        blank.parse(None).unwrap_err(),
+        "Specify either a program or an HTTP URL."
+    );
+}
+
+#[test]
 fn mcp_completion_cannot_close_reopened_form() {
     let mut form = ExtensionsForm::default();
     form.sync_host(Some("host".into()));

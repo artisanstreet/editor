@@ -32,10 +32,11 @@ impl ServerFields {
     pub fn parse(&self, previous: Option<&McpServer>) -> Result<McpServer, String> {
         let name = self.name.trim().to_owned();
         let url = self.url.trim().to_owned();
+        let command = self.command.trim().to_owned();
         if name.is_empty() {
             return Err("Give the server a name.".into());
         }
-        if self.command.is_empty() == url.is_empty() {
+        if command.is_empty() == url.is_empty() {
             return Err("Specify either a program or an HTTP URL.".into());
         }
         let args: Vec<String> = if self.args.trim().is_empty() {
@@ -66,7 +67,7 @@ impl ServerFields {
         }
         Ok(McpServer {
             name,
-            command: self.command.clone(),
+            command,
             args,
             env,
             url: (!url.is_empty()).then_some(url),
