@@ -349,11 +349,43 @@ impl Refused for CompleteError {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("the claude.ai event stream of conversation {conversation} failed")]
-pub struct StreamError {
-    pub conversation: String,
-    #[source]
-    pub source: SseStreamError<reqwest::Error>,
+pub enum StreamError {
+    #[error("the claude.ai event stream of conversation {conversation} failed")]
+    Transport {
+        conversation: String,
+        #[source]
+        source: SseStreamError<reqwest::Error>,
+    },
+    #[error("claude.ai sent an unreadable {event} event in conversation {conversation}")]
+    Unreadable {
+        conversation: String,
+        event: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+fn stream_event(
+    conversation: &str,
+    event: Result<SseEvent, SseStreamError<reqwest::Error>>,
+) -> Option<Result<Value, StreamError>> {
+    match event {
+        Ok(SseEvent::Message(message)) if message.data.trim().is_empty() => None,
+        Ok(SseEvent::Message(message)) => Some(
+            serde_json::from_str::<Value>(&message.data).map_err(|source| {
+                StreamError::Unreadable {
+                    conversation: conversation.to_owned(),
+                    event: message.event.into_owned(),
+                    source,
+                }
+            }),
+        ),
+        Ok(SseEvent::Retry(_)) => None,
+        Err(source) => Some(Err(StreamError::Transport {
+            conversation: conversation.to_owned(),
+            source,
+        })),
+    }
 }
 
 impl Refused for StreamError {
@@ -726,21 +758,8 @@ impl Backend for Transport {
             let mut stream = SseStream::with_decoder(SseDecoder::with_limit(MAX_EVENT_BYTES));
             stream.attach(response.bytes_stream());
             let conversation = conversation.to_owned();
-            let events = stream.filter_map(move |event| {
-                let conversation = conversation.clone();
-                async move {
-                    match event {
-                        Ok(SseEvent::Message(message)) => {
-                            serde_json::from_str::<Value>(&message.data).ok().map(Ok)
-                        }
-                        Ok(SseEvent::Retry(_)) => None,
-                        Err(source) => Some(Err(StreamError {
-                            conversation,
-                            source,
-                        })),
-                    }
-                }
-            });
+            let events = stream
+                .filter_map(move |event| std::future::ready(stream_event(&conversation, event)));
             Ok(events.boxed())
         })
     }
@@ -950,3 +969,7 @@ mod tests {
         assert!(message.chars().count() < 400);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/claudeai/transport.rs"]
+mod stream_tests;
