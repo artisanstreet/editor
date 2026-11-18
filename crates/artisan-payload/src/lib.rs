@@ -118,7 +118,7 @@ macro_rules! payload {
     };
 }
 
-pub fn pack(program: &[u8]) -> Result<Vec<u8>, PackError> {
+fn pack(program: &[u8]) -> Result<Vec<u8>, PackError> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
     encoder.write_all(program).map_err(PackError)?;
     encoder.finish().map_err(PackError)
