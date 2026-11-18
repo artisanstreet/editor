@@ -12,6 +12,8 @@ pub enum StorageError {
     WriterStopped,
     #[error("the store writer dropped the write")]
     WriteDropped(#[source] tokio::sync::oneshot::error::RecvError),
+    #[error("the store's authorization worker dropped the check")]
+    AuthorizationDropped(#[source] tokio::sync::oneshot::error::RecvError),
     #[error("wait for a store read slot")]
     ReadSlot(#[source] tokio::sync::AcquireError),
     #[error("the store's blocking task stopped")]

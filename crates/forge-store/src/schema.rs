@@ -373,6 +373,7 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
             "CREATE INDEX items_outline ON items(thread_id,position,id,outline) WHERE outline IS NOT NULL;",
         ),
     ],
+    &[Step::Sql(include_str!("sql/pairing/track_revisions.sql"))],
 ];
 
 pub const fn version() -> usize {

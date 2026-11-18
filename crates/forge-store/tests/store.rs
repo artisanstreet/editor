@@ -560,12 +560,14 @@ async fn a_pairing_code_works_once_and_not_after_it_expires() {
     assert_eq!(
         store
             .is_authorized(&DeviceCertificate::from_der(b"key-a"))
+            .await
             .unwrap(),
         Some(device.clone())
     );
     assert_eq!(
         store
             .is_authorized(&DeviceCertificate::from_der(b"key-b"))
+            .await
             .unwrap(),
         None
     );
@@ -575,6 +577,7 @@ async fn a_pairing_code_works_once_and_not_after_it_expires() {
     assert_eq!(
         store
             .is_authorized(&DeviceCertificate::from_der(b"key-a"))
+            .await
             .unwrap(),
         None
     );
@@ -623,6 +626,7 @@ async fn a_device_revoked_by_another_process_is_refused_next() {
     assert_eq!(
         store
             .is_authorized(&DeviceCertificate::from_der(b"key-a"))
+            .await
             .unwrap(),
         Some(device.clone())
     );
@@ -632,6 +636,7 @@ async fn a_device_revoked_by_another_process_is_refused_next() {
     assert_eq!(
         store
             .is_authorized(&DeviceCertificate::from_der(b"key-a"))
+            .await
             .unwrap(),
         None
     );
@@ -996,6 +1001,7 @@ async fn pairing_failure_does_not_consume_the_invitation() {
     assert_eq!(
         store
             .is_authorized(&DeviceCertificate::from_der(b"certificate"))
+            .await
             .unwrap(),
         Some(id)
     );

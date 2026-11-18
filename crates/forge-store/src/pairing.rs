@@ -6,8 +6,8 @@ use base64::engine::general_purpose::STANDARD;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::PoisonError;
-use tokio::sync::broadcast;
+use std::sync::{Arc, Mutex, PoisonError};
+use tokio::sync::{broadcast, oneshot};
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 
@@ -74,15 +74,21 @@ pub struct Device {
 
 pub struct Devices {
     conn: Connection,
-    data_version: i64,
+    seen: Option<Seen>,
     keys: HashMap<String, DeviceId>,
+}
+
+#[derive(Clone, Copy)]
+struct Seen {
+    data_version: i64,
+    revision: i64,
 }
 
 impl Devices {
     pub(crate) fn open(conn: Connection) -> Result<Self> {
         let mut devices = Self {
             conn,
-            data_version: -1,
+            seen: None,
             keys: HashMap::new(),
         };
         devices.refresh()?;
@@ -90,15 +96,27 @@ impl Devices {
     }
 
     fn refresh(&mut self) -> Result<Vec<DeviceId>> {
-        let version: i64 = self
+        let data_version: i64 = self
             .conn
             .query_row("PRAGMA data_version", [], |row| row.get(0))?;
-        if version == self.data_version {
+        if self
+            .seen
+            .is_some_and(|seen| seen.data_version == data_version)
+        {
+            return Ok(Vec::new());
+        }
+        let revision: i64 =
+            self.conn
+                .query_row(include_str!("sql/pairing/revision.sql"), [], |row| {
+                    row.get(0)
+                })?;
+        if let Some(seen) = self.seen.as_mut().filter(|seen| seen.revision == revision) {
+            seen.data_version = data_version;
             return Ok(Vec::new());
         }
         let keys = self
             .conn
-            .prepare_cached("SELECT public_key, id FROM authorized_keys")?
+            .prepare_cached(include_str!("sql/pairing/keys.sql"))?
             .query_map([], |row| Ok((row.get(0)?, DeviceId(row.get(1)?))))?
             .collect::<rusqlite::Result<HashMap<String, DeviceId>>>()?;
         let gone = self
@@ -108,8 +126,91 @@ impl Devices {
             .cloned()
             .collect();
         self.keys = keys;
-        self.data_version = version;
+        self.seen = Some(Seen {
+            data_version,
+            revision,
+        });
         Ok(gone)
+    }
+}
+
+pub(crate) struct Authorizer {
+    queue: Arc<Mutex<Queue>>,
+    revocations: broadcast::Sender<DeviceId>,
+}
+
+struct Check {
+    certificate: DeviceCertificate,
+    reply: oneshot::Sender<Result<Option<DeviceId>>>,
+}
+
+enum Queue {
+    Idle(Devices),
+    Checking(Vec<Check>),
+}
+
+impl Authorizer {
+    pub(crate) fn new(devices: Devices, revocations: broadcast::Sender<DeviceId>) -> Self {
+        Self {
+            queue: Arc::new(Mutex::new(Queue::Idle(devices))),
+            revocations,
+        }
+    }
+
+    fn check(&self, check: Check) {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        match std::mem::replace(&mut *queue, Queue::Checking(Vec::new())) {
+            Queue::Checking(mut pending) => {
+                pending.push(check);
+                *queue = Queue::Checking(pending);
+            }
+            Queue::Idle(devices) => {
+                *queue = Queue::Checking(vec![check]);
+                let (queue, revocations) = (Arc::clone(&self.queue), self.revocations.clone());
+                drop(tokio::task::spawn_blocking(move || {
+                    answer_checks(devices, &queue, &revocations);
+                }));
+            }
+        }
+    }
+}
+
+fn answer_checks(
+    mut devices: Devices,
+    queue: &Mutex<Queue>,
+    revocations: &broadcast::Sender<DeviceId>,
+) {
+    loop {
+        let batch = {
+            let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
+            match &mut *queue {
+                Queue::Checking(pending) if pending.is_empty() => {
+                    *queue = Queue::Idle(devices);
+                    return;
+                }
+                Queue::Checking(pending) => std::mem::take(pending),
+                Queue::Idle(_) => {
+                    unreachable!("invariant: only the authorization worker idles its queue")
+                }
+            }
+        };
+        let mut fresh = false;
+        for check in batch {
+            let answer = if fresh {
+                Ok(())
+            } else {
+                devices.refresh().map(|gone| {
+                    for revoked in gone {
+                        revocations.send(revoked).ok();
+                    }
+                })
+            };
+            fresh = answer.is_ok();
+            check
+                .reply
+                .send(answer.map(|()| devices.keys.get(check.certificate.as_str()).cloned()))
+                .ok();
+        }
     }
 }
 
@@ -222,21 +323,22 @@ impl Store {
             })
     }
 
-    pub fn is_authorized(
+    pub async fn is_authorized(
         &self,
         certificate: &DeviceCertificate,
     ) -> Result<Option<DeviceId>, AuthorizeError> {
-        let mut devices = self
-            .inner
-            .devices
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        for revoked in devices.refresh().map_err(|cause| AuthorizeError {
+        let failed = |cause| AuthorizeError {
             cause: Box::new(cause),
-        })? {
-            self.inner.revocations.send(revoked).ok();
-        }
-        Ok(devices.keys.get(certificate.as_str()).cloned())
+        };
+        let (reply, answer) = oneshot::channel();
+        self.inner.authorizer.check(Check {
+            certificate: certificate.clone(),
+            reply,
+        });
+        answer
+            .await
+            .map_err(|dropped| failed(StorageError::AuthorizationDropped(dropped)))?
+            .map_err(failed)
     }
 }
 

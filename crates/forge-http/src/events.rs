@@ -162,7 +162,7 @@ pub async fn stream(
     tasks.spawn(async move {
         let store = app.hub.store();
         let revocations = store.subscribe_revocations();
-        if !still_authorized(store, &client.certificate) {
+        if !still_authorized(store, &client.certificate).await {
             stop.cancel();
             return;
         }
@@ -466,13 +466,13 @@ async fn watch_authorization(
                 Ok(_) => {}
                 Err(RecvError::Closed) => return,
                 Err(RecvError::Lagged(_)) => {
-                    if !still_authorized(store, certificate) {
+                    if !still_authorized(store, certificate).await {
                         return;
                     }
                 }
             },
             _ = recheck.tick() => {
-                if !still_authorized(store, certificate) {
+                if !still_authorized(store, certificate).await {
                     return;
                 }
             }
@@ -480,11 +480,11 @@ async fn watch_authorization(
     }
 }
 
-fn still_authorized(
+async fn still_authorized(
     store: &forge_store::Store,
     certificate: &forge_store::DeviceCertificate,
 ) -> bool {
-    match store.is_authorized(certificate) {
+    match store.is_authorized(certificate).await {
         Ok(device) => device.is_some(),
         Err(error) => {
             tracing::warn!(

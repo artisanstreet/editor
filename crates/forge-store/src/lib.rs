@@ -46,7 +46,7 @@ use artisan_api::{
     BlobHash, DeviceId, Envelope, Event, Item, ItemId, ItemKind, Project, ProjectId, Run, RunId,
     Seq, Status, Thread, ThreadId, Timestamp,
 };
-use pairing::Devices;
+use pairing::{Authorizer, Devices};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -283,7 +283,7 @@ struct Inner {
     scan_slots: Arc<Semaphore>,
     hot: Arc<hot::HotPages>,
     index_build: Arc<Semaphore>,
-    devices: Mutex<Devices>,
+    authorizer: Authorizer,
     database: PathBuf,
     blob_dir: PathBuf,
     resource_dir: PathBuf,
@@ -299,6 +299,18 @@ fn open_database(path: &Path) -> Result<Connection> {
         database: path.to_path_buf(),
         source: Box::new(source),
     })
+}
+
+fn start_authorizer(
+    database: &Path,
+    revocations: broadcast::Sender<DeviceId>,
+) -> Result<Authorizer, OpenStoreError> {
+    let prepare = |source| OpenStoreError::Database {
+        database: database.to_path_buf(),
+        source,
+    };
+    let devices = Devices::open(open_database(database).map_err(prepare)?).map_err(prepare)?;
+    Ok(Authorizer::new(devices, revocations))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -577,7 +589,8 @@ impl Store {
         drop(checkpointer_thread);
 
         let first_reader = open_database(&database).map_err(prepare)?;
-        let devices = Devices::open(open_database(&database).map_err(prepare)?).map_err(prepare)?;
+        let revocations = broadcast::channel(64).0;
+        let authorizer = start_authorizer(&database, revocations.clone())?;
         Ok(Self {
             inner: Arc::new(Inner {
                 #[cfg(feature = "qualification")]
@@ -589,7 +602,7 @@ impl Store {
                 events,
                 local_live: feed::Feed::new(CHANGES),
                 coordination: watch::Sender::new(()),
-                revocations: broadcast::channel(64).0,
+                revocations,
                 head,
                 live_revision: AtomicU64::new(0),
                 reads: AtomicU64::new(0),
@@ -599,7 +612,7 @@ impl Store {
                 scan_slots: Arc::new(Semaphore::new(SCAN_SLOTS)),
                 hot,
                 index_build: Arc::new(Semaphore::new(1)),
-                devices: Mutex::new(devices),
+                authorizer,
                 database,
                 blob_dir,
                 resource_dir,
@@ -621,11 +634,11 @@ impl Store {
             writer,
             checkpointer,
             readers,
-            devices,
+            authorizer,
             ..
         } = inner;
         drop(readers);
-        drop(devices);
+        drop(authorizer);
         drop(jobs);
         writer
             .join()

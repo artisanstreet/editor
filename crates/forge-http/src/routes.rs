@@ -168,7 +168,7 @@ async fn authorize(
     let Some(Extension(client)) = client else {
         return Failure::from(Unauthorized::NoCertificate).into_response();
     };
-    match app.hub.store().is_authorized(&client.certificate) {
+    match app.hub.store().is_authorized(&client.certificate).await {
         Ok(Some(device)) => {
             request.extensions_mut().insert(device);
             next.run(request).await

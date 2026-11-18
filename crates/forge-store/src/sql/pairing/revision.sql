@@ -1,0 +1,1 @@
+SELECT revision FROM authorized_keys_revision
