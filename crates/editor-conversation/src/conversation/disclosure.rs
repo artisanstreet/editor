@@ -28,8 +28,8 @@ const MAX_ROWS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowClip {
-    pub height: f32,
-    pub opacity: f32,
+    pub(crate) height: f32,
+    pub(crate) opacity: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -65,12 +65,12 @@ impl Flight {
         let eased = MotionCurve::SmoothOut.sample(run.max(0.0)) as f32;
         (target - self.from).mul_add(eased, self.from)
     }
-    pub(crate) fn includes(&self, row: &Row) -> bool {
+    fn includes(&self, row: &Row) -> bool {
         row.member().is_some_and(|id| self.members.contains(id))
     }
 }
 impl DisclosureState {
-    pub fn start_disclosure(
+    pub(crate) fn start_disclosure(
         &mut self,
         rows: &[(Row, u64)],
         row_heights: &HashMap<RowKey, f32>,
@@ -158,7 +158,7 @@ impl DisclosureState {
             },
         );
     }
-    pub fn retain_disclosure_rows(&mut self, mut rows: Vec<(Row, u64)>) -> Vec<(Row, u64)> {
+    pub(crate) fn retain_disclosure_rows(&mut self, mut rows: Vec<(Row, u64)>) -> Vec<(Row, u64)> {
         for (header, flight) in &mut self.disclosures {
             let Some(index) = rows.iter().position(|(row, _)| row.key() == *header) else {
                 continue;
@@ -182,7 +182,7 @@ impl DisclosureState {
         }
         rows
     }
-    pub fn index_disclosure_rows(&mut self, rows: &[(Row, u64)]) {
+    pub(crate) fn index_disclosure_rows(&mut self, rows: &[(Row, u64)]) {
         for (header, flight) in &mut self.disclosures {
             let Some(index) = rows.iter().position(|(row, _)| row.key() == *header) else {
                 continue;
@@ -195,7 +195,7 @@ impl DisclosureState {
                 .collect();
         }
     }
-    pub fn advance_disclosures(
+    pub(crate) fn advance_disclosures(
         &mut self,
         rows: &[(Row, u64)],
         row_heights: &HashMap<RowKey, f32>,
@@ -302,7 +302,7 @@ impl DisclosureState {
             released,
         }
     }
-    pub fn row_disclosure(&self, row: &Row) -> RowDisclosure {
+    pub(crate) fn row_disclosure(&self, row: &Row) -> RowDisclosure {
         let key = row.key();
         RowDisclosure {
             clip: self.disclosure_clips.get(&key).copied(),

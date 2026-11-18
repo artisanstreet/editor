@@ -199,7 +199,7 @@ impl RowSnapshots {
         })
     }
 
-    pub fn key(&self, index: usize) -> Option<RowKey> {
+    pub(crate) fn key(&self, index: usize) -> Option<RowKey> {
         self.rows.get(index).map(|(row, _)| row.key())
     }
 
@@ -394,7 +394,7 @@ pub fn sync_questionnaires(
     changed
 }
 
-pub fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId, Seq)> {
+pub(crate) fn read_boundary(conversation: &Conversation, core: &Core) -> Option<(ItemId, Seq)> {
     if !conversation.host_is_current(core) {
         return None;
     }

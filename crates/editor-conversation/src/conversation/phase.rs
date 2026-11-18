@@ -14,7 +14,7 @@ pub enum Phase {
 }
 
 #[must_use]
-pub fn turn_phase<S: BuildHasher>(
+pub(crate) fn turn_phase<S: BuildHasher>(
     run: &Run,
     items: &[&Item],
     live: &HashMap<LiveTarget, std::sync::Arc<ropey::Rope>, S>,
@@ -90,7 +90,7 @@ pub fn turn_phase<S: BuildHasher>(
 }
 
 #[must_use]
-pub const fn status_copy(phase: Phase) -> Option<&'static str> {
+pub(crate) const fn status_copy(phase: Phase) -> Option<&'static str> {
     match phase {
         Phase::Thinking => Some("Thinking"),
         Phase::Working => Some("Working"),
@@ -100,7 +100,7 @@ pub const fn status_copy(phase: Phase) -> Option<&'static str> {
 }
 
 #[must_use]
-pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
+pub(crate) fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
     let elapsed = format_elapsed(elapsed_ms);
     match phase {
         Phase::Unknown if worked => "Worked".to_owned(),
@@ -131,7 +131,7 @@ pub fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
 }
 
 #[must_use]
-pub fn format_elapsed(millis: u64) -> String {
+fn format_elapsed(millis: u64) -> String {
     let total = millis / 1_000;
     let (hours, minutes, seconds) = (total / 3_600, (total % 3_600) / 60, total % 60);
     if hours > 0 {

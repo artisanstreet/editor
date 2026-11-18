@@ -153,7 +153,7 @@ impl RowFactory {
         realized
     }
 
-    pub fn realize_with_layout(
+    fn realize_with_layout(
         &self,
         index: usize,
         key: &RowKey,

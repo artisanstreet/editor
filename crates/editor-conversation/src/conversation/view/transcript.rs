@@ -118,7 +118,7 @@ impl TranscriptObservations {
         self.0.borrow_mut().reader_toward_end = Some(toward_end);
     }
 
-    pub fn viewport_callback(
+    pub(crate) fn viewport_callback(
         &self,
         active: Rc<std::cell::Cell<bool>>,
     ) -> Rc<dyn Fn(CollectionViewport)> {
@@ -686,7 +686,7 @@ pub fn layout_batched_list(
     )
 }
 
-pub fn reader_scrolled(
+fn reader_scrolled(
     conversation: &mut Conversation,
     core: &editor_core::Core,
     viewport: CollectionViewport,

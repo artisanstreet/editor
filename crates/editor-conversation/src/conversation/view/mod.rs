@@ -2,8 +2,8 @@ pub mod compaction;
 pub mod factory;
 pub mod motion;
 pub mod navigator;
-pub mod notice;
-pub mod request;
+mod notice;
+mod request;
 pub mod resources;
 pub mod reveal;
 pub mod row_cache;
@@ -11,7 +11,7 @@ pub mod row_sources;
 pub mod source_actions;
 pub mod status;
 pub mod transcript;
-pub mod work;
+pub(crate) mod work;
 
 use crate::conversation::adapter::{Action, RowModel};
 use crate::conversation::disclosure::RowDisclosure;
@@ -25,9 +25,9 @@ use std::rc::Rc;
 
 pub type Dispatch = Rc<dyn Fn(Action)>;
 
-pub const COLUMN_MAX: f32 = 768.0;
-pub const GUTTER: Space = Space::S24;
-pub const CHAIN_INDENT: Space = Space::S24;
+const COLUMN_MAX: f32 = 768.0;
+const GUTTER: Space = Space::S24;
+const CHAIN_INDENT: Space = Space::S24;
 const CHAIN_RULE: f32 = 2.0;
 const STATUS_TAIL: Space = Space::S8;
 const EDGE_INSET: Space = Space::S2;
@@ -35,7 +35,7 @@ const COMPOSER_LIFT: Space = Space::S24;
 const COMPOSER_LIFT_NARROW: Space = Space::S16;
 const NARROW: f32 = 640.0;
 
-pub fn reading_width(viewport: f32) -> f32 {
+fn reading_width(viewport: f32) -> f32 {
     viewport.min(COLUMN_MAX) - 2.0 * GUTTER.px()
 }
 
@@ -80,7 +80,7 @@ pub fn scoped_dispatch(
     Some(Rc::new(move |action| emit(scope.bind(action))))
 }
 
-pub fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<Element> {
+fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<Element> {
     let (key, label, action) = match row {
         Row::EarlierWork { first, .. } => (
             format!("earlier-work-{first}"),
@@ -109,7 +109,7 @@ pub fn load_row(row: &Row, theme: ArtisanTheme, dispatch: Dispatch) -> Option<El
     )
 }
 
-pub fn row_frame(
+pub(crate) fn row_frame(
     model: &RowModel,
     disclosure: RowDisclosure,
     held: bool,
@@ -212,7 +212,7 @@ fn row_frame_with_body_observer(
         .build()
 }
 
-pub fn measured_row_frame(
+fn measured_row_frame(
     model: &RowModel,
     disclosure: RowDisclosure,
     held: bool,

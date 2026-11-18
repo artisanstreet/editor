@@ -1,7 +1,7 @@
-use editor_ui::kit::{Button, ButtonTone};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::element::{Box as UiBox, Element, Text};
 use aqua_ui::style::Length;
+use editor_ui::kit::{Button, ButtonTone};
+use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,11 +14,11 @@ pub enum CopySource {
 }
 
 impl CopySource {
-    pub fn from_parts(live: Option<Arc<ropey::Rope>>, text: Arc<str>) -> Self {
+    pub(crate) fn from_parts(live: Option<Arc<ropey::Rope>>, text: Arc<str>) -> Self {
         live.map_or_else(|| Self::Text(text), Self::Live)
     }
 
-    pub fn bytes(&self) -> usize {
+    fn bytes(&self) -> usize {
         match self {
             Self::Text(text) => text.len(),
             Self::Live(text) => text.len_bytes(),
@@ -32,7 +32,7 @@ impl CopySource {
     }
 }
 
-pub fn copy_action(
+fn copy_action(
     key: String,
     theme: ArtisanTheme,
     source: CopySource,
@@ -61,7 +61,7 @@ pub fn copy_action(
     root.build()
 }
 
-pub fn failed_body(
+pub(crate) fn failed_body(
     theme: ArtisanTheme,
     error: String,
     key: String,

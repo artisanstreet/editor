@@ -95,7 +95,7 @@ pub struct PreparedElement {
     pub sources: Vec<SelectionSource>,
 }
 
-pub struct PreparedProjectedRow {
+pub(crate) struct PreparedProjectedRow {
     pub row: aqua_ui::collection::BatchedCollectionRow,
     pub geometry: editor_ui::markdown::presenter::ProjectedGeometry,
     pub text: Vec<editor_ui::markdown::presenter::ProjectedRevealText>,
@@ -112,7 +112,7 @@ pub struct ProjectedProof {
 }
 
 impl ProjectedProof {
-    pub fn matches_row(&self, row: &super::fold::Row) -> bool {
+    pub(crate) fn matches_row(&self, row: &super::fold::Row) -> bool {
         matches!(row.semantic(), super::fold::Row::Text { id, slot, block, .. }
             if *id == self.key.item && *slot == self.key.slot && *block == self.row)
     }
@@ -133,7 +133,7 @@ impl SelectionOwners {
         }
     }
 
-    pub fn document(&self) -> SelectionDocumentId {
+    fn document(&self) -> SelectionDocumentId {
         self.document
     }
 
@@ -514,7 +514,7 @@ impl MarkdownOwners {
         Ok((count, body.revision))
     }
 
-    pub fn prepare_projected_row_with_geometry(
+    pub(crate) fn prepare_projected_row_with_geometry(
         &mut self,
         scope: &PresentationScope,
         request: MarkdownRender<'_>,
@@ -621,7 +621,7 @@ impl MarkdownOwners {
         })
     }
 
-    pub fn code_services(
+    pub(crate) fn code_services(
         &self,
         scope: &PresentationScope,
         key: &BodyKey,
@@ -677,7 +677,7 @@ impl MarkdownOwners {
         Some(self.bodies.get(key)?.projected.get(&row)?.0.clone())
     }
 
-    pub fn projected_leaf_info(
+    pub(crate) fn projected_leaf_info(
         &self,
         scope: &PresentationScope,
         key: &BodyKey,
@@ -689,7 +689,7 @@ impl MarkdownOwners {
         self.bodies.get(key)?.presenter.projected_leaf_info(row)
     }
 
-    pub fn projected_leaf_is_current(
+    pub(crate) fn projected_leaf_is_current(
         &self,
         scope: &PresentationScope,
         key: &BodyKey,
@@ -734,7 +734,7 @@ impl MarkdownOwners {
         self.capture_projected_row(key, row)
     }
 
-    pub fn capture_projected_row(&self, key: &BodyKey, row: usize) -> Option<ProjectedProof> {
+    fn capture_projected_row(&self, key: &BodyKey, row: usize) -> Option<ProjectedProof> {
         let body = self.bodies.get(key)?;
         let (range, proof) = body.projected.get(&row)?;
         Some(ProjectedProof {
@@ -746,7 +746,7 @@ impl MarkdownOwners {
         })
     }
 
-    pub fn release_projected_reveal(&mut self, proof: &ProjectedProof) {
+    pub(crate) fn release_projected_reveal(&mut self, proof: &ProjectedProof) {
         if let Some(body) = self.bodies.get(&proof.key) {
             body.presenter
                 .set_projected_reveal(&body.id, proof.row, None);
@@ -767,7 +767,11 @@ impl MarkdownOwners {
             })
     }
 
-    pub fn accepts_projected_row(&self, scope: &PresentationScope, proof: &ProjectedProof) -> bool {
+    pub(crate) fn accepts_projected_row(
+        &self,
+        scope: &PresentationScope,
+        proof: &ProjectedProof,
+    ) -> bool {
         self.scope.as_ref() == Some(scope)
             && self.bodies.get(&proof.key).is_some_and(|body| {
                 body.presenter

@@ -58,7 +58,7 @@ pub struct Viewport {
     pub oldest: Option<Seq>,
     pub exhausted: bool,
     pub in_flight: bool,
-    pub requested: Option<Fetch>,
+    pub(crate) requested: Option<Fetch>,
     pub gap: Option<Seq>,
 }
 

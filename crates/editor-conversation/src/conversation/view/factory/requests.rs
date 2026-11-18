@@ -119,7 +119,7 @@ impl RowFactory {
         Ok(result)
     }
 
-    pub(super) fn question_collection(
+    fn question_collection(
         &self,
         owner: &Rc<super::super::row_cache::RowOwner>,
         item: &artisan_api::Item,

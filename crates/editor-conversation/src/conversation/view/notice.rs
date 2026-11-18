@@ -7,7 +7,7 @@ use editor_assets::AssetId;
 use editor_ui::kit::{IconSize, Space, Spaced, TextRole};
 use editor_ui::theme::ArtisanTheme;
 
-pub fn render<E>(
+pub(crate) fn render<E>(
     item: &Item,
     theme: ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor) -> Element,

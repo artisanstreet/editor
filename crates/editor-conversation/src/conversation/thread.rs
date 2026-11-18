@@ -6,8 +6,8 @@ use editor_core::ResidentBytes as _;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-pub const PAGE: u32 = 100;
-pub const ROWS_PAGE: u32 = 40;
+pub(crate) const PAGE: u32 = 100;
+pub(crate) const ROWS_PAGE: u32 = 40;
 const WINDOW_MAX: usize = 800;
 const WINDOW_KEEP: usize = 600;
 const WINDOW_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -41,12 +41,12 @@ pub enum AnswerState {
 
 impl AnswerState {
     #[must_use]
-    pub const fn sending(&self) -> bool {
+    pub(crate) const fn sending(&self) -> bool {
         matches!(self, Self::Sending(_))
     }
 
     #[must_use]
-    pub fn error(&self) -> Option<&str> {
+    pub(crate) fn error(&self) -> Option<&str> {
         match self {
             Self::Sending(_) => None,
             Self::Failed(error) => Some(error),
@@ -63,17 +63,17 @@ impl ItemUi {
 
 #[derive(Clone)]
 pub struct ThreadView {
-    pub thread: ThreadId,
+    pub(crate) thread: ThreadId,
     pub context: HashMap<ItemId, Arc<Item>>,
     pub items: BTreeMap<Seq, Arc<Item>>,
-    pub work: BTreeMap<Seq, WorkSpan>,
+    pub(crate) work: BTreeMap<Seq, WorkSpan>,
     positions: HashMap<ItemId, Seq>,
     resident_bytes: usize,
-    pub live: HashMap<LiveTarget, Arc<ropey::Rope>>,
+    pub(crate) live: HashMap<LiveTarget, Arc<ropey::Rope>>,
     pub viewport: Viewport,
     pub ui: HashMap<ItemId, ItemUi>,
-    pub answers: HashMap<ItemId, AnswerState>,
-    pub work_open: HashMap<RunId, bool>,
+    pub(crate) answers: HashMap<ItemId, AnswerState>,
+    pub(crate) work_open: HashMap<RunId, bool>,
     pub runs: HashMap<RunId, Run>,
 }
 
@@ -124,11 +124,7 @@ impl ThreadView {
         self.handle(&Input::Resume)
     }
 
-    pub const fn resident_bytes(&self) -> usize {
-        self.resident_bytes
-    }
-
-    pub fn parked_bytes(&self) -> usize {
+    pub(crate) fn parked_bytes(&self) -> usize {
         let items = self.items.len() + self.context.len();
         self.resident_bytes
             + self
@@ -565,11 +561,11 @@ impl ThreadView {
 }
 
 #[must_use]
-pub fn refreshes(first: Option<Seq>, newest: Option<Seq>, more: bool) -> bool {
+fn refreshes(first: Option<Seq>, newest: Option<Seq>, more: bool) -> bool {
     !more || matches!((first, newest), (Some(first), Some(newest)) if first <= newest)
 }
 
-pub const fn work_query(span: &WorkSpan) -> ItemsQuery {
+pub(crate) const fn work_query(span: &WorkSpan) -> ItemsQuery {
     ItemsQuery {
         before: Some(span.last.saturating_add(1)),
         after: Some(span.first.saturating_sub(1)),
@@ -577,7 +573,7 @@ pub const fn work_query(span: &WorkSpan) -> ItemsQuery {
     }
 }
 
-pub const fn query(fetch: Fetch, limit: u32) -> ItemsQuery {
+pub(crate) const fn query(fetch: Fetch, limit: u32) -> ItemsQuery {
     let (before, after) = match fetch {
         Fetch::Tail | Fetch::Refresh => (None, None),
         Fetch::Older { before } => (Some(before), None),

@@ -8,7 +8,7 @@ use crate::conversation::fold::RowKey;
 use editor_ui::kit::TextRole;
 use editor_ui::shimmer_text::{ShimmerText, ShimmerTiming, ShimmerTone};
 
-pub enum StatusText {
+pub(crate) enum StatusText {
     Reasoning(String),
     Status(String),
 }
@@ -19,10 +19,13 @@ pub struct StatusShimmers {
 }
 
 impl StatusShimmers {
-    pub fn set_scope(&mut self, scope: &crate::conversation::presentation::PresentationScope) {
+    pub(crate) fn set_scope(
+        &mut self,
+        scope: &crate::conversation::presentation::PresentationScope,
+    ) {
         self.scope = Some(scope.clone());
     }
-    pub fn render(
+    pub(crate) fn render(
         &mut self,
         row: RowKey,
         text: StatusText,
@@ -56,7 +59,7 @@ impl StatusShimmers {
             .build(typography)
     }
 
-    pub fn agent(
+    pub(crate) fn agent(
         &mut self,
         row: RowKey,
         text: String,
@@ -67,7 +70,7 @@ impl StatusShimmers {
     }
 }
 
-pub fn run<T>(
+pub(crate) fn run<T>(
     model: &RowModel,
     run: &RunId,
     theme: ArtisanTheme,
@@ -115,7 +118,7 @@ pub fn run<T>(
     Some(render(text, live, theme))
 }
 
-pub fn agent<T>(
+pub(crate) fn agent<T>(
     doing: Option<&str>,
     theme: ArtisanTheme,
     render: impl FnOnce(String, ArtisanTheme) -> T,

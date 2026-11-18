@@ -15,7 +15,7 @@ use std::collections::HashMap;
 const HEADER_TAIL: Space = Space::S8;
 const FAILURE_TAIL: Space = Space::S4;
 
-pub const fn line_role(mono: bool) -> TextRole {
+pub(crate) const fn line_role(mono: bool) -> TextRole {
     match mono {
         true => TextRole::Code,
         false => TextRole::Prose,
@@ -60,7 +60,7 @@ fn activator(
         )
 }
 
-pub fn section_title(summary: &RunSummary, now: Timestamp) -> String {
+pub(crate) fn section_title(summary: &RunSummary, now: Timestamp) -> String {
     let end = summary.ended_at.unwrap_or(now);
     let elapsed = summary
         .started_at
@@ -69,7 +69,7 @@ pub fn section_title(summary: &RunSummary, now: Timestamp) -> String {
     phase::section_title(summary.phase, summary.worked, elapsed)
 }
 
-pub fn header(
+pub(crate) fn header(
     theme: &ArtisanTheme,
     run: Option<&RunId>,
     segment: usize,
@@ -127,7 +127,7 @@ pub fn header(
     }
 }
 
-pub fn chain(
+pub(crate) fn chain(
     ids: &[ItemId],
     items: &HashMap<ItemId, std::sync::Arc<Item>>,
     open: bool,
@@ -175,7 +175,7 @@ pub fn chain(
     ))
 }
 
-pub fn agent(
+pub(crate) fn agent(
     item: &Item,
     theme: ArtisanTheme,
     truncate: impl FnOnce(String, aqua_core::GpuiTextColor) -> Element,
@@ -218,7 +218,7 @@ pub fn agent(
     ))
 }
 
-pub fn activity_row<E>(
+pub(crate) fn activity_row<E>(
     item: &Item,
     expanded: bool,
     agents: &HashMap<ItemId, String>,
@@ -311,7 +311,7 @@ pub fn activity_row<E>(
     })
 }
 
-pub fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
+pub(crate) fn plan_entry(item: &Item, theme: ArtisanTheme) -> Option<Element> {
     let ItemKind::Plan { approval, .. } = &item.kind else {
         return None;
     };

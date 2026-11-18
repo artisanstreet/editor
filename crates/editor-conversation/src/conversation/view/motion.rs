@@ -69,7 +69,10 @@ pub struct RowMotion {
 }
 
 impl RowMotion {
-    pub fn rebind_scope(&mut self, scope: &crate::conversation::presentation::PresentationScope) {
+    pub(crate) fn rebind_scope(
+        &mut self,
+        scope: &crate::conversation::presentation::PresentationScope,
+    ) {
         if self.scope.as_ref() != Some(scope) {
             self.phrases.clear();
             self.chevrons.clear();
@@ -84,7 +87,10 @@ impl RowMotion {
         }
     }
 
-    pub fn scope_is(&self, scope: &crate::conversation::presentation::PresentationScope) -> bool {
+    pub(crate) fn scope_is(
+        &self,
+        scope: &crate::conversation::presentation::PresentationScope,
+    ) -> bool {
         self.scope.as_ref() == Some(scope)
     }
     pub fn entrance(
@@ -220,7 +226,7 @@ impl RowMotion {
     }
 
     #[must_use]
-    pub fn sticking(&self, now: Instant) -> bool {
+    pub(crate) fn sticking(&self, now: Instant) -> bool {
         self.stickers.values().any(|state| {
             state
                 .started
@@ -228,7 +234,7 @@ impl RowMotion {
         })
     }
 
-    pub fn begin_frame(&mut self) {
+    pub(crate) fn begin_frame(&mut self) {
         self.animating = false;
     }
 
@@ -266,7 +272,7 @@ impl RowMotion {
         )
     }
 
-    pub fn chevron(
+    pub(crate) fn chevron(
         &mut self,
         key: &str,
         open: bool,
@@ -300,7 +306,7 @@ impl RowMotion {
         editor_ui::icon::disclosure_chevron(fraction.unwrap_or(value), size, color)
     }
 
-    pub fn compaction(
+    pub(crate) fn compaction(
         &mut self,
         id: &ItemId,
         phase: CompactionPhase,
@@ -372,7 +378,7 @@ impl EntranceFrame {
     }
 }
 
-pub fn swapped(element: Element, progress: f32) -> Element {
+pub(crate) fn swapped(element: Element, progress: f32) -> Element {
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
     UiBox::new()
@@ -390,7 +396,7 @@ pub fn swapped(element: Element, progress: f32) -> Element {
         .build()
 }
 
-pub fn arrived(element: Element, progress: f32) -> Element {
+pub(crate) fn arrived(element: Element, progress: f32) -> Element {
     use aqua_ui::element::Box as UiBox;
     use aqua_ui::style::{Length, Style};
     UiBox::new()

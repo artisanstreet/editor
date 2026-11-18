@@ -12,7 +12,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub(super) fn pending_above(
+fn pending_above(
     pending: aqua_ui::element::Element,
     full: aqua_ui::element::Element,
 ) -> aqua_ui::element::Element {
@@ -201,7 +201,7 @@ impl RowFactory {
         Ok((prepared.element, Some(proof)))
     }
 
-    pub(super) fn stored_page(
+    fn stored_page(
         &self,
         services: &StoredResources,
         key: &BodyKey,
@@ -223,12 +223,7 @@ impl RowFactory {
         page
     }
 
-    pub(super) fn page_failure(
-        &self,
-        key: &BodyKey,
-        offset: u64,
-        cause: &str,
-    ) -> aqua_ui::element::Element {
+    fn page_failure(&self, key: &BodyKey, offset: u64, cause: &str) -> aqua_ui::element::Element {
         let dispatch = Rc::clone(&self.dispatch);
         let active = Rc::clone(&self.active);
         let body = key.clone();

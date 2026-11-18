@@ -72,7 +72,7 @@ pub struct RowCache {
 }
 
 impl RowCache {
-    pub const CAPACITY: usize = 128;
+    const CAPACITY: usize = 128;
 
     pub fn rebind(&mut self, scope: Option<PresentationScope>) {
         if self.scope != scope {
@@ -82,7 +82,7 @@ impl RowCache {
         }
     }
 
-    pub fn scope_is(&self, scope: &PresentationScope) -> bool {
+    pub(crate) fn scope_is(&self, scope: &PresentationScope) -> bool {
         self.scope.as_ref() == Some(scope)
     }
 

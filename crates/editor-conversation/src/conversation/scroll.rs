@@ -82,7 +82,7 @@ pub fn wants_older(viewport_height: f32, scroll_offset: f32) -> bool {
     viewport_height > 0.0 && -scroll_offset < 1200.0
 }
 
-pub fn scrolled(
+pub(crate) fn scrolled(
     conversation: &Conversation,
     top: usize,
     viewport_height: f32,
@@ -125,13 +125,17 @@ pub fn scrolled(
     inputs
 }
 
-pub fn gap_visible(rows: &[(Row, u64)], revealed_count: usize, last_below_viewport: bool) -> bool {
+pub(crate) fn gap_visible(
+    rows: &[(Row, u64)],
+    revealed_count: usize,
+    last_below_viewport: bool,
+) -> bool {
     revealed_count > 0
         && matches!(rows.get(revealed_count - 1), Some((Row::Gap, _)))
         && !last_below_viewport
 }
 
-pub const TRANSCRIPT: &str = "conversation-transcript";
+const TRANSCRIPT: &str = "conversation-transcript";
 
 pub fn following_tail(ui: &aqua::UiApp) -> bool {
     ui.is_collection_following_tail(TRANSCRIPT) == Some(true)

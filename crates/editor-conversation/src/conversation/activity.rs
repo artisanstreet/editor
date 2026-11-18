@@ -25,7 +25,7 @@ pub enum ActivityCategory {
 }
 
 impl ActivityCategory {
-    pub(crate) fn count_label(self, count: usize) -> String {
+    fn count_label(self, count: usize) -> String {
         let counted = |one: &str, many: &str| {
             if count == 1 {
                 one.to_owned()
@@ -55,7 +55,7 @@ impl ActivityCategory {
     }
 }
 
-pub fn category(item: &Item) -> Option<ActivityCategory> {
+pub(crate) fn category(item: &Item) -> Option<ActivityCategory> {
     use ActivityCategory as C;
     match &item.kind {
         ItemKind::Agent { .. } => Some(C::Subagent),
@@ -135,16 +135,16 @@ fn is_image_path(path: &str) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Line {
-    pub verb: String,
-    pub object: String,
-    pub code: bool,
+    pub(crate) verb: String,
+    pub(crate) object: String,
+    pub(crate) code: bool,
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "one arm per kind of call, each its own words"
 )]
-pub fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
+pub(crate) fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
     let live = matches!(item.status, Status::Running | Status::AwaitingUser);
     let tense = |done: &str, running: &str| if live { running } else { done }.to_owned();
     let agent = |id: Option<&ItemId>| id.and_then(|id| agents.get(id)).cloned();
@@ -432,7 +432,7 @@ fn doing_one(item: &Item, agents: &HashMap<ItemId, String>) -> String {
     }
 }
 
-pub fn doing(items: &[&Item], agents: &HashMap<ItemId, String>) -> Option<String> {
+pub(crate) fn doing(items: &[&Item], agents: &HashMap<ItemId, String>) -> Option<String> {
     let running: Vec<&Item> = items
         .iter()
         .copied()
@@ -712,13 +712,13 @@ fn first_field(input: &str) -> Option<String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentMessage {
-    pub to: Option<artisan_api::ItemId>,
-    pub direction: MessageDirection,
-    pub summary: Option<String>,
-    pub text: artisan_api::TextContent,
+    pub(crate) to: Option<artisan_api::ItemId>,
+    pub(crate) direction: MessageDirection,
+    pub(crate) summary: Option<String>,
+    pub(crate) text: artisan_api::TextContent,
 }
 
-pub fn agent_message(item: &Item) -> Option<AgentMessage> {
+pub(crate) fn agent_message(item: &Item) -> Option<AgentMessage> {
     if let ItemKind::UserMessage {
         text,
         from_agent: Some(from),
@@ -754,11 +754,11 @@ pub fn agent_message(item: &Item) -> Option<AgentMessage> {
     })
 }
 
-pub fn chain_categories<'a>(items: impl Iterator<Item = &'a Item>) -> Vec<ActivityCategory> {
+pub(crate) fn chain_categories<'a>(items: impl Iterator<Item = &'a Item>) -> Vec<ActivityCategory> {
     items.filter_map(category).collect()
 }
 
-pub fn chain_clause(categories: impl Iterator<Item = ActivityCategory>) -> String {
+pub(crate) fn chain_clause(categories: impl Iterator<Item = ActivityCategory>) -> String {
     let mut composition: Vec<(ActivityCategory, usize)> = Vec::new();
     for category in categories {
         match composition.iter_mut().find(|(known, _)| *known == category) {
@@ -783,7 +783,9 @@ pub fn chain_clause(categories: impl Iterator<Item = ActivityCategory>) -> Strin
     text
 }
 
-pub fn chain_icon(categories: impl Iterator<Item = ActivityCategory>) -> editor_assets::AssetId {
+pub(crate) fn chain_icon(
+    categories: impl Iterator<Item = ActivityCategory>,
+) -> editor_assets::AssetId {
     use editor_assets::AssetId;
     let mut categories = categories;
     let Some(first) = categories.next() else {

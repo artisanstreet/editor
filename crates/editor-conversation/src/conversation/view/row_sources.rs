@@ -2,9 +2,9 @@ use super::row_cache::RowOwner;
 use crate::conversation::content::{SourceAction, SourceEffect, SourceExport};
 use crate::conversation::presentation::PresentationScope;
 use crate::conversation::questions::QuestionCollectionAction;
+use artisan_api::{Item, ItemId};
 use editor_core::Core;
 use editor_core::host::ScopedSourceProvider;
-use artisan_api::{Item, ItemId};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
@@ -36,7 +36,7 @@ pub enum RowSourceEffect {
 pub struct RowSourceExport {
     pub item: ItemId,
     pub scope: PresentationScope,
-    pub provider: ScopedSourceProvider,
+    provider: ScopedSourceProvider,
     owner: Weak<RowOwner>,
     export: ExportKind,
 }

@@ -22,7 +22,7 @@ struct Origin {
     generation: u64,
 }
 
-pub fn completion_is_current<I: Copy + Eq>(
+fn completion_is_current<I: Copy + Eq>(
     captured: (&HostId, I, u64),
     open: Option<(&HostId, I, u64)>,
     current: Option<I>,
@@ -114,16 +114,16 @@ pub struct Conversation {
     pub rows: Vec<(Row, u64)>,
     rows_epoch: u64,
     row_positions: RefCell<(u64, usize, HashMap<RowKey, usize>)>,
-    pub runs: HashMap<RunId, RunSummary>,
+    pub(crate) runs: HashMap<RunId, RunSummary>,
     pub disclosures: DisclosureState,
     pub question_pages: super::questions::QuestionPages,
-    pub question_collection: super::questions::QuestionCollection,
+    question_collection: super::questions::QuestionCollection,
     pub sources: super::content::SourceOwners,
     projections: super::projection::Projections,
     body_versions: HashMap<super::presentation::BodyKey, u64>,
     pub reveal: Rc<RefCell<super::admission::RevealQueue>>,
-    pub reveal_frontier: Option<RowKey>,
-    pub arrivals: Rc<RefCell<HashMap<ItemId, super::admission::LiveBlockArrivals>>>,
+    pub(crate) reveal_frontier: Option<RowKey>,
+    pub(crate) arrivals: Rc<RefCell<HashMap<ItemId, super::admission::LiveBlockArrivals>>>,
     visible_items: HashSet<ItemId>,
     mounted_rows: HashSet<RowKey>,
     mounted_for: Option<(u64, usize, usize)>,
@@ -132,7 +132,7 @@ pub struct Conversation {
     pub landing: Option<Landing>,
     landed_at: Option<Instant>,
     away: bool,
-    pub scroll_frame: Option<Instant>,
+    scroll_frame: Option<Instant>,
     generation: u64,
     work_reading: Option<Seq>,
     page_task: Option<AbortOnDropHandle<()>>,
@@ -161,7 +161,7 @@ impl Conversation {
         self.rows_epoch
     }
 
-    pub fn row_position(&self, key: &RowKey) -> Option<usize> {
+    pub(crate) fn row_position(&self, key: &RowKey) -> Option<usize> {
         let mut positions = self.row_positions.borrow_mut();
         if positions.0 != self.rows_epoch || positions.1 != self.rows.len() {
             positions.0 = self.rows_epoch;
@@ -432,7 +432,7 @@ impl Conversation {
             .put((host.clone(), instance, thread.clone()), parked, bytes);
     }
 
-    pub fn close(&mut self, core: &mut Core) {
+    fn close(&mut self, core: &mut Core) {
         self.pending = None;
         self.park();
         self.generation = self.generation.wrapping_add(1);
@@ -501,11 +501,11 @@ impl Conversation {
         ))
     }
 
-    pub fn work_idle(&self) -> bool {
+    pub(crate) fn work_idle(&self) -> bool {
         self.work_reading.is_none()
     }
 
-    pub fn landed(&mut self) {
+    pub(crate) fn landed(&mut self) {
         if self.landing.take().is_some() {
             self.landed_at = Some(self.clock.now());
         }
@@ -595,7 +595,7 @@ impl Conversation {
         }
     }
 
-    pub fn jump_row(&self, position: Seq) -> Option<usize> {
+    pub(crate) fn jump_row(&self, position: Seq) -> Option<usize> {
         let view = self.view.as_ref()?;
         let starts: Vec<_> = self
             .rows
@@ -694,7 +694,7 @@ impl Conversation {
         });
     }
 
-    pub fn observe_visible_rows(
+    pub(crate) fn observe_visible_rows(
         &mut self,
         range: std::ops::Range<usize>,
         mounted: std::ops::Range<usize>,
@@ -758,7 +758,7 @@ impl Conversation {
         frame
     }
 
-    pub fn observe_live_preparation(
+    pub(crate) fn observe_live_preparation(
         &mut self,
         core: &Core,
         binding: &super::live::LiveBinding,
@@ -826,7 +826,7 @@ impl Conversation {
             .observed(now);
     }
 
-    pub fn publish_projections(
+    pub(crate) fn publish_projections(
         &mut self,
         core: &Core,
         scope: &super::presentation::PresentationScope,
@@ -857,7 +857,7 @@ impl Conversation {
         published
     }
 
-    pub fn body_shape_count(&self, key: &super::presentation::BodyKey) -> Option<usize> {
+    pub(crate) fn body_shape_count(&self, key: &super::presentation::BodyKey) -> Option<usize> {
         self.projections
             .shaped(key)
             .then(|| self.projections.leaf_count(key))
@@ -940,7 +940,7 @@ impl Conversation {
         )))
     }
 
-    pub fn load_work(&mut self, core: &Core, first: Seq) {
+    pub(crate) fn load_work(&mut self, core: &Core, first: Seq) {
         if self.work_reading.is_some() || self.agent.is_some() {
             return;
         }
@@ -1101,7 +1101,7 @@ impl Conversation {
         trail
     }
 
-    pub fn toggle_work(
+    pub(crate) fn toggle_work(
         &mut self,
         core: &Core,
         run: &RunId,
@@ -1136,7 +1136,7 @@ impl Conversation {
         }
     }
 
-    pub fn toggle_chain(
+    pub(crate) fn toggle_chain(
         &mut self,
         core: &Core,
         id: &ItemId,
@@ -1159,7 +1159,7 @@ impl Conversation {
         }
     }
 
-    pub fn toggle_item(&mut self, core: &Core, id: &ItemId, open: bool) {
+    pub(crate) fn toggle_item(&mut self, core: &Core, id: &ItemId, open: bool) {
         if let Some(view) = &mut self.view {
             view.ui.entry(id.clone()).or_default().expanded = Some(open);
             self.rebuild(core);
@@ -1173,7 +1173,7 @@ impl Conversation {
         }
     }
 
-    pub fn answer(&mut self, core: &Core, item: ItemId, answer: Answer) {
+    pub(crate) fn answer(&mut self, core: &Core, item: ItemId, answer: Answer) {
         let Some((host, _)) = &self.open else { return };
         let Some(host) = self
             .host_instance
@@ -1187,7 +1187,8 @@ impl Conversation {
         }
         let request = AnswerRequest(self.next_answer);
         self.next_answer = self.next_answer.wrapping_add(1);
-        view.answers.insert(item.clone(), AnswerState::Sending(request));
+        view.answers
+            .insert(item.clone(), AnswerState::Sending(request));
         let client = host.client.clone();
         let origin = Origin {
             host: host.id.clone(),
@@ -1328,7 +1329,7 @@ impl Conversation {
         )
     }
 
-    pub fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
 

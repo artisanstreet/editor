@@ -88,7 +88,7 @@ pub struct StoredProof {
 }
 
 impl StoredProof {
-    pub fn accepts(
+    pub(crate) fn accepts(
         &self,
         owner: &StoredConversation,
         scope: &PresentationScope,
@@ -98,7 +98,7 @@ impl StoredProof {
         self.ordinal + 1 == self.source.block_count() && self.accepts_row(owner, scope, row, item)
     }
 
-    pub fn accepts_row(
+    pub(crate) fn accepts_row(
         &self,
         owner: &StoredConversation,
         scope: &PresentationScope,
@@ -324,7 +324,7 @@ impl StoredConversation {
         }
     }
 
-    pub fn sync_after_layout(&self, app: &mut aqua::UiApp) -> bool {
+    pub(crate) fn sync_after_layout(&self, app: &mut aqua::UiApp) -> bool {
         let mut changed = false;
         for body in self.bodies.values() {
             {
@@ -529,7 +529,7 @@ impl StoredConversation {
         self.owner.leaf(&leaf_key, source, ordinal)
     }
 
-    pub fn literal_leaf(
+    pub(crate) fn literal_leaf(
         &mut self,
         key: &BodyKey,
         source: &StoredSource,
@@ -550,7 +550,7 @@ impl StoredConversation {
         }
     }
 
-    pub fn page(
+    pub(crate) fn page(
         &mut self,
         key: &BodyKey,
         source: &StoredSource,
@@ -566,13 +566,13 @@ impl StoredConversation {
         (self.owner.page(source, ordinal), moved)
     }
 
-    pub fn retry_page(&mut self, key: &BodyKey, offset: u64) -> bool {
+    pub(crate) fn retry_page(&mut self, key: &BodyKey, offset: u64) -> bool {
         self.bodies
             .get(key)
             .is_some_and(|body| self.owner.retry_page(&body.owner, offset))
     }
 
-    pub fn proof(
+    pub(crate) fn proof(
         &self,
         scope: &PresentationScope,
         key: &BodyKey,

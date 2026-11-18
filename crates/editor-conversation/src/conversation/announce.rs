@@ -23,12 +23,12 @@ pub enum Turn {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Announcement {
-    pub text: String,
-    pub busy: bool,
+    text: String,
+    busy: bool,
 }
 
 #[must_use]
-pub fn announcement(turn: &Turn) -> Announcement {
+fn announcement(turn: &Turn) -> Announcement {
     let text = match turn {
         Turn::Idle => String::new(),
         Turn::Working { engine } => format!("{engine} is working"),
@@ -60,7 +60,7 @@ fn latest_paragraph(text: &str) -> Option<&str> {
 }
 
 #[must_use]
-pub fn turn(conversation: &Conversation, now: Timestamp) -> Turn {
+fn turn(conversation: &Conversation, now: Timestamp) -> Turn {
     let Some(view) = conversation.view.as_ref() else {
         return Turn::Idle;
     };
@@ -143,7 +143,7 @@ pub fn current(conversation: &Conversation) -> Announcement {
 }
 
 #[must_use]
-pub fn announced(transcript: Element, announcement: &Announcement) -> Element {
+pub(crate) fn announced(transcript: Element, announcement: &Announcement) -> Element {
     transcript.aria_busy(announcement.busy)
 }
 

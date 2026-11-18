@@ -1,11 +1,11 @@
 use crate::conversation::controller::Conversation;
 use crate::conversation::fold::RowKey;
 use crate::conversation::presentation::{MarkdownOwners, PresentationScope, ProjectedProof};
+use aqua_core::NodeId;
+use aqua_ui::tree::{NodeKind, UiTree};
 use editor_core::Core;
 use editor_ui::markdown::presenter::{ProjectedGeometry, ProjectedRevealText};
 use editor_ui::markdown::reveal::PreparedReveal;
-use aqua_core::NodeId;
-use aqua_ui::tree::{NodeKind, UiTree};
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -156,7 +156,7 @@ impl MountedReveals {
         }
     }
 
-    pub fn sync(
+    pub(crate) fn sync(
         &mut self,
         app: &mut aqua::UiApp,
         conversation: &Conversation,
@@ -189,9 +189,7 @@ impl MountedReveals {
             let Some(row) = weak.upgrade() else { continue };
             let row = row.borrow_mut();
             let epochs = (app.tree().layout_version(), app.tree().structure_epoch());
-            if row.ready.get()
-                && row.settled_at.get() == Some(epochs)
-                && !row.reveal.is_animating()
+            if row.ready.get() && row.settled_at.get() == Some(epochs) && !row.reveal.is_animating()
             {
                 continue;
             }
@@ -338,18 +336,18 @@ fn is_within(tree: &UiTree, node: NodeId, root: NodeId) -> bool {
     false
 }
 
-pub struct GeometryFrame<'a> {
-    pub scope: &'a PresentationScope,
-    pub row: &'a RowKey,
-    pub row_version: u64,
-    pub block: usize,
-    pub proof: &'a ProjectedProof,
-    pub geometry: &'a ProjectedGeometry,
-    pub text: &'a [ProjectedRevealText],
-    pub reveal: &'a PreparedReveal,
+struct GeometryFrame<'a> {
+    scope: &'a PresentationScope,
+    row: &'a RowKey,
+    row_version: u64,
+    block: usize,
+    proof: &'a ProjectedProof,
+    geometry: &'a ProjectedGeometry,
+    text: &'a [ProjectedRevealText],
+    reveal: &'a PreparedReveal,
 }
 
-pub fn sync_geometry(
+fn sync_geometry(
     app: &mut aqua::UiApp,
     conversation: &Conversation,
     core: &Core,

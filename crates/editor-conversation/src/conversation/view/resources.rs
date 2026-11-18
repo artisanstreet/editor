@@ -41,7 +41,7 @@ pub struct BatchRelease {
 }
 
 impl BatchRelease {
-    pub fn apply(self, app: &mut aqua::UiApp) {
+    pub(crate) fn apply(self, app: &mut aqua::UiApp) {
         app.release_selection_batch_owner(self.document, self.owner);
         if let Some(source) = self.source {
             app.unregister_selection_source_in(self.document, source);
@@ -64,7 +64,7 @@ fn same_source(left: &Option<SelectionSource>, right: &Option<SelectionSource>) 
 }
 
 impl ResourceBatches {
-    pub fn set_scope(&mut self, scope: &PresentationScope) -> bool {
+    pub(crate) fn set_scope(&mut self, scope: &PresentationScope) -> bool {
         if self.scope.as_ref().is_some_and(|current| current != scope) {
             return false;
         }
@@ -72,7 +72,7 @@ impl ResourceBatches {
         true
     }
 
-    pub fn take_releases(&mut self) -> Vec<BatchRelease> {
+    pub(crate) fn take_releases(&mut self) -> Vec<BatchRelease> {
         self.scope = None;
         self.entries
             .drain()
@@ -84,7 +84,7 @@ impl ResourceBatches {
             .collect()
     }
 
-    pub fn retain_deferred(
+    pub(crate) fn retain_deferred(
         &mut self,
         keep: &std::collections::HashSet<ResourceKey>,
     ) -> Vec<BatchRelease> {
@@ -162,11 +162,7 @@ impl ResourceBatches {
         })
     }
 
-    pub fn retain(
-        &mut self,
-        app: &mut aqua::UiApp,
-        mut retained: impl FnMut(&ResourceKey) -> bool,
-    ) {
+    fn retain(&mut self, app: &mut aqua::UiApp, mut retained: impl FnMut(&ResourceKey) -> bool) {
         self.entries.retain(|key, entry| {
             if retained(key) {
                 return true;

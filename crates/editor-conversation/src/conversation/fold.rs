@@ -53,39 +53,30 @@ pub struct NonEmpty<T>(Vec<T>);
 
 impl<T> NonEmpty<T> {
     #[must_use]
-    pub fn new(first: T) -> Self {
-        Self(vec![first])
-    }
-
-    #[must_use]
-    pub fn from_vec(items: Vec<T>) -> Option<Self> {
+    fn from_vec(items: Vec<T>) -> Option<Self> {
         (!items.is_empty()).then_some(Self(items))
     }
 
-    pub fn push(&mut self, item: T) {
-        self.0.push(item);
-    }
-
     #[must_use]
-    pub fn first(&self) -> &T {
+    pub(crate) fn first(&self) -> &T {
         self.0
             .first()
             .expect("invariant: a non-empty list has a first member")
     }
 
     #[must_use]
-    pub fn last(&self) -> &T {
+    fn last(&self) -> &T {
         self.0
             .last()
             .expect("invariant: a non-empty list has a last member")
     }
 
     #[must_use]
-    pub fn as_slice(&self) -> &[T] {
+    pub(crate) fn as_slice(&self) -> &[T] {
         &self.0
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
 }
@@ -107,7 +98,7 @@ pub struct WorkMembers {
 
 impl WorkMembers {
     #[must_use]
-    pub fn from_item(first: ItemId) -> Self {
+    fn from_item(first: ItemId) -> Self {
         Self {
             entries: vec![first],
             spans: Vec::new(),
@@ -115,28 +106,28 @@ impl WorkMembers {
     }
 
     #[must_use]
-    pub fn from_span(first: Seq) -> Self {
+    fn from_span(first: Seq) -> Self {
         Self {
             entries: Vec::new(),
             spans: vec![first],
         }
     }
 
-    pub fn push_item(&mut self, id: ItemId) {
+    fn push_item(&mut self, id: ItemId) {
         self.entries.push(id);
     }
 
-    pub fn push_span(&mut self, first: Seq) {
+    fn push_span(&mut self, first: Seq) {
         self.spans.push(first);
     }
 
     #[must_use]
-    pub fn entries(&self) -> &[ItemId] {
+    pub(crate) fn entries(&self) -> &[ItemId] {
         &self.entries
     }
 
     #[must_use]
-    pub fn spans(&self) -> &[Seq] {
+    pub(crate) fn spans(&self) -> &[Seq] {
         &self.spans
     }
 
@@ -243,7 +234,7 @@ impl PlainSection {
         }
     }
 }
-pub fn selection_order(agent_scope: bool, position: u64, slot: Slot) -> Vec<u64> {
+pub(crate) fn selection_order(agent_scope: bool, position: u64, slot: Slot) -> Vec<u64> {
     if agent_scope {
         vec![
             match slot {
@@ -263,7 +254,7 @@ pub fn selection_order(agent_scope: bool, position: u64, slot: Slot) -> Vec<u64>
     }
 }
 
-pub fn plain_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn plain_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     const ROW_BYTES: usize = 1024;
     let mut ranges = Vec::new();
     let mut start = 0;
@@ -301,7 +292,7 @@ pub enum TextSection {
     AgentMessage,
 }
 impl TextSection {
-    pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
+    fn inline_text(self, item: &Item) -> Option<&str> {
         if self == Self::AgentTask
             && let ItemKind::Agent {
                 prompt: None,
@@ -402,7 +393,7 @@ pub enum RowKey {
 }
 
 impl Row {
-    pub(crate) const fn text(id: ItemId, slot: Slot) -> Self {
+    const fn text(id: ItemId, slot: Slot) -> Self {
         Self::Text {
             id,
             slot,
@@ -608,7 +599,7 @@ pub struct Folded {
     pub runs: HashMap<RunId, RunSummary>,
 }
 
-pub const fn in_composer_strip(item: &Item) -> bool {
+pub(crate) const fn in_composer_strip(item: &Item) -> bool {
     matches!(
         &item.kind,
         ItemKind::Notice {
@@ -622,12 +613,12 @@ fn run_order(run: &Run) -> (Timestamp, &RunId) {
     (run.started_at, &run.id)
 }
 
-pub struct Turns {
+struct Turns {
     roots: HashMap<RunId, RunId>,
 }
 
 impl Turns {
-    pub fn new(view: &ThreadView, latest: Option<&Run>) -> Self {
+    fn new(view: &ThreadView, latest: Option<&Run>) -> Self {
         let mut runs: Vec<&Run> = view
             .runs
             .values()
@@ -654,12 +645,12 @@ impl Turns {
         Self { roots }
     }
 
-    pub fn of(&self, run: &RunId) -> RunId {
+    fn of(&self, run: &RunId) -> RunId {
         self.roots.get(run).unwrap_or(run).clone()
     }
 }
 
-pub fn turn_of(view: &ThreadView, latest: Option<&Run>, run: &RunId) -> RunId {
+pub(crate) fn turn_of(view: &ThreadView, latest: Option<&Run>, run: &RunId) -> RunId {
     let find = |id: &RunId| {
         latest
             .filter(|latest| &latest.id == id)
@@ -957,7 +948,7 @@ fn head_every_run(
     headed_rows
 }
 
-pub fn span_member(first: Seq) -> ItemId {
+pub(crate) fn span_member(first: Seq) -> ItemId {
     ItemId::from(format!("unloaded-work:{first}"))
 }
 
@@ -1202,7 +1193,7 @@ fn expand_entries(
     }
 }
 
-pub const fn agent_report(item: &Item) -> Option<&artisan_api::TextContent> {
+const fn agent_report(item: &Item) -> Option<&artisan_api::TextContent> {
     match &item.kind {
         ItemKind::Agent { result, .. } => result.as_ref(),
         ItemKind::UserMessage { .. }
@@ -1236,7 +1227,7 @@ fn agent_names(items: &[&Item]) -> HashMap<ItemId, String> {
         .collect()
 }
 
-pub fn children<'a>(items: &[&'a Item]) -> HashMap<ItemId, Vec<&'a Item>> {
+fn children<'a>(items: &[&'a Item]) -> HashMap<ItemId, Vec<&'a Item>> {
     let mut children: HashMap<ItemId, Vec<&Item>> = HashMap::new();
     for item in items {
         if let Some(parent) = &item.parent_id {
@@ -1373,7 +1364,7 @@ const STATUS_GAP: f32 = 32.0;
     clippy::too_many_lines,
     reason = "the spacing rules between every pair of row kinds read as one table"
 )]
-pub fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
+pub(crate) fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
     let run_of = |row: &Row| -> Option<RunId> {
         match row {
             Row::Work { run, .. }

@@ -2,7 +2,7 @@ use super::fold::{Row, RowKey, Slot, TextSection};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-pub fn immediate(row: &Row) -> bool {
+pub(crate) fn immediate(row: &Row) -> bool {
     matches!(
         row.semantic(),
         Row::Work { .. }
@@ -14,7 +14,7 @@ pub fn immediate(row: &Row) -> bool {
     )
 }
 
-pub fn behind_reveal(index: usize, row: &Row, frontier: Option<usize>) -> bool {
+pub(crate) fn behind_reveal(index: usize, row: &Row, frontier: Option<usize>) -> bool {
     !immediate(row) && frontier.is_some_and(|frontier| index > frontier)
 }
 
@@ -87,10 +87,10 @@ pub struct LiveBlockArrivals {
     high_water: usize,
     pending: bool,
     fresh: HashMap<usize, Instant>,
-    pub seen: Instant,
+    pub(crate) seen: Instant,
 }
 impl LiveBlockArrivals {
-    pub fn baseline(blocks: usize, now: Instant) -> Self {
+    pub(crate) fn baseline(blocks: usize, now: Instant) -> Self {
         Self {
             high_water: blocks,
             pending: false,
@@ -98,11 +98,11 @@ impl LiveBlockArrivals {
             seen: now,
         }
     }
-    pub const fn observed(&mut self, now: Instant) {
+    pub(crate) const fn observed(&mut self, now: Instant) {
         self.pending = true;
         self.seen = now;
     }
-    pub fn prepared(
+    pub(crate) fn prepared(
         &mut self,
         blocks: usize,
         caught_up: bool,
@@ -125,7 +125,7 @@ impl LiveBlockArrivals {
         }
         self.seen = now;
     }
-    pub fn claim(&mut self, block: usize) -> bool {
+    pub(crate) fn claim(&mut self, block: usize) -> bool {
         self.fresh.remove(&block).is_some()
     }
 }

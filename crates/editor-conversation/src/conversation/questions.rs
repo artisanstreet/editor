@@ -61,7 +61,7 @@ pub struct QuestionPages {
 }
 
 impl QuestionPages {
-    pub fn sync(
+    pub(crate) fn sync(
         &mut self,
         core: &Core,
         host_id: Option<&HostId>,
@@ -136,7 +136,7 @@ impl QuestionPages {
         }
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.questions = None;
         self.options = None;
         self.option_question = None;
@@ -224,7 +224,7 @@ impl QuestionPages {
         true
     }
 
-    pub fn option_action(
+    fn option_action(
         &self,
         panel: &QuestionnairePanel,
         index: u64,
@@ -262,7 +262,7 @@ pub struct OptionAction {
     action: editor_sources::CollectionAction<QuestionOption>,
 }
 
-pub fn option_preview(
+fn option_preview(
     option: &QuestionOption,
     panel: &QuestionnairePanel,
 ) -> editor_sources::CollectionPreview {
@@ -274,7 +274,7 @@ pub fn option_preview(
     }
 }
 
-pub fn question_preview(question: &Question, index: u64) -> editor_sources::CollectionPreview {
+fn question_preview(question: &Question, index: u64) -> editor_sources::CollectionPreview {
     let preview = match &question.text {
         artisan_api::TextContent::Inline(text) => text.chars().take(160).collect(),
         artisan_api::TextContent::Stored(_) => "Read content".to_owned(),
@@ -301,31 +301,35 @@ pub struct QuestionCollectionAction {
 }
 
 impl QuestionCollectionAction {
-    pub fn matches_item(&self, item: &artisan_api::Item) -> bool {
+    pub(crate) fn matches_item(&self, item: &artisan_api::Item) -> bool {
         item.id == self.item
             && matches!(&item.kind, artisan_api::ItemKind::Question { questions: Collection::Stored(source), .. } if source == &self.source)
     }
 }
 
 impl QuestionCollection {
-    pub fn identity(&self) -> Option<(ItemId, CollectionRef)> {
+    pub(crate) fn identity(&self) -> Option<(ItemId, CollectionRef)> {
         self.owner
             .as_ref()
             .map(|owner| (owner.item.clone(), owner.source.clone()))
     }
-    pub fn dispatch_changed(&mut self, core: &Core, action: QuestionCollectionAction) -> bool {
+    pub(crate) fn dispatch_changed(
+        &mut self,
+        core: &Core,
+        action: QuestionCollectionAction,
+    ) -> bool {
         let before = self.browser().map(|browser| browser.borrow().view_state());
         self.dispatch(core, action);
         let after = self.browser().map(|browser| browser.borrow().view_state());
         before != after
     }
 
-    pub fn drain_changed(&mut self, core: &Core) -> bool {
+    pub(crate) fn drain_changed(&mut self, core: &Core) -> bool {
         self.browser().is_some_and(|browser| {
             editor_sources::drain_collection_changed(&mut browser.borrow_mut(), core)
         })
     }
-    pub fn open_provider(
+    pub(crate) fn open_provider(
         &mut self,
         provider: &editor_core::host::ScopedSourceProvider,
         item: &ItemId,
@@ -363,7 +367,7 @@ impl QuestionCollection {
         }
         true
     }
-    pub fn retain(
+    pub(crate) fn retain(
         &mut self,
         core: &Core,
         item: impl FnOnce(&ItemId) -> Option<std::sync::Arc<artisan_api::Item>>,
@@ -393,15 +397,15 @@ impl QuestionCollection {
         }
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.owner = None;
     }
 
-    pub fn browser(&self) -> Option<Rc<RefCell<CollectionBrowser<Question>>>> {
+    pub(crate) fn browser(&self) -> Option<Rc<RefCell<CollectionBrowser<Question>>>> {
         Some(Rc::clone(&self.owner.as_ref()?.browser))
     }
 
-    pub fn dispatch(&mut self, core: &Core, action: QuestionCollectionAction) {
+    fn dispatch(&mut self, core: &Core, action: QuestionCollectionAction) {
         use editor_sources::CollectionAction;
         let Some(owner) = self.owner.as_mut() else {
             return;
@@ -427,7 +431,7 @@ impl QuestionCollection {
         }
     }
 
-    pub fn view(
+    pub(crate) fn view(
         &self,
         theme: editor_ui::theme::ArtisanTheme,
         document: aqua_text::document::SelectionDocumentId,

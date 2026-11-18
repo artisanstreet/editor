@@ -1,10 +1,4 @@
 use crate::conversation::compaction::{CompactionFrame, CompactionPhase, eased};
-use editor_ui::{
-    kit::{IconSize, Space, Spaced, TextRole},
-    motion::MotionCurve,
-    shimmer_text::{ShimmerTiming, sweep},
-    theme::ArtisanTheme,
-};
 use aqua_core::{DisplayItem, Rect, scene::TextShimmer};
 use aqua_ui::{
     AlignItems, JustifyContent,
@@ -12,6 +6,12 @@ use aqua_ui::{
     style::{Length, Style},
 };
 use artisan_api::{Item, ItemKind, ModelSwitch, NamedModel, Status};
+use editor_ui::{
+    kit::{IconSize, Space, Spaced, TextRole},
+    motion::MotionCurve,
+    shimmer_text::{ShimmerTiming, sweep},
+    theme::ArtisanTheme,
+};
 
 const SHIMMER_KEY: &str = "compaction-shimmer";
 const RULE_LINE: f32 = 1.0;
@@ -78,11 +78,7 @@ fn shimmering(style: Style, shimmer: Option<TextShimmer>) -> Style {
     }
 }
 
-fn switch_line(
-    switch: &ModelSwitch,
-    shimmer: Option<TextShimmer>,
-    theme: ArtisanTheme,
-) -> Element {
+fn switch_line(switch: &ModelSwitch, shimmer: Option<TextShimmer>, theme: ArtisanTheme) -> Element {
     let model = |model: &NamedModel| {
         UiBox::new()
             .spaced(Space::S4)
@@ -190,7 +186,7 @@ pub fn label(
         .build()
 }
 
-pub fn row(
+pub(crate) fn row(
     item: &Item,
     frame: CompactionFrame,
     theme: ArtisanTheme,

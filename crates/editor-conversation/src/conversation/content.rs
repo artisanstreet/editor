@@ -154,7 +154,7 @@ pub struct SourceAction {
 }
 
 impl SourceAction {
-    pub fn matches_item(&self, item: &Item) -> bool {
+    pub(crate) fn matches_item(&self, item: &Item) -> bool {
         item.id == self.item
             && matches!(self.field.text(item), Some(TextContent::Stored(source)) if source == &self.source)
     }
@@ -171,10 +171,10 @@ pub struct SourceExport {
 }
 
 impl SourceExport {
-    pub fn item(&self) -> &ItemId {
+    pub(crate) fn item(&self) -> &ItemId {
         &self.item
     }
-    pub fn matches_item(&self, item: &Item) -> bool {
+    pub(crate) fn matches_item(&self, item: &Item) -> bool {
         item.id == self.item
             && matches!(self.field.text(item), Some(TextContent::Stored(source)) if source == &self.source)
     }
@@ -197,7 +197,7 @@ impl SourceOwners {
                     && owner.text.is_export_pending(export.generation)
             })
     }
-    pub fn dispatch_changed(
+    pub(crate) fn dispatch_changed(
         &mut self,
         core: &Core,
         action: SourceAction,
@@ -212,7 +212,7 @@ impl SourceOwners {
         (before != after, effect)
     }
 
-    pub fn drain_all(&mut self, core: &Core) -> (bool, Vec<SourceEffect>) {
+    pub(crate) fn drain_all(&mut self, core: &Core) -> (bool, Vec<SourceEffect>) {
         let mut changed = false;
         let mut effects = Vec::new();
         for ((item, field), owner) in &mut self.owners {
@@ -270,7 +270,7 @@ impl SourceOwners {
         }
         true
     }
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.owners.clear();
     }
 

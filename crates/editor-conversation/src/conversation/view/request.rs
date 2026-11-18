@@ -9,11 +9,11 @@ use editor_ui::kit::{Button, ButtonTone, Row, Space, Spaced, Surface, TextRole};
 use editor_ui::theme::ArtisanTheme;
 use std::rc::Rc;
 
-pub type Dispatch = Rc<dyn Fn(Action)>;
+pub(crate) type Dispatch = Rc<dyn Fn(Action)>;
 
 const CARD: Surface = Surface::Card;
 
-pub const fn field_role(mono: bool) -> TextRole {
+pub(crate) const fn field_role(mono: bool) -> TextRole {
     match mono {
         true => TextRole::Code,
         false => TextRole::Label,
@@ -55,7 +55,7 @@ fn decision_label(decision: Decision) -> &'static str {
     }
 }
 
-pub fn approval<E>(
+pub(crate) fn approval<E>(
     item: &Item,
     sending: bool,
     error: Option<&str>,
@@ -176,7 +176,7 @@ pub fn approval<E>(
     Ok(Some(card(theme, title, details.build())))
 }
 
-pub fn question<E>(
+pub(crate) fn question<E>(
     item: &Item,
     theme: ArtisanTheme,
     mut source: impl FnMut(SourceField) -> Result<Element, E>,
@@ -223,7 +223,7 @@ pub fn question<E>(
     Ok(Some(card(theme, title, details.build())))
 }
 
-pub fn answered<E>(
+pub(crate) fn answered<E>(
     questions: &Collection<artisan_api::Question>,
     theme: ArtisanTheme,
     mut source: impl FnMut(SourceField) -> Result<Element, E>,
@@ -270,7 +270,7 @@ pub fn answered<E>(
         .build())
 }
 
-pub fn question_theme(item: &Item, mut theme: ArtisanTheme) -> ArtisanTheme {
+pub(crate) fn question_theme(item: &Item, mut theme: ArtisanTheme) -> ArtisanTheme {
     if matches!(
         &item.kind,
         ItemKind::Question {

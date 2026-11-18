@@ -16,7 +16,7 @@ impl RowFactory {
         fingerprint.filter(|_| &row_key == key)
     }
 
-    pub(super) fn compute_fingerprint(&self, index: usize) -> Option<u64> {
+    fn compute_fingerprint(&self, index: usize) -> Option<u64> {
         let RowSource::Snapshots { snapshots, rows } = &self.rows else {
             return None;
         };
@@ -58,7 +58,7 @@ impl RowFactory {
         (self.settled.borrow().get(key) == Some(&fingerprint)).then_some(fingerprint)
     }
 
-    pub(super) fn row_key(&self, index: usize) -> Option<RowKey> {
+    fn row_key(&self, index: usize) -> Option<RowKey> {
         let RowSource::Snapshots { snapshots, .. } = &self.rows else {
             return None;
         };

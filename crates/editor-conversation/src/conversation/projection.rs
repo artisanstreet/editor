@@ -67,7 +67,7 @@ pub struct Projections {
     shapes: HashMap<BodyKey, BodyShape>,
 }
 
-pub fn block_version(signature: u64, seq: u64, running: bool, block: usize, count: usize) -> u64 {
+fn block_version(signature: u64, seq: u64, running: bool, block: usize, count: usize) -> u64 {
     let mut hash = DefaultHasher::new();
     signature.hash(&mut hash);
     seq.hash(&mut hash);
@@ -106,7 +106,7 @@ impl Projections {
         self.shapes.contains_key(key)
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.bodies.clear();
         self.shapes.clear();
     }
