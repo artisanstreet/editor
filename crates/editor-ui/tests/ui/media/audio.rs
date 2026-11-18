@@ -98,3 +98,33 @@ fn a_remote_track_is_refused_without_fetching() {
     );
     assert!(fixture.calls.try_recv().is_err());
 }
+
+#[test]
+fn an_embedded_track_at_the_size_limit_stays_cached_once_loaded() {
+    use base64::Engine as _;
+    let fixture = Fixture::new();
+    let payload = vec![7_u8; 32 * 1024 * 1024];
+    let source = MediaSource::from(format!(
+        "data:audio/ogg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&payload)
+    ));
+    let request = || {
+        fixture
+            .assets
+            .request(Some(&fixture.fetcher), &source, "audio", 1, Arc::new(|| {}))
+    };
+    assert!(request().is_none());
+    fixture
+        .wake
+        .recv_timeout(LIMIT)
+        .expect("the embedded track decoded");
+    assert!(fixture.assets.drain());
+    let first = request()
+        .expect("the track is cached")
+        .expect("the track plays");
+    let second = request()
+        .expect("the track is still cached")
+        .expect("the track plays");
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(first.len(), payload.len());
+}

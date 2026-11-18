@@ -31,6 +31,8 @@ pub enum MediaLoadError {
     Invalid,
     #[error(transparent)]
     Fetch(MediaFailure),
+    #[error("the media is too large to keep in memory")]
+    TooLarge,
 }
 
 pub type MediaFetch = Pin<Box<dyn Future<Output = Result<Arc<[u8]>, MediaFailure>> + Send>>;

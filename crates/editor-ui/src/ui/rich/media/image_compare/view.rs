@@ -32,6 +32,7 @@ pub(crate) enum Failure {
     Invalid,
     Fetch(MediaFailure),
     Undecodable,
+    TooLarge,
 }
 
 impl Failure {
@@ -43,6 +44,7 @@ impl Failure {
             Self::Fetch(MediaFailure::Unreachable) => "The host didn't answer",
             Self::Fetch(MediaFailure::Unreadable) => "Couldn't read the file",
             Self::Undecodable => "Not a supported image",
+            Self::TooLarge => "Too large to preview",
         }
     }
 }
@@ -142,6 +144,9 @@ impl CompareState {
                     ImageState::Failed(Failure::Fetch(error))
                 }
                 Some(Err(ImageError::Decode)) => ImageState::Failed(Failure::Undecodable),
+                Some(Err(ImageError::Load(MediaLoadError::TooLarge))) => {
+                    ImageState::Failed(Failure::TooLarge)
+                }
             };
             let same = match (&self.images[index], &next) {
                 (ImageState::Loading, ImageState::Loading) => true,
@@ -548,7 +553,7 @@ fn image_layer(
                 editor_assets::AssetId::TABLER_WORLD,
                 Some("Load remote images"),
             ),
-            Failure::Invalid => (editor_assets::AssetId::TABLER_FILE_OFF, None),
+            Failure::Invalid | Failure::TooLarge => (editor_assets::AssetId::TABLER_FILE_OFF, None),
             Failure::Fetch(_) | Failure::Undecodable => (
                 editor_assets::AssetId::TABLER_FILE_OFF,
                 Some("Click to retry"),

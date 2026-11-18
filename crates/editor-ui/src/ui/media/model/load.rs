@@ -1,7 +1,7 @@
 use super::{Format, Model, Up, parse};
 use crate::ui::media::{
     resource_cache::{Load, LoadTicket, ResourceCache, ResourceLoader},
-    source::{self, MediaFetcher, MediaSource, Owned, Parsed},
+    source::{self, MediaFetcher, MediaLoadError, MediaSource, Owned, Parsed},
 };
 use aqua_core::gpui_mesh::{GpuiMesh, GpuiMeshVertex};
 use editor_core::{delivery::Delivery, media_http, runtime};
@@ -177,6 +177,7 @@ impl ModelAssets {
         match cache.load::<Loader>(&membership, &key, source_bytes, waiter, wake) {
             Load::Ready(result) => Some(result),
             Load::Pending => None,
+            Load::TooLarge => Some(Err(MediaLoadError::TooLarge.to_string())),
             Load::Start(ticket) => {
                 let mut state = self.state.borrow_mut();
                 let id = state.next;

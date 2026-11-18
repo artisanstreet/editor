@@ -25,6 +25,7 @@ pub enum AudioLoadError {
 struct Completion {
     id: u64,
     bytes: Result<MediaBytes, MediaLoadError>,
+    retained: usize,
 }
 struct Job {
     ticket: LoadTicket<Loader>,
@@ -102,6 +103,7 @@ impl AudioAssets {
         match cache.load::<Loader>(&membership, &key, source_bytes, waiter, wake) {
             Load::Ready(result) => Some(result.map_err(AudioLoadError::from)),
             Load::Pending => None,
+            Load::TooLarge => Some(Err(MediaLoadError::TooLarge.into())),
             Load::Start(ticket) => {
                 let mut state = self.state.borrow_mut();
                 let id = state.next;
@@ -117,7 +119,16 @@ impl AudioAssets {
                     let bytes =
                         source::load_image_bytes(&source, fetcher.as_ref(), &media_http::client())
                             .await;
-                    let _ = sender.send(Completion { id, bytes }).await;
+                    let retained = bytes
+                        .as_ref()
+                        .map_or(0, |loaded| unshared_bytes(&source, &loaded.bytes));
+                    let _ = sender
+                        .send(Completion {
+                            id,
+                            bytes,
+                            retained,
+                        })
+                        .await;
                 });
                 let abort = task.abort_handle();
                 if ticket.attach(abort.clone()) {
@@ -142,8 +153,7 @@ impl AudioAssets {
                 continue;
             }
             let bytes = completion.bytes.map(|loaded| loaded.bytes);
-            let size = bytes.as_ref().map_or(0, |bytes| bytes.len());
-            job.ticket.publish(bytes, size, drop);
+            job.ticket.publish(bytes, completion.retained, drop);
             changed = true;
         }
         self.discard_stale();
@@ -157,6 +167,13 @@ impl AudioAssets {
             }
             current
         });
+    }
+}
+
+fn unshared_bytes(source: &MediaSource, bytes: &Arc<[u8]>) -> usize {
+    match source.parsed() {
+        Parsed::Data(payload) if Arc::ptr_eq(&payload.bytes, bytes) => 0,
+        Parsed::Data(_) | Parsed::Url(_) | Parsed::File { .. } | Parsed::Invalid => bytes.len(),
     }
 }
 

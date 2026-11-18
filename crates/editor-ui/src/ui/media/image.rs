@@ -119,6 +119,7 @@ impl Images {
             wake,
         ) {
             Load::Ready(result) => Some(result),
+            Load::TooLarge => Some(Err(ImageError::Load(MediaLoadError::TooLarge))),
             Load::Pending => {
                 let mut state = self.state.borrow_mut();
                 if let Some(job) = state

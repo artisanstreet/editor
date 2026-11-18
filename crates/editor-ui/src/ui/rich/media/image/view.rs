@@ -313,8 +313,10 @@ impl ImageState {
                             },
                         );
                     }
-                    Loaded::Loading | Loaded::Failed(ImageError::Load(MediaLoadError::Invalid)) => {
-                    }
+                    Loaded::Loading
+                    | Loaded::Failed(ImageError::Load(
+                        MediaLoadError::Invalid | MediaLoadError::TooLarge,
+                    )) => {}
                 }
                 let mut column = UiBox::new()
                     .layout("column")
@@ -423,6 +425,7 @@ fn content(
                 let title = match error {
                     ImageError::NeedsConsent => "Remote image",
                     ImageError::Load(MediaLoadError::Invalid) => "Not a valid image path",
+                    ImageError::Load(MediaLoadError::TooLarge) => "Too large to preview",
                     ImageError::Load(MediaLoadError::Fetch(
                         crate::ui::media::source::MediaFailure::Missing,
                     )) => "File not found",
@@ -439,7 +442,7 @@ fn content(
                         editor_assets::AssetId::TABLER_WORLD,
                         Some("Load remote images"),
                     ),
-                    ImageError::Load(MediaLoadError::Invalid) => {
+                    ImageError::Load(MediaLoadError::Invalid | MediaLoadError::TooLarge) => {
                         (editor_assets::AssetId::TABLER_FILE_OFF, None)
                     }
                     ImageError::Load(MediaLoadError::Fetch(_)) | ImageError::Decode => (
