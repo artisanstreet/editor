@@ -89,7 +89,7 @@ fn replay(case: &str) -> Vec<Step> {
             Ok(events) => {
                 steps.extend(events.into_iter().map(|event| Step::Event(Box::new(event))));
             }
-            Err(error) => steps.push(Step::ProtocolError(format!("{error:#}"))),
+            Err(error) => steps.push(Step::ProtocolError(diagnostics::chain(&error))),
         }
         steps.extend(decoder.take_outbox().into_iter().map(Step::Reply));
         for response in decoder.take_responses() {
@@ -405,6 +405,27 @@ fn a_goal_is_shown_only_when_one_was_set() {
     let set = json!({"method": "thread/goal/updated", "params": {"threadId": thread, "goal": {"objective": "Ship the parser", "status": "active"}}});
     assert_eq!(goals(set), ["active: Ship the parser"]);
     assert_eq!(goals(cleared), ["cleared: Ship the parser"]);
+}
+
+#[test]
+fn a_turn_completed_that_is_not_terminal_fails_instead_of_finishing() {
+    use serde_json::json;
+    for status in ["inProgress", "paused"] {
+        let mut decoder = super::decoder::Decoder::default();
+        let request = decoder.request("thread/start", json!({}));
+        decoder
+            .feed(&json!({ "id": request, "result": { "thread": { "id": "root" }, "turn": { "id": "turn-1" } } }).to_string())
+            .unwrap();
+        let ended = decoder.feed(
+            &json!({ "method": "turn/completed", "params": { "threadId": "root", "turn": { "id": "turn-1", "status": status } } })
+                .to_string(),
+        );
+        assert!(
+            matches!(ended, Err(super::decoder::DecodeError::TurnCompleted { .. })),
+            "{status}"
+        );
+        assert_eq!(decoder.take_turn_end(), None, "{status}");
+    }
 }
 
 #[test]

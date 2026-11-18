@@ -154,11 +154,7 @@ expression: "replay(\"async-questions\")"
         },
     ),
     TurnEnd(
-        Outcome {
-            status: Done,
-            error: None,
-            retry: None,
-        },
+        Done,
     ),
     Event(
         Item {

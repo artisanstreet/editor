@@ -476,11 +476,7 @@ expression: "replay(\"approval-queue\")"
         },
     ),
     TurnEnd(
-        Outcome {
-            status: Done,
-            error: None,
-            retry: None,
-        },
+        Done,
     ),
     Event(
         Status {

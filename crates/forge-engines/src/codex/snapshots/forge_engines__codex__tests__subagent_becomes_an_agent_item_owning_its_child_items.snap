@@ -304,10 +304,6 @@ expression: "replay(\"subagent\")"
         ),
     ),
     TurnEnd(
-        Outcome {
-            status: Done,
-            error: None,
-            retry: None,
-        },
+        Done,
     ),
 ]

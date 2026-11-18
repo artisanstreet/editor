@@ -23,8 +23,7 @@
 //! the thread is closed and its persistence writer has been released.
 
 use crate::Turn;
-use crate::process::{self, EngineProcess};
-use anyhow::{Context, Result, anyhow, bail};
+use crate::process::{self, EngineProcess, ReadError, SendError, SpawnError};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
@@ -43,6 +42,70 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Frames held for threads no run has claimed yet.
 const UNCLAIMED_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Debug, thiserror::Error)]
+pub enum AttachError {
+    #[error("the old Codex server ended during the handoff of thread {thread}")]
+    HandoffEnded { thread: String },
+    #[error("the old Codex server didn't release thread {thread} in {}s", INITIALIZE_TIMEOUT.as_secs())]
+    ReleaseTimedOut { thread: String },
+    #[error("the old Codex server couldn't release thread {thread}")]
+    Release {
+        thread: String,
+        #[source]
+        source: ReleaseError,
+    },
+    #[error("start the Codex app-server")]
+    Start(#[source] StartError),
+    #[error("the Codex app-server ended while run {run} attached")]
+    Ended { run: u64 },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ReleaseError {
+    #[error("the server ended before answering")]
+    Ended,
+    #[error("a run is still attached to the thread")]
+    StillAttached,
+    #[error("Codex refused thread/unsubscribe: {response}")]
+    Refused { response: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error("create CODEX_HOME {}", path.display())]
+    Home {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("spawn the app-server")]
+    Spawn(#[source] SpawnError),
+    #[error("the app-server didn't answer initialize in {}s: {stderr}", INITIALIZE_TIMEOUT.as_secs())]
+    InitializeTimedOut { stderr: String },
+    #[error("initialize the app-server: {stderr}")]
+    Initialize {
+        stderr: String,
+        #[source]
+        source: InitializeError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum InitializeError {
+    #[error("send initialize")]
+    Send(#[source] SendError),
+    #[error("read the answer to initialize")]
+    Read(#[source] ReadError),
+    #[error("Codex refused initialize: {error}")]
+    Refused { error: Value },
+    #[error("Codex exited before answering initialize")]
+    Exited,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("the Codex app-server has ended")]
+pub struct Ended;
+
 static SERVERS: LazyLock<tokio::sync::Mutex<Vec<Arc<Server>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(Vec::new()));
 
@@ -51,7 +114,7 @@ static SERVERS: LazyLock<tokio::sync::Mutex<Vec<Arc<Server>>>> =
     clippy::significant_drop_tightening,
     reason = "the pool stays locked until the run is attached; see below"
 )]
-pub(super) async fn attach(turn: &Turn) -> Result<Attachment> {
+pub(super) async fn attach(turn: &Turn) -> Result<Attachment, AttachError> {
     let key = launch_key(turn);
     let window = turn.config.context_window_override();
     let mut servers = SERVERS.lock().await;
@@ -81,11 +144,29 @@ pub(super) async fn attach(turn: &Turn) -> Result<Attachment> {
                     thread: thread.clone(),
                     reply,
                 })
-                .map_err(|_unsent| anyhow!("the old Codex server ended during thread handoff"))?;
-            tokio::time::timeout(INITIALIZE_TIMEOUT, released)
-                .await
-                .context("waiting for the old Codex server to release the thread timed out")?
-                .context("the old Codex server ended before releasing the thread")??;
+                .map_err(|_unsent| AttachError::HandoffEnded {
+                    thread: thread.clone(),
+                })?;
+            match tokio::time::timeout(INITIALIZE_TIMEOUT, released).await {
+                Err(_elapsed) => {
+                    return Err(AttachError::ReleaseTimedOut {
+                        thread: thread.clone(),
+                    });
+                }
+                Ok(Err(_dropped)) => {
+                    return Err(AttachError::Release {
+                        thread: thread.clone(),
+                        source: ReleaseError::Ended,
+                    });
+                }
+                Ok(Ok(Err(source))) => {
+                    return Err(AttachError::Release {
+                        thread: thread.clone(),
+                        source,
+                    });
+                }
+                Ok(Ok(Ok(()))) => {}
+            }
         }
     }
     let current = servers
@@ -95,7 +176,9 @@ pub(super) async fn attach(turn: &Turn) -> Result<Attachment> {
     let server = if let Some(server) = current {
         server
     } else {
-        let server = Server::start(turn, key).await?;
+        let server = Server::start(turn, key)
+            .await
+            .map_err(AttachError::Start)?;
         servers.push(Arc::clone(&server));
         server
     };
@@ -106,7 +189,7 @@ pub(super) async fn attach(turn: &Turn) -> Result<Attachment> {
     server
         .commands
         .send(Command::Attach { run, lines, window })
-        .map_err(|_unsent| anyhow!("the Codex app-server ended while a run attached"))?;
+        .map_err(|_unsent| AttachError::Ended { run })?;
     Ok(Attachment {
         server,
         run,
@@ -142,9 +225,9 @@ struct Server {
 }
 
 impl Server {
-    async fn start(turn: &Turn, key: u64) -> Result<Arc<Self>> {
-        std::fs::create_dir_all(super::codex_home(turn))
-            .context("creating CODEX_HOME for the Codex app-server")?;
+    async fn start(turn: &Turn, key: u64) -> Result<Arc<Self>, StartError> {
+        let home = super::codex_home(turn);
+        std::fs::create_dir_all(&home).map_err(|source| StartError::Home { path: home, source })?;
         // Artisan already retains idle threads for IDLE_UNLOAD. An explicit
         // unsubscribe must release persistence immediately for server handoffs,
         // rather than starting Codex's separate idle retention timer.
@@ -157,14 +240,22 @@ impl Server {
             ],
             &turn.home,
             "codex-server",
-        )?;
-        tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&mut process))
-            .await
-            .context("Codex app-server did not answer initialize")?
-            .with_context(|| {
-                let tail = process.stderr_tail();
-                format!("initializing the Codex app-server: {tail}")
-            })?;
+        )
+        .map_err(StartError::Spawn)?;
+        match tokio::time::timeout(INITIALIZE_TIMEOUT, initialize(&mut process)).await {
+            Err(_elapsed) => {
+                return Err(StartError::InitializeTimedOut {
+                    stderr: process.stderr_tail(),
+                });
+            }
+            Ok(Err(source)) => {
+                return Err(StartError::Initialize {
+                    stderr: process.stderr_tail(),
+                    source,
+                });
+            }
+            Ok(Ok(())) => {}
+        }
         let (commands, receiver) = mpsc::unbounded_channel();
         let server = Arc::new(Self {
             key,
@@ -212,7 +303,7 @@ impl Server {
     }
 }
 
-async fn initialize(process: &mut EngineProcess) -> Result<()> {
+async fn initialize(process: &mut EngineProcess) -> Result<(), InitializeError> {
     process
         .send(&json!({
             "id": 0,
@@ -230,19 +321,25 @@ async fn initialize(process: &mut EngineProcess) -> Result<()> {
                 },
             },
         }))
-        .await?;
-    while let Some(line) = process.next_line().await? {
-        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+        .await
+        .map_err(InitializeError::Send)?;
+    while let Some(line) = process.next_line().await.map_err(InitializeError::Read)? {
+        let Ok(mut frame) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         if frame.get("method").is_none() && frame["id"] == json!(0) {
-            if let Some(error) = frame.get("error") {
-                bail!("{error}");
+            if let Some(error) = frame.get_mut("error") {
+                return Err(InitializeError::Refused {
+                    error: error.take(),
+                });
             }
-            return Ok(process.send(&json!({ "method": "initialized" })).await?);
+            return process
+                .send(&json!({ "method": "initialized" }))
+                .await
+                .map_err(InitializeError::Send);
         }
     }
-    bail!("Codex exited before answering initialize")
+    Err(InitializeError::Exited)
 }
 
 /// One run's connection to its server. Dropping it detaches the run.
@@ -258,14 +355,14 @@ impl Attachment {
         self.lines.recv().await
     }
 
-    pub fn send(&self, message: Value) -> Result<()> {
+    pub fn send(&self, message: Value) -> Result<(), Ended> {
         self.server
             .commands
             .send(Command::Send {
                 run: self.run,
                 message,
             })
-            .map_err(|_unsent| anyhow!("the Codex app-server has ended"))
+            .map_err(|_unsent| Ended)
     }
 
     /// Why the process ended, with the tail of its stderr.
@@ -308,7 +405,7 @@ enum Command {
     },
     Release {
         thread: String,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<(), ReleaseError>>,
     },
     /// Look again at whether the server should end.
     Check,
@@ -316,7 +413,7 @@ enum Command {
 
 struct Release {
     thread: String,
-    reply: oneshot::Sender<Result<()>>,
+    reply: oneshot::Sender<Result<(), ReleaseError>>,
 }
 
 struct AttachedRun {
@@ -399,21 +496,21 @@ impl Actor {
                     Ok(Some(line)) => {
                         self.route(line);
                         if let Err(error) = self.flush().await {
-                            break format!("writing to the Codex app-server: {error:#}");
+                            break format!("writing to the Codex app-server: {}", diagnostics::chain(&error));
                         }
                     }
                     Ok(None) => break "Codex app-server exited".to_owned(),
-                    Err(error) => break format!("reading the Codex app-server: {error:#}"),
+                    Err(error) => break format!("reading the Codex app-server: {}", diagnostics::chain(&error)),
                 },
                 command = self.commands.recv() => {
                     let Some(command) = command else { break "every handle is gone".to_owned() };
                     if let Err(error) = self.command(command).await {
-                        break format!("writing to the Codex app-server: {error:#}");
+                        break format!("writing to the Codex app-server: {}", diagnostics::chain(&error));
                     }
                 }
                 _ = sweep.tick() => {
                     if let Err(error) = self.unload_idle().await {
-                        break format!("writing to the Codex app-server: {error:#}");
+                        break format!("writing to the Codex app-server: {}", diagnostics::chain(&error));
                     }
                 }
             }
@@ -463,7 +560,7 @@ impl Actor {
         self.commands.close();
     }
 
-    async fn command(&mut self, command: Command) -> Result<()> {
+    async fn command(&mut self, command: Command) -> Result<(), SendError> {
         match command {
             Command::Attach { run, lines, window } => {
                 self.runs.insert(run, AttachedRun { lines, window });
@@ -496,7 +593,7 @@ impl Actor {
             Command::Release { thread, reply } => {
                 if self.owners.contains_key(&thread) {
                     reply
-                        .send(Err(anyhow!("the Codex thread still has an attached run")))
+                        .send(Err(ReleaseError::StillAttached))
                         .ok();
                 } else if !self.server.loaded().contains_key(&thread) {
                     reply.send(Ok(())).ok();
@@ -518,7 +615,7 @@ impl Actor {
     }
 
     /// Unsubscribes threads no run has used for [`IDLE_UNLOAD`].
-    async fn unload_idle(&mut self) -> Result<()> {
+    async fn unload_idle(&mut self) -> Result<(), SendError> {
         let now = Instant::now();
         let stale: Vec<String> = self
             .idle
@@ -533,7 +630,7 @@ impl Actor {
         Ok(())
     }
 
-    async fn unsubscribe(&mut self, thread: &str) -> Result<()> {
+    async fn unsubscribe(&mut self, thread: &str) -> Result<(), SendError> {
         let id = self.next_id;
         self.next_id += 1;
         self.pending.insert(id, (SERVER_RUN, json!(id)));
@@ -580,7 +677,7 @@ impl Actor {
     }
 
     /// Writes what routing answered on the server's behalf.
-    async fn flush(&mut self) -> Result<()> {
+    async fn flush(&mut self) -> Result<(), SendError> {
         for message in std::mem::take(&mut self.outbox) {
             self.process.send(&message).await?;
         }
@@ -608,7 +705,9 @@ impl Actor {
                 {
                     release
                         .reply
-                        .send(Err(anyhow!("Codex could not release the thread: {line}")))
+                        .send(Err(ReleaseError::Refused {
+                            response: line.to_owned(),
+                        }))
                         .ok();
                 }
             }

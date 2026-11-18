@@ -379,10 +379,6 @@ expression: "replay(\"approval\")"
         ),
     ),
     TurnEnd(
-        Outcome {
-            status: Done,
-            error: None,
-            retry: None,
-        },
+        Done,
     ),
 ]

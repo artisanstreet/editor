@@ -162,7 +162,6 @@ pub(super) struct TurnCompleted {
 
 #[derive(Deserialize)]
 pub(super) struct CompletedTurn {
-    /// `inProgress` is a schema status, but never a terminal one.
     pub status: TurnStatus,
     pub error: Option<CodexError>,
 }
@@ -173,10 +172,6 @@ pub(super) enum TurnStatus {
     Completed,
     Interrupted,
     Failed,
-    /// `inProgress`, or one Artisan doesn't know: `turn/completed` says the
-    /// turn ended, and that is how it reads.
-    #[serde(other)]
-    Ended,
 }
 
 /// Codex's error shape, on failed turns and `error` notifications.

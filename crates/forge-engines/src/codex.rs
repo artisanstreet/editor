@@ -1,23 +1,3 @@
-//! Codex over `codex app-server` (JSON-RPC, one JSON object per line).
-//!
-//! Every run attaches to one shared app-server (see [`server`]):
-//! `thread/start` or `thread/resume`, then `turn/start`. A steer goes in as
-//! `turn/steer` against the running turn; if Codex says the turn already
-//! ended, the steer starts the next turn. The run ends when the root
-//! thread's turn completes with nothing left to send. Cancel is
-//! `turn/interrupt`.
-//!
-//! The thread stays loaded between runs, and `thread/resume` of a loaded
-//! thread keeps the settings it was loaded with, so every `turn/start`
-//! carries the run's model, permissions, working directory and tier.
-//!
-//! Verified against Codex 0.162.1: approvals answered `acceptForSession`
-//! skip the next identical prompt and `decline` declines the call, though
-//! `availableDecisions` lists neither; MCP servers in the managed config
-//! reach every thread (a `mcp_servers` table in `thread/start` would replace
-//! that config, so it is not sent); a
-//! steer after the turn ended is rejected with "no active turn to steer".
-
 #[cfg(test)]
 #[path = "../tests/codex/activity.rs"]
 mod activity_tests;
@@ -35,9 +15,13 @@ mod side;
 #[cfg(test)]
 mod tests;
 
+pub use decoder::DecodeError;
+pub use goal::{CallError, ClearGoalError};
+pub use server::{AttachError, Ended, InitializeError, ReleaseError, StartError};
+pub use side::SideQueryError;
+
 use crate::{EngineEvent, Harness, Input, Outcome, RunIo, SideReply, Turn, UserInput};
-use anyhow::{Context, Result, anyhow};
-use artisan_api::{EngineConfig, ItemId, Permissions};
+use artisan_api::{EngineConfig, ItemId, Permissions, ThreadId};
 use decoder::Decoder;
 use futures::future::BoxFuture;
 use serde_json::{Map, Value, json};
@@ -45,34 +29,75 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::Instant;
 
-/// How long an interrupted turn may take to wind down before Codex is given up on.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetTitleError {
+    #[error("thread {thread} has no Codex session")]
+    NoSession { thread: ThreadId },
+    #[error("attach to the Codex app-server")]
+    Attach(#[source] AttachError),
+    #[error("Codex didn't name session {session} in 30s")]
+    TimedOut { session: String },
+    #[error("name session {session}")]
+    Call {
+        session: String,
+        #[source]
+        source: CallError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("start session {session:?} with {method}")]
+    Open {
+        method: &'static str,
+        session: Option<String>,
+        #[source]
+        source: RequestError,
+    },
+    #[error("Codex exited during {during}{}", if ended.is_empty() { String::new() } else { format!(": {ended}") })]
+    Exited { during: &'static str, ended: String },
+    #[error("decode Codex output")]
+    Decode(#[source] DecodeError),
+    #[error("write to Codex")]
+    Write(#[source] Ended),
+    #[error("Codex refused turn/start")]
+    TurnStart(#[source] crate::rpc::RpcError),
+    #[error("Codex answered turn/start without a turn id")]
+    NoTurn,
+    #[error("Codex has no thread for this run")]
+    NoThread,
+    #[error("{}; requested thread unload and retired the server. Underlying work may still be running.", if *interrupt_sent { "Codex did not confirm the turn stopped after an interrupt" } else { "Codex did not return the started turn ID before cancellation timed out" })]
+    StopTimedOut { interrupt_sent: bool },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RequestError {
+    #[error("Codex exited{}", if ended.is_empty() { String::new() } else { format!(": {ended}") })]
+    Exited { ended: String },
+    #[error("decode Codex output")]
+    Decode(#[source] DecodeError),
+    #[error("write to Codex")]
+    Write(#[source] Ended),
+    #[error("Codex refused the request")]
+    Refused(#[source] crate::rpc::RpcError),
+}
 
 pub struct CodexHarness;
 
 impl Harness for CodexHarness {
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
-        Box::pin(crate::harness::bridge(async move {
-            let session = turn
-                .session_id
-                .as_ref()
-                .context("naming a Codex thread needs a session")?;
-            let mut conn = server::attach(&turn).await?;
-            // Name by id directly: resuming here would steal the live run's
-            // notification subscription from the shared server.
-            tokio::time::timeout(
-                Duration::from_secs(30),
-                goal::call(
-                    &mut conn,
-                    1,
-                    "thread/name/set",
-                    json!({ "threadId": session, "name": title }),
-                ),
-            )
-            .await
-            .context("naming the Codex thread timed out")??;
-            Ok(())
-        }))
+    fn set_title(
+        &self,
+        turn: Turn,
+        title: String,
+    ) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
+        let thread = turn.thread_id.clone();
+        Box::pin(async move {
+            set_title(turn, title)
+                .await
+                .map_err(|source| crate::SetTitleError::Codex { thread, source })
+        })
     }
 
     fn compact(
@@ -80,7 +105,12 @@ impl Harness for CodexHarness {
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
     ) -> BoxFuture<'static, Result<crate::SideReply, crate::SideQueryError>> {
-        Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
+        let thread = turn.thread_id.clone();
+        Box::pin(async move {
+            side::compact(turn, cancel)
+                .await
+                .map_err(|source| crate::SideQueryError::Codex { thread, source })
+        })
     }
 
     fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
@@ -88,9 +118,13 @@ impl Harness for CodexHarness {
             let thread = turn.thread_id.clone();
             let conn = match server::attach(&turn).await {
                 Ok(conn) => conn,
-                Err(error) => {
-                    tracing::error!(%thread, "starting Codex: {error:#}");
-                    return Outcome::failed(format!("Codex could not start: {error:#}"));
+                Err(failure) => {
+                    let error: &dyn std::error::Error = &failure;
+                    tracing::error!(%thread, error, "Codex could not start");
+                    return Outcome::failed(format!(
+                        "Codex could not start: {}",
+                        diagnostics::chain(&failure)
+                    ));
                 }
             };
             let mut run = Run {
@@ -98,16 +132,14 @@ impl Harness for CodexHarness {
                 decoder: Decoder::default(),
                 io,
                 queued: Vec::new(),
-                starting: None,
+                phase: Phase::Idle,
                 steering: HashMap::new(),
-                cancelling: false,
-                nudge: false,
-                outcome: None,
                 permissions: None,
             };
-            let outcome = run.run(&turn).await.unwrap_or_else(|error| {
-                tracing::warn!(%thread, session = ?turn.session_id, "Codex run failed: {error:#}");
-                Outcome::failed(format!("{error:#}"))
+            let outcome = run.run(&turn).await.unwrap_or_else(|failure| {
+                let error: &dyn std::error::Error = &failure;
+                tracing::warn!(%thread, session = ?turn.session_id, error, "Codex run failed");
+                Outcome::failed(diagnostics::chain(&failure))
             });
             let events = run.decoder.finish();
             run.emit(events).await;
@@ -120,11 +152,21 @@ impl Harness for CodexHarness {
         turn: Turn,
         cancel: tokio_util::sync::CancellationToken,
     ) -> BoxFuture<'static, Result<SideReply, crate::SideQueryError>> {
-        Box::pin(crate::harness::bridge(side::side_query(turn, cancel)))
+        let thread = turn.thread_id.clone();
+        Box::pin(async move {
+            side::side_query(turn, cancel)
+                .await
+                .map_err(|source| crate::SideQueryError::Codex { thread, source })
+        })
     }
 
     fn clear_goal(&self, turn: Turn) -> BoxFuture<'static, Result<(), crate::ClearGoalError>> {
-        Box::pin(crate::harness::bridge(goal::clear_goal(turn)))
+        let thread = turn.thread_id.clone();
+        Box::pin(async move {
+            goal::clear_goal(turn)
+                .await
+                .map_err(|source| crate::ClearGoalError::Codex { thread, source })
+        })
     }
 }
 
@@ -137,46 +179,87 @@ fn codex_home(turn: &Turn) -> std::path::PathBuf {
         .map_or_else(|| turn.home.join(".codex"), |(_, value)| value.into())
 }
 
-/// One queued provider input and whether it acknowledges a persisted user input.
+async fn set_title(turn: Turn, title: String) -> Result<(), SetTitleError> {
+    let session = turn
+        .session_id
+        .clone()
+        .ok_or_else(|| SetTitleError::NoSession {
+            thread: turn.thread_id.clone(),
+        })?;
+    let mut conn = server::attach(&turn).await.map_err(SetTitleError::Attach)?;
+    let named = tokio::time::timeout(
+        Duration::from_secs(30),
+        goal::call(
+            &mut conn,
+            1,
+            "thread/name/set",
+            json!({ "threadId": session, "name": title }),
+        ),
+    )
+    .await;
+    match named {
+        Err(_elapsed) => Err(SetTitleError::TimedOut { session }),
+        Ok(Err(source)) => Err(SetTitleError::Call { session, source }),
+        Ok(Ok(_)) => Ok(()),
+    }
+}
+
 struct Queued {
     input: UserInput,
-    /// Provider-generated follow-ups have no durable user input to acknowledge.
     acknowledge: bool,
+}
+
+struct Starting {
+    request: u64,
+    acknowledges: Vec<ItemId>,
+}
+
+enum Phase {
+    Idle,
+    Starting(Starting),
+    Active {
+        turn: String,
+    },
+    Finished {
+        outcome: Outcome,
+        nudge: bool,
+    },
+    Stopping {
+        deadline: Instant,
+        interrupt_sent: bool,
+        starting: Option<Starting>,
+    },
 }
 
 struct Run {
     conn: server::Attachment,
     decoder: Decoder,
     io: RunIo,
-    /// Messages for the next `turn/start`.
     queued: Vec<Queued>,
-    /// The `turn/start` in flight and the durable input IDs it acknowledges.
-    starting: Option<(u64, Vec<ItemId>)>,
-    /// `turn/steer` requests in flight.
+    phase: Phase,
     steering: HashMap<u64, Queued>,
-    cancelling: bool,
-    /// Start a turn with no new input: Codex holds a message it never answered.
-    nudge: bool,
-    /// How the last finished turn ended.
-    outcome: Option<Outcome>,
-    /// Access the user chose mid-run, for the turns after this one.
     permissions: Option<Permissions>,
 }
 
+enum Step {
+    Continue,
+    End(Outcome),
+}
+
 impl Run {
-    async fn run(&mut self, turn: &Turn) -> Result<Outcome> {
+    async fn run(&mut self, turn: &Turn) -> Result<Outcome, RunError> {
         let (method, params) = thread_params(turn);
         match self.call(method, params).await {
             Ok(Some(_)) => {}
-            Ok(None) => return Ok(Outcome::cancelled()),
-            Err(error) => {
-                return Err(
-                    error.context(format!("Codex {method} (session {:?})", turn.session_id))
-                );
+            Ok(None) => return Ok(Outcome::Cancelled),
+            Err(source) => {
+                return Err(RunError::Open {
+                    method,
+                    session: turn.session_id.clone(),
+                    source,
+                });
             }
         }
-        // A thread already loaded answers with the model it was loaded with;
-        // `turn/start` switches it to the run's.
         if let Some(model) = non_empty(turn.config.model.as_deref()) {
             self.io
                 .emit(EngineEvent::Model {
@@ -192,121 +275,180 @@ impl Run {
         self.drive(turn).await
     }
 
-    /// Sends a request and waits for its result, decoding whatever Codex
-    /// sends meanwhile. `None` when the run was cancelled.
-    async fn call(&mut self, method: &str, params: Value) -> Result<Option<Value>> {
+    async fn call(&mut self, method: &str, params: Value) -> Result<Option<Value>, RequestError> {
         let id = self.decoder.request(method, params);
-        self.flush()?;
+        self.send_outbox().map_err(RequestError::Write)?;
         loop {
             let line = tokio::select! {
                 line = self.conn.next_line() => line,
                 () = self.io.cancel.cancelled() => return Ok(None),
             };
             let Some(line) = line else {
-                return Err(self.exited(method));
+                return Err(RequestError::Exited {
+                    ended: self.conn.ended(),
+                });
             };
-            self.handle_line(&line).await?;
+            let events = self.decoder.feed(&line).map_err(RequestError::Decode)?;
+            self.emit(events).await;
+            self.send_outbox().map_err(RequestError::Write)?;
             if let Some(response) = self
                 .decoder
                 .take_responses()
                 .into_iter()
                 .find(|response| response.id == id)
             {
-                return response
-                    .result
-                    .map(Some)
-                    .map_err(|error| anyhow!("Codex {method}: {error}"));
+                return response.result.map(Some).map_err(RequestError::Refused);
             }
         }
     }
 
-    async fn drive(&mut self, turn: &Turn) -> Result<Outcome> {
+    async fn drive(&mut self, turn: &Turn) -> Result<Outcome, RunError> {
         let mut inbox_open = true;
-        let mut interrupt_sent = false;
-        let mut deadline: Option<Instant> = None;
         loop {
-            tokio::select! {
-                line = self.conn.next_line() => {
-                    let Some(line) = line else {
-                        if self.cancelling {
-                            return Ok(Outcome::cancelled());
-                        }
-                        return Err(self.exited("the turn"));
-                    };
-                    self.handle_line(&line).await?;
-                    for response in self.decoder.take_responses() {
-                        self.responded(response).await?;
-                    }
-                    if let Some(outcome) = self.decoder.take_turn_end() {
-                        if self.cancelling {
-                            return Ok(Outcome::cancelled());
-                        }
-                        self.outcome = Some(outcome);
-                        if self.decoder.take_stranded() {
-                            tracing::debug!(thread = %turn.thread_id, "Codex ended the turn without answering a steer; starting another");
-                            self.nudge = true;
-                        }
-                    }
-                    for text in self.decoder.take_messages() {
-                        self.queued.push(Queued { input: UserInput { id: ItemId::default(), text, images: Vec::new() }, acknowledge: false });
-                    }
-                    if self.idle() {
-                        // A steer that raced the turn's end still gets its turn.
-                        while let Ok(input) = self.io.inbox.try_recv() {
-                            self.input(input).await?;
-                        }
-                    }
-                    self.pump(turn)?;
-                    if self.cancelling && !interrupt_sent {
-                        interrupt_sent = self.interrupt()?;
-                        if interrupt_sent {
-                            deadline = Some(Instant::now() + INTERRUPT_GRACE);
-                        }
-                        if !interrupt_sent && self.idle() {
-                            return Ok(Outcome::cancelled());
-                        }
-                    }
-                    if self.idle()
-                        && self.queued.is_empty()
-                        && !self.nudge
-                        && let Some(outcome) = self.outcome.take()
-                    {
-                        return Ok(outcome);
-                    }
+            let deadline = match &self.phase {
+                Phase::Stopping { deadline, .. } => Some(*deadline),
+                Phase::Idle | Phase::Starting(_) | Phase::Active { .. } | Phase::Finished { .. } => {
+                    None
                 }
-                input = self.io.inbox.recv(), if inbox_open && !self.cancelling => match input {
-                    Some(input) => {
-                        self.input(input).await?;
-                        self.pump(turn)?;
-                    }
-                    None => inbox_open = false,
+            };
+            let stopping = deadline.is_some();
+            let step = tokio::select! {
+                line = self.conn.next_line() => match line {
+                    Some(line) => self.line(turn, &line).await?,
+                    None if stopping => Step::End(Outcome::Cancelled),
+                    None => return Err(RunError::Exited { during: "the turn", ended: self.conn.ended() }),
                 },
-                () = self.io.cancel.cancelled(), if !self.cancelling => {
-                    self.cancelling = true;
-                    interrupt_sent = self.interrupt()?;
-                    if !interrupt_sent && self.idle() {
-                        return Ok(Outcome::cancelled());
+                input = self.io.inbox.recv(), if inbox_open && !stopping => {
+                    match input {
+                        Some(input) => {
+                            self.input(input).await?;
+                            self.pump(turn)?;
+                        }
+                        None => inbox_open = false,
                     }
-                    deadline = Some(Instant::now() + INTERRUPT_GRACE);
+                    Step::Continue
                 }
-                () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                () = self.io.cancel.cancelled(), if !stopping => self.stop()?,
+                () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if stopping => {
                     if let Some(thread) = self.decoder.thread() {
                         self.decoder.request("thread/unsubscribe", json!({ "threadId": thread }));
                         self.flush()?;
                     }
                     self.conn.retire();
-                    let reason = if interrupt_sent {
-                        "Codex did not confirm the turn stopped after an interrupt"
-                    } else {
-                        "Codex did not return the started turn ID before cancellation timed out"
-                    };
-                    return Err(anyhow!("{reason}; requested thread unload and retired the server. Underlying work may still be running."));
+                    let interrupt_sent = matches!(self.phase, Phase::Stopping { interrupt_sent: true, .. });
+                    return Err(RunError::StopTimedOut { interrupt_sent });
                 }
+            };
+            if let Step::End(outcome) = step {
+                return Ok(outcome);
             }
         }
     }
 
-    fn interrupt(&mut self) -> Result<bool> {
+    async fn line(&mut self, turn: &Turn, line: &str) -> Result<Step, RunError> {
+        let events = self.decoder.feed(line).map_err(RunError::Decode)?;
+        self.emit(events).await;
+        self.flush()?;
+        self.follow_turn();
+        for response in self.decoder.take_responses() {
+            self.responded(response).await?;
+        }
+        if let Some(outcome) = self.decoder.take_turn_end() {
+            if matches!(self.phase, Phase::Stopping { .. }) {
+                return Ok(Step::End(Outcome::Cancelled));
+            }
+            if let Phase::Starting(starting) = std::mem::replace(&mut self.phase, Phase::Idle) {
+                self.acknowledge(starting.acknowledges).await;
+            }
+            let nudge = self.decoder.take_stranded();
+            if nudge {
+                tracing::debug!(thread = %turn.thread_id, "Codex ended the turn without answering a steer; starting another");
+            }
+            self.phase = Phase::Finished { outcome, nudge };
+        }
+        for text in self.decoder.take_messages() {
+            self.queued.push(Queued {
+                input: UserInput {
+                    id: ItemId::default(),
+                    text,
+                    images: Vec::new(),
+                },
+                acknowledge: false,
+            });
+        }
+        if self.idle() {
+            while let Ok(input) = self.io.inbox.try_recv() {
+                self.input(input).await?;
+            }
+        }
+        self.pump(turn)?;
+        if let Phase::Stopping {
+            interrupt_sent: false,
+            starting,
+            ..
+        } = &self.phase
+        {
+            let starting = starting.is_some();
+            if self.interrupt()? {
+                if let Phase::Stopping {
+                    interrupt_sent,
+                    deadline,
+                    ..
+                } = &mut self.phase
+                {
+                    *interrupt_sent = true;
+                    *deadline = Instant::now() + INTERRUPT_GRACE;
+                }
+            } else if !starting && self.steering.is_empty() {
+                return Ok(Step::End(Outcome::Cancelled));
+            }
+        }
+        if self.queued.is_empty()
+            && self.steering.is_empty()
+            && matches!(self.phase, Phase::Finished { nudge: false, .. })
+            && let Phase::Finished { outcome, .. } = std::mem::replace(&mut self.phase, Phase::Idle)
+        {
+            return Ok(Step::End(outcome));
+        }
+        Ok(Step::Continue)
+    }
+
+    fn follow_turn(&mut self) {
+        let Some(running) = self.decoder.active_turn() else {
+            return;
+        };
+        match &mut self.phase {
+            Phase::Idle | Phase::Finished { .. } => {
+                self.phase = Phase::Active {
+                    turn: running.to_owned(),
+                };
+            }
+            Phase::Active { turn } if turn != running => running.clone_into(turn),
+            Phase::Active { .. } | Phase::Starting(_) | Phase::Stopping { .. } => {}
+        }
+    }
+
+    fn stop(&mut self) -> Result<Step, RunError> {
+        let deadline = Instant::now() + INTERRUPT_GRACE;
+        let interrupt_sent = self.interrupt()?;
+        let starting = match std::mem::replace(&mut self.phase, Phase::Idle) {
+            Phase::Starting(starting) => Some(starting),
+            Phase::Idle | Phase::Active { .. } | Phase::Finished { .. } | Phase::Stopping { .. } => {
+                None
+            }
+        };
+        if !interrupt_sent && starting.is_none() && self.steering.is_empty() {
+            return Ok(Step::End(Outcome::Cancelled));
+        }
+        self.phase = Phase::Stopping {
+            deadline,
+            interrupt_sent,
+            starting,
+        };
+        Ok(Step::Continue)
+    }
+
+    fn interrupt(&mut self) -> Result<bool, RunError> {
         let (Some(thread), Some(turn_id)) = (self.decoder.thread(), self.decoder.active_turn())
         else {
             return Ok(false);
@@ -319,12 +461,11 @@ impl Run {
         Ok(true)
     }
 
-    /// No turn running and nothing on its way to Codex.
     fn idle(&self) -> bool {
-        self.decoder.active_turn().is_none() && self.starting.is_none() && self.steering.is_empty()
+        matches!(self.phase, Phase::Idle | Phase::Finished { .. }) && self.steering.is_empty()
     }
 
-    async fn input(&mut self, input: Input) -> Result<()> {
+    async fn input(&mut self, input: Input) -> Result<(), RunError> {
         match input {
             Input::Steer(input) => self.queued.push(Queued {
                 input,
@@ -335,10 +476,9 @@ impl Run {
                 self.emit(events).await;
                 self.flush()?;
             }
-            // Codex sets access per turn; Forge approves what this one asks.
             Input::SetPermissions(permissions) => self.permissions = Some(permissions),
             Input::ClearGoal => {
-                let thread = self.decoder.thread().context("no Codex thread")?.to_owned();
+                let thread = self.decoder.thread().ok_or(RunError::NoThread)?.to_owned();
                 self.decoder
                     .request("thread/goal/clear", json!({ "threadId": thread }));
                 self.flush()?;
@@ -347,21 +487,23 @@ impl Run {
         Ok(())
     }
 
-    /// Sends queued messages: as steers into the running turn, or as the
-    /// next turn once the last one is over.
-    fn pump(&mut self, turn: &Turn) -> Result<()> {
-        if self.cancelling || self.starting.is_some() || (self.queued.is_empty() && !self.nudge) {
+    fn pump(&mut self, turn: &Turn) -> Result<(), RunError> {
+        let nudge = match &self.phase {
+            Phase::Starting(_) | Phase::Stopping { .. } => return Ok(()),
+            Phase::Finished { nudge, .. } => *nudge,
+            Phase::Idle | Phase::Active { .. } => false,
+        };
+        if self.queued.is_empty() && !nudge {
             return Ok(());
         }
-        let thread = self.decoder.thread().context("no Codex thread")?.to_owned();
-        if let Some(turn_id) = self.decoder.active_turn().map(str::to_owned) {
+        let thread = self.decoder.thread().ok_or(RunError::NoThread)?.to_owned();
+        if let Phase::Active { turn: turn_id } = &self.phase {
             for queued in std::mem::take(&mut self.queued) {
                 let params = json!({ "threadId": thread, "expectedTurnId": turn_id, "input": user_input(&queued.input) });
                 let id = self.decoder.request("turn/steer", params);
                 self.steering.insert(id, queued);
             }
         } else if self.steering.is_empty() {
-            self.nudge = false;
             let queued = std::mem::take(&mut self.queued);
             let input: Vec<Value> = queued
                 .iter()
@@ -372,29 +514,54 @@ impl Run {
             if let Some(permissions) = self.permissions {
                 access_overrides(permissions, &mut params);
             }
-            let id = self.decoder.request("turn/start", params);
-            let inputs = queued
+            let request = self.decoder.request("turn/start", params);
+            let acknowledges = queued
                 .into_iter()
                 .filter(|queued| queued.acknowledge)
                 .map(|queued| queued.input.id)
                 .collect();
-            self.starting = Some((id, inputs));
+            self.phase = Phase::Starting(Starting {
+                request,
+                acknowledges,
+            });
         }
         self.flush()
     }
 
-    async fn responded(&mut self, response: decoder::Response) -> Result<()> {
+    async fn acknowledge(&self, inputs: Vec<ItemId>) {
+        for id in inputs {
+            self.io.emit(EngineEvent::InputAccepted { id }).await;
+        }
+    }
+
+    async fn responded(&mut self, response: decoder::Response) -> Result<(), RunError> {
         match response.method.as_str() {
             "turn/start" => {
-                let Some((_, steers)) = self.starting.take_if(|(id, _)| *id == response.id) else {
+                let starting = match &mut self.phase {
+                    Phase::Starting(starting) if starting.request == response.id => {
+                        Some(std::mem::take(&mut starting.acknowledges))
+                    }
+                    Phase::Stopping {
+                        starting: starting @ Some(_),
+                        ..
+                    } if starting.as_ref().is_some_and(|starting| starting.request == response.id) => {
+                        starting.take().map(|starting| starting.acknowledges)
+                    }
+                    Phase::Idle
+                    | Phase::Starting(_)
+                    | Phase::Active { .. }
+                    | Phase::Finished { .. }
+                    | Phase::Stopping { .. } => None,
+                };
+                let Some(acknowledges) = starting else {
                     return Ok(());
                 };
-                if let Err(error) = response.result {
-                    return Err(anyhow!("Codex turn/start: {error}"));
+                response.result.map_err(RunError::TurnStart)?;
+                if matches!(self.phase, Phase::Starting(_)) {
+                    let turn = self.decoder.active_turn().ok_or(RunError::NoTurn)?.to_owned();
+                    self.phase = Phase::Active { turn };
                 }
-                for id in steers {
-                    self.io.emit(EngineEvent::InputAccepted { id }).await;
-                }
+                self.acknowledge(acknowledges).await;
             }
             "turn/steer" => {
                 let Some(queued) = self.steering.remove(&response.id) else {
@@ -403,27 +570,23 @@ impl Run {
                 match response.result {
                     Ok(_) => {
                         if queued.acknowledge {
-                            self.io
-                                .emit(EngineEvent::InputAccepted {
-                                    id: queued.input.id,
-                                })
-                                .await;
+                            self.acknowledge(vec![queued.input.id]).await;
                         }
                     }
                     Err(error) => {
-                        tracing::debug!(item = %queued.input.id, "Codex takes rejected steer as the next turn: {error}");
+                        tracing::debug!(item = %queued.input.id, %error, "Codex takes a rejected steer as the next turn");
                         self.queued.insert(0, queued);
                     }
                 }
             }
             "turn/interrupt" => {
                 if let Err(error) = response.result {
-                    tracing::debug!("Codex turn/interrupt: {error}");
+                    tracing::debug!(%error, "Codex refused turn/interrupt");
                 }
             }
             "thread/goal/clear" => {
                 if let Err(error) = response.result {
-                    tracing::warn!("Codex thread/goal/clear: {error}");
+                    tracing::warn!(%error, "Codex refused thread/goal/clear");
                 }
             }
             _ => {}
@@ -431,15 +594,13 @@ impl Run {
         Ok(())
     }
 
-    async fn handle_line(&mut self, line: &str) -> Result<()> {
-        let events = self.decoder.feed(line)?;
-        self.emit(events).await;
-        self.flush()
+    fn flush(&mut self) -> Result<(), RunError> {
+        self.send_outbox().map_err(RunError::Write)
     }
 
-    fn flush(&mut self) -> Result<()> {
+    fn send_outbox(&mut self) -> Result<(), Ended> {
         for message in self.decoder.take_outbox() {
-            self.conn.send(message).context("writing to Codex")?;
+            self.conn.send(message)?;
         }
         Ok(())
     }
@@ -448,18 +609,6 @@ impl Run {
         for event in events {
             self.io.emit(event).await;
         }
-    }
-
-    fn exited(&self, during: &str) -> anyhow::Error {
-        let ended = self.conn.ended();
-        anyhow!(
-            "Codex exited during {during}{}",
-            if ended.is_empty() {
-                String::new()
-            } else {
-                format!(": {ended}")
-            }
-        )
     }
 }
 

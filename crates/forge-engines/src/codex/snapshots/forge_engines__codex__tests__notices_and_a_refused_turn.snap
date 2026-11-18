@@ -135,12 +135,6 @@ expression: "replay(\"notices\")"
         },
     ),
     TurnEnd(
-        Outcome {
-            status: Refused,
-            error: Some(
-                "Blocked by policy",
-            ),
-            retry: None,
-        },
+        Refused,
     ),
 ]

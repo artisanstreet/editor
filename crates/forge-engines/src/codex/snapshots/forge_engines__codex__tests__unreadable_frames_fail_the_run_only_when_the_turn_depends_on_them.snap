@@ -20,25 +20,21 @@ expression: "replay(\"malformed\")"
         ),
     },
     ProtocolError(
-        "decoding Codex protocol JSON: key must be a string at line 1 column 2",
+        "decode a Codex protocol frame: key must be a string at line 1 column 2",
     ),
     ProtocolError(
-        "decoding Codex protocol JSON: invalid type: null, expected struct Frame at line 1 column 4",
+        "decode a Codex protocol frame: invalid type: null, expected struct Frame at line 1 column 4",
     ),
     ProtocolError(
-        "decoding Codex protocol JSON: invalid length 0, expected struct Frame with 5 elements at line 1 column 2",
+        "decode a Codex protocol frame: invalid length 0, expected struct Frame with 5 elements at line 1 column 2",
     ),
     ProtocolError(
         "Codex protocol frame has neither a method nor an id",
     ),
     ProtocolError(
-        "reading Codex turn/completed of thread Some(\"root\"): missing field `status`",
+        "read Codex turn/completed of thread Some(\"root\"): missing field `status`",
     ),
     TurnEnd(
-        Outcome {
-            status: Done,
-            error: None,
-            retry: None,
-        },
+        Done,
     ),
 ]

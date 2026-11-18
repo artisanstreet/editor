@@ -98,12 +98,11 @@ expression: "replay(\"web-search-actions\")"
         },
     ),
     TurnEnd(
-        Outcome {
-            status: Failed,
-            error: Some(
-                "Provider rejected the request",
-            ),
-            retry: None,
-        },
+        Failed(
+            Failure {
+                message: "Provider rejected the request",
+                retry: None,
+            },
+        ),
     ),
 ]

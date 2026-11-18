@@ -14,13 +14,26 @@
 
 mod requests;
 
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("decode a Codex protocol frame")]
+    Frame(#[source] serde_json::Error),
+    #[error("read Codex turn/completed of thread {thread:?}")]
+    TurnCompleted {
+        thread: Option<String>,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Codex protocol frame has neither a method nor an id")]
+    Unaddressed,
+}
+
 use super::protocol::{
     CallStatus, CodexError, CollabCall, CollabStatus, CollabTool, CompletedTurn, ExecutionStatus,
     Frame, Item, MessagePhase, Notification, PatchKind, PlanEntry, PlanStatus, SubAgentActivity,
     SubAgentActivityKind, ThreadInfo, ThreadStarted, TokenUsage, TurnStatus, UserInput,
 };
 use crate::{EngineEvent, LiveKind, Outcome};
-use anyhow::Context as _;
 use artisan_api::{
     AgentAction, ErrorKind, FileChange, FileOp, ItemKind, MessageDirection, NoticeKind, Output,
     Phase, PlanStep, RunStatus, Status, StepStatus, TextContent, ToolKind, Usage,
@@ -139,20 +152,18 @@ impl Decoder {
         self.turn.as_deref()
     }
 
-    /// One line from Codex.
-    pub fn feed(&mut self, line: &str) -> anyhow::Result<Vec<EngineEvent>> {
-        let frame: Frame = serde_json::from_str(line).context("decoding Codex protocol JSON")?;
+    pub fn feed(&mut self, line: &str) -> Result<Vec<EngineEvent>, DecodeError> {
+        let frame: Frame = serde_json::from_str(line).map_err(DecodeError::Frame)?;
         let mut out = Vec::new();
         match (frame.method, frame.id) {
             (Some(method), Some(rpc)) => self.server_request(rpc, &method, &frame.params, &mut out),
             (Some(method), None) => match Notification::parse(&method, &frame.params) {
                 Ok(notice) => self.notification(notice, line.len(), &mut out),
-                // The run waits for its turn's end; one it can't read fails it.
-                Err(error) if method == "turn/completed" => {
-                    return Err(anyhow::Error::new(error).context(format!(
-                        "reading Codex turn/completed of thread {:?}",
-                        frame.params["threadId"].as_str()
-                    )));
+                Err(source) if method == "turn/completed" => {
+                    return Err(DecodeError::TurnCompleted {
+                        thread: frame.params["threadId"].as_str().map(str::to_owned),
+                        source,
+                    });
                 }
                 Err(error) => tracing::warn!(
                     method,
@@ -163,7 +174,7 @@ impl Decoder {
                 ),
             },
             (None, Some(rpc)) => self.response(&rpc, frame.result, frame.error.as_ref(), &mut out),
-            (None, None) => anyhow::bail!("Codex protocol frame has neither a method nor an id"),
+            (None, None) => return Err(DecodeError::Unaddressed),
         }
         let out = self.reasoning_summary.normalize(out, false);
         let out = self.citations.normalize(out);
@@ -562,7 +573,7 @@ impl Decoder {
                         (false, None) => Outcome::failed(message),
                     }
                 }
-                TurnStatus::Completed | TurnStatus::Ended => {
+                TurnStatus::Completed => {
                     self.stranded = std::mem::take(&mut self.unanswered);
                     Outcome::done()
                 }
@@ -576,7 +587,7 @@ impl Decoder {
         let status = match turn.status {
             TurnStatus::Interrupted => Status::Cancelled,
             TurnStatus::Failed => Status::Failed,
-            TurnStatus::Completed | TurnStatus::Ended => Status::Done,
+            TurnStatus::Completed => Status::Done,
         };
         let reply = self
             .child_replies

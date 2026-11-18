@@ -1,45 +1,75 @@
-//! Side queries: one question to an ephemeral fork of a Codex thread.
-//!
-//! `thread/fork` with `ephemeral` copies the thread into one Codex never
-//! saves, on the same shared app-server, so the thread itself is never
-//! touched. The fork's turn keeps the thread's model and effort, so its
-//! request starts with the thread's prefix and reads its prompt cache; it
-//! runs read-only and never asks, so nothing can change. The fork is
-//! unsubscribed once it answered.
-//!
-//! Measured against Codex 0.163.0: a fork reads the thread's whole cached
-//! prefix and adds about 5k tokens of its own after it, which the first
-//! fork of a point in the thread pays for. The read-only override costs
-//! nothing, and `experimentalPredictionMode` read no more than a plain fork.
-
+use super::goal::CallError;
 use super::protocol::{Frame, Item, Notification, TurnStatus};
-use super::{server, turn_overrides};
+use super::server::{self, AttachError, Ended};
+use super::turn_overrides;
 use crate::{SideReply, SideUsage, Turn};
-use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// How long a side query may take before it is given up on.
 const LIMIT: Duration = Duration::from_secs(120);
 
-pub(super) async fn side_query(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
+#[derive(Debug, thiserror::Error)]
+pub enum SideQueryError {
+    #[error("attach to the Codex app-server")]
+    Attach(#[source] AttachError),
+    #[error("the side query was cancelled")]
+    Cancelled,
+    #[error("the Codex fork gave no answer in {}s", after.as_secs())]
+    TimedOut { after: Duration },
+    #[error("ask Codex {method}")]
+    Call {
+        method: &'static str,
+        #[source]
+        source: CallError,
+    },
+    #[error("Codex {method} answered without a thread")]
+    NoThread { method: &'static str },
+    #[error("refuse a request in fork {fork}")]
+    Refuse {
+        fork: String,
+        #[source]
+        source: Ended,
+    },
+    #[error("read the end of fork {fork}'s turn")]
+    TurnEnd {
+        fork: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Codex fork {fork} failed: {message}")]
+    Failed { fork: String, message: String },
+    #[error("Codex fork {fork} was interrupted")]
+    Interrupted { fork: String },
+    #[error("Codex exited during the side query: {ended}")]
+    Exited { ended: String },
+    #[error("decode Codex output during the side query")]
+    Decode(#[source] serde_json::Error),
+}
+
+pub(super) async fn side_query(
+    turn: Turn,
+    cancel: CancellationToken,
+) -> Result<SideReply, SideQueryError> {
     query(turn, cancel, LIMIT).await
 }
 
-pub(super) async fn compact(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
-    query(turn, cancel, std::time::Duration::from_secs(300)).await
+pub(super) async fn compact(
+    turn: Turn,
+    cancel: CancellationToken,
+) -> Result<SideReply, SideQueryError> {
+    query(turn, cancel, Duration::from_secs(300)).await
 }
 
 async fn query(
     turn: Turn,
     cancel: CancellationToken,
-    deadline: std::time::Duration,
-) -> Result<SideReply> {
+    deadline: Duration,
+) -> Result<SideReply, SideQueryError> {
     let thread = turn.session_id.clone();
     let mut conn = server::attach(&turn)
         .await
-        .context("attaching to the Codex app-server")?;
+        .map_err(SideQueryError::Attach)?;
     let mut fork = Fork {
         conn: &mut conn,
         next_id: 1,
@@ -50,30 +80,37 @@ async fn query(
     };
     let answer = tokio::select! {
         answer = fork.ask(&turn, thread.as_deref()) => answer,
-        () = cancel.cancelled() => Err(anyhow!("the side query was cancelled")),
-        () = tokio::time::sleep(deadline) => Err(anyhow!("the Codex fork gave no answer in {}s", deadline.as_secs())),
+        () = cancel.cancelled() => Err(SideQueryError::Cancelled),
+        () = tokio::time::sleep(deadline) => Err(SideQueryError::TimedOut { after: deadline }),
     };
     if let Some(forked) = fork.thread.take() {
         if let Some(turn) = fork.turn.take() {
-            tokio::time::timeout(
+            let interrupted = tokio::time::timeout(
                 Duration::from_secs(5),
                 fork.call(
                     "turn/interrupt",
                     json!({ "threadId": forked, "turnId": turn }),
                 ),
             )
-            .await
-            .ok();
+            .await;
+            match interrupted {
+                Ok(Ok(_)) => {}
+                Ok(Err(failure)) => {
+                    let error: &dyn std::error::Error = &failure;
+                    tracing::debug!(fork = forked, error, "couldn't interrupt a Codex fork");
+                }
+                Err(_elapsed) => tracing::debug!(fork = forked, "a Codex fork didn't confirm its interrupt"),
+            }
         }
         let id = fork.next_id;
-        // Best effort: a server that has ended dropped the fork with it.
-        fork.conn
-            .send(json!({
-                "id": id,
-                "method": "thread/unsubscribe",
-                "params": { "threadId": forked },
-            }))
-            .ok();
+        if let Err(failure) = fork.conn.send(json!({
+            "id": id,
+            "method": "thread/unsubscribe",
+            "params": { "threadId": forked },
+        })) {
+            let error: &dyn std::error::Error = &failure;
+            tracing::debug!(fork = forked, error, "the Codex server ended with the fork");
+        }
     }
     answer
 }
@@ -81,7 +118,6 @@ async fn query(
 struct Fork<'a> {
     conn: &'a mut server::Attachment,
     next_id: u64,
-    /// The fork's thread id, once Codex made it.
     thread: Option<String>,
     turn: Option<String>,
     text: Option<String>,
@@ -93,15 +129,18 @@ impl Fork<'_> {
         clippy::too_many_lines,
         reason = "one forked turn and its exhaustive notification loop"
     )]
-    async fn ask(&mut self, turn: &Turn, thread: Option<&str>) -> Result<SideReply> {
-        let forked = if let Some(thread) = thread {
-            self.call(
-                "thread/fork",
-                json!({
-                    "threadId": thread, "ephemeral": true, "excludeTurns": true,
-                }),
-            )
-            .await?
+    async fn ask(&mut self, turn: &Turn, thread: Option<&str>) -> Result<SideReply, SideQueryError> {
+        let (method, forked) = if let Some(thread) = thread {
+            let method = "thread/fork";
+            let forked = self
+                .call(
+                    method,
+                    json!({
+                        "threadId": thread, "ephemeral": true, "excludeTurns": true,
+                    }),
+                )
+                .await?;
+            (method, forked)
         } else {
             let (_, mut params) = super::thread_params(turn);
             params["ephemeral"] = json!(true);
@@ -110,11 +149,12 @@ impl Fork<'_> {
             if let Some(params) = params.as_object_mut() {
                 params.remove("approvalsReviewer");
             }
-            self.call("thread/start", params).await?
+            let method = "thread/start";
+            (method, self.call(method, params).await?)
         };
         let forked = forked["thread"]["id"]
             .as_str()
-            .context("Codex thread/fork answered without a thread")?
+            .ok_or(SideQueryError::NoThread { method })?
             .to_owned();
         self.thread = Some(forked.clone());
         let mut params = json!({
@@ -135,15 +175,29 @@ impl Fork<'_> {
                 continue;
             };
             if let Some(id) = frame.id {
-                // Never asks under `never`; anything that does is refused.
-                self.conn.send(json!({
-                    "id": id,
-                    "error": { "code": crate::rpc::METHOD_NOT_FOUND, "message": "a side query takes no requests" },
-                }))?;
+                self.conn
+                    .send(json!({
+                        "id": id,
+                        "error": { "code": crate::rpc::METHOD_NOT_FOUND, "message": "a side query takes no requests" },
+                    }))
+                    .map_err(|source| SideQueryError::Refuse {
+                        fork: forked.clone(),
+                        source,
+                    })?;
                 continue;
             }
-            let Ok(notification) = Notification::parse(method, &frame.params) else {
-                continue;
+            let notification = match Notification::parse(method, &frame.params) {
+                Ok(notification) => notification,
+                Err(source)
+                    if method == "turn/completed"
+                        && frame.params["threadId"].as_str() == Some(forked.as_str()) =>
+                {
+                    return Err(SideQueryError::TurnEnd {
+                        fork: forked,
+                        source,
+                    });
+                }
+                Err(_unread) => continue,
             };
             if notification.thread() != Some(forked.as_str()) {
                 continue;
@@ -165,18 +219,21 @@ impl Fork<'_> {
                 }
                 Notification::TurnCompleted(notice) => {
                     self.turn = None;
-                    if matches!(notice.turn.status, TurnStatus::Failed) {
-                        let message = notice
-                            .turn
-                            .error
-                            .and_then(|error| error.message)
-                            .unwrap_or_else(|| "no reason given".to_owned());
-                        bail!("the Codex fork failed: {message}");
-                    }
-                    return Ok(SideReply {
-                        text: self.text.take().unwrap_or_default().trim().to_owned(),
-                        usage: self.usage,
-                    });
+                    return match notice.turn.status {
+                        TurnStatus::Failed => Err(SideQueryError::Failed {
+                            fork: forked,
+                            message: notice
+                                .turn
+                                .error
+                                .and_then(|error| error.message)
+                                .unwrap_or_else(|| "no reason given".to_owned()),
+                        }),
+                        TurnStatus::Interrupted => Err(SideQueryError::Interrupted { fork: forked }),
+                        TurnStatus::Completed => Ok(SideReply {
+                            text: self.text.take().unwrap_or_default().trim().to_owned(),
+                            usage: self.usage,
+                        }),
+                    };
                 }
                 Notification::ThreadStarted(_)
                 | Notification::ThreadNameUpdated(_)
@@ -200,31 +257,20 @@ impl Fork<'_> {
         }
     }
 
-    /// Sends a request and waits for its result.
-    async fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    async fn call(&mut self, method: &'static str, params: Value) -> Result<Value, SideQueryError> {
         let id = self.next_id;
         self.next_id += 1;
-        self.conn
-            .send(json!({ "id": id, "method": method, "params": params }))?;
-        loop {
-            let frame = self.next().await?;
-            if frame.method.is_none() && frame.id == Some(json!(id)) {
-                if let Some(error) = frame.error {
-                    bail!("Codex {method}: {error}");
-                }
-                return Ok(frame.result.unwrap_or(Value::Null));
-            }
-        }
+        super::goal::call(self.conn, id, method, params)
+            .await
+            .map_err(|source| SideQueryError::Call { method, source })
     }
 
-    async fn next(&mut self) -> Result<Frame> {
-        loop {
-            let line = self.conn.next_line().await.ok_or_else(|| {
-                anyhow!("Codex exited during a side query: {}", self.conn.ended())
-            })?;
-            if let Ok(frame) = serde_json::from_str::<Frame>(&line) {
-                return Ok(frame);
-            }
-        }
+    async fn next(&mut self) -> Result<Frame, SideQueryError> {
+        let Some(line) = self.conn.next_line().await else {
+            return Err(SideQueryError::Exited {
+                ended: self.conn.ended(),
+            });
+        };
+        serde_json::from_str::<Frame>(&line).map_err(SideQueryError::Decode)
     }
 }
