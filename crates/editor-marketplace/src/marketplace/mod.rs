@@ -211,7 +211,9 @@ impl Marketplace {
                 presentation::by_name(listings)
                     .into_iter()
                     .filter(|(listing, _)| {
-                        !self.items.iter().any(|item| item.name() == listing.name)
+                        !self.items.iter().any(
+                            |item| matches!(item, Item::Skill(skill) if skill.name == listing.name),
+                        )
                     })
                     .map(|(listing, others)| presentation::listing_item(listing, others)),
             );

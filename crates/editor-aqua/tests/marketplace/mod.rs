@@ -477,6 +477,25 @@ fn enter_installs_the_skill_that_is_painted_selected_after_the_catalog_shrinks()
 }
 
 #[test]
+fn an_mcp_server_does_not_hide_a_skills_sh_skill_with_the_same_name() {
+    let mut page = Marketplace::default();
+    page.set_shown(true);
+    page.sync_host(Some(HostId("host".into())), &[], &[]);
+    page.items = vec![Item::Server(ServerRow {
+        name: "github".into(),
+        target: "npx github-mcp".into(),
+    })];
+    page.set_query("github".into(), Instant::now());
+    page.listings = Remote::Found(vec![listing("listing", "github", 5)]);
+    page.set_kind(presentation::Kind::Skills);
+    assert!(
+        page.results()
+            .iter()
+            .any(|item| matches!(item, Item::Listing(row) if row.name == "github"))
+    );
+}
+
+#[test]
 fn a_search_started_on_one_host_is_not_shown_after_switching_to_another() {
     use artisan_api::tls::{Identity, fingerprint};
     use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostKind, Screen};
