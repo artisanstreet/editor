@@ -8,8 +8,8 @@ use artisan_api::{
     ProjectId, SendMessage, State, Thread, ThreadId, UpdateThread,
 };
 pub use error::{
-    CallError, CallFailure, CopyContentError, ExportContentError, NewClientError, RangeError,
-    ReadBodyError, RelayClientError, ResponseError,
+    CallError, CallFailure, CopyContentError, ExportContentError, ForgeFault, NewClientError,
+    RangeError, ReadBodyError, RelayClientError, ResponseError,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;

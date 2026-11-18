@@ -196,9 +196,71 @@ impl CallError {
     pub fn api_code(&self) -> Option<ErrorCode> {
         self.failure.api_code()
     }
+
+    #[must_use]
+    pub fn fault(&self) -> ForgeFault {
+        self.failure.fault()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForgeFault {
+    Unrecognised,
+    Unreachable,
+    Unauthorized,
+    Incompatible,
+    Unreadable,
+    Failed,
+}
+
+impl ForgeFault {
+    const fn of(code: ErrorCode) -> Self {
+        match code {
+            ErrorCode::NotFound => Self::Unrecognised,
+            ErrorCode::Unauthorized => Self::Unauthorized,
+            ErrorCode::VersionMismatch => Self::Incompatible,
+            ErrorCode::BadRequest
+            | ErrorCode::Conflict
+            | ErrorCode::EngineUnavailable
+            | ErrorCode::Internal => Self::Failed,
+        }
+    }
+
+    #[must_use]
+    pub const fn sentence(self) -> &'static str {
+        match self {
+            Self::Unrecognised => "Forge didn't recognise it.",
+            Self::Unreachable => "Forge couldn't be reached.",
+            Self::Unauthorized => "Forge didn't accept this Editor's credential.",
+            Self::Incompatible => "Forge and this Editor speak different versions.",
+            Self::Unreadable => "Forge's answer couldn't be read.",
+            Self::Failed => "Forge ran into a problem.",
+        }
+    }
 }
 
 impl CallFailure {
+    #[must_use]
+    pub fn fault(&self) -> ForgeFault {
+        use artisan_account::relay_client::CallFailure as Relay;
+        match self {
+            Self::Answer(error) => ForgeFault::of(error.code()),
+            Self::Incompatible { .. } => ForgeFault::Incompatible,
+            Self::Relay(error) => match &*error.failure {
+                Relay::Refused(error) => ForgeFault::of(error.code),
+                Relay::Closed | Relay::Open(_) | Relay::Exchange(_) | Relay::TimedOut => {
+                    ForgeFault::Unreachable
+                }
+                Relay::Decode(_) | Relay::Bytes(_) | Relay::TooLarge { .. } => {
+                    ForgeFault::Unreadable
+                }
+            },
+            Self::Reach(_) | Self::Task(_) => ForgeFault::Unreachable,
+            Self::Read(_) | Self::Decode(_) | Self::Inconsistent { .. } => ForgeFault::Unreadable,
+            Self::Build(_) | Self::StreamingBody | Self::EncodeBody(_) => ForgeFault::Failed,
+        }
+    }
+
     #[must_use]
     pub fn api_code(&self) -> Option<ErrorCode> {
         match self {

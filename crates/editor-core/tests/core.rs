@@ -1,3 +1,5 @@
+#[path = "core/client/error.rs"]
+mod client_error;
 #[path = "core/connection.rs"]
 mod connection;
 #[path = "core/hosts.rs"]

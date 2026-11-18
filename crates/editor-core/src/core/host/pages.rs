@@ -148,13 +148,11 @@ pub enum ThreadUnavailable {
 impl std::fmt::Display for ThreadUnavailable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Failed(error) => {
-                write!(
-                    formatter,
-                    "Couldn't load this thread: {}",
-                    ::diagnostics::chain(&**error)
-                )
-            }
+            Self::Failed(error) => write!(
+                formatter,
+                "Couldn't load this thread. {}",
+                error.source.fault().sentence()
+            ),
             Self::Deleted => {
                 formatter.write_str("This thread was deleted after a long time without activity.")
             }

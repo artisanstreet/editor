@@ -1405,9 +1405,15 @@ impl Conversation {
                             effects
                         }
                         Err(error) => {
+                            tracing::warn!(
+                                thread = %view.thread,
+                                ?fetch,
+                                error = %diagnostics::chain(&error),
+                                "couldn't load a transcript page"
+                            );
                             self.load_error = Some(format!(
-                                "Couldn't load this thread: {}",
-                                diagnostics::chain(&error)
+                                "Couldn't load this thread. {}",
+                                error.fault().sentence()
                             ));
                             view.page_failed()
                         }

@@ -19,7 +19,7 @@ Group "Artisan Editor" [focused]
   Button "Maximize window"
   Button "Close window"
   Label "No messages yet."
-  Label "Couldn't load this thread: load thread missing from mch_capture0000000000000000: GET /threads/missing: Forge did not answer: Forge answered 404 Not Found: thread missing not found"
+  Label "Couldn't load this thread. Forge didn't recognise it."
   Button "Try again"
     Label "Try again"
   ComboBox "No model" [collapsed]
