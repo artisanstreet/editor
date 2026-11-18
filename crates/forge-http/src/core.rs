@@ -6,7 +6,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_CORE_BASE_URL: &str = "https://api.artisan.st";
+const DEFAULT_CORE_BASE_URL: &str = "https://api.artisan.st";
 
 #[must_use]
 pub fn core_base_url(explicit: Option<&str>) -> String {
@@ -249,7 +249,7 @@ impl CoreClient {
         Self::answer(call, response).await
     }
 
-    pub async fn issue_machine_grant(
+    pub(crate) async fn issue_machine_grant(
         &self,
         machine_id: &str,
         secret: &[u8; 32],
@@ -303,27 +303,27 @@ pub struct ConfirmedMachine {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantToken {
-    pub token: String,
-    pub expires_at: String,
+    pub(crate) token: String,
+    pub(crate) expires_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Jwk {
-    pub kty: String,
-    pub crv: String,
-    pub x: String,
-    pub kid: String,
+    pub(crate) kty: String,
+    pub(crate) crv: String,
+    pub(crate) x: String,
+    pub(crate) kid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#use: Option<String>,
+    pub(crate) r#use: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alg: Option<String>,
+    pub(crate) alg: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Jwks {
-    pub keys: Vec<Jwk>,
+    pub(crate) keys: Vec<Jwk>,
 }
 
 #[cfg(test)]

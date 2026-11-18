@@ -3,8 +3,8 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::core::now_sec;
 
-pub const CONFIG_BUNDLES_LATEST_PATH: &str = "/v1/config/bundles/latest";
-pub const CONFIG_STATE_PATH: &str = "/v1/config/state";
+const CONFIG_BUNDLES_LATEST_PATH: &str = "/v1/config/bundles/latest";
+const CONFIG_STATE_PATH: &str = "/v1/config/state";
 const MANIFEST_FORMAT: &str = "ast-editor-config/1";
 
 fn config_manifest_path(version: u64) -> String {
@@ -75,7 +75,7 @@ pub struct LocalMcpServerKept {
     pub name: String,
 }
 
-pub fn sync_state_path(data_dir: &Path) -> PathBuf {
+fn sync_state_path(data_dir: &Path) -> PathBuf {
     data_dir.join("ast_sync.json")
 }
 

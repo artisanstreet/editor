@@ -77,7 +77,7 @@ pub(crate) async fn replaying(engine: EngineId, fixture: &str) -> Replay {
 }
 
 impl Replay {
-    pub(crate) async fn head(&self) -> Seq {
+    async fn head(&self) -> Seq {
         self.editor
             .http()
             .get(self.editor.url("/state"))
@@ -90,7 +90,7 @@ impl Replay {
             .head
     }
 
-    pub(crate) async fn thread(&self, permissions: Permissions) -> ThreadId {
+    async fn thread(&self, permissions: Permissions) -> ThreadId {
         let mut config = EngineConfig::new(self.engine);
         config.permissions = permissions;
         let thread = CreateThread {
@@ -105,7 +105,7 @@ impl Replay {
         thread.id
     }
 
-    pub(crate) async fn send(&self, thread: &ThreadId, text: &str) {
+    async fn send(&self, thread: &ThreadId, text: &str) {
         self.post(
             &format!("/threads/{thread}/messages"),
             &SendMessage {
@@ -119,15 +119,15 @@ impl Replay {
         .await;
     }
 
-    pub(crate) async fn answer(&self, item: &ItemId, answer: &Answer) {
+    async fn answer(&self, item: &ItemId, answer: &Answer) {
         self.post(&format!("/items/{item}/answer"), answer).await;
     }
 
-    pub(crate) async fn stop(&self, thread: &ThreadId) {
+    async fn stop(&self, thread: &ThreadId) {
         self.post(&format!("/threads/{thread}/cancel"), &()).await;
     }
 
-    pub(crate) async fn carry_on(&self, thread: &ThreadId) {
+    async fn carry_on(&self, thread: &ThreadId) {
         self.post(&format!("/threads/{thread}/continue"), &()).await;
     }
 
@@ -145,7 +145,7 @@ impl Replay {
         assert!(status.is_success(), "POST {path} answered {status}: {text}");
     }
 
-    pub(crate) async fn events(
+    async fn events(
         &self,
         since: Seq,
         what: &str,
@@ -172,14 +172,14 @@ impl Replay {
         screen
     }
 
-    pub(crate) async fn settled(&self, since: Seq, thread: &ThreadId, runs: usize) -> Screen {
+    async fn settled(&self, since: Seq, thread: &ThreadId, runs: usize) -> Screen {
         self.events(since, "the thread's runs to settle", |screen| {
             screen.finished(thread) >= runs
         })
         .await
     }
 
-    pub(crate) async fn trace(&self, thread: &ThreadId) -> Vec<serde_json::Value> {
+    async fn trace(&self, thread: &ThreadId) -> Vec<serde_json::Value> {
         let folder = forge_engines::trace::folder(&self.dir.path().join("forge"));
         let prefix = format!("{}-{thread}-", self.engine);
         let records = || -> Vec<serde_json::Value> {
@@ -211,7 +211,7 @@ impl Replay {
         records()
     }
 
-    pub(crate) fn launches(&self) -> usize {
+    fn launches(&self) -> usize {
         self.engine_files.launches()
     }
 }
@@ -243,20 +243,20 @@ impl Screen {
         }
     }
 
-    pub(crate) fn finished(&self, thread: &ThreadId) -> usize {
+    fn finished(&self, thread: &ThreadId) -> usize {
         self.runs
             .values()
             .filter(|run| &run.thread_id == thread && run.status() != RunStatus::Running)
             .count()
     }
 
-    pub(crate) fn started(&self, thread: &ThreadId) -> bool {
+    fn started(&self, thread: &ThreadId) -> bool {
         self.runs
             .values()
             .any(|run| &run.thread_id == thread && run.session_id.is_some())
     }
 
-    pub(crate) fn runs(&self, thread: &ThreadId) -> Vec<(RunStatus, Option<String>)> {
+    fn runs(&self, thread: &ThreadId) -> Vec<(RunStatus, Option<String>)> {
         let mut runs: Vec<&Run> = self
             .runs
             .values()
@@ -268,13 +268,13 @@ impl Screen {
             .collect()
     }
 
-    pub(crate) fn item(&self, thread: &ThreadId, matches: impl Fn(&Item) -> bool) -> Option<&Item> {
+    fn item(&self, thread: &ThreadId, matches: impl Fn(&Item) -> bool) -> Option<&Item> {
         self.items
             .values()
             .find(|item| &item.thread_id == thread && matches(item))
     }
 
-    pub(crate) fn transcript(&self, thread: &ThreadId) -> Vec<String> {
+    fn transcript(&self, thread: &ThreadId) -> Vec<String> {
         let mut items: Vec<&Item> = self
             .items
             .values()
@@ -284,7 +284,7 @@ impl Screen {
         items.into_iter().map(line).collect()
     }
 
-    pub(crate) fn envelopes(&self) -> &[Envelope] {
+    fn envelopes(&self) -> &[Envelope] {
         &self.envelopes
     }
 }
@@ -313,4 +313,4 @@ fn line(item: &Item) -> String {
     format!("{what} ({:?})", item.status)
 }
 
-pub(crate) const SETTLE: Duration = Duration::from_secs(20);
+const SETTLE: Duration = Duration::from_secs(20);

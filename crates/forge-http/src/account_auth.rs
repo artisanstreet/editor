@@ -205,7 +205,7 @@ impl GrantVerifier {
     reason = "test-only helpers; failures fail the test"
 )]
 #[cfg(test)]
-pub mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::routing::get;
 
@@ -215,7 +215,7 @@ pub mod tests {
         axum::Json(keys)
     }
 
-    pub async fn verifier_with_stub(
+    pub(crate) async fn verifier_with_stub(
         jwks: serde_json::Value,
     ) -> (GrantVerifier, test_support::http::StubServer) {
         let router = axum::Router::new()
@@ -238,7 +238,7 @@ pub mod tests {
         (key, x)
     }
 
-    pub fn grant_token(
+    fn grant_token(
         key: &ed25519_dalek::SigningKey,
         sub: &str,
         mid: &str,

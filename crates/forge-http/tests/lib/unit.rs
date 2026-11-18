@@ -10,7 +10,7 @@ pub(crate) struct Device {
     base: String,
 }
 
-pub(crate) fn device(forge_certificate: &str, address: SocketAddr) -> Device {
+fn device(forge_certificate: &str, address: SocketAddr) -> Device {
     let identity = Identity::generate("artisan-editor").unwrap();
     let config =
         tls::client_config(&identity, &tls::fingerprint_of(forge_certificate).unwrap()).unwrap();

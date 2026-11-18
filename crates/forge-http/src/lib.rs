@@ -48,7 +48,7 @@ use tower::Service;
 
 pub use tls::Identity;
 
-pub const DEFAULT_PORT: u16 = 47_900;
+const DEFAULT_PORT: u16 = 47_900;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfiguredListenError {
@@ -101,11 +101,6 @@ pub struct PairInvite {
     pub code: String,
     pub forge_certificate: String,
     pub expires_at: Timestamp,
-}
-
-pub async fn serve(config: ServeConfig, stop: impl Future<Output = ()>) -> Result<(), StartError> {
-    start(config).await?.run_until(stop).await;
-    Ok(())
 }
 
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
@@ -199,7 +194,7 @@ pub async fn start(config: ServeConfig) -> Result<Server, StartError> {
     start_with_harness(config, std::sync::Arc::new(forge_engines::harness)).await
 }
 
-pub async fn start_with_harness(
+async fn start_with_harness(
     config: ServeConfig,
     harness_for: forge_runs::HarnessFor,
 ) -> Result<Server, StartError> {
@@ -213,7 +208,8 @@ pub async fn start_generation(
     start_mode(config, Arc::new(forge_engines::harness), Some(registry)).await
 }
 
-pub async fn start_generation_with_harness(
+#[cfg(test)]
+pub(crate) async fn start_generation_with_harness(
     config: ServeConfig,
     registry: forge_runs::runtime::Registry,
     harness_for: forge_runs::HarnessFor,
