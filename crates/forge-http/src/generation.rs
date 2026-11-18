@@ -10,7 +10,7 @@ use axum::{
 };
 use forge_runs::{
     Hub,
-    runtime::{Command, Member, PROTOCOL, Registry, Reply},
+    runtime::{Command, Member, Overlap, PROTOCOL, Phase, Registry, Reply},
 };
 use futures::StreamExt as _;
 use std::{collections::HashSet, time::Duration};
@@ -78,7 +78,7 @@ async fn control(
         }
         Command::Stop => {
             if let Some(generation) = service.hub.generation() {
-                generation.set_accepting(false);
+                generation.set_phase(Phase::Draining);
             }
             let stop = service.stop.clone();
             tokio::spawn(async move {
@@ -158,10 +158,21 @@ pub fn start(
 }
 
 async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
+    let Some(generation) = hub.generation().cloned() else {
+        return;
+    };
+    let mut overlap = generation.watch();
     let mut cursor = hub.store().head();
     let mut peers = HashSet::new();
     let mut interval = tokio::time::interval(Duration::from_millis(50));
     loop {
+        if !overlap.borrow_and_update().overlapping() {
+            tokio::select! {
+                () = stop.cancelled() => break,
+                watching = settled(&mut overlap, Overlap::overlapping) => if !watching { break },
+            }
+            interval.reset_immediately();
+        }
         tokio::select! {
             () = stop.cancelled() => break,
             _tick = interval.tick() => {}
@@ -169,10 +180,10 @@ async fn synchronize(hub: Hub, stop: CancellationToken, tasks: TaskTracker) {
         if let Err(error) = hub.store().synchronize(&mut cursor).await {
             tracing::warn!("synchronize generation store: {error:#}");
         }
+        if let Err(error) = hub.follow_peers().await {
+            tracing::warn!("follow the other generations: {error:#}");
+        }
         hub.runtime_changed();
-        let Some(generation) = hub.generation() else {
-            break;
-        };
         let Ok(members) = generation.registry.peers() else {
             continue;
         };
@@ -218,54 +229,57 @@ pub fn start_primary_services(
     tasks.spawn(primary_services(data, app, stop.clone()));
 }
 
+async fn settled(
+    overlap: &mut tokio::sync::watch::Receiver<Overlap>,
+    condition: impl FnMut(&Overlap) -> bool,
+) -> bool {
+    overlap.wait_for(condition).await.is_ok()
+}
+
 async fn primary_services(
     data: std::path::PathBuf,
     app: crate::routes::App,
     stop: CancellationToken,
 ) {
+    let Some(generation) = app.hub.generation().cloned() else {
+        return;
+    };
+    let mut overlap = generation.watch();
     loop {
-        if stop.is_cancelled() {
-            break;
-        }
-        if let Some(generation) = app.hub.generation()
-            && generation.accepting()
-            && let Ok(Some(_lease)) = generation.registry.services_lock()
-        {
-            let leadership = stop.child_token();
-            let services = TaskTracker::new();
-            let account = crate::account_service::run(
-                data.clone(),
-                app.clone(),
-                leadership.clone(),
-                services.clone(),
-            );
-            let retention = crate::remove_inactive_threads(
-                app.hub.clone(),
-                app.hub.store().clone(),
-                leadership.clone(),
-            );
-            let service = async {
-                tokio::join!(account, retention);
-            };
-            tokio::pin!(service);
-            loop {
-                tokio::select! {
-                    () = &mut service => break,
-                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
-                }
-                if stop.is_cancelled() || !generation.accepting() {
-                    leadership.cancel();
-                    service.await;
-                    break;
-                }
-            }
-            leadership.cancel();
-            services.close();
-            services.wait().await;
-        }
         tokio::select! {
             () = stop.cancelled() => break,
-            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+            watching = settled(&mut overlap, |overlap| overlap.phase == Phase::Active) => if !watching { break },
+        }
+        let leadership = stop.child_token();
+        let services = TaskTracker::new();
+        let account = crate::account_service::run(
+            data.clone(),
+            app.clone(),
+            leadership.clone(),
+            services.clone(),
+        );
+        let retention = crate::remove_inactive_threads(
+            app.hub.clone(),
+            app.hub.store().clone(),
+            leadership.clone(),
+        );
+        let service = async {
+            tokio::join!(account, retention);
+        };
+        tokio::pin!(service);
+        let watching = tokio::select! {
+            () = &mut service => true,
+            watching = settled(&mut overlap, |overlap| overlap.phase != Phase::Active) => {
+                leadership.cancel();
+                service.await;
+                watching
+            }
+        };
+        leadership.cancel();
+        services.close();
+        services.wait().await;
+        if !watching {
+            break;
         }
     }
 }

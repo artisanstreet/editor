@@ -62,6 +62,7 @@ impl Harness for Script {
                     tokio::select! {
                         ()=io.cancel.cancelled()=>return Outcome::cancelled(),
                         input=io.inbox.recv()=>match input {
+                            Some(Input::Steer(input)) if input.text == "unheard" => {}
                             Some(Input::Steer(input))=>{
                                 io.emit(EngineEvent::InputAccepted {id:input.id}).await;
                                 io.emit(EngineEvent::Live {target:LiveKind::Reasoning,text:format!("{name}:{}",input.text),append:false}).await;
@@ -275,4 +276,133 @@ async fn new_turns_use_the_replacement_while_old_turns_keep_their_identity_and_c
         true
     );
     runtime::request(&new_member, &Command::Stop).await.unwrap();
+}
+
+struct Overlap {
+    _directory: tempfile::TempDir,
+    store: Store,
+    threads: Vec<ThreadId>,
+    old: Hub,
+    new: Hub,
+    new_member: runtime::Member,
+    new_starts: Arc<AtomicUsize>,
+}
+
+async fn overlap(held: &[&str]) -> Overlap {
+    let directory = tempfile::tempdir().unwrap();
+    let data = directory.path();
+    let store = Store::open(data).unwrap();
+    let binary = data
+        .join("engines/claude/versions/1.0.0")
+        .join(forge_engines::host_entry(EngineId::Claude).unwrap());
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::write(binary, "").unwrap();
+    std::fs::write(data.join("engines/claude/current"), "1.0.0").unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: data.display().to_string(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let mut threads = Vec::new();
+    for _ in 0..3 {
+        threads.push(
+            store
+                .create_thread(CreateThread {
+                    id: ThreadId::new(),
+                    project_id: project.id.clone(),
+                    config: EngineConfig::new(EngineId::Claude),
+                    title: None,
+                    parent_thread_id: None,
+                    spawned_by: None,
+                })
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let registry = Registry::open(data).unwrap();
+    let old = generation(data, &registry, "old", Arc::new(AtomicUsize::new(0))).await;
+    let old_member = old.generation().unwrap().member.clone();
+    runtime::request(&old_member, &Command::Activate)
+        .await
+        .unwrap();
+    registry.promote(&old_member).unwrap();
+    for (thread, text) in threads.iter().zip(held) {
+        old.send_message(thread, message(text)).await.unwrap();
+        wait(&store, thread, RunStatus::Running).await;
+    }
+    let new_starts = Arc::new(AtomicUsize::new(0));
+    let new = generation(data, &registry, "new", Arc::clone(&new_starts)).await;
+    let new_member = new.generation().unwrap().member.clone();
+    runtime::request(&new_member, &Command::Activate)
+        .await
+        .unwrap();
+    registry.promote(&new_member).unwrap();
+    Overlap {
+        _directory: directory,
+        store,
+        threads,
+        old,
+        new,
+        new_member,
+        new_starts,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_the_old_generation_has_not_taken_does_not_hold_up_other_threads() {
+    let overlap = overlap(&["hold"]).await;
+    overlap
+        .old
+        .send_message(&overlap.threads[0], message("unheard"))
+        .await
+        .unwrap();
+    overlap
+        .new
+        .send_message(&overlap.threads[1], message("fresh"))
+        .await
+        .unwrap();
+    wait(&overlap.store, &overlap.threads[1], RunStatus::Done).await;
+    assert_eq!(
+        overlap
+            .store
+            .last_reply(&overlap.threads[1])
+            .await
+            .unwrap()
+            .unwrap(),
+        "new:fresh"
+    );
+    assert_eq!(overlap.new_starts.load(Ordering::SeqCst), 1);
+    runtime::request(&overlap.new_member, &Command::Stop)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generations_cancelling_each_others_threads_at_once_both_finish() {
+    let overlap = overlap(&["hold"]).await;
+    overlap
+        .new
+        .send_message(&overlap.threads[1], message("hold"))
+        .await
+        .unwrap();
+    wait(&overlap.store, &overlap.threads[1], RunStatus::Running).await;
+    let (on_old, on_new) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            overlap.new.cancel(&overlap.threads[0]),
+            overlap.old.cancel(&overlap.threads[1]),
+        )
+    })
+    .await
+    .unwrap();
+    on_old.unwrap();
+    on_new.unwrap();
+    wait(&overlap.store, &overlap.threads[0], RunStatus::Cancelled).await;
+    wait(&overlap.store, &overlap.threads[1], RunStatus::Cancelled).await;
+    runtime::request(&overlap.new_member, &Command::Stop)
+        .await
+        .unwrap();
 }

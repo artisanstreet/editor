@@ -120,3 +120,40 @@ async fn a_background_result_that_could_not_be_delivered_is_delivered_after_reco
     );
     fixture.hub.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_background_agent_reports_to_its_parent_in_a_managed_generation() {
+    let fixture = fixture_in_generation(Arc::new(|turn, io| {
+        Box::pin(async move {
+            if turn.input.text == "review it" {
+                io.emit(reply("verdict", "looks fine")).await;
+            }
+            Outcome::done()
+        })
+    }))
+    .await;
+    let store = fixture.hub.store();
+    let parent = store.thread(&fixture.thread_id).await.unwrap().unwrap();
+    let (agent, child) = background_agent(&fixture, &parent).await;
+    fixture.hub.resume_pending();
+    test_support::wait::eventually(
+        "the parent to hear its agent finished",
+        Duration::from_secs(10),
+        || async {
+            fixture
+                .items()
+                .await
+                .iter()
+                .any(|item| {
+                    matches!(&item.kind, ItemKind::UserMessage { from_agent: Some(from), .. } if *from == agent)
+                })
+        },
+    )
+    .await;
+    assert_eq!(
+        store.item(&agent).await.unwrap().unwrap().status,
+        Status::Done,
+        "the agent row of {child} stops running"
+    );
+    fixture.hub.shutdown();
+}

@@ -125,12 +125,48 @@ async fn fixture_with_parts(
     harness_for: HarnessFor,
     disk: disk::Probe,
 ) -> Fixture {
+    fixture_in(engine, harness_for, disk, false).await
+}
+
+async fn fixture_in_generation(script: Script) -> Fixture {
+    let harness: Arc<dyn Harness> = Arc::new(Scripted(script));
+    fixture_in(
+        EngineId::Claude,
+        Arc::new(move |_| Arc::clone(&harness)),
+        disk::Probe::system(),
+        true,
+    )
+    .await
+}
+
+async fn fixture_in(
+    engine: EngineId,
+    harness_for: HarnessFor,
+    disk: disk::Probe,
+    managed: bool,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().to_path_buf();
     install_fake(&data, engine);
     let store = forge_store::Store::open(&data.join("forge")).unwrap();
     let engines = Engines::new(&data);
-    let hub = Hub::build(store, engines, data.clone(), harness_for, disk, None);
+    let generation = managed.then(|| {
+        let registry = runtime::Registry::open(&data).unwrap();
+        let generation = registry
+            .register(runtime::Member {
+                id: String::new(),
+                control: "http://127.0.0.1:1".into(),
+                token: "test".into(),
+                address: "127.0.0.1:2".parse().unwrap(),
+                pid: std::process::id(),
+                protocol: runtime::PROTOCOL,
+                schema: forge_store::Store::schema_version(),
+            })
+            .unwrap();
+        generation.set_phase(runtime::Phase::Active);
+        generation
+    });
+    let hub = Hub::build(store, engines, data.clone(), harness_for, disk, generation);
     let project = hub
         .store()
         .create_project(CreateProject {

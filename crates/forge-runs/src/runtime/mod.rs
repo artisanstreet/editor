@@ -1,11 +1,15 @@
 mod registry;
 
-pub use registry::{Generation, Lease, Member, Registry, RegistryFileError, read, write};
+pub use registry::{
+    Generation, Holds, Member, Overlap, Peer, Phase, Registry, RegistryFileError, UpgradeLock,
+    read, write,
+};
 
 use artisan_api::{Answer, EditorReply, ItemId, SendMessage, ThreadId};
 use forge_store::Acceptance;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 pub const PROTOCOL: u32 = 1;
 
@@ -69,6 +73,22 @@ pub async fn request(member: &Member, command: &Command) -> anyhow::Result<Value
     }
 }
 
+enum Drained {
+    Reported(BTreeSet<ThreadId>),
+    Unreported,
+}
+
+async fn drain_peer(member: &Member) -> anyhow::Result<Drained> {
+    Ok(match request(member, &Command::Drain).await? {
+        Value::Null => Drained::Unreported,
+        threads @ (Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_)
+        | Value::Object(_)) => Drained::Reported(serde_json::from_value(threads)?),
+    })
+}
+
 impl crate::Hub {
     pub async fn control(&self, command: Command) -> anyhow::Result<Value> {
         match command {
@@ -76,27 +96,19 @@ impl crate::Hub {
                 serde_json::json!({"protocol":PROTOCOL,"schema":forge_store::Store::schema_version(),"active":self.generation().is_some_and(Generation::accepting),"runs":self.local_active_count(),"generation":self.generation().map(|generation|&generation.member)}),
             ),
             Command::Activate => {
-                self.generation()
-                    .ok_or_else(|| anyhow::anyhow!("not a managed generation"))?
-                    .set_accepting(true);
-                self.resume_pending();
+                self.activate().await?;
                 Ok(Value::Null)
             }
-            Command::Drain => {
-                self.generation()
-                    .ok_or_else(|| anyhow::anyhow!("not a managed generation"))?
-                    .set_accepting(false);
-                Ok(Value::Null)
-            }
+            Command::Drain => Ok(serde_json::to_value(self.drain().await?)?),
             Command::Accept {
                 thread,
                 message,
                 acceptance,
             } => Ok(serde_json::to_value(
-                self.accept_message(&thread, message, acceptance).await?,
+                self.accept_here(&thread, message, acceptance).await?,
             )?),
             Command::Answer { item, answer } => {
-                self.answer(&item, answer).await?;
+                self.answer_here(&item, answer).await?;
                 Ok(Value::Null)
             }
             Command::Cancel { thread } => {
@@ -104,10 +116,10 @@ impl crate::Hub {
                 Ok(Value::Null)
             }
             Command::Update { thread, update } => Ok(serde_json::to_value(
-                self.update_thread(&thread, update).await?,
+                self.update_here(&thread, update).await?,
             )?),
             Command::ClearGoal { thread } => {
-                self.clear_goal(&thread).await?;
+                self.clear_goal_here(&thread).await?;
                 Ok(Value::Null)
             }
             Command::EditorReply { id, reply } => {
@@ -120,6 +132,111 @@ impl crate::Hub {
         }
     }
 
+    fn managed(&self) -> anyhow::Result<&Generation> {
+        self.generation()
+            .ok_or_else(|| anyhow::anyhow!("not a managed generation"))
+    }
+
+    async fn activate(&self) -> anyhow::Result<()> {
+        let generation = self.managed()?;
+        if generation.accepting() {
+            return Ok(());
+        }
+        let mut peers = Vec::new();
+        for member in generation.registry.peers()? {
+            if member.id == generation.member.id {
+                continue;
+            }
+            let holds = match drain_peer(&member).await {
+                Ok(Drained::Reported(threads)) => Holds::Reported(threads),
+                Ok(Drained::Unreported) => {
+                    tracing::info!(generation = %member.id, "stopping a generation that cannot report its threads; its turns carry on here");
+                    if let Err(error) = request(&member, &Command::Stop).await {
+                        tracing::warn!(generation = %member.id, "stop a generation that cannot report its threads: {error:#}");
+                    }
+                    Holds::Unreported(BTreeSet::new())
+                }
+                Err(error) => {
+                    tracing::warn!(generation = %member.id, "drain a generation before taking over: {error:#}");
+                    Holds::Unreported(BTreeSet::new())
+                }
+            };
+            peers.push(Peer { member, holds });
+        }
+        let reported: BTreeSet<ThreadId> = peers
+            .iter()
+            .filter_map(|peer| match &peer.holds {
+                Holds::Reported(threads) => Some(threads.iter().cloned()),
+                Holds::Unreported(_) => None,
+            })
+            .flatten()
+            .collect();
+        let local: BTreeSet<ThreadId> = self.owned_thread_ids().into_iter().collect();
+        let unclaimed: BTreeSet<ThreadId> = self
+            .store()
+            .running_threads()
+            .await?
+            .into_iter()
+            .filter(|thread| !reported.contains(thread) && !local.contains(thread))
+            .collect();
+        let unreported = peers
+            .iter()
+            .any(|peer| matches!(peer.holds, Holds::Unreported(_)));
+        if unreported {
+            for peer in &mut peers {
+                if let Holds::Unreported(threads) = &mut peer.holds {
+                    threads.clone_from(&unclaimed);
+                }
+            }
+        } else {
+            for thread in unclaimed {
+                self.store().recover_thread(thread).await?;
+            }
+        }
+        generation.track(peers);
+        generation.set_phase(Phase::Active);
+        self.resume_pending();
+        Ok(())
+    }
+
+    async fn drain(&self) -> anyhow::Result<Vec<ThreadId>> {
+        self.managed()?.set_phase(Phase::Draining);
+        let _admission = self.inner.admission.lock().await;
+        Ok(self.owned_thread_ids())
+    }
+
+    pub async fn follow_peers(&self) -> anyhow::Result<()> {
+        let Some(generation) = self.generation() else {
+            return Ok(());
+        };
+        let tracked = generation.peers();
+        if tracked.is_empty() {
+            return Ok(());
+        }
+        let alive = generation.registry.peers()?;
+        for peer in tracked {
+            let id = &peer.member.id;
+            if !alive.iter().any(|member| &member.id == id) {
+                for thread in generation.forget(id) {
+                    if generation.owner(&thread).is_none() {
+                        self.store().recover_thread(thread).await?;
+                    }
+                }
+                continue;
+            }
+            if matches!(peer.holds, Holds::Reported(_)) {
+                match drain_peer(&peer.member).await {
+                    Ok(Drained::Reported(threads)) => generation.reported(id, threads),
+                    Ok(Drained::Unreported) => {}
+                    Err(error) => {
+                        tracing::debug!(generation = %id, "ask a draining generation for its threads: {error:#}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn answer_distributed_editor_call(
         &self,
         id: &str,
@@ -128,7 +245,10 @@ impl crate::Hub {
         if self.answer_editor_call(id, reply.clone()) {
             return Ok(true);
         }
-        let Some(generation) = self.generation() else {
+        let Some(generation) = self
+            .generation()
+            .filter(|generation| generation.overlapping())
+        else {
             return Ok(false);
         };
         for member in generation.registry.peers()? {
@@ -156,7 +276,10 @@ impl crate::Hub {
         &self,
     ) -> anyhow::Result<(u64, Vec<artisan_api::Event>)> {
         let (revision, mut events) = self.live_snapshot();
-        if let Some(generation) = self.generation() {
+        if let Some(generation) = self
+            .generation()
+            .filter(|generation| generation.overlapping())
+        {
             for member in generation.registry.peers()? {
                 if member.id == generation.member.id {
                     continue;

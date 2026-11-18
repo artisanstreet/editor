@@ -113,6 +113,8 @@ struct Inner {
     mcp_unreachable: Mutex<std::collections::HashSet<mcp_reach::Endpoint>>,
 }
 
+const RUN_CAPACITY: usize = 8;
+
 const UNSETTLED_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// One live run's handles and memory-only text.
@@ -209,7 +211,7 @@ impl Hub {
                 homes: Mutex::new(()),
                 shutdown: CancellationToken::new(),
                 tasks: TaskTracker::new(),
-                harness_slots: Arc::new(Semaphore::new(8)),
+                harness_slots: Arc::new(Semaphore::new(RUN_CAPACITY)),
                 dispatch: Notify::new(),
                 admission: tokio::sync::Mutex::new(()),
                 gateway: Mutex::new(gateway::Gateway::default()),
@@ -301,7 +303,7 @@ impl Hub {
         message: SendMessage,
         acceptance: forge_store::Acceptance,
     ) -> Result<Item> {
-        if let Some(member) = self.remote_target(thread_id, true)? {
+        if let Some(member) = self.route(thread_id)? {
             return Ok(serde_json::from_value(
                 runtime::request(
                     &member,
@@ -314,6 +316,15 @@ impl Hub {
                 .await?,
             )?);
         }
+        self.accept_here(thread_id, message, acceptance).await
+    }
+
+    async fn accept_here(
+        &self,
+        thread_id: &ThreadId,
+        message: SendMessage,
+        acceptance: forge_store::Acceptance,
+    ) -> Result<Item> {
         let steer = self.is_live(thread_id);
         let (item, created, saved_engine) = self
             .inner
@@ -353,14 +364,13 @@ impl Hub {
     /// Answers the approval or question on an item of a live run. What the
     /// item's state turns down is [`Refused`]; anything else is Forge's fault.
     pub async fn answer(&self, item_id: &ItemId, answer: Answer) -> Result<()> {
-        let refused = |message: String| anyhow::Error::new(Refused(message));
         let item = self
             .inner
             .store
             .item(item_id)
             .await?
             .ok_or_else(|| forge_store::ItemNotFound(item_id.clone()))?;
-        if let Some(member) = self.remote_target(&item.thread_id, false)? {
+        if let Some(member) = self.route(&item.thread_id)? {
             runtime::request(
                 &member,
                 &runtime::Command::Answer {
@@ -371,6 +381,22 @@ impl Hub {
             .await?;
             return Ok(());
         }
+        self.answer_item(item, answer).await
+    }
+
+    async fn answer_here(&self, item_id: &ItemId, answer: Answer) -> Result<()> {
+        let item = self
+            .inner
+            .store
+            .item(item_id)
+            .await?
+            .ok_or_else(|| forge_store::ItemNotFound(item_id.clone()))?;
+        self.answer_item(item, answer).await
+    }
+
+    async fn answer_item(&self, item: Item, answer: Answer) -> Result<()> {
+        let refused = |message: String| anyhow::Error::new(Refused(message));
+        let item_id = &item.id;
         if let Answer::Question { answers } = &answer {
             self.inner
                 .store
@@ -479,7 +505,7 @@ impl Hub {
         thread_id: &ThreadId,
         update: artisan_api::UpdateThread,
     ) -> Result<Option<artisan_api::Thread>> {
-        if let Some(member) = self.remote_target(thread_id, false)? {
+        if let Some(member) = self.route(thread_id)? {
             return Ok(serde_json::from_value(
                 runtime::request(
                     &member,
@@ -491,6 +517,14 @@ impl Hub {
                 .await?,
             )?);
         }
+        self.update_here(thread_id, update).await
+    }
+
+    async fn update_here(
+        &self,
+        thread_id: &ThreadId,
+        update: artisan_api::UpdateThread,
+    ) -> Result<Option<artisan_api::Thread>> {
         let before = self
             .store()
             .thread(thread_id)
@@ -521,7 +555,7 @@ impl Hub {
     }
 
     pub async fn clear_goal(&self, thread_id: &ThreadId) -> Result<()> {
-        if let Some(member) = self.remote_target(thread_id, false)? {
+        if let Some(member) = self.route(thread_id)? {
             runtime::request(
                 &member,
                 &runtime::Command::ClearGoal {
@@ -531,6 +565,10 @@ impl Hub {
             .await?;
             return Ok(());
         }
+        self.clear_goal_here(thread_id).await
+    }
+
+    async fn clear_goal_here(&self, thread_id: &ThreadId) -> Result<()> {
         let refused = |message: &str| anyhow::Error::new(Refused(message.to_owned()));
         let store = self.store();
         let thread = store
@@ -611,28 +649,22 @@ impl Hub {
         Ok(())
     }
 
-    /// Cancels the thread's live run, if any, and the agents it started.
     pub async fn cancel(&self, thread_id: &ThreadId) -> Result<()> {
-        // Stop the whole tree before dispatching inputs or delivering agent
-        // results. Otherwise a child's cancellation can restart its parent.
-        let _admission = self.inner.admission.lock().await;
-        self.cancel_one(thread_id).await?;
-        self.cancel_agents_of(thread_id).await
-    }
-
-    /// The caller holds admission across the entire cancellation tree.
-    async fn cancel_one(&self, thread_id: &ThreadId) -> Result<()> {
-        if let Some(member) = self.remote_target(thread_id, false)? {
-            runtime::request(
-                &member,
-                &runtime::Command::Cancel {
-                    thread: thread_id.clone(),
-                },
-            )
-            .await?;
-            return Ok(());
+        let elsewhere = {
+            let _admission = self.inner.admission.lock().await;
+            let mut elsewhere = Vec::new();
+            for thread in self.agent_tree(thread_id).await? {
+                match self.route(&thread)? {
+                    Some(member) => elsewhere.push((thread, member)),
+                    None => self.cancel_owned(&thread).await?,
+                }
+            }
+            elsewhere
+        };
+        for (thread, member) in elsewhere {
+            runtime::request(&member, &runtime::Command::Cancel { thread }).await?;
         }
-        self.cancel_owned(thread_id).await
+        Ok(())
     }
 
     pub async fn cancel_local(&self, thread_id: &ThreadId) -> Result<()> {
@@ -685,51 +717,48 @@ impl Hub {
     #[must_use]
     pub fn is_live(&self, thread_id: &ThreadId) -> bool {
         self.lock().contains_key(thread_id)
-            || self.inner.generation.as_ref().is_some_and(|generation| {
-                generation
-                    .registry
-                    .owner(thread_id)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
+            || self
+                .inner
+                .generation
+                .as_ref()
+                .is_some_and(|generation| generation.owner(thread_id).is_some())
+    }
+
+    fn owned_thread_ids(&self) -> Vec<ThreadId> {
+        let mut ids: std::collections::BTreeSet<_> = self.lock().keys().cloned().collect();
+        ids.extend(self.unsettled_lock().keys().cloned());
+        ids.into_iter().collect()
     }
 
     pub fn active_thread_ids(&self) -> Vec<ThreadId> {
-        let mut ids: std::collections::BTreeSet<_> = self.lock().keys().cloned().collect();
-        ids.extend(self.unsettled_lock().keys().cloned());
-        if let Some(generation) = &self.inner.generation
-            && let Ok(owners) = generation.registry.owners()
-        {
-            ids.extend(owners.into_iter().map(|(id, _)| id));
+        let mut ids: std::collections::BTreeSet<_> = self.owned_thread_ids().into_iter().collect();
+        if let Some(generation) = &self.inner.generation {
+            ids.extend(generation.foreign_threads());
         }
         ids.into_iter().collect()
     }
 
-    fn remote_target(&self, thread: &ThreadId, new_work: bool) -> Result<Option<runtime::Member>> {
+    fn route(&self, thread: &ThreadId) -> Result<Option<runtime::Member>> {
         let Some(generation) = &self.inner.generation else {
             return Ok(None);
         };
-        let owner = generation.registry.owner(thread)?;
-        let target = match owner {
-            Some(owner) => Some(owner),
-            None if new_work => generation.registry.active()?,
-            None => None,
-        };
-        Ok(target.filter(|target| target.id != generation.member.id))
+        if self.lock().contains_key(thread) || self.unsettled_lock().contains_key(thread) {
+            return Ok(None);
+        }
+        if let Some(owner) = generation.owner(thread) {
+            return Ok(Some(owner));
+        }
+        if !generation.draining() {
+            return Ok(None);
+        }
+        Ok(generation
+            .registry
+            .active()?
+            .filter(|active| active.id != generation.member.id))
     }
 
     pub fn local_active_count(&self) -> usize {
-        let live = self.lock().len();
-        self.inner.generation.as_ref().map_or(live, |generation| {
-            generation.registry.owners().map_or(live, |owners| {
-                owners
-                    .into_iter()
-                    .filter(|(_, member)| member.id == generation.member.id)
-                    .count()
-                    .max(live)
-            })
-        })
+        self.owned_thread_ids().len()
     }
 
     /// The current memory-only text of every live run, and every thread's
@@ -900,32 +929,24 @@ impl Hub {
                         () = hub.inner.shutdown.cancelled() => break,
                         () = hub.inner.dispatch.notified() => {},
                         () = parked => {},
-                        () = async { match &hub.inner.generation { Some(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await, None => std::future::pending().await } } => {},
                         () = async { if hub.unsettled_lock().is_empty() { std::future::pending().await } else { tokio::time::sleep(UNSETTLED_RETRY).await } } => {},
                     }
                     hub.settle_unsettled().await;
-                    if let Some(generation) = &hub.inner.generation
-                        && generation.accepting()
-                        && let Ok(threads) = hub.store().running_threads().await {
-                        for thread in threads {
-                            if hub.lock().contains_key(&thread) { continue; }
-                            if let Ok(Some(_lease)) = generation.claim(&thread)
-                                && let Err(error) = hub.store().recover_thread(thread.clone()).await {
-                                tracing::error!(%thread,"recover orphaned generation: {error:#}");
-                            }
-                        }
-                    }
                     loop {
                         let _admission = hub.inner.admission.lock().await;
                         if hub.inner.shutdown.is_cancelled() {
                             return;
                         }
                         if hub.inner.generation.as_ref().is_some_and(|generation| !generation.accepting()) { break; }
+                        let excluded = hub.active_thread_ids();
+                        let foreign = excluded.len().saturating_sub(hub.local_active_count());
+                        if hub.inner.harness_slots.available_permits() <= foreign {
+                            break;
+                        }
                         let Ok(permit) = Arc::clone(&hub.inner.harness_slots).try_acquire_owned()
                         else {
                             break;
                         };
-                        let excluded = hub.active_thread_ids();
                         let next = match hub.store().pending_threads(1, excluded).await {
                             Ok(threads) => threads.into_iter().next(),
                             Err(error) => {
@@ -936,17 +957,7 @@ impl Hub {
                         let Some(thread) = next else {
                             break;
                         };
-                        let leases = if let Some(generation) = &hub.inner.generation {
-                            let Ok(Some(slot)) = generation.slot() else { break; };
-                            let Ok(Some(owner)) = generation.claim(&thread) else { continue; };
-                            Some((slot, owner))
-                        } else { None };
-                        if leases.is_some()
-                            && let Err(error) = hub.store().recover_thread(thread.clone()).await {
-                            tracing::error!(%thread, "recover abandoned run: {error:#}");
-                            break;
-                        }
-                        hub.claim(thread, permit, leases);
+                        hub.claim(thread, permit);
                     }
                 }
             },
@@ -954,12 +965,7 @@ impl Hub {
         );
     }
 
-    fn claim(
-        &self,
-        thread_id: ThreadId,
-        permit: OwnedSemaphorePermit,
-        leases: Option<(runtime::Lease, runtime::Lease)>,
-    ) {
+    fn claim(&self, thread_id: ThreadId, permit: OwnedSemaphorePermit) {
         let (inbox, receiver) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let cancel_through = Arc::new(AtomicU64::new(0));
@@ -978,7 +984,6 @@ impl Hub {
         let hub = self.clone();
         let span = tracing::info_span!("run", thread = %thread_id, run = %run_id);
         let run = async move {
-            let _leases = leases;
             let outcome = Box::pin(run::drive(
                 &hub,
                 &thread_id,

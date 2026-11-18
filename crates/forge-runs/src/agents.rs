@@ -749,20 +749,24 @@ impl Hub {
         self.refresh_agent(item, &child).await
     }
 
-    /// Cancels the agents a thread started, and theirs.
-    pub(crate) async fn cancel_agents_of(&self, thread: &ThreadId) -> Result<()> {
+    pub(crate) async fn agent_tree(&self, thread: &ThreadId) -> Result<Vec<ThreadId>> {
+        let mut tree = Vec::new();
         let mut stack = vec![thread.clone()];
         let mut seen = std::collections::HashSet::new();
         while let Some(next) = stack.pop() {
             if !seen.insert(next.clone()) {
                 continue;
             }
-            for child in self.store().agent_threads(&next).await? {
-                self.cancel_one(&child.id).await?;
-                stack.push(child.id);
-            }
+            stack.extend(
+                self.store()
+                    .agent_threads(&next)
+                    .await?
+                    .into_iter()
+                    .map(|child| child.id),
+            );
+            tree.push(next);
         }
-        Ok(())
+        Ok(tree)
     }
 
     /// A run of `thread` ended: if it runs an agent, update the parent, and
@@ -878,7 +882,9 @@ impl Hub {
                 thread: Some(child),
                 ..
             } = &item.kind
-                && self.remote_target(child, false).ok().flatten().is_none()
+                && self
+                    .generation()
+                    .is_none_or(|generation| generation.owner(child).is_none())
                 && let Err(error) = self.settle_agent(child).await
             {
                 tracing::error!(thread = %child, "updating an agent: {error:#}");

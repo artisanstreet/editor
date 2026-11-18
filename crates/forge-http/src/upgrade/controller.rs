@@ -113,6 +113,9 @@ async fn replace(service: &Service, upgrade: Upgrade) -> Result<Gateway> {
     }
     .await;
     if let Err(error) = commit {
+        if let Err(reactivation) = runtime::request(&previous, &Command::Activate).await {
+            tracing::error!(generation = %previous.id, "hand new work back to the previous generation: {reactivation:#}");
+        }
         service.registry.promote(&previous)?;
         write(&service.registry.root().join("gateway.json"), &current)?;
         write(&service.data.join("forge.pid"), &current.pid)?;
@@ -165,6 +168,7 @@ fn binding(
         lock.try_lock_exclusive()
             .context("another Forge gateway is running")?;
         if registry.peers()?.is_empty() {
+            registry.retire_unused()?;
             let _exclusive = crate::lock_data_dir(&config.data_dir)?;
             drop(forge_store::Store::open(&config.data_dir)?);
         }
