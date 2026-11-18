@@ -559,9 +559,9 @@ fn marketplace_host(
     use artisan_api::tls::{Identity, fingerprint};
     use editor_aqua::core::{ForgeClient, HostConfig, HostKind, Screen};
     use editor_aqua::marketplace::controller::MarketplaceController;
-    let identity = Identity::generate("marketplace-state-test").unwrap();
-    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
-    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
+    let identity = Identity::generate("marketplace-state-test").expect("identity");
+    let fingerprint = fingerprint(identity.certificate_der().expect("certificate").as_ref());
+    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).expect("client");
     core.add_test_host(
         &HostConfig {
             id: HostId("state-host".into()),
@@ -590,9 +590,9 @@ fn marketplace_app(
     editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
     let mut app = aqua::UiApp::new(fonts, SharedRuns::new());
     let element = view::build(controller, core, ArtisanTheme::resolved(), emit);
-    app.mount(|_| element).unwrap();
+    app.mount(|_| element).expect("mount the marketplace");
     app.set_viewport(1000.0, 1600.0, 1.0);
-    app.build_frame().unwrap();
+    app.build_frame().expect("lay out the marketplace");
     app
 }
 

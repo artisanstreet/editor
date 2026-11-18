@@ -897,7 +897,7 @@ fn engine_sign_in_can_be_cancelled_while_busy_and_enter_submits_the_code() {
         .borrow_mut()
         .set_text("abc-123");
     let mut app = render_settings(&settings, &core, emit);
-    assert!(app.focus_key(&format!("settings-engine-login-code-{engine}")));
+    assert!(app.focus_key(format!("settings-engine-login-code-{engine}").as_str()));
     let enter = KeyEvent {
         key: Key::Named(NamedKey::Enter),
         modifiers: Modifiers::default(),
@@ -931,10 +931,7 @@ fn engine_sign_in_can_be_cancelled_while_busy_and_enter_submits_the_code() {
 #[test]
 fn an_mcp_sign_in_that_is_still_opening_can_be_cancelled() {
     use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
-    use editor_aqua::settings::{
-        controller::SettingsController,
-        view::{ViewAction, dispatch},
-    };
+    use editor_aqua::settings::{controller::SettingsController, view::dispatch};
     use serde_json::json;
     use std::{cell::RefCell, rc::Rc};
     let dir = tempfile::tempdir().unwrap();
