@@ -39,6 +39,7 @@ List
     Label "Thought for [duration]"
   ListItem
     Label "Picked the parser refactor back up."
+Label "Reply finished"
 ComboBox "No model" [collapsed]
   Label "No model"
 ScrollView

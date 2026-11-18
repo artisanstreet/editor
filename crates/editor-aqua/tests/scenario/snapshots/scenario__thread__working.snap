@@ -39,6 +39,7 @@ List
     Label "Thinking for [duration]"
   ListItem
     Label "Thinking"
+Label "Claude Code is working"
 ComboBox "No model" [collapsed]
   Label "No model"
 ScrollView

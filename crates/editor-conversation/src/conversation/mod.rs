@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod adapter;
 pub mod admission;
+pub mod announce;
 pub mod compaction;
 pub mod content;
 pub mod controller;

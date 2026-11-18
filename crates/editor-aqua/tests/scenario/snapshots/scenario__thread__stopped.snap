@@ -37,6 +37,7 @@ List
     Label "Refactor the parser"
   ListItem
     Label "Stopped after [duration]"
+Label "Reply stopped"
 ComboBox "No model" [collapsed]
   Label "No model"
 ScrollView

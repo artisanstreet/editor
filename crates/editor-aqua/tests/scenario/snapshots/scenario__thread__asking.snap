@@ -51,6 +51,7 @@ List
       Label "Deny"
   ListItem
     Label "Waiting for you"
+Label "OpenCode is waiting for you"
 ComboBox "No model" [collapsed]
   Label "No model"
 ScrollView

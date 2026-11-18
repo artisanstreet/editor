@@ -658,7 +658,7 @@ pub fn layout_batched_list(
         rows.last().map(|row| &row.key).hash(&mut hasher);
         hasher.finish()
     };
-    List::new()
+    let list = List::new()
         .items(rows)
         .shape_epoch(epoch)
         .key(|row: &TranscriptRow| format!("{:?}", row.key))
@@ -679,7 +679,11 @@ pub fn layout_batched_list(
                 .height(Length::Pct(100.0)),
         )
         .build()
-        .with_key("conversation-transcript")
+        .with_key("conversation-transcript");
+    crate::conversation::announce::announced(
+        list,
+        &crate::conversation::announce::current(conversation),
+    )
 }
 
 pub fn reader_scrolled(

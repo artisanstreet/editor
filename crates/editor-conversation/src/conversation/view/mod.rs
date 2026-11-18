@@ -322,11 +322,14 @@ pub fn layout_batched_thread_element(
     revision: transcript::RowRevision,
     viewport: Rc<dyn Fn(aqua_ui::collection_runtime::CollectionViewport)>,
     initial_height: Rc<dyn Fn(usize, &crate::conversation::fold::RowKey) -> f32>,
-    overlays: Vec<Element>,
+    mut overlays: Vec<Element>,
     composer: Option<Element>,
     drawer: Option<Element>,
     viewport_width: f32,
 ) -> Element {
+    overlays.push(crate::conversation::announce::announcer(
+        &crate::conversation::announce::current(conversation),
+    ));
     let list = transcript::layout_batched_list(
         conversation,
         estimated_height,

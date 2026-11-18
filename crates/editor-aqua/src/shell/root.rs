@@ -2573,6 +2573,14 @@ impl SectionViews for RootViews {
                 return false;
             }
         };
+        let announcer = crate::conversation::announce::announcer(
+            &crate::conversation::announce::current(&workspace.conversation),
+        );
+        if let Err(error) =
+            ui.refresh_subtree(crate::conversation::announce::ANNOUNCER_KEY, announcer)
+        {
+            tracing::warn!(%error, "could not refresh the reply announcement");
+        }
         match ui.refresh_subtree("conversation-transcript", element) {
             Ok(refreshed) => {
                 if !refreshed {
