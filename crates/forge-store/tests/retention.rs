@@ -273,3 +273,72 @@ async fn an_old_thread_with_a_saved_draft_survives_collection() {
         serde_json::json!({"text": "half a thought"})
     );
 }
+
+#[tokio::test]
+async fn retention_takes_a_removed_threads_coordination_with_it() {
+    use forge_store::coordination::{Content, Intent, MessageState, WorkState};
+    let (_dir, store, project) = open().await;
+    let idle = add_thread(&store, &project, None).await;
+    let busy = add_thread(&store, &project, None).await;
+    store
+        .upsert_item(message(&busy, Status::AwaitingUser, Vec::new()))
+        .await
+        .unwrap();
+    let work = |dependencies| Content::Work {
+        objective: "fix parser".into(),
+        worktree: "/repo".into(),
+        state: WorkState::Running,
+        resources: vec![],
+        dependencies,
+        summary: String::new(),
+        evidence: vec![],
+    };
+    let declared = store
+        .coordination_put(idle.clone(), None, work(vec![]), None)
+        .await
+        .unwrap();
+    let kept = store
+        .coordination_put(busy.clone(), None, work(vec![]), None)
+        .await
+        .unwrap();
+    let addressed = store
+        .coordination_put(
+            busy.clone(),
+            None,
+            Content::Message {
+                recipient: idle.clone(),
+                intent: Intent::Information,
+                text: "the parser is yours".into(),
+                state: MessageState::Prepared,
+                reply: None,
+                delivery_item: None,
+                receipt_revision: 0,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let removed: Vec<ThreadId> = store
+        .remove_inactive_threads(now() + 60_000, HashSet::new(), 8)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect();
+
+    assert_eq!(removed, vec![idle.clone()]);
+    assert_eq!(store.coordination_get(declared.id).await.unwrap(), None);
+    assert_eq!(store.coordination_get(addressed.id).await.unwrap(), None);
+    assert_eq!(
+        store.coordination_get(kept.id.clone()).await.unwrap(),
+        Some(kept)
+    );
+    let changes = store.coordination_changes(0, None, 100).await.unwrap();
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.owner == busy && change.record_id.starts_with("work:")),
+        "{changes:?}"
+    );
+}
