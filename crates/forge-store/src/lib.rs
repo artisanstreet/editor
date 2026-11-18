@@ -109,6 +109,14 @@ pub const fn park_setting(continuation: artisan_api::Continuation) -> Option<&'s
 }
 
 #[derive(Clone, Debug)]
+pub struct AgentReport {
+    pub thread: ThreadId,
+    pub message: artisan_api::SendMessage,
+    pub steer: bool,
+    pub acceptance: Acceptance,
+}
+
+#[derive(Clone, Debug)]
 pub struct Settlement {
     pub run: Run,
     pub open: Vec<ItemId>,

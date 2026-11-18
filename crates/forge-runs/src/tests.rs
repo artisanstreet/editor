@@ -5,6 +5,8 @@ use super::*;
 
 #[path = "../tests/run/activity.rs"]
 mod activity;
+#[path = "../tests/agents/report.rs"]
+mod agent_report;
 #[path = "../tests/agents/spawn.rs"]
 mod agent_spawn;
 #[path = "../tests/agents/status.rs"]

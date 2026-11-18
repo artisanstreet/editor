@@ -321,20 +321,31 @@ impl Hub {
         if !created {
             return Ok(item);
         }
+        self.dispatch_accepted(thread_id, &item, saved_engine)
+            .await?;
+        Ok(item)
+    }
+
+    async fn dispatch_accepted(
+        &self,
+        thread_id: &ThreadId,
+        item: &Item,
+        saved_engine: EngineId,
+    ) -> Result<()> {
         let live = self
             .lock()
             .get(thread_id)
             .map(|run| (run.inbox.clone(), run.engine.unwrap_or(saved_engine)));
         match live {
-            // A closed inbox means the run is ending; it starts the next run
-            // with this message.
             Some((inbox, engine)) => {
-                let input = self.user_input(&item, engine).await?;
-                inbox.send(Input::Steer(input)).await.ok();
+                let input = self.user_input(item, engine).await?;
+                if inbox.send(Input::Steer(input)).await.is_err() {
+                    self.resume_pending();
+                }
             }
             None => self.resume_pending(),
         }
-        Ok(item)
+        Ok(())
     }
 
     /// Answers the approval or question on an item of a live run. What the

@@ -561,8 +561,26 @@ impl Hub {
         })
     }
 
-    /// Brings an agent's item in line with its thread, and reports it.
     async fn refresh_agent(&self, item: Item, child: &ThreadId) -> Result<AgentInfo> {
+        let (info, update) = self.agent_view(&item, child).await?;
+        if let Some(update) = update {
+            if item.status.is_terminal()
+                && !update.status.is_terminal()
+                && let Some(run) = &item.run_id
+            {
+                self.store().reopen_agent(&item.id, run).await?;
+            }
+            self.store().upsert_item(update).await?;
+            self.agents_moved();
+        }
+        Ok(info)
+    }
+
+    async fn agent_view(
+        &self,
+        item: &Item,
+        child: &ThreadId,
+    ) -> Result<(AgentInfo, Option<NewItem>)> {
         let store = self.store();
         let (state, error) = self.child_state(child).await?;
         let result = if state.is_settled() {
@@ -593,39 +611,28 @@ impl Hub {
         let changed = item.status != next
             || (state.is_settled()
                 && matches!(&item.kind, ItemKind::Agent { result, .. } if *result != result_text));
-        if changed {
-            let new = NewItem {
-                id: item.id.clone(),
-                thread_id: item.thread_id.clone(),
-                run_id: item.run_id.clone(),
-                parent_id: item.parent_id.clone(),
-                native_id: None,
-                status: next,
-                kind: ItemKind::Agent {
-                    name,
-                    description: description.clone(),
-                    prompt,
-                    agent_id,
-                    context_used,
-                    model: model.clone(),
-                    background,
-                    result: result_text,
-                    label: label.clone(),
-                    engine,
-                    thread: child_thread,
-                },
-            };
-            // A settled agent that was messaged works again.
-            if item.status.is_terminal()
-                && !next.is_terminal()
-                && let Some(run) = &item.run_id
-            {
-                store.reopen_agent(&item.id, run).await?;
-            }
-            store.upsert_item(new).await?;
-            self.agents_moved();
-        }
-        Ok(AgentInfo {
+        let update = changed.then(|| NewItem {
+            id: item.id.clone(),
+            thread_id: item.thread_id.clone(),
+            run_id: item.run_id.clone(),
+            parent_id: item.parent_id.clone(),
+            native_id: None,
+            status: next,
+            kind: ItemKind::Agent {
+                name,
+                description: description.clone(),
+                prompt,
+                agent_id,
+                context_used,
+                model: model.clone(),
+                background,
+                result: result_text,
+                label: label.clone(),
+                engine,
+                thread: child_thread,
+            },
+        });
+        let info = AgentInfo {
             agent: item.id.clone(),
             thread: child.clone(),
             task: label.unwrap_or_else(|| store_text(&description)),
@@ -645,7 +652,8 @@ impl Hub {
             result,
             error,
             warnings: Vec::new(),
-        })
+        };
+        Ok((info, update))
     }
 
     /// One agent of the caller's, as it is now.
@@ -772,8 +780,6 @@ impl Hub {
     }
 
     async fn settle_agent(&self, thread: &ThreadId) -> Result<()> {
-        // Serialize reports with Stop and with reconciliation, so a report
-        // is either included in Stop's cutoff or observes its cancellation.
         let _admission = self.inner.admission.lock().await;
         let store = self.store();
         let Some(child) = store.thread(thread).await? else {
@@ -785,7 +791,6 @@ impl Hub {
         let Some(item) = store.item(agent).await? else {
             return Ok(());
         };
-        let was = item.status;
         let parent = item.thread_id.clone();
         let background = matches!(
             item.kind,
@@ -794,75 +799,66 @@ impl Hub {
                 ..
             }
         );
-        let info = self.refresh_agent(item, thread).await?;
+        let (info, update) = self.agent_view(&item, thread).await?;
         let waited = self
             .waiters_lock()
             .get(agent)
             .is_some_and(|count| *count > 0);
-        if background
+        let reports = background
             && !waited
-            && !was.is_terminal()
+            && !item.status.is_terminal()
             && info.state.is_settled()
             && info.state != AgentState::Cancelled
-        {
-            self.deliver_result(&parent, &info).await?;
-        }
-        Ok(())
-    }
-
-    /// Tells the parent a background agent finished, as a message.
-    async fn deliver_result(&self, parent: &ThreadId, info: &AgentInfo) -> Result<()> {
-        // A child can finish successfully while Stop is winding the tree
-        // down. Its late result must not start another turn either.
-        let cancelling = self.lock().get(parent).map(|run| run.cancel.is_cancelled());
-        if cancelling == Some(true)
-            || (cancelling.is_none()
-                && self
-                    .store()
-                    .latest_run(parent)
-                    .await?
-                    .is_some_and(|run| run.status == RunStatus::Cancelled))
-        {
+            && !self.stopping(&parent).await?;
+        if !reports {
+            if let Some(update) = update {
+                if item.status.is_terminal()
+                    && !update.status.is_terminal()
+                    && let Some(run) = &item.run_id
+                {
+                    store.reopen_agent(&item.id, run).await?;
+                }
+                store.upsert_item(update).await?;
+                self.agents_moved();
+            }
             return Ok(());
         }
-        let outcome = match info.state {
-            AgentState::Done => "finished",
-            AgentState::Failed => "failed",
-            AgentState::Working | AgentState::WaitingForUser | AgentState::Cancelled => {
-                "was cancelled"
-            }
-        };
-        let mut text = format!(
-            "[Artisan] Agent \"{}\" ({}, {}) {outcome}.",
-            info.task,
-            info.harness.display_name(),
-            info.agent
-        );
-        if let Some(error) = &info.error {
-            write!(text, "\nError: {error}")?;
-        }
-        if let Some(result) = &info.result {
-            text.push_str("\nIts last reply:\n\n");
-            text.push_str(result);
-        }
-        self.accept_message(
-            parent,
-            SendMessage {
-                id: ItemId::new(),
-                text,
-                images: Vec::new(),
-                config: None,
-                draft: None,
-            },
-            forge_store::Acceptance {
-                title: None,
-                remember_config: false,
-                from_agent: Some(info.agent.clone()),
-                sender: None,
-            },
-        )
-        .await?;
-        Ok(())
+        let (report, engine) = store
+            .settle_agent(
+                update,
+                forge_store::AgentReport {
+                    thread: parent.clone(),
+                    message: SendMessage {
+                        id: ItemId::new(),
+                        text: report_text(&info)?,
+                        images: Vec::new(),
+                        config: None,
+                        draft: None,
+                    },
+                    steer: self.is_live(&parent),
+                    acceptance: forge_store::Acceptance {
+                        title: None,
+                        remember_config: false,
+                        from_agent: Some(info.agent.clone()),
+                        sender: None,
+                    },
+                },
+            )
+            .await?;
+        self.agents_moved();
+        self.dispatch_accepted(&parent, &report, engine).await
+    }
+
+    async fn stopping(&self, parent: &ThreadId) -> Result<bool> {
+        let cancelling = self.lock().get(parent).map(|run| run.cancel.is_cancelled());
+        Ok(match cancelling {
+            Some(cancelling) => cancelling,
+            None => self
+                .store()
+                .latest_run(parent)
+                .await?
+                .is_some_and(|run| run.status == RunStatus::Cancelled),
+        })
     }
 
     /// Agent items a previous Forge left working catch up with their
@@ -899,6 +895,28 @@ impl Hub {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+fn report_text(info: &AgentInfo) -> Result<String> {
+    let outcome = match info.state {
+        AgentState::Done => "finished",
+        AgentState::Failed => "failed",
+        AgentState::Working | AgentState::WaitingForUser | AgentState::Cancelled => "was cancelled",
+    };
+    let mut text = format!(
+        "[Artisan] Agent \"{}\" ({}, {}) {outcome}.",
+        info.task,
+        info.harness.display_name(),
+        info.agent
+    );
+    if let Some(error) = &info.error {
+        write!(text, "\nError: {error}")?;
+    }
+    if let Some(result) = &info.result {
+        text.push_str("\nIts last reply:\n\n");
+        text.push_str(result);
+    }
+    Ok(text)
 }
 
 fn store_text(text: &artisan_api::TextContent) -> String {

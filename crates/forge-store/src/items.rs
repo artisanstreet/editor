@@ -84,6 +84,31 @@ impl Store {
         .await
     }
 
+    pub async fn settle_agent(
+        &self,
+        agent: Option<NewItem>,
+        report: crate::AgentReport,
+    ) -> Result<(Item, EngineId)> {
+        let blob_dir = self.inner.blob_dir.clone();
+        let parent = report.thread.clone();
+        self.write(move |tx| {
+            if let Some(agent) = agent {
+                tx.upsert_item(agent)?;
+            }
+            let crate::AgentReport {
+                thread,
+                message,
+                steer,
+                acceptance,
+            } = report;
+            let (item, _, engine) =
+                tx.send_message(thread, message, steer, acceptance, &blob_dir)?;
+            Ok((item, engine))
+        })
+        .await
+        .with_context(|| format!("report an agent's end to thread {parent}"))
+    }
+
     pub async fn spawn_agent(
         &self,
         agent: NewItem,
