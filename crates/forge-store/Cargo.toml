@@ -11,6 +11,7 @@ doctest = false
 
 [features]
 qualification = []
+test-support = []
 
 [dependencies]
 artisan-markdown-index.workspace = true

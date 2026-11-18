@@ -210,6 +210,8 @@ impl Writer {
             ..
         } = tx;
         events.sort_by_key(|envelope| envelope.seq);
+        #[cfg(feature = "test-support")]
+        crate::faults::before_commit(sql.path()).map_err(StorageError::from)?;
         sql.commit().map_err(StorageError::from)?;
         self.commits.note();
         self.hot.committed(&events);

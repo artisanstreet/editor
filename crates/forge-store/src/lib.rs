@@ -24,6 +24,8 @@ pub mod coordination;
 pub mod discovery;
 mod encoded;
 mod error;
+#[cfg(feature = "test-support")]
+pub mod faults;
 mod feed;
 pub mod hot;
 mod items;
