@@ -118,3 +118,28 @@ async fn projects_past_the_limit_are_refused_until_one_is_removed() {
     store.remove_project(&first.unwrap()).await.unwrap();
     store.create_project(project("/work/extra")).await.unwrap();
 }
+
+#[tokio::test]
+async fn the_starting_state_carries_an_unread_thread_older_than_its_first_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store.create_project(project("/work/app")).await.unwrap();
+    let create = || CreateThread {
+        id: ThreadId::new(),
+        project_id: project.id.clone(),
+        config: EngineConfig::new(EngineId::Claude),
+        title: None,
+        parent_thread_id: None,
+        spawned_by: None,
+    };
+    let unread = store.create_thread(create()).await.unwrap().id;
+    store.mark_unread(&unread).await.unwrap();
+    for _ in 0..210 {
+        store.create_thread(create()).await.unwrap();
+    }
+    let state = store.state().await.unwrap();
+    assert!(
+        state.threads.iter().any(|thread| thread.id == unread),
+        "the inbox shows the unread thread without paging the whole history"
+    );
+}
