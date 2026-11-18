@@ -1688,6 +1688,7 @@ dependencies = [
  "artisan-api",
  "artisan-mentions",
  "diagnostics",
+ "divan",
  "editor-assets",
  "editor-composer",
  "editor-conversation",
