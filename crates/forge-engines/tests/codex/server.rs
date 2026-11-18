@@ -134,3 +134,49 @@ async fn rejected_steers_start_the_next_turn_in_the_order_they_were_sent() {
     );
     assert!(first < second, "{next_turn}");
 }
+
+#[tokio::test]
+async fn a_run_that_falls_too_far_behind_codex_is_detached_while_others_carry_on() {
+    let fixture = Fixture::new();
+    let mut flooded = crate::codex::server::attach(&fixture.turn("flood", None))
+        .await
+        .unwrap();
+    flooded
+        .send(serde_json::json!({ "id": 1, "method": "thread/start", "params": {} }))
+        .unwrap();
+    let thread = loop {
+        let line = flooded.next_line().await.unwrap().expect("Codex answers");
+        let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if frame["id"] == 1 {
+            break frame["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        }
+    };
+    flooded
+        .send(serde_json::json!({
+            "id": 2,
+            "method": "turn/start",
+            "params": { "threadId": thread, "input": [{ "type": "text", "text": "flood" }] },
+        }))
+        .unwrap();
+    until_codex_read(&fixture, "\"text\":\"flood\"").await;
+    let (outcome, _) = run(fixture.turn("hello", None)).await;
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
+    let ended = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match flooded.next_line().await {
+                Ok(Some(_)) => {}
+                other => break other,
+            }
+        }
+    })
+    .await
+    .expect("the run that stopped reading is detached instead of buffering forever");
+    assert!(
+        matches!(ended, Err(crate::codex::Overloaded { .. })),
+        "{ended:?}"
+    );
+}

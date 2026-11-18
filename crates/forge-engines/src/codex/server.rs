@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -16,6 +16,7 @@ const SWEEP: Duration = Duration::from_secs(60);
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const UNCLAIMED_BYTES: usize = 16 * 1024 * 1024;
+const RUN_BACKLOG_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AttachError {
@@ -76,6 +77,18 @@ pub enum InitializeError {
 #[derive(Debug, thiserror::Error)]
 #[error("the Codex app-server has ended")]
 pub struct Ended;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Artisan fell more than {} MiB behind run {run}'s Codex output, so the run was detached", RUN_BACKLOG_BYTES / (1024 * 1024))]
+pub struct Overloaded {
+    run: u64,
+}
+
+#[derive(Default)]
+struct Backlog {
+    bytes: AtomicUsize,
+    overloaded: AtomicBool,
+}
 
 static SERVERS: LazyLock<tokio::sync::Mutex<Vec<Arc<Server>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(Vec::new()));
@@ -273,13 +286,20 @@ impl Server {
     fn take_run(self: &Arc<Self>, window: Option<u64>) -> Result<Attachment, AttachError> {
         let run = self.next_run.fetch_add(1, Ordering::Relaxed);
         let (lines, receiver) = mpsc::unbounded_channel();
+        let backlog = Arc::new(Backlog::default());
         self.commands
-            .send(Command::Attach { run, lines, window })
+            .send(Command::Attach {
+                run,
+                lines,
+                backlog: Arc::clone(&backlog),
+                window,
+            })
             .map_err(|_unsent| AttachError::Ended { run })?;
         Ok(Attachment {
             server: Arc::clone(self),
             run,
             lines: receiver,
+            backlog,
         })
     }
 
@@ -362,11 +382,21 @@ pub(super) struct Attachment {
     server: Arc<Server>,
     run: u64,
     lines: mpsc::UnboundedReceiver<String>,
+    backlog: Arc<Backlog>,
 }
 
 impl Attachment {
-    pub async fn next_line(&mut self) -> Option<String> {
-        self.lines.recv().await
+    pub async fn next_line(&mut self) -> Result<Option<String>, Overloaded> {
+        match self.lines.recv().await {
+            Some(line) => {
+                self.backlog.bytes.fetch_sub(line.len(), Ordering::AcqRel);
+                Ok(Some(line))
+            }
+            None if self.backlog.overloaded.load(Ordering::Acquire) => {
+                Err(Overloaded { run: self.run })
+            }
+            None => Ok(None),
+        }
     }
 
     pub fn send(&self, message: Value) -> Result<(), Ended> {
@@ -405,6 +435,7 @@ enum Command {
     Attach {
         run: u64,
         lines: mpsc::UnboundedSender<String>,
+        backlog: Arc<Backlog>,
         window: Option<u64>,
     },
     Send {
@@ -428,6 +459,7 @@ struct Release {
 
 struct AttachedRun {
     lines: mpsc::UnboundedSender<String>,
+    backlog: Arc<Backlog>,
     window: Option<u64>,
 }
 
@@ -567,8 +599,20 @@ impl Actor {
 
     fn command(&mut self, command: Command) {
         match command {
-            Command::Attach { run, lines, window } => {
-                self.runs.insert(run, AttachedRun { lines, window });
+            Command::Attach {
+                run,
+                lines,
+                backlog,
+                window,
+            } => {
+                self.runs.insert(
+                    run,
+                    AttachedRun {
+                        lines,
+                        backlog,
+                        window,
+                    },
+                );
             }
             Command::Send { run, mut message } => {
                 if message.get("method").is_some()
@@ -661,9 +705,7 @@ impl Actor {
             Ok(head) => head,
             Err(error) => {
                 tracing::warn!(%error, "Codex app-server wrote a frame Artisan can't read");
-                for run in self.runs.values() {
-                    run.lines.send(line.clone()).ok();
-                }
+                self.deliver_all(&line);
                 return;
             }
         };
@@ -816,9 +858,7 @@ impl Actor {
 
     fn unthreaded(&mut self, method: &str, id: Option<Value>, line: String) {
         let Some(id) = id else {
-            for run in self.runs.values() {
-                run.lines.send(line.clone()).ok();
-            }
+            self.deliver_all(&line);
             return;
         };
         if let Some(run) = self.runs.keys().min().copied() {
@@ -865,9 +905,48 @@ impl Actor {
         }
     }
 
-    fn deliver(&self, run: u64, line: String) {
-        if let Some(attached) = self.runs.get(&run) {
-            attached.lines.send(line).ok();
+    fn deliver_all(&mut self, line: &str) {
+        let runs: Vec<u64> = self.runs.keys().copied().collect();
+        for run in runs {
+            self.deliver(run, line.to_owned());
+        }
+    }
+
+    fn deliver(&mut self, run: u64, line: String) {
+        let Some(attached) = self.runs.get(&run) else {
+            return;
+        };
+        let queued = attached
+            .backlog
+            .bytes
+            .fetch_add(line.len(), Ordering::AcqRel)
+            + line.len();
+        if queued > RUN_BACKLOG_BYTES {
+            attached.backlog.overloaded.store(true, Ordering::Release);
+            tracing::warn!(
+                run,
+                queued,
+                "detaching a Codex run whose output Artisan could not keep up with"
+            );
+            self.overloaded(run);
+            return;
+        }
+        attached.lines.send(line).ok();
+    }
+
+    fn overloaded(&mut self, run: u64) {
+        self.runs.remove(&run);
+        let threads: Vec<String> = self
+            .owners
+            .iter()
+            .filter(|(_, owner)| **owner == run)
+            .map(|(thread, _)| thread.clone())
+            .collect();
+        for thread in threads {
+            self.owners.remove(&thread);
+            if self.server.loaded().contains_key(&thread) {
+                self.unsubscribe(&thread);
+            }
         }
     }
 }

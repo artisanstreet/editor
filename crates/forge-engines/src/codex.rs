@@ -16,7 +16,7 @@ mod tests;
 
 pub use decoder::DecodeError;
 pub use goal::{CallError, ClearGoalError};
-pub use server::{AttachError, Ended, InitializeError, ReleaseError, StartError};
+pub use server::{AttachError, Ended, InitializeError, Overloaded, ReleaseError, StartError};
 pub use side::SideQueryError;
 
 use crate::{EngineEvent, Harness, Input, Outcome, RunIo, SideReply, Turn, UserInput};
@@ -65,6 +65,12 @@ pub enum RunError {
     },
     #[error("Codex exited during {during}{}", if ended.is_empty() { String::new() } else { format!(": {ended}") })]
     Exited { during: &'static str, ended: String },
+    #[error("read Codex output during {during}")]
+    Overloaded {
+        during: &'static str,
+        #[source]
+        source: Overloaded,
+    },
     #[error("decode Codex output")]
     Decode(#[source] DecodeError),
     #[error("write to Codex")]
@@ -83,6 +89,8 @@ pub enum RunError {
 pub enum RequestError {
     #[error("Codex exited{}", if ended.is_empty() { String::new() } else { format!(": {ended}") })]
     Exited { ended: String },
+    #[error("read Codex output")]
+    Overloaded(#[source] Overloaded),
     #[error("decode Codex output")]
     Decode(#[source] DecodeError),
     #[error("write to Codex")]
@@ -310,7 +318,7 @@ impl Run {
         self.send_outbox().map_err(RequestError::Write)?;
         loop {
             let line = tokio::select! {
-                line = self.conn.next_line() => line,
+                line = self.conn.next_line() => line.map_err(RequestError::Overloaded)?,
                 () = self.io.cancel.cancelled() => return Ok(None),
             };
             let Some(line) = line else {
@@ -344,7 +352,7 @@ impl Run {
             };
             let stopping = deadline.is_some();
             let step = tokio::select! {
-                line = self.conn.next_line() => match line {
+                line = self.conn.next_line() => match line.map_err(|source| RunError::Overloaded { during: "the turn", source })? {
                     Some(line) => self.line(turn, &line).await?,
                     None if stopping => Step::End(Outcome::Cancelled),
                     None => return Err(RunError::Exited { during: "the turn", ended: self.conn.ended() }),

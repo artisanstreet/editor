@@ -204,6 +204,16 @@ impl AppServer {
         respond(id, &json!({ "turn": { "id": turn } }));
         match text.as_str() {
             "jam" => std::thread::sleep(Duration::from_secs(30)),
+            "flood" => {
+                let delta = "x".repeat(1024 * 1024);
+                for _ in 0..48 {
+                    emit_json(&json!({
+                        "method": "item/agentMessage/delta",
+                        "params": { "threadId": thread, "turnId": turn, "itemId": format!("msg-{turn}"), "delta": delta },
+                    }));
+                }
+                completed(&thread, &turn, "completed");
+            }
             "ask" => {
                 self.asked = Some(Asked {
                     thread: thread.clone(),
