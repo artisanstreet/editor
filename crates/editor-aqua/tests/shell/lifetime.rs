@@ -82,3 +82,39 @@ fn a_preview_whose_host_goes_away_says_so_instead_of_taking_the_late_answer() {
         Some(Err(PreviewError::HostGone { .. }))
     ));
 }
+
+#[test]
+fn the_waiting_mark_keeps_its_reveal_clock_while_the_same_thread_waits() {
+    use editor_aqua::core::HostId;
+    use editor_aqua::shell::connection::{ConnectionPresenter, Owner};
+    use editor_aqua::ui::theme::ArtisanTheme;
+    use std::time::{Duration, Instant};
+
+    let theme = ArtisanTheme::resolved();
+    let waiting = Owner::Thread(HostId("gone".into()), ThreadId::from("waiting"));
+    let mut presenter = ConnectionPresenter::default();
+    let opened = Instant::now();
+    let reveal = opened + Duration::from_millis(500);
+    for rebuilt in [0, 100, 300] {
+        let now = opened + Duration::from_millis(rebuilt);
+        presenter.hold(Some(waiting.clone()));
+        let _mark = presenter.waiting(theme, now, false);
+        assert_eq!(
+            presenter.deadline(now, false),
+            Some(reveal),
+            "rebuilding at {rebuilt} ms keeps the mark's reveal at 500 ms"
+        );
+    }
+    presenter.hold(None);
+    assert_eq!(presenter.deadline(opened, false), None);
+    let later = opened + Duration::from_secs(1);
+    presenter.hold(Some(Owner::Thread(
+        HostId("gone".into()),
+        ThreadId::from("another"),
+    )));
+    let _mark = presenter.waiting(theme, later, false);
+    assert_eq!(
+        presenter.deadline(later, false),
+        Some(later + Duration::from_millis(500))
+    );
+}

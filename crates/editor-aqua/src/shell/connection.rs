@@ -121,8 +121,15 @@ enum Command {
 
 type Commands = Rc<RefCell<Vec<(HostId, HostInstance, Command)>>>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Owner {
+    NewThread(HostId),
+    Thread(HostId, artisan_api::ThreadId),
+}
+
 #[derive(Default)]
 pub struct ConnectionPresenter {
+    owner: Option<Owner>,
     host: Option<(HostId, HostInstance)>,
     phase: Option<(bool, Instant)>,
     mark: WordmarkLoader,
@@ -152,11 +159,19 @@ fn command_button(
 
 impl ConnectionPresenter {
     pub fn reset(&mut self) {
+        self.owner = None;
         self.host = None;
         self.phase = None;
         self.mark.reset();
         self.commands.borrow_mut().clear();
         self.last_failure = None;
+    }
+
+    pub fn hold(&mut self, owner: Option<Owner>) {
+        if self.owner != owner {
+            self.reset();
+            self.owner = owner;
+        }
     }
 
     pub fn waiting(&mut self, theme: ArtisanTheme, now: Instant, reduced_motion: bool) -> Element {
@@ -198,7 +213,9 @@ impl ConnectionPresenter {
     ) -> Option<Element> {
         let identity = (host.id.clone(), host.instance());
         if self.host.as_ref() != Some(&identity) {
-            self.reset();
+            self.phase = None;
+            self.mark.reset();
+            self.commands.borrow_mut().clear();
             self.host = Some(identity.clone());
         }
         let code = match &host.status {

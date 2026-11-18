@@ -2986,6 +2986,7 @@ impl SectionViews for RootViews {
             opacity: self.composer_glide.sky_opacity(now),
             transform: self.composer_glide.sky_transform(now),
         };
+        let mut connection_held = false;
         let center = match &screen {
             Screen::Home => workspace.home_view(&shell.core, &theme),
             Screen::Marketplace => workspace.marketplace_view(&shell.core, theme),
@@ -2997,6 +2998,13 @@ impl SectionViews for RootViews {
                 }
                 if !workspace.conversation.host_is_current(&shell.core) {
                     self.replace_rows(None);
+                    if let Screen::Thread { host, thread } = &screen {
+                        self.connection.hold(Some(crate::shell::connection::Owner::Thread(
+                            host.clone(),
+                            thread.clone(),
+                        )));
+                    }
+                    connection_held = true;
                     view::centered_conversation(self.connection.waiting(theme, now, reduced))
                 } else {
                     self.thread_content(
@@ -3014,6 +3022,9 @@ impl SectionViews for RootViews {
                 }
             }
             Screen::NewThread { host, .. } => {
+                self.connection
+                    .hold(Some(crate::shell::connection::Owner::NewThread(host.clone())));
+                connection_held = true;
                 let host = shell
                     .core
                     .host(host)
@@ -3072,8 +3083,8 @@ impl SectionViews for RootViews {
             self.smooth_scroll.cancel();
             self.scroll_requests.clear();
         }
-        if !matches!(screen, Screen::NewThread { .. }) {
-            self.connection.reset();
+        if !connection_held {
+            self.connection.hold(None);
         }
         if let Some(palette) = &workspace.palette {
             if self.palette.is_none() {
