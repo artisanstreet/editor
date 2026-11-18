@@ -2,9 +2,6 @@ use super::{
     CollectionBrowser, CollectionPreview, page_record,
     view::{button, code_card, source_lines, stack, viewport},
 };
-use editor_core::RangeState;
-use editor_ui::kit::{ButtonSize, ButtonTone, Density, Row, RowItem, Surface, TextRole};
-use editor_ui::theme::ArtisanTheme;
 use aqua_ui::{
     collection::{
         CollectionDescriptor, CollectionError, CollectionLayout, CollectionRole, CollectionSource,
@@ -14,6 +11,9 @@ use aqua_ui::{
     style::{Length, Style},
 };
 use artisan_api::CollectionRange;
+use editor_core::RangeState;
+use editor_ui::kit::{ButtonSize, ButtonTone, Density, Row, RowItem, Surface, TextRole};
+use editor_ui::theme::ArtisanTheme;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 type Presenter<T> = Rc<dyn Fn(&T, u64) -> CollectionPreview>;
@@ -161,7 +161,10 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
     let count = browser.borrow().window().source().count;
     let Ok(count_native) = usize::try_from(count) else {
         return TextRole::Label
-            .text(&theme, "This collection exceeds this device's native list capacity.")
+            .text(
+                &theme,
+                "This collection exceeds this device's native list capacity.",
+            )
             .build();
     };
     let height = viewport(entry_height(), max_height);
@@ -210,9 +213,13 @@ pub fn collection_list<T: serde::de::DeserializeOwned + Send + 'static>(
         body = body
             .child(TextRole::Label.text(&theme, error).build())
             .child(
-                button("collection-retry", theme, ButtonTone::Neutral, "Retry", move || {
-                    action(CollectionAction::Retry)
-                })
+                button(
+                    "collection-retry",
+                    theme,
+                    ButtonTone::Neutral,
+                    "Retry",
+                    move || action(CollectionAction::Retry),
+                )
                 .build(),
             );
     }
@@ -236,10 +243,11 @@ pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
     source_id: aqua_text::document::SelectionSourceId,
     stored_detail: Option<Element>,
     action: Handler<T>,
-) -> Result<super::ContentView, &'static str> {
-    if browser.detail.is_some() && stored_detail.is_none() {
-        return Err("stored collection detail requires its source view");
-    }
+) -> super::ContentView {
+    assert!(
+        browser.detail.is_none() || stored_detail.is_some(),
+        "invariant: stored collection detail is rendered with its source view"
+    );
     let callback = Rc::clone(&action);
     let mut body = stack().child(
         button(
@@ -268,10 +276,10 @@ pub fn collection_detail<T: serde::de::DeserializeOwned + Send + 'static>(
             source_id,
         ));
     }
-    Ok(super::ContentView {
+    super::ContentView {
         element: code_card(theme, body.build()),
         selection,
-    })
+    }
 }
 
 pub fn dispatch_collection<T: serde::de::DeserializeOwned + Send + 'static>(

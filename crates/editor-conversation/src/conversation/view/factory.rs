@@ -920,7 +920,6 @@ impl RowFactory {
             .questions
             .borrow()
             .view(theme, services.document, id, stored_detail, callback)
-            .map_err(anyhow::Error::msg)?
             .ok_or_else(|| anyhow::anyhow!("question collection view is unavailable"))?;
         let mut retained = owner.batches.borrow_mut();
         anyhow::ensure!(

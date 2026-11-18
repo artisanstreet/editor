@@ -22,4 +22,6 @@ pub use terminal_view::{TerminalAction, terminal_view};
 
 pub use view::{AgentCard, InspectorAction, agent_card, inspector_view, render_agent_card};
 
-pub use owner::{InspectorElements, InspectorOwner, OwnerAction, SourceIds, SourceTarget};
+pub use owner::{
+    BuildInspectorError, InspectorElements, InspectorOwner, OwnerAction, SourceIds, SourceTarget,
+};

@@ -21,7 +21,8 @@ aqua-ui = { workspace = true }
 artisan-api = { workspace = true, features = ["tls"] }
 editor-assets.workspace = true
 palette.workspace = true
-anyhow.workspace = true
+thiserror.workspace = true
+diagnostics.workspace = true
 tracing.workspace = true
 tokio-util.workspace = true
 editor-core.workspace = true

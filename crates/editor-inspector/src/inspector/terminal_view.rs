@@ -9,9 +9,7 @@ use aqua_ui::{
     style::{Length, Style},
 };
 use editor_assets::AssetId;
-use editor_ui::kit::{
-    Button, ButtonTone, Finish, IconButton, IconButtonSize, Surface, TextRole,
-};
+use editor_ui::kit::{Button, ButtonTone, Finish, IconButton, IconButtonSize, Surface, TextRole};
 use editor_ui::theme::ArtisanTheme;
 use std::{cell::RefCell, rc::Rc};
 
@@ -134,7 +132,10 @@ impl CollectionSource for Rows {
                             .build(),
                     );
                 } else {
-                    row = row.child(TYPE.text(&theme, shell_prompt(job.cwd.as_deref()).prompt).build());
+                    row = row.child(
+                        TYPE.text(&theme, shell_prompt(job.cwd.as_deref()).prompt)
+                            .build(),
+                    );
                 }
             }
             None => {}
@@ -152,25 +153,26 @@ pub fn terminal_view(
     command_source: Option<Element>,
     output_source: Option<Element>,
     action: Rc<dyn Fn(TerminalAction)>,
-) -> Result<Element, &'static str> {
+) -> Element {
     let state = dialog.borrow();
-    let Some(job) = &state.job else {
-        return Err("terminal dialog is closed");
-    };
-    if job.command_source.is_some() && command_source.is_none() {
-        return Err("terminal command requires its source view");
-    }
-    if job.output_source.is_some() && output_source.is_none() {
-        return Err("terminal output requires its source view");
-    }
+    let job = state
+        .job
+        .as_ref()
+        .expect("invariant: the terminal dialog is rendered only while a job is open");
+    assert!(
+        job.command_source.is_none() || command_source.is_some(),
+        "invariant: a stored terminal command is rendered with its source view"
+    );
+    assert!(
+        job.output_source.is_none() || output_source.is_some(),
+        "invariant: stored terminal output is rendered with its source view"
+    );
     let output_stored = job.output_source.is_some();
     let layout = Layout::of(job);
     let height = (viewport_height * 0.62)
         .min(640.0)
         .min((viewport_height - 160.0).max(32.0));
-    let mut content = UiBox::new()
-        .layout("column")
-        .width(Length::Pct(100.0));
+    let mut content = UiBox::new().layout("column").width(Length::Pct(100.0));
     if let Some(error) = &state.error {
         let retry = Rc::clone(&action);
         content = content
@@ -182,7 +184,11 @@ pub fn terminal_view(
                     .build(),
             );
     } else if state.loading && job.data.is_none() {
-        content = content.child(TextRole::Label.text(&theme, "Loading shell output…").build());
+        content = content.child(
+            TextRole::Label
+                .text(&theme, "Loading shell output…")
+                .build(),
+        );
     }
     if let Some(source) = command_source {
         content = content.child(source);
@@ -265,9 +271,9 @@ pub fn terminal_view(
         );
     }
     let hover = Rc::clone(&action);
-    Ok(DIALOG
+    DIALOG
         .build(&theme, vec![WELL.build(&theme, well)])
         .style(Style::new().width(Length::Pct(100.0)))
         .with_key("inspector-terminal-card")
-        .on_hover_change(move |value| hover(TerminalAction::Hover(value))))
+        .on_hover_change(move |value| hover(TerminalAction::Hover(value)))
 }

@@ -395,15 +395,11 @@ impl Workspace {
         self.retiring_tooltips.retain(|tooltip| tooltip.is_open(ui));
         let shown = owner.shown_tooltip();
         let node = shown.as_ref().and_then(|shown| {
-            [
-                PopupKind::Model,
-                PopupKind::Project,
-                PopupKind::Mentions,
-            ]
-            .into_iter()
-            .filter_map(|kind| owner.popup_root(kind, ui))
-            .find_map(|root| keyed_descendant(ui, root, shown.anchor.clone().into()))
-            .or_else(|| keyed_node(ui, shown.anchor.clone().into()))
+            [PopupKind::Model, PopupKind::Project, PopupKind::Mentions]
+                .into_iter()
+                .filter_map(|kind| owner.popup_root(kind, ui))
+                .find_map(|root| keyed_descendant(ui, root, shown.anchor.clone().into()))
+                .or_else(|| keyed_node(ui, shown.anchor.clone().into()))
         });
         if self
             .composer_tooltip
@@ -536,16 +532,9 @@ impl Workspace {
         let emit: view::Dispatch = Rc::new(move |action| actions.borrow_mut().push_back(action));
         let (menu, mentions) = {
             let composer = owner.controller.borrow();
-            (
-                composer.picker.menu,
-                !composer.mentions.rows.is_empty(),
-            )
+            (composer.picker.menu, !composer.mentions.rows.is_empty())
         };
-        for kind in [
-            PopupKind::Model,
-            PopupKind::Project,
-            PopupKind::Mentions,
-        ] {
+        for kind in [PopupKind::Model, PopupKind::Project, PopupKind::Mentions] {
             let desired = match kind {
                 PopupKind::Model => menu == Some(Menu::Model),
                 PopupKind::Project => menu == Some(Menu::Project),
@@ -1109,8 +1098,7 @@ impl Workspace {
             options_source,
             stored_detail,
             self.question_option_emit(),
-        )
-        .map_err(anyhow::Error::msg)?;
+        );
         let options = if let Some(options) = options {
             if let Some(selection) = options.selection {
                 ui.register_selection_source_in(options_document, selection)?;
@@ -1683,8 +1671,7 @@ fn keyed_descendant(
     found
 }
 
-impl Workspace {
-}
+impl Workspace {}
 
 fn mention_anchor(ui: &aqua::UiApp) -> &'static str {
     match keyed_node(ui, "composer-tab-card-body".into()) {

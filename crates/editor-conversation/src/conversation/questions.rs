@@ -434,10 +434,8 @@ impl QuestionCollection {
         source_id: aqua_text::document::SelectionSourceId,
         stored_detail: Option<aqua_ui::element::Element>,
         emit: Rc<dyn Fn(QuestionCollectionAction)>,
-    ) -> Result<Option<editor_sources::ContentView>, &'static str> {
-        let Some(owner) = self.owner.as_ref() else {
-            return Ok(None);
-        };
+    ) -> Option<editor_sources::ContentView> {
+        let owner = self.owner.as_ref()?;
         let browser = Rc::clone(&owner.browser);
         let host = owner.host.clone();
         let instance = owner.instance;
@@ -453,7 +451,7 @@ impl QuestionCollection {
             })
         });
         if browser.borrow().selected.is_some() {
-            return editor_sources::collection_detail(
+            return Some(editor_sources::collection_detail(
                 &browser.borrow(),
                 theme,
                 None,
@@ -461,10 +459,9 @@ impl QuestionCollection {
                 source_id,
                 stored_detail,
                 action,
-            )
-            .map(Some);
+            ));
         }
-        Ok(Some(editor_sources::ContentView {
+        Some(editor_sources::ContentView {
             element: editor_sources::collection_list(
                 browser,
                 "Questions",
@@ -475,7 +472,7 @@ impl QuestionCollection {
                 action,
             ),
             selection: None,
-        }))
+        })
     }
 }
 
@@ -548,10 +545,8 @@ pub fn stored_options(
     source_id: aqua_text::document::SelectionSourceId,
     stored_detail: Option<aqua_ui::element::Element>,
     dispatch: Rc<dyn Fn(OptionAction)>,
-) -> Result<Option<editor_sources::ContentView>, &'static str> {
-    let Some(owner) = pages.options.as_ref() else {
-        return Ok(None);
-    };
+) -> Option<editor_sources::ContentView> {
+    let owner = pages.options.as_ref()?;
     let browser = Rc::clone(&owner.browser);
     let host = owner.host.clone();
     let instance = owner.instance;
@@ -570,7 +565,7 @@ pub fn stored_options(
             });
         });
     if browser.borrow().selected.is_some() {
-        return editor_sources::collection_detail(
+        return Some(editor_sources::collection_detail(
             &browser.borrow(),
             theme,
             None,
@@ -578,8 +573,7 @@ pub fn stored_options(
             source_id,
             stored_detail,
             dispatch,
-        )
-        .map(Some);
+        ));
     }
     let ticked = panel.ticked.clone();
     let sending = panel.sending.is_some();
@@ -591,10 +585,10 @@ pub fn stored_options(
             disabled: sending,
         },
     );
-    Ok(Some(editor_sources::ContentView {
+    Some(editor_sources::ContentView {
         element: editor_sources::collection_list(
             browser, "Choices", theme, None, present, true, dispatch,
         ),
         selection: None,
-    }))
+    })
 }

@@ -11,8 +11,8 @@ use artisan_api::{Collection, Status, StepStatus, TextContent};
 use editor_assets::AssetId;
 use editor_core::Core;
 use editor_ui::kit::{
-    Button, ButtonTone, Density, Divider, IconSize, Row, RowItem, Space, Spaced, Surface,
-    TextRole, Tooltip,
+    Button, ButtonTone, Density, Divider, IconSize, Row, RowItem, Space, Spaced, Surface, TextRole,
+    Tooltip,
 };
 use editor_ui::theme::{ArtisanTheme, Oklch};
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
@@ -60,7 +60,11 @@ fn static_row(children: Vec<Element>) -> Element {
         .height(ROW.height().unwrap_or_default())
         .padded(ROW.pad().x)
         .spaced(ROW.gap())
-        .style(Style::new().min_width(Length::Pct(0.0)).align(AlignItems::CENTER))
+        .style(
+            Style::new()
+                .min_width(Length::Pct(0.0))
+                .align(AlignItems::CENTER),
+        )
         .children(children)
         .build()
 }
@@ -70,9 +74,8 @@ fn static_row(children: Vec<Element>) -> Element {
     reason = "the agent status dot is a painted status mark, not chrome"
 )]
 fn status_dot(color: Oklch, pulse: Option<u32>) -> Element {
-    let mut style = Style::new().gpui_background(aqua_core::GpuiBackground::Solid(
-        color.to_reference_paint(),
-    ));
+    let mut style =
+        Style::new().gpui_background(aqua_core::GpuiBackground::Solid(color.to_reference_paint()));
     if let Some(start_ms) = pulse {
         style = style.gpui_quad_pulse(aqua_core::scene::GpuiQuadPulse {
             start_ms,
@@ -166,7 +169,13 @@ pub fn agent_card(
                     .as_ref()
                     .map_or(speed.default, |id| &speed.id == id)
             })
-            .map_or_else(|| "Normal".to_owned(), |speed| artisan_api::SpeedLevel::from_native(&speed.id).map_or_else(|| speed.label.clone(), |level| level.label().into()));
+            .map_or_else(
+                || "Normal".to_owned(),
+                |speed| {
+                    artisan_api::SpeedLevel::from_native(&speed.id)
+                        .map_or_else(|| speed.label.clone(), |level| level.label().into())
+                },
+            );
         settings.push((AssetId::TABLER_BOLT_FILLED, speed));
     }
     if let Some(tokens) = config
@@ -301,10 +310,9 @@ fn fact_row(
                         .min_width(Length::Pct(0.0))
                         .max_width(Length::Px(VALUE_WIDTH)),
                 )
-                .child(fit(TextRole::Label.text(
-                    theme,
-                    value.unwrap_or_else(|| "—".into()),
-                )))
+                .child(fit(
+                    TextRole::Label.text(theme, value.unwrap_or_else(|| "—".into()))
+                ))
                 .build(),
         ),
     }
@@ -386,10 +394,13 @@ fn plan_row(
             };
             let mut struck = TextRole::Label.style(&theme);
             struck.strikethrough = resolved;
-            static_row(vec![fit(
-                inked(&theme, TextRole::Label, value.clone(), ink)
-                    .spans(vec![StyledSpan::new(value.clone(), struck)]),
-            )])
+            static_row(vec![fit(inked(
+                &theme,
+                TextRole::Label,
+                value.clone(),
+                ink,
+            )
+            .spans(vec![StyledSpan::new(value.clone(), struck)]))])
         }
         TextContent::Stored(source) => {
             let source = source.clone();
@@ -452,13 +463,15 @@ pub fn inspector_view(
     reduced_motion: bool,
     pulse_starts: Rc<RefCell<HashMap<usize, u32>>>,
     action: Rc<dyn Fn(InspectorAction)>,
-) -> Result<Element, &'static str> {
-    if inspector.source.is_some() && source.is_none() {
-        return Err("inspector source requires its source view");
-    }
-    if inspector.plan.is_some() && plan.is_none() {
-        return Err("inspector checklist requires its collection view");
-    }
+) -> Element {
+    assert!(
+        inspector.source.is_none() || source.is_some(),
+        "invariant: an inspector source is rendered with its source view"
+    );
+    assert!(
+        inspector.plan.is_none() || plan.is_some(),
+        "invariant: an inspector checklist is rendered with its collection view"
+    );
     let host = inspector
         .open
         .as_ref()
@@ -502,7 +515,9 @@ pub fn inspector_view(
     if let Some(error) = &inspector.error {
         let retry = Rc::clone(&action);
         root = root
-            .child(static_row(vec![fit(TextRole::Label.text(&theme, error.clone()))]))
+            .child(static_row(vec![fit(
+                TextRole::Label.text(&theme, error.clone())
+            )]))
             .child(
                 Button::text("inspector-retry", theme, ButtonTone::Neutral, "Retry")
                     .within(LIST)
@@ -516,10 +531,14 @@ pub fn inspector_view(
         .key(|(index, _)| *index)
         .row(move |(index, entry)| {
             let content = match entry {
-                Entry::Heading(label) => {
-                    RowItem::new(format!("inspector-heading-{label}"), theme, HEADING, LIST, *label)
-                        .build()
-                }
+                Entry::Heading(label) => RowItem::new(
+                    format!("inspector-heading-{label}"),
+                    theme,
+                    HEADING,
+                    LIST,
+                    *label,
+                )
+                .build(),
                 Entry::Fact(label) => fact_row(&theme, label, &values, summary.edits.as_ref()),
                 Entry::Agent(index) => {
                     let agent = &summary.agents[*index];
@@ -556,11 +575,9 @@ pub fn inspector_view(
                     ),
                     Collection::Stored(_) => static_row(Vec::new()),
                 },
-                Entry::Terminal(index) => terminal_row(
-                    theme,
-                    &summary.terminals[*index],
-                    Rc::clone(&row_action),
-                ),
+                Entry::Terminal(index) => {
+                    terminal_row(theme, &summary.terminals[*index], Rc::clone(&row_action))
+                }
                 Entry::Workflow(index) => {
                     let workflow = &summary.workflows[*index];
                     static_row(vec![
@@ -600,5 +617,5 @@ pub fn inspector_view(
             )
             .child(Divider::Rule.build(&theme, bleed));
     }
-    Ok(root.build())
+    root.build()
 }
