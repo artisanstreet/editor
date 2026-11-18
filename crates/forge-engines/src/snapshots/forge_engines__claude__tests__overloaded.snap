@@ -38,14 +38,13 @@ expression: "(events, outcome)"
         },
     ],
     Some(
-        Outcome {
-            status: Failed,
-            error: Some(
-                "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
-            ),
-            retry: Some(
-                Overloaded,
-            ),
-        },
+        Failed(
+            Failure {
+                message: "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+                retry: Some(
+                    Overloaded,
+                ),
+            },
+        ),
     ),
 )

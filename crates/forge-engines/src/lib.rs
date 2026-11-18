@@ -27,9 +27,9 @@
 )]
 mod account;
 mod catalog;
-pub(crate) mod claude;
+pub mod claude;
 pub mod claudeai;
-mod codex;
+pub mod codex;
 mod commands;
 mod compaction;
 mod customise;
@@ -41,7 +41,7 @@ mod marketplace;
 pub mod mcp_oauth;
 mod mentions;
 mod native;
-mod opencode;
+pub mod opencode;
 pub mod process;
 mod question;
 mod reasoning;
@@ -52,11 +52,15 @@ pub mod trace;
 mod transcript_tests;
 mod usage;
 
-pub use account::{SignIn, check as check_sign_in};
+pub use account::{SignIn, SubmitCodeError, check as check_sign_in};
 pub use claude::{CLAUDE_AI_TRANSPORT, CLAUDE_AI_UNAVAILABLE};
-pub use commands::normalize_command;
+pub use commands::{MissingPrompt, normalize_command};
 pub use compaction::{COMPACTION_NUDGE, compaction_prompt, is_compaction_summary};
 pub use engines::host_entry;
+pub use customise::{
+    AdoptSkillError, DiscardSkillError, FindSkillError, ImportError, InstallSkillError,
+    LaunchError, MaterializeError, ReadSkillsError, ReconcileSkillsError,
+};
 pub use customise::{
     ARTISAN_MCP, COMPUTER_MCP, Customisation, McpServer, PromptApplied, PromptFile, adopt_skill,
     apply_prompt, discard_skill, enabled_skills, inspect_prompt, install_skill, materialize,
@@ -65,7 +69,11 @@ pub use customise::{
 };
 pub use harness::*;
 pub use manager::{BinaryLease, EngineChange, Engines};
-pub use marketplace::{SKILLS_SH_URL, fetch_skill, search_skills};
+pub use manager::{
+    CheckUpdateError, ClaudeAiSignInError, InstallError, ListVersionsError, NoBuild, NotInstalled, RefreshModelsError,
+    ValidateVersionError,
+};
+pub use marketplace::{FetchSkillError, SKILLS_SH_URL, SearchSkillsError, fetch_skill, search_skills};
 pub use mentions::{with_skill_mentions, with_thread_mentions};
 pub use usage::{UsageCache, has_usage_reader, read_usage};
 

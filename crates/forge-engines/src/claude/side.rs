@@ -1,34 +1,48 @@
-//! Side queries: one question to a fork of a Claude session.
-//!
-//! `--resume <session> --fork-session` copies the session into a new one,
-//! so the thread's own transcript is never touched. The fork launches
-//! exactly as the thread does, so its request starts with the same prefix
-//! and reads the thread's prompt cache: against Claude Code 2.1.296 a fork
-//! in the thread's permission mode read all of it, while one in another
-//! mode, or with a hook added through `--settings`, rewrote about 11k
-//! tokens on every fork.
-//!
-//! So tools stay as they are, and none of them runs: the fork registers a
-//! `PreToolUse` hook over the stream (`initialize`), which the CLI calls
-//! before every tool in every permission mode and which always refuses.
-//! A permission prompt (Auto mode) is refused too. `--max-turns 1` ends the
-//! fork after one reply; a fork that reached for a tool answers nothing.
-
 use super::{SIDE_QUERY_LIMIT, apply_env, config_dir, launch_args};
-use crate::process;
+use crate::process::{self, ReadError, SendError, SpawnError};
 use crate::{SideReply, SideUsage, Turn};
-use anyhow::{Context, Result, bail};
 use artisan_api::EngineConfig;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub(super) async fn side_query(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
+#[derive(Debug, thiserror::Error)]
+pub enum SideQueryError {
+    #[error("Claude Code can't resume claude.ai session {session}")]
+    ClaudeAiSession { session: String },
+    #[error("start the Claude fork")]
+    Spawn(#[source] SpawnError),
+    #[error("{step} in the Claude fork")]
+    Send {
+        step: &'static str,
+        #[source]
+        source: SendError,
+    },
+    #[error("read the Claude fork")]
+    Read(#[source] ReadError),
+    #[error("the side query was cancelled")]
+    Cancelled,
+    #[error("the Claude fork gave no answer in {}s", after.as_secs())]
+    TimedOut { after: Duration },
+    #[error("the Claude fork exited ({}) without an answer: {stderr}", code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")))]
+    Exited { code: Option<i32>, stderr: String },
+    #[error("the Claude fork failed: {reason}")]
+    Failed { reason: String },
+}
+
+pub(super) async fn side_query(
+    turn: Turn,
+    cancel: CancellationToken,
+) -> Result<SideReply, SideQueryError> {
     query(turn, cancel, SIDE_QUERY_LIMIT).await
 }
 
-pub(super) async fn compact(turn: Turn, cancel: CancellationToken) -> Result<SideReply> {
-    query(turn, cancel, std::time::Duration::from_secs(300)).await
+pub(super) async fn compact(
+    turn: Turn,
+    cancel: CancellationToken,
+) -> Result<SideReply, SideQueryError> {
+    query(turn, cancel, Duration::from_secs(300)).await
 }
 
 #[expect(
@@ -38,21 +52,24 @@ pub(super) async fn compact(turn: Turn, cancel: CancellationToken) -> Result<Sid
 async fn query(
     mut turn: Turn,
     cancel: CancellationToken,
-    deadline: std::time::Duration,
-) -> Result<SideReply> {
+    deadline: Duration,
+) -> Result<SideReply, SideQueryError> {
     let session = turn.session_id.clone();
-    anyhow::ensure!(
-        !session
-            .as_deref()
-            .is_some_and(|id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX)),
-        "a claude.ai session cannot be resumed by Claude Code"
-    );
+    if let Some(session) = session
+        .as_deref()
+        .filter(|id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX))
+    {
+        return Err(SideQueryError::ClaudeAiSession {
+            session: session.to_owned(),
+        });
+    }
     apply_env(&mut turn);
     let mut engine = process::spawn(
         &turn,
         &side_args(&turn.config, session.as_deref(), &turn.launch.readable),
     )
-    .context("starting the Claude fork")?;
+    .map_err(SideQueryError::Spawn)?;
+    let send_error = |step: &'static str| move |source| SideQueryError::Send { step, source };
     engine
         .send(&json!({
             "type": "control_request",
@@ -63,7 +80,7 @@ async fn query(
             },
         }))
         .await
-        .context("registering the Claude fork's tool hook")?;
+        .map_err(send_error("register the tool hook"))?;
     engine
         .send(&json!({
             "type": "user",
@@ -72,32 +89,31 @@ async fn query(
             "session_id": "",
         }))
         .await
-        .context("sending the side query to Claude")?;
+        .map_err(send_error("send the side query"))?;
     let limit = tokio::time::sleep(deadline);
     tokio::pin!(limit);
     let mut fork = None;
     let reply = loop {
         let line = tokio::select! {
-            line = engine.next_line() => line.context("reading the Claude fork")?,
+            line = engine.next_line() => line.map_err(SideQueryError::Read)?,
             () = cancel.cancelled() => {
                 engine.kill().await;
                 discard(&turn, fork.as_deref());
-                bail!("the side query was cancelled");
+                return Err(SideQueryError::Cancelled);
             }
             () = &mut limit => {
                 engine.kill().await;
                 discard(&turn, fork.as_deref());
-                bail!("the Claude fork gave no answer in {}s", deadline.as_secs());
+                return Err(SideQueryError::TimedOut { after: deadline });
             }
         };
         let Some(line) = line else {
             let code = engine.wait().await;
             discard(&turn, fork.as_deref());
-            bail!(
-                "the Claude fork exited ({}) without an answer: {}",
-                code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")),
-                engine.stderr_tail()
-            );
+            return Err(SideQueryError::Exited {
+                code,
+                stderr: engine.stderr_tail(),
+            });
         };
         let Ok(frame) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -135,7 +151,7 @@ async fn query(
                         },
                     }))
                     .await
-                    .context("refusing a tool in the Claude fork")?;
+                    .map_err(send_error("refuse a tool"))?;
             }
             Some("result") => break reply_of(&frame),
             _ => {}
@@ -161,17 +177,16 @@ fn side_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf])
     args
 }
 
-fn reply_of(frame: &Value) -> Result<SideReply> {
-    // Reaching for a tool used up the one turn: there is no answer.
+fn reply_of(frame: &Value) -> Result<SideReply, SideQueryError> {
     let reached_for_a_tool = frame["subtype"] == "error_max_turns";
     if frame["is_error"].as_bool() == Some(true) && !reached_for_a_tool {
-        bail!(
-            "the Claude fork failed: {}",
-            frame["result"]
+        return Err(SideQueryError::Failed {
+            reason: frame["result"]
                 .as_str()
                 .or_else(|| frame["subtype"].as_str())
                 .unwrap_or("no reason given")
-        );
+                .to_owned(),
+        });
     }
     let usage = &frame["usage"];
     let tokens = |key: &str| usage[key].as_u64().unwrap_or(0);

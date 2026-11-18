@@ -252,12 +252,60 @@ pub enum SideQueryError {
     Unsupported { engine: EngineId },
     #[error("the side query on {engine} thread {thread} was cancelled")]
     Cancelled { engine: EngineId, thread: ThreadId },
+    #[error("Claude side query for thread {thread}")]
+    Claude {
+        thread: ThreadId,
+        #[source]
+        source: crate::claude::SideQueryError,
+    },
+    #[error("Codex side query for thread {thread}")]
+    Codex {
+        thread: ThreadId,
+        #[source]
+        source: crate::codex::SideQueryError,
+    },
+    #[error("OpenCode side query for thread {thread}")]
+    OpenCode {
+        thread: ThreadId,
+        #[source]
+        source: crate::opencode::SideQueryError,
+    },
+    #[error("claude.ai side query for thread {thread}")]
+    ClaudeAi {
+        thread: ThreadId,
+        #[source]
+        source: crate::claudeai::SideQueryError,
+    },
     #[error(transparent)]
     Unconverted(#[from] anyhow::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SetTitleError {
+    #[error("name Claude thread {thread}")]
+    Claude {
+        thread: ThreadId,
+        #[source]
+        source: crate::claude::SetTitleError,
+    },
+    #[error("name Codex thread {thread}")]
+    Codex {
+        thread: ThreadId,
+        #[source]
+        source: crate::codex::SetTitleError,
+    },
+    #[error("name OpenCode thread {thread}")]
+    OpenCode {
+        thread: ThreadId,
+        #[source]
+        source: crate::opencode::SetTitleError,
+    },
+    #[error("name claude.ai thread {thread}")]
+    ClaudeAi {
+        thread: ThreadId,
+        #[source]
+        source: crate::claudeai::SetTitleError,
+    },
     #[error(transparent)]
     Unconverted(#[from] anyhow::Error),
 }
@@ -266,6 +314,18 @@ pub enum SetTitleError {
 pub enum ClearGoalError {
     #[error("{engine} can't clear a goal")]
     Unsupported { engine: EngineId },
+    #[error("clear the goal of Codex thread {thread}")]
+    Codex {
+        thread: ThreadId,
+        #[source]
+        source: crate::codex::ClearGoalError,
+    },
+    #[error("clear the goal of OpenCode thread {thread}")]
+    OpenCode {
+        thread: ThreadId,
+        #[source]
+        source: crate::opencode::ClearGoalError,
+    },
     #[error(transparent)]
     Unconverted(#[from] anyhow::Error),
 }

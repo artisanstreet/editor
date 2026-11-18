@@ -20,13 +20,13 @@ mod door;
 mod side;
 pub mod tools;
 
-pub use decoder::ClaudeDecoder;
+pub use decoder::{ClaudeDecoder, DecodeError};
+pub use side::SideQueryError;
 use door::{Door, Ending, Session};
 
-use crate::process::{self, EngineProcess};
+use crate::process::{self, EngineProcess, ReadError, SendError};
 use crate::{EngineEvent, Harness, Input, Outcome, RunIo, SideReply, Turn, UserInput};
-use anyhow::{Context, Result};
-use artisan_api::{EngineConfig, Permissions};
+use artisan_api::{EngineConfig, ItemId, Permissions, ThreadId};
 use base64::Engine as _;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -51,32 +51,23 @@ const SIDE_QUERY_LIMIT: Duration = Duration::from_secs(120);
 pub struct ClaudeHarness;
 
 impl Harness for ClaudeHarness {
-    fn set_title(&self, turn: Turn, title: String) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
-        Box::pin(crate::harness::bridge(async move {
-            let session = turn
+    fn set_title(
+        &self,
+        turn: Turn,
+        title: String,
+    ) -> BoxFuture<'static, Result<(), crate::SetTitleError>> {
+        let thread = turn.thread_id.clone();
+        Box::pin(async move {
+            match turn
                 .session_id
                 .as_deref()
-                .context("naming Claude needs a session")?;
-            if let Some(native) = session.strip_prefix(artisan_api::CLAUDE_AI_SESSION_PREFIX) {
-                let conversation = native.split('/').next().context("no native conversation")?;
-                return crate::claudeai::Transport::open(&turn.home)?
-                    .rename_conversation(conversation, &title)
-                    .await;
+                .and_then(|session| session.strip_prefix(artisan_api::CLAUDE_AI_SESSION_PREFIX))
+            {
+                Some(native) => rename_on_claude_ai(&turn, native, &title).await,
+                None => set_title(&turn, &title)
+                    .map_err(|source| crate::SetTitleError::Claude { thread, source }),
             }
-            // The CLI's native generated-title record. Appending preserves
-            // the active transcript and makes the name survive resume.
-            let path = config_dir(&turn)
-                .join("projects")
-                .join(side::project_dir(&turn))
-                .join(format!("{session}.jsonl"));
-            let mut record = serde_json::to_vec(&json!({
-                "type": "ai-title", "aiTitle": title, "sessionId": session,
-            }))?;
-            record.push(b'\n');
-            let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-            file.write_all(&record)?;
-            Ok(())
-        }))
+        })
     }
 
     fn compact(
@@ -96,10 +87,19 @@ impl Harness for ClaudeHarness {
             },
             |id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX),
         );
+        let thread = turn.thread_id.clone();
         if native {
-            Box::pin(crate::harness::bridge(crate::claudeai::compact(turn, cancel)))
+            Box::pin(async move {
+                crate::claudeai::compact(turn, cancel)
+                    .await
+                    .map_err(|source| crate::SideQueryError::ClaudeAi { thread, source })
+            })
         } else {
-            Box::pin(crate::harness::bridge(side::compact(turn, cancel)))
+            Box::pin(async move {
+                side::compact(turn, cancel)
+                    .await
+                    .map_err(|source| crate::SideQueryError::Claude { thread, source })
+            })
         }
     }
 
@@ -114,6 +114,7 @@ impl Harness for ClaudeHarness {
     ) -> BoxFuture<'static, Result<SideReply, crate::SideQueryError>> {
         // A session made on claude.ai is asked there: Claude Code cannot
         // resume it.
+        let thread = turn.thread_id.clone();
         if turn.session_id.as_deref().map_or_else(
             || {
                 turn.config.options.get("transport").and_then(Value::as_str)
@@ -121,11 +122,110 @@ impl Harness for ClaudeHarness {
             },
             |id| id.starts_with(artisan_api::CLAUDE_AI_SESSION_PREFIX),
         ) {
-            Box::pin(crate::harness::bridge(crate::claudeai::side_query(turn, cancel)))
+            Box::pin(async move {
+                crate::claudeai::side_query(turn, cancel)
+                    .await
+                    .map_err(|source| crate::SideQueryError::ClaudeAi { thread, source })
+            })
         } else {
-            Box::pin(crate::harness::bridge(side::side_query(turn, cancel)))
+            Box::pin(async move {
+                side::side_query(turn, cancel)
+                    .await
+                    .map_err(|source| crate::SideQueryError::Claude { thread, source })
+            })
         }
     }
+}
+
+async fn rename_on_claude_ai(
+    turn: &Turn,
+    native: &str,
+    title: &str,
+) -> Result<(), crate::SetTitleError> {
+    let conversation = native
+        .split_once('/')
+        .map_or(native, |(conversation, _)| conversation);
+    crate::claudeai::set_title(&turn.home, conversation, title)
+        .await
+        .map_err(|source| crate::SetTitleError::ClaudeAi {
+            thread: turn.thread_id.clone(),
+            source,
+        })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetTitleError {
+    #[error("thread {thread} has no Claude session")]
+    NoSession { thread: ThreadId },
+    #[error("encode the title record of session {session}")]
+    Encode {
+        session: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("append the title to {}", path.display())]
+    Append {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExchangeError {
+    #[error("read Claude output")]
+    Read(#[source] ReadError),
+    #[error("decode Claude output")]
+    Decode(#[source] DecodeError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeliverError {
+    #[error("expand the command in message {item}")]
+    Command {
+        item: ItemId,
+        #[source]
+        source: crate::commands::MissingPrompt,
+    },
+    #[error("read image {} of message {item}", path.display())]
+    Image {
+        item: ItemId,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("send message {item}")]
+    Send {
+        item: ItemId,
+        #[source]
+        source: SendError,
+    },
+}
+
+fn set_title(turn: &Turn, title: &str) -> Result<(), SetTitleError> {
+    let session = turn
+        .session_id
+        .as_deref()
+        .ok_or_else(|| SetTitleError::NoSession {
+            thread: turn.thread_id.clone(),
+        })?;
+    let path = config_dir(turn)
+        .join("projects")
+        .join(side::project_dir(turn))
+        .join(format!("{session}.jsonl"));
+    let mut record = serde_json::to_vec(&json!({
+        "type": "ai-title", "aiTitle": title, "sessionId": session,
+    }))
+    .map_err(|source| SetTitleError::Encode {
+        session: session.to_owned(),
+        source,
+    })?;
+    record.push(b'\n');
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(&record))
+        .map_err(|source| SetTitleError::Append { path, source })
 }
 
 /// The run's environment: what the thread's settings ask of the CLI.
@@ -185,16 +285,24 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
         let args = launch_args(&turn.config, session.as_deref(), &turn.launch.readable);
         let mut engine = match process::spawn(&turn, &args) {
             Ok(engine) => engine,
-            Err(error) => {
-                tracing::error!(thread = %turn.thread_id, "starting Claude: {error:#}");
-                return Outcome::failed(format!("Claude could not start: {error:#}"));
+            Err(failure) => {
+                let error: &dyn std::error::Error = &failure;
+                tracing::error!(thread = %turn.thread_id, error, "Claude could not start");
+                return Outcome::failed(format!(
+                    "Claude could not start: {}",
+                    diagnostics::chain(&failure)
+                ));
             }
         };
         let mut delivered = 0;
         while let Some((input, steer)) = next.pop_front() {
-            if let Err(error) = deliver(&mut engine, &mut decoder, &input, steer).await {
-                tracing::error!(thread = %turn.thread_id, item = %input.id, "sending a message to Claude: {error:#}");
-                return Outcome::failed(format!("Claude did not take the message: {error:#}"));
+            if let Err(failure) = deliver(&mut engine, &mut decoder, &input, steer).await {
+                let error: &dyn std::error::Error = &failure;
+                tracing::error!(thread = %turn.thread_id, item = %input.id, error, "Claude did not take a message");
+                return Outcome::failed(format!(
+                    "Claude did not take the message: {}",
+                    diagnostics::chain(&failure)
+                ));
             }
             delivered += 1;
         }
@@ -213,13 +321,19 @@ async fn run_claude_code(mut turn: Turn, mut io: RunIo) -> Outcome {
         .await;
         let finished = match finished {
             Ok(finished) => finished,
-            Err(error) => {
-                tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), "Claude protocol exchange failed: {error:#}");
+            Err(failure) => {
+                {
+                    let error: &dyn std::error::Error = &failure;
+                    tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), error, "Claude protocol exchange failed");
+                }
                 engine.kill().await;
                 for event in decoder.finish() {
                     io.emit(event).await;
                 }
-                return Outcome::failed(format!("Claude protocol exchange failed: {error:#}"));
+                return Outcome::failed(format!(
+                    "Claude protocol exchange failed: {}",
+                    diagnostics::chain(&failure)
+                ));
             }
         };
         let code = engine.wait().await;
@@ -285,7 +399,7 @@ async fn drive(
     io: &mut RunIo,
     next: &mut VecDeque<(UserInput, bool)>,
     inbox_open: &mut bool,
-) -> Result<Finished> {
+) -> Result<Finished, ExchangeError> {
     let mut cancelling = false;
     let grace = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
     tokio::pin!(grace);
@@ -299,10 +413,10 @@ async fn drive(
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(error) => {
-                        return Err(anyhow::Error::new(error).context("reading Claude output"));
+                        return Err(ExchangeError::Read(error));
                     }
                 };
-                for event in decoder.feed(&line)? {
+                for event in decoder.feed(&line).map_err(ExchangeError::Decode)? {
                     io.emit(event).await;
                 }
                 for reply in decoder.take_replies() {
@@ -454,9 +568,15 @@ async fn deliver(
     decoder: &mut ClaudeDecoder,
     input: &UserInput,
     _steer: bool,
-) -> Result<()> {
+) -> Result<(), DeliverError> {
     let line = user_line(input).await?;
-    engine.send(&line).await?;
+    engine
+        .send(&line)
+        .await
+        .map_err(|source| DeliverError::Send {
+            item: input.id.clone(),
+            source,
+        })?;
     decoder.expect_replay(Some(input.id.clone()));
     Ok(())
 }
@@ -466,16 +586,21 @@ async fn request_title(engine: &mut EngineProcess, decoder: &mut ClaudeDecoder, 
         return;
     }
     let request = decoder.title_request(text);
-    if let Err(error) = engine.send(&request).await {
-        tracing::debug!("requesting a Claude title: {error:#}");
+    if let Err(failure) = engine.send(&request).await {
+        let error: &dyn std::error::Error = &failure;
+        tracing::debug!(error, "Claude did not take the title request");
         decoder.finish_title();
     }
 }
 
 /// A stream-json user message: the text, then each image as a base64 block.
-async fn user_line(input: &UserInput) -> Result<Value> {
+async fn user_line(input: &UserInput) -> Result<Value, DeliverError> {
     let mut content = Vec::new();
-    let native_text = crate::normalize_command(artisan_api::EngineId::Claude, &input.text)?
+    let native_text = crate::normalize_command(artisan_api::EngineId::Claude, &input.text)
+        .map_err(|source| DeliverError::Command {
+            item: input.id.clone(),
+            source,
+        })?
         .unwrap_or_else(|| input.text.clone());
     if !native_text.is_empty() {
         content.push(json!({ "type": "text", "text": native_text }));
@@ -483,7 +608,11 @@ async fn user_line(input: &UserInput) -> Result<Value> {
     for path in &input.images {
         let bytes = tokio::fs::read(path)
             .await
-            .with_context(|| format!("reading image {} for item {}", path.display(), input.id))?;
+            .map_err(|source| DeliverError::Image {
+                item: input.id.clone(),
+                path: path.clone(),
+                source,
+            })?;
         content.push(json!({
             "type": "image",
             "source": {
@@ -740,7 +869,7 @@ mod tests {
             assert!(outcome.error().unwrap().contains(if malformed {
                 "protocol JSON"
             } else {
-                "exceeds"
+                "wrote a line over"
             }));
             for (path, parent) in [(parent_pid, true), (child_pid, false)] {
                 let pid = std::fs::read_to_string(path).unwrap();
@@ -1128,7 +1257,7 @@ cat > /dev/null
                 }
                 match decoder.feed(line) {
                     Ok(line_events) => events.extend(line_events),
-                    Err(error) => protocol_errors.push(format!("{error:#}")),
+                    Err(error) => protocol_errors.push(diagnostics::chain(&error)),
                 }
             }
             events.extend(decoder.finish());

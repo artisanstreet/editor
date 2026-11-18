@@ -163,10 +163,6 @@ expression: "(events, outcome)"
         ),
     ],
     Some(
-        Outcome {
-            status: Done,
-            error: None,
-            retry: None,
-        },
+        Done,
     ),
 )

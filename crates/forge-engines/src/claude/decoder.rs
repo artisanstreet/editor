@@ -1,12 +1,10 @@
-//! Pure mapping from Claude's stream-json lines onto items.
-
 use super::tools::{questions, todo_steps, tool_kind, validate_input};
 use crate::{EngineEvent, LiveKind, Outcome, Retry};
-use anyhow::Context as _;
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Decision, ErrorKind, ItemId, ItemKind, MessageDirection,
     NoticeKind, Output, Phase, RunStatus, Status, Timestamp, ToolKind, Usage,
 };
+use serde::Deserialize as _;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -16,6 +14,41 @@ struct IndexedBlock {
 }
 
 const TITLE_REQUEST_ID: &str = "artisan-title";
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("decode Claude protocol JSON")]
+    Json(#[source] serde_json::Error),
+    #[error("a Claude protocol frame must be an object")]
+    NotObject,
+    #[error("a Claude protocol frame is missing its type")]
+    NoType,
+    #[error("a Claude assistant frame is missing its message id")]
+    NoMessageId,
+    #[error("read Claude's background task snapshot")]
+    Background(#[source] serde_json::Error),
+}
+
+#[derive(serde::Deserialize)]
+struct BackgroundSnapshot {
+    tasks: Vec<BackgroundTask>,
+}
+
+#[derive(serde::Deserialize)]
+struct BackgroundTask {
+    #[serde(default)]
+    ambient: bool,
+    parent_task_id: Option<String>,
+}
+
+#[derive(Default)]
+enum MainTurn {
+    #[default]
+    Idle,
+    Active {
+        refused: bool,
+    },
+}
 
 /// Decodes one Claude process's output. Holds just enough to settle items
 /// and answer the CLI; `feed` never does I/O.
@@ -41,14 +74,11 @@ pub struct ClaudeDecoder {
     title_pending: bool,
     titled: bool,
     usage: Usage,
-    refused: bool,
     /// The usage limit the CLI said it hit, from a rejected
     /// `rate_limit_event` until the turn's `result`.
     limit_reached: Option<LimitReached>,
     result_seen: bool,
-    /// The main session is mid-turn: its own frames arrived since the last
-    /// `result`. Subagent frames don't count.
-    in_turn: bool,
+    turn: MainTurn,
     /// Background agents and workflows the CLI reports live, and the
     /// background work of agents (an agent waiting on its own shell is
     /// resumed when it ends): they report back into the session, so it must
@@ -114,26 +144,25 @@ struct Pending {
 }
 
 impl ClaudeDecoder {
-    /// Maps one stdout line. Replies for the CLI collect in [`Self::take_replies`].
-    pub fn feed(&mut self, line: &str) -> anyhow::Result<Vec<EngineEvent>> {
-        let frame: Value = serde_json::from_str(line).context("decoding Claude protocol JSON")?;
-        anyhow::ensure!(frame.is_object(), "Claude protocol frame must be an object");
-        anyhow::ensure!(
-            frame["type"].is_string(),
-            "Claude protocol frame is missing its type"
-        );
-        if str_at(&frame, "type") == Some("assistant") {
-            anyhow::ensure!(
-                str_at(&frame["message"], "id")
-                    .or_else(|| str_at(&frame, "uuid"))
-                    .is_some_and(|id| !id.is_empty()),
-                "Claude assistant frame is missing its message id"
-            );
+    pub fn feed(&mut self, line: &str) -> Result<Vec<EngineEvent>, DecodeError> {
+        let frame: Value = serde_json::from_str(line).map_err(DecodeError::Json)?;
+        if !frame.is_object() {
+            return Err(DecodeError::NotObject);
         }
-        let events = self.feed_raw(&frame);
+        if !frame["type"].is_string() {
+            return Err(DecodeError::NoType);
+        }
+        if str_at(&frame, "type") == Some("assistant")
+            && !str_at(&frame["message"], "id")
+                .or_else(|| str_at(&frame, "uuid"))
+                .is_some_and(|id| !id.is_empty())
+        {
+            return Err(DecodeError::NoMessageId);
+        }
+        let events = self.feed_raw(&frame)?;
         let events = self.reasoning_summary.normalize(events, true);
         let mut events = crate::retained::settle(self, events);
-        let waiting = !self.in_turn && self.background > 0;
+        let waiting = !self.in_turn() && self.background > 0;
         if std::mem::replace(&mut self.waiting_on_background, waiting) != waiting {
             events.push(EngineEvent::background_wait(
                 artisan_api::EngineId::Claude,
@@ -143,7 +172,7 @@ impl ClaudeDecoder {
         Ok(events)
     }
 
-    fn feed_raw(&mut self, frame: &Value) -> Vec<EngineEvent> {
+    fn feed_raw(&mut self, frame: &Value) -> Result<Vec<EngineEvent>, DecodeError> {
         let mut out = Vec::new();
         let parent = str_at(frame, "parent_tool_use_id").map(str::to_owned);
         if parent.is_none()
@@ -151,11 +180,12 @@ impl ClaudeDecoder {
                 str_at(frame, "type"),
                 Some("assistant" | "user" | "stream_event")
             )
+            && matches!(self.turn, MainTurn::Idle)
         {
-            self.in_turn = true;
+            self.turn = MainTurn::Active { refused: false };
         }
         match str_at(frame, "type").unwrap_or_default() {
-            "system" => self.system(frame, &mut out),
+            "system" => self.system(frame, &mut out)?,
             "stream_event" if parent.is_none() => self.stream_event(&frame["event"], &mut out),
             "assistant" => self.assistant(frame, parent, &mut out),
             "user" => self.user(frame, parent, &mut out),
@@ -168,7 +198,7 @@ impl ClaudeDecoder {
                 "ignored unsupported Claude frame"
             ),
         }
-        out
+        Ok(out)
     }
 
     /// Answers the approval or question on `key`. The reply for the CLI goes
@@ -322,10 +352,9 @@ impl ClaudeDecoder {
         )
     }
 
-    /// Whether the main session is mid-turn.
     #[must_use]
     pub const fn in_turn(&self) -> bool {
-        self.in_turn
+        matches!(self.turn, MainTurn::Active { .. })
     }
 
     pub fn take_result_seen(&mut self) -> bool {
@@ -381,7 +410,7 @@ impl ClaudeDecoder {
         out
     }
 
-    fn system(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
+    fn system(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) -> Result<(), DecodeError> {
         match str_at(frame, "subtype").unwrap_or_default() {
             "init" => {
                 if let Some(id) = str_at(frame, "session_id")
@@ -400,14 +429,12 @@ impl ClaudeDecoder {
                 }
             }
             "background_tasks_changed" => {
-                let tasks = frame["tasks"].as_array().map_or(&[][..], Vec::as_slice);
-                self.background = tasks
-                    .iter()
-                    .filter(|task| task["ambient"].as_bool() != Some(true))
-                    .count();
-                self.waiting_agents = tasks
-                    .iter()
-                    .filter_map(|task| str_at(task, "parent_task_id").map(str::to_owned))
+                let snapshot = BackgroundSnapshot::deserialize(frame).map_err(DecodeError::Background)?;
+                self.background = snapshot.tasks.iter().filter(|task| !task.ambient).count();
+                self.waiting_agents = snapshot
+                    .tasks
+                    .into_iter()
+                    .filter_map(|task| task.parent_task_id)
                     .collect();
             }
             // Claude repeats `compacting` as progress (with a growing
@@ -463,6 +490,7 @@ impl ClaudeDecoder {
             "task_notification" => self.task_notification(frame, out),
             _ => {}
         }
+        Ok(())
     }
 
     /// A background task started: an agent's id, a backgrounded tool.
@@ -698,7 +726,9 @@ impl ClaudeDecoder {
                 let stop = str_at(&event["delta"], "stop_reason");
                 self.settle_message(&id, stop == Some("end_turn"), out);
                 if stop == Some("refusal") {
-                    self.refused = true;
+                    if let MainTurn::Active { refused } = &mut self.turn {
+                        *refused = true;
+                    }
                     let key = self.next_key("error");
                     out.push(error_item(
                         key,
@@ -1032,7 +1062,10 @@ impl ClaudeDecoder {
 
     fn result(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
         self.result_seen = true;
-        self.in_turn = false;
+        let refused = matches!(
+            std::mem::take(&mut self.turn),
+            MainTurn::Active { refused: true }
+        );
         self.worked_this_turn = false;
         let usage = &frame["usage"];
         let count = |field: &str| usage[field].as_u64().unwrap_or_default();
@@ -1107,7 +1140,7 @@ impl ClaudeDecoder {
                 }
                 None => Outcome::failed(message),
             }
-        } else if self.refused {
+        } else if refused {
             Outcome::Refused
         } else {
             Outcome::done()
@@ -1461,3 +1494,7 @@ fn usage_limit_text(message: &str) -> bool {
     let message = message.to_lowercase();
     message.contains("usage limit") || message.contains("hit your limit")
 }
+
+#[cfg(test)]
+#[path = "../../tests/claude/turns.rs"]
+mod turn_tests;

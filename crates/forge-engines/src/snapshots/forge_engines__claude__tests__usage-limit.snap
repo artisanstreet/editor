@@ -38,18 +38,17 @@ expression: "(events, outcome)"
         },
     ],
     Some(
-        Outcome {
-            status: Failed,
-            error: Some(
-                "You've hit your limit · resets 3pm (Europe/Oslo)",
-            ),
-            retry: Some(
-                UsageLimit {
-                    resets_at: Some(
-                        1791931800000,
-                    ),
-                },
-            ),
-        },
+        Failed(
+            Failure {
+                message: "You've hit your limit · resets 3pm (Europe/Oslo)",
+                retry: Some(
+                    UsageLimit {
+                        resets_at: Some(
+                            1791931800000,
+                        ),
+                    },
+                ),
+            },
+        ),
     ),
 )
