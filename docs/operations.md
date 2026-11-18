@@ -26,6 +26,24 @@ A root chosen with `ae install --location` is remembered in a `location` file in
 
 `ae status` shows what is installed, whether Forge runs and answers its health check, where its log is, and every problem it found. `ae status --json` prints the same for scripts.
 
+## Engine sandbox
+
+In every permission mode except Full access, an engine's whole process tree (its shells, MCP servers and tools, and the claude.ai transport's shells and MCP servers) may write only to:
+
+- the thread's project folder, plus the repository's shared `.git` folder when the project is a git worktree,
+- the engine's home, `<root>/forge/data/engines/<engine>/home` (and `CODEX_HOME` when it points elsewhere),
+- a temporary folder for the run, exported as `TMPDIR`, `TMP` and `TEMP` and removed when the engine exits,
+- `/dev/null`, `/dev/zero`, `/dev/full` and the terminal devices.
+
+Reading, running programs, the network and Unix sockets stay open, so engines still read your files and reach their model APIs. Any other write fails with `Permission denied`, even when approved; switch the thread to Full access for that. Sandboxed processes can't gain privileges, so `sudo` and other setuid programs fail.
+
+| Mode | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| Auto | Enforced by Landlock with the newest write rights the kernel offers. Codex's own bubblewrap sandbox can't start inside Landlock, so Forge turns it off and Codex keeps its reviewer. A kernel without Landlock runs the engine unsandboxed and the run says "This run isn't sandboxed". | Not sandboxed, and every Auto run says so. AppContainer blocks the loopback connections engines make to Forge and to OpenCode's server, and a restricted token needs lasting ACL changes on your folders. | Not sandboxed, and every Auto run says so. |
+| Full access | Not sandboxed. | Not sandboxed. | Not sandboxed. |
+
+A run that starts under Full access and is switched to Auto finishes unsandboxed and says so; the next run is sandboxed. A run switched from Auto to Full access stays sandboxed until it ends. The claude.ai transport's Read, Write and Edit tools run inside Forge and follow its permission rules, not the sandbox.
+
 ## Forge is unhealthy
 
 `ae status` asks the running Forge gateway's `/health` endpoint (on Linux and WSL), which checks that the serving backend speaks the gateway's protocol and database schema. An unhealthy Forge is reported as `Forge isn't healthy: <cause>; see <log>`, naming the step that failed: no gateway record, no answer, a refused token, the backend's own reason, or an unexpected status.
