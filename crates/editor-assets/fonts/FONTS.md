@@ -15,11 +15,11 @@ Retrieved 2026-09-05.
 Corresponding OFL files are in `../licenses/`. Internal family names and fvar axes verified with fontTools 4.63.0.
 Static TrueType instances are embedded and registered before the first native window; no runtime font download or system installation is needed.
 
-## Static weight instances for the native renderer
+## Static weight instances
 
-The active WGPU backend uses Cosmic Text. Its face matcher reads OS/2 weight metadata and does not instantiate the variable wght axis; registering only the source variable TTF selected Regular for every requested weight.
+The Editor embeds only static instances (`editor_assets::fonts::FACES`) and registers them with Aqua's shared font manager (`aqua_text::font::SharedFonts`) in `editor_ui::fonts::register_bundled_fonts`. The variable source files stay in this folder as provenance inputs; they are not embedded or registered.
 
-Registration therefore uses static instances at 300, 400, 500, 600 and 700 for each Spline family, plus the conversation-prose instances at 410 (body) and 630 (headings) for Spline Sans. Source variable files remain as provenance inputs, not registered faces. Generated with fontTools 4.63.0 `instantiateVariableFont(font, {"wght": weight}, inplace=True)`, with typographic family/style names and OS/2/head style-linking metadata set for each weight. The 410 face mirrors the 400 naming (`Spline Sans` / `Regular`, OS/2 410, REGULAR and USE_TYPO_METRICS bits); the 630 face mirrors the 600 naming (`Spline Sans SemiBold` / `SemiBold`, OS/2 630, REGULAR bit cleared with USE_TYPO_METRICS kept). Outlines come directly from the original variation; no synthetic emboldening is used, and no 400/600 binary was relabeled: the 410/630 outlines hash differently from both neighbors.
+The static instances are 300, 400, 500, 600 and 700 for each Spline family, plus the conversation-prose instances at 410 (body) and 630 (headings) for Spline Sans. Generated with fontTools 4.63.0 `instantiateVariableFont(font, {"wght": weight}, inplace=True)`, with typographic family/style names and OS/2/head style-linking metadata set for each weight. The 410 face mirrors the 400 naming (`Spline Sans` / `Regular`, OS/2 410, REGULAR and USE_TYPO_METRICS bits); the 630 face mirrors the 600 naming (`Spline Sans SemiBold` / `SemiBold`, OS/2 630, REGULAR bit cleared with USE_TYPO_METRICS kept). Outlines come directly from the original variation; no synthetic emboldening is used, and no 400/600 binary was relabeled: the 410/630 outlines hash differently from both neighbors.
 
 | Static face | Weight | SHA-256 |
 | --- | --- | --- |
@@ -41,4 +41,5 @@ Registration therefore uses static instances at 300, 400, 500, 600 and 700 for e
 `sigurd-400.ttf` is the static weight-400 instance of the dashboard's Sigurd
 Variable web font that draws the sidebar wordmark. Size: 103876 bytes.
 SHA-256: `3bd4098eb6fe40f576fd653683bc43fe8ad8fc70ab14a2ad1970ea64e6c288ed`.
-See `../licenses/sigurd-NOTES.md` for provenance and licensing status.
+It is embedded in every Editor build. See `../licenses/sigurd-NOTES.md` for
+its provenance and licensing status, which is unconfirmed.

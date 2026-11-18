@@ -1,7 +1,9 @@
 # SVGL and brand-mark logos — licensing position
 
-Scope: `modules/assets/svg/svgl/*` (12 entries) and
-`modules/assets/svg/brands/*` (kimi, opencode, opencode-light, zai).
+Scope: `crates/editor-assets/svg/svgl/*` (claude-ai, deepseek, git, github,
+gitlab, meta, microsoft-azure, openai, qwen) and
+`crates/editor-assets/svg/brands/*` (kimi, opencode, opencode-light,
+reflection, zai).
 
 ## What is attested
 
@@ -11,9 +13,10 @@ Scope: `modules/assets/svg/svgl/*` (12 entries) and
   artwork.**
 - The upstream svgl project (`pheralb/svgl`, svgl.app) publishes per-logo
   metadata without a license field; its API entries carry the owner/product URL
-  and, where available, an official brand-resource URL. A snapshot of exactly
-  the 12 vendored logos is checked in as extraction-time evidence:
-  `licenses/svgl-api-evidence.json` (captured 2026-08-24).
+  and, where available, an official brand-resource URL. A snapshot of the 12
+  logos vendored at extraction time is checked in as evidence:
+  `licenses/svgl-api-evidence.json` (captured 2026-08-24). Three of those
+  logos have since been removed; the scope above is the current set.
 - Per-logo SPDX identifiers are therefore **not attestable** from the installed
   package, its lockfile entry, or svgl's own metadata.
 
@@ -22,14 +25,16 @@ Scope: `modules/assets/svg/svgl/*` (12 entries) and
 Each svgl/brand asset is treated as `LicenseRef-Brand-Mark`.
 This records precisely what is known: these are the trademarked brand marks of
 their respective owners (GitHub, GitLab, Git, Microsoft Azure, Anthropic
-Claude, Cursor, DeepSeek, xAI Grok, Meta, OpenAI, Alibaba Qwen,
-Moonshot AI Kimi, OpenCode, Z.ai). Use to identify the
+Claude, DeepSeek, Meta, OpenAI, Alibaba Qwen, Moonshot AI Kimi, OpenCode,
+Reflection AI, Z.ai). Use to identify the
 corresponding product/service (nominative use) is how the legacy frontend used
 them; nothing here claims a copyright license from the owner. Brand-resource
 URLs published by svgl are preserved as attribution evidence.
 
-`needs_review = true` is set on all of these entries so legal review before any
-external distribution is explicit rather than assumed.
+No legal review of these marks is recorded. The asset catalog
+(`crates/editor-assets/src/lib.rs`) carries no review flag and no release
+check blocks on them; this note is the only record that permission from the
+owners has not been confirmed.
 
 ## Legacy brands directory
 
