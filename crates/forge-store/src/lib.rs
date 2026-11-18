@@ -1,5 +1,4 @@
 #![expect(
-    clippy::field_scoped_visibility_modifiers,
     clippy::iter_over_hash_type,
     clippy::needless_pass_by_ref_mut,
     clippy::renamed_function_params,

@@ -11,7 +11,6 @@
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::enum_variant_names,
-    clippy::field_scoped_visibility_modifiers,
     clippy::float_cmp,
     clippy::fn_params_excessive_bools,
     clippy::format_collect,

@@ -4,7 +4,6 @@
     clippy::cast_sign_loss,
     clippy::clone_on_ref_ptr,
     clippy::collapsible_if,
-    clippy::field_scoped_visibility_modifiers,
     clippy::imprecise_flops,
     clippy::large_types_passed_by_value,
     clippy::let_underscore_must_use,

@@ -4,7 +4,6 @@
     clippy::default_trait_access,
     clippy::duration_suboptimal_units,
     clippy::explicit_into_iter_loop,
-    clippy::field_scoped_visibility_modifiers,
     clippy::fn_params_excessive_bools,
     clippy::items_after_statements,
     clippy::iter_over_hash_type,

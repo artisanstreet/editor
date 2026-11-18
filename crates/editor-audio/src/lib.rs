@@ -1,5 +1,4 @@
 #![expect(
-    clippy::field_scoped_visibility_modifiers,
     clippy::inconsistent_struct_constructor,
     clippy::unused_result_ok,
     missing_debug_implementations,

@@ -8,7 +8,6 @@
     clippy::collapsible_if,
     clippy::collapsible_match,
     clippy::default_trait_access,
-    clippy::field_scoped_visibility_modifiers,
     clippy::float_cmp,
     clippy::fn_params_excessive_bools,
     clippy::if_not_else,

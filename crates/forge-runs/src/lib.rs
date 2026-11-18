@@ -4,7 +4,6 @@
 )]
 #![allow(
     clippy::assertions_on_result_states,
-    clippy::field_scoped_visibility_modifiers,
     clippy::inconsistent_struct_constructor,
     clippy::iter_over_hash_type,
     clippy::partial_pub_fields,

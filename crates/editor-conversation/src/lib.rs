@@ -4,7 +4,6 @@
     clippy::clone_on_ref_ptr,
     clippy::default_trait_access,
     clippy::derive_partial_eq_without_eq,
-    clippy::field_scoped_visibility_modifiers,
     clippy::float_cmp,
     clippy::fn_params_excessive_bools,
     clippy::implicit_hasher,
