@@ -1,5 +1,5 @@
 use crate::core::{ConnectionStatus, Core, HostId, Screen, SettingsPage};
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use artisan_api::{EditorCall, EditorReply, SettingOwner, setting_decl};
 use serde_json::{Value, json};
 
@@ -62,7 +62,7 @@ impl Core {
             }
             EditorCall::SettingSet { key, value } => {
                 let decl = editor_setting(&key)?;
-                decl.check(&value).map_err(|error| anyhow!(error))?;
+                decl.check(&value)?;
                 self.set_setting(&key, value.clone())?;
                 Ok(json!({ "key": key, "value": value }))
             }

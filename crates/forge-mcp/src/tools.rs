@@ -1258,6 +1258,11 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                             .to_owned()
                     }
                     artisan_api::SettingKind::Text { hint } => (*hint).to_owned(),
+                    artisan_api::SettingKind::Options { values } => values
+                        .iter()
+                        .map(|value| format!("\"{value}\""))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     artisan_api::SettingKind::Choice { values } => values
                         .iter()
                         .map(|value| {
@@ -1323,7 +1328,8 @@ pub async fn call(hub: &Hub, caller: &ThreadId, name: &str, arguments: Value) ->
                     set.key
                 ))
             })?;
-            decl.check(&set.value).map_err(Refused)?;
+            decl.check(&set.value)
+                .map_err(|error| Refused(error.to_string()))?;
             if decl.needs_approval {
                 approve(
                     hub,

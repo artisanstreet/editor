@@ -22,10 +22,47 @@ pub enum SettingKind {
     Choice {
         values: &'static [Option<u32>],
     },
-    /// A name; `hint` says which names fit.
+    Options {
+        values: &'static [&'static str],
+    },
     Text {
         hint: &'static str,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SettingValueError {
+    #[error("{key} takes true or false")]
+    NotBool { key: &'static str },
+    #[error("{key} takes {hint}")]
+    NotText {
+        key: &'static str,
+        hint: &'static str,
+    },
+    #[error("{key} takes one of {}", listed(values))]
+    NotAChoice {
+        key: &'static str,
+        values: &'static [Option<u32>],
+    },
+    #[error("{key} takes one of {}", values.join(", "))]
+    NotAnOption {
+        key: &'static str,
+        values: &'static [&'static str],
+    },
+    #[error("{key} takes a model customization set")]
+    ModelCustomizations {
+        key: &'static str,
+        #[source]
+        source: crate::ModelCustomizationsError,
+    },
+}
+
+fn listed(values: &[Option<u32>]) -> String {
+    values
+        .iter()
+        .map(|value| value.map_or_else(|| "null".to_owned(), |n| n.to_string()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -44,21 +81,28 @@ pub struct SettingDecl {
 impl SettingDecl {
     #[must_use]
     pub fn default_value(&self) -> Value {
-        serde_json::from_str(self.default).unwrap_or(Value::Null)
+        serde_json::from_str(self.default).unwrap_or_else(|error| {
+            unreachable!(
+                "invariant: setting {} declares a JSON default: {error}",
+                self.key
+            )
+        })
     }
 
-    /// Why `value` can't be this setting's, if it can't.
-    ///
-    /// # Errors
-    ///
-    /// The value's type or choice doesn't fit the declaration.
-    pub fn check(&self, value: &Value) -> Result<(), String> {
+    pub fn check(&self, value: &Value) -> Result<(), SettingValueError> {
+        let key = self.key;
         match self.kind {
-            SettingKind::ModelCustomizations => crate::model_customizations(value).map(|_| ()),
+            SettingKind::ModelCustomizations => crate::model_customizations(value)
+                .map(|_| ())
+                .map_err(|source| SettingValueError::ModelCustomizations { key, source }),
             SettingKind::Bool if value.is_boolean() => Ok(()),
-            SettingKind::Bool => Err(format!("{} takes true or false.", self.key)),
+            SettingKind::Bool => Err(SettingValueError::NotBool { key }),
             SettingKind::Text { .. } if value.is_string() => Ok(()),
-            SettingKind::Text { hint } => Err(format!("{} takes {hint}.", self.key)),
+            SettingKind::Text { hint } => Err(SettingValueError::NotText { key, hint }),
+            SettingKind::Options { values } => match value.as_str() {
+                Some(given) if values.contains(&given) => Ok(()),
+                Some(_) | None => Err(SettingValueError::NotAnOption { key, values }),
+            },
             SettingKind::Choice { values } => {
                 let given = match value {
                     Value::Null => Some(None),
@@ -71,11 +115,7 @@ impl SettingDecl {
                 if given.is_some_and(|given| values.contains(&given)) {
                     Ok(())
                 } else {
-                    let listed: Vec<String> = values
-                        .iter()
-                        .map(|value| value.map_or_else(|| "null".to_owned(), |n| n.to_string()))
-                        .collect();
-                    Err(format!("{} takes one of {}.", self.key, listed.join(", ")))
+                    Err(SettingValueError::NotAChoice { key, values })
                 }
             }
         }
@@ -229,12 +269,12 @@ pub const SETTINGS: &[SettingDecl] = &[
     SettingDecl {
         key: "font_set",
         owner: SettingOwner::Editor,
-        kind: SettingKind::Text {
-            hint: "\"spline\" (the bundled Spline Sans and Spline Sans Mono) or \"system\" (the platform's UI and monospace fonts)",
+        kind: SettingKind::Options {
+            values: &["spline", "system"],
         },
         default: "\"spline\"",
         label: "Fontset",
-        description: "The families the Editor draws text in: \"spline\" or \"system\".",
+        description: "The families the Editor draws text in: \"spline\" (the bundled Spline Sans and Spline Sans Mono) or \"system\" (the platform's UI and monospace fonts).",
         needs_approval: false,
     },
     SettingDecl {
