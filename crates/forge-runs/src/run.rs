@@ -1145,22 +1145,17 @@ impl Work {
     }
 }
 
-/// The item an engine names by its key, as a parent or as an agent it
-/// reports on. Usually one this run made; a subagent resumed in a later
-/// process (Claude's `SendMessage`) still names its first run's agent, which
-/// is found by its native id and reopened here.
-/// Minting an id for it instead orphaned the resumed agent's whole work.
-async fn parent_of(
+async fn known_item(
     store: &forge_store::Store,
     run: &Run,
     items: &mut Work,
     key: &str,
-) -> Result<ItemId, ApplyError> {
+) -> Result<Option<ItemId>, ApplyError> {
     if let Some(tracked) = items.by_key.get(key) {
-        return Ok(tracked.id.clone());
+        return Ok(Some(tracked.id.clone()));
     }
     let Some(found) = store.item_by_native(&run.thread_id, None, key).await? else {
-        return Ok(items.id(key));
+        return Ok(None);
     };
     let item = store
         .reopen_agent(&found.id, &run.id)
@@ -1175,7 +1170,19 @@ async fn parent_of(
             persisted: true,
         },
     );
-    Ok(item.id)
+    Ok(Some(item.id))
+}
+
+async fn stored_parent(
+    store: &forge_store::Store,
+    run: &Run,
+    items: &mut Work,
+    key: &str,
+) -> Result<Option<ItemId>, ApplyError> {
+    match items.by_key.get(key) {
+        Some(tracked) => Ok(tracked.persisted.then(|| tracked.id.clone())),
+        None => known_item(store, run, items, key).await,
+    }
 }
 
 #[expect(
@@ -1423,13 +1430,14 @@ async fn apply_item(
         *title = artisan_title(store, input).await?;
     }
     let parent_id = match parent {
-        Some(parent) => Some(parent_of(store, run, items, &parent).await?),
+        Some(parent) => stored_parent(store, run, items, &parent).await?,
         None => None,
     };
-    // An agent this run didn't start (resumed from an earlier
-    // process) is the one stored under its tool id.
     let id = if matches!(kind, ItemKind::Agent { .. }) {
-        parent_of(store, run, items, &key).await?
+        match known_item(store, run, items, &key).await? {
+            Some(id) => id,
+            None => items.id(&key),
+        }
     } else {
         items.id(&key)
     };

@@ -1526,6 +1526,42 @@ async fn a_prompt_edited_outside_artisan_is_reported_and_left_alone() {
 /// there: the report lands on the agent the user already sees, with the
 /// task it was given, not on a second agent.
 #[tokio::test(flavor = "multi_thread")]
+async fn work_whose_parent_never_arrives_stays_in_the_transcript() {
+    let fixture = fixture(Arc::new(|_turn, io| {
+        Box::pin(async move {
+            io.emit(EngineEvent::Item {
+                key: "orphan".into(),
+                parent: Some("agent-that-never-started".into()),
+                status: Status::Done,
+                kind: ItemKind::AssistantMessage {
+                    text: "found the bug".into(),
+                    phase: Phase::Final,
+                },
+            })
+            .await;
+            Outcome::done()
+        })
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("investigate"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+
+    let orphan = fixture.by_native("orphan").await;
+    assert_eq!(orphan.parent_id, None);
+    assert!(
+        fixture
+            .items()
+            .await
+            .iter()
+            .any(|item| item.preview() == Some("found the bug"))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_resumed_agents_report_reaches_its_first_item() {
     let fixture = fixture(Arc::new(|turn, io| {
         Box::pin(async move {
