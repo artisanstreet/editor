@@ -15,9 +15,9 @@ const MAX_MESSAGE: usize = 65_535;
 #[derive(Debug, thiserror::Error)]
 #[error("Noise channel {channel}")]
 pub struct NoiseError {
-    pub channel: String,
+    channel: String,
     #[source]
-    pub failure: NoiseFailure,
+    failure: NoiseFailure,
 }
 
 #[derive(Debug, thiserror::Error)]

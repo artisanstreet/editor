@@ -40,9 +40,9 @@ pub enum ConnectRelayError {
 #[derive(Debug, thiserror::Error)]
 #[error("open a {prefix} Relay channel")]
 pub struct OpenChannelError {
-    pub prefix: &'static str,
+    prefix: &'static str,
     #[source]
-    pub failure: OpenFailure,
+    failure: OpenFailure,
 }
 
 #[derive(Debug, thiserror::Error)]

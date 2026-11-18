@@ -136,7 +136,7 @@ struct AccountDetails {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimRequest {
-    pub code: String,
+    code: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,7 +163,6 @@ pub struct GrantIssueRequest {
 #[derive(Clone, Debug, Deserialize)]
 pub struct GrantToken {
     pub token: String,
-    pub expires_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -448,5 +447,5 @@ impl CoreSessionClient {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimedEnrollment {
-    pub enrollment_id: String,
+    enrollment_id: String,
 }

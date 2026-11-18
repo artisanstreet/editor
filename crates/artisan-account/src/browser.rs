@@ -24,7 +24,7 @@ impl Provider {
     }
 
     #[must_use]
-    pub const fn slug(self) -> &'static str {
+    const fn slug(self) -> &'static str {
         match self {
             Self::Google => "google",
             Self::GitHub => "github",
@@ -43,7 +43,7 @@ pub enum Problem {
 
 impl Problem {
     #[must_use]
-    pub fn of(slug: &str) -> Self {
+    fn of(slug: &str) -> Self {
         match slug {
             "denied" | "cancelled" => Self::Denied,
             "unavailable" => Self::Unavailable,
@@ -54,7 +54,7 @@ impl Problem {
     }
 
     #[must_use]
-    pub const fn slug(self) -> &'static str {
+    const fn slug(self) -> &'static str {
         match self {
             Self::Denied => "denied",
             Self::Unavailable => "unavailable",
@@ -79,7 +79,9 @@ impl Problem {
                 "That email already signs in another way. Use the emailed link instead.".to_owned()
             }
             Self::Unfinished => {
-                format!("{name} sign-in didn't finish in the browser. Press the button to try again.")
+                format!(
+                    "{name} sign-in didn't finish in the browser. Press the button to try again."
+                )
             }
         }
     }
@@ -208,7 +210,8 @@ pub async fn receive(
         };
         let response = match &arrival {
             Arrival::Unrelated => {
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_owned()
             }
             Arrival::Code(_) | Arrival::Problem(_) => format!(
                 "HTTP/1.1 303 See Other\r\nLocation: {}\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

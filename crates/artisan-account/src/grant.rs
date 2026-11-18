@@ -79,7 +79,7 @@ pub enum Aud {
 
 impl Aud {
     #[must_use]
-    pub fn values(&self) -> Vec<&str> {
+    fn values(&self) -> Vec<&str> {
         match self {
             Self::One(value) => vec![value.as_str()],
             Self::Many(values) => values.iter().map(String::as_str).collect(),
@@ -87,7 +87,7 @@ impl Aud {
     }
 
     #[must_use]
-    pub fn contains(&self, aud: &str) -> bool {
+    fn contains(&self, aud: &str) -> bool {
         self.values().contains(&aud)
     }
 }
@@ -145,7 +145,7 @@ pub enum GrantErrorKind {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("grant rejected: {kind:?}")]
 pub struct GrantError {
-    pub kind: GrantErrorKind,
+    kind: GrantErrorKind,
 }
 
 impl GrantError {
