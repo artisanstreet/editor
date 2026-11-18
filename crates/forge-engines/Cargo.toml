@@ -62,7 +62,7 @@ rustix = { workspace = true, features = ["fs"] }
 axum.workspace = true
 divan.workspace = true
 insta.workspace = true
-test-support = { workspace = true, features = ["http"] }
+test-support = { workspace = true, features = ["http", "transcript"] }
 tracing-subscriber.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net"] }

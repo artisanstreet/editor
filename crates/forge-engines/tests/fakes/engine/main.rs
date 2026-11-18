@@ -1,6 +1,7 @@
 mod claude;
 mod codex;
 mod opencode;
+mod replay;
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead as _, Write as _};
@@ -9,8 +10,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 fn main() -> ExitCode {
-    let scenario = std::env::var("ARTISAN_FAKE").unwrap_or_default();
-    match scenario.as_str() {
+    let Some(scenario) = std::env::var_os("ARTISAN_FAKE") else {
+        return replay::run();
+    };
+    match scenario.to_string_lossy().as_ref() {
         "codex-app-server" => codex::app_server(),
         "claude-interrupt" => claude::interrupt(),
         "claude-closes-output" => claude::closes_output(),
