@@ -261,6 +261,14 @@ fn account_copy(status: &EngineStatus) -> String {
         SignInState::Failed { message } => format!("Account status unavailable: {message}."),
     }
 }
+fn sign_in_copy(engine: EngineId) -> String {
+    match engine {
+        EngineId::OpenCode => "Sign in to use models beyond OpenCode's free ones.".into(),
+        EngineId::Claude | EngineId::Codex => {
+            format!("{} can't run until you sign in.", engine.display_name())
+        }
+    }
+}
 fn account(
     controller: &SettingsController,
     status: &EngineStatus,
@@ -277,7 +285,7 @@ fn account(
             blocks.push(ui::row(
                 theme,
                 "Sign in",
-                format!("{} can't run until you sign in.", engine.display_name()),
+                sign_in_copy(engine),
                 Some(button(
                     theme,
                     format!("settings-engine-login-{engine}"),

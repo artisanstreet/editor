@@ -388,7 +388,19 @@ pub fn build(
                 &theme,
                 TextRole::Label,
                 Ink::Muted,
-                "Pair a host on the Hosts page first.",
+                "Pair a Forge on the Account page first.",
+            ))
+            .child(ui::button(
+                &theme,
+                "settings-open-account",
+                "Open Account",
+                ButtonTone::Neutral,
+                false,
+                move || {
+                    emit(ViewAction::Navigate(Screen::Settings(
+                        SettingsPage::Account,
+                    )))
+                },
             ))
             .build(),
     };
@@ -593,7 +605,7 @@ fn hosts(theme: &ArtisanTheme, core: &Core) -> Element {
         rows.push(ui::row(
             theme,
             "No Forges open",
-            "Add and connect Forges on the Account page.",
+            "Pair and open Forges on the Account page.",
             None,
         ));
     }
@@ -629,8 +641,8 @@ fn notifications(
         .build();
     let row = ui::row(
         theme,
-        "Notify Me",
-        "Uses your operating systems notification scheduler to alert you when threads finish, is stuck or out right failed.",
+        "Notify me",
+        "Uses your system's notifications to tell you when a thread finishes, needs attention or fails.",
         Some(control),
     );
     section_page(
@@ -680,19 +692,19 @@ fn thread_section(
                     "settings-switch-retry-overloaded",
                     "retry_when_overloaded",
                     "Keep retrying when the provider is overloaded",
-                    "Artisan Editor indefintely reschedules a thread which its model's capacityis overloaded  to continue until theturn finishes.",
+                    "When the model is overloaded, Artisan keeps rescheduling the thread until the turn finishes.",
                 ),
                 (
                     "settings-switch-continue-usage-limit",
                     "continue_after_usage_limit",
                     "Continue when my usage limit resets",
-                    "Artisan Editor marks a thread that stopped because of session depletage to continue when its session is replenished.",
+                    "A thread that stopped at the usage limit continues once the limit resets.",
                 ),
                 (
                     "settings-switch-continue-restart",
                     "continue_after_restart",
                     "Continue after a restart",
-                    "Artisan Editor automatically continues threads that were stopped because of a system shutdown, restart or similiar.",
+                    "Threads stopped by a shutdown or restart continue automatically afterwards.",
                 ),
             ],
         ),
@@ -1218,7 +1230,7 @@ fn appearance(
         font_entries(),
         controller.font_select.clone(),
     )
-    .label("Fontset")
+    .label("Fonts")
     .on_change(move |font| send(ViewAction::SetFont(font)))
     .on_open_change(move |open_state| open(ViewAction::FontMenu(open_state)))
     .build();
@@ -1263,14 +1275,14 @@ fn appearance(
     let rows = vec![
         ui::row(
             theme,
-            "Dark Mode",
+            "Dark mode",
             "Whether to draw Artisan Editor in a dark theme.",
             Some(dark),
         ),
         ui::row(
             theme,
-            "Fontset",
-            "Choose what set of fonts to Artisan Editor will render in.",
+            "Fonts",
+            "Choose the fonts Artisan Editor uses.",
             Some(fonts),
         ),
         ui::row(

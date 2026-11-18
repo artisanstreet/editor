@@ -386,7 +386,9 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
     for page in host_pages {
         let texts = render(&mut core, page);
         assert!(
-            texts.iter().any(|text| text.contains("Pair a host")),
+            texts
+                .iter()
+                .any(|text| text.contains("Pair a Forge on the Account page")),
             "{page:?} without a host"
         );
     }
@@ -398,7 +400,9 @@ fn host_bound_pages_show_their_content_once_a_host_is_connected() {
             "{page:?} header"
         );
         assert!(
-            !texts.iter().any(|text| text.contains("Pair a host")),
+            !texts
+                .iter()
+                .any(|text| text.contains("Pair a Forge on the Account page")),
             "{page:?} with a host"
         );
     }

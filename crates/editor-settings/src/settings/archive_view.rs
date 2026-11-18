@@ -296,7 +296,9 @@ pub fn archived(
     ui::section(
         theme,
         "Archived",
-        Some("Archived threads leave the sidebar. They stay here until you restore them."),
+        Some(
+            "Archived threads leave the sidebar and stay here until you restore them, unless Cleanup deletes them first.",
+        ),
         None,
         body.build(),
     )
