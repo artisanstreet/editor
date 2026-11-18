@@ -154,6 +154,7 @@ pub struct ShellApplication<V> {
     retention_popup: Option<crate::ui::popover::AnimatedPickerHost>,
     usage_deadline: Option<Instant>,
     fit_launch: bool,
+    #[cfg(feature = "capture")]
     render_tap: Option<std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>>>,
 }
 
@@ -306,10 +307,12 @@ impl<V: SectionViews> ShellApplication<V> {
             retention_popup: None,
             usage_deadline: None,
             fit_launch: false,
+            #[cfg(feature = "capture")]
             render_tap: None,
         }
     }
 
+    #[cfg(feature = "capture")]
     pub fn tap_render(
         &mut self,
     ) -> std::rc::Rc<std::cell::RefCell<Vec<aqua_protocol::RenderCommand>>> {
@@ -1031,6 +1034,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     fn take_output(&mut self, id: AquaWindowId) -> aqua::RuntimeOutput {
         let _tm = Tm::new("take");
         let output = self.ui.take_output(id);
+        #[cfg(feature = "capture")]
         if let Some(tap) = &self.render_tap {
             tap.borrow_mut().extend(output.render.iter().cloned());
         }
