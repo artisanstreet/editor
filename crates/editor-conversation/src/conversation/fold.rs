@@ -604,7 +604,7 @@ impl RunSummary {
 }
 
 pub struct Folded {
-    pub rows: Vec<(Row, u64)>,
+    pub rows: Vec<Row>,
     pub runs: HashMap<RunId, RunSummary>,
 }
 
@@ -620,6 +620,43 @@ pub const fn in_composer_strip(item: &Item) -> bool {
 
 fn run_order(run: &Run) -> (Timestamp, &RunId) {
     (run.started_at, &run.id)
+}
+
+pub struct Turns {
+    roots: HashMap<RunId, RunId>,
+}
+
+impl Turns {
+    pub fn new(view: &ThreadView, latest: Option<&Run>) -> Self {
+        let mut runs: Vec<&Run> = view
+            .runs
+            .values()
+            .filter(|run| latest.is_none_or(|latest| latest.id != run.id))
+            .chain(latest)
+            .collect();
+        runs.sort_by(|a, b| run_order(a).cmp(&run_order(b)));
+        let mut roots: HashMap<RunId, RunId> = HashMap::with_capacity(runs.len());
+        let mut previous: Option<&Run> = None;
+        for run in runs {
+            let root = previous
+                .filter(|_| run.continuation.is_some())
+                .filter(|previous| {
+                    !matches!(
+                        previous.status(),
+                        RunStatus::Done | RunStatus::Failed | RunStatus::Refused
+                    )
+                })
+                .and_then(|previous| roots.get(&previous.id).cloned())
+                .unwrap_or_else(|| run.id.clone());
+            roots.insert(run.id.clone(), root);
+            previous = Some(run);
+        }
+        Self { roots }
+    }
+
+    pub fn of(&self, run: &RunId) -> RunId {
+        self.roots.get(run).unwrap_or(run).clone()
+    }
 }
 
 pub fn turn_of(view: &ThreadView, latest: Option<&Run>, run: &RunId) -> RunId {
@@ -676,14 +713,14 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
         .filter(|item| scope.is_none_or(|agent| descends_from(view, item, agent) || to_scope(item)))
         .collect();
     let loaded: HashSet<&ItemId> = shown.iter().map(|item| &item.id).collect();
-    let children = children(&shown);
     let unloaded: Vec<&artisan_api::WorkSpan> = if scope.is_none() {
         view.shown_work().collect()
     } else {
         Vec::new()
     };
-    let runs = summaries(view, &shown, &unloaded, latest);
-    let turn = |run: &Option<RunId>| run.as_ref().map(|run| turn_of(view, latest, run));
+    let turns = Turns::new(view, latest);
+    let runs = summaries(view, &shown, &unloaded, latest, &turns);
+    let turn = |run: &Option<RunId>| run.as_ref().map(|run| turns.of(run));
     let mut rows: Vec<Row> = Vec::new();
     let mut work: Option<(Option<RunId>, WorkMembers)> = None;
     let mut segments: HashMap<Option<RunId>, usize> = HashMap::new();
@@ -840,25 +877,18 @@ pub fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> 
         rows.push(Row::Status(run.id.clone()));
     }
     if scope.is_none() {
-        head_every_run(&mut rows, &shown, &run_starts, latest, &turn);
+        rows = head_every_run(rows, &shown, &run_starts, latest, &turn);
     }
-    let rows = rows
-        .into_iter()
-        .map(|row| {
-            let version = version(view, &row, &children, &runs);
-            (row, version)
-        })
-        .collect();
     Folded { rows, runs }
 }
 
 fn head_every_run(
-    rows: &mut Vec<Row>,
+    rows: Vec<Row>,
     shown: &[&Item],
     run_starts: &HashMap<RunId, Seq>,
     latest: Option<&Run>,
     turn: &impl Fn(&Option<RunId>) -> Option<RunId>,
-) {
+) -> Vec<Row> {
     let headed: HashSet<RunId> = rows
         .iter()
         .filter_map(|row| match row {
@@ -878,36 +908,53 @@ fn head_every_run(
             | Row::AgentStatus(..) => None,
         })
         .collect();
-    let work_header = Row::WorkHeader;
-    let mut inserts: Vec<(usize, RunId)> = run_starts
-        .iter()
-        .filter(|(run, _)| !headed.contains(*run))
-        .filter_map(|(run, start)| {
-            let message = shown.iter().find(|item| {
-                item.position == *start
-                    && matches!(item.kind, ItemKind::UserMessage { steer: false, .. })
-            })?;
-            let at = rows
-                .iter()
-                .rposition(|row| row.anchor() == Some(&message.id))?;
-            Some((at + 1, run.clone()))
-        })
-        .collect();
-    inserts.sort_by_key(|&(at, _)| std::cmp::Reverse(at));
-    let inserted: HashSet<RunId> = inserts.iter().map(|(_, run)| run.clone()).collect();
-    for (at, run) in inserts {
-        rows.insert(at, work_header(run));
+    let mut opening: HashMap<Seq, &ItemId> = HashMap::new();
+    for item in shown {
+        if matches!(item.kind, ItemKind::UserMessage { steer: false, .. }) {
+            opening.entry(item.position).or_insert(&item.id);
+        }
+    }
+    let mut heads: HashMap<&ItemId, Vec<&RunId>> = HashMap::new();
+    for (run, start) in run_starts {
+        if !headed.contains(run)
+            && let Some(message) = opening.get(start)
+        {
+            heads.entry(message).or_default().push(run);
+        }
+    }
+    let mut last: HashMap<&ItemId, usize> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        if let Some(anchor) = row.anchor()
+            && heads.contains_key(anchor)
+        {
+            last.insert(anchor, index);
+        }
+    }
+    let mut after: HashMap<usize, Vec<RunId>> = HashMap::new();
+    for (message, index) in last {
+        let runs = after.entry(index).or_default();
+        runs.extend(heads[message].iter().map(|run| (*run).clone()));
+        runs.sort();
+    }
+    let inserted: HashSet<RunId> = after.values().flatten().cloned().collect();
+    let mut headed_rows = Vec::with_capacity(rows.len() + inserted.len() + 1);
+    for (index, row) in rows.into_iter().enumerate() {
+        headed_rows.push(row);
+        if let Some(runs) = after.remove(&index) {
+            headed_rows.extend(runs.into_iter().map(Row::WorkHeader));
+        }
     }
     if let Some(run) = latest.filter(|run| run.status().is_live()) {
         let id = turn(&Some(run.id.clone())).unwrap_or_else(|| run.id.clone());
         if !headed.contains(&id) && !inserted.contains(&id) {
-            let status = rows
+            let status = headed_rows
                 .iter()
                 .rposition(|row| matches!(row, Row::Status(_)))
-                .unwrap_or(rows.len());
-            rows.insert(status, work_header(id));
+                .unwrap_or(headed_rows.len());
+            headed_rows.insert(status, Row::WorkHeader(id));
         }
     }
+    headed_rows
 }
 
 pub fn span_member(first: Seq) -> ItemId {
@@ -943,7 +990,7 @@ fn fold_span(
 
 pub fn expanded(
     view: &ThreadView,
-    rows: Vec<(Row, u64)>,
+    rows: Vec<Row>,
     runs: &HashMap<RunId, RunSummary>,
 ) -> Vec<(Row, u64)> {
     let children = children(&view.shown().collect::<Vec<_>>());
@@ -952,7 +999,7 @@ pub fn expanded(
         let revision = version(view, &row, &children, runs);
         expanded.push((row, revision));
     };
-    for (row, revision) in rows {
+    for row in rows {
         match row {
             Row::Work {
                 run,
@@ -1033,10 +1080,7 @@ pub fn expanded(
             | Row::Compaction(_)
             | Row::Gap
             | Row::Status(_)
-            | Row::AgentStatus(..)) => {
-                let _ = revision;
-                emit(other);
-            }
+            | Row::AgentStatus(..)) => emit(other),
         }
     }
     expanded
@@ -1207,6 +1251,7 @@ fn summaries(
     shown: &[&Item],
     unloaded: &[&artisan_api::WorkSpan],
     latest: Option<&Run>,
+    roots: &Turns,
 ) -> HashMap<RunId, RunSummary> {
     let mut by_run: HashMap<&RunId, Vec<&Item>> = HashMap::new();
     for item in shown {
@@ -1281,10 +1326,7 @@ fn summaries(
         .collect();
     let mut turns: HashMap<RunId, Vec<RunId>> = HashMap::new();
     for run in summaries.keys() {
-        turns
-            .entry(turn_of(view, latest, run))
-            .or_default()
-            .push(run.clone());
+        turns.entry(roots.of(run)).or_default().push(run.clone());
     }
     for (root, mut members) in turns {
         if members.len() < 2 && members.first() == Some(&root) {

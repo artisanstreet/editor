@@ -120,7 +120,6 @@ fn a_resumed_agent_shows_its_status_until_it_reports_again() {
             .rows
             .into_iter()
             .skip(1)
-            .map(|(row, _)| row)
             .collect::<Vec<_>>()
     };
     assert!(matches!(
@@ -269,4 +268,77 @@ fn the_latest_of_two_same_millisecond_continuations_sets_the_turn_status() {
             );
         }
     }
+}
+
+#[test]
+fn a_finished_turn_ends_the_continuation_chain() {
+    let view = thread_with(vec![
+        run("run-a", RunStatus::Cancelled, 1_000, false),
+        run("run-b", RunStatus::Cancelled, 2_000, true),
+        run("run-c", RunStatus::Done, 3_000, true),
+        run("run-d", RunStatus::Running, 4_000, true),
+    ]);
+    let turns = super::Turns::new(&view, None);
+    for (id, root) in [
+        ("run-a", "run-a"),
+        ("run-b", "run-a"),
+        ("run-c", "run-a"),
+        ("run-d", "run-d"),
+    ] {
+        let id = RunId(id.into());
+        assert_eq!(turns.of(&id), RunId(root.into()), "{id}");
+        assert_eq!(turn_of(&view, None, &id), RunId(root.into()), "{id}");
+    }
+}
+
+fn prompt_in(run: &str, position: u64) -> Item {
+    Item {
+        id: ItemId(format!("prompt-{position}")),
+        kind: ItemKind::UserMessage {
+            text: format!("Prompt {position}.").into(),
+            images: Vec::new(),
+            steer: false,
+            from_agent: None,
+            sender: None,
+        },
+        ..reply_in(run, position)
+    }
+}
+
+#[test]
+fn every_turn_without_tools_gets_its_header_right_after_its_prompt() {
+    let (mut view, _) = ThreadView::open(ThreadId("thread".into()));
+    for (index, id) in ["run-a", "run-b", "run-c"].into_iter().enumerate() {
+        let position = u64::try_from(index).expect("three turns") * 2 + 1;
+        assert!(view.apply_item(prompt_in(id, position), None));
+        assert!(view.apply_item(reply_in(id, position + 1), None));
+        view.remember_run(run(
+            id,
+            RunStatus::Done,
+            1_000 * (position + 1).cast_signed(),
+            false,
+        ));
+    }
+    let rows = fold(&view, None, None).rows;
+    let shape = rows
+        .iter()
+        .map(|row| match row {
+            super::Row::WorkHeader(run) => format!("header {run}"),
+            other => other.anchor().map_or("-", |id| id.as_str()).to_owned(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shape,
+        [
+            "prompt-1",
+            "header run-a",
+            "reply-2",
+            "prompt-3",
+            "header run-b",
+            "reply-4",
+            "prompt-5",
+            "header run-c",
+            "reply-6",
+        ]
+    );
 }
