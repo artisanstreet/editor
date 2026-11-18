@@ -7,6 +7,8 @@ use std::sync::{
 };
 
 const MAX_TRACE_BYTES: usize = 64 * 1024 * 1024;
+const RETAINED_BYTES: u64 = 256 * 1024 * 1024;
+const RETAINED_AGE: std::time::Duration = std::time::Duration::from_hours(7 * 24);
 const MAX_RECORD_BYTES: usize = 256 * 1024;
 const RECORD_OVERHEAD_BYTES: usize = 128;
 
@@ -171,9 +173,131 @@ pub enum StartTraceError {
     },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum PruneTracesError {
+    #[error("list the engine traces in {path}")]
+    ReadFolder {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("read the size and age of the engine trace {path}")]
+    Inspect {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("delete the engine trace {path}")]
+    Remove {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[must_use]
+pub fn folder(data_dir: &Path) -> PathBuf {
+    data_dir.join("traces")
+}
+
+struct Listed {
+    path: PathBuf,
+    bytes: u64,
+    modified: std::time::SystemTime,
+}
+
+pub fn prune(dir: &Path, now: std::time::SystemTime) -> Result<usize, PruneTracesError> {
+    prune_within(dir, now, RETAINED_BYTES)
+}
+
+fn prune_within(
+    dir: &Path,
+    now: std::time::SystemTime,
+    budget: u64,
+) -> Result<usize, PruneTracesError> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => {
+            return Err(PruneTracesError::ReadFolder {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut traces = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| PruneTracesError::ReadFolder {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "jsonl")
+        {
+            continue;
+        }
+        let metadata = match entry.metadata().and_then(|metadata| {
+            metadata
+                .modified()
+                .map(|modified| (metadata.is_file(), metadata.len(), modified))
+        }) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(PruneTracesError::Inspect { path, source }),
+        };
+        if let (true, bytes, modified) = metadata {
+            traces.push(Listed {
+                path,
+                bytes,
+                modified,
+            });
+        }
+    }
+    let doomed = expired(traces, now, budget);
+    for path in &doomed {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(PruneTracesError::Remove {
+                    path: path.clone(),
+                    source,
+                });
+            }
+        }
+    }
+    Ok(doomed.len())
+}
+
+fn expired(mut traces: Vec<Listed>, now: std::time::SystemTime, budget: u64) -> Vec<PathBuf> {
+    traces.sort_by_key(|trace| std::cmp::Reverse(trace.modified));
+    let oldest = now.checked_sub(RETAINED_AGE);
+    let mut total: u64 = 0;
+    let mut full = false;
+    traces
+        .into_iter()
+        .filter_map(|trace| {
+            total = total.saturating_add(trace.bytes);
+            full = full || total > budget;
+            let stale = oldest.is_some_and(|oldest| trace.modified < oldest);
+            (full || stale).then_some(trace.path)
+        })
+        .collect()
+}
+
 impl Trace {
     pub fn start(dir: &Path, name: &str, secrets: Secrets) -> Result<Started, StartTraceError> {
         artisan_paths::private::create_folder(dir).map_err(StartTraceError::CreateFolder)?;
+        let room = RETAINED_BYTES.saturating_sub(MAX_TRACE_BYTES as u64);
+        if let Err(failure) = prune_within(dir, std::time::SystemTime::now(), room) {
+            let error: &dyn std::error::Error = &failure;
+            tracing::warn!(
+                error,
+                "older engine traces stay until the next trace starts"
+            );
+        }
         let path = dir.join(format!("{name}-{}.jsonl", artisan_api::now()));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);

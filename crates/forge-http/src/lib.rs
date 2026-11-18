@@ -405,6 +405,15 @@ async fn start_services(
         generation::start_primary_services(data_dir.to_path_buf(), routes_app, shutdown, tasks);
     }
     hub.resume_pending();
+    let traces = forge_engines::trace::folder(data_dir);
+    tasks.spawn_blocking(move || {
+        if let Err(failure) = forge_engines::trace::prune(&traces, std::time::SystemTime::now()) {
+            tracing::warn!(
+                error = diagnostics::chain(&failure),
+                "remove old engine traces"
+            );
+        }
+    });
     let auth = hub.clone();
     tasks.spawn(async move { auth.mcp().check_auth().await });
     let agents = hub.clone();

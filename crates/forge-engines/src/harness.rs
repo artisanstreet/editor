@@ -29,7 +29,6 @@ pub struct Turn {
     pub input: UserInput,
     /// Extra arguments and environment from customisation (MCP, settings).
     pub launch: Launch,
-    /// Explicit diagnostic trace destination. Normal runs do not record raw content.
     pub trace_dir: Option<PathBuf>,
 }
 

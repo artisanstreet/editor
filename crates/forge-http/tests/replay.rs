@@ -24,7 +24,7 @@ const SIDE_QUERIES: [&str; 3] = [
 ];
 
 pub(crate) struct Replay {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     folder: PathBuf,
     engine: EngineId,
     editor: Device,
@@ -111,7 +111,7 @@ pub(crate) async fn replaying(engine: EngineId, fixture: &str) -> Replay {
         .expect("create the project");
     assert!(created.status().is_success(), "the project is created");
     Replay {
-        _dir: dir,
+        dir,
         folder,
         engine,
         editor,
@@ -220,6 +220,38 @@ impl Replay {
             screen.finished(thread) >= runs
         })
         .await
+    }
+
+    pub(crate) async fn trace(&self, thread: &ThreadId) -> Vec<serde_json::Value> {
+        let folder = forge_engines::trace::folder(&self.dir.path().join("forge"));
+        let prefix = format!("{}-{thread}-", self.engine);
+        let records = || -> Vec<serde_json::Value> {
+            let files: Vec<PathBuf> = std::fs::read_dir(&folder)
+                .into_iter()
+                .flatten()
+                .map(|entry| entry.expect("list the engine traces").path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(&prefix))
+                })
+                .collect();
+            files
+                .iter()
+                .flat_map(|path| {
+                    std::fs::read_to_string(path)
+                        .expect("read the engine trace")
+                        .lines()
+                        .filter_map(|line| serde_json::from_str(line).ok())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        test_support::wait::eventually("the engine trace to end", SETTLE, || async {
+            records().iter().any(|record| record["kind"] == "end")
+        })
+        .await;
+        records()
     }
 
     pub(crate) fn launches(&self) -> usize {

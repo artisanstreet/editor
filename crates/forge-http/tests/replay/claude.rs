@@ -99,3 +99,32 @@ async fn continuing_a_stopped_claude_turn_does_not_send_its_delivered_message_ag
     );
     assert_eq!(replay.launches(), 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_turn_leaves_a_complete_trace_of_its_frames() {
+    let replay = replaying(EngineId::Claude, "reply").await;
+    let thread = replay.thread(Permissions::Auto).await;
+    let since = replay.head().await;
+    replay.send(&thread, "Say hello").await;
+    replay.settled(since, &thread, 1).await;
+    let trace = replay.trace(&thread).await;
+    let frames = |kind: &str, text: &str| {
+        trace.iter().any(|record| {
+            record["kind"] == kind
+                && record["text"]
+                    .as_str()
+                    .is_some_and(|frame| frame.contains(text))
+        })
+    };
+    assert!(frames("in", "Say hello"), "the frame Forge sent: {trace:?}");
+    assert!(
+        frames("out", "Hello from the replay."),
+        "the frame Claude wrote: {trace:?}"
+    );
+    let ends: Vec<_> = trace
+        .iter()
+        .filter(|record| record["kind"] == "end")
+        .collect();
+    assert_eq!(ends.len(), 1, "{trace:?}");
+    assert_eq!(ends[0]["dropped"], 0);
+}

@@ -21,6 +21,7 @@ A root chosen with `ae install --location` is remembered in a `location` file in
 | Forge log | `journalctl --user -u artisan-forge.service` under systemd, otherwise `<root>/forge/data/forge.log` (16 MiB, 4 rotated files) |
 | Editor log | `<root>/editor/data/logs/editor.log` (8 MiB, 6 rotated files) |
 | Crash reports | `<root>/<app>/data/crashes/<app>-<unix ms>-<pid>.txt` |
+| Engine traces | `<root>/forge/data/traces/<engine>-<thread>-<unix ms>.jsonl` (newest 256 MiB, at most 7 days old) |
 | Install lock | `<root>/.install.lock` |
 
 `ae status` shows what is installed, whether Forge runs and answers its health check, where its log is, and every problem it found. `ae status --json` prints the same for scripts.
@@ -74,6 +75,8 @@ Forge does not check the database's integrity itself; corruption shows up as err
 ## Crash reports and telemetry
 
 When the Editor, Forge or `ae` hits a broken invariant, it writes a crash report before aborting: the message, source location, span trace, backtrace and the last 200 log lines. The report's path is printed to stderr. Reports are plain local files under `<root>/<app>/data/crashes/`. Nothing collects or uploads them, and Artisan sends no telemetry. To report a crash, attach the file by hand. Reports are never deleted automatically; remove old ones when they are no longer needed.
+
+Forge also writes one engine trace per engine process to `<root>/forge/data/traces/<engine>-<thread>-<unix ms>.jsonl`: the raw frames Forge sent (`in`) and the engine wrote (`out`), its stderr, notes such as why Forge closed the engine's input, `dropped` and `truncated_from` markers where a trace hit its 64 MiB or 256 KiB-per-record limit, and an `end` record once the process is gone. Traces are private files, and launch credentials (MCP URLs, headers and environment secrets, the Artisan gateway token) are replaced with `[redacted]`; prompts, replies and tool output are kept as the engine saw them. Forge keeps the newest traces up to 256 MiB in total and deletes traces older than 7 days, when a trace starts and when Forge starts. Attach the traces for the affected thread to a bug report by hand; nothing uploads them.
 
 Release builds keep split debug symbols (`.dwp`, `.dSYM`, `.pdb`). They are uploaded as `symbols-<os>-<arch>` artifacts of the release workflow run and kept for 90 days, which bounds how long a release's backtraces can be symbolized.
 

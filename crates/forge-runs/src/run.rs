@@ -909,7 +909,7 @@ async fn prepare_on(
         session_id,
         input,
         launch,
-        trace_dir: None,
+        trace_dir: Some(forge_engines::trace::folder(hub.data_dir())),
     })
 }
 

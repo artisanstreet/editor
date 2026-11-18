@@ -1,5 +1,8 @@
-use forge_engines::trace::{Kind, Secrets, Started, Trace};
+use forge_engines::trace::{Kind, Secrets, Started, Trace, prune};
 use serde_json::Value;
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 #[expect(clippy::unwrap_used, reason = "a writer that panicked fails the test")]
 fn finish(started: Started) {
@@ -9,7 +12,7 @@ fn finish(started: Started) {
 }
 
 #[expect(clippy::unwrap_used, reason = "an unreadable trace fails the test")]
-fn records(dir: &std::path::Path) -> Vec<Value> {
+fn records(dir: &Path) -> Vec<Value> {
     let entries: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(Result::unwrap)
@@ -135,5 +138,75 @@ fn launch_credentials_never_reach_the_trace() {
     assert!(
         traced.contains("thread/start") && traced.contains("[redacted]"),
         "the frame is kept with its credentials redacted: {traced}"
+    );
+}
+
+const MIB: u64 = 1024 * 1024;
+const HOUR: Duration = Duration::from_hours(1);
+const DAY: Duration = Duration::from_hours(24);
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "a fixture that cannot be written fails the test"
+)]
+fn trace_file(dir: &Path, name: &str, bytes: u64, modified: SystemTime) {
+    let file = std::fs::File::create(dir.join(name)).unwrap();
+    file.set_len(bytes).unwrap();
+    file.set_modified(modified).unwrap();
+}
+
+#[expect(clippy::unwrap_used, reason = "an unreadable folder fails the test")]
+fn remaining(dir: &Path) -> BTreeSet<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[test]
+fn traces_older_than_a_week_are_deleted_and_other_files_are_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = SystemTime::now();
+    trace_file(dir.path(), "claude-a-1.jsonl", 1024, now - 8 * DAY);
+    trace_file(dir.path(), "codex-b-2.jsonl", 1024, now - 6 * DAY);
+    trace_file(dir.path(), "notes.txt", 1024, now - 30 * DAY);
+    assert_eq!(prune(dir.path(), now).unwrap(), 1);
+    assert_eq!(
+        remaining(dir.path()),
+        BTreeSet::from(["codex-b-2.jsonl".to_owned(), "notes.txt".to_owned()])
+    );
+}
+
+#[test]
+fn only_the_newest_traces_that_fit_in_256_mib_are_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = SystemTime::now();
+    trace_file(dir.path(), "claude-c-3.jsonl", 100 * MIB, now - HOUR);
+    trace_file(dir.path(), "claude-b-2.jsonl", 100 * MIB, now - 2 * HOUR);
+    trace_file(dir.path(), "claude-a-1.jsonl", 100 * MIB, now - 3 * HOUR);
+    trace_file(dir.path(), "codex-z-0.jsonl", 1024, now - 4 * HOUR);
+    assert_eq!(prune(dir.path(), now).unwrap(), 2);
+    assert_eq!(
+        remaining(dir.path()),
+        BTreeSet::from(["claude-b-2.jsonl".to_owned(), "claude-c-3.jsonl".to_owned()]),
+        "once the budget is spent every older trace goes, however small"
+    );
+}
+
+#[test]
+fn starting_a_trace_makes_room_for_it_and_drops_stale_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = SystemTime::now();
+    trace_file(dir.path(), "claude-b-2.jsonl", 100 * MIB, now - HOUR);
+    trace_file(dir.path(), "claude-a-1.jsonl", 100 * MIB, now - 2 * HOUR);
+    trace_file(dir.path(), "codex-z-0.jsonl", 1024, now - 8 * DAY);
+    let started = Trace::start(dir.path(), "claude-c-3", Secrets::default()).unwrap();
+    finish(started);
+    let left = remaining(dir.path());
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left.contains("claude-b-2.jsonl"), "{left:?}");
+    assert!(
+        left.iter().any(|name| name.starts_with("claude-c-3-")),
+        "{left:?}"
     );
 }
