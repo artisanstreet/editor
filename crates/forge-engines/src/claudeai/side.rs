@@ -1,7 +1,3 @@
-//! Summarize from the source's saved message UUID, keeping its model and tool
-//! prefix. The summary is a sibling branch: Forge never advances the source's
-//! continuation to it. Only missing sessions need serialized canonical history
-//! in a fresh temporary conversation.
 use super::*;
 use crate::{SideReply, SideUsage};
 use tokio_util::sync::CancellationToken;
@@ -61,7 +57,6 @@ struct SummaryContext {
     conversation: String,
     parent: Option<String>,
     tools: Vec<Value>,
-    /// A fresh fallback conversation is ours to delete. Never delete the source.
     owned: bool,
 }
 
@@ -117,7 +112,6 @@ pub(super) async fn compact_with(
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| "claude-opus-5-5".to_owned()),
         thinking_mode: "auto".to_owned(),
-        // Match drive_turn's effective effort as well as its tool definitions.
         effort: turn
             .config
             .effort
@@ -135,8 +129,6 @@ pub(super) async fn compact_with(
         () = tokio::time::sleep(ANSWER_LIMIT) => Err(SideQueryError::TimedOut { seconds: ANSWER_LIMIT.as_secs() }),
         answer = read_summary(backend, &context.conversation, &request) => answer,
     };
-    // end_turn may precede message_stop; release the server completion before
-    // the caller can resume its original branch, including on cancellation.
     let stopped = stop(backend, &context.conversation).await;
     if context.owned {
         match tokio::time::timeout(

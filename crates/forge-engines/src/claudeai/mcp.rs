@@ -1,17 +1,3 @@
-//! An MCP client for the claude.ai transport.
-//!
-//! Claude Code starts the thread's MCP servers itself; the claude.ai
-//! transport has no process, so it speaks to them here. stdio servers are
-//! started with their command, env and args; remote servers speak JSON-RPC
-//! over Streamable HTTP, or over the legacy HTTP+SSE transport. Either way
-//! the transport lists the server's tools, offers them to the model under
-//! unique `mcp__server__tool` names, and runs the calls Forge approves.
-//!
-//! A thread's servers stay connected between its turns ([`for_thread`]):
-//! the next turn with the same servers reuses them, a changed config or
-//! [`IDLE_TIMEOUT`] without a turn shuts them down, and one that died is
-//! started again.
-
 use crate::sandbox::Sandbox;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
@@ -233,88 +219,57 @@ impl StartError {
     }
 }
 
-/// The protocol version the client asks for.
 const PROTOCOL_VERSION: &str = "2025-06-18";
-/// How long listing a server's tools may take, page by page.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a tool call may take, from the moment it is sent. Progress
-/// notifications do not extend it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
-/// How long starting a server and listing its tools may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-/// How long a thread's servers stay connected without a turn.
 pub const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
 const MAX_WARM_THREADS: usize = 8;
-/// The most tools all servers together offer.
 const MAX_TOOLS: usize = 256;
-/// The longest tool name claude.ai takes.
 const MAX_NAME: usize = 64;
-/// The most of a project's `.mcp.json` that is read, and the most servers
-/// it may hold.
 const MAX_MCP_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_PROJECT_SERVERS: usize = 64;
-/// The most `tools/list` pages read.
 const MAX_PAGES: usize = 20;
-/// The largest message a server may send: a stdio line, an SSE event or an
-/// HTTP body.
 const MAX_MESSAGE_BYTES: usize = MAX_LINE_BYTES;
 const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(MAX_MESSAGE_BYTES).unwrap();
-/// The most of a server's stderr kept for a failed start.
 const MAX_STDERR: usize = 8 * 1024;
-/// The largest image a result attaches, and the most one result attaches.
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_IMAGES: usize = 8;
 const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
-/// Values shorter than this are not redacted from logs: they are flags
-/// (`1`, `true`), not secrets, and redacting them garbles the text.
 const MIN_SECRET_CHARS: usize = 4;
 
-/// Every MCP server one run connected to.
 #[derive(Default)]
 pub struct Servers {
     clients: Vec<Arc<Client>>,
-    /// Every tool offered, under its model-facing name.
     tools: Vec<Tool>,
-    /// A model-facing name → its index in `tools`.
     names: HashMap<String, usize>,
     failures: Vec<(String, String)>,
-    /// Images calls returned that have not gone to claude.ai yet.
     images: Mutex<Vec<Image>>,
-    /// The thread whose warm servers these are, and which turn's use.
     warm: Option<(String, u64)>,
 }
 
-/// One connected server.
 pub struct Client {
     pub server: String,
     listed: Vec<Listed>,
     transport: Transport,
 }
 
-/// One tool as its server lists it.
 struct Listed {
     raw: String,
     description: String,
     schema: Value,
 }
 
-/// One tool offered to the model.
 #[derive(Clone, Debug)]
 pub struct Tool {
-    /// The name the model sees: `mcp__server__tool`, shortened with a hash
-    /// when it is too long or two tools would share it.
     pub name: String,
-    /// The server's name, as configured.
     pub server: String,
-    /// The tool's name on its server.
     pub raw: String,
     pub description: String,
     pub schema: Value,
-    /// Its client, in [`Servers::clients`].
     client: usize,
 }
 
-/// An image a tool returned, for the message that carries the results.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {
     pub mime: String,
@@ -322,7 +277,6 @@ pub struct Image {
 }
 
 impl Image {
-    /// The file extension claude.ai's upload reads the type from.
     #[must_use]
     pub fn extension(&self) -> &'static str {
         match self.mime.as_str() {
@@ -334,13 +288,9 @@ impl Image {
     }
 }
 
-/// A thread's connected servers, kept between its turns.
 struct Warm {
-    /// The servers' config and working directory they were started with.
     config: String,
     clients: Vec<Arc<Client>>,
-    /// Which turn took the set last; an idle timer only ends the set its
-    /// own turn left.
     generation: u64,
 }
 
@@ -348,12 +298,9 @@ static WARM: LazyLock<Mutex<HashMap<String, Warm>>> = LazyLock::new(Mutex::defau
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
 tokio::task_local! {
-    /// The thread whose servers [`Servers::connect`] keeps warm.
     static THREAD: String;
 }
 
-/// Runs `future`, which builds a turn's runtime, with the MCP servers it
-/// connects kept warm for `thread`'s next turn.
 pub async fn for_thread<F: Future>(thread: &str, future: F) -> F::Output {
     THREAD.scope(thread.to_owned(), future).await
 }
@@ -363,10 +310,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Servers {
-    /// Connects to every server at once. A server that fails to start is
-    /// recorded and left out; the run carries on without it. Inside
-    /// [`for_thread`], the thread's servers from its last turn are reused
-    /// when their config is unchanged.
     pub async fn connect(servers: &[McpServer], cwd: &Path, sandbox: &Sandbox) -> Self {
         let thread = THREAD.try_with(Clone::clone).ok();
         let mut seen = HashSet::new();
@@ -452,8 +395,6 @@ impl Servers {
         connected
     }
 
-    /// Names every tool the model is offered, up to [`MAX_TOOLS`] in the
-    /// servers' order.
     fn name_tools(&mut self) {
         let mut offered = Vec::new();
         'clients: for (index, client) in self.clients.iter().enumerate() {
@@ -493,13 +434,11 @@ impl Servers {
         self.tools = tools;
     }
 
-    /// Whether any server is connected.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.clients.is_empty()
     }
 
-    /// Each connected server, with how many tools it offers.
     #[must_use]
     pub fn offered(&self) -> Vec<(&str, usize)> {
         self.clients
@@ -516,14 +455,11 @@ impl Servers {
             .collect()
     }
 
-    /// The servers that could not start, with a short reason fit for the
-    /// model and the user: never their output or a response body.
     #[must_use]
     pub fn failures(&self) -> &[(String, String)] {
         &self.failures
     }
 
-    /// Every tool, in the shape claude.ai takes.
     #[must_use]
     pub fn definitions(&self) -> Vec<Value> {
         self.tools
@@ -538,31 +474,22 @@ impl Servers {
             .collect()
     }
 
-    /// The client and tool a model-facing name names.
     #[must_use]
     pub fn find(&self, name: &str) -> Option<(&Client, &Tool)> {
         let tool = &self.tools[*self.names.get(name)?];
         Some((self.clients[tool.client].as_ref(), tool))
     }
 
-    /// The server (as configured) and the tool's own name behind a
-    /// model-facing name, for showing the call.
     #[must_use]
     pub fn lookup(&self, name: &str) -> Option<(&str, &str)> {
         self.find(name)
             .map(|(_, tool)| (tool.server.as_str(), tool.raw.as_str()))
     }
 
-    /// The images calls returned since the last take, for the message that
-    /// carries their results.
     pub fn take_images(&self) -> Vec<Image> {
         std::mem::take(&mut *lock(&self.images))
     }
 
-    /// Calls a tool and returns what the model is told. `Err` is the
-    /// server's or the transport's error text. Images the tool returned
-    /// wait in [`Self::take_images`]. Dropping the future cancels the call
-    /// on the server.
     pub async fn call(
         &self,
         client: &Client,
@@ -611,8 +538,6 @@ impl Drop for Servers {
         let Some((thread, generation)) = self.warm.take() else {
             return;
         };
-        // The servers stay up for the thread's next turn, until they idle
-        // out; a turn that takes them meanwhile moves the generation on.
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             drop(take_warm(&thread, generation));
             return;
@@ -647,7 +572,6 @@ fn keep_warm(thread: String, set: Warm) -> Vec<Warm> {
     retired
 }
 
-/// Takes a thread's warm servers if no turn took them since `generation`.
 fn take_warm(thread: &str, generation: u64) -> Option<Warm> {
     let mut warm = lock(&WARM);
     if warm
@@ -660,8 +584,6 @@ fn take_warm(thread: &str, generation: u64) -> Option<Warm> {
     }
 }
 
-/// What a set of servers was started from: two turns with the same
-/// fingerprint can share them.
 fn fingerprint(servers: &[&McpServer], cwd: &Path, sandbox: &Sandbox) -> String {
     let mut hash = Sha256::new();
     hash.update(cwd.to_string_lossy().as_bytes());
@@ -673,8 +595,6 @@ fn fingerprint(servers: &[&McpServer], cwd: &Path, sandbox: &Sandbox) -> String 
     hex::encode(hash.finalize())
 }
 
-/// Starts one server and lists its tools. `Err` is the short reason the
-/// model and the user are told; the log has the detail.
 async fn connect_client(
     server: &McpServer,
     cwd: &Path,
@@ -725,7 +645,6 @@ async fn connect_client(
     }
 }
 
-/// The tools a server lists.
 async fn list_tools(
     transport: &Transport,
     server: &str,
@@ -785,14 +704,11 @@ async fn list_tools(
     Ok(tools)
 }
 
-/// The plain name the model would see for a server's tool, before it is
-/// made short and unique.
 #[must_use]
 pub fn prefixed_name(server: &str, tool: &str) -> String {
     format!("mcp__{}__{}", component(server), component(tool))
 }
 
-/// A name part inside the tool-name grammar.
 fn component(name: &str) -> String {
     let sanitized: String = name
         .chars()
@@ -811,11 +727,6 @@ fn component(name: &str) -> String {
     }
 }
 
-/// The names the model sees, one per `(server, tool)`, each matching
-/// `^[a-zA-Z0-9_-]{1,64}$` and unique across every server. A plain name
-/// that is too long, or that two tools would share (`a.b` and `a_b` both
-/// read `a_b`), is cut short and ends in a hash of its server and tool, so
-/// the same servers always get the same names.
 fn tool_names(tools: &[(&str, &str)]) -> Vec<String> {
     let plain: Vec<String> = tools
         .iter()
@@ -850,7 +761,6 @@ fn tool_names(tools: &[(&str, &str)]) -> Vec<String> {
         .collect()
 }
 
-/// `name` cut to fit, then `_` and eight hex digits of its server and tool.
 fn hashed_name(name: &str, server: &str, tool: &str, salt: u32) -> String {
     let mut hash = Sha256::new();
     hash.update(server.as_bytes());
@@ -858,19 +768,15 @@ fn hashed_name(name: &str, server: &str, tool: &str, salt: u32) -> String {
     hash.update(tool.as_bytes());
     hash.update(salt.to_le_bytes());
     let digest = hex::encode(&hash.finalize()[..4]);
-    // The name is ASCII: every other character became `_`.
     let keep = name.len().min(MAX_NAME - digest.len() - 1);
     format!("{}_{digest}", &name[..keep])
 }
 
-/// A tool result for the model: its text, and the images that go with it.
 struct Rendered {
     text: String,
     images: Vec<Image>,
 }
 
-/// The text of a tool result's content blocks; images are taken out to be
-/// attached, text resources are embedded and links named.
 fn render(result: &Value) -> Rendered {
     let mut parts = Vec::new();
     let mut images = Vec::new();
@@ -904,7 +810,6 @@ fn render(result: &Value) -> Rendered {
     }
 }
 
-/// Takes an image out of a result for attaching, and says where it went.
 fn image(mime: Option<&str>, data: Option<&str>, images: &mut Vec<Image>) -> String {
     let mime = mime.unwrap_or("image/png").to_ascii_lowercase();
     if !matches!(
@@ -938,7 +843,6 @@ fn image(mime: Option<&str>, data: Option<&str>, images: &mut Vec<Image>) -> Str
     note
 }
 
-/// An embedded resource: its text, or what it is when it is binary.
 fn resource(resource: &Value, images: &mut Vec<Image>) -> String {
     let uri = resource["uri"].as_str().unwrap_or("resource");
     if let Some(text) = resource["text"].as_str() {
@@ -956,7 +860,6 @@ fn resource(resource: &Value, images: &mut Vec<Image>) -> String {
     )
 }
 
-/// A link to a resource the model may ask for by name.
 fn link(part: &Value) -> String {
     let uri = part["uri"].as_str().unwrap_or_default();
     let mut text = part["name"]
@@ -974,7 +877,6 @@ fn link(part: &Value) -> String {
     text
 }
 
-/// A size for people: `64 KB`, `32 MB`.
 fn size(bytes: usize) -> String {
     if bytes >= 1024 * 1024 {
         format!("{} MB", bytes / (1024 * 1024))
@@ -983,8 +885,6 @@ fn size(bytes: usize) -> String {
     }
 }
 
-/// A server's config with `${VAR}` and `${VAR:-default}` expanded, as
-/// Claude Code expands `.mcp.json`.
 struct Resolved {
     command: String,
     args: Vec<String>,
@@ -992,12 +892,9 @@ struct Resolved {
     url: Option<String>,
     headers: BTreeMap<String, String>,
     sse: bool,
-    /// What logs never show: env and header values, and whatever the
-    /// expansion put in.
     secrets: Vec<String>,
 }
 
-/// Expands a server's config. `Err` names the variables that are not set.
 fn resolve(
     server: &McpServer,
     lookup: &dyn Fn(&str) -> Option<String>,
@@ -1044,7 +941,6 @@ fn resolve(
         .chain(expander.inserted)
         .filter(|value| value.chars().count() >= MIN_SECRET_CHARS)
         .collect();
-    // Longest first, so a secret that contains another is hidden whole.
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
     secrets.dedup();
     Ok(Resolved {
@@ -1100,7 +996,6 @@ impl Expander<'_> {
     }
 }
 
-/// `text` with every secret replaced.
 fn redact(text: &str, secrets: &[String]) -> String {
     secrets.iter().fold(text.to_owned(), |text, secret| {
         text.replace(secret, "[redacted]")
@@ -1114,7 +1009,6 @@ struct RpcError {
     message: String,
 }
 
-/// The `result` of a JSON-RPC reply, or its error.
 fn response_result(reply: &Value) -> Result<Value, RequestError> {
     if let Some(error) = reply.get("error") {
         return Err(RequestError::Rpc(RpcError {
@@ -1128,9 +1022,6 @@ fn response_result(reply: &Value) -> Result<Value, RequestError> {
     Ok(reply["result"].clone())
 }
 
-/// What the client answers a request from the server: an empty result to
-/// `ping`, "not supported" to everything else (sampling, roots,
-/// elicitation). `None` for notifications and replies.
 fn answer_to(message: &Value) -> Option<Value> {
     let method = message.get("method")?.as_str()?;
     let id = message.get("id").filter(|id| !id.is_null())?;
@@ -1145,7 +1036,6 @@ fn answer_to(message: &Value) -> Option<Value> {
     })
 }
 
-/// The messages in one JSON-RPC payload: itself, or a batch's members.
 fn batch(value: Value) -> Vec<Value> {
     match value {
         Value::Array(values) => values,
@@ -1178,9 +1068,7 @@ fn cancelled(id: u64) -> Value {
 }
 
 enum Transport {
-    /// A stdio server, or a legacy HTTP+SSE one: messages both ways.
     Stream(Stream),
-    /// A Streamable HTTP server: one POST per message.
     Http(Arc<Http>),
 }
 
@@ -1208,7 +1096,6 @@ impl Transport {
         }
     }
 
-    /// The MCP handshake, then the server is ready.
     async fn initialize(&self, deadline: Instant) -> Result<(), StartError> {
         self.request("initialize", initialize_params(), deadline)
             .await
@@ -1237,8 +1124,6 @@ impl Transport {
         }
     }
 
-    /// Whether the server may still answer; a dead one starts again next
-    /// turn.
     fn alive(&self) -> bool {
         match self {
             Self::Stream(stream) => stream.rpc.alive.load(Ordering::SeqCst),
@@ -1253,7 +1138,6 @@ impl Transport {
         }
     }
 
-    /// How a stdio server that stopped answering ended, once it has.
     async fn exit_status(&self) -> Option<String> {
         let Self::Stream(Stream {
             child: Some(child), ..
@@ -1261,7 +1145,6 @@ impl Transport {
         else {
             return None;
         };
-        // Its output closes a moment before it is reaped.
         for _ in 0..20 {
             let status = lock(child).try_wait().ok().flatten();
             if let Some(status) = status {
@@ -1276,7 +1159,6 @@ impl Transport {
     }
 }
 
-/// The requests waiting on a message stream's server.
 struct Rpc {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, Undelivered>>>>,
@@ -1303,7 +1185,6 @@ impl Rpc {
         lock(&self.pending).remove(&id);
     }
 
-    /// Fails one request: its reply cannot come.
     fn fail(&self, id: u64, reason: Undelivered) {
         let waiting = lock(&self.pending).remove(&id);
         if let Some(waiting) = waiting {
@@ -1311,7 +1192,6 @@ impl Rpc {
         }
     }
 
-    /// The server is gone: every waiting request fails with `reason`.
     fn close(&self, reason: &Closed) {
         self.alive.store(false, Ordering::SeqCst);
         let pending = std::mem::take(&mut *lock(&self.pending));
@@ -1320,9 +1200,6 @@ impl Rpc {
         }
     }
 
-    /// Takes in one message from the server and returns what to answer.
-    /// A message with a `method` is the server's own request or
-    /// notification, never a reply to ours, whatever its id.
     fn receive(&self, message: Value) -> Option<Value> {
         if message.get("method").is_some() {
             return answer_to(&message);
@@ -1336,8 +1213,6 @@ impl Rpc {
     }
 }
 
-/// A server that speaks JSON-RPC as a stream of messages both ways: a stdio
-/// server's pipes, or a legacy HTTP+SSE server's event stream and endpoint.
 struct Queued {
     text: String,
     request: Option<u64>,
@@ -1418,12 +1293,9 @@ fn answer(rpc: &Rpc, outgoing: &Outbox, message: &Value) -> bool {
 
 struct Stream {
     rpc: Arc<Rpc>,
-    /// Messages to the server, written in order by the writer task.
     outgoing: Outbox,
-    /// Held so a stdio server is killed when the client goes.
     child: Option<Mutex<crate::process::OwnedChild>>,
     stderr: Arc<Mutex<String>>,
-    /// The reader and writer (and stderr) tasks, ended with the client.
     _tasks: Vec<AbortOnDropHandle<()>>,
 }
 
@@ -1484,8 +1356,6 @@ impl Stream {
         })
     }
 
-    /// Opens a legacy HTTP+SSE server: its event stream names the endpoint
-    /// messages are POSTed to, and carries the replies.
     async fn sse(url: &str, headers: HeaderMap, deadline: Instant) -> Result<Self, OpenError> {
         let client = http_client()?;
         let base = reqwest::Url::parse(url).map_err(OpenError::InvalidUrl)?;
@@ -1548,8 +1418,6 @@ impl Stream {
         })
     }
 
-    /// Sends a request and waits for its reply until `deadline`; messages
-    /// the server sends meanwhile (progress, pings) do not move it.
     async fn request(
         &self,
         method: &str,
@@ -1608,8 +1476,6 @@ impl Stream {
     }
 }
 
-/// A request in flight. Dropped before its reply came (timed out, or the
-/// turn was stopped), it tells the server to stop working on it.
 struct Pending<'a> {
     stream: &'a Stream,
     id: u64,
@@ -1625,7 +1491,6 @@ impl Drop for Pending<'_> {
     }
 }
 
-/// Writes messages to a stdio server, one line each.
 async fn write_lines(mut stdin: tokio::process::ChildStdin, mut messages: Inbox, rpc: Arc<Rpc>) {
     while let Some(message) = messages.recv().await {
         let written = async {
@@ -1643,9 +1508,6 @@ async fn write_lines(mut stdin: tokio::process::ChildStdin, mut messages: Inbox,
     }
 }
 
-/// Reads a stdio server's output, one message per line. A line over
-/// `max_line` fails the request it answers and is skipped; the next line
-/// reads as usual.
 async fn read_lines(
     stdout: impl AsyncRead + Unpin,
     rpc: Arc<Rpc>,
@@ -1656,7 +1518,6 @@ async fn read_lines(
     loop {
         match lines.next().await {
             Ok(Some(Line::Message(line))) => {
-                // Anything else on stdout (a stray log line) is not ours.
                 let Ok(value) = serde_json::from_slice::<Value>(&line) else {
                     continue;
                 };
@@ -1687,7 +1548,6 @@ async fn read_lines(
     }
 }
 
-/// Keeps the last [`MAX_STDERR`] bytes a stdio server wrote to stderr.
 async fn keep_tail(mut pipe: tokio::process::ChildStderr, tail: Arc<Mutex<String>>) {
     let mut buffer = vec![0_u8; 4096];
     while let Ok(read) = pipe.read(&mut buffer).await {
@@ -1704,15 +1564,11 @@ async fn keep_tail(mut pipe: tokio::process::ChildStderr, tail: Arc<Mutex<String
     }
 }
 
-/// One line of a server's output.
 enum Line {
     Message(Vec<u8>),
-    /// A line over the limit, skipped; the request id it answers, when it
-    /// names one at its top level.
     Oversized(Option<u64>),
 }
 
-/// Reads lines without ever holding more than the limit of one.
 struct Lines<R> {
     inner: R,
     buffer: Vec<u8>,
@@ -1732,7 +1588,6 @@ impl<R: AsyncRead + Unpin> Lines<R> {
         }
     }
 
-    /// The next line, or `None` at the end of the output.
     async fn next(&mut self) -> std::io::Result<Option<Line>> {
         let mut line = Vec::new();
         let mut skipped: Option<IdScan> = None;
@@ -1770,8 +1625,6 @@ impl<R: AsyncRead + Unpin> Lines<R> {
     }
 }
 
-/// Finds the top-level numeric `"id"` of a JSON object read in pieces,
-/// without keeping it.
 #[derive(Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -1781,11 +1634,9 @@ struct IdScan {
     depth: u32,
     in_string: bool,
     escaped: bool,
-    /// At the top level, the next string is a key.
     expect_key: bool,
     reading_key: bool,
     key: Vec<u8>,
-    /// The last key read was `id`, and its value comes next.
     id_value_next: bool,
     number: Option<u64>,
     id: Option<u64>,
@@ -1855,7 +1706,6 @@ impl IdScan {
     }
 }
 
-/// The events of an SSE body, too large ones reported and skipped.
 type Events = BoxStream<'static, Result<SseEvent, EventError>>;
 
 enum EventError {
@@ -1876,7 +1726,6 @@ fn sse_events(response: reqwest::Response) -> Events {
         .boxed()
 }
 
-/// Reads a legacy SSE server's event stream: its replies and requests.
 fn answer_all(rpc: &Rpc, outgoing: &Outbox, value: Value) -> bool {
     batch(value)
         .into_iter()
@@ -1905,7 +1754,6 @@ async fn read_events(mut events: Events, rpc: Arc<Rpc>, outgoing: Outbox) {
     rpc.close(&Closed::EventStream);
 }
 
-/// POSTs messages to a legacy SSE server's endpoint, in order.
 async fn post_messages(
     client: reqwest::Client,
     endpoint: reqwest::Url,
@@ -1940,7 +1788,6 @@ async fn post_messages(
     }
 }
 
-/// The headers a config names, marked sensitive.
 fn header_map(headers: &BTreeMap<String, String>) -> Result<HeaderMap, OpenError> {
     let mut map = HeaderMap::new();
     for (name, value) in headers {
@@ -1969,7 +1816,6 @@ fn http_client() -> Result<reqwest::Client, OpenError> {
         .map_err(OpenError::Client)
 }
 
-/// Why a request did not reach the server, without its url.
 fn reach_error(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         "the request timed out"
@@ -1980,7 +1826,6 @@ fn reach_error(error: &reqwest::Error) -> &'static str {
     }
 }
 
-/// A remote MCP server: JSON-RPC over Streamable HTTP.
 struct Http {
     client: reqwest::Client,
     url: String,
@@ -2005,7 +1850,6 @@ impl Http {
         })
     }
 
-    /// Sends a request and waits for its reply until `deadline`.
     async fn request(
         self: &Arc<Self>,
         method: &str,
@@ -2030,8 +1874,6 @@ impl Http {
         response_result(&reply?)
     }
 
-    /// One request, with a new session and a second try when the server
-    /// forgot the one it gave.
     async fn exchange(&self, id: u64, method: &str, params: &Value) -> Result<Value, RequestError> {
         match self.round_trip(id, method, params).await {
             Err(RequestError::SessionGone) if method != "initialize" => {
@@ -2057,8 +1899,6 @@ impl Http {
         }
     }
 
-    /// POSTs a request and reads its reply: a JSON body, or the first
-    /// message with its id on an event stream.
     async fn round_trip(
         &self,
         id: u64,
@@ -2111,8 +1951,6 @@ impl Http {
         Ok(reply)
     }
 
-    /// The reply with `id` on an event stream, as soon as it comes: the
-    /// server may keep the stream open after it.
     async fn reply_from_events(
         &self,
         mut events: Events,
@@ -2156,7 +1994,6 @@ impl Http {
         })
     }
 
-    /// POSTs one message; also says whether it named a session.
     async fn post(&self, message: &Value) -> Result<(reqwest::Response, bool), reqwest::Error> {
         let mut request = self
             .client
@@ -2207,8 +2044,6 @@ impl Http {
     }
 }
 
-/// An HTTP request in flight; dropped before its reply, it tells the
-/// server to stop working on it.
 struct HttpPending {
     http: Arc<Http>,
     id: u64,
@@ -2239,8 +2074,6 @@ impl Drop for HttpPending {
     }
 }
 
-/// Reads a whole HTTP body of at most `limit` bytes. A body that breaks off
-/// or runs over is an error, never a shortened answer.
 async fn read_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, BodyError> {
     let too_large = || BodyError::TooLarge { limit };
     if response
@@ -2261,10 +2094,6 @@ async fn read_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>,
     Ok(body)
 }
 
-/// The `.mcp.json` servers of the project, as Claude Code reads them: from
-/// the repository root down to the working directory, with a nearer file's
-/// server of the same name winning. `${VAR}` references stay as written
-/// until the server starts.
 #[must_use]
 pub fn project_servers(cwd: &Path) -> Vec<McpServer> {
     let mut dirs: Vec<&Path> = cwd.ancestors().collect();
@@ -2289,7 +2118,6 @@ pub fn project_servers(cwd: &Path) -> Vec<McpServer> {
     servers
 }
 
-/// The string values of a JSON object.
 fn strings(value: &Value) -> BTreeMap<String, String> {
     value
         .as_object()
@@ -2299,7 +2127,6 @@ fn strings(value: &Value) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The servers one `.mcp.json` file holds.
 fn from_file(path: &Path) -> Vec<McpServer> {
     let Ok(metadata) = std::fs::metadata(path) else {
         return Vec::new();
@@ -2350,7 +2177,6 @@ fn from_file(path: &Path) -> Vec<McpServer> {
         .collect()
 }
 
-/// Reads one HTTP request off a test socket: its head and body.
 #[cfg(test)]
 async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<(String, String)> {
     let mut data = Vec::new();
@@ -2382,7 +2208,6 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<(String, Str
     }
 }
 
-/// What the test servers answer: one `search` tool that finds it.
 #[cfg(test)]
 fn fake_reply(value: &Value) -> Value {
     let result = match value["method"].as_str() {
@@ -2410,9 +2235,6 @@ fn fake_reply(value: &Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": value["id"], "result": result })
 }
 
-/// A tiny MCP-over-HTTP server for tests: `initialize`, `tools/list` and
-/// `tools/call`, one JSON-RPC request per connection. Runs until its task
-/// is aborted.
 #[cfg(test)]
 pub async fn fake_server(listener: tokio::net::TcpListener) {
     loop {
@@ -2441,8 +2263,6 @@ pub async fn fake_server(listener: tokio::net::TcpListener) {
     }
 }
 
-/// A stdio MCP server for tests: this test binary, running
-/// `tests::fake_stdio_server` with `env` (see there for what it does).
 #[cfg(test)]
 pub fn fake_stdio(name: &str, env: &[(&str, &str)]) -> McpServer {
     let mut vars: BTreeMap<String, String> = env
@@ -2471,4 +2291,5 @@ pub fn fake_stdio(name: &str, env: &[(&str, &str)]) -> McpServer {
 }
 
 #[cfg(test)]
+#[path = "../../tests/claudeai/mcp/unit.rs"]
 mod tests;

@@ -163,9 +163,7 @@ async fn query(
     reply
 }
 
-/// The id of the hook that refuses every tool.
 const REFUSE_TOOLS: &str = "artisan-side-refuse-tools";
-/// What the fork is told when it reaches for a tool.
 const NO_TOOLS: &str = "A side question cannot use tools; answer from the conversation.";
 
 fn side_args(config: &EngineConfig, session: Option<&str>, readable: &[PathBuf]) -> Vec<String> {
@@ -209,7 +207,6 @@ fn reply_of(frame: &Value) -> Result<SideReply, SideQueryError> {
     })
 }
 
-/// Deletes the fork's transcript: it is never resumed.
 fn discard(turn: &Turn, fork: Option<&str>) {
     let Some(fork) = fork else {
         return;
@@ -229,8 +226,6 @@ fn discard(turn: &Turn, fork: Option<&str>) {
     }
 }
 
-/// Claude's directory name for the project: the path with every character
-/// that isn't a letter or digit replaced by `-`.
 pub(super) fn project_dir(turn: &Turn) -> String {
     turn.cwd
         .to_string_lossy()
@@ -240,26 +235,5 @@ pub(super) fn project_dir(turn: &Turn) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use artisan_api::Permissions;
-
-    /// The fork reads the thread's cache only if it launches as the thread
-    /// does, permission mode included.
-    #[test]
-    fn a_fork_launches_as_its_thread_does() {
-        for permissions in [Permissions::Auto, Permissions::Full] {
-            let mut config = EngineConfig::new(artisan_api::EngineId::Claude);
-            config.permissions = permissions;
-            config.model = Some("claude-opus-5-5".to_owned());
-            let readable = [PathBuf::from("/data/blobs")];
-            let thread = launch_args(&config, Some("s1"), &readable);
-            let fork = side_args(&config, Some("s1"), &readable);
-            assert_eq!(fork[..thread.len()], thread[..]);
-            assert_eq!(
-                fork[thread.len()..],
-                ["--fork-session", "--max-turns", "1"].map(str::to_owned)
-            );
-        }
-    }
-}
+#[path = "../../tests/claude/side.rs"]
+mod tests;

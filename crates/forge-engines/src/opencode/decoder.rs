@@ -1,10 +1,3 @@
-//! Pure decoding of OpenCode's v2 event stream (`GET /api/event`).
-//!
-//! The global stream carries every session on the server, so the decoder
-//! follows the run's root session plus any child session whose parent it
-//! already follows; everything else is ignored. Shapes were captured from
-//! OpenCode 2.1.0 (see `transcripts/opencode`).
-
 use crate::{EngineEvent, LiveKind};
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Collection, Decision, ErrorKind, FileChange, FileOp, ItemId,
@@ -36,8 +29,6 @@ struct NativeOption {
     description: Option<String>,
 }
 
-/// Tool names OpenCode ships; any other name with an underscore is an MCP
-/// tool (`<server>_<tool>`).
 const BUILTIN_TOOLS: &[&str] = &[
     "edit",
     "execute",
@@ -53,7 +44,6 @@ const BUILTIN_TOOLS: &[&str] = &[
     "write",
 ];
 
-/// An HTTP request the driver must send to answer OpenCode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub method: Method,
@@ -94,28 +84,17 @@ pub enum Method {
 pub struct Decoder {
     reasoning_summary: crate::reasoning::Summary,
     root: Option<String>,
-    /// Followed sessions → the `Agent` item their items belong to.
     sessions: HashMap<String, Option<String>>,
-    /// Child sessions no `subagent` call has claimed yet → their
-    /// `session.created` data, for the Agent item they get if none does.
     unbound: HashMap<String, Value>,
     orphans: HashMap<String, String>,
-    /// Tool names by call id: `session.tool.called` doesn't repeat it.
     tool_names: HashMap<String, String>,
-    /// By OpenCode call id.
     tools: HashMap<String, Tool>,
     retired: crate::retained::Retired,
     awaiting_settle: HashSet<String>,
-    /// Background shells awaiting their completion notification → starting call.
-    /// `shell.exited` precedes notification admission and must not release this
-    /// guard: the server still needs to wake the assistant with the result.
     shells: HashMap<String, String>,
-    /// Texts ended in the current step, per session, for the phase decision.
     step_texts: HashMap<String, Vec<(String, String)>>,
     open_texts: HashSet<String>,
-    /// Compactions started per session, which keys the running one.
     compactions: HashMap<String, usize>,
-    /// OpenCode inbox id → our user message, for steers.
     steers: HashMap<String, ItemId>,
     admitted: HashSet<String>,
     delivered: HashSet<String>,
@@ -125,10 +104,7 @@ pub struct Decoder {
     usage: Usage,
     model: Option<String>,
     title: Option<String>,
-    /// The error the last step failed with, which the execution failure
-    /// that follows repeats.
     step_error: Option<String>,
-    /// The last error that ended a turn.
     pub error: Option<String>,
     cancelled: bool,
     goals: HashMap<String, Goal>,
@@ -220,8 +196,6 @@ impl Decoder {
         self.root = Some(session);
     }
 
-    /// The driver sent a prompt OpenCode admitted as inbox item `message`;
-    /// `steer` names our user message when it was a steer.
     pub fn prompt_sent(&mut self, message: &str, steer: Option<ItemId>) -> Vec<EngineEvent> {
         self.admitted.insert(message.to_owned());
         match steer {
@@ -287,7 +261,6 @@ impl Decoder {
         }]
     }
 
-    /// Settles what is still open after the user cancelled.
     pub fn cancel(&mut self) -> Vec<EngineEvent> {
         self.cancelled = true;
         let mut out = Vec::new();
@@ -348,12 +321,10 @@ impl Decoder {
         let kind = event["type"].as_str().unwrap_or_default();
         let data = &event["data"];
         match kind {
-            // Child sessions announce themselves before any of their events.
             "session.created" => {
                 self.session_created(data);
                 return out;
             }
-            // Shells live outside sessions: a background one reports its exit here.
             "shell.exited" => {
                 self.shell_exited(data, &mut out);
                 return out;
@@ -535,7 +506,6 @@ impl Decoder {
             "session.step.failed" => {
                 let texts = self.step_texts.remove(session).unwrap_or_default();
                 settle_texts(texts, parent.as_deref(), false, &mut out);
-                // An interrupt fails the step; the user already knows.
                 if data["error"]["type"] != "aborted" {
                     let message = error_message(&data["error"]);
                     out.push(error_item(event, parent, ErrorKind::Api, &message, false));
@@ -745,8 +715,6 @@ impl Decoder {
         Answered::Reply { reply, events: out }
     }
 
-    /// A child session of a followed one: followed from now on, under the
-    /// `subagent` call that claims it with its progress.
     fn session_created(&mut self, data: &Value) {
         let (Some(session), Some(parent)) = (data["sessionID"].as_str(), data["parentID"].as_str())
         else {
@@ -759,8 +727,6 @@ impl Decoder {
         self.unbound.insert(session.to_owned(), data.clone());
     }
 
-    /// A child no call claimed before its first step still gets an Agent
-    /// item. Arrival order never ties a child to a call.
     fn bind_orphan(&mut self, session: &str, out: &mut Vec<EngineEvent>) {
         let Some(info) = self.unbound.remove(session) else {
             return;
@@ -803,7 +769,6 @@ impl Decoder {
             return;
         };
         let input = &data["input"];
-        // The question arrives as `form.created`.
         if name == "question" {
             return;
         }
@@ -864,7 +829,6 @@ impl Decoder {
         out.push(self.tool_event(call));
     }
 
-    /// A `subagent` call names the child session it runs in its progress.
     fn tool_progress(&mut self, data: &Value) {
         let (Some(call), Some(child)) =
             (data["id"].as_str(), data["metadata"]["sessionID"].as_str())
@@ -942,8 +906,6 @@ impl Decoder {
                     (false, false, true) => Status::Cancelled,
                     (false, false, false) => Status::Failed,
                 };
-                // A background shell's call returns while it runs on; it
-                // ends with its `shell.exited`.
                 if success
                     && str_at(metadata, "status").as_deref() == Some("running")
                     && let ToolKind::Shell { background, .. } = kind
@@ -956,7 +918,6 @@ impl Decoder {
                 out.push(self.tool_event(call));
                 return;
             }
-            // Settled when answered.
             ItemKind::Question { .. } => return,
             ItemKind::UserMessage { .. }
             | ItemKind::AssistantMessage { .. }
@@ -1108,8 +1069,6 @@ impl Decoder {
             ],
             decision: None,
         };
-        // Approvals live on the tool they gate; one asked before its call
-        // is announced creates the item from what the permission says.
         let key = data["source"]["id"].as_str().unwrap_or(request).to_owned();
         if self.retired.contains(&key) {
             tracing::warn!(
@@ -1151,7 +1110,6 @@ impl Decoder {
         out.push(self.tool_event(&key));
     }
 
-    /// A reply we didn't send (another client answered).
     fn permission_replied(&mut self, data: &Value, out: &mut Vec<EngineEvent>) {
         let Some(request) = data["requestID"].as_str() else {
             return;
@@ -1176,8 +1134,6 @@ impl Decoder {
         }
     }
 
-    /// A form (the question tool asks through one) becomes a question per
-    /// field.
     fn form_created(&mut self, event: &Value, form: &Value, out: &mut Vec<EngineEvent>) {
         let (Some(session), Some(id)) = (form["sessionID"].as_str(), form["id"].as_str()) else {
             return;
@@ -1242,7 +1198,6 @@ impl Decoder {
         out.push(self.tool_event(&key));
     }
 
-    /// Settles a form another client answered or dismissed.
     fn form_settled(&mut self, replied: bool, data: &Value, out: &mut Vec<EngineEvent>) {
         let Some(form) = data["id"].as_str() else {
             return;
@@ -1310,7 +1265,6 @@ impl crate::retained::Retains for Decoder {
     }
 }
 
-/// One form field as a question; `None` for a field Artisan can't ask.
 fn form_question(field: NativeField) -> Option<(Question, FormField)> {
     let text = field
         .description
@@ -1618,8 +1572,6 @@ fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     })
 }
 
-/// Edit results list the files with their diffs; `write` says whether the
-/// file existed.
 fn settle_changes(changes: &mut Collection<FileChange>, metadata: &Value) -> Result<(), String> {
     if let Some(files) = metadata["files"].as_array() {
         *changes = files

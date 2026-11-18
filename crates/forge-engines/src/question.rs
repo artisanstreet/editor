@@ -1,4 +1,3 @@
-//! Native values are resolved by opaque choice identity, never displayed labels.
 use artisan_api::{Collection, Question, QuestionAnswer};
 
 pub fn native_answers(
@@ -50,8 +49,6 @@ pub fn native_answers(
         .collect()
 }
 
-/// Adapters retain native pending prompts until they are answered. A descriptor
-/// cannot stand in for the native question records used to build a reply.
 pub fn native_collection_answers(
     questions: &Collection<Question>,
     answers: &[Option<QuestionAnswer>],

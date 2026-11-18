@@ -1,5 +1,3 @@
-//! What Claude's tool inputs mean as items.
-
 use super::decoder::str_at;
 use artisan_api::{
     AgentAction, FileChange, FileOp, MessageDirection, PlanStep, Question, QuestionOption,
@@ -83,7 +81,6 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
         "WebSearch" => ToolKind::WebSearch {
             query: text("query"),
         },
-        // Forge resolves `to` to the Agent item it names.
         "SendMessage" if optional("to").is_some_and(|to| !to.trim().is_empty()) => {
             ToolKind::AgentMessage {
                 recipient: text("to"),
@@ -105,7 +102,6 @@ pub fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
             addresses: Vec::new(),
             targets: Vec::new(),
         },
-        // An agent's id or a background shell's; Forge finds the agent.
         "TaskStop" | "KillShell" => ToolKind::Agents {
             action: AgentAction::Stop,
             addresses: optional("task_id")
@@ -234,7 +230,6 @@ pub fn validate_input(name: &str, input: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The same unified diff representation used by the other adapters.
 fn diff(old: &str, new: &str) -> String {
     similar::TextDiff::from_lines(old, new)
         .unified_diff()
@@ -302,29 +297,5 @@ pub(super) fn questions(input: &Value) -> Vec<Question> {
 }
 
 #[cfg(test)]
-mod required_input_tests {
-    use super::*;
-    #[test]
-    fn known_native_tools_reject_missing_fields_but_allow_empty_replacement_text() {
-        for name in [
-            "Bash",
-            "Read",
-            "Edit",
-            "Write",
-            "Grep",
-            "Glob",
-            "WebFetch",
-            "WebSearch",
-            "SendMessage",
-        ] {
-            assert!(tool_kind(name, &serde_json::json!({})).is_err(), "{name}");
-        }
-        assert!(
-            tool_kind(
-                "Edit",
-                &serde_json::json!({"file_path":"file","old_string":"","new_string":""})
-            )
-            .is_ok()
-        );
-    }
-}
+#[path = "../../tests/claude/tools/required_input.rs"]
+mod required_input_tests;

@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-#[path = "../../tests/codex/routing.rs"]
+#[path = "../routing.rs"]
 mod activity_routing;
-#[path = "../../tests/codex/server.rs"]
+#[path = "../server.rs"]
 mod actor;
-#[path = "../../tests/codex/cancellation.rs"]
+#[path = "../cancellation.rs"]
 mod cancellation;
 
 struct Fixture {

@@ -123,9 +123,7 @@ impl Session {
     }
 }
 
-/// JSON-RPC's "invalid params": a request Artisan can't read.
 pub const INVALID_PARAMS: i64 = -32602;
-/// JSON-RPC's "method not found": a request Artisan doesn't serve.
 pub const METHOD_NOT_FOUND: i64 = -32601;
 
 #[derive(Debug)]
@@ -135,8 +133,6 @@ pub struct Response {
     pub result: Result<Value, RpcError>,
 }
 
-/// A JSON-RPC error response: the engine's code, when it gave one, and its
-/// message with any detail it added.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcError {
     pub code: Option<i64>,
@@ -151,8 +147,6 @@ impl std::fmt::Display for RpcError {
 
 impl std::error::Error for RpcError {}
 
-/// Codex's correlation and wire queues; provider semantics stay in its
-/// decoder. No process/task lifecycle is hidden in this value.
 #[derive(Default)]
 pub struct State {
     pub next_id: u64,
@@ -179,12 +173,10 @@ impl State {
             self.requests.insert(id, method.to_owned());
         }
     }
-    /// Answers the engine's request `rpc`.
     pub fn reply(&mut self, rpc: Value, result: Value) {
         self.answer(rpc, "result", result);
     }
 
-    /// Refuses the engine's request `rpc`.
     pub fn reply_error(&mut self, rpc: Value, code: i64, message: &str) {
         self.answer(rpc, "error", json!({ "code": code, "message": message }));
     }
@@ -196,7 +188,6 @@ impl State {
         self.outbox.push(Value::Object(message));
     }
 
-    /// Correlates a response from its parts.
     pub fn respond(
         &mut self,
         id: &Value,
@@ -235,32 +226,5 @@ impl State {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn replies_correlate_out_of_order_and_unknown_ids_do_not_consume_requests() {
-        let mut state = State::default();
-        let first = state.request("first", json!({}));
-        let second = state.request("second", json!({}));
-        assert!(state.respond(&json!(999), Some(json!({})), None).is_none());
-        assert_eq!(
-            state
-                .respond(&json!(second), Some(json!({ "ok": true })), None)
-                .unwrap()
-                .method,
-            "second"
-        );
-        let error = json!({ "message": "rejected", "data": { "message": "details" } });
-        assert_eq!(
-            state
-                .respond(&json!(first), None, Some(&error))
-                .unwrap()
-                .result,
-            Err(RpcError {
-                code: None,
-                message: "rejected: details".into()
-            })
-        );
-        assert!(state.requests.is_empty());
-    }
-}
+#[path = "../tests/rpc/unit.rs"]
+mod tests;

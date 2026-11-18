@@ -1,6 +1,3 @@
-//! `Engines`: installs, versions and models for every engine, and the
-//! `EngineStatus` stream the Editor shows.
-
 use crate::catalog::{self, Listing, Program};
 use crate::engines::{Artifact, Feed, compare_versions, host_spec, meets_minimum};
 use crate::install::{self, Event, Layout, Machine, Resolved};
@@ -22,7 +19,6 @@ pub struct Engines {
     inner: Arc<Inner>,
 }
 
-/// Full metadata snapshots and a precise install-progress delta.
 #[derive(Clone, Debug)]
 #[expect(
     clippy::large_enum_variant,
@@ -44,18 +40,13 @@ struct Inner {
     usage: crate::UsageCache,
 }
 
-/// Everything Forge tracks about one engine. Add a field here and fill it
-/// in `Engines::status` to extend `EngineStatus`.
 struct Slot {
     install: Mutex<Machine>,
-    /// Cache of the last listing; `None` until the first one.
     models: Mutex<ModelCache>,
     sign_in: Arc<crate::SignIn>,
     sign_in_follower: Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
     model_reading: tokio::sync::Mutex<()>,
-    /// The vendor's versions, newest first, once asked for.
     versions: Mutex<Arc<[PublishedVersion]>>,
-    /// The `/` commands the engine last reported, by a probe or a run.
     commands: Mutex<Arc<[SlashCommand]>>,
 }
 
@@ -88,7 +79,6 @@ impl Drop for Slot {
     }
 }
 
-/// Keeps an installed binary's files available until its run finishes.
 pub struct BinaryLease {
     path: PathBuf,
     usage: std::fs::File,
@@ -102,9 +92,6 @@ impl BinaryLease {
 
 impl Drop for BinaryLease {
     fn drop(&mut self) {
-        // A concurrent fork can briefly inherit this open file description.
-        // Release the owner's lock explicitly instead of waiting for every
-        // inherited descriptor to close at exec.
         if let Err(error) = fs2::FileExt::unlock(&self.usage) {
             tracing::warn!(path = %self.path.display(), %error, "release engine binary lease");
         }
@@ -112,7 +99,6 @@ impl Drop for BinaryLease {
 }
 
 enum Target {
-    /// Install the newest version unless one is installed already.
     Present,
     Latest,
     Exact(String),
@@ -242,8 +228,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Engines {
-    /// Forge's HTTP client, for what the engines' vendors and directories
-    /// serve.
     #[must_use]
     pub fn http(&self) -> &reqwest::Client {
         &self.inner.http
@@ -294,7 +278,6 @@ impl Engines {
         &self.inner.slots[index]
     }
 
-    /// What Forge knows about `engine` now. Never probes the engine.
     #[must_use]
     pub fn status(&self, engine: EngineId) -> EngineStatus {
         let slot = self.slot(engine);
@@ -316,8 +299,6 @@ impl Engines {
         }
     }
 
-    /// Something about the engine changed outside the manager (a run marked
-    /// its claude.ai session): tell whoever shows its status.
     pub fn changed(&self, engine: EngineId) {
         self.publish(engine);
     }
@@ -379,14 +360,10 @@ impl Engines {
         Ok(())
     }
 
-    /// Current scalar installation state without cloning any catalog metadata.
     pub fn install_state(&self, engine: EngineId) -> InstallState {
         install::view(lock(&self.slot(engine).install).state())
     }
 
-    /// The listed versions with where each stands on disk now.
-    /// What the engine reported, then what Forge reads for it that the
-    /// engine didn't name.
     fn commands(&self, engine: EngineId) -> Arc<[SlashCommand]> {
         let reported = lock(&self.slot(engine).commands).clone();
         let own: Vec<SlashCommand> = crate::commands::own(engine)
@@ -399,8 +376,6 @@ impl Engines {
         reported.iter().cloned().chain(own).collect()
     }
 
-    /// The engine said which `/` commands it reads now: a probe or a run
-    /// reported them.
     pub fn set_commands(&self, engine: EngineId, commands: Vec<SlashCommand>) {
         let commands: Arc<[SlashCommand]> = crate::commands::reported(commands).into();
         {
@@ -445,7 +420,6 @@ impl Engines {
         Ok(self.published(engine))
     }
 
-    /// Reconcile external CLI changes only at an explicit refresh boundary.
     fn reconcile_install(&self, engine: EngineId) {
         let current = self
             .inner
@@ -471,14 +445,12 @@ impl Engines {
         }
     }
 
-    /// Every change to any engine's status.
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<EngineChange> {
         self.inner.statuses.subscribe()
     }
 
     fn publish(&self, engine: EngineId) {
-        // Nobody listening is fine.
         self.inner
             .statuses
             .send(EngineChange::Full(self.status(engine)))
@@ -488,7 +460,6 @@ impl Engines {
     fn apply(&self, engine: EngineId, event: &Event) {
         lock(&self.slot(engine).install).handle(event);
         if matches!(event, Event::Progress { .. }) {
-            // Nobody listening is fine.
             self.inner
                 .statuses
                 .send(EngineChange::Install {
@@ -501,13 +472,11 @@ impl Engines {
         }
     }
 
-    /// The engine's executable, if installed.
     #[must_use]
     pub fn binary(&self, engine: EngineId) -> Option<PathBuf> {
         self.inner.layout.binary(engine)
     }
 
-    /// Pins installed files across Forge and CLI processes while in use.
     pub fn lease(&self, engine: EngineId) -> Option<BinaryLease> {
         let usage = install::usage_lock(&self.home(engine)).ok()?;
         fs2::FileExt::lock_shared(&usage).ok()?;
@@ -515,13 +484,11 @@ impl Engines {
         Some(BinaryLease { path, usage })
     }
 
-    /// The engine's `HOME`: `<data>/engines/<engine>/home`.
     #[must_use]
     pub fn home(&self, engine: EngineId) -> PathBuf {
         self.inner.layout.home(engine)
     }
 
-    /// Uses the selected lease for both the executable and its helper PATH.
     #[must_use]
     pub fn launch_env_for_binary(&self, engine: EngineId, binary: &Path) -> Vec<(String, String)> {
         crate::engines::environment(engine, Some(binary), &self.home(engine))
@@ -827,7 +794,6 @@ impl Engines {
         cache.discovery = artisan_api::DiscoveryState::Unknown;
     }
 
-    /// A new binary may list different models.
     fn models_changed(&self, engine: EngineId) {
         self.invalidate_models(engine);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -842,8 +808,6 @@ impl Engines {
     }
 }
 
-/// What the engine's downloads are checked against: whatever digest its
-/// feed publishes.
 fn integrity(engine: EngineId) -> Option<Integrity> {
     Some(match host_spec(engine).artifact?.feed {
         Feed::Claude { .. } => Integrity::VendorSha256,
@@ -858,301 +822,13 @@ fn artifact(engine: EngineId) -> Result<Artifact, NoBuild> {
 
 #[cfg(test)]
 #[cfg(unix)]
-mod context_tests {
-    use super::*;
-    use artisan_api::SignInState;
-    use std::os::unix::fs::PermissionsExt as _;
-
-    /// A Codex stand-in: a shell script answering the CLI calls Forge makes.
-    /// `app_server <model>` plays `codex app-server`: it answers
-    /// `initialize`, takes `initialized`, and lists `<model>` as the default
-    /// once `model/list` arrives.
-    fn codex_manager(script: &str) -> (tempfile::TempDir, Engines, PathBuf) {
-        let directory = tempfile::tempdir().unwrap();
-        let layout = Layout::new(directory.path());
-        let engine = EngineId::Codex;
-        let home = layout.home(engine);
-        std::fs::create_dir_all(&home).unwrap();
-        let version = layout.version_dir(engine, "1.0.0");
-        let binary = version.join(host_spec(engine).artifact.unwrap().entry);
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        let script = script.replacen(
-            '\n',
-            "\napp_server() {\n read -r _; echo '{\"id\":1,\"result\":{}}'\n read -r _\n read -r _; printf '{\"id\":2,\"result\":{\"data\":[{\"id\":\"%s\",\"isDefault\":true}]}}\\n' \"$1\"\n}\n",
-            1,
-        );
-        std::fs::write(&binary, script).unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        install::switch(&layout, engine, "1.0.0").unwrap();
-        let engines = Engines::new(directory.path());
-        (directory, engines, home)
-    }
-
-    async fn wait_until(mut ready: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while !ready() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn login_links_are_still_parsed_after_the_retained_log_budget() {
-        let (_directory, engines, _home) = codex_manager(
-            r#"#!/bin/sh
-case "$*" in
- "login --device-auth") yes 'noise' | head -n 15000; echo 'https://login.example.test/login'; sleep 30 ;;
- "login status") echo 'Logged in' ;;
- "app-server --stdio") app_server model1 ;;
-esac
-"#,
-        );
-        engines.login(EngineId::Codex).unwrap();
-        wait_until(|| matches!(engines.status(EngineId::Codex).sign_in, SignInState::LoggingIn { url: Some(url), .. } if url == "https://login.example.test/login")).await;
-        engines.cancel_login(EngineId::Codex);
-        wait_until(|| {
-            matches!(
-                engines.status(EngineId::Codex).sign_in,
-                SignInState::SignedIn { .. }
-            )
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn overlapping_model_refreshes_share_one_native_probe() {
-        let (_directory, engines, home) = codex_manager(
-            r#"#!/bin/sh
-printf 'probe\n' >> "$PWD/calls"
-touch "$PWD/started"
-while [ ! -e "$PWD/release" ]; do sleep 0.01; done
-app_server model1
-"#,
-        );
-        let owner = engines.clone();
-        let first =
-            tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
-        wait_until(|| home.join("started").exists()).await;
-        let owner = engines.clone();
-        let (started, waiting) = tokio::sync::oneshot::channel();
-        let second = tokio::spawn(async move {
-            started.send(()).ok();
-            owner.refresh_models(EngineId::Codex).await.unwrap()
-        });
-        waiting.await.unwrap();
-        std::fs::write(home.join("release"), "").unwrap();
-        assert_eq!(first.await.unwrap(), second.await.unwrap());
-        assert_eq!(
-            std::fs::read_to_string(home.join("calls"))
-                .unwrap()
-                .lines()
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn old_models_cannot_return_after_an_account_aba() {
-        let (_directory, engines, home) = codex_manager(
-            r#"#!/bin/sh
-case "$*" in
- "login status") if [ -e "$PWD/out" ]; then echo 'Not logged in'; else echo 'Logged in'; fi ;;
- logout) touch "$PWD/out" ;;
- "login --device-auth") rm -f "$PWD/out" ;;
- "app-server --stdio") model=$(cat "$PWD/model"); touch "$PWD/started"; while [ ! -e "$PWD/release" ]; do sleep 0.01; done; app_server "$model" ;;
-esac
-"#,
-        );
-        std::fs::write(home.join("model"), "old-model1").unwrap();
-        assert_eq!(
-            engines.check_sign_in(EngineId::Codex).await,
-            SignInState::SignedIn { account: None }
-        );
-        let owner = engines.clone();
-        let old = tokio::spawn(async move { owner.refresh_models(EngineId::Codex).await.unwrap() });
-        wait_until(|| home.join("started").exists()).await;
-        engines.logout(EngineId::Codex).unwrap();
-        wait_until(|| engines.status(EngineId::Codex).sign_in == SignInState::SignedOut).await;
-        std::fs::write(home.join("model"), "new-model2").unwrap();
-        engines.login(EngineId::Codex).unwrap();
-        wait_until(|| {
-            engines.status(EngineId::Codex).sign_in == SignInState::SignedIn { account: None }
-        })
-        .await;
-        std::fs::write(home.join("release"), "").unwrap();
-        assert!(
-            old.await.unwrap().is_empty(),
-            "old context must not commit even though public account state is identical"
-        );
-        wait_until(|| {
-            engines
-                .status(EngineId::Codex)
-                .models
-                .iter()
-                .any(|model| model.id == "new-model2")
-        })
-        .await;
-        assert!(
-            !engines
-                .status(EngineId::Codex)
-                .models
-                .iter()
-                .any(|model| model.id == "old-model1")
-        );
-    }
-
-    #[tokio::test]
-    async fn login_pins_the_selected_version_until_cancellation_and_probe_finish() {
-        let (directory, engines, home) = codex_manager(
-            r#"#!/bin/sh
-case "$*" in
- "login --device-auth") touch "$PWD/started"; while :; do sleep 1; done ;;
- "login status") echo 'Logged in' ;;
- "app-server --stdio") app_server model1 ;;
-esac
-"#,
-        );
-        let old_binary = engines.binary(EngineId::Codex).unwrap();
-        engines.login(EngineId::Codex).unwrap();
-        wait_until(|| home.join("started").exists()).await;
-        let layout = Layout::new(directory.path());
-        for version in ["2.0.0", "3.0.0"] {
-            let next = layout
-                .version_dir(EngineId::Codex, version)
-                .join(host_spec(EngineId::Codex).artifact.unwrap().entry);
-            std::fs::create_dir_all(next.parent().unwrap()).unwrap();
-            std::fs::copy(&old_binary, next).unwrap();
-            install::switch(&layout, EngineId::Codex, version).unwrap();
-        }
-        install::prune(&layout, EngineId::Codex);
-        assert!(old_binary.is_file());
-        engines.cancel_login(EngineId::Codex);
-        wait_until(|| {
-            install::prune(&layout, EngineId::Codex);
-            !old_binary.exists()
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn present_install_reconciles_a_failed_update_without_another_download() {
-        let (_directory, engines, _home) = codex_manager("#!/bin/sh\necho 'Logged in'\n");
-        engines.apply(
-            EngineId::Codex,
-            &Event::Start {
-                version: "2.0.0".into(),
-            },
-        );
-        engines.apply(
-            EngineId::Codex,
-            &Event::Fail {
-                message: "download failed".into(),
-            },
-        );
-        assert!(matches!(
-            engines.status(EngineId::Codex).install,
-            artisan_api::InstallState::Failed { .. }
-        ));
-        assert_eq!(engines.install(EngineId::Codex).await.unwrap(), "1.0.0");
-        assert!(matches!(
-            engines.status(EngineId::Codex).install,
-            artisan_api::InstallState::Installed { .. }
-        ));
-    }
-}
+#[path = "../tests/manager/context.rs"]
+mod context_tests;
 
 #[cfg(test)]
-mod snapshot_tests {
-    use super::*;
-    #[tokio::test]
-    async fn download_progress_shares_catalog_allocations_and_preserves_prior_snapshots() {
-        let folder = tempfile::tempdir().unwrap();
-        let engines = Engines::new(folder.path());
-        let engine = EngineId::Codex;
-        lock(&engines.slot(engine).models).listing = Some(CachedListing::from(catalog::Listing {
-            models: vec![artisan_api::Model {
-                id: "fixture-model1".into(),
-                ..artisan_api::Model::default()
-            }],
-            default: Some("fixture-model1".into()),
-            ..catalog::Listing::default()
-        }));
-        *lock(&engines.slot(engine).versions) = vec![PublishedVersion {
-            version: "1.0.0".into(),
-            installed: true,
-            current: true,
-            unsupported: false,
-        }]
-        .into();
-        let before = engines.status(engine);
-        let mut events = engines.subscribe();
-        engines.apply(
-            engine,
-            &Event::Start {
-                version: "2.0.0".into(),
-            },
-        );
-        engines.apply(
-            engine,
-            &Event::Progress {
-                received: 100,
-                total: Some(1000),
-            },
-        );
-        let EngineChange::Full(started) = events.recv().await.unwrap() else {
-            panic!("start must publish metadata");
-        };
-        let EngineChange::Install {
-            engine: progress_engine,
-            install: progress_install,
-        } = events.recv().await.unwrap()
-        else {
-            panic!("progress must publish only installation");
-        };
-        assert_eq!(progress_engine, engine);
-        let progress = engines.status(engine);
-        assert!(Arc::ptr_eq(&before.models, &started.models));
-        assert!(Arc::ptr_eq(&before.models, &progress.models));
-        assert!(Arc::ptr_eq(&before.versions, &progress.versions));
-        assert!(matches!(
-            progress_install,
-            artisan_api::InstallState::Downloading { received: 100, .. }
-        ));
-        // Explicit install reconciliation may replace metadata, while already
-        // published snapshots retain their original coherent flags.
-        engines.reconcile_install(engine);
-        assert!(before.versions[0].installed);
-        assert!(!engines.status(engine).versions[0].installed);
-    }
-}
+#[path = "../tests/manager/snapshot.rs"]
+mod snapshot_tests;
 
 #[cfg(test)]
-mod lease_release_tests {
-    use super::*;
-
-    #[test]
-    fn dropping_binary_lease_releases_lock_with_an_inherited_descriptor_open() {
-        let directory = tempfile::tempdir().unwrap();
-        let engine = EngineId::Codex;
-        let layout = Layout::new(directory.path());
-        let binary = layout
-            .version_dir(engine, "0.150.0")
-            .join(host_spec(engine).artifact.unwrap().entry);
-        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-        std::fs::write(&binary, "lease fixture").unwrap();
-        install::switch(&layout, engine, "0.150.0").unwrap();
-        let engines = Engines::new(directory.path());
-        let lease = engines.lease(engine).unwrap();
-        // A duplicated handle models the inherited open file description
-        // before a concurrently spawned child reaches exec.
-        let inherited = lease.usage.try_clone().unwrap();
-        let competing = install::usage_lock(&layout.home(engine)).unwrap();
-        assert!(fs2::FileExt::try_lock_exclusive(&competing).is_err());
-        drop(lease);
-        fs2::FileExt::try_lock_exclusive(&competing)
-            .expect("the ended owner releases its lease even before the inherited handle closes");
-        drop(inherited);
-    }
-}
+#[path = "../tests/manager/lease_release.rs"]
+mod lease_release_tests;

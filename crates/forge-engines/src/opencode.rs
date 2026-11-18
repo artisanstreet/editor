@@ -24,6 +24,7 @@ mod form_tests;
 mod output_tests;
 mod side;
 #[cfg(test)]
+#[path = "../tests/opencode/unit.rs"]
 mod tests;
 
 pub use decoder::DecodeError;
@@ -641,8 +642,6 @@ async fn emit_all(io: &RunIo, events: Vec<EngineEvent>) {
     }
 }
 
-/// `provider/model` (the model part may contain more slashes) plus the
-/// effort as OpenCode's variant.
 fn model_ref(model: Option<&str>, variant: Option<&str>) -> Option<Value> {
     let (provider, id) = model?.split_once('/')?;
     let mut model = json!({ "providerID": provider, "id": id });
@@ -725,8 +724,6 @@ struct Api {
     password: String,
 }
 
-/// The `/` commands this server reads, for the composer's menu; `None` when
-/// it won't say, which leaves the last list in place.
 async fn commands(api: &Api) -> Option<Vec<artisan_api::SlashCommand>> {
     let mut listed = None;
     for path in ["/api/command", "/command"] {
@@ -836,8 +833,6 @@ impl Api {
     }
 }
 
-/// Opens the global event stream and waits for its first event, so nothing
-/// the session does afterwards is missed. Yields each event's `data`.
 async fn subscribe(api: &Api) -> Result<mpsc::Receiver<String>, SubscribeError> {
     let response = api
         .client
@@ -853,7 +848,6 @@ async fn subscribe(api: &Api) -> Result<mpsc::Receiver<String>, SubscribeError> 
         });
     }
     let (sender, mut receiver) = mpsc::channel(256);
-    // The reader keeps the run's span, so its log names the thread.
     tokio::spawn(tracing::Instrument::in_current_span(read_events(
         response, sender,
     )));

@@ -4,22 +4,8 @@ use std::time::Duration;
 
 use super::*;
 
-/// The bytes the fake server's `image` tool returns.
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake screenshot";
 
-/// The stdio server [`fake_stdio`] starts: this test, run in a child
-/// process with `ARTISAN_FAKE_MCP` set. Elsewhere it passes at once.
-///
-/// - `FAKE_TOOLS`: the tools it lists (`echo` by default).
-/// - `FAKE_TAG`: what `echo` puts before its text.
-/// - `FAKE_DELAY_MS`: how long `initialize` takes.
-/// - `FAKE_LOG`: a file it appends `start` and `cancelled <id>` to.
-/// - `FAKE_EXIT`: it writes this to stderr and exits 1 instead.
-/// - `FAKE_BIG`: how large the line `big` answers with is.
-///
-/// Tools: `echo` (its `text`), `image` (a PNG), `slow` (progress every
-/// 100 ms, the answer after 3 s), `ping` (pings the client with the call's
-/// own id first) and `big`.
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -159,7 +145,6 @@ fn log_lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Waits up to two seconds for the log to hold `line`.
 async fn logged(path: &Path, line: &str) -> bool {
     for _ in 0..40 {
         if log_lines(path)
@@ -334,7 +319,6 @@ async fn progress_does_not_extend_a_call_and_a_dropped_call_is_cancelled() {
         log_lines(&log)
     );
 
-    // Stopping the turn drops the call, which cancels it on the server.
     let cancel = tokio_util::sync::CancellationToken::new();
     let stopper = cancel.clone();
     tokio::spawn(async move {
@@ -603,13 +587,9 @@ async fn only_the_most_recently_used_threads_keep_servers_warm() {
     assert!(warm.contains_key(&threads[threads.len() - 1]));
 }
 
-/// A Streamable HTTP server for tests that can forget sessions and answer
-/// over a stream it keeps open.
 #[derive(Default)]
 struct FakeHttp {
-    /// Answer over SSE and keep the stream open five seconds after.
     stream: bool,
-    /// Forget the session after each call.
     forget: bool,
     session: Mutex<Option<String>>,
     initialized: AtomicUsize,

@@ -1,12 +1,3 @@
-//! Transcript snapshots of the OpenCode decoder.
-//!
-//! Each transcript line is one event from OpenCode's global stream
-//! (`GET /api/event`), recorded from OpenCode 2.1.0. The replay plays the
-//! driver's part: it registers each prompt OpenCode admits (the first as the
-//! run's message, later ones as steers) and answers permissions and forms
-//! the way the recording did. Consecutive live appends to the same target
-//! are merged to keep snapshots readable.
-
 use super::decoder::{Decoder, Reply};
 use crate::EngineEvent;
 use artisan_api::{Answer, Decision, ItemId, QuestionAnswer};
@@ -16,18 +7,12 @@ use serde_json::Value;
 #[expect(dead_code, reason = "read through the Debug snapshot")]
 enum Step {
     Event(Box<EngineEvent>),
-    /// The request the driver sends OpenCode.
     Reply(Reply),
-    /// Whether the run would end here.
     Idle(bool),
-    /// The error the run ends with.
     RunError(String),
-    /// A line OpenCode's protocol can't carry: the run fails.
     ProtocolError(String),
 }
 
-/// What the recording answered: the later `permission.replied` or
-/// `form.replied`/`form.cancelled` naming `request`.
 fn recorded_answer(events: &[Value], request: &str, form: &Value) -> Option<Answer> {
     events.iter().find_map(|event| {
         let data = &event["data"];
@@ -89,7 +74,6 @@ fn replay(case: &str) -> Vec<Step> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect();
-    // A line that isn't JSON still goes to the decoder, which fails it.
     let parsed: Vec<Value> = lines
         .iter()
         .map(|line| serde_json::from_str(line).unwrap_or(Value::Null))
@@ -100,7 +84,6 @@ fn replay(case: &str) -> Vec<Step> {
     let mut steps = Vec::new();
     for (index, (line, event)) in lines.iter().zip(&parsed).enumerate() {
         let data = &event["data"];
-        // The driver learns the session id when it creates the session.
         let decoder = decoder.get_or_insert_with(|| Decoder::new(None));
         if !decoder.has_root()
             && let Some(session) = data["sessionID"].as_str()
@@ -117,8 +100,6 @@ fn replay(case: &str) -> Vec<Step> {
         };
         let later = &parsed[index + 1..];
         let asked = match event["type"].as_str() {
-            // The driver sends only the root's prompts; subagents get theirs
-            // from OpenCode.
             Some("session.inbox.enqueued")
                 if data["item"]["type"] == "user"
                     && data["sessionID"].as_str() == root.as_deref() =>
@@ -202,40 +183,32 @@ fn question_is_asked_as_a_form_and_answered_through_the_api() {
     insta::assert_debug_snapshot!(replay("question"));
 }
 
-/// Skipping every question dismisses the form, which ends OpenCode's turn.
 #[test]
 fn a_dismissed_question_cancels_the_form() {
     insta::assert_debug_snapshot!(replay("question-dismissed"));
 }
 
-/// A model OpenCode can't route fails the execution, which ends the run.
 #[test]
 fn a_failed_execution_ends_the_run_with_its_error() {
     insta::assert_debug_snapshot!(replay("execution-failed"));
 }
 
-/// Lines that aren't OpenCode events fail the run.
 #[test]
 fn malformed_frames_are_protocol_errors() {
     insta::assert_debug_snapshot!(replay("malformed"));
 }
 
-/// A text that ends without its body is an error, never an empty reply.
 #[test]
 fn a_text_without_its_body_fails_the_run() {
     insta::assert_debug_snapshot!(replay("text-without-body"));
 }
 
-/// Forms Artisan can't ask and tool calls missing their fields become
-/// explicit errors, never empty cards.
 #[test]
 fn malformed_native_payloads_become_errors() {
     insta::assert_debug_snapshot!("malformed_question", replay("malformed-question"));
     insta::assert_debug_snapshot!("tool_fields", replay("tool-fields"));
 }
 
-/// The chosen variant is the `model.variant` OpenCode runs; older threads
-/// kept it in their effort.
 #[test]
 fn the_chosen_variant_is_the_model_variant() {
     let model = super::model_ref(Some("anthropic/claude-opus-5"), Some("max")).expect("model");
@@ -272,11 +245,6 @@ fn each_permission_level_is_an_agent_opencode_knows() {
     );
 }
 
-/// A background shell's call returns at once (`status: "running"` and its
-/// shell id) and the shell ends with `shell.exited`: the command stays
-/// running, in the background, until then. Frames follow the recorded
-/// `shell` call and `shell.exited`; the background fields follow the schema
-/// OpenCode 2.1's binary carries, not a recording.
 #[test]
 fn a_background_shell_runs_until_it_exits() {
     use artisan_api::Status::{Done, Running};
@@ -327,7 +295,6 @@ fn background_shell_keeps_server_alive_through_notification_and_followup() {
     for (exit, expected, exited_event) in [
         (0, artisan_api::Status::Done, true),
         (1, artisan_api::Status::Failed, true),
-        // A fast shell can exit before its tool result registers the shell ID.
         (0, artisan_api::Status::Done, false),
         (1, artisan_api::Status::Failed, false),
     ] {
@@ -384,7 +351,6 @@ fn background_shell_keeps_server_alive_through_notification_and_followup() {
             !decoder.idle(),
             "shell exit still needs a notification and wake"
         );
-        // Other sessions must not release the shell or replace its output.
         feed(
             &mut decoder,
             "session.inbox.enqueued",

@@ -35,8 +35,8 @@ const READ_REQUESTS: [&str; 5] = [
     "item/tool/requestUserInput",
     "mcpServer/elicitation/request",
 ];
-const NOTIFICATIONS: &str = include_str!("schema/ServerNotification.json");
-const REQUESTS: &str = include_str!("schema/ServerRequest.json");
+const NOTIFICATIONS: &str = include_str!("../../src/codex/schema/ServerNotification.json");
+const REQUESTS: &str = include_str!("../../src/codex/schema/ServerRequest.json");
 const MAX_EXAMPLES: usize = 48;
 const MAX_DEPTH: usize = 14;
 

@@ -53,6 +53,7 @@ mod rpc;
 mod sandbox;
 pub mod trace;
 #[cfg(test)]
+#[path = "../tests/transcript/unit.rs"]
 mod transcript_tests;
 mod usage;
 

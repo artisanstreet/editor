@@ -1,12 +1,7 @@
-//! Adapter-owned slash normalization. The client sends literal user text;
-//! the stored message stays as typed and only the engine's prompt changes.
 use artisan_api::{EngineId, SlashCommand};
 
-/// More than any engine lists; the rest are dropped.
 const MAX_COMMANDS: usize = 1024;
 
-/// The commands Forge reads for `engine` itself, listed beside the ones the
-/// engine reports: exactly what [`normalize_command`] rewrites.
 pub fn own(engine: EngineId) -> Vec<SlashCommand> {
     if engine != EngineId::Claude {
         return Vec::new();
@@ -24,7 +19,6 @@ pub fn own(engine: EngineId) -> Vec<SlashCommand> {
     .collect()
 }
 
-/// An engine's own list, as the menu can show it: named, each once, bounded.
 pub fn reported(commands: Vec<SlashCommand>) -> Vec<SlashCommand> {
     let mut seen = std::collections::HashSet::new();
     commands
@@ -68,28 +62,5 @@ pub fn normalize_command(engine: EngineId, text: &str) -> Result<Option<String>,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ultra_commands_are_keywords_of_the_turn_they_start() {
-        assert_eq!(
-            normalize_command(EngineId::Claude, "/ultracode ship the parser").unwrap(),
-            Some("ultracode\nship the parser".to_owned())
-        );
-        assert_eq!(
-            normalize_command(EngineId::Claude, "  /ultrathink why?").unwrap(),
-            Some("ultrathink\nwhy?".to_owned())
-        );
-        for text in ["/ultracode", "/ultrathink  "] {
-            assert!(normalize_command(EngineId::Claude, text).is_err(), "{text}");
-        }
-        for (engine, text) in [
-            (EngineId::Codex, "/ultracode ship it"),
-            (EngineId::Claude, "/goal ship it"),
-            (EngineId::Claude, "plain text"),
-        ] {
-            assert!(normalize_command(engine, text).unwrap().is_none(), "{text}");
-        }
-    }
-}
+#[path = "../tests/commands/unit.rs"]
+mod tests;

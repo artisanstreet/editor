@@ -1,19 +1,3 @@
-//! The claude.ai transport: Anthropic's chat backend, spoken to directly.
-//!
-//! The public Messages API — and therefore Claude Code — only returns the
-//! model's reasoning as prose, which Forge trims into a clause. claude.ai's
-//! own chat endpoint returns the provider's one-line recap of the thinking
-//! instead, as a `thinking_summary_delta` event: the same text claude.ai
-//! shows above each tool group. The public API never sends it, and
-//! `thinking.display` has no value that asks for it.
-//!
-//! The endpoint is the one the claude.ai web app uses. Its stream is a
-//! superset of the Messages API stream, and it takes client-defined tools
-//! with an `input_schema`, so the model can call back into the caller. The
-//! model reads a tool's result from the next message's prompt (claude.ai
-//! ignores `tool_states` for that), so results are sent in a block the
-//! first message tells the model about.
-
 mod capabilities;
 mod decoder;
 mod files;
@@ -55,31 +39,18 @@ use tokio::sync::mpsc;
 
 use crate::{EngineEvent, Harness, Input, LiveKind, Outcome, Retry, RunIo, Turn, UserInput};
 
-/// The most of a call's input its result repeats; a Write's whole content
-/// is not worth sending back.
 const MAX_ECHOED_INPUT: usize = 1000;
 
-/// How many times a turn may run its tools before the transport gives up.
 const MAX_TOOL_ROUNDS: usize = 200;
 
-/// After the model's last call to a tool of ours, how long the stream is
-/// given to start another: the model may call several at once, and the
-/// stream says nothing else until their results are in.
 const CALL_GRACE: Duration = Duration::from_secs(2);
 
-/// The most project instructions the first message carries.
 const MAX_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 
-/// How long a stopped turn waits for its subagent to stop the subagent's
-/// own completion and end; past it, the subagent is dropped.
 const SUBAGENT_SETTLE: Duration = Duration::from_secs(20);
 
-/// How long claude.ai is given to delete a subagent's conversation.
 const DELETE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The tags that frame what the model is sent. Text from tools, files,
-/// pages and skills has them escaped (`&lt;/result>`), so it cannot end
-/// its block early and pose as the user or as more results.
 const FRAMING_TAGS: &[&str] = &[
     "result",
     "tool_results",
@@ -88,7 +59,6 @@ const FRAMING_TAGS: &[&str] = &[
     "available_skills",
 ];
 
-/// Runs turns against claude.ai.
 pub struct ClaudeAiHarness;
 
 impl Harness for ClaudeAiHarness {
@@ -141,7 +111,6 @@ impl Harness for ClaudeAiHarness {
     }
 }
 
-/// Runs one turn against claude.ai, as the session kept in the engine home.
 pub async fn run(turn: Turn, io: RunIo) -> Outcome {
     let session = match Session::load(&turn.home) {
         Ok(Some(session)) => session,
@@ -157,8 +126,6 @@ pub async fn run(turn: Turn, io: RunIo) -> Outcome {
             ));
         }
     };
-    // A session claude.ai refused is not tried again until it is fixed, so
-    // a turn does not knock on Cloudflare's door for nothing.
     if let Some(reason) = &session.expired {
         return Outcome::failed(format!(
             "The claude.ai session no longer works ({reason}). Sign in again under Settings → Claude Code → claude.ai mode."
@@ -182,8 +149,6 @@ pub async fn run(turn: Turn, io: RunIo) -> Outcome {
     outcome
 }
 
-/// The user's input while the turn runs: steers waiting to be sent, and
-/// what the access mode is now.
 struct Inbox {
     steers: Vec<crate::UserInput>,
     permissions: artisan_api::Permissions,
@@ -197,18 +162,14 @@ struct Steers {
 }
 
 impl Inbox {
-    /// Takes in what does not answer anything the turn waits on.
     fn take(&mut self, input: Input) {
         match input {
             Input::Steer(message) => self.steers.push(message),
             Input::SetPermissions(permissions) => self.permissions = permissions,
-            // Answers to nothing waiting; the goal is Codex's.
             Input::Answer { .. } | Input::ClearGoal => {}
         }
     }
 
-    /// The next input, or `None` once the inbox closed. Waits forever when
-    /// it is closed, so a `select!` moves on to its other arms.
     async fn next(&mut self, io: &mut RunIo) -> Option<Input> {
         if !self.open {
             return std::future::pending().await;
@@ -237,20 +198,13 @@ impl Inbox {
     }
 }
 
-/// How a completion's stream ended.
 enum Read {
-    /// The provider closed the message.
     Ended,
-    /// We stopped reading while the provider may still be generating.
     Interrupted,
-    /// The stream failed; its server completion still needs stopping.
     Failed(StreamError),
-    /// The user stopped the turn.
     Cancelled,
 }
 
-/// Runs a turn on `backend`, building what the run's tools share first:
-/// the skills, MCP servers and permission rules of the turn's machine.
 pub async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
     let sandbox = match crate::sandbox::Sandbox::for_turn(&turn) {
         Ok(sandbox) => sandbox,
@@ -264,7 +218,6 @@ pub async fn drive(backend: &dyn Backend, turn: Turn, io: RunIo) -> Outcome {
     drive_with(&runtime, backend, turn, io).await
 }
 
-/// Runs a turn on `backend` with `runtime`'s tools.
 pub async fn drive_with(
     runtime: &tools::Runtime,
     backend: &dyn Backend,
@@ -279,15 +232,9 @@ pub async fn drive_with(
     Box::pin(drive_turn(runtime, backend, turn, io, scope)).await
 }
 
-/// Who a turn runs for: the user's thread, or a subagent a `Task` call
-/// started inside it.
 #[derive(Clone, Copy)]
 struct Scope<'a> {
-    /// The "Allow always" answers, shared by the turn and its subagents
-    /// both ways, as one permission context.
     allowed: &'a Mutex<Allowed>,
-    /// A subagent's turn, which starts no subagents of its own, as in
-    /// Claude Code.
     subagent: bool,
 }
 
@@ -297,7 +244,6 @@ impl Scope<'_> {
     }
 }
 
-/// Runs one turn, the user's or a subagent's.
 #[expect(
     clippy::too_many_lines,
     reason = "one turn's rounds, read top to bottom: send, read, run the calls"
@@ -309,8 +255,6 @@ async fn drive_turn(
     mut io: RunIo,
     scope: Scope<'_>,
 ) -> Outcome {
-    // The session is the conversation and the last message the thread
-    // saw in it, `<conversation>/<message>`.
     let resumed = turn
         .session_id
         .as_deref()
@@ -362,8 +306,6 @@ async fn drive_turn(
             .filter(|model| !model.is_empty())
             .unwrap_or_else(|| "claude-opus-5-5".to_owned()),
         thinking_mode: "auto".to_owned(),
-        // claude.ai only returns the provider's recap when an effort is
-        // asked for.
         effort: turn
             .config
             .effort
@@ -384,7 +326,6 @@ async fn drive_turn(
         open: true,
     };
     let mut decoder = ClaudeAiDecoder::default();
-    // The ids the next request delivers: the turn's message first.
     let mut delivering = vec![turn.input.id.clone()];
 
     for round in 0..MAX_TOOL_ROUNDS {
@@ -403,10 +344,6 @@ async fn drive_turn(
         let mut events = match started {
             Ok(events) => events,
             Err(error) => {
-                // claude.ai deleted the conversation: the thread carries on
-                // in a new one. The message stays undelivered, so Forge runs
-                // it again on a fresh session, which starts from the
-                // thread's history.
                 if round == 0
                     && resumed.is_some()
                     && error.refusal() == Some(&Refusal::ConversationGone)
@@ -423,9 +360,6 @@ async fn drive_turn(
         }
 
         let read = read(&mut events, &mut decoder, &mut inbox, &mut io).await;
-        // Dropping an SSE connection does not stop claude.ai's server
-        // completion. Release it before tools, approvals or another POST;
-        // otherwise each tool round consumes another concurrent slot.
         if !matches!(read, Read::Ended) {
             let stopped = stop(backend, &conversation).await;
             if matches!(read, Read::Cancelled) {
@@ -467,7 +401,6 @@ async fn drive_turn(
         for event in out {
             emit(&io, event).await;
         }
-        // The next message follows this one, and so does the next turn.
         if let Some(leaf) = decoder
             .leaf()
             .filter(|&leaf| request.parent.as_deref() != Some(leaf))
@@ -486,8 +419,6 @@ async fn drive_turn(
         }
 
         if calls.is_empty() {
-            // The model answered. A steer that came meanwhile carries the
-            // turn on.
             if let Some(steers) = inbox.drain() {
                 request.prompt = steers.text;
                 request.tool_states = Vec::new();
@@ -528,9 +459,6 @@ async fn drive_turn(
         };
         for call in &calls {
             let answer = if call.name == "Task" && !scope.subagent {
-                // A subagent ends itself when the turn is stopped, and
-                // stops its own completion on the way; dropping it here
-                // would cut that request short.
                 run_call(call, &ctx, &mut inbox, &mut io).await
             } else {
                 tokio::select! {
@@ -553,7 +481,6 @@ async fn drive_turn(
         request.prompt = tool_results(&results);
         request.tool_states = states;
         request.files = attached;
-        // A steer that came while the tools ran goes with their results.
         if let Some(steers) = inbox.drain() {
             write!(
                 request.prompt,
@@ -573,8 +500,6 @@ async fn drive_turn(
     Outcome::failed("Claude.ai kept asking for tools without finishing the turn.")
 }
 
-/// Reads one completion: until the model answers, or until it waits on our
-/// tools and has had its grace to call more.
 async fn read(
     events: &mut Events,
     decoder: &mut ClaudeAiDecoder,
@@ -596,7 +521,6 @@ async fn read(
             () = cancel.cancelled() => return Read::Cancelled,
             Some(input) = inbox.next(io) => inbox.take(input),
             event = next => {
-                // The grace passed with nothing new, or the stream ended.
                 let Some(Some(event)) = event else { return Read::Interrupted };
                 let value = match event {
                     Ok(value) => value,
@@ -615,7 +539,6 @@ async fn read(
                     return Read::Interrupted;
                 }
                 if decoder.connector_started() && inbox.permissions != artisan_api::Permissions::Full {
-                    // Stop it before the provider runs it.
                     return Read::Interrupted;
                 }
                 if kind == "message_stop" || kind == "error" {
@@ -643,8 +566,6 @@ impl Refused for StopCompletionError {
     }
 }
 
-/// Bound cleanup even when the provider stops answering. A failed stop
-/// prevents a tool continuation from starting another server completion.
 async fn stop(backend: &dyn Backend, conversation: &str) -> Result<(), StopCompletionError> {
     tokio::time::timeout(Duration::from_secs(15), backend.stop(conversation))
         .await
@@ -654,12 +575,10 @@ async fn stop(backend: &dyn Backend, conversation: &str) -> Result<(), StopCompl
         .map_err(StopCompletionError::Stop)
 }
 
-/// Sends an event to Forge.
 async fn emit(io: &RunIo, event: EngineEvent) {
     io.emit(event).await;
 }
 
-/// The outcome of a request claude.ai refused, or that never reached it.
 fn refused(error: &impl Refused) -> Outcome {
     match error.refusal() {
         Some(Refusal::Challenge) => Outcome::retryable(
@@ -684,7 +603,6 @@ fn refused(error: &impl Refused) -> Outcome {
         }
         Some(Refusal::ConversationGone) => Outcome::failed("The claude.ai conversation is gone."),
         Some(Refusal::Other(message)) => Outcome::failed(message.clone()),
-        // It never reached claude.ai: the network is down or slow.
         None => Outcome::retryable(
             format!("Could not reach claude.ai: {}", diagnostics::chain(error)),
             Retry::Overloaded,
@@ -692,7 +610,6 @@ fn refused(error: &impl Refused) -> Outcome {
     }
 }
 
-/// What a call's runner needs from the turn it runs in.
 struct Calls<'a> {
     backend: &'a dyn Backend,
     runtime: &'a tools::Runtime,
@@ -700,8 +617,6 @@ struct Calls<'a> {
     scope: Scope<'a>,
 }
 
-/// Runs one call: asks first when it needs asking, and never runs a call
-/// the user did not allow. `None` when the inbox closed while it waited.
 async fn run_call(
     call: &Call,
     ctx: &Calls<'_>,
@@ -748,8 +663,6 @@ async fn run_call(
             })
         }
         Plan::Ask(request) => {
-            // The card shows what the call will do, from its input alone:
-            // nothing runs until the user allows it.
             let mut kind = tools::approval_card(call, &ctx.turn.cwd, &ctx.runtime.mcp);
             let options = vec![
                 artisan_api::Decision::AllowOnce,
@@ -838,9 +751,6 @@ async fn execute(
     answer
 }
 
-/// Waits for the user's decision on a call. Steers and access changes that
-/// arrive meanwhile are kept; Forge answers a waiting call itself when the
-/// user switches to full access.
 async fn wait_for_approval(
     key: &str,
     inbox: &mut Inbox,
@@ -860,11 +770,6 @@ async fn wait_for_approval(
     }
 }
 
-/// Runs a `Task` call: a nested turn in its own claude.ai conversation,
-/// whose events show under the agent item, and whose final reply is the
-/// tool's result. Approvals and questions it raises are forwarded to the
-/// user here. The conversation is deleted once the subagent ends, however
-/// it ends: nothing continues it.
 #[expect(
     clippy::too_many_lines,
     reason = "one subagent's whole life, read top to bottom: start, forward, settle"
@@ -902,8 +807,6 @@ async fn run_task(
     }
     let mut child_turn = ctx.turn.clone();
     child_turn.session_id = None;
-    // The access the user set last: it may have changed since the turn
-    // began.
     child_turn.config.permissions = inbox.permissions;
     child_turn.input = UserInput {
         id: ItemId::new(),
@@ -918,8 +821,6 @@ async fn run_task(
         child_turn.config.model = Some(model.to_owned());
     }
     let (child_inputs, child_inbox) = mpsc::channel(64);
-    // Dropped when the thread's inbox closes, which closes the subagent's
-    // too: a question or approval it waits on then ends it as cancelled.
     let mut child_inputs = Some(child_inputs);
     let (child_events_tx, mut child_events) = mpsc::channel(256);
     let child_io = RunIo {
@@ -940,8 +841,6 @@ async fn run_task(
     ));
     let prefix = format!("{}:", call.id);
     let mut forwarded = Forwarded::default();
-    // A stopped subagent ends by itself once it has stopped its completion;
-    // it is waited for, a while, rather than dropped mid-request.
     let cancel = io.cancel.clone();
     let settle = async {
         cancel.cancelled().await;
@@ -991,8 +890,6 @@ async fn run_task(
         }
     };
     drop(child);
-    // The nested turn may have finished with events still queued: its
-    // final reply is one of them.
     while let Ok(event) = child_events.try_recv() {
         if let Some(event) = forwarded.forward(event, &call.id) {
             emit(io, event).await;
@@ -1023,8 +920,6 @@ async fn run_task(
     Some(finish_agent(call, &answer, io).await)
 }
 
-/// Deletes a subagent's conversation. A failure only leaves it behind in
-/// claude.ai (it is temporary), so it is logged, not fatal.
 async fn delete_conversation(ctx: &Calls<'_>, call: &Call, conversation: &str) {
     let deleted = tokio::time::timeout(
         DELETE_TIMEOUT,
@@ -1045,7 +940,6 @@ async fn delete_conversation(ctx: &Calls<'_>, call: &Call, conversation: &str) {
     );
 }
 
-/// Settles the agent item with the answer its nested turn produced.
 async fn finish_agent(call: &Call, answer: &Answer, io: &RunIo) -> Answer {
     let mut kind = tools::agent_kind(call);
     if let ItemKind::Agent { result, .. } = &mut kind {
@@ -1068,7 +962,6 @@ async fn finish_agent(call: &Call, answer: &Answer, io: &RunIo) -> Answer {
     answer.clone()
 }
 
-/// The prompt a subagent's own conversation starts with.
 fn subagent_prompt(call: &Call, prompt: &str) -> String {
     format!(
         "You are a subagent running one task for another agent in Artisan. Do the task yourself with the tools you have, and do not ask the user questions unless the task cannot go on without one. Finish with a report of what you found or did, written for the agent that started you.\n\n<task description=\"{}\">\n{prompt}\n</task>",
@@ -1076,25 +969,15 @@ fn subagent_prompt(call: &Call, prompt: &str) -> String {
     )
 }
 
-/// What a subagent's events told its runner, as they were forwarded.
 #[derive(Default)]
 struct Forwarded {
-    /// The subagent's claude.ai conversation, from its session events.
     conversation: Option<String>,
-    /// The message whose text is being collected, and its text so far.
     message: Option<String>,
     texts: Vec<String>,
-    /// The subagent's final reply: all the text of its answering message,
-    /// in order.
     reply: Option<String>,
 }
 
 impl Forwarded {
-    /// Rewrites one of a nested turn's events for the thread: its keys are
-    /// prefixed, its items parented to the agent item, its todo list keyed
-    /// as the agent's, and its final reply captured. Events that are about
-    /// the nested conversation itself (sessions, models, usage) are
-    /// dropped.
     fn forward(&mut self, event: EngineEvent, agent: &str) -> Option<EngineEvent> {
         let prefix = |key: &str| {
             if key == "plan" {
@@ -1170,9 +1053,6 @@ impl Forwarded {
         })
     }
 
-    /// Keeps a settled text of the subagent's. A message's texts settle
-    /// together, under `<message>:<block>` keys, the last one final when
-    /// the message answered.
     fn collect(&mut self, key: &str, text: &str, phase: artisan_api::Phase) {
         let message = key.rsplit_once(':').map(|(message, _)| message.to_owned());
         if message != self.message {
@@ -1186,7 +1066,6 @@ impl Forwarded {
     }
 }
 
-/// Asks the user a question the model raised, and returns the answer.
 async fn ask_user(call: &Call, inbox: &mut Inbox, io: &mut RunIo) -> Option<Answer> {
     let questions = tools::questions(call);
     let key = call.id.clone();
@@ -1281,9 +1160,6 @@ enum AttachImageError {
     Upload(#[source] UploadError),
 }
 
-/// Uploads the images a call's MCP server returned, for the message that
-/// carries the results: claude.ai shows the model a message's files, not
-/// images inside its text.
 async fn attach_images(
     backend: &dyn Backend,
     runtime: &tools::Runtime,
@@ -1338,13 +1214,6 @@ async fn attach_images(
     }
 }
 
-/// The next message's prompt: what the calls returned, marked as theirs so
-/// the model never reads them as the user's words. What they returned has
-/// the framing escaped, so a page or a file cannot close the block and
-/// write on as the user.
-///
-/// claude.ai never saves the message that made the calls, so each result
-/// repeats what was called, or the model would not know what it asked for.
 fn tool_results(results: &[(&Call, Answer)]) -> String {
     let mut prompt = String::from("<tool_results>\n");
     for (call, answer) in results {
@@ -1371,9 +1240,6 @@ fn tool_results(results: &[(&Call, Answer)]) -> String {
     prompt
 }
 
-/// `text` with every framing tag in it (see [`FRAMING_TAGS`]) escaped, any
-/// case, opening or closing: its `<` becomes `&lt;`. Everything else, code
-/// included, is left as it is.
 pub(super) fn escape_framing(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -1394,15 +1260,10 @@ pub(super) fn escape_framing(text: &str) -> String {
     out
 }
 
-/// A value fit for a framing tag's attribute.
 fn escape_attribute(value: &str) -> String {
     escape_framing(value).replace('"', "&quot;")
 }
 
-/// What the first message tells the model, which claude.ai's own system
-/// prompt does not: where it works, with which tools, how their results
-/// come back, the skills and MCP servers the machine has, and the
-/// instructions the user keeps for it.
 fn preamble(turn: &Turn, runtime: &tools::Runtime, subagent: bool) -> String {
     let mut text = format!(
         "<environment>\nYou are working on the user's own machine through Artisan, a coding agent app, not in claude.ai's chat.\n\
@@ -1433,7 +1294,6 @@ Inside it, a `<` that would start one of these blocks' tags is written `&lt;`; r
         text.push_str("</mcp_servers>");
     }
     if !runtime.mcp.failures().is_empty() {
-        // Short reasons only: a server's output or answer may hold secrets.
         text.push_str("\n<mcp_errors>\nThese MCP servers did not start; tell the user if the task needs them. One that failed with HTTP 401 needs a sign-in: the Artisan MCP's mcp_server_sign_in gives the user the link.\n");
         for (server, reason) in runtime.mcp.failures() {
             writeln!(text, "- {server}: {reason}").ok();
@@ -1450,13 +1310,9 @@ Inside it, a `<` that would start one of these blocks' tags is written `&lt;`; r
     text
 }
 
-/// The user's CLAUDE.md files, as Claude Code reads them: the global one
-/// in the engine home (where Artisan's global prompt lives), then the
-/// project's, from the repository root down to the working directory.
 fn instructions(home: &Path, cwd: &Path) -> String {
     let mut files = vec![home.join(".claude").join("CLAUDE.md")];
     let mut project: Vec<_> = cwd.ancestors().take_while(|dir| *dir != home).collect();
-    // Stop at the repository root.
     if let Some(root) = project.iter().position(|dir| dir.join(".git").exists()) {
         project.truncate(root + 1);
     } else {
@@ -1488,9 +1344,9 @@ fn instructions(home: &Path, cwd: &Path) -> String {
 }
 
 #[cfg(test)]
+#[path = "../../tests/claudeai/unit.rs"]
 mod tests;
 
-/// A compaction of canonical history on the native transport.
 pub(crate) async fn compact(
     turn: Turn,
     cancel: tokio_util::sync::CancellationToken,
@@ -1498,9 +1354,6 @@ pub(crate) async fn compact(
     side::compact(turn, cancel).await
 }
 
-/// A side question (title, suggestion, note) to a sibling branch of a
-/// native session: asked the way a compaction is, from the session's saved
-/// message, so the thread's own continuation never moves.
 pub(crate) async fn side_query(
     turn: Turn,
     cancel: tokio_util::sync::CancellationToken,

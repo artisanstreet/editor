@@ -1,7 +1,3 @@
-//! Sign-in, usage and customisation on `Engines` (see `account.rs`,
-//! `usage.rs`, `customise.rs`). Every change is published as an
-//! `EngineStatus`.
-
 use super::Engines;
 use crate::{Customisation, Launch};
 use artisan_api::{EngineId, SignInState, UsageLimits};
@@ -17,10 +13,6 @@ pub struct NotInstalled {
 pub(super) const USAGE_TTL: Duration = Duration::from_mins(5);
 
 impl Engines {
-    /// Probes whether `engine` is signed in (no model call) and publishes
-    /// the result. Does nothing while the engine isn't installed.
-    /// Re-reads everything Forge knows about an installed engine: sign-in,
-    /// models and usage. Done at startup and after installs.
     pub async fn refresh(&self, engine: EngineId) {
         let engines = self.clone();
         if let Err(error) =
@@ -106,8 +98,6 @@ impl Engines {
         Ok(())
     }
 
-    /// Reads usage when due (or with `force`), and publishes it. `None`
-    /// means "usage unavailable": no good read yet.
     pub async fn refresh_usage(&self, engine: EngineId, force: bool) -> Option<UsageLimits> {
         let Some(lease) = self.lease(engine) else {
             self.inner.usage.unreadable(engine);
@@ -130,7 +120,6 @@ impl Engines {
         crate::materialize(engine, &self.home(engine), customisation)
     }
 
-    /// One owned follower per engine, regardless of repeated button presses.
     fn follow_sign_in(&self, engine: EngineId) {
         let mut owner = super::lock(&self.slot(engine).sign_in_follower);
         if owner.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -152,7 +141,6 @@ impl Engines {
                             | SignInState::Failed { .. }
                     ) {
                         engines.inner.usage.invalidate(engine);
-                        // OpenCode's free models need no account.
                         if matches!(state, SignInState::SignedIn { .. })
                             || (engine == EngineId::OpenCode
                                 && matches!(state, SignInState::SignedOut))

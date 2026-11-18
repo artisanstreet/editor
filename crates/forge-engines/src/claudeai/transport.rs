@@ -1,11 +1,3 @@
-//! claude.ai's chat transport.
-//!
-//! The endpoint is the one the claude.ai web app uses:
-//! `POST /api/organizations/{org}/chat_conversations/{conversation}/completion`.
-//! Its event stream is a superset of the Messages API stream — the same
-//! event names, plus `thinking_summary_delta`, which carries the provider's
-//! own one-line recap of the model's thinking.
-
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -20,43 +12,24 @@ use super::session::{LoadSessionError, Session, cookie_change};
 use super::session_writer::{SessionChange, SessionWriter};
 use crate::process::MAX_LINE_BYTES;
 
-/// Where claude.ai lives.
 pub const HOST: &str = "https://claude.ai";
 
-/// Oversized events terminate the run instead of silently skipping state.
 const MAX_EVENT_BYTES: NonZeroUsize = NonZeroUsize::new(MAX_LINE_BYTES).unwrap();
 
-/// The longest a claude.ai error is quoted.
 const MAX_QUOTED: usize = 300;
 
-/// What one turn asks claude.ai for.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Request {
-    /// What the model reads: the user's message, or the results of the
-    /// tools it called. claude.ai keeps the conversation itself, so a turn
-    /// only carries what is new.
     pub prompt: String,
-    /// The model to answer with.
     pub model: String,
-    /// How much thinking the model should do. claude.ai accepts `extended`,
-    /// `standard`, `auto` and `off`.
     pub thinking_mode: String,
-    /// The effort level. claude.ai only returns the provider's recap when
-    /// an effort is asked for.
     pub effort: Option<String>,
-    /// The tools the model may call. claude.ai calls them; the caller runs
-    /// them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Value>,
-    /// The calls that have run. The model reads their results from the
-    /// prompt; this closes the calls on claude.ai's side.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_states: Vec<Value>,
-    /// Uploaded files (images) the message carries.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
-    /// The message this one follows in claude.ai's conversation tree. None
-    /// starts a new conversation's first message.
     #[serde(
         rename = "parent_message_uuid",
         skip_serializing_if = "Option::is_none"
@@ -65,7 +38,6 @@ pub struct Request {
 }
 
 impl Request {
-    /// The body claude.ai expects.
     #[must_use]
     pub fn body(&self) -> Value {
         let mut body = json!({
@@ -87,26 +59,17 @@ impl Request {
     }
 }
 
-/// Why claude.ai refused a request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// Cloudflare asked for a browser check: the session needs renewing in
-    /// a browser.
     Challenge,
-    /// claude.ai no longer takes the session.
     SignedOut(String),
-    /// The conversation is gone (claude.ai deleted it).
     ConversationGone,
-    /// The account ran out of usage.
     UsageLimit {
         resets_at: Option<artisan_api::Timestamp>,
         message: String,
     },
-    /// A temporary request or concurrency limit, rather than spent usage.
     RateLimited(String),
-    /// claude.ai is overloaded or failing.
     Overloaded(String),
-    /// Anything else.
     Other(String),
 }
 
@@ -134,7 +97,6 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// What claude.ai's answer means, from its status, headers and body.
 #[must_use]
 pub fn refusal(status: reqwest::StatusCode, challenge_header: bool, body: &str) -> Refusal {
     let html = body.trim_start().starts_with('<');
@@ -164,7 +126,6 @@ pub fn refusal(status: reqwest::StatusCode, challenge_header: bool, body: &str) 
     }
 }
 
-/// claude.ai can use 429 for concurrent completions as well as quota.
 pub(super) fn rate_limit(message: &str) -> Refusal {
     let inner: Value = serde_json::from_str(message).unwrap_or(Value::Null);
     if inner.is_object() {
@@ -179,7 +140,6 @@ pub(super) fn rate_limit(message: &str) -> Refusal {
     })
 }
 
-/// HTTP refusals and streamed limit events use the same limit payload.
 pub(super) fn limit_refusal(limit: &Value) -> Refusal {
     tracing::warn!(limit = %limit, "claude.ai reported a completion limit");
     if limit["representativeClaim"].as_str() == Some("concurrents") {
@@ -220,7 +180,6 @@ pub(super) fn limit_refusal(limit: &Value) -> Refusal {
     }
 }
 
-/// A body short enough to show, and never a page of HTML.
 fn quote(body: &str, status: reqwest::StatusCode) -> String {
     let body = body.trim();
     if body.is_empty() || body.starts_with('<') {
@@ -459,25 +418,17 @@ pub enum DeleteConversationError {
     },
 }
 
-/// The stream of one completion: claude.ai's events, parsed.
 pub type Events = BoxStream<'static, Result<Value, StreamError>>;
 
-/// What a turn needs from claude.ai. The transport speaks to claude.ai;
-/// tests replay recorded streams.
 pub trait Backend: Send + Sync {
-    /// Starts a conversation and returns its id.
     fn create_conversation(&self) -> BoxFuture<'_, Result<String, CreateConversationError>>;
-    /// Asks claude.ai to continue a conversation.
     fn complete<'a>(
         &'a self,
         conversation: &'a str,
         request: &'a Request,
     ) -> BoxFuture<'a, Result<Events, CompleteError>>;
-    /// Uploads a file and returns its id for [`Request::files`].
     fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, UploadError>>;
-    /// Stops the server's completion before another one may start.
     fn stop<'a>(&'a self, conversation: &'a str) -> BoxFuture<'a, Result<(), StopError>>;
-    /// Deletes a conversation nothing will continue (a subagent's).
     fn delete_conversation<'a>(
         &'a self,
         conversation: &'a str,
@@ -512,7 +463,6 @@ async fn multipart(path: &Path, boundary: &str) -> std::io::Result<Vec<u8>> {
 
 const READ_SLACK: usize = 32;
 
-/// A client for claude.ai's chat API.
 pub struct Transport {
     client: reqwest::Client,
     session: Mutex<Session>,
@@ -520,12 +470,6 @@ pub struct Transport {
 }
 
 impl Transport {
-    /// A transport that talks as the session kept in `home`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error if there is no usable session or the HTTP client
-    /// cannot be built.
     pub fn open(home: &Path) -> Result<Self, OpenTransportError> {
         let session = Session::load(home)
             .map_err(|source| OpenTransportError::Load {
@@ -538,12 +482,6 @@ impl Transport {
         Self::new(home, session).map_err(OpenTransportError::Client)
     }
 
-    /// A transport that talks as `session`, writing its cookies back to
-    /// `home`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error if the HTTP client cannot be built.
     pub fn new(home: &Path, session: Session) -> Result<Self, BuildClientError> {
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
@@ -560,7 +498,6 @@ impl Transport {
         })
     }
 
-    /// The session the transport talks as.
     #[must_use]
     pub fn session(&self) -> Session {
         self.session
@@ -582,8 +519,6 @@ impl Transport {
         self.session().org_uuid
     }
 
-    /// Sends a request; claude.ai's cookie changes are kept, and a refusal
-    /// is classified and recorded on the session.
     async fn send(
         &self,
         method: reqwest::Method,
@@ -680,12 +615,6 @@ impl Transport {
         self.writer.submit(change);
     }
 
-    /// Asks claude.ai for something, and gives back the answer.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error if claude.ai refuses the request or its answer is
-    /// not JSON.
     pub async fn get(&self, path: &str) -> Result<Value, RequestError> {
         let response = self
             .send(reqwest::Method::GET, path, |request| request)
@@ -693,11 +622,6 @@ impl Transport {
         Self::json(reqwest::Method::GET, path, response).await
     }
 
-    /// Saves the sidebar title on the native conversation too.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error if claude.ai does not take the new name.
     pub async fn rename_conversation(
         &self,
         conversation: &str,
@@ -741,9 +665,6 @@ impl Backend for Transport {
     fn create_conversation(&self) -> BoxFuture<'_, Result<String, CreateConversationError>> {
         Box::pin(async move {
             let path = format!("/api/organizations/{}/chat_conversations", self.org());
-            // Temporary: Forge's conversations stay out of the user's
-            // claude.ai history. claude.ai may delete one; the thread then
-            // carries on in a new conversation with its history.
             let body = json!({ "name": "Artisan", "is_temporary": true });
             let response = self
                 .post_json(&path, &body, "application/json")
@@ -847,8 +768,6 @@ impl Backend for Transport {
                 "/api/organizations/{}/chat_conversations/{conversation}",
                 self.org()
             );
-            // Not through `send`: a refused delete is no news about the
-            // session, and must not mark it signed out.
             let response = self
                 .builder(reqwest::Method::DELETE, &path)
                 .send()
@@ -859,7 +778,6 @@ impl Backend for Transport {
                 })?;
             self.keep_cookies(response.headers());
             let status = response.status();
-            // Gone already is as good as deleted.
             if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
                 return Ok(());
             }
@@ -887,92 +805,8 @@ fn rand_u64() -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use reqwest::StatusCode;
-
-    #[test]
-    fn the_body_carries_the_fields_claude_ai_reads() {
-        let request = Request {
-            prompt: "hello".to_owned(),
-            model: "claude-opus-5-5".to_owned(),
-            thinking_mode: "auto".to_owned(),
-            effort: Some("high".to_owned()),
-            tools: Vec::new(),
-            tool_states: Vec::new(),
-            files: vec!["f1".to_owned()],
-            parent: Some("m1".to_owned()),
-        };
-        let body = request.body();
-        assert_eq!(body["prompt"], "hello");
-        assert_eq!(body["parent_message_uuid"], "m1");
-        assert_eq!(body["files"], json!(["f1"]));
-        assert_eq!(body["rendering_mode"], "messages");
-    }
-
-    #[test]
-    fn a_cloudflare_page_is_a_browser_check_not_a_wall_of_html() {
-        let page = r#"<!DOCTYPE html><html><head><title>Just a moment...</title></head><body><script src="/cdn-cgi/challenge-platform/h/b"></script></body></html>"#;
-        let refused = refusal(StatusCode::FORBIDDEN, false, page);
-        assert_eq!(refused, Refusal::Challenge);
-        assert!(!refused.to_string().contains('<'));
-        assert_eq!(
-            refusal(StatusCode::FORBIDDEN, true, ""),
-            Refusal::Challenge,
-            "Cloudflare's header says so too"
-        );
-    }
-
-    #[test]
-    fn a_missing_conversation_is_told_apart() {
-        let body = r#"{"type":"error","error":{"type":"not_found_error","message":"This conversation could not be found.","details":{"error_code":"chat_conversation_not_found"}}}"#;
-        assert_eq!(
-            refusal(StatusCode::NOT_FOUND, false, body),
-            Refusal::ConversationGone
-        );
-    }
-
-    #[test]
-    fn a_usage_limit_says_when_it_resets() {
-        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"{\"type\":\"exceeded_limit\",\"representativeClaim\":\"five_hour\",\"resetsAt\":1792620000}"}}"#;
-        assert_eq!(
-            refusal(StatusCode::TOO_MANY_REQUESTS, false, body),
-            Refusal::UsageLimit {
-                resets_at: Some(1_792_620_000_000),
-                message: "session usage limit".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn a_concurrency_limit_is_not_exhausted_usage() {
-        let body = json!({"error":{"type":"rate_limit_error", "message":json!({"type":"exceeded_limit", "representativeClaim":"concurrents"}).to_string()}});
-        assert_eq!(
-            refusal(StatusCode::TOO_MANY_REQUESTS, false, &body.to_string()),
-            Refusal::RateLimited(
-                "Claude.ai has too many active responses. Try again shortly.".to_owned()
-            )
-        );
-    }
-
-    #[test]
-    fn an_unclassified_429_keeps_the_reason_and_does_not_claim_spent_usage() {
-        let body = r#"{"error":{"type":"rate_limit_error","message":"Please slow down"}}"#;
-        assert_eq!(
-            refusal(StatusCode::TOO_MANY_REQUESTS, false, body),
-            Refusal::RateLimited("Claude.ai temporarily limited this request (HTTP 429). Provider message: Please slow down".to_owned())
-        );
-    }
-
-    #[test]
-    fn an_unknown_answer_is_quoted_short() {
-        let long = "x".repeat(2000);
-        let Refusal::Other(message) = refusal(StatusCode::BAD_REQUEST, false, &long) else {
-            panic!("an other refusal");
-        };
-        assert!(message.chars().count() < 400);
-    }
-}
+#[path = "../../tests/claudeai/transport/unit.rs"]
+mod tests;
 
 #[cfg(test)]
 #[path = "../../tests/claudeai/transport.rs"]

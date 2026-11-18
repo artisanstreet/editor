@@ -1,12 +1,3 @@
-//! The global prompt in each engine's own file (master's
-//! `extension_sync/prompt.rs`).
-//!
-//! Forge remembers what it last wrote to each engine home
-//! (`<home>/.artisan/global-prompt.sha256`). A file still holding that, or
-//! one Forge never wrote, is brought in line (the first takeover backs the
-//! old file up); anything else was edited outside Artisan and is reported,
-//! never overwritten until the user decides.
-
 use super::{paths, remove_file_if_present, write_if_changed};
 use artisan_api::EngineId;
 use sha2::{Digest, Sha256};
@@ -14,32 +5,24 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// One engine's global prompt file as found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptFile {
-    /// The file relative to the engine's home, as the user would look for it.
     pub display: String,
-    /// What the engine reads (an override file wins); `None` without a file.
     pub text: Result<Option<String>, String>,
 }
 
-/// Where one engine's file stands after [`apply_prompt`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PromptApplied {
     Synced,
-    /// Edited outside Artisan: what it says now.
     Drifted(String),
-    /// Why it couldn't be read or written.
     Failed(String),
 }
 
-/// Line endings and surrounding blank space don't make two prompts differ.
 #[must_use]
 pub fn normalize_prompt(text: &str) -> String {
     text.replace("\r\n", "\n").trim().to_owned()
 }
 
-/// Lowercase hexadecimal SHA-256.
 #[must_use]
 pub fn prompt_digest(text: &str) -> String {
     hex::encode(Sha256::digest(text.as_bytes()))
@@ -57,8 +40,6 @@ fn read_text(path: &Path) -> io::Result<Option<String>> {
     }
 }
 
-/// The file the engine reads: an override (Codex's `AGENTS.override.md`)
-/// when present, else its prompt file.
 fn source(engine: EngineId, home: &Path) -> Option<(PathBuf, Vec<PathBuf>, PathBuf)> {
     let paths = paths(engine, home)?;
     let overrides: Vec<PathBuf> = paths
@@ -74,7 +55,6 @@ fn source(engine: EngineId, home: &Path) -> Option<(PathBuf, Vec<PathBuf>, PathB
     Some((read, overrides, paths.prompt))
 }
 
-/// Reads an engine's global prompt; `None` for an engine without one.
 #[must_use]
 pub fn read_prompt_file(engine: EngineId, home: &Path) -> Option<PromptFile> {
     let (read, _, _) = source(engine, home)?;
@@ -85,7 +65,6 @@ pub fn read_prompt_file(engine: EngineId, home: &Path) -> Option<PromptFile> {
     })
 }
 
-/// Inspects the effective prompt without reconciling or writing any files.
 #[must_use]
 pub fn inspect_prompt(engine: EngineId, home: &Path, canonical: &str) -> Option<PromptApplied> {
     let (read, overrides, _) = source(engine, home)?;
@@ -244,26 +223,8 @@ fn back_up(path: &Path, backups: &Path, stamp: artisan_api::Timestamp) -> io::Re
 }
 
 #[cfg(test)]
-mod inspection_tests {
-    use super::*;
-    #[test]
-    fn readonly_inspection_never_creates_or_reconciles_prompt_files() {
-        let home = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            inspect_prompt(EngineId::Claude, home.path(), ""),
-            Some(PromptApplied::Synced)
-        ));
-        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
-        let file = home.path().join(".claude/CLAUDE.md");
-        fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(&file, "external prompt").unwrap();
-        assert!(
-            matches!(inspect_prompt(EngineId::Claude, home.path(), "canonical"), Some(PromptApplied::Drifted(text)) if text == "external prompt")
-        );
-        assert_eq!(fs::read_to_string(file).unwrap(), "external prompt");
-        assert!(!home.path().join(".artisan").exists());
-    }
-}
+#[path = "../../tests/customise/prompt/inspection.rs"]
+mod inspection_tests;
 
 #[cfg(test)]
 #[path = "../../tests/customise/prompt.rs"]

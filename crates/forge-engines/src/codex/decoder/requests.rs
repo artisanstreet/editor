@@ -1,6 +1,3 @@
-//! What Codex asks the client: approvals, which ride on the item they gate,
-//! user-input questions, questions inside agent messages, and the replies.
-
 use super::{Decoder, Scope, display_command};
 use crate::EngineEvent;
 use crate::codex::protocol::{AsyncQuestion, Request, UserQuestion};
@@ -11,35 +8,24 @@ use artisan_api::{
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// Approval requests by the item they gate, oldest first: the item shows
-/// the first until it is answered or Codex settles it.
 pub(super) type Approvals = HashMap<String, VecDeque<Asked>>;
 
-/// Questions waiting for the user, by item key.
 pub(super) type Questions = HashMap<String, Asking>;
 
 pub(super) struct Asked {
     rpc: Value,
     reply: Reply,
     approval: Approval,
-    /// The item exists only for this request (permissions asked outside
-    /// any item): the decision settles it.
     standalone: bool,
 }
 
-/// How a decision goes back to Codex.
 enum Reply {
-    /// Commands and file changes take a decision word.
     Decision,
-    /// Permissions are granted back as asked, minus nulls. Asked outside
-    /// any item, they get an item of their own.
     Permissions { requested: Value, standalone: bool },
 }
 
 pub(super) enum Asking {
-    /// `item/tool/requestUserInput`, answered by question id.
     Request { rpc: Value, ids: Vec<String> },
-    /// Questions inside an agent message; the answer goes back as a message.
     Message { texts: Vec<String> },
 }
 
@@ -204,7 +190,6 @@ impl Decoder {
                 self.ask(&key, scope, approval, request.reason, rpc, reply, host, out);
             }
             (Request::UserInput(request), Some(scope), Some(key)) => {
-                // Nothing asked: answered as it is, nothing to show.
                 if request.questions.is_empty() {
                     self.reply(rpc, json!({ "answers": {} }));
                     return;
@@ -243,8 +228,6 @@ impl Decoder {
                 self.questions.insert(key, Asking::Request { rpc, ids });
             }
             (Request::Elicitation(request), scope, _) => {
-                // Artisan has no form for MCP elicitation yet; say so and
-                // let the server go on without the input.
                 let text = format!(
                     "{} asked for input Artisan can't show yet: {}",
                     request.server_name, request.message
@@ -271,9 +254,6 @@ impl Decoder {
         }
     }
 
-    /// Puts an approval on the item it gates, creating the item from the
-    /// request when Codex asks before announcing it. A second request for
-    /// the same item waits behind the first.
     #[expect(
         clippy::too_many_arguments,
         reason = "an approval carries its item, request and reply"
@@ -305,9 +285,6 @@ impl Decoder {
         let approval = Approval {
             request,
             reason: reason.map(Into::into),
-            // Codex lists fewer in `availableDecisions`, but takes all four
-            // (verified on 0.162.1: `decline` declines the call and
-            // `acceptForSession` skips the next identical prompt).
             options: vec![
                 Decision::AllowOnce,
                 Decision::AllowAlways,
@@ -470,7 +447,6 @@ impl Decoder {
         if let ItemKind::Question { answers, .. } = &mut tracked.kind {
             *answers = Some(given.to_vec().into());
         }
-        // Skipping every question declines them, as with the other engines.
         let skipped = given.iter().all(Option::is_none);
         tracked.status = tracked.status.advance(if skipped {
             Status::Declined
@@ -480,8 +456,6 @@ impl Decoder {
         vec![self.event(key)]
     }
 
-    /// Codex settled a request without us (the turn ended, or it was
-    /// auto-reviewed): the item stops waiting on it.
     pub(super) fn resolved(&mut self, rpc: &Value, out: &mut Vec<EngineEvent>) {
         let approval = self.approvals.iter().find_map(|(key, queue)| {
             let at = queue.iter().position(|asked| asked.rpc == *rpc)?;
@@ -532,8 +506,6 @@ impl Decoder {
         }
     }
 
-    /// An agent message may carry questions it doesn't wait for; answers
-    /// go back as the next user message.
     pub(super) fn async_questions(
         &mut self,
         key: &str,
@@ -541,7 +513,6 @@ impl Decoder {
         questions: Option<Value>,
         out: &mut Vec<EngineEvent>,
     ) {
-        // `null` when the message asks nothing.
         let Some(questions) = questions.filter(|value| !value.is_null()) else {
             return;
         };
@@ -611,8 +582,6 @@ impl Decoder {
     }
 }
 
-/// `requestUserInput` prompts as questions, or `None` when one lacks its id,
-/// its text or an option label: never a question nobody can answer.
 fn user_questions(questions: Vec<UserQuestion>) -> Option<Vec<Question>> {
     let questions = questions
         .into_iter()

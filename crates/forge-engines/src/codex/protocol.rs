@@ -1,18 +1,7 @@
-//! The `codex app-server` frames Artisan reads, as typed structs: each line
-//! is parsed once into these and decoded from them.
-//!
-//! Shapes follow Codex rust-v0.162.1's generated v2 schema
-//! (`codex-rs/app-server-protocol/schema/typescript/v2`) and the recordings
-//! in `transcripts/codex`. Unknown fields are ignored and unknown methods,
-//! item types and statuses parse as `Unknown`, so a newer Codex adding
-//! something never fails a run. Fields the decoder can do without, or
-//! checks itself so it can say what was missing, are `Option`.
-
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// A collection Codex may send as `null` when empty.
 fn nullable<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -21,7 +10,6 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-/// One line, before its params are read.
 #[derive(Deserialize)]
 pub(super) struct Frame {
     pub method: Option<String>,
@@ -32,7 +20,6 @@ pub(super) struct Frame {
     pub error: Option<Value>,
 }
 
-/// A notification Codex sends.
 pub(super) enum Notification {
     ThreadStarted(ThreadStarted),
     ThreadNameUpdated(ThreadNameUpdated),
@@ -40,7 +27,6 @@ pub(super) enum Notification {
     TurnCompleted(TurnCompleted),
     ItemStarted(ItemNotice),
     ItemCompleted(ItemNotice),
-    /// `item/agentMessage/delta` and `item/plan/delta`.
     TextDelta(Delta),
     ReasoningDelta(Delta),
     ReasoningPart(ReasoningPart),
@@ -55,7 +41,6 @@ pub(super) enum Notification {
     Error(ErrorNotice),
     Warning(Warning),
     RequestResolved(RequestResolved),
-    /// A method Artisan doesn't read.
     Unknown,
 }
 
@@ -89,7 +74,6 @@ impl Notification {
         })
     }
 
-    /// The thread it concerns; `None` for one about no thread in particular.
     pub(super) fn thread(&self) -> Option<&str> {
         Some(match self {
             Self::ThreadStarted(_) | Self::Unknown => return None,
@@ -174,26 +158,20 @@ pub(super) enum TurnStatus {
     Failed,
 }
 
-/// Codex's error shape, on failed turns and `error` notifications.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct CodexError {
     pub message: Option<String>,
-    /// A code such as `cyberPolicy`; objects for other kinds.
     pub codex_error_info: Option<Value>,
 }
 
 impl CodexError {
-    /// Policy blocks (`cyberPolicy`, `misalignmentPolicyViolation`, …).
     pub(super) fn is_refusal(&self) -> bool {
         self.codex_error_info
             .as_ref()
             .and_then(Value::as_str)
             .is_some_and(|code| code.ends_with("Policy") || code.ends_with("PolicyViolation"))
     }
-    /// Whether the failure passes by itself. Codex's own retries already
-    /// ran; what is left is capacity or connection trouble, or the plan's
-    /// usage running out (whose reset Codex doesn't say here).
     pub(super) fn retry(&self) -> Option<crate::Retry> {
         let transient = |status: &Value| {
             status["httpStatusCode"]
@@ -232,7 +210,6 @@ pub(super) struct ItemNotice {
     pub item: Item,
 }
 
-/// An item of a thread, by its `type`.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub(super) enum Item {
@@ -240,7 +217,6 @@ pub(super) enum Item {
         id: String,
         text: Option<String>,
         phase: Option<MessagePhase>,
-        /// Questions the message asks without waiting; `null` when none.
         questions: Option<Value>,
     },
     Plan {
@@ -331,12 +307,10 @@ pub(super) enum UserInput {
     Text {
         text: String,
     },
-    /// Images, audio, skills and mentions carry no authored text.
     #[serde(other)]
     Other,
 }
 
-/// `CommandExecutionStatus` and `PatchApplyStatus`.
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) enum ExecutionStatus {
@@ -348,7 +322,6 @@ pub(super) enum ExecutionStatus {
     Unknown,
 }
 
-/// `McpToolCallStatus` and `DynamicToolCallStatus`: no `declined`.
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) enum CallStatus {
@@ -372,15 +345,11 @@ pub(super) struct FileChange {
 pub(super) enum PatchKind {
     Add,
     Delete,
-    Update {
-        /// Snake case on the wire, unlike the rest of the schema.
-        move_path: Option<String>,
-    },
+    Update { move_path: Option<String> },
 }
 
 #[derive(Deserialize)]
 pub(super) struct McpResult {
-    /// MCP content blocks.
     #[serde(default)]
     pub content: Value,
 }
@@ -484,7 +453,6 @@ pub(super) struct McpProgress {
 #[serde(rename_all = "camelCase")]
 pub(super) struct PlanUpdated {
     pub thread_id: String,
-    /// Read entry by entry, so a malformed plan is reported, not skipped.
     #[serde(default)]
     pub plan: Value,
 }
@@ -513,7 +481,6 @@ pub(super) struct TokenUsageUpdated {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TokenUsage {
-    /// One model call; `total` is the whole thread, history included.
     pub last: TokenCounts,
     pub model_context_window: Option<u64>,
 }
@@ -525,7 +492,6 @@ pub(super) struct TokenCounts {
     pub total_tokens: u64,
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
-    /// Left out by Codex versions that don't count cache writes.
     #[serde(default)]
     pub cache_write_input_tokens: u64,
     pub output_tokens: u64,
@@ -539,7 +505,6 @@ pub(super) struct Rerouted {
     pub turn_id: String,
     pub from_model: String,
     pub to_model: String,
-    /// `highRiskCyberActivity` on 0.162.1.
     pub reason: String,
 }
 
@@ -561,8 +526,6 @@ pub(super) struct GoalUpdated {
 #[derive(Deserialize)]
 pub(super) struct Goal {
     pub objective: String,
-    /// `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`,
-    /// `complete`.
     pub status: String,
 }
 
@@ -589,19 +552,16 @@ pub(super) struct RequestResolved {
     pub request_id: Value,
 }
 
-/// A request Codex makes of the client.
 pub(super) enum Request {
     CommandApproval(CommandApproval),
     FileChangeApproval(Approval),
     PermissionsApproval(PermissionsApproval),
     UserInput(UserInputRequest),
     Elicitation(Elicitation),
-    /// A method Artisan doesn't serve.
     Unknown,
 }
 
 impl Request {
-    /// The thread it concerns; MCP servers may ask outside any thread.
     pub(super) fn thread(&self) -> Option<&str> {
         match self {
             Self::CommandApproval(request) => Some(&request.thread_id),
@@ -639,7 +599,6 @@ pub(super) struct CommandApproval {
     pub command: Option<String>,
     pub cwd: Option<String>,
     pub reason: Option<String>,
-    /// `command`, or `writeStdin` for input to a running command.
     pub kind: Option<String>,
 }
 
@@ -657,7 +616,6 @@ pub(super) struct PermissionsApproval {
     pub thread_id: String,
     pub item_id: Option<String>,
     pub reason: Option<String>,
-    /// Granted back as asked, minus nulls.
     #[serde(default)]
     pub permissions: Value,
 }
@@ -667,7 +625,6 @@ pub(super) struct PermissionsApproval {
 pub(super) struct UserInputRequest {
     pub thread_id: String,
     pub item_id: Option<String>,
-    /// Codex 0.162.1 always sends it; a request is answered either way.
     #[serde(default = "blocking")]
     pub is_blocking: bool,
     #[serde(default, deserialize_with = "nullable")]
@@ -700,11 +657,9 @@ pub(super) struct Elicitation {
     pub message: String,
 }
 
-/// Questions inside an agent message.
 #[derive(Deserialize)]
 pub(super) struct AsyncQuestion {
     pub title: String,
-    /// `null` for a question answered in the user's own words.
     #[serde(default, deserialize_with = "nullable")]
     pub options: Vec<String>,
 }

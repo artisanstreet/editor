@@ -1,10 +1,3 @@
-//! Which skills go into the engines, and where each stands in each engine.
-//!
-//! Three sources (master's `extension_sync`): Artisan's own skills, embedded
-//! in Forge from the repository's `skills/`; the user's own, one folder per
-//! skill in `<data>/extensions/skills`; and skills an engine has in its own
-//! skills folder, which Forge only reports until the user adopts them.
-
 use super::{COPY_MARKER, Entry, inspect, paths, skill_metadata, skill_metadata_in};
 use super::{Customisation, ImportError, copy_dir, import_folder, read_skill_header};
 use super::{discard_leftover, remove_file_if_present, write_if_changed};
@@ -89,8 +82,6 @@ fn catalog_metadata(skill: &CatalogSkill) -> usize {
             .sum::<usize>()
 }
 
-/// One first-party skill: its folder under the repository's `skills/` and
-/// every file in it.
 struct FirstParty {
     folder: &'static str,
     files: &'static [(&'static str, &'static [u8])],
@@ -110,17 +101,14 @@ const FIRST_PARTY: &[FirstParty] = &[FirstParty {
     ],
 }];
 
-/// The id of a first-party skill.
 fn first_party_id(folder: &str) -> String {
     format!("artisan.{folder}")
 }
 
-/// The id of a skill in the user's skills folder.
 fn user_id(folder: &str) -> String {
     format!("local.{folder}")
 }
 
-/// `<data>/extensions/artisan`: where Forge writes its own skills out.
 fn first_party_root(skills_dir: &Path) -> PathBuf {
     skills_dir.parent().map_or_else(
         || skills_dir.join(".artisan"),
@@ -128,7 +116,6 @@ fn first_party_root(skills_dir: &Path) -> PathBuf {
     )
 }
 
-/// `<data>/extensions/backups`: engines' copies of adopted skills.
 fn backups_root(skills_dir: &Path) -> PathBuf {
     skills_dir.parent().map_or_else(
         || skills_dir.join(".backups"),
@@ -136,9 +123,6 @@ fn backups_root(skills_dir: &Path) -> PathBuf {
     )
 }
 
-/// `<data>/extensions/quarantine`: skills found in an engine's skills folder
-/// that Artisan didn't install, one folder per engine laid out like that
-/// engine's skills folder.
 fn quarantine_root(skills_dir: &Path) -> PathBuf {
     skills_dir.parent().map_or_else(
         || skills_dir.join(".quarantine"),
@@ -146,11 +130,8 @@ fn quarantine_root(skills_dir: &Path) -> PathBuf {
     )
 }
 
-/// How long a quarantined skill waits for Install or Discard.
 const QUARANTINE_DAYS: u64 = 30;
 
-/// When `name` entered the quarantine: a hidden file beside it, so the
-/// skill's own files stay as they were.
 fn quarantined_at(engine_quarantine: &Path, name: &str) -> PathBuf {
     engine_quarantine.join(format!(".{name}.at"))
 }
@@ -271,8 +252,6 @@ fn recover_quarantine(engine: EngineId, root: &Path) {
     }
 }
 
-/// The repository's `skills/` in a development build, linked directly so an
-/// edit reaches the engines without a rebuild.
 fn repository_root() -> Option<PathBuf> {
     if !cfg!(debug_assertions) {
         return None;
@@ -296,10 +275,8 @@ fn without_verbatim_prefix(path: &Path) -> PathBuf {
         .map_or_else(|| path.to_path_buf(), PathBuf::from)
 }
 
-/// Every folder Forge links engines' skills to: links into them are Forge's.
 pub(super) fn owned_roots(skills_dir: &Path) -> Vec<PathBuf> {
     let mut roots = vec![skills_dir.to_path_buf(), first_party_root(skills_dir)];
-    // Links into the old content-addressed store are Forge's too.
     if let Some(extensions) = skills_dir.parent() {
         roots.push(extensions.join("store"));
     }
@@ -307,7 +284,6 @@ pub(super) fn owned_roots(skills_dir: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// A skill Forge manages.
 struct Managed {
     id: String,
     name: String,
@@ -315,12 +291,9 @@ struct Managed {
     origin: SkillOrigin,
     folder: PathBuf,
     enabled: bool,
-    /// A first-party skill already has this name; this one isn't placed.
     shadowed: bool,
 }
 
-/// Writes the embedded first-party skills out (or, in a development build,
-/// points at the repository) and returns `(folder name, folder)`.
 fn first_party(skills_dir: &Path, materialize: bool) -> io::Result<Vec<(String, PathBuf)>> {
     let repository = repository_root();
     let root = first_party_root(skills_dir);
@@ -465,7 +438,6 @@ pub fn enabled_skills(c: &Customisation) -> Result<Vec<artisan_api::Skill>, Read
     Ok(skills)
 }
 
-/// A skill folder an engine has on its own.
 struct Found {
     engine: EngineId,
     folder: PathBuf,
@@ -477,7 +449,6 @@ struct Found {
     byte_count: u64,
 }
 
-/// Real skill folders in the engines' skills folders that aren't Forge's.
 fn discovered(
     homes: &[(EngineId, Option<PathBuf>)],
     quarantine: Option<&Path>,
@@ -487,8 +458,6 @@ fn discovered(
 ) -> Result<Vec<Found>, ReadSkillsError> {
     let mut found = Vec::new();
     let mut budget = CatalogBudget::default();
-    // Between passes a foreign skill can still sit in the engine's folder;
-    // after one it is in the quarantine. Both are listed for Install.
     let folders = homes.iter().flat_map(|(engine, home)| {
         let native = home
             .as_deref()
@@ -553,8 +522,6 @@ fn discovered(
     Ok(found)
 }
 
-/// Bounded, link-free skill content. The engine may read links; adoption
-/// explicitly rejects them so the managed copy cannot silently omit assets.
 pub(super) fn entries(folder: &Path) -> io::Result<Vec<walkdir::DirEntry>> {
     if fs::symlink_metadata(folder)?.file_type().is_symlink() {
         return Err(io::Error::new(
@@ -789,7 +756,6 @@ fn unavailable_reason(engine: EngineId) -> String {
     )
 }
 
-/// Where a managed skill stands in one engine.
 fn managed_state(
     skill: &Managed,
     engine: EngineId,
@@ -848,8 +814,6 @@ fn managed_state(
     }
 }
 
-/// The skills engines have on their own; copies with the same name and
-/// files are one skill found in several engines.
 fn discovered_entries(
     homes: &[(EngineId, Option<PathBuf>)],
     quarantine: &Path,
@@ -1386,8 +1350,6 @@ fn move_folder(from: &Path, to: &Path) -> io::Result<()> {
                 return Err(error);
             }
             if let Err(error) = fs::remove_dir_all(from) {
-                // Restore any entries already removed; keep the complete backup
-                // if the source itself cannot be repaired.
                 if let Err(restore) = copy_dir(to, from) {
                     return Err(io::Error::new(
                         restore.kind(),
@@ -1410,456 +1372,34 @@ fn move_folder(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod measurement_tests {
-    use super::*;
-    #[test]
-    fn invalid_native_metadata_is_never_adoptable() {
-        let directory = tempfile::tempdir().unwrap();
-        let home = directory.path().join("home");
-        let native = home.join(".claude/skills/broken");
-        std::fs::create_dir_all(&native).unwrap();
-        std::fs::write(
-            native.join("SKILL.md"),
-            "---\nname: [not a scalar]\ndescription: bad\n---\n",
-        )
-        .unwrap();
-        let customisation = Customisation {
-            skills_dir: directory.path().join("managed"),
-            ..Default::default()
-        };
-        let homes = [(EngineId::Claude, Some(home))];
-        assert!(skill_catalog(&homes, &customisation).unwrap().is_empty());
-        let digest = measure(&native).unwrap().0;
-        assert!(adopt_skill(&homes, &customisation, &discovered_id("broken", &digest)).is_err());
-        assert!(!customisation.skills_dir.exists());
-        assert!(native.is_dir());
-    }
-
-    #[test]
-    fn catalog_generation_reuses_content_but_adoption_always_revalidates_it() {
-        let folder = tempfile::tempdir().unwrap();
-        let file = folder.path().join("resource.txt");
-        fs::write(&file, "abc").unwrap();
-        let modified = fs::metadata(&file).unwrap().modified().unwrap();
-        let first = measure_inner(folder.path(), true).unwrap();
-        assert_eq!(measure_inner(folder.path(), true).unwrap(), first);
-        fs::write(&file, "xyz").unwrap();
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&file)
-            .unwrap()
-            .set_modified(modified)
-            .unwrap();
-        // An external tool may preserve timestamps; adoption must not trust cache.
-        assert_ne!(measure(folder.path()).unwrap().0, first.0);
-        fs::write(&file, "a longer resource").unwrap();
-        assert_ne!(measure_inner(folder.path(), true).unwrap(), first);
-    }
-}
+#[path = "../../tests/customise/skills/measurement.rs"]
+mod measurement_tests;
 
 #[cfg(test)]
 #[cfg(unix)]
-mod managed_count_tests {
-    use super::*;
-    #[test]
-    fn unsupported_managed_tree_does_not_publish_fabricated_zero_counts() {
-        let folder = tempfile::tempdir().unwrap();
-        let root = folder.path().join("skills");
-        let skill = root.join("demo");
-        fs::create_dir_all(&skill).unwrap();
-        fs::write(
-            skill.join("SKILL.md"),
-            "---\nname: demo\ndescription: Demonstration\n---\n",
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(".", skill.join("cycle")).unwrap();
-        let settings = Customisation {
-            skills_dir: root,
-            ..Customisation::default()
-        };
-        let error = skill_catalog(&[], &settings).unwrap_err();
-        assert!(matches!(error, ReadSkillsError::Inspect { .. }), "{error}");
-    }
-}
+#[path = "../../tests/customise/skills/managed_count.rs"]
+mod managed_count_tests;
 
 #[cfg(test)]
-mod admission_tests {
-    use super::*;
-    fn settings(root: &Path) -> Customisation {
-        Customisation {
-            skills_dir: root.to_owned(),
-            ..Customisation::default()
-        }
-    }
-    #[test]
-    fn empty_native_directories_do_not_consume_metadata_admission() {
-        let folder = tempfile::tempdir().unwrap();
-        let home = folder.path().join("home");
-        let native = home.join(".claude/skills");
-        for i in 0..=MAX_CATALOG_RECORDS {
-            fs::create_dir_all(native.join(format!("empty-{i}"))).unwrap();
-        }
-        assert!(
-            skill_catalog(
-                &[(EngineId::Claude, Some(home))],
-                &settings(&folder.path().join("managed"))
-            )
-            .unwrap()
-            .is_empty()
-        );
-    }
-    #[test]
-    fn cumulative_native_metadata_is_an_explicit_error_not_a_truncated_catalog() {
-        let folder = tempfile::tempdir().unwrap();
-        let home = folder.path().join("home");
-        let native = home.join(".claude/skills");
-        for i in 0..100 {
-            let skill = native.join(format!("skill-{i}"));
-            fs::create_dir_all(&skill).unwrap();
-            fs::write(
-                skill.join("SKILL.md"),
-                format!(
-                    "---\nname: skill-{i}\ndescription: {}\n---\n",
-                    "x".repeat(48 * 1024)
-                ),
-            )
-            .unwrap();
-        }
-        let error = skill_catalog(
-            &[(EngineId::Claude, Some(home))],
-            &settings(&folder.path().join("managed")),
-        )
-        .unwrap_err();
-        assert!(matches!(error, ReadSkillsError::Paging { .. }), "{error}");
-        assert!(native.join("skill-99/SKILL.md").exists());
-    }
-    #[test]
-    fn selecting_native_folder_avoids_hashing_unrelated_catalogs() {
-        let folder = tempfile::tempdir().unwrap();
-        let home = folder.path().join("home");
-        let native = home.join(".claude/skills");
-        for name in ["selected", "unrelated"] {
-            let skill = native.join(name);
-            fs::create_dir_all(&skill).unwrap();
-            fs::write(
-                skill.join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: Native\n---\n"),
-            )
-            .unwrap();
-        }
-        fs::write(
-            native.join("unrelated/content.bin"),
-            b"unselected native content",
-        )
-        .unwrap();
-        let homes = [(EngineId::Claude, Some(home))];
-        assert_eq!(discovered(&homes, None, &[], false, None).unwrap().len(), 2);
-        let selected = discovered(&homes, None, &[], false, Some("selected")).unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].folder_name, "selected");
-    }
-}
+#[path = "../../tests/customise/skills/admission.rs"]
+mod admission_tests;
 
 #[cfg(test)]
-mod directory_failure_tests {
-    use super::*;
-    #[test]
-    fn inaccessible_skill_roots_cannot_look_like_empty_desired_state() {
-        let folder = tempfile::tempdir().unwrap();
-        let root = folder.path().join("managed");
-        fs::write(&root, b"not a directory").unwrap();
-        let settings = Customisation {
-            skills_dir: root,
-            ..Customisation::default()
-        };
-        assert!(skill_catalog(&[], &settings).is_err());
-        assert!(
-            wanted(&settings).is_err(),
-            "reconciliation must not delete links after a failed source read"
-        );
-        let home = folder.path().join("home");
-        fs::create_dir_all(home.join(".claude")).unwrap();
-        fs::write(home.join(".claude/skills"), b"not a directory").unwrap();
-        let settings = Customisation {
-            skills_dir: folder.path().join("missing"),
-            ..Customisation::default()
-        };
-        assert!(skill_catalog(&[(EngineId::Claude, Some(home))], &settings).is_err());
-    }
-}
+#[path = "../../tests/customise/skills/directory_failure.rs"]
+mod directory_failure_tests;
 
 #[cfg(test)]
 #[cfg(target_os = "linux")]
-mod adoption_failure_tests {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
-
-    const SKILL: &str =
-        "---\nname: recoverable\ndescription: adoption fixture\n---\nKeep every instruction.\n";
-
-    fn require_enforced_permissions() {
-        let status = fs::read_to_string("/proc/self/status").unwrap();
-        assert!(
-            !status.lines().any(|line| line.starts_with("Uid:\t0\t")),
-            "this fixture makes a folder read-only, which root ignores; run it as an unprivileged user"
-        );
-    }
-
-    fn other_filesystem_than(path: &Path) -> tempfile::TempDir {
-        use std::os::unix::fs::MetadataExt as _;
-        let other = tempfile::tempdir_in("/dev/shm")
-            .expect("this fixture needs /dev/shm for a second filesystem");
-        assert_ne!(
-            fs::metadata(other.path()).unwrap().dev(),
-            fs::metadata(path).unwrap().dev(),
-            "this fixture needs /dev/shm on a different filesystem than the temporary directory"
-        );
-        other
-    }
-
-    #[test]
-    fn a_later_backup_failure_restores_every_original_and_allows_normal_retry() {
-        require_enforced_permissions();
-        let dir = tempfile::tempdir().unwrap();
-        let claude = dir.path().join("claude");
-        let codex = dir.path().join("codex");
-        let claude_copy = claude.join(".claude/skills/recoverable");
-        let codex_copy = codex.join(".codex/skills/recoverable");
-        for copy in [&claude_copy, &codex_copy] {
-            fs::create_dir_all(copy).unwrap();
-            fs::write(copy.join("SKILL.md"), SKILL).unwrap();
-        }
-        let config = Customisation {
-            skills_dir: dir.path().join("extensions/skills"),
-            ..Default::default()
-        };
-        let homes = [
-            (EngineId::Claude, Some(claude)),
-            (EngineId::Codex, Some(codex)),
-        ];
-        let digest = measure(&claude_copy).unwrap().0;
-        let id = discovered_id("recoverable", &digest);
-        let parent = codex_copy.parent().unwrap();
-        let permissions = fs::metadata(parent).unwrap().permissions();
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o555)).unwrap();
-        let result = adopt_skill(&homes, &config, &id);
-        fs::set_permissions(parent, permissions).unwrap();
-        assert!(
-            result.is_err(),
-            "the second backup must fail after the first moved"
-        );
-        assert!(!config.skills_dir.join("recoverable").exists());
-        for copy in [&claude_copy, &codex_copy] {
-            assert_eq!(fs::read_to_string(copy.join("SKILL.md")).unwrap(), SKILL);
-        }
-        assert_eq!(
-            fs::read_dir(backups_root(&config.skills_dir))
-                .unwrap()
-                .count(),
-            0,
-            "successful rollback leaves no stranded backup"
-        );
-        assert_eq!(adopt_skill(&homes, &config, &id).unwrap(), "recoverable");
-        assert_eq!(
-            fs::read_to_string(config.skills_dir.join("recoverable/SKILL.md")).unwrap(),
-            SKILL
-        );
-        assert!(!claude_copy.exists() && !codex_copy.exists());
-        assert_eq!(
-            fs::read_dir(backups_root(&config.skills_dir))
-                .unwrap()
-                .count(),
-            2
-        );
-    }
-
-    #[test]
-    fn cross_device_partial_delete_failure_restores_content_before_retry() {
-        require_enforced_permissions();
-        let source_root = tempfile::tempdir().unwrap();
-        let backup_root = other_filesystem_than(source_root.path());
-        let source = source_root.path().join("recoverable");
-        let backup = backup_root.path().join("backup");
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join("SKILL.md"), SKILL).unwrap();
-        let permissions = fs::metadata(source_root.path()).unwrap().permissions();
-        fs::set_permissions(source_root.path(), fs::Permissions::from_mode(0o555)).unwrap();
-        let result = move_folder(&source, &backup);
-        fs::set_permissions(source_root.path(), permissions).unwrap();
-        let error = result.unwrap_err();
-        assert!(
-            error.to_string().contains("original source restored"),
-            "must exercise cross-device copy followed by failed deletion and successful restoration: {error}"
-        );
-        assert_eq!(fs::read_to_string(source.join("SKILL.md")).unwrap(), SKILL);
-        assert!(!backup.exists());
-        move_folder(&source, &backup).unwrap();
-        assert!(!source.exists());
-        assert_eq!(fs::read_to_string(backup.join("SKILL.md")).unwrap(), SKILL);
-    }
-}
+#[path = "../../tests/customise/skills/adoption_failure.rs"]
+mod adoption_failure_tests;
 
 #[cfg(test)]
-mod install_tests {
-    use super::*;
-
-    fn skill(folder: &Path, description: &str) {
-        fs::create_dir_all(folder).unwrap();
-        fs::write(
-            folder.join("SKILL.md"),
-            format!("---\nname: release-notes\ndescription: {description}\n---\n"),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn an_installed_skill_reaches_every_engine_and_replace_keeps_a_backup() {
-        let dir = tempfile::tempdir().unwrap();
-        let homes = [
-            (EngineId::Claude, Some(dir.path().join("claude"))),
-            (EngineId::Codex, Some(dir.path().join("codex"))),
-        ];
-        let config = Customisation {
-            skills_dir: dir.path().join("extensions/skills"),
-            ..Default::default()
-        };
-        let draft = dir.path().join("project/release-notes");
-        skill(&draft, "First");
-
-        assert_eq!(
-            install_skill(&homes, &config, &draft, false).unwrap(),
-            "release-notes"
-        );
-        super::super::reconcile_skills(&homes, &config).unwrap();
-        for linked in [
-            dir.path()
-                .join("claude/.claude/skills/release-notes/SKILL.md"),
-            dir.path()
-                .join("codex/.codex/skills/release-notes/SKILL.md"),
-        ] {
-            assert!(fs::read_to_string(linked).unwrap().contains("First"));
-        }
-
-        skill(&draft, "Second");
-        let error = install_skill(&homes, &config, &draft, false).unwrap_err();
-        assert!(matches!(error, InstallSkillError::Exists { .. }), "{error}");
-        install_skill(&homes, &config, &draft, true).unwrap();
-        let installed = config.skills_dir.join("release-notes/SKILL.md");
-        assert!(fs::read_to_string(installed).unwrap().contains("Second"));
-        assert_eq!(
-            fs::read_dir(backups_root(&config.skills_dir))
-                .unwrap()
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn a_skill_written_into_an_engine_folder_is_refused_with_the_way_out() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("claude");
-        let config = Customisation {
-            skills_dir: dir.path().join("extensions/skills"),
-            ..Default::default()
-        };
-        let native = home.join(".claude/skills/release-notes");
-        skill(&native, "Written in place");
-
-        let error =
-            install_skill(&[(EngineId::Claude, Some(home))], &config, &native, false).unwrap_err();
-        assert!(
-            matches!(error, InstallSkillError::InsideEngine { .. }),
-            "{error}"
-        );
-        assert!(!config.skills_dir.join("release-notes").exists());
-    }
-}
+#[path = "../../tests/customise/skills/install.rs"]
+mod install_tests;
 
 #[cfg(test)]
-mod quarantine_tests {
-    use super::*;
-
-    fn skill(folder: &Path, name: &str) {
-        fs::create_dir_all(folder).unwrap();
-        fs::write(
-            folder.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: {name} things\n---\n"),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn a_skill_artisan_didnt_install_is_quarantined_then_installed_or_discarded() {
-        let dir = tempfile::tempdir().unwrap();
-        let claude = dir.path().join("claude");
-        let codex = dir.path().join("codex");
-        let homes = [
-            (EngineId::Claude, Some(claude.clone())),
-            (EngineId::Codex, Some(codex.clone())),
-        ];
-        let config = Customisation {
-            skills_dir: dir.path().join("extensions/skills"),
-            ..Default::default()
-        };
-        skill(&config.skills_dir.join("pdf"), "pdf");
-        let stray = claude.join(".claude/skills/animation");
-        skill(&stray, "animation");
-        skill(&codex.join(".codex/skills/animation"), "animation");
-        skill(&claude.join(".claude/skills/scratch"), "scratch");
-        let system = codex.join(".codex/skills/.system");
-        skill(&system, "system");
-
-        super::super::reconcile_skills(&homes, &config).unwrap();
-
-        // The engines keep only what Artisan installed, and Codex's own.
-        assert!(!stray.exists());
-        assert!(claude.join(".claude/skills/pdf/SKILL.md").exists());
-        assert!(system.exists());
-        let quarantine = quarantine_root(&config.skills_dir);
-        assert!(quarantine.join("claude/animation/SKILL.md").exists());
-        assert!(quarantine.join("codex/animation/SKILL.md").exists());
-
-        // One entry per skill, from both engines, ready to install.
-        let catalog = skill_catalog(&homes, &config).unwrap();
-        let found: Vec<&CatalogSkill> = catalog
-            .iter()
-            .filter(|skill| skill.origin == SkillOrigin::Discovered)
-            .collect();
-        assert_eq!(found.len(), 2);
-        let animation = found
-            .iter()
-            .find(|skill| skill.name == "animation")
-            .unwrap();
-        assert!(
-            animation
-                .engines
-                .iter()
-                .all(|state| state.status == SkillEngineStatus::Native)
-        );
-
-        assert_eq!(
-            adopt_skill(&homes, &config, &animation.id).unwrap(),
-            "animation"
-        );
-        super::super::reconcile_skills(&homes, &config).unwrap();
-        assert!(claude.join(".claude/skills/animation/SKILL.md").exists());
-        assert!(!quarantine.join("claude/animation").exists());
-
-        let scratch = skill_catalog(&homes, &config)
-            .unwrap()
-            .into_iter()
-            .find(|skill| skill.name == "scratch")
-            .unwrap();
-        discard_skill(&homes, &config, &scratch.id).unwrap();
-        assert!(!quarantine.join("claude/scratch").exists());
-        assert!(
-            skill_catalog(&homes, &config)
-                .unwrap()
-                .iter()
-                .all(|skill| skill.origin != SkillOrigin::Discovered)
-        );
-    }
-}
+#[path = "../../tests/customise/skills/quarantine.rs"]
+mod quarantine_tests;
 
 #[cfg(test)]
 #[path = "../../tests/customise/skills.rs"]

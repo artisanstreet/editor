@@ -1,13 +1,3 @@
-//! Transcript snapshots of the Codex decoder.
-//!
-//! Each transcript is a recorded `codex app-server` session (Codex 0.162.1):
-//! server lines as Codex wrote them, and `{"client": …}` lines for what the
-//! recorder sent. The replay plays the driver's part: it registers each
-//! request so response ids line up, and answers approvals the way the
-//! recording did. `{"answer": {"key", "answer"}}` lines are the user
-//! answering an item (questions; recordings reply to approvals themselves).
-//! Consecutive live appends to one target are merged.
-
 use super::decoder::Decoder;
 use crate::{EngineEvent, Outcome};
 use artisan_api::{Answer, Decision};
@@ -18,31 +8,24 @@ use std::collections::HashMap;
 #[expect(dead_code, reason = "read through the Debug snapshot")]
 enum Step {
     Event(Box<EngineEvent>),
-    /// What the driver writes back to Codex.
     Reply(Value),
-    /// A response to one of the driver's requests.
     Response {
         method: String,
         result: Result<(), String>,
     },
-    /// The root thread's turn ended this way.
     TurnEnd(Outcome),
-    /// A user message the driver sends next (answers to async questions).
     Message(String),
-    /// A line Codex's protocol can't carry: the run fails.
     ProtocolError(String),
 }
 
 fn replay(case: &str) -> Vec<Step> {
     let transcript = crate::transcript_tests::read("codex", case);
     let mut decoder = Decoder::default();
-    // The recorder's `initialize` (id 1) isn't in the transcript.
     decoder.request("initialize", json!({}));
     decoder.take_outbox();
     let mut asked: HashMap<String, String> = HashMap::new();
     let mut steps = Vec::new();
     for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
-        // A line that isn't JSON still goes to the decoder, which fails it.
         let message: Value = serde_json::from_str(line).unwrap_or(Value::Null);
         if let Some(answer) = message.get("answer") {
             let key = answer["key"].as_str().expect("answered key");
@@ -150,54 +133,41 @@ fn subagent_becomes_an_agent_item_owning_its_child_items() {
     insta::assert_debug_snapshot!(replay("subagent"));
 }
 
-/// Lines that aren't JSON-RPC, and a turn end Artisan can't read, fail the
-/// run; notices and items it can't read are skipped.
 #[test]
 fn unreadable_frames_fail_the_run_only_when_the_turn_depends_on_them() {
     insta::assert_debug_snapshot!(replay("malformed"));
 }
 
-/// A completed item missing what it needs is an error, never an empty card.
 #[test]
 fn malformed_items_become_errors_not_empty_cards() {
     insta::assert_debug_snapshot!(replay("malformed-items"));
 }
 
-/// Web actions show what they looked up, keep what they knew, and leave
-/// out what names nothing; a real error still shows.
 #[test]
 fn web_actions_show_their_query_or_address() {
     insta::assert_debug_snapshot!(replay("web-search-actions"));
 }
 
-/// Approvals ride on the item they gate: a second one waits behind the
-/// first, one asked before its item makes the item, and Codex can settle
-/// one itself.
 #[test]
 fn approvals_queue_on_the_item_they_gate() {
     insta::assert_debug_snapshot!(replay("approval-queue"));
 }
 
-/// Questions Codex can't ask are refused with an error; an answer names
-/// the chosen option by id, and the tool call behind it settles it.
 #[test]
 fn user_input_is_answered_by_choice_id() {
     insta::assert_debug_snapshot!(replay("user-input"));
 }
 
-/// A malformed plan keeps the last good one.
 #[test]
 fn plan_updates_replace_the_plan_and_a_malformed_one_is_an_error() {
     insta::assert_debug_snapshot!(replay("plan"));
 }
 
-/// Questions inside an agent message are answered with the next message.
 #[test]
 fn async_questions_are_answered_as_a_message() {
     insta::assert_debug_snapshot!(replay("async-questions"));
 }
 
-/// How the turn ended, from a replayed transcript.
 fn turn_end(case: &str) -> crate::Outcome {
     replay(case)
         .into_iter()
@@ -213,8 +183,6 @@ fn turn_end(case: &str) -> crate::Outcome {
         .expect("the turn ends")
 }
 
-/// "Selected model is at capacity" after Codex's own retries: the turn
-/// fails, and Forge may retry it.
 #[test]
 fn a_turn_failed_at_capacity_can_be_retried() {
     let outcome = turn_end("overloaded");
@@ -222,8 +190,6 @@ fn a_turn_failed_at_capacity_can_be_retried() {
     assert_eq!(outcome.retry(), Some(crate::Retry::Overloaded));
 }
 
-/// A used-up plan fails the turn until the limit resets; Codex doesn't
-/// say when here.
 #[test]
 fn a_turn_failed_on_the_usage_limit_waits_for_the_reset() {
     let outcome = turn_end("usage-limit");
@@ -234,7 +200,6 @@ fn a_turn_failed_on_the_usage_limit_waits_for_the_reset() {
     );
 }
 
-/// A policy refusal is never retried.
 #[test]
 fn a_refused_turn_is_not_retried() {
     assert_eq!(turn_end("notices").retry(), None);
@@ -245,9 +210,6 @@ fn notices_and_a_refused_turn() {
     insta::assert_debug_snapshot!(replay("notices"));
 }
 
-/// The tier chosen in the picker is what Codex is asked for, on the thread
-/// and on each turn; a turn on the standard tier says so, since the thread
-/// may have been loaded on another.
 #[test]
 fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
     let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Codex);
@@ -291,7 +253,6 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
     assert_eq!(overrides["serviceTierForTurn"], "default");
 }
 
-/// Auto is Codex's sandbox plus its automatic reviewer; Full has neither.
 #[test]
 fn permissions_pick_the_reviewed_sandbox_or_full_access() {
     let mut turn = crate::Turn {
@@ -340,7 +301,6 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
     assert_eq!(params["sandbox"], "danger-full-access");
     assert_eq!(params["approvalPolicy"], "never");
     assert!(params.get("approvalsReviewer").is_none(), "{params}");
-    // A thread loaded under Auto switches to full access on its next turn.
     let mut overrides = json!({});
     super::turn_overrides(&turn, super::ProjectGuard::Codex, &mut overrides);
     assert_eq!(
@@ -395,9 +355,6 @@ fn inside_forges_sandbox_auto_keeps_the_reviewer_but_not_codexs_own_sandbox() {
     );
 }
 
-/// Codex sends `thread/goal/cleared` at every turn, goal or not: a thread
-/// without a goal shows no "Goal cleared:" line; one with a goal shows it
-/// set, then cleared.
 #[test]
 fn a_goal_is_shown_only_when_one_was_set() {
     let transcript = crate::transcript_tests::read("codex", "command");
@@ -499,7 +456,6 @@ fn reversed_child_arrival_keeps_explicit_spawn_ownership() {
     assert!(!after.iter().any(|event| matches!(event, crate::EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-a")));
 }
 
-/// Sanitized native trace: optional web metadata can remain absent at completion.
 #[test]
 fn opaque_web_actions_do_not_invent_execution_errors_or_fail_the_turn() {
     let steps = replay("web-search-optional-metadata");
@@ -523,8 +479,6 @@ fn opaque_web_actions_do_not_invent_execution_errors_or_fail_the_turn() {
     );
 }
 
-/// Codex waiting on its agents and sleeping read as their own rows: the wait
-/// names the agents' threads for Forge to resolve, the sleep its length.
 #[test]
 fn waits_and_sleeps_become_rows() {
     use artisan_api::{AgentAction, ItemKind, ToolKind};
@@ -546,8 +500,6 @@ fn waits_and_sleeps_become_rows() {
         }, .. } if name == "sleep" && title == "30 s")));
 }
 
-/// A question Codex leaves open (`"options": null`) asks for the user's own
-/// words; it is a question like any other, never an error.
 #[test]
 fn a_question_without_options_is_asked_in_own_words() {
     use artisan_api::ItemKind;
@@ -579,10 +531,6 @@ fn a_question_without_options_is_asked_in_own_words() {
                 && questions[0].options.inline().is_some_and(<[_]>::is_empty)))));
 }
 
-/// A steer landing while Codex streams a reply makes it drop that reply and
-/// answer again (seen 2026-10-20). It never completes the dropped one, so it
-/// ends empty as soon as the new reply starts instead of keeping its
-/// half-streamed text until the turn ends.
 #[test]
 fn a_reply_codex_drops_for_a_steer_ends_empty_when_the_next_starts() {
     use artisan_api::{ItemKind, Status};

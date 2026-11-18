@@ -1,6 +1,3 @@
-//! Whole turns against a scripted claude.ai: what the user sees and what
-//! claude.ai is sent, from the first message to the answer.
-
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,20 +17,14 @@ use super::{
     Backend, CompleteError, CreateConversationError, DeleteConversationError, Events, Refusal,
     Request, RequestError, StopError, UploadError, drive,
 };
-#[path = "../../tests/claudeai/cancellation.rs"]
+#[path = "cancellation.rs"]
 mod cancellation;
 use crate::{EngineEvent, Input, Launch, Outcome, RunIo, Turn, UserInput};
 
-/// One completion claude.ai answers with.
 enum Reply {
-    /// These events, then the stream ends.
     Ends(Vec<Value>),
-    /// These events, then the stream waits (pings never come in a test),
-    /// as it does after a call to one of the caller's tools.
     Waits(Vec<Value>),
     Refuses(Refusal),
-    /// The reply made from what the request sent, for a reply that names
-    /// something only the run knows (a shell's id).
     From(Box<dyn FnOnce(&Request) -> Self + Send>),
 }
 
@@ -42,17 +33,12 @@ struct Script {
     replies: Mutex<Vec<Reply>>,
     sent: Mutex<Vec<Request>>,
     uploads: Mutex<Vec<PathBuf>>,
-    /// What each upload held, read when it was uploaded.
     uploaded: Mutex<Vec<Vec<u8>>>,
     created: Mutex<usize>,
-    /// The conversation each completion was asked in, in order.
     conversations: Mutex<Vec<String>>,
     active: Arc<Mutex<HashSet<String>>>,
-    /// The conversations whose completions were stopped, each recorded once
-    /// its stop finished.
     stopped: Mutex<Vec<String>>,
     stop_error: Mutex<Option<Refusal>>,
-    /// How long claude.ai takes to confirm a stop.
     stop_delay: Mutex<Option<std::time::Duration>>,
     deleted: Mutex<Vec<String>>,
 }
@@ -235,12 +221,8 @@ fn turn(cwd: &Path, session: Option<&str>, permissions: Permissions) -> Turn {
     }
 }
 
-/// What the user does when the turn asks: answers each approval, and
-/// sends inputs when an event appears.
 type User = Box<dyn FnMut(&EngineEvent) -> Vec<Input> + Send>;
 
-/// Runs the turn to its end, with `user` answering, and returns what Forge
-/// saw.
 async fn run(
     backend: Arc<Script>,
     turn: Turn,
@@ -446,7 +428,6 @@ async fn provider_limits_show_the_correct_error_for_http_and_both_stream_event_s
     }
 }
 
-/// The key of an item that waits on the user.
 fn awaiting(event: &EngineEvent) -> Option<&str> {
     if let EngineEvent::Item {
         key,
@@ -605,7 +586,6 @@ async fn parallel_calls_are_all_answered_and_marked_as_tool_output() {
     );
 }
 
-/// A message that sits in claude.ai's conversation tree, answering `asks`.
 fn start_in(id: &str, uuid: &str, asks: &str) -> Value {
     json!({ "type": "message_start", "message": { "id": id, "model": "claude-opus-5-5", "uuid": uuid, "parent_uuid": asks } })
 }
@@ -967,10 +947,6 @@ async fn images_are_uploaded_and_go_with_the_message() {
     );
 }
 
-/// A whole turn against the real claude.ai, as the session in
-/// `CLAUDE_AI_HOME` (an engine home holding `.claude-ai/session.json`).
-/// The model reads a file with the user's-machine tool and must report
-/// what it holds: the result reached it, framed as tool output.
 #[tokio::test]
 #[ignore = "needs a signed-in claude.ai session"]
 async fn a_live_turn_reads_a_file_and_reports_it() {
@@ -980,8 +956,6 @@ async fn a_live_turn_reads_a_file_and_reports_it() {
     let transport = super::Transport::open(&home).expect("a session");
     let mut turn = turn(work.path(), None, Permissions::Full);
     turn.home = home.clone();
-    // The code word is only in the question: the answer has it only when
-    // the model still sees the question after the tool's result.
     turn.input.text = "My code word is HERON. Read hostname.txt with the Read tool, then tell me exactly what it says, followed by my code word.".to_owned();
     let (events, mut seen) = mpsc::channel(256);
     let (_inputs, inbox) = mpsc::channel(4);
@@ -1385,7 +1359,6 @@ async fn a_background_shell_is_read_and_stopped() {
         "the model is told the shell's id: {}",
         sent[1].prompt
     );
-    // Each round waits out the call grace, so the echo ran long before.
     assert!(
         sent[2].prompt.contains("first\n[still running]"),
         "the shell's output is read while it runs: {}",
@@ -1410,8 +1383,6 @@ async fn a_background_shell_is_read_and_stopped() {
     )));
 }
 
-/// The id a background shell got, from the results that announced it
-/// (or, in the next round, that named it).
 fn shell_id(prompt: &str) -> String {
     let at = prompt.find("bash-").expect("a shell id");
     prompt[at..]
@@ -1633,7 +1604,6 @@ async fn an_mcp_image_goes_to_claude_ai_with_the_results() {
     );
 }
 
-/// A turn whose model starts one agent with `prompt`.
 fn starts_an_agent(prompt: &str) -> Reply {
     calls(
         "m1",
@@ -1650,11 +1620,7 @@ async fn stopping_the_turn_during_a_task_stops_the_agent_s_completion() {
     let work = tempfile::tempdir().expect("a dir");
     let mut working = vec![start("c1")];
     working.extend(text(0, "Looking."));
-    let backend = script(vec![
-        starts_an_agent("Look around."),
-        // The agent's completion streams on; it never ends by itself.
-        Reply::Waits(working),
-    ]);
+    let backend = script(vec![starts_an_agent("Look around."), Reply::Waits(working)]);
     *backend.stop_delay.lock().expect("lock") = Some(std::time::Duration::from_millis(300));
     let cancel = CancellationToken::new();
     let stopper = cancel.clone();
@@ -2090,11 +2056,11 @@ async fn a_settings_file_that_fails_to_load_refuses_tools_until_it_is_repaired()
 }
 
 #[cfg(unix)]
-#[path = "../../tests/claudeai/status.rs"]
+#[path = "status.rs"]
 mod status;
 
-#[path = "../../tests/claudeai/stops.rs"]
+#[path = "stops.rs"]
 mod stops;
 
-#[path = "../../tests/claudeai/blocks.rs"]
+#[path = "blocks.rs"]
 mod blocks;

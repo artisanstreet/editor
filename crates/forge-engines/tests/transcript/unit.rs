@@ -1,5 +1,3 @@
-//! Canonical snapshot cleanup and file diagnostics, shared by native drivers.
-//! Request IDs, approvals, steers and provider responses stay in each replay.
 use crate::{EngineEvent, LiveKind};
 use std::path::Path;
 
@@ -13,9 +11,6 @@ pub fn read_path(path: &Path) -> String {
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
-/// Merge only adjacent canonical live events. Driver replies/responses are
-/// barriers because callers invoke this only for two neighboring Event steps.
-/// Status and empty replacement events remain explicit snapshot evidence.
 pub fn merge_live(previous: &mut EngineEvent, current: &EngineEvent) -> bool {
     if let EngineEvent::Live {
         target,

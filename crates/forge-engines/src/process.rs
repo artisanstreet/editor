@@ -218,7 +218,6 @@ impl std::ops::DerefMut for OwnedChild {
 impl OwnedChild {
     pub(crate) fn shutdown(&mut self) {
         if self.armed {
-            // A child that already exited has nothing to kill.
             self.child.start_kill().ok();
             self.armed = false;
         }
@@ -522,100 +521,10 @@ mod containment_tests;
 
 #[cfg(test)]
 #[cfg(unix)]
-mod reform_tests {
-    use super::*;
-    #[tokio::test]
-    async fn dropping_the_owner_closes_pipes_held_by_descendants() {
-        let mut command = Command::new("sh");
-        command
-            .args(["-c", "sleep 30 & echo ready; wait"])
-            .stdout(Stdio::piped());
-        let mut child = owned_command(command, Sandbox::Open).unwrap();
-        let mut pipe = BufReader::new(child.stdout().take().unwrap());
-        let mut ready = String::new();
-        pipe.read_line(&mut ready).await.unwrap();
-        assert_eq!(ready.trim(), "ready");
-        drop(child);
-        let mut rest = Vec::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            pipe.read_to_end(&mut rest),
-        )
-        .await
-        .expect("descendant inherited stdout must close with the owner")
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn oversized_probe_fails_without_waiting_for_a_blocked_pipe() {
-        let mut command = Command::new("sh");
-        command.args(["-c", "head -c 1048576 /dev/zero; sleep 30"]);
-        let result = probe(command, std::time::Duration::from_secs(2), 4096).await;
-        assert!(matches!(
-            result,
-            Err(ProbeError::Oversized { limit: 4096, .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn oversized_engine_line_is_a_protocol_error() {
-        let home = tempfile::tempdir().unwrap();
-        let turn = Turn {
-            thread_id: artisan_api::ThreadId::from("bounded-output"),
-            engine: artisan_api::EngineId::Codex,
-            binary: "/bin/sh".into(),
-            home: home.path().into(),
-            cwd: home.path().into(),
-            config: artisan_api::EngineConfig::new(artisan_api::EngineId::Codex),
-            session_id: None,
-            input: crate::UserInput::default(),
-            launch: crate::Launch::default(),
-            trace_dir: None,
-        };
-        let mut process = spawn(
-            &turn,
-            &[
-                "-c".into(),
-                format!("head -c {} /dev/zero; printf '\\n'", MAX_LINE_BYTES + 1),
-            ],
-        )
-        .unwrap();
-        let error = tokio::time::timeout(std::time::Duration::from_secs(5), process.next_line())
-            .await
-            .unwrap()
-            .unwrap_err();
-        assert!(matches!(error, ReadError::Oversized { .. }));
-    }
-}
+#[path = "../tests/process/reform.rs"]
+mod reform_tests;
 
 #[cfg(test)]
 #[cfg(windows)]
-mod windows_owner_tests {
-    use super::*;
-    #[tokio::test]
-    async fn native_job_drop_closes_pipes_held_by_its_own_descendants() {
-        let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", "$child = Start-Process -FilePath $env:ComSpec -ArgumentList '/c ping -n 30 127.0.0.1 >NUL' -NoNewWindow -PassThru; Write-Output 'ready'; Wait-Process -Id $child.Id"])
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = owned_command(command, Sandbox::Open).unwrap();
-        let mut pipe = BufReader::new(child.stdout().take().unwrap());
-        let mut ready = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            pipe.read_line(&mut ready),
-        )
-        .await
-        .expect("owned native parent must start its descendant")
-        .unwrap();
-        assert_eq!(ready.trim(), "ready");
-        drop(child);
-        let mut rest = Vec::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            pipe.read_to_end(&mut rest),
-        )
-        .await
-        .expect("native JobObject drop must close descendant stdout")
-        .unwrap();
-    }
-}
+#[path = "../tests/process/windows_owner.rs"]
+mod windows_owner_tests;

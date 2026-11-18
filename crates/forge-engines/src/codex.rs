@@ -6,12 +6,15 @@ mod decoder;
 mod goal;
 mod protocol;
 #[cfg(test)]
+#[path = "../tests/codex/schema.rs"]
 mod schema_tests;
 mod server;
 #[cfg(test)]
+#[path = "../tests/codex/server/unit.rs"]
 mod server_tests;
 mod side;
 #[cfg(test)]
+#[path = "../tests/codex/unit.rs"]
 mod tests;
 
 pub use decoder::DecodeError;
@@ -200,7 +203,6 @@ impl Harness for CodexHarness {
     }
 }
 
-/// Where Codex keeps its config and sessions for this launch.
 fn codex_home(turn: &Turn) -> std::path::PathBuf {
     turn.launch
         .env
@@ -689,8 +691,6 @@ impl ProjectGuard {
     }
 }
 
-/// `thread/start`, or `thread/resume` for a known session, with the run's
-/// model, sandbox and approval policy.
 fn thread_params(turn: &Turn, guard: ProjectGuard) -> (&'static str, Value) {
     let config = &turn.config;
     let mut settings = Map::new();
@@ -704,7 +704,6 @@ fn thread_params(turn: &Turn, guard: ProjectGuard) -> (&'static str, Value) {
     for (name, url) in &turn.launch.gateway_mcp {
         let server = format!("mcp_servers.{name}");
         settings.insert(format!("{server}.url"), json!(url));
-        // `agent_wait` and approval cards block for up to nine minutes.
         settings.insert(format!("{server}.tool_timeout_sec"), json!(600));
     }
     let mut params = json!({
@@ -736,7 +735,6 @@ fn thread_params(turn: &Turn, guard: ProjectGuard) -> (&'static str, Value) {
     match &turn.session_id {
         Some(session) => {
             params["threadId"] = json!(session);
-            // Only the thread's identity is needed, not its history.
             params["excludeTurns"] = json!(true);
             ("thread/resume", params)
         }
@@ -744,8 +742,6 @@ fn thread_params(turn: &Turn, guard: ProjectGuard) -> (&'static str, Value) {
     }
 }
 
-/// What a turn sets for itself and the turns after it: the thread may have
-/// been loaded by an earlier run with other settings.
 fn turn_overrides(turn: &Turn, guard: ProjectGuard, params: &mut Value) {
     let config = &turn.config;
     params["cwd"] = json!(turn.cwd);
@@ -755,12 +751,10 @@ fn turn_overrides(turn: &Turn, guard: ProjectGuard, params: &mut Value) {
     if let Some(effort) = non_empty(config.effort.as_deref()) {
         params["effort"] = json!(effort);
     }
-    // `serviceTier` can't go back to standard; this one can, per turn.
     params["serviceTierForTurn"] = json!(service_tier(config).unwrap_or("default"));
     access_overrides(config.permissions, guard, params);
 }
 
-/// The same access choices as `thread_params`, in `turn/start`'s shapes.
 fn access_overrides(permissions: Permissions, guard: ProjectGuard, params: &mut Value) {
     match (permissions, guard) {
         (Permissions::Auto, ProjectGuard::Codex) => {
@@ -780,7 +774,6 @@ fn access_overrides(permissions: Permissions, guard: ProjectGuard, params: &mut 
     }
 }
 
-/// The chosen tier's id (`priority`); the standard tier sends nothing.
 fn service_tier(config: &EngineConfig) -> Option<&str> {
     non_empty(config.speed.as_deref()).filter(|speed| *speed != crate::catalog::STANDARD_SPEED)
 }
@@ -789,7 +782,6 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.is_empty())
 }
 
-/// Codex `UserInput` items: the text, then each image by path.
 fn user_input(input: &UserInput) -> Vec<Value> {
     let mut items = Vec::new();
     if !input.text.is_empty() || input.images.is_empty() {

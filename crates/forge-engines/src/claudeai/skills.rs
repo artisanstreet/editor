@@ -1,12 +1,3 @@
-//! The skills the claude.ai transport offers the model.
-//!
-//! Claude Code finds skills in `.claude/skills` folders; Forge materialises
-//! the enabled ones into the engine home before every run. The transport
-//! reads the same folders (the home's, and the project's, as Claude Code
-//! does), lists each skill's name and description in the preamble, and loads
-//! a skill's `SKILL.md` on demand when the model calls the `Skill` tool —
-//! the same on-demand loading Claude Code does.
-
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt::Write as _;
@@ -17,16 +8,11 @@ use serde_json::{Value, json};
 
 use super::escape_framing;
 
-/// The most skills the transport offers.
 const MAX_SKILLS: usize = 256;
-/// The most of a skill's metadata that is read.
 const MAX_HEADER_BYTES: usize = 64 * 1024;
-/// The largest `SKILL.md` the Skill tool loads.
 const MAX_SKILL_BYTES: u64 = 256 * 1024;
-/// The most bundled files the Skill tool lists.
 const MAX_FILES: usize = 200;
 
-/// One skill the model may load.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,
@@ -34,24 +20,16 @@ pub struct Skill {
     pub folder: PathBuf,
 }
 
-/// Every skill reachable from `home` and `cwd`, by name. The project's
-/// skills override the home's when the names collide, as in Claude Code.
 #[must_use]
 pub fn discover(home: &Path, cwd: &Path) -> Vec<Skill> {
     discover_with(home, cwd, user_home().as_deref())
 }
 
-/// [`discover`], with the user's own home given.
 fn discover_with(home: &Path, cwd: &Path, user_home: Option<&Path>) -> Vec<Skill> {
-    // The project's skills, from the working directory up to the
-    // repository root, so the nearest definition wins.
     let mut project: Vec<_> = cwd.ancestors().take_while(|dir| *dir != home).collect();
     if let Some(root) = project.iter().position(|dir| dir.join(".git").exists()) {
         project.truncate(root + 1);
     } else if user_home.is_some_and(|user_home| same_dir(cwd, user_home)) {
-        // Outside a repository, the user's home is not a project: its
-        // `.claude/skills` are the ones Forge enables and disables, and
-        // reading them here would bring back the disabled ones.
         project.clear();
     } else {
         project.truncate(1);
@@ -61,8 +39,6 @@ fn discover_with(home: &Path, cwd: &Path, user_home: Option<&Path>) -> Vec<Skill
         .map(|dir| dir.join(".claude").join("skills"))
         .collect();
     roots.push(home.join(".claude").join("skills"));
-    // The project's first, so the first definition of a name wins and a
-    // home with many skills cannot crowd the project's out.
     let mut found: BTreeMap<String, Skill> = BTreeMap::new();
     for root in roots {
         for skill in in_root(&root) {
@@ -77,7 +53,6 @@ fn discover_with(home: &Path, cwd: &Path, user_home: Option<&Path>) -> Vec<Skill
     found.into_values().collect()
 }
 
-/// The user's own home directory.
 fn user_home() -> Option<PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var)
@@ -85,7 +60,6 @@ fn user_home() -> Option<PathBuf> {
         .filter(|home| home.is_absolute())
 }
 
-/// Whether two paths are the same directory, links resolved.
 fn same_dir(left: &Path, right: &Path) -> bool {
     left == right
         || matches!(
@@ -94,7 +68,6 @@ fn same_dir(left: &Path, right: &Path) -> bool {
         )
 }
 
-/// The skills one `.claude/skills` folder holds.
 fn in_root(root: &Path) -> Vec<Skill> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -131,7 +104,6 @@ fn in_root(root: &Path) -> Vec<Skill> {
     skills
 }
 
-/// The `Skill` tool's definition.
 #[must_use]
 pub fn definition() -> Value {
     json!({
@@ -148,8 +120,6 @@ pub fn definition() -> Value {
     })
 }
 
-/// The `<available_skills>` block the preamble carries, or empty when there
-/// are no skills.
 #[must_use]
 pub fn listing(skills: &[Skill]) -> String {
     let mut text = String::new();
@@ -165,8 +135,6 @@ pub fn listing(skills: &[Skill]) -> String {
     text
 }
 
-/// Loads the skill `name` names: its `SKILL.md` body and the files it
-/// bundles, so the model can read them with Read.
 pub fn load(skills: &[Skill], name: &str) -> Result<String, String> {
     let name = name.trim();
     let Some(skill) = skills.iter().find(|skill| skill.name == name).or_else(|| {
@@ -216,7 +184,6 @@ pub fn load(skills: &[Skill], name: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// The files a skill bundles, relative to its folder, bounded.
 fn bundled(folder: &Path) -> Vec<String> {
     let mut files = Vec::new();
     let walk = walkdir::WalkDir::new(folder)
@@ -243,7 +210,6 @@ fn bundled(folder: &Path) -> Vec<String> {
     files
 }
 
-/// A `SKILL.md`'s YAML front matter, read bounded.
 fn read_header(path: &Path) -> std::io::Result<String> {
     use std::io::BufRead as _;
     let file = std::fs::File::open(path)?;
@@ -269,10 +235,6 @@ fn read_header(path: &Path) -> std::io::Result<String> {
     }
 }
 
-/// The `name` and `description` in a `SKILL.md`'s front matter, as
-/// Claude Code reads them: a skill without a name is named for its folder,
-/// and front matter that is not valid YAML (`description: Use when: X`)
-/// is read line by line.
 fn metadata(text: &str, folder: &str) -> Option<(String, String)> {
     let mut lines = without_bom(text).lines();
     if lines.next()?.trim() != "---" {
@@ -306,8 +268,6 @@ fn metadata(text: &str, folder: &str) -> Option<(String, String)> {
     Some((name, description))
 }
 
-/// A top-level `key: value` line's value, for front matter YAML refuses:
-/// everything after the first `: `, unquoted.
 fn lenient_field(yaml: &str, key: &str) -> Option<String> {
     yaml.lines().find_map(|line| {
         let (name, value) = line.split_once(':')?;
@@ -328,12 +288,10 @@ fn lenient_field(yaml: &str, key: &str) -> Option<String> {
     })
 }
 
-/// Text without the UTF-8 byte-order mark some editors write first.
 fn without_bom(text: &str) -> &str {
     text.strip_prefix('\u{feff}').unwrap_or(text)
 }
 
-/// The `SKILL.md` body, without its front matter.
 fn strip_front_matter(text: &str) -> &str {
     let text = without_bom(text);
     let mut lines = text.split_inclusive('\n');
@@ -354,167 +312,5 @@ fn strip_front_matter(text: &str) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn skill(root: &Path, name: &str, description: &str) {
-        let folder = root.join(".claude/skills").join(name);
-        std::fs::create_dir_all(folder.join("references")).unwrap();
-        std::fs::write(
-            folder.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: {description}\n---\n\nDo the {name} thing.\n"),
-        )
-        .unwrap();
-        std::fs::write(folder.join("references/blocks.md"), "block catalog\n").unwrap();
-    }
-
-    #[test]
-    fn skills_come_from_the_home_and_the_project_with_the_project_winning() {
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project.path().join(".git")).unwrap();
-        skill(home.path(), "review", "Review code");
-        skill(home.path(), "deploy", "Deploy things");
-        skill(project.path(), "deploy", "Deploy this project");
-        let skills = discover(home.path(), project.path());
-        assert_eq!(skills.len(), 2);
-        let deploy = skills
-            .iter()
-            .find(|skill| skill.name == "deploy")
-            .expect("the project's deploy");
-        assert_eq!(deploy.description, "Deploy this project");
-        assert!(deploy.folder.starts_with(project.path()));
-    }
-
-    #[test]
-    fn a_skill_loads_with_its_body_and_bundled_files() {
-        let home = tempfile::tempdir().unwrap();
-        skill(home.path(), "review", "Review code");
-        let skills = discover(home.path(), home.path());
-        let loaded = load(&skills, "review").expect("the skill loads");
-        assert!(loaded.contains("Do the review thing."));
-        assert!(loaded.contains("references/blocks.md"));
-        assert!(
-            !loaded.contains("description: Review code"),
-            "front matter is not part of the instructions"
-        );
-        assert!(load(&skills, "missing").unwrap_err().contains("no skill"));
-    }
-
-    #[test]
-    fn an_invalid_or_hidden_skill_is_not_listed() {
-        let home = tempfile::tempdir().unwrap();
-        let skills_root = home.path().join(".claude/skills");
-        std::fs::create_dir_all(skills_root.join("broken")).unwrap();
-        std::fs::write(skills_root.join("broken/SKILL.md"), "no front matter").unwrap();
-        std::fs::create_dir_all(skills_root.join(".hidden")).unwrap();
-        std::fs::write(skills_root.join(".hidden/SKILL.md"), "---\nname: x\n---\n").unwrap();
-        assert!(discover(home.path(), home.path()).is_empty());
-    }
-
-    #[test]
-    fn a_skill_with_a_bom_no_name_or_loose_yaml_is_still_listed() {
-        let home = tempfile::tempdir().unwrap();
-        let root = home.path().join(".claude/skills");
-        for (folder, text) in [
-            (
-                "bom",
-                "\u{feff}---\nname: bom\ndescription: Saved by Notepad\n---\nBody.\n",
-            ),
-            (
-                "nameless",
-                "---\ndescription: Named for its folder\n---\nBody.\n",
-            ),
-            (
-                "loose",
-                "---\nname: loose\ndescription: Use when: the YAML is loose\n---\nBody.\n",
-            ),
-        ] {
-            std::fs::create_dir_all(root.join(folder)).unwrap();
-            std::fs::write(root.join(folder).join("SKILL.md"), text).unwrap();
-        }
-        let skills = discover(home.path(), home.path());
-        let listed: Vec<(&str, &str)> = skills
-            .iter()
-            .map(|skill| (skill.name.as_str(), skill.description.as_str()))
-            .collect();
-        assert_eq!(
-            listed,
-            [
-                ("bom", "Saved by Notepad"),
-                ("loose", "Use when: the YAML is loose"),
-                ("nameless", "Named for its folder"),
-            ]
-        );
-        let loaded = load(&skills, "bom").unwrap();
-        assert!(
-            loaded.contains("Body.") && !loaded.contains("Saved by Notepad"),
-            "{loaded}"
-        );
-    }
-
-    #[test]
-    fn the_users_home_outside_a_repository_is_not_a_project() {
-        let engine_home = tempfile::tempdir().unwrap();
-        let user_home = tempfile::tempdir().unwrap();
-        // Forge turned this one off: it is in the user's skills, not the
-        // engine home's.
-        skill(user_home.path(), "disabled", "Turned off in Forge");
-        skill(engine_home.path(), "enabled", "Turned on in Forge");
-        let names = |skills: Vec<Skill>| {
-            skills
-                .into_iter()
-                .map(|skill| skill.name)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            names(discover_with(
-                engine_home.path(),
-                user_home.path(),
-                Some(user_home.path())
-            )),
-            ["enabled"]
-        );
-        std::fs::create_dir_all(user_home.path().join(".git")).unwrap();
-        assert_eq!(
-            names(discover_with(
-                engine_home.path(),
-                user_home.path(),
-                Some(user_home.path())
-            )),
-            ["disabled", "enabled"],
-            "a home that is a repository is that repository's project"
-        );
-    }
-
-    #[test]
-    fn a_crowded_home_does_not_crowd_out_the_projects_skills() {
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(project.path().join(".git")).unwrap();
-        for index in 0..MAX_SKILLS {
-            skill(home.path(), &format!("home-{index:03}"), "From the home");
-        }
-        skill(project.path(), "zz-project", "From the project");
-        let skills = discover(home.path(), project.path());
-        assert_eq!(skills.len(), MAX_SKILLS);
-        assert!(skills.iter().any(|skill| skill.name == "zz-project"));
-    }
-
-    #[test]
-    fn an_exact_name_wins_over_one_that_differs_in_case() {
-        let home = tempfile::tempdir().unwrap();
-        let root = home.path().join(".claude/skills");
-        for (folder, name) in [("upper", "Review"), ("lower", "review")] {
-            std::fs::create_dir_all(root.join(folder)).unwrap();
-            std::fs::write(
-                root.join(folder).join("SKILL.md"),
-                format!("---\nname: {name}\n---\nThe {folder} one.\n"),
-            )
-            .unwrap();
-        }
-        let skills = discover(home.path(), home.path());
-        assert!(load(&skills, "review").unwrap().contains("The lower one."));
-        assert!(load(&skills, "Review").unwrap().contains("The upper one."));
-    }
-}
+#[path = "../../tests/claudeai/skills.rs"]
+mod tests;

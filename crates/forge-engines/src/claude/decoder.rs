@@ -50,8 +50,6 @@ enum MainTurn {
     },
 }
 
-/// Decodes one Claude process's output. Holds just enough to settle items
-/// and answer the CLI; `feed` never does I/O.
 #[derive(Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -61,36 +59,24 @@ pub struct ClaudeDecoder {
     reasoning_summary: crate::reasoning::Summary,
     session: Option<String>,
     model: Option<String>,
-    /// Messages announced by `message_start`; they settle on `message_delta`.
     streamed: HashSet<String>,
     current: Option<String>,
     messages: HashMap<String, Message>,
     tools: HashMap<String, Tool>,
     retired: crate::retained::Retired,
-    /// Open `can_use_tool` requests by item key.
     pending: HashMap<String, Pending>,
     replies: Vec<Value>,
-    /// User lines written and not yet echoed; `Some` for steers.
     replays: VecDeque<Option<ItemId>>,
     title_pending: bool,
     titled: bool,
     usage: Usage,
-    /// The usage limit the CLI said it hit, from a rejected
-    /// `rate_limit_event` until the turn's `result`.
     limit_reached: Option<LimitReached>,
     result_seen: bool,
     turn: MainTurn,
-    /// Background agents and workflows the CLI reports live, and the
-    /// background work of agents (an agent waiting on its own shell is
-    /// resumed when it ends): they report back into the session, so it must
-    /// keep taking input.
     background: usize,
-    /// Agent tasks with background work of their own still live.
     waiting_agents: HashSet<String>,
     waiting_on_background: bool,
-    /// Agent tool calls by the task id the CLI gives them.
     agent_tasks: HashMap<String, String>,
-    /// Every task's tool call, for a task moved to the background later.
     task_tools: HashMap<String, String>,
     outcome: Option<Outcome>,
     compacting: Option<String>,
@@ -103,7 +89,6 @@ pub struct ClaudeDecoder {
 struct Message {
     parent: Option<String>,
     blocks: u64,
-    /// Text parts not yet settled: key and text.
     texts: Vec<(String, String)>,
     worked: bool,
 }
@@ -134,7 +119,6 @@ struct Tool {
     parent: Option<String>,
     kind: ItemKind,
     status: Status,
-    /// Runs on after its `tool_result`; a task notification settles it.
     background: bool,
 }
 
@@ -254,8 +238,6 @@ impl ClaudeDecoder {
         Ok(out)
     }
 
-    /// Answers the approval or question on `key`. The reply for the CLI goes
-    /// to [`Self::take_replies`].
     pub fn answer(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
         let events = self.answer_raw(key, answer);
         let events = crate::retained::settle(self, events);
@@ -354,8 +336,6 @@ impl ClaudeDecoder {
                         let mut allow =
                             json!({ "behavior": "allow", "updatedInput": pending.input });
                         if *decision == Decision::AllowAlways {
-                            // The CLI suggests rules for its settings files;
-                            // Artisan keeps them for this session only.
                             let rules: Vec<Value> = pending
                                 .suggestions
                                 .iter()
@@ -390,18 +370,14 @@ impl ClaudeDecoder {
         vec![tool.event()]
     }
 
-    /// Lines to write to the CLI's stdin.
     pub fn take_replies(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.replies)
     }
 
-    /// A user line was written; `Some` marks a steer to acknowledge.
     pub fn expect_replay(&mut self, steer: Option<ItemId>) {
         self.replays.push_back(steer);
     }
 
-    /// Asks Claude to name a fresh session after `text`; the answer comes
-    /// back as a `control_response` and becomes `Title`.
     pub fn title_request(&mut self, text: &str) -> Value {
         self.title_pending = true;
         json!({
@@ -411,20 +387,16 @@ impl ClaudeDecoder {
         })
     }
 
-    /// Something written to the CLI still awaits its answer.
     #[must_use]
     pub fn awaiting_input(&self) -> bool {
         !self.replays.is_empty() || self.title_pending
     }
 
-    /// Whether a `result` arrived since the last call.
-    /// Whether background agents or workflows are still running.
     #[must_use]
     pub const fn background_running(&self) -> bool {
         self.background > 0
     }
 
-    /// What the decoder believes runs in the background, for the trace.
     #[must_use]
     pub fn background_summary(&self) -> String {
         format!(
@@ -456,12 +428,10 @@ impl ClaudeDecoder {
         self.titled
     }
 
-    /// How the last turn ended, once a `result` arrived.
     pub const fn take_outcome(&mut self) -> Option<Outcome> {
         self.outcome.take()
     }
 
-    /// The process is gone: whatever is still open was cut off.
     pub fn finish(&mut self) -> Vec<EngineEvent> {
         let mut out = Vec::new();
         self.settle_open_texts(Status::Cancelled, &mut out);
@@ -519,9 +489,6 @@ impl ClaudeDecoder {
                     .filter_map(|task| task.parent_task_id)
                     .collect();
             }
-            // Claude repeats `compacting` as progress (with a growing
-            // `compact_output_chars`) and ends it with a null status that
-            // carries `compact_result` (2.1.296): one compaction, one item.
             "status" if str_at(frame, "status") == Some("compacting") => {
                 if self.compacting.is_none() {
                     let key = self.next_key("compaction");
@@ -559,8 +526,6 @@ impl ClaudeDecoder {
                 });
             }
             "task_started" => self.task_started(frame, out),
-            // A foreground command past its timeout moves to the background
-            // just before its tool result says so.
             "task_updated" if frame["patch"]["is_backgrounded"].as_bool() == Some(true) => {
                 if let Some(tool) = str_at(frame, "task_id")
                     .and_then(|task| self.task_tools.get(task))
@@ -575,7 +540,6 @@ impl ClaudeDecoder {
         Ok(())
     }
 
-    /// A background task started: an agent's id, a backgrounded tool.
     fn task_started(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
         if let (Some(task), Some(tool)) = (str_at(frame, "task_id"), str_at(frame, "tool_use_id")) {
             self.task_tools.insert(task.to_owned(), tool.to_owned());
@@ -584,7 +548,6 @@ impl ClaudeDecoder {
             && str_at(frame, "task_type") == Some("local_agent")
         {
             self.agent_tasks.insert(task.to_owned(), tool.to_owned());
-            // The id its `SendMessage`s address it by.
             if let Some(known) = self.tools.get_mut(tool)
                 && let ItemKind::Agent {
                     agent_id: slot @ None,
@@ -594,9 +557,6 @@ impl ClaudeDecoder {
                 *slot = Some(task.to_owned());
                 out.push(known.event());
             }
-            // An agent from an earlier process of this session,
-            // resumed: adopt it so its report reaches its item
-            // (Forge finds that by the tool id).
             if !self.tools.contains_key(tool) {
                 let tool = Tool {
                     key: tool.to_owned(),
@@ -629,8 +589,6 @@ impl ClaudeDecoder {
         }
     }
 
-    /// The tool runs on in the background: its result only says so, and its
-    /// task notification ends it.
     fn backgrounded(&mut self, tool: &str, out: &mut Vec<EngineEvent>) {
         if let Some(tool) = self.tools.get_mut(tool)
             && !tool.background
@@ -648,12 +606,7 @@ impl ClaudeDecoder {
         }
     }
 
-    /// A background task stopped. For an agent this is its report, unless
-    /// it only paused to wait on background work of its own.
     fn task_notification(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
-        // An agent that ended its turn to wait on its own background
-        // work is resumed when that work ends: its "completed"
-        // summary is a progress line, not its report.
         if str_at(frame, "task_id").is_some_and(|task| {
             self.agent_tasks.contains_key(task) && self.waiting_agents.contains(task)
         }) {
@@ -671,9 +624,6 @@ impl ClaudeDecoder {
             _ => Status::Cancelled,
         };
         match &mut tool.kind {
-            // An agent notifies each time it stops, and a resumed
-            // one reports again: the latest report is its result.
-            // Preserve the report verbatim, even when it repeats the task.
             ItemKind::Agent { result, .. } => {
                 let summary = str_at(frame, "summary").filter(|_| status == Status::Done);
                 if let Some(summary) = summary {
@@ -697,8 +647,6 @@ impl ClaudeDecoder {
         out.push(tool.event());
     }
 
-    /// A subagent's message carries its own usage: its agent's context and
-    /// model follow it, for the context meter in the agent's view.
     fn agent_context(&mut self, parent: &str, message: &Value, out: &mut Vec<EngineEvent>) {
         let usage = &message["usage"];
         let Some(input) = usage["input_tokens"].as_u64() else {
@@ -732,7 +680,6 @@ impl ClaudeDecoder {
         }
     }
 
-    /// A content block opens.
     fn block_start(&self, event: &Value, out: &mut Vec<EngineEvent>) {
         let Some(id) = self.current.clone() else {
             return;
@@ -761,7 +708,6 @@ impl ClaudeDecoder {
         }
     }
 
-    /// A content block grows.
     fn block_delta(&self, event: &Value, out: &mut Vec<EngineEvent>) {
         let Some(id) = self.current.as_deref() else {
             return;
@@ -839,8 +785,6 @@ impl ClaudeDecoder {
 
     fn assistant(&mut self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
         let message = &frame["message"];
-        // The CLI's own reply to `/goal` is the goal, for the goal strip; it
-        // isn't the model talking.
         if frame["local_command_run"]["command"] == "goal" {
             let text = message["content"]
                 .as_array()
@@ -853,7 +797,6 @@ impl ClaudeDecoder {
             let goal = [("Goal set:", "active"), ("Goal cleared:", "cleared")]
                 .into_iter()
                 .find_map(|(prefix, state)| Some((state, text.strip_prefix(prefix)?.trim())));
-            // A status line or usage reply changes nothing.
             if let Some((state, objective)) = goal {
                 let key = parent
                     .as_ref()
@@ -980,7 +923,6 @@ impl ClaudeDecoder {
                 },
                 Status::Running,
             ),
-            // One todo list per run, replaced in place.
             "TodoWrite" => (
                 parent
                     .as_ref()
@@ -1030,7 +972,6 @@ impl ClaudeDecoder {
                 Status::Running,
             ),
         };
-        // A watcher and a workflow always run in the background.
         let background = input["run_in_background"].as_bool() == Some(true)
             || matches!(name, "Monitor" | "Workflow");
         let tool = Tool {
@@ -1045,9 +986,6 @@ impl ClaudeDecoder {
     }
 
     fn user(&mut self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
-        // Claude replays what others put in its turn too: a message from one
-        // of its agents or another session, or a task notification. Only
-        // the rest are our own inputs.
         match str_at(&frame["origin"], "kind") {
             Some("peer") => return self.peer_message(frame, parent, out),
             Some(kind) if kind != "user" => return,
@@ -1075,7 +1013,6 @@ impl ClaudeDecoder {
             let text = crate::native::content_text(&block["content"]).unwrap_or_default();
             let settled = if failed { Status::Failed } else { Status::Done };
             match &mut tool.kind {
-                // A background agent's tool result only says it started.
                 ItemKind::Agent { .. } if tool.background && !failed => continue,
                 ItemKind::Agent { result, .. } => {
                     *result = Some(text.into());
@@ -1100,8 +1037,6 @@ impl ClaudeDecoder {
         }
     }
 
-    /// A message that came in from one of this session's agents (`from` is
-    /// its id) or from another session (`name` is the session's).
     fn peer_message(&mut self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
         let origin = &frame["origin"];
         let Some(body) = str_at(origin, "body").filter(|body| !body.trim().is_empty()) else {
@@ -1229,9 +1164,6 @@ impl ClaudeDecoder {
         self.outcome = Some(outcome);
     }
 
-    /// The CLI's word on the account's limits before each request. Only a
-    /// rejection matters: the turn that follows fails, and carries on once
-    /// the window it names resets.
     fn rate_limit(&mut self, info: &Value) {
         if str_at(info, "status") == Some("rejected") {
             let resets_at = info["resetsAt"].as_i64().map(|seconds| seconds * 1_000);
@@ -1498,7 +1430,6 @@ impl Tool {
     }
 }
 
-/// What a `can_use_tool` request asks of the user for a `name` tool call.
 fn assistant_text(key: String, parent: Option<String>, text: String, phase: Phase) -> EngineEvent {
     EngineEvent::Item {
         key,
@@ -1549,8 +1480,6 @@ fn approval_request(kind: &ToolKind, name: &str, reason: Option<&str>) -> Approv
     }
 }
 
-/// Claude's `answers` input: question text to the chosen labels, skipped
-/// questions left out.
 #[expect(
     clippy::expect_used,
     reason = "native_collection_answers already proved the questions inline"
@@ -1611,14 +1540,11 @@ pub(super) fn str_at<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     value.get(field).and_then(Value::as_str)
 }
 
-/// A usage limit the CLI hit: when it resets, ms, if it said.
 #[derive(Clone, Copy)]
 struct LimitReached {
     resets_at: Option<Timestamp>,
 }
 
-/// Claude's words for an exhausted plan ("Claude AI usage limit reached",
-/// "You've hit your limit · resets 3pm").
 fn usage_limit_text(message: &str) -> bool {
     let message = message.to_lowercase();
     message.contains("usage limit") || message.contains("hit your limit")
