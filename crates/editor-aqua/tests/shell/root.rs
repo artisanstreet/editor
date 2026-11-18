@@ -299,3 +299,61 @@ fn tail_controls_force_full_refresh_only_when_visibility_changes() {
     resources.ui.layout().unwrap();
     assert!(resources.ui.tree().sole_node_with_key(key).is_none());
 }
+
+fn rebuild(
+    root: &mut RootViews,
+    shell: &mut editor_aqua::shell::host::Shell,
+    ui: &mut aqua::UiApp,
+    window: &aqua::prelude::ObservedWindowState,
+) {
+    let element = root.build(shell, ui, window).unwrap();
+    ui.refresh(vec![element]).unwrap();
+    ui.layout().unwrap();
+}
+
+fn keyed(ui: &aqua::UiApp, key: &str) -> Option<aqua_core::Rect> {
+    let node = ui
+        .tree()
+        .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(key)))?;
+    ui.tree().visual_rect(node)
+}
+
+#[test]
+fn every_workspace_route_mounts_its_screen() {
+    let mut opened = ThreadShell::open("routes-host", "routes-thread", Motion::Reduced);
+    let window = opened.window("routes");
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        host,
+        ..
+    } = opened;
+    let mut root = RootViews::default();
+    let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
+    resources.ui.mount(|_| element).unwrap();
+    for (query, screen, mounted) in [
+        ("market", Screen::Marketplace, "marketplace-list"),
+        ("usage", Screen::Usage, "usage-screen"),
+    ] {
+        let mut palette = editor_aqua::shell::palette::Palette::default();
+        palette.query = query.into();
+        palette.refresh(Some(&host.id), &[]);
+        assert_eq!(palette.selected(), Some(&screen), "the palette offers {query}");
+        shell.navigate(screen.clone());
+        rebuild(&mut root, &mut shell, &mut resources.ui, &window);
+        assert!(
+            keyed(&resources.ui, mounted).is_some(),
+            "{screen:?} mounts its content"
+        );
+    }
+    shell.core.remove_host(&host.id).unwrap();
+    shell.core.navigate(Screen::Home);
+    assert_eq!(shell.core.workspace_screen(), &Screen::Home);
+    rebuild(&mut root, &mut shell, &mut resources.ui, &window);
+    assert!(
+        test_support::editor::ui::painted_texts(&resources.ui)
+            .iter()
+            .any(|text| text == "Choose a Forge"),
+        "Home mounts its Forge picker"
+    );
+}

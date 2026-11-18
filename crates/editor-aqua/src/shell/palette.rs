@@ -237,6 +237,16 @@ impl Palette {
                     project: None,
                 },
             });
+            commands.push(Entry {
+                label: "Marketplace".into(),
+                detail: "Skills and MCP servers".into(),
+                screen: Screen::Marketplace,
+            });
+            commands.push(Entry {
+                label: "Usage".into(),
+                detail: "Engine limits and spend".into(),
+                screen: Screen::Usage,
+            });
         }
         for host in hosts {
             if Some(host.id) != active {

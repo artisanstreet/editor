@@ -3288,28 +3288,25 @@ impl SectionViews for RootViews {
             titlebar,
             self.sidebar_model(&theme, search, tree, account.as_ref(), now),
             overlay,
-            match &screen {
-                Screen::Thread { .. } | Screen::NewThread { .. } => vec![
-                    aqua::Aqua::Box()
-                        .layout("row")
-                        .styles([aqua::Aqua::Style()
-                            .flex_grow(1.0)
-                            .min_width(aqua::pct(0.0))
-                            .min_height(aqua::pct(0.0))])
-                        .child(
-                            aqua::Aqua::Box()
-                                .layout("column")
-                                .styles([aqua::Aqua::Style()
-                                    .flex_grow(1.0)
-                                    .min_width(aqua::pct(0.0))])
-                                .child(center)
-                                .build(),
-                        )
-                        .children(overview)
-                        .build(),
-                ],
-                _ => Vec::new(),
-            },
+            vec![
+                aqua::Aqua::Box()
+                    .layout("row")
+                    .styles([aqua::Aqua::Style()
+                        .flex_grow(1.0)
+                        .min_width(aqua::pct(0.0))
+                        .min_height(aqua::pct(0.0))])
+                    .child(
+                        aqua::Aqua::Box()
+                            .layout("column")
+                            .styles([aqua::Aqua::Style()
+                                .flex_grow(1.0)
+                                .min_width(aqua::pct(0.0))])
+                            .child(center)
+                            .build(),
+                    )
+                    .children(overview)
+                    .build(),
+            ],
             Rc::clone(&self.seam),
             reduced,
         );
