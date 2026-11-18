@@ -1,5 +1,6 @@
 use super::attachment::PendingUpload;
 use super::draft_session::{DraftSession, Operation, SAVE_DELAY, Submission};
+use super::spool::DraftSpool;
 use artisan_api::{BlobHash, ItemId, ThreadId};
 use editor_core::{Core, ForgeClient, HostId, HostInstance, runtime::runtime};
 use serde_json::Value;
@@ -26,11 +27,13 @@ struct Shared {
     viewers: Vec<Weak<Viewer>>,
     timer: Option<tokio::task::AbortHandle>,
     version: u64,
+    recovered: bool,
 }
 
 struct Inner {
     host: HostId,
     client: ForgeClient,
+    spool: Option<DraftSpool>,
     shared: Mutex<Shared>,
     changed: watch::Sender<u64>,
     cancelled: CancellationToken,
@@ -110,12 +113,17 @@ impl Drop for DraftLease {
 #[derive(Default)]
 pub struct DraftSessions {
     sessions: HashMap<(HostId, HostInstance, String), DraftHandle>,
+    spool: Option<DraftSpool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ShutdownOutcome {
     Saved,
-    Incomplete { failed: usize, timed_out: usize },
+    Incomplete {
+        failed: usize,
+        timed_out: usize,
+        kept_locally: usize,
+    },
 }
 
 fn pending_shutdown() -> &'static Mutex<Vec<DraftHandle>> {
@@ -128,6 +136,7 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut failed = 0;
     let mut timed_out = 0;
+    let mut kept_locally = 0;
     for session in sessions {
         let mut changed = session.subscribe();
         loop {
@@ -149,6 +158,7 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
                     ShutdownOutcome::Incomplete {
                         failed: failures,
                         timed_out: timeouts,
+                        ..
                     } => {
                         failed += failures;
                         timed_out += timeouts;
@@ -157,10 +167,17 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
                 break;
             }
         }
+        if session.keep_locally() {
+            kept_locally += 1;
+        }
     }
     match (failed, timed_out) {
         (0, 0) => ShutdownOutcome::Saved,
-        _ => ShutdownOutcome::Incomplete { failed, timed_out },
+        _ => ShutdownOutcome::Incomplete {
+            failed,
+            timed_out,
+            kept_locally,
+        },
     }
 }
 
@@ -178,6 +195,14 @@ impl Drop for DraftSessions {
 }
 
 impl DraftSessions {
+    #[must_use]
+    pub fn with_spool(spool: DraftSpool) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            spool: Some(spool),
+        }
+    }
+
     pub fn open(
         &mut self,
         host: HostId,
@@ -205,15 +230,35 @@ impl DraftSessions {
         if self.sessions.len() >= 64 {
             return None;
         }
+        let mut state = DraftSession::new(scope.clone());
+        let recovered = match self.spool.as_ref().map(|spool| spool.take(&host, &scope)) {
+            Some(Ok(Some(body))) => {
+                tracing::info!(host = %host, %scope, "recovered a draft kept locally at shutdown");
+                state.recover(body);
+                true
+            }
+            Some(Ok(None)) | None => false,
+            Some(Err(error)) => {
+                tracing::error!(
+                    host = %host,
+                    %scope,
+                    error = %::diagnostics::chain(&error),
+                    "a draft kept locally at shutdown is unreadable; leaving it on disk"
+                );
+                false
+            }
+        };
         let (changed, _) = watch::channel(0);
         let session = DraftHandle(Arc::new(Inner {
             host,
             client,
+            spool: self.spool.clone(),
             shared: Mutex::new(Shared {
-                state: DraftSession::new(scope),
+                state,
                 viewers: Vec::new(),
                 timer: None,
                 version: 0,
+                recovered,
             }),
             changed,
             cancelled: CancellationToken::new(),
@@ -243,16 +288,60 @@ impl DraftHandle {
                 (true, true) => ShutdownOutcome::Incomplete {
                     failed: 1,
                     timed_out: 0,
+                    kept_locally: 0,
                 },
                 (true, false) => {
                     self.0.cancelled.cancel();
                     ShutdownOutcome::Incomplete {
                         failed: 0,
                         timed_out: 1,
+                        kept_locally: 0,
                     }
                 }
             },
         )
+    }
+
+    fn keep_locally(&self) -> bool {
+        let (pending, scope, body) =
+            self.read(|state| (state.pending(), state.scope.clone(), state.body.clone()));
+        let Some(spool) = self.0.spool.as_ref().filter(|_| pending) else {
+            return false;
+        };
+        match spool.keep(&self.0.host, &scope, &body) {
+            Ok(()) => {
+                tracing::warn!(host = %self.0.host, %scope, "kept an unsaved draft on this device until Forge can take it");
+                true
+            }
+            Err(error) => {
+                tracing::error!(
+                    host = %self.0.host,
+                    %scope,
+                    error = %::diagnostics::chain(&error),
+                    "couldn't keep an unsaved draft on this device"
+                );
+                false
+            }
+        }
+    }
+
+    fn forget_recovered(&self, shared: &mut Shared) {
+        if !shared.recovered || shared.state.pending() {
+            return;
+        }
+        shared.recovered = false;
+        let scope = &shared.state.scope;
+        let Some(spool) = &self.0.spool else {
+            return;
+        };
+        if let Err(error) = spool.forget(&self.0.host, scope) {
+            tracing::error!(
+                host = %self.0.host,
+                %scope,
+                error = %::diagnostics::chain(&error),
+                "couldn't remove a recovered draft that Forge has saved"
+            );
+        }
     }
 
     pub fn adopt_image(&self, upload: PendingUpload) {
@@ -359,6 +448,7 @@ impl DraftHandle {
         self.mutate(|shared| {
             shared.state.use_remote();
             shared.emit(SessionEvent::Reloaded);
+            self.forget_recovered(shared);
         });
     }
 
@@ -406,7 +496,10 @@ impl DraftHandle {
                 if let Err(error) = &result {
                     tracing::warn!(%scope, %error, "draft save failed");
                 }
-                session.mutate(|shared| shared.state.written(&request, edited, result));
+                session.mutate(|shared| {
+                    shared.state.written(&request, edited, result);
+                    session.forget_recovered(shared);
+                });
             }
             Operation::Post(request) => {
                 let span = tracing::info_span!(
@@ -444,6 +537,7 @@ impl DraftHandle {
                             item: request.message.id,
                         });
                     }
+                    session.forget_recovered(shared);
                 });
             }
         }

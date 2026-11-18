@@ -85,9 +85,7 @@ pub enum UpdateConfigError {
     Write(#[source] WriteConfigError),
 }
 
-pub(crate) fn read<T: Default + for<'de> Deserialize<'de>>(
-    path: &Path,
-) -> Result<T, ReadConfigError> {
+pub fn read<T: Default + for<'de> Deserialize<'de>>(path: &Path) -> Result<T, ReadConfigError> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| ReadConfigError::Decode {
             path: path.to_owned(),
@@ -107,7 +105,7 @@ enum Replacement {
     CreateOnly,
 }
 
-pub(crate) fn write<T: Serialize>(path: &Path, value: &T) -> Result<(), WriteConfigError> {
+pub fn write<T: Serialize>(path: &Path, value: &T) -> Result<(), WriteConfigError> {
     publish(path, value, Replacement::Overwrite)
 }
 

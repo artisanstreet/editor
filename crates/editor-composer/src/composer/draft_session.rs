@@ -90,6 +90,15 @@ impl DraftSession {
         !self.removed && (self.dirty || self.outgoing.is_some() || self.adopting > 0)
     }
 
+    pub fn recover(&mut self, body: Value) {
+        if self.removed || body.is_null() {
+            return;
+        }
+        self.body = body;
+        self.edited = self.edited.wrapping_add(1);
+        self.dirty = true;
+    }
+
     pub fn adopting(&mut self) {
         self.adopting += 1;
     }

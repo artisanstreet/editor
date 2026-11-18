@@ -12,5 +12,6 @@ pub mod picker;
 pub mod placeholder;
 pub mod questionnaire;
 pub mod sliding_tab;
+pub mod spool;
 pub mod swap;
 pub mod view;

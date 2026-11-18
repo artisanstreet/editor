@@ -138,7 +138,9 @@ impl Workspace {
             conversation: crate::conversation::controller::Conversation::new(core),
             composer: None,
             composer_target: None,
-            draft_sessions: crate::composer::persistence::DraftSessions::default(),
+            draft_sessions: crate::composer::persistence::DraftSessions::with_spool(
+                crate::composer::spool::DraftSpool::new(&core.files.dir),
+            ),
             composer_actions: Rc::new(RefCell::new(VecDeque::new())),
             sent_new_thread: None,
             composer_effects: Vec::new(),

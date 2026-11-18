@@ -509,6 +509,7 @@ fn process_exit_reports_a_pending_draft_at_the_deadline() {
             ShutdownOutcome::Incomplete {
                 failed: 0,
                 timed_out: 1,
+                kept_locally: 0,
             }
         );
         let mut bytes = [0; 1024];
@@ -560,8 +561,73 @@ fn process_exit_reports_a_rejected_draft_write() {
             ShutdownOutcome::Incomplete {
                 failed: 1,
                 timed_out: 0,
+                kept_locally: 0,
             }
         );
+    });
+}
+
+#[test]
+fn closing_offline_keeps_the_draft_on_this_device_until_forge_takes_it() {
+    use editor_aqua::composer::persistence::{ShutdownOutcome, drain_pending};
+    use editor_aqua::composer::spool::DraftSpool;
+
+    if !child_process(
+        "persistence::closing_offline_keeps_the_draft_on_this_device_until_forge_takes_it",
+    ) {
+        return;
+    }
+    let (directory, core, config, _client) = fixture();
+    let spool = DraftSpool::new(directory.path());
+    let instance = core.host(&config.id).unwrap().instance();
+    run(async {
+        let (listener, acceptor, client) = server().await;
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client.clone())
+            .unwrap();
+        load(&lease, &listener, &acceptor).await;
+        lease.queue(json!({"text": "typed while Forge was unreachable"}));
+        drop(lease);
+        drop(sessions);
+        let (socket, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        assert_eq!(
+            drain_pending(Duration::ZERO).await,
+            ShutdownOutcome::Incomplete {
+                failed: 0,
+                timed_out: 1,
+                kept_locally: 1,
+            }
+        );
+        drop(socket);
+
+        let mut sessions = DraftSessions::with_spool(spool.clone());
+        let lease = sessions
+            .open(config.id.clone(), instance, "new".into(), client)
+            .unwrap();
+        let (mut socket, route, _) = request(&listener, &acceptor).await;
+        assert_eq!(route, "GET /drafts/new HTTP/1.1");
+        respond(&mut socket, json!({"revision": 0, "body": null})).await;
+        drop(socket);
+        let (mut socket, route, body) = request(&listener, &acceptor).await;
+        assert_eq!(route, "PUT /drafts/new HTTP/1.1");
+        assert_eq!(
+            body["body"],
+            json!({"text": "typed while Forge was unreachable"}),
+            "the draft typed before closing comes back after restarting"
+        );
+        let mut changed = lease.subscribe();
+        respond(
+            &mut socket,
+            json!({"saved": true, "current": {"revision": 1, "body": body["body"]}}),
+        )
+        .await;
+        drop(socket);
+        while lease.read(|state| state.pending()) {
+            changed.changed().await.unwrap();
+        }
+        assert_eq!(spool.take(&config.id, "new").unwrap(), None);
     });
 }
 

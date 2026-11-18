@@ -25,6 +25,8 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process", "net", "io-util"] }
 tracing.workspace = true
 tokio-util.workspace = true
+thiserror.workspace = true
+diagnostics.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 webp.workspace = true
 editor-core.workspace = true

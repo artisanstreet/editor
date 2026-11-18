@@ -17,11 +17,13 @@ fn pending_write() -> (DraftHandle, artisan_api::WriteDraft, u64) {
     let handle = DraftHandle(Arc::new(Inner {
         host: HostId("deadline-test".into()),
         client,
+        spool: None,
         shared: Mutex::new(Shared {
             state,
             viewers: Vec::new(),
             timer: None,
             version: 0,
+            recovered: false,
         }),
         changed,
         cancelled: CancellationToken::new(),
@@ -63,7 +65,8 @@ fn rejection_before_deadline_recheck_is_a_failure_without_cancellation() {
         handle.deadline_outcome(),
         ShutdownOutcome::Incomplete {
             failed: 1,
-            timed_out: 0
+            timed_out: 0,
+            kept_locally: 0,
         }
     );
     assert!(!handle.0.cancelled.is_cancelled());
@@ -76,7 +79,8 @@ fn unacknowledged_write_at_deadline_is_cancelled_and_counted_once() {
         handle.deadline_outcome(),
         ShutdownOutcome::Incomplete {
             failed: 0,
-            timed_out: 1
+            timed_out: 1,
+            kept_locally: 0,
         }
     );
     assert!(handle.0.cancelled.is_cancelled());

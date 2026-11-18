@@ -189,14 +189,32 @@ fn run(qualifying: bool) -> anyhow::Result<()> {
     );
     let shutdown = match shutdown {
         crate::composer::persistence::ShutdownOutcome::Saved => Ok(()),
-        crate::composer::persistence::ShutdownOutcome::Incomplete { failed, timed_out } => {
+        crate::composer::persistence::ShutdownOutcome::Incomplete {
+            failed,
+            timed_out,
+            kept_locally,
+        } if kept_locally == failed + timed_out => {
+            tracing::warn!(
+                failed,
+                timed_out,
+                kept_locally,
+                "Editor closed before Forge saved every draft; they are kept on this device until it can"
+            );
+            Ok(())
+        }
+        crate::composer::persistence::ShutdownOutcome::Incomplete {
+            failed,
+            timed_out,
+            kept_locally,
+        } => {
             tracing::error!(
                 failed,
                 timed_out,
-                "Editor closed before all drafts could be saved"
+                kept_locally,
+                "Editor closed before all drafts could be saved or kept on this device"
             );
             Err(anyhow::anyhow!(
-                "Could not finish saving drafts: {failed} failed, {timed_out} timed out"
+                "Could not finish saving drafts: {failed} failed, {timed_out} timed out, {kept_locally} kept on this device"
             ))
         }
     };
