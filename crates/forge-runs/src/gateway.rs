@@ -5,7 +5,7 @@
 
 use crate::Hub;
 use anyhow::Result;
-use artisan_api::{EditorCall, EditorReply, Event, ThreadId};
+use artisan_api::{EditorCall, EditorReply, Event, Secret, ThreadId};
 use forge_store::Refused;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -23,7 +23,7 @@ pub struct Gateway {
     base: Option<String>,
     /// The gateway serves computer use (this machine has a display for it).
     computer: bool,
-    tokens: HashMap<ThreadId, String>,
+    tokens: HashMap<ThreadId, Secret>,
     threads: HashMap<String, ThreadId>,
     /// Calls sent to Editors, waiting for the first answer.
     calls: HashMap<String, oneshot::Sender<EditorReply>>,
@@ -38,10 +38,26 @@ impl Hub {
         gateway.computer = computer;
     }
 
-    /// The thread a gateway credential acts for.
     #[must_use]
     pub fn gateway_thread(&self, token: &str) -> Option<ThreadId> {
-        self.gateway_lock().threads.get(token).cloned()
+        let gateway = self.gateway_lock();
+        gateway
+            .threads
+            .get(token)
+            .filter(|thread| {
+                gateway
+                    .tokens
+                    .get(*thread)
+                    .is_some_and(|issued| issued.expose() == token)
+            })
+            .cloned()
+    }
+
+    pub(crate) fn revoke_gateway_credential(&self, thread: &ThreadId) {
+        let mut gateway = self.gateway_lock();
+        if let Some(token) = gateway.tokens.remove(thread) {
+            gateway.threads.remove(token.expose());
+        }
     }
 
     /// Forge's own servers for a thread's engine, as (name, address with
@@ -80,7 +96,7 @@ impl Hub {
         let mut gateway = self.gateway_lock();
         let base = gateway.base.clone()?;
         let token = if let Some(token) = gateway.tokens.get(thread) {
-            token.clone()
+            token.expose().to_owned()
         } else {
             let mut bytes = [0_u8; 24];
             if let Err(error) = getrandom::fill(&mut bytes) {
@@ -88,7 +104,9 @@ impl Hub {
                 return None;
             }
             let token = hex::encode(bytes);
-            gateway.tokens.insert(thread.clone(), token.clone());
+            gateway
+                .tokens
+                .insert(thread.clone(), Secret::from(token.as_str()));
             gateway.threads.insert(token.clone(), thread.clone());
             token
         };

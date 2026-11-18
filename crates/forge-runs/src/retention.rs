@@ -53,7 +53,8 @@ impl Hub {
             .filter(|days| *days > 0))
     }
 
-    async fn forget_removed_thread(&self, thread: Thread) {
+    pub(crate) async fn forget_removed_thread(&self, thread: Thread) {
+        self.revoke_gateway_credential(&thread.id);
         let suggested = self.suggestions_lock().remove(&thread.id);
         if let Some(suggested) = suggested {
             suggested.cancel.cancel();

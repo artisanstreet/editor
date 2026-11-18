@@ -27,6 +27,8 @@ mod mcp_reach_tests;
 mod resource_paths;
 #[path = "../tests/resources/snapshot.rs"]
 mod resource_snapshots;
+#[path = "../tests/retention/removal.rs"]
+mod retention_tests;
 #[path = "../tests/runtime/registry.rs"]
 mod runtime_registry;
 use artisan_api::{

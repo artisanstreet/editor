@@ -52,6 +52,12 @@ impl ArtisanMcp {
         name: &str,
         mut arguments: Value,
     ) -> Result<ToolResult> {
+        if self.hub.store().thread(caller).await?.is_none() {
+            return Err(forge_runs::Refused(
+                "The thread this MCP address was issued to no longer exists.".to_owned(),
+            )
+            .into());
+        }
         if let Some(value) = awareness::call(&self.hub, caller, name, arguments.clone()).await? {
             return ToolResult::structured(value);
         }
