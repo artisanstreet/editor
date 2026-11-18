@@ -116,3 +116,102 @@ fn axes_offer_only_concrete_choices_and_resolve_inherited_selections() {
         "High"
     );
 }
+
+#[test]
+fn the_model_picker_offers_install_and_sign_in_for_engines_that_are_not_ready() {
+    use artisan_api::tls::{Identity, fingerprint};
+    use artisan_api::{DiscoveryState, EngineStatus, InstallState, SignInState};
+    use editor_aqua::composer::controller::ComposerTarget;
+    use editor_aqua::composer::persistence::DraftSessions;
+    use editor_aqua::composer::picker::Menu;
+    use editor_aqua::composer::view::ComposerOwner;
+    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+    use editor_aqua::ui::theme::ArtisanTheme;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().join("editor"),
+    })
+    .unwrap();
+    let identity = Identity::generate("picker-gates").unwrap();
+    let print = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let client = ForgeClient::new("127.0.0.1:1", &print, &identity).unwrap();
+    let host = HostId("picker-gates".into());
+    core.add_test_host(
+        &HostConfig {
+            id: host.clone(),
+            name: "Forge".into(),
+            address: "127.0.0.1:1".into(),
+            fingerprint: print,
+            kind: HostKind::Local,
+        },
+        client,
+    );
+    let status = |engine, install, sign_in| EngineStatus {
+        discovery: DiscoveryState::Unknown,
+        engine,
+        install,
+        sign_in,
+        models: Vec::new().into(),
+        default_model: None,
+        commands: Vec::new().into(),
+        usage: None,
+        integrity: None,
+        versions: Vec::new().into(),
+        claude_ai: None,
+    };
+    let installed = || InstallState::Installed {
+        version: "1.0.0".into(),
+        update: None,
+    };
+    let engines = &mut core.host_mut(&host).unwrap().engines;
+    for engine in [
+        status(EngineId::Claude, InstallState::Absent, SignInState::SignedOut),
+        status(EngineId::Codex, installed(), SignInState::SignedOut),
+        status(
+            EngineId::OpenCode,
+            InstallState::Verifying {
+                version: "2.0.0".into(),
+            },
+            SignInState::Unknown,
+        ),
+    ] {
+        engines.insert(engine.engine, engine);
+    }
+    let mut sessions = DraftSessions::default();
+    let owner = ComposerOwner::new(
+        &core,
+        &mut sessions,
+        ComposerTarget::NewThread {
+            host: host.clone(),
+            project: None,
+        },
+        std::rc::Rc::new(|_| {}),
+    );
+    owner
+        .controller
+        .borrow_mut()
+        .open_picker(Menu::Model, core.host(&host).unwrap());
+    let menu = owner
+        .model_menu(
+            ArtisanTheme::resolved(),
+            core.host(&host).unwrap(),
+            aqua_core::Size::new(900.0, 700.0),
+            0.0,
+            &aqua::images::ImageAssets::default(),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+    let app = test_support::editor::ui::mounted(900.0, 700.0, menu);
+    let texts = test_support::editor::ui::painted_texts(&app);
+    for wanted in [
+        "Install Claude Code",
+        "Sign in to Codex",
+        "OpenCode is not ready: installing.",
+    ] {
+        assert!(
+            texts.iter().any(|text| text == wanted),
+            "the picker shows {wanted:?} among {texts:?}"
+        );
+    }
+}

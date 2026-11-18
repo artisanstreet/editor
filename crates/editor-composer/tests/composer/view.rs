@@ -2,6 +2,7 @@ use super::{
     ComposerAction, ComposerFailure, QUESTIONNAIRE_MAX_HEIGHT, draft_error, model_gate_row,
     questionnaire,
 };
+use crate::composer::picker::gate;
 use crate::composer::questionnaire::{ComposerQuestionnaire, QuestionnairePanel};
 use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
 use aqua_text::{SharedFonts, SharedRuns};
@@ -262,7 +263,9 @@ fn an_engine_without_models_offers_its_settings_and_a_signed_out_one_asks_to_sig
         r#"{"state":"signed_in","account":null}"#,
         r#"{"state":"fresh","observed_at":0}"#,
     );
-    let mut mounted = Mounted::new(|dispatch| model_gate_row(&theme, &empty, &dispatch));
+    let mut mounted = Mounted::new(|dispatch| {
+        model_gate_row(&theme, empty.engine, gate(&empty).unwrap(), &dispatch)
+    });
     assert!(
         mounted
             .said()
@@ -279,7 +282,14 @@ fn an_engine_without_models_offers_its_settings_and_a_signed_out_one_asks_to_sig
         r#"{"state":"signed_out"}"#,
         r#"{"state":"fresh","observed_at":0}"#,
     );
-    let mounted = Mounted::new(|dispatch| model_gate_row(&theme, &signed_out, &dispatch));
+    let mounted = Mounted::new(|dispatch| {
+        model_gate_row(
+            &theme,
+            signed_out.engine,
+            gate(&signed_out).unwrap(),
+            &dispatch,
+        )
+    });
     let said = mounted.said();
     assert!(said.iter().any(|text| text == "Sign in to Codex"));
     assert!(!said.iter().any(|text| text.contains("no models")));

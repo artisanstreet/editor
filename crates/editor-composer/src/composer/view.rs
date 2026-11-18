@@ -2437,7 +2437,7 @@ impl ComposerOwner {
         let picker = &controller.picker;
         let current = controller.effective_config(host);
         let engines =
-            super::picker::offered_engines(host, current.as_ref().map(|config| config.engine));
+            super::picker::offered_engines(host);
         let layout = ListLayout::new(&picker.models);
         let items = model_menu_items(host, picker, current.clone());
         let pane = picker
@@ -3229,17 +3229,19 @@ fn model_engine_bar(
         let tooltip_anchor = format!("composer-engine-{engine}");
         let gated = super::picker::gate(status);
         let reason = gated.map(|gate| {
+            use super::picker::Gate;
             let name = engine.display_name();
             match gate {
-                "Not installed" => format!("{name} isn't installed on this Forge."),
-                "Sign in" => format!("Sign in to {name} to use its models."),
-                "Signing in…" => format!("Signing in to {name}…"),
-                "Checking…" => format!("Checking {name}…"),
-                "No models" => format!("{name} hasn't reported any models."),
-                "Discovering models…" | "Discovery failed" => {
+                Gate::NotInstalled => format!("{name} isn't installed on this Forge."),
+                Gate::Installing => format!("Installing {name}…"),
+                Gate::InstallFailed => format!("Installing {name} failed."),
+                Gate::SignIn => format!("Sign in to {name} to use its models."),
+                Gate::SigningIn => format!("Signing in to {name}…"),
+                Gate::Checking => format!("Checking {name}…"),
+                Gate::NoModels => format!("{name} hasn't reported any models."),
+                Gate::DiscoveringModels | Gate::DiscoveryFailed => {
                     status.discovery.description(artisan_api::now())
                 }
-                _ => unreachable!(),
             }
         });
         let tab = IconButton::new(
@@ -3281,11 +3283,10 @@ fn model_engine_bar(
 
 fn model_gate_row(
     theme: &ArtisanTheme,
-    status: &artisan_api::EngineStatus,
+    engine: artisan_api::EngineId,
+    gate: super::picker::Gate,
     dispatch: &Dispatch,
 ) -> Element {
-    let engine = status.engine;
-    let reason = super::picker::gate(status).unwrap_or_default();
     let mut body = UiBox::new()
         .layout("column")
         .height(super::model_list::GATE_ROW_HEIGHT)
@@ -3296,24 +3297,19 @@ fn model_gate_row(
             TextRole::Label
                 .text(
                     theme,
-                    format!(
-                        "{} is not ready: {}.",
-                        engine.display_name(),
-                        reason.to_lowercase()
-                    ),
+                    format!("{} is not ready: {}.", engine.display_name(), gate.reason()),
                 )
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .wrap(true)
                 .build(),
         );
-    let name = engine.display_name();
-    let action_label = match reason {
-        "Sign in" => Some(format!("Sign in to {name}")),
-        "Not installed" => Some(format!("Install {name}")),
-        "Discovery failed" | "No models" => Some(format!("Open {name} settings")),
-        _ => None,
-    };
-    if let Some(action_label) = action_label {
+    if let Some(action) = gate.action() {
+        let name = engine.display_name();
+        let action_label = match action {
+            super::picker::GateAction::SignIn => format!("Sign in to {name}"),
+            super::picker::GateAction::Install => format!("Install {name}"),
+            super::picker::GateAction::OpenSettings => format!("Open {name} settings"),
+        };
         let action = Rc::clone(dispatch);
         body = body.child(
             Link::new(
@@ -3371,8 +3367,8 @@ fn model_list_pane(
                 );
             }
             ModelRow::Gate(_) => {
-                if let Some(status) = host.engines.get(&engine) {
-                    rows = rows.child(model_gate_row(&theme, status, dispatch));
+                if let Some(gate) = host.engines.get(&engine).and_then(super::picker::gate) {
+                    rows = rows.child(model_gate_row(&theme, engine, gate, dispatch));
                 }
             }
             ModelRow::Group { name, open, .. } => {
@@ -3614,8 +3610,7 @@ pub fn model_menu(
     } = frame;
     let sheet = Surface::Picker(Picker::Sheet);
     let pane_radius = Radius::Panel.px();
-    let engines =
-        super::picker::offered_engines(host, current.as_ref().map(|config| config.engine));
+    let engines = super::picker::offered_engines(host);
     let model_icon = picker.pane_config(host, current.clone()).map(|config| {
         host.engines
             .get(&config.engine)

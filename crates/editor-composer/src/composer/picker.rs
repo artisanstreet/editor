@@ -114,11 +114,63 @@ impl ModelRow {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    NotInstalled,
+    Installing,
+    InstallFailed,
+    SignIn,
+    SigningIn,
+    Checking,
+    DiscoveringModels,
+    DiscoveryFailed,
+    NoModels,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateAction {
+    Install,
+    SignIn,
+    OpenSettings,
+}
+
+impl Gate {
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not installed",
+            Self::Installing => "installing",
+            Self::InstallFailed => "the install failed",
+            Self::SignIn => "signed out",
+            Self::SigningIn => "signing in",
+            Self::Checking => "checking sign-in",
+            Self::DiscoveringModels => "discovering models",
+            Self::DiscoveryFailed => "model discovery failed",
+            Self::NoModels => "no models",
+        }
+    }
+
+    #[must_use]
+    pub const fn action(self) -> Option<GateAction> {
+        match self {
+            Self::NotInstalled | Self::InstallFailed => Some(GateAction::Install),
+            Self::SignIn => Some(GateAction::SignIn),
+            Self::DiscoveryFailed | Self::NoModels => Some(GateAction::OpenSettings),
+            Self::Installing | Self::SigningIn | Self::Checking | Self::DiscoveringModels => None,
+        }
+    }
+}
+
 #[must_use]
-pub fn gate(status: &artisan_api::EngineStatus) -> Option<&'static str> {
-    use artisan_api::{InstallState, SignInState};
-    if !matches!(status.install, InstallState::Installed { .. }) {
-        return Some("Not installed");
+pub fn gate(status: &artisan_api::EngineStatus) -> Option<Gate> {
+    use artisan_api::{DiscoveryState, InstallState, SignInState};
+    match &status.install {
+        InstallState::Installed { .. } => {}
+        InstallState::Absent => return Some(Gate::NotInstalled),
+        InstallState::Downloading { .. } | InstallState::Verifying { .. } => {
+            return Some(Gate::Installing);
+        }
+        InstallState::Failed { .. } => return Some(Gate::InstallFailed),
     }
     match &status.sign_in {
         SignInState::SignedOut
@@ -126,29 +178,25 @@ pub fn gate(status: &artisan_api::EngineStatus) -> Option<&'static str> {
         {
             None
         }
-        SignInState::SignedOut | SignInState::Failed { .. } => Some("Sign in"),
-        SignInState::LoggingIn { .. } => Some("Signing in…"),
-        SignInState::Unknown if status.models.is_empty() => Some("Checking…"),
+        SignInState::SignedOut | SignInState::Failed { .. } => Some(Gate::SignIn),
+        SignInState::LoggingIn { .. } => Some(Gate::SigningIn),
+        SignInState::Unknown if status.models.is_empty() => Some(Gate::Checking),
         SignInState::SignedIn { .. } if status.models.is_empty() => match status.discovery {
-            artisan_api::DiscoveryState::Unknown
-            | artisan_api::DiscoveryState::Refreshing { .. } => Some("Discovering models…"),
-            artisan_api::DiscoveryState::Unavailable { .. }
-            | artisan_api::DiscoveryState::Stale { .. } => Some("Discovery failed"),
-            artisan_api::DiscoveryState::Fresh { .. } => Some("No models"),
+            DiscoveryState::Unknown | DiscoveryState::Refreshing { .. } => {
+                Some(Gate::DiscoveringModels)
+            }
+            DiscoveryState::Unavailable { .. } | DiscoveryState::Stale { .. } => {
+                Some(Gate::DiscoveryFailed)
+            }
+            DiscoveryState::Fresh { .. } => Some(Gate::NoModels),
         },
         SignInState::Unknown | SignInState::SignedIn { .. } => None,
     }
 }
 
 #[must_use]
-pub fn offered_engines(
-    host: &editor_core::HostData,
-    current: Option<EngineId>,
-) -> Vec<&artisan_api::EngineStatus> {
-    host.engines
-        .values()
-        .filter(|status| gate(status).is_none() || current == Some(status.engine))
-        .collect()
+pub fn offered_engines(host: &editor_core::HostData) -> Vec<&artisan_api::EngineStatus> {
+    host.engines.values().collect()
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Menu {
@@ -305,7 +353,7 @@ impl PickerState {
         let current_engine = current.map(|config| config.engine);
         let chosen = current.and_then(|config| config.model.as_deref());
         let mut rows = Vec::new();
-        for status in offered_engines(host, current_engine) {
+        for status in offered_engines(host) {
             self.push_engine_rows(host, status, chosen, current_engine, &mut rows);
         }
         self.models = rows;
@@ -413,7 +461,7 @@ impl PickerState {
     ) {
         let engine = status.engine;
         let gated = gate(status);
-        if matches!(gated, Some("Not installed" | "Sign in"))
+        if gated.is_some_and(|gate| gate.action().is_some())
             || (gated.is_some() && status.models.is_empty())
         {
             rows.push(ModelRow::Engine(engine));
