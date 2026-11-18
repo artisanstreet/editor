@@ -88,7 +88,7 @@ fn concurrent_draft_conflict_requires_an_explicit_resolution() {
             },
         }),
     );
-    assert!(session.conflict);
+    assert!(session.conflict());
     assert!(session.next().is_none());
     session.keep_local();
     let Some(Operation::Write { request, .. }) = session.next() else {
@@ -411,7 +411,7 @@ fn replacing_same_host_id_does_not_reuse_old_composer_or_draft_session() {
             .session
             .as_ref()
             .unwrap()
-            .read(|session| session.body.clone()),
+            .read(|session| session.body().clone()),
         serde_json::Value::Null
     );
     let editor = current.editor.clone();
@@ -626,7 +626,7 @@ fn assert_original_submission(session: &mut DraftSession) {
     session.posted(Ok(()), submission().thread);
     assert!(!session.sending());
     assert!(!session.pending());
-    assert!(session.body.is_null());
+    assert!(session.body().is_null());
 }
 
 #[test]
@@ -639,7 +639,7 @@ fn draft_load_failure_unlocks_the_queued_send_and_retry_preserves_its_identity()
     assert!(session.sending());
     session.loaded(Err("offline".into()));
     assert!(!session.sending());
-    assert_eq!(session.body, body);
+    assert_eq!(*session.body(), body);
     assert!(session.pending());
     assert!(session.next().is_none());
     session.retry();
@@ -662,7 +662,7 @@ fn draft_write_failure_unlocks_the_queued_send_without_losing_the_draft() {
     };
     session.written(&request, edited, Err("offline".into()));
     assert!(!session.sending());
-    assert_eq!(session.body, body);
+    assert_eq!(*session.body(), body);
     assert!(session.pending());
     session.retry();
     assert!(
@@ -670,7 +670,7 @@ fn draft_write_failure_unlocks_the_queued_send_without_losing_the_draft() {
         "a save with no answer is checked against Forge before writing again"
     );
     session.loaded(Ok(DraftSnapshot::default()));
-    assert!(!session.conflict);
+    assert!(!session.conflict());
     save_next(&mut session);
     assert_original_submission(&mut session);
 }
@@ -697,9 +697,14 @@ fn a_submitted_draft_conflict_unlocks_and_resumes_only_after_resolution() {
         }),
     );
     assert!(!session.sending());
-    assert_eq!(session.body, body);
-    assert!(session.conflict);
+    assert_eq!(*session.body(), body);
+    assert!(session.conflict());
     session.retry();
+    assert!(
+        session.conflict(),
+        "retrying does not hide the choice between the two versions"
+    );
+    assert!(session.error().is_some_and(|error| error.contains("another client")));
     assert!(!session.sending());
     assert!(session.next().is_none());
     session.keep_local();
@@ -731,10 +736,10 @@ fn a_save_forge_answered_too_late_is_not_shown_as_another_clients_change() {
         body: json!({"text": "typed while Forge was slow"}),
     }));
     assert!(
-        !session.conflict,
+        !session.conflict(),
         "the timed-out save landing late is this client's own draft"
     );
-    assert!(session.error.is_none(), "no error is shown for it");
+    assert!(session.error().is_none(), "no error is shown for it");
     let Some(Operation::Write { request, .. }) = session.next() else {
         panic!("expected the newest text to be saved on top");
     };
@@ -770,7 +775,7 @@ fn repeated_unanswered_saves_never_pile_up() {
             revision: 3,
             body: json!({"text": "old"}),
         }));
-        assert!(!session.conflict);
+        assert!(!session.conflict());
     }
 }
 
@@ -794,10 +799,10 @@ fn another_clients_change_after_a_timed_out_save_still_asks_which_to_keep() {
         body: json!({"text": "written on the other machine"}),
     }));
     assert!(
-        session.conflict,
+        session.conflict(),
         "a draft this client never sent is another client's change"
     );
-    assert_eq!(session.body, json!({"text": "mine, edited"}));
+    assert_eq!(*session.body(), json!({"text": "mine, edited"}));
 }
 
 #[test]
@@ -810,16 +815,16 @@ fn typing_before_the_first_load_asks_which_draft_to_keep() {
         body: json!({"text": "saved on another machine"}),
     }));
     assert!(
-        session.conflict,
+        session.conflict(),
         "the saved draft would be overwritten unseen"
     );
     assert!(session.next().is_none());
     assert_eq!(
-        session.body,
+        *session.body(),
         json!({"text": "typed before the draft arrived"})
     );
     session.use_remote();
-    assert_eq!(session.body, json!({"text": "saved on another machine"}));
+    assert_eq!(*session.body(), json!({"text": "saved on another machine"}));
 }
 
 #[test]
@@ -831,7 +836,7 @@ fn typing_before_the_first_load_of_an_empty_draft_just_saves() {
         revision: 2,
         body: serde_json::Value::Null,
     }));
-    assert!(!session.conflict);
+    assert!(!session.conflict());
     let Some(Operation::Write { request, .. }) = session.next() else {
         panic!("expected the early text to be saved");
     };
@@ -865,7 +870,7 @@ fn a_draft_typed_while_the_message_posts_survives_its_acceptance() {
     session.queue(typed.clone());
     session.posted(Ok(()), submission().thread);
     assert!(!session.sending());
-    assert_eq!(session.body, typed);
+    assert_eq!(*session.body(), typed);
     assert!(session.pending());
     assert!(matches!(session.next(), Some(Operation::Load)));
     session.loaded(Ok(DraftSnapshot {

@@ -26,7 +26,6 @@
     clippy::should_implement_trait,
     clippy::single_match_else,
     clippy::string_slice,
-    clippy::struct_excessive_bools,
     clippy::suboptimal_flops,
     clippy::too_many_arguments,
     clippy::too_many_lines,

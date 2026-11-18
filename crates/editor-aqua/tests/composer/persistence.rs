@@ -144,11 +144,11 @@ fn rejected_write_unlocks_queued_send_and_retry_preserves_the_message() {
         )
         .await;
         drop(socket);
-        while lease.read(|state| state.error.is_none()) {
+        while lease.read(|state| state.error().is_none()) {
             changed.changed().await.unwrap();
         }
         assert!(!lease.read(|state| state.sending()));
-        assert_eq!(lease.read(|state| state.body.clone()), draft);
+        assert_eq!(lease.read(|state| state.body().clone()), draft);
         assert!(lease.read(|state| state.pending()));
 
         lease.retry();
@@ -176,7 +176,7 @@ fn rejected_write_unlocks_queued_send_and_retry_preserves_the_message() {
         assert_eq!(route, "GET /drafts/new HTTP/1.1");
         respond(&mut socket, json!({"revision": 2, "body": null})).await;
         drop(socket);
-        while !lease.read(|state| state.loaded && state.evictable()) {
+        while !lease.read(|state| state.is_loaded() && state.evictable()) {
             changed.changed().await.unwrap();
         }
         assert!(!lease.read(|state| state.sending()));
@@ -191,7 +191,7 @@ async fn load(lease: &DraftLease, listener: &TcpListener, acceptor: &TlsAcceptor
     assert_eq!(body, Value::Null);
     respond(&mut socket, json!({"revision": 0, "body": null})).await;
     drop(socket);
-    while !lease.read(|state| state.loaded) {
+    while !lease.read(|state| state.is_loaded()) {
         changed.changed().await.unwrap();
     }
 }
@@ -253,11 +253,11 @@ fn replacing_host_invalidates_old_draft_writer_but_preserves_current_writer() {
     old.queue(serde_json::json!({"text": "stale edit"}));
     old.retry();
     assert_eq!(
-        old.read(|state| state.body.clone()),
+        old.read(|state| state.body().clone()),
         serde_json::Value::Null
     );
     assert_eq!(
-        current.read(|state| state.body.clone()),
+        current.read(|state| state.body().clone()),
         serde_json::json!({"text": "current pairing"})
     );
 }
@@ -300,7 +300,7 @@ fn dropping_lease_and_manager_flushes_a_loaded_dirty_draft() {
         }
         assert!(!handle.read(|state| state.removed()));
         assert_eq!(persisted, expected);
-        assert_eq!(handle.read(|state| state.body.clone()), persisted);
+        assert_eq!(handle.read(|state| state.body().clone()), persisted);
     });
 }
 
@@ -359,11 +359,11 @@ fn graceful_teardown_finishes_an_inflight_write_and_queued_post() {
         assert_eq!(route, "GET /drafts/new HTTP/1.1");
         respond(&mut socket, json!({"revision": 2, "body": null})).await;
         drop(socket);
-        while !handle.read(|state| state.loaded && state.evictable()) {
+        while !handle.read(|state| state.is_loaded() && state.evictable()) {
             changed.changed().await.unwrap();
         }
         assert!(!handle.read(|state| state.removed()));
-        assert_eq!(handle.read(|state| state.body.clone()), Value::Null);
+        assert_eq!(handle.read(|state| state.body().clone()), Value::Null);
     });
 }
 
@@ -406,7 +406,7 @@ fn explicit_host_removal_cancels_an_inflight_write_and_queued_post() {
 
         assert!(lease.read(|state| state.removed()));
         assert!(!lease.read(|state| state.sending()));
-        assert_eq!(lease.read(|state| state.body.clone()), Value::Null);
+        assert_eq!(lease.read(|state| state.body().clone()), Value::Null);
         let mut bytes = [0; 1024];
         loop {
             match socket.read(&mut bytes).await {
@@ -721,7 +721,7 @@ fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
             .session
             .as_ref()
             .unwrap()
-            .read(|state| state.loaded)
+            .read(|state| state.is_loaded())
         {
             changed.changed().await.unwrap();
         }
@@ -771,7 +771,7 @@ fn a_failed_send_keeps_both_a_long_prompt_and_the_follow_up_typed_meanwhile() {
             .session
             .as_ref()
             .unwrap()
-            .read(|state| state.body.clone());
+            .read(|state| state.body().clone());
         assert_eq!(
             saved["follow_ups"][0]["text"], "the follow-up",
             "what was typed while sending is kept beside it"

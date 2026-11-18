@@ -740,10 +740,10 @@ impl Composer {
         let events = session.drain_events();
         let (loaded, sending, failed, body) = session.read(|state| {
             (
-                state.loaded,
+                state.is_loaded(),
                 state.sending(),
                 state.send_failed(),
-                state.body.clone(),
+                state.body().clone(),
             )
         });
         for event in &events {

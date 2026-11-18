@@ -1267,9 +1267,9 @@ impl ComposerRest {
             session: composer.session.as_ref().map(|session| {
                 session.read(|state| {
                     (
-                        state.loaded,
-                        state.conflict,
-                        state.error.clone(),
+                        state.is_loaded(),
+                        state.conflict(),
+                        state.error().map(str::to_owned),
                         state.sending(),
                     )
                 })
@@ -2551,7 +2551,7 @@ impl ComposerOwner {
             .session
             .as_ref()
             .and_then(|session| {
-                session.read(|state| state.error.clone().map(|error| (error, state.conflict)))
+                session.read(|state| state.error().map(|error| (error.to_owned(), state.conflict())))
             })
             .map(|(error, conflict)| {
                 draft_error(

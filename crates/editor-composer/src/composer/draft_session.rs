@@ -43,20 +43,35 @@ pub enum Operation {
     Post(Submission),
 }
 
+const CONFLICT: &str = "This draft changed on another client. Choose which version to keep.";
+const REMOVED: &str = "This Forge pairing was removed.";
+
+enum Remote {
+    Unloaded,
+    Loaded(DraftSnapshot),
+    Ambiguous {
+        snapshot: DraftSnapshot,
+        written: Value,
+    },
+}
+
+enum Halt {
+    Clear,
+    Failed(String),
+    Conflict,
+    Removed,
+}
+
 pub struct DraftSession {
-    pub scope: String,
-    pub body: Value,
-    pub loaded: bool,
-    pub error: Option<String>,
-    pub conflict: bool,
-    snapshot: DraftSnapshot,
-    ambiguous: Option<Value>,
+    scope: String,
+    body: Value,
+    remote: Remote,
+    halt: Halt,
     adopting: usize,
     edited: u64,
     saved: u64,
     dirty: bool,
     busy: bool,
-    removed: bool,
     outgoing: Option<Outgoing>,
     accepted: Option<ThreadId>,
 }
@@ -66,19 +81,57 @@ impl DraftSession {
         Self {
             scope,
             body: Value::Null,
-            loaded: false,
-            error: None,
-            conflict: false,
-            snapshot: DraftSnapshot::default(),
-            ambiguous: None,
+            remote: Remote::Unloaded,
+            halt: Halt::Clear,
             adopting: 0,
             edited: 0,
             saved: 0,
             dirty: false,
             busy: false,
-            removed: false,
             outgoing: None,
             accepted: None,
+        }
+    }
+
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    pub const fn body(&self) -> &Value {
+        &self.body
+    }
+
+    pub const fn is_loaded(&self) -> bool {
+        !matches!(self.remote, Remote::Unloaded)
+    }
+
+    pub const fn conflict(&self) -> bool {
+        matches!(self.halt, Halt::Conflict)
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match &self.halt {
+            Halt::Clear => None,
+            Halt::Failed(error) => Some(error),
+            Halt::Conflict => Some(CONFLICT),
+            Halt::Removed => Some(REMOVED),
+        }
+    }
+
+    const fn halted(&self) -> bool {
+        !matches!(self.halt, Halt::Clear)
+    }
+
+    fn clear_failure(&mut self) {
+        if matches!(self.halt, Halt::Failed(_)) {
+            self.halt = Halt::Clear;
+        }
+    }
+
+    fn snapshot(&self) -> Option<&DraftSnapshot> {
+        match &self.remote {
+            Remote::Unloaded => None,
+            Remote::Loaded(snapshot) | Remote::Ambiguous { snapshot, .. } => Some(snapshot),
         }
     }
 
@@ -87,11 +140,11 @@ impl DraftSession {
     }
 
     pub fn pending(&self) -> bool {
-        !self.removed && (self.dirty || self.outgoing.is_some() || self.adopting > 0)
+        !self.removed() && (self.dirty || self.outgoing.is_some() || self.adopting > 0)
     }
 
     pub fn recover(&mut self, body: Value) {
-        if self.removed || body.is_null() {
+        if self.removed() || body.is_null() {
             return;
         }
         self.body = body;
@@ -108,7 +161,7 @@ impl DraftSession {
             .adopting
             .checked_sub(1)
             .expect("invariant: an adopted upload was counted when it started");
-        if self.removed {
+        if self.removed() {
             return None;
         }
         let hash = match result {
@@ -139,13 +192,12 @@ impl DraftSession {
         Some(hash)
     }
 
-    pub fn removed(&self) -> bool {
-        self.removed
+    pub const fn removed(&self) -> bool {
+        matches!(self.halt, Halt::Removed)
     }
 
     pub fn sending(&self) -> bool {
-        !self.conflict
-            && self.error.is_none()
+        !self.halted()
             && self
                 .outgoing
                 .as_ref()
@@ -171,7 +223,7 @@ impl DraftSession {
     }
 
     pub fn queue(&mut self, body: Value) -> bool {
-        if self.removed || self.body == body {
+        if self.removed() || self.body == body {
             return false;
         }
         self.body = body;
@@ -180,14 +232,12 @@ impl DraftSession {
         if !self.sending() {
             self.outgoing = None;
         }
-        if !self.conflict {
-            self.error = None;
-        }
+        self.clear_failure();
         true
     }
 
     pub fn submit(&mut self, submission: Submission) {
-        if self.removed || self.sending() {
+        if self.removed() || self.sending() {
             return;
         }
         self.accepted = None;
@@ -201,99 +251,103 @@ impl DraftSession {
                 })
             }
         }
-        if !self.conflict {
-            self.error = None;
-        }
+        self.clear_failure();
     }
 
     pub fn retry(&mut self) {
-        if self.removed {
+        if self.removed() {
             return;
         }
-        self.error = None;
+        self.clear_failure();
         if let Some(outgoing) = &mut self.outgoing {
             outgoing.state = Sending::Queued;
         }
     }
 
     pub fn keep_local(&mut self) {
-        if self.removed {
+        if self.removed() {
             return;
         }
-        self.conflict = false;
-        self.error = None;
+        self.halt = Halt::Clear;
         if let Some(outgoing) = &mut self.outgoing {
             outgoing.state = Sending::Queued;
         }
     }
 
     pub fn use_remote(&mut self) {
-        if self.removed {
+        if self.removed() {
             return;
         }
-        self.body = self.snapshot.body.clone();
+        self.body = self
+            .snapshot()
+            .map_or(Value::Null, |snapshot| snapshot.body.clone());
         self.dirty = false;
-        self.conflict = false;
-        self.error = None;
+        self.halt = Halt::Clear;
         self.outgoing = None;
     }
 
     pub fn remove(&mut self) {
-        self.removed = true;
+        self.halt = Halt::Removed;
         self.busy = false;
         self.dirty = false;
         self.outgoing = None;
         self.accepted = None;
         self.body = Value::Null;
-        self.snapshot.body = Value::Null;
-        self.error = Some("This Forge pairing was removed.".into());
+        self.remote = Remote::Unloaded;
     }
 
     pub fn next(&mut self) -> Option<Operation> {
-        if self.removed || self.busy || self.conflict || self.error.is_some() {
+        if self.busy || self.halted() {
             return None;
         }
         let posting = self.outgoing.as_ref().is_some_and(|outgoing| {
             outgoing.state == Sending::Queued && self.saved >= outgoing.edited
         });
-        let operation = if !self.loaded || self.ambiguous.is_some() {
-            Operation::Load
-        } else if self.dirty && !posting {
-            Operation::Write {
+        let operation = match &self.remote {
+            Remote::Unloaded | Remote::Ambiguous { .. } => Operation::Load,
+            Remote::Loaded(snapshot) if self.dirty && !posting => Operation::Write {
                 request: WriteDraft {
-                    expected_revision: self.snapshot.revision,
+                    expected_revision: snapshot.revision,
                     body: self.body.clone(),
                 },
                 edited: self.edited,
+            },
+            Remote::Loaded(snapshot) => {
+                let revision = snapshot.revision;
+                let outgoing = self.outgoing.as_mut()?;
+                if outgoing.state != Sending::Queued {
+                    return None;
+                }
+                outgoing.state = Sending::Running;
+                outgoing.request.message.draft = Some(DraftRevision {
+                    scope: self.scope.clone(),
+                    revision,
+                });
+                Operation::Post(outgoing.request.clone())
             }
-        } else {
-            let outgoing = self.outgoing.as_mut()?;
-            if outgoing.state != Sending::Queued {
-                return None;
-            }
-            outgoing.state = Sending::Running;
-            outgoing.request.message.draft = Some(DraftRevision {
-                scope: self.scope.clone(),
-                revision: self.snapshot.revision,
-            });
-            Operation::Post(outgoing.request.clone())
         };
         self.busy = true;
         Some(operation)
     }
 
     pub fn loaded(&mut self, result: Result<DraftSnapshot, String>) {
-        if self.removed {
+        if self.removed() {
             return;
         }
         self.busy = false;
         match result {
             Ok(snapshot) => {
-                let landed = self
-                    .ambiguous
-                    .take()
-                    .is_some_and(|body| body == snapshot.body);
-                let unchanged = self.loaded && snapshot.revision == self.snapshot.revision;
+                let (landed, unchanged) = match &self.remote {
+                    Remote::Unloaded => (false, false),
+                    Remote::Loaded(previous) => (false, snapshot.revision == previous.revision),
+                    Remote::Ambiguous {
+                        snapshot: previous,
+                        written,
+                    } => (
+                        *written == snapshot.body,
+                        snapshot.revision == previous.revision,
+                    ),
+                };
                 let unseen = !landed
                     && !unchanged
                     && self.dirty
@@ -302,14 +356,9 @@ impl DraftSession {
                 if !self.dirty {
                     self.body = snapshot.body.clone();
                 }
-                self.snapshot = snapshot;
-                self.loaded = true;
+                self.remote = Remote::Loaded(snapshot);
                 if unseen {
-                    self.conflict = true;
-                    self.fail(
-                        "This draft changed on another client. Choose which version to keep."
-                            .into(),
-                    );
+                    self.halt_on_conflict();
                 }
             }
             Err(error) => self.fail(format!("Couldn't load the draft: {error}")),
@@ -322,29 +371,34 @@ impl DraftSession {
         edited: u64,
         result: Result<DraftWriteResult, String>,
     ) {
-        if self.removed {
+        if self.removed() {
             return;
         }
         self.busy = false;
         match result {
             Ok(result) => {
                 let matched = result.saved || result.current.body == request.body;
-                self.snapshot = result.current;
+                self.remote = Remote::Loaded(result.current);
                 if matched {
                     self.saved = edited;
                     if self.edited == edited {
                         self.dirty = false;
                     }
                 } else {
-                    self.conflict = true;
-                    self.fail(
-                        "This draft changed on another client. Choose which version to keep."
-                            .into(),
-                    );
+                    self.halt_on_conflict();
                 }
             }
             Err(error) => {
-                self.ambiguous = Some(request.body.clone());
+                let snapshot = match std::mem::replace(&mut self.remote, Remote::Unloaded) {
+                    Remote::Loaded(snapshot) | Remote::Ambiguous { snapshot, .. } => snapshot,
+                    Remote::Unloaded => {
+                        unreachable!("invariant: draft {} wrote before it loaded", self.scope)
+                    }
+                };
+                self.remote = Remote::Ambiguous {
+                    snapshot,
+                    written: request.body.clone(),
+                };
                 self.fail(format!("Couldn't save the draft: {error}"));
             }
         }
@@ -352,14 +406,24 @@ impl DraftSession {
 
     fn fail(&mut self, error: String) {
         tracing::warn!(scope = %self.scope, %error, "draft operation failed; releasing queued submission");
+        self.release_submission();
+        self.halt = Halt::Failed(error);
+    }
+
+    fn halt_on_conflict(&mut self) {
+        tracing::warn!(scope = %self.scope, "draft changed on another client; releasing queued submission");
+        self.release_submission();
+        self.halt = Halt::Conflict;
+    }
+
+    fn release_submission(&mut self) {
         if let Some(outgoing) = &mut self.outgoing {
             outgoing.state = Sending::Failed;
         }
-        self.error = Some(error);
     }
 
     pub fn posted(&mut self, result: Result<(), String>, thread: ThreadId) {
-        if self.removed {
+        if self.removed() {
             return;
         }
         self.busy = false;
@@ -370,17 +434,14 @@ impl DraftSession {
                     .take()
                     .is_some_and(|outgoing| outgoing.edited != self.edited);
                 self.accepted = Some(thread);
-                self.snapshot.revision = self.snapshot.revision.saturating_add(1);
-                self.snapshot.body = Value::Null;
-                self.ambiguous = None;
+                self.remote = Remote::Unloaded;
                 if typed_since {
                     self.dirty = true;
                 } else {
                     self.body = Value::Null;
                     self.dirty = false;
                 }
-                self.error = None;
-                self.loaded = false;
+                self.halt = Halt::Clear;
             }
             Err(error) => self.fail(format!("Couldn't send the message: {error}")),
         }

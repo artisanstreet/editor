@@ -158,7 +158,7 @@ pub async fn drain_pending(timeout: Duration) -> ShutdownOutcome {
         let mut changed = session.subscribe();
         loop {
             let (pending, error) =
-                session.read(|state| (state.pending(), state.error.is_some() || state.conflict));
+                session.read(|state| (state.pending(), state.error().is_some()));
             if !pending {
                 break;
             }
@@ -300,7 +300,7 @@ impl DraftSessions {
 impl DraftHandle {
     fn deadline_outcome(&self) -> ShutdownOutcome {
         self.read(
-            |state| match (state.pending(), state.error.is_some() || state.conflict) {
+            |state| match (state.pending(), state.error().is_some()) {
                 (false, _) => ShutdownOutcome::Saved,
                 (true, true) => ShutdownOutcome::Incomplete {
                     failed: 1,
@@ -321,7 +321,7 @@ impl DraftHandle {
 
     fn keep_locally(&self) -> bool {
         let (pending, scope, body) =
-            self.read(|state| (state.pending(), state.scope.clone(), state.body.clone()));
+            self.read(|state| (state.pending(), state.scope().to_owned(), state.body().clone()));
         let Some(spool) = self.0.spool.as_ref().filter(|_| pending) else {
             return false;
         };
@@ -347,7 +347,7 @@ impl DraftHandle {
             return;
         }
         shared.recovered = false;
-        let scope = &shared.state.scope;
+        let scope = shared.state.scope();
         let Some(spool) = &self.0.spool else {
             return;
         };
@@ -494,7 +494,7 @@ impl DraftHandle {
         let client = &session.0.client;
         match operation {
             Operation::Load => {
-                let scope = session.read(|state| state.scope.clone());
+                let scope = session.read(|state| state.scope().to_owned());
                 let result = client
                     .draft(&scope)
                     .await
@@ -505,7 +505,7 @@ impl DraftHandle {
                 session.mutate(|shared| shared.state.loaded(result));
             }
             Operation::Write { request, edited } => {
-                let scope = session.read(|state| state.scope.clone());
+                let scope = session.read(|state| state.scope().to_owned());
                 let result = client
                     .set_draft(&scope, &request)
                     .await
