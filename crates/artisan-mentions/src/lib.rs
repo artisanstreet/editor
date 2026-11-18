@@ -107,37 +107,79 @@ pub fn valid_thread_title(title: &str) -> bool {
         && !title.contains(['\n', '\r'])
 }
 
-#[must_use]
-pub fn thread_mentions(text: &str, titles: &[&str]) -> Vec<Mention> {
-    let mut mentions = Vec::new();
-    for (start, character) in text.char_indices() {
-        if character != '@'
-            || !text[..start]
-                .chars()
-                .next_back()
-                .is_none_or(char::is_whitespace)
-        {
-            continue;
-        }
-        let rest = &text[start + 1..];
-        let matched = titles
+#[derive(Clone, Debug, Default)]
+pub struct ThreadTitles {
+    sorted: Vec<String>,
+    longest: usize,
+}
+
+impl ThreadTitles {
+    #[must_use]
+    pub fn new<T: AsRef<str>>(titles: &[T]) -> Self {
+        let mut sorted: Vec<String> = titles
             .iter()
-            .filter(|title| valid_thread_title(title) && rest.starts_with(**title))
-            .filter(|title| {
-                rest[title.len()..]
+            .map(AsRef::as_ref)
+            .filter(|title| valid_thread_title(title))
+            .map(str::to_owned)
+            .collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let longest = sorted.iter().map(String::len).max().unwrap_or(0);
+        Self { sorted, longest }
+    }
+
+    fn longest_at(&self, rest: &str) -> Option<&str> {
+        let bytes = rest.as_bytes();
+        let (mut low, mut high) = (0, self.sorted.len());
+        let mut matched = None;
+        for depth in 0..=bytes.len().min(self.longest) {
+            if low >= high {
+                break;
+            }
+            let shortest = &self.sorted[low];
+            if shortest.len() == depth {
+                if rest[depth..]
                     .chars()
                     .next()
                     .is_none_or(|next| next.is_whitespace() || TERMINATORS.contains(&next))
-            })
-            .max_by_key(|title| title.len());
-        if let Some(title) = matched {
-            mentions.push(Mention {
-                name: (*title).to_owned(),
-                range: start..start + 1 + title.len(),
-            });
+                {
+                    matched = Some(shortest.as_str());
+                }
+                low += 1;
+            }
+            let Some(&byte) = bytes.get(depth) else {
+                break;
+            };
+            let range = &self.sorted[low..high];
+            let first = range.partition_point(|title| title.as_bytes()[depth] < byte);
+            let last = range.partition_point(|title| title.as_bytes()[depth] <= byte);
+            (low, high) = (low + first, low + last);
         }
+        matched
     }
-    mentions
+
+    #[must_use]
+    pub fn mentions(&self, text: &str) -> Vec<Mention> {
+        if self.sorted.is_empty() {
+            return Vec::new();
+        }
+        let mut mentions = Vec::new();
+        let mut previous = None;
+        for (start, character) in text.char_indices() {
+            let after_space = previous.is_none_or(char::is_whitespace);
+            previous = Some(character);
+            if character != '@' || !after_space {
+                continue;
+            }
+            if let Some(title) = self.longest_at(&text[start + 1..]) {
+                mentions.push(Mention {
+                    name: title.to_owned(),
+                    range: start..start + 1 + title.len(),
+                });
+            }
+        }
+        mentions
+    }
 }
 
 #[must_use]
@@ -184,13 +226,26 @@ mod tests {
     #[test]
     fn thread_titles_with_spaces_take_the_longest_match_at_a_word_end() {
         let text = "see @Fix sidebar lag, then @Fix and email@Fix or @Fixed";
-        let mentions = thread_mentions(text, &["Fix", "Fix sidebar lag", "Fix sidebar"]);
+        let mentions = ThreadTitles::new(&["Fix", "Fix sidebar lag", "Fix sidebar"]).mentions(text);
         assert_eq!(
             mentions
                 .iter()
                 .map(|mention| &text[mention.range.clone()])
                 .collect::<Vec<_>>(),
             ["@Fix sidebar lag", "@Fix"]
+        );
+    }
+    #[test]
+    fn titles_sharing_prefixes_match_the_longest_title_that_ends_at_a_word_end() {
+        let text = "@abc d, @ab. @abd @abx @a";
+        let titles = ThreadTitles::new(&["a", "ab", "abc d", "abd", " padded", "two\nlines"]);
+        assert_eq!(
+            titles
+                .mentions(text)
+                .iter()
+                .map(|mention| &text[mention.range.clone()])
+                .collect::<Vec<_>>(),
+            ["@abc d", "@ab", "@abd", "@a"]
         );
     }
     #[test]

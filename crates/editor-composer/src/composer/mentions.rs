@@ -447,7 +447,7 @@ impl Mentions {
                 .map(|row| row.name.as_str())
                 .collect::<Vec<_>>(),
         );
-        let threads = self.threads.clone();
+        let threads = artisan_mentions::ThreadTitles::new(&self.threads);
         let colors = theme.colors;
         std::rc::Rc::new(move |text| {
             let mut tokens = Vec::new();
@@ -474,8 +474,7 @@ impl Mentions {
                     });
                 }
             }
-            let titles = threads.iter().map(String::as_str).collect::<Vec<_>>();
-            for mention in artisan_mentions::thread_mentions(text, &titles) {
+            for mention in threads.mentions(text) {
                 tokens.push(StyledToken {
                     range: mention.range,
                     glyph: Some(editor_assets::AssetId::TABLER_MESSAGE_CIRCLE),

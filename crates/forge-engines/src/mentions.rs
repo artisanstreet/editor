@@ -58,7 +58,8 @@ pub fn with_thread_mentions(text: &str, threads: &[(ThreadId, String)]) -> Strin
         .map(|(_, title)| title.as_str())
         .collect::<Vec<_>>();
     let mut seen = std::collections::HashSet::new();
-    let mentioned = artisan_mentions::thread_mentions(text, &titles)
+    let mentioned = artisan_mentions::ThreadTitles::new(&titles)
+        .mentions(text)
         .into_iter()
         .filter(|mention| seen.insert(mention.name.clone()))
         .filter_map(|mention| threads.iter().find(|(_, title)| *title == mention.name))
