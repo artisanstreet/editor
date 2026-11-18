@@ -84,13 +84,16 @@ pub struct Pkce {
 impl Pkce {
     pub fn new() -> Result<Self> {
         let verifier = Secret::new(random(32)?);
-        let challenge = b64(&Sha256::digest(verifier.expose().as_bytes()));
         Ok(Self {
+            challenge: s256_challenge(verifier.expose()),
             verifier,
-            challenge,
             state: random(24)?,
         })
     }
+}
+
+fn s256_challenge(verifier: &str) -> String {
+    b64(&Sha256::digest(verifier.as_bytes()))
 }
 
 fn random(len: usize) -> Result<String> {
@@ -484,13 +487,14 @@ mod tests {
     }
 
     #[test]
-    fn pkce_challenge_is_the_s256_of_the_verifier() {
-        let pkce = Pkce::new().unwrap();
+    fn pkce_challenge_matches_the_rfc_7636_vector() {
         assert_eq!(
-            pkce.challenge,
-            b64(&Sha256::digest(pkce.verifier.expose().as_bytes()))
+            s256_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
-        assert!(pkce.verifier.expose().len() >= 43);
+        let pkce = Pkce::new().unwrap();
+        assert_eq!(pkce.challenge, s256_challenge(pkce.verifier.expose()));
+        assert_eq!(pkce.verifier.expose().len(), 43, "a 32-byte verifier");
         assert_ne!(pkce.state, Pkce::new().unwrap().state);
     }
 
