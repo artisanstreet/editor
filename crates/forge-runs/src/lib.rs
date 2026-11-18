@@ -891,6 +891,7 @@ impl Hub {
                 text: Some(text),
             })
         }));
+        snapshot.extend(self.pending_editor_calls());
         sort_snapshot(&mut snapshot);
         (self.inner.store.live_revision(), snapshot)
     }

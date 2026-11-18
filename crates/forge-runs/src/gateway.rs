@@ -54,6 +54,22 @@ impl CallEditorError {
     }
 }
 
+struct PendingCall {
+    call: EditorCall,
+    answer: oneshot::Sender<EditorReply>,
+}
+
+struct CallGuard {
+    hub: Hub,
+    id: String,
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        self.hub.gateway_lock().calls.remove(&self.id);
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Gateway {
     /// `http://127.0.0.1:<port>/mcp/`, once the gateway listens.
@@ -62,8 +78,7 @@ pub(crate) struct Gateway {
     computer: bool,
     tokens: HashMap<ThreadId, Secret>,
     threads: HashMap<String, ThreadId>,
-    /// Calls sent to Editors, waiting for the first answer.
-    calls: HashMap<String, oneshot::Sender<EditorReply>>,
+    calls: HashMap<String, PendingCall>,
 }
 
 impl Hub {
@@ -166,13 +181,21 @@ impl Hub {
     ) -> Result<serde_json::Value, CallEditorError> {
         let id = artisan_api::ItemId::new().to_string();
         let (answer, answered) = oneshot::channel();
-        self.gateway_lock().calls.insert(id.clone(), answer);
+        let pending = PendingCall {
+            call: call.clone(),
+            answer,
+        };
+        self.gateway_lock().calls.insert(id.clone(), pending);
+        let guard = CallGuard {
+            hub: self.clone(),
+            id: id.clone(),
+        };
         self.store().publish_live(Event::EditorCall {
             id: id.clone(),
             call,
         });
         let reply = tokio::time::timeout(EDITOR_ANSWERS_WITHIN, answered).await;
-        self.gateway_lock().calls.remove(&id);
+        drop(guard);
         let no_editor = || Refused(NO_EDITOR.to_owned());
         match reply {
             Ok(Ok(EditorReply::Ok(value))) => Ok(value),
@@ -193,8 +216,19 @@ impl Hub {
 
     /// An Editor's answer to a call; `false` when nothing waits for it.
     pub fn answer_editor_call(&self, id: &str, reply: EditorReply) -> bool {
-        let answer = self.gateway_lock().calls.remove(id);
-        answer.is_some_and(|answer| answer.send(reply).is_ok())
+        let pending = self.gateway_lock().calls.remove(id);
+        pending.is_some_and(|pending| pending.answer.send(reply).is_ok())
+    }
+
+    pub(crate) fn pending_editor_calls(&self) -> Vec<Event> {
+        self.gateway_lock()
+            .calls
+            .iter()
+            .map(|(id, pending)| Event::EditorCall {
+                id: id.clone(),
+                call: pending.call.clone(),
+            })
+            .collect()
     }
 
     fn gateway_lock(&self) -> std::sync::MutexGuard<'_, Gateway> {
