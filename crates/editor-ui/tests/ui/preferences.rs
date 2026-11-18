@@ -27,7 +27,7 @@ fn windows_accessibility_settings_reach_the_theme_unless_overridden() {
     let followed = preferences(system).theme();
     assert_eq!(followed.colors.contrast, Contrast::High);
     assert_eq!(followed.interaction.motion, Motion::Reduced);
-    assert_eq!(followed.typography.scale, 1.5);
+    assert!((followed.typography.scale - 1.5).abs() < f32::EPSILON);
     let overridden = Preferences {
         reduced_motion: Some(false),
         high_contrast: Some(false),
@@ -37,7 +37,7 @@ fn windows_accessibility_settings_reach_the_theme_unless_overridden() {
     .theme();
     assert_eq!(overridden.colors.contrast, Contrast::Standard);
     assert_eq!(overridden.interaction.motion, Motion::Full);
-    assert_eq!(overridden.typography.scale, 1.25);
+    assert!((overridden.typography.scale - 1.25).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -48,16 +48,16 @@ fn windows_text_size_and_high_contrast_reach_the_theme() {
         reduce_transparency: PrefState::Unknown,
         high_contrast: PrefState::On,
         text_scale: TextScale::from_percent(150),
-        theme: Default::default(),
+        theme: aqua_protocol::shell::ColorScheme::Unknown,
         source: PreferenceSource::WindowsSystem,
     };
     let theme = preferences(SystemAccess::from_os(&os)).theme();
     assert_eq!(theme.colors.contrast, Contrast::High);
     assert_eq!(theme.interaction.motion, Motion::Reduced);
-    assert_eq!(theme.typography.scale, 1.5);
+    assert!((theme.typography.scale - 1.5).abs() < f32::EPSILON);
 }
 
-fn label_height(theme: &ArtisanTheme) -> f32 {
+fn label_height(theme: &ArtisanTheme) -> Option<f32> {
     use aqua_text::{SharedFonts, SharedRuns};
     use aqua_ui::element::Box as UiBox;
     let text = TextRole::Label
@@ -70,16 +70,15 @@ fn label_height(theme: &ArtisanTheme) -> f32 {
         .with_key("label");
     let mut app = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
     app.mount(|_| UiBox::new().width(160.0).child(text).build())
-        .unwrap();
+        .ok()?;
     app.set_viewport(400.0, 400.0, 1.0);
-    app.build_frame().unwrap();
-    let node = app
-        .tree()
-        .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
-            "label",
-        )))
-        .unwrap();
-    app.tree().rect(node).unwrap().h
+    app.build_frame().ok()?;
+    let node =
+        app.tree()
+            .sole_node_with_key(aqua_ui::tree::hash_key(aqua_ui::element::Key::from(
+                "label",
+            )))?;
+    Some(app.tree().rect(node)?.h)
 }
 
 #[test]
@@ -90,5 +89,9 @@ fn a_larger_text_size_reflows_labels() {
         ..SystemAccess::default()
     })
     .theme();
-    assert!(label_height(&larger) > label_height(&standard) * 1.5);
+    let (larger, standard) = (
+        label_height(&larger).unwrap(),
+        label_height(&standard).unwrap(),
+    );
+    assert!(larger > standard * 1.5);
 }

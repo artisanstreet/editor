@@ -4,12 +4,16 @@ fn luminance(color: Oklch) -> f64 {
     let srgb = color.to_srgb();
     let linear = |channel: f32| {
         let channel = f64::from(channel);
-        match channel <= 0.04045 {
-            true => channel / 12.92,
-            false => ((channel + 0.055) / 1.055).powf(2.4),
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
         }
     };
-    0.2126 * linear(srgb.r) + 0.7152 * linear(srgb.g) + 0.0722 * linear(srgb.b)
+    0.0722f64.mul_add(
+        linear(srgb.b),
+        0.7152f64.mul_add(linear(srgb.g), 0.2126 * linear(srgb.r)),
+    )
 }
 
 fn ratio(foreground: Oklch, background: Oklch) -> f64 {
