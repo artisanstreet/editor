@@ -20,9 +20,38 @@ pub struct ItemUi {
     pub expanded: Option<bool>,
     pub arrived: Option<std::time::Instant>,
     pub chain_open: Option<bool>,
-    pub sending: bool,
+}
 
-    pub error: Option<String>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct AnswerRequest(pub(crate) u64);
+
+impl AnswerRequest {
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn for_tests(request: u64) -> Self {
+        Self(request)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AnswerState {
+    Sending(AnswerRequest),
+    Failed(String),
+}
+
+impl AnswerState {
+    #[must_use]
+    pub const fn sending(&self) -> bool {
+        matches!(self, Self::Sending(_))
+    }
+
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Sending(_) => None,
+            Self::Failed(error) => Some(error),
+        }
+    }
 }
 
 impl ItemUi {
@@ -43,6 +72,7 @@ pub struct ThreadView {
     pub live: HashMap<LiveTarget, Arc<ropey::Rope>>,
     pub viewport: Viewport,
     pub ui: HashMap<ItemId, ItemUi>,
+    pub answers: HashMap<ItemId, AnswerState>,
     pub work_open: HashMap<RunId, bool>,
     pub runs: HashMap<RunId, Run>,
 }
@@ -59,6 +89,7 @@ impl ThreadView {
             live: HashMap::new(),
             viewport: Viewport::default(),
             ui: HashMap::new(),
+            answers: HashMap::new(),
             work_open: HashMap::new(),
             runs: HashMap::new(),
         };
@@ -79,9 +110,14 @@ impl ThreadView {
         self.resident_bytes = 0;
         self.live.clear();
         self.ui.clear();
+        self.answers.clear();
         self.work_open.clear();
         self.runs.clear();
         self.handle(&Input::Open)
+    }
+
+    pub(crate) fn abandon_answers(&mut self) {
+        self.answers.retain(|_, state| !state.sending());
     }
 
     pub(crate) fn resume(&mut self) -> Vec<Effect> {

@@ -1,6 +1,6 @@
 use super::controller::{Conversation, ScrollAction};
 use super::fold::{self, Row, RunSummary};
-use super::thread::ItemUi;
+use super::thread::{AnswerState, ItemUi};
 use super::viewport::Input;
 use artisan_api::{Answer, Item, ItemId, LiveTarget, RunId, Seq};
 use editor_core::Core;
@@ -115,14 +115,14 @@ impl ScopedAction {
                 let before = conversation
                     .view
                     .as_ref()
-                    .and_then(|view| view.ui.get(&id))
-                    .is_some_and(|ui| ui.sending);
+                    .and_then(|view| view.answers.get(&id))
+                    .is_some_and(AnswerState::sending);
                 conversation.answer(core, id.clone(), answer);
                 let after = conversation
                     .view
                     .as_ref()
-                    .and_then(|view| view.ui.get(&id))
-                    .is_some_and(|ui| ui.sending);
+                    .and_then(|view| view.answers.get(&id))
+                    .is_some_and(AnswerState::sending);
                 before != after
             }
             Action::Jump(position) => {
@@ -155,6 +155,7 @@ pub struct RowModel {
     pub items: HashMap<ItemId, Arc<Item>>,
     pub live: HashMap<LiveTarget, Arc<ropey::Rope>>,
     pub ui: HashMap<ItemId, ItemUi>,
+    pub answers: HashMap<ItemId, AnswerState>,
     pub run: Option<RunSummary>,
     pub author: Option<artisan_api::EngineId>,
     pub gap: f32,
@@ -230,6 +231,10 @@ fn row_model_from(
         .iter()
         .filter_map(|id| Some((id.clone(), view.ui.get(id)?.clone())))
         .collect();
+    let answers = ids
+        .iter()
+        .filter_map(|id| Some((id.clone(), view.answers.get(id)?.clone())))
+        .collect();
     let run = row.run().and_then(|run| runs.get(run)).cloned();
     let author = row
         .anchor()
@@ -266,6 +271,7 @@ fn row_model_from(
         items,
         live,
         ui,
+        answers,
         run,
         author,
         gap,

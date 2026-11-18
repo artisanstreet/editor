@@ -38,7 +38,7 @@ pub(super) fn fixture_at(
     (directory, listener, core, conversation)
 }
 
-fn origin(conversation: &Conversation) -> Origin {
+pub(super) fn origin(conversation: &Conversation) -> Origin {
     Origin {
         host: conversation.open.as_ref().unwrap().0.clone(),
         instance: conversation.host_instance.unwrap(),
@@ -72,7 +72,7 @@ fn page(id: &str) -> ItemsPage {
     }
 }
 
-fn enqueue(conversation: &Conversation, completion: Completion) {
+pub(super) fn enqueue(conversation: &Conversation, completion: Completion) {
     assert!(
         runtime()
             .block_on(conversation.delivery.sender().send(completion))

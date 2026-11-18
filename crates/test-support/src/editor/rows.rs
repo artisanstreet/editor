@@ -24,6 +24,7 @@ pub fn row_model(row: Row, items: impl IntoIterator<Item = Arc<Item>>) -> RowMod
             .collect(),
         live: HashMap::new(),
         ui: HashMap::new(),
+        answers: HashMap::new(),
         run: None,
         author: None,
         gap: 0.0,

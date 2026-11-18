@@ -1,6 +1,6 @@
 use super::disclosure::DisclosureState;
 use super::fold::{self, Row, RowKey, RunSummary};
-use super::thread::{self, ThreadView};
+use super::thread::{self, AnswerRequest, AnswerState, ThreadView};
 use super::viewport::{Effect, Fetch, Input, Jump};
 use artisan_api::{Answer, Item, ItemId, ItemKind, ItemsPage, RunId, Seq, ThreadId};
 use editor_core::{
@@ -85,6 +85,7 @@ enum Completion {
     Answer {
         origin: Origin,
         item: ItemId,
+        request: AnswerRequest,
         result: Result<(), CallError>,
     },
 }
@@ -129,7 +130,8 @@ pub struct Conversation {
     page_task: Option<AbortOnDropHandle<()>>,
     work_task: Option<AbortOnDropHandle<()>>,
     agent_task: Option<AbortOnDropHandle<()>>,
-    answer_tasks: HashMap<ItemId, AbortOnDropHandle<()>>,
+    answer_tasks: HashMap<AnswerRequest, AbortOnDropHandle<()>>,
+    next_answer: u64,
     delivery: Delivery<Completion>,
     scroll: Vec<ScrollAction>,
     parked: super::parked::Shelf<ParkedKey, ParkedThread>,
@@ -205,6 +207,7 @@ impl Conversation {
             work_task: None,
             agent_task: None,
             answer_tasks: HashMap::new(),
+            next_answer: 0,
             delivery: Delivery::with_wake(
                 NonZeroUsize::new(64).unwrap(),
                 core.wake_mailbox().sender(),
@@ -407,9 +410,10 @@ impl Conversation {
         let (Some((host, thread)), Some(instance)) = (&self.open, self.host_instance) else {
             return;
         };
-        let Some(view) = self.view.take().filter(|_| parkable) else {
+        let Some(mut view) = self.view.take().filter(|_| parkable) else {
             return;
         };
+        view.abandon_answers();
         let bytes = view.resident_bytes();
         self.parked.put(
             (host.clone(), instance, thread.clone()),
@@ -429,7 +433,7 @@ impl Conversation {
         self.page_task = None;
         self.work_task = None;
         self.agent_task = None;
-        self.answer_tasks.clear();
+        self.abandon_answers();
         self.work_reading = None;
         self.landing = None;
         self.landed_at = None;
@@ -967,7 +971,7 @@ impl Conversation {
         self.agent_task = None;
         self.work_task = None;
         self.work_reading = None;
-        self.answer_tasks.clear();
+        self.abandon_answers();
         self.load_error = None;
         self.scroll_frame = None;
         self.disclosures = DisclosureState::default();
@@ -1144,6 +1148,13 @@ impl Conversation {
         }
     }
 
+    fn abandon_answers(&mut self) {
+        self.answer_tasks.clear();
+        if let Some(view) = &mut self.view {
+            view.abandon_answers();
+        }
+    }
+
     pub fn answer(&mut self, core: &Core, item: ItemId, answer: Answer) {
         let Some((host, _)) = &self.open else { return };
         let Some(host) = self
@@ -1153,12 +1164,12 @@ impl Conversation {
             return;
         };
         let Some(view) = &mut self.view else { return };
-        let ui = view.ui.entry(item.clone()).or_default();
-        if ui.sending {
+        if view.answers.get(&item).is_some_and(AnswerState::sending) {
             return;
         }
-        ui.sending = true;
-        ui.error = None;
+        let request = AnswerRequest(self.next_answer);
+        self.next_answer = self.next_answer.wrapping_add(1);
+        view.answers.insert(item.clone(), AnswerState::Sending(request));
         let client = host.client.clone();
         let origin = Origin {
             host: host.id.clone(),
@@ -1168,13 +1179,14 @@ impl Conversation {
         let sender = self.delivery.sender();
         let id = item.clone();
         self.answer_tasks.insert(
-            item,
+            request,
             AbortOnDropHandle::new(runtime().spawn(async move {
                 let result = client.answer(&id, &answer).await;
                 let _ = sender
                     .send(Completion::Answer {
                         origin,
                         item: id,
+                        request,
                         result,
                     })
                     .await;
@@ -1446,19 +1458,27 @@ impl Conversation {
                 Completion::Answer {
                     origin,
                     item,
+                    request,
                     result,
                 } if self.accepts(core, &origin) => {
-                    self.answer_tasks.remove(&item);
-                    if let Some(ui) = self.view.as_mut().and_then(|view| view.ui.get_mut(&item)) {
-                        changed |= ui.sending;
-                        ui.sending = false;
-                        if let Err(error) = result {
-                            let error = Some(format!(
-                                "Couldn't send the answer: {}",
-                                diagnostics::chain(&error)
-                            ));
-                            changed |= ui.error != error;
-                            ui.error = error;
+                    self.answer_tasks.remove(&request);
+                    if let Some(view) = self.view.as_mut().filter(|view| {
+                        view.answers.get(&item) == Some(&AnswerState::Sending(request))
+                    }) {
+                        changed = true;
+                        match result {
+                            Ok(()) => {
+                                view.answers.remove(&item);
+                            }
+                            Err(error) => {
+                                view.answers.insert(
+                                    item,
+                                    AnswerState::Failed(format!(
+                                        "Couldn't send the answer: {}",
+                                        diagnostics::chain(&error)
+                                    )),
+                                );
+                            }
                         }
                     }
                     self.rebuild(core);
@@ -1548,3 +1568,7 @@ mod switch_tests;
 #[cfg(test)]
 #[path = "../../tests/conversation/controller/arrival.rs"]
 mod arrival_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/answer.rs"]
+mod answer_tests;

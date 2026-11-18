@@ -2,7 +2,7 @@ use artisan_api::{Item, ItemId, ItemKind, Status, ThreadId, ToolKind};
 use editor_aqua::conversation::adapter::RowModel;
 use editor_aqua::conversation::disclosure::RowDisclosure;
 use editor_aqua::conversation::fold::Row;
-use editor_aqua::conversation::thread::ItemUi;
+use editor_aqua::conversation::thread::{AnswerRequest, AnswerState, ItemUi};
 use editor_aqua::conversation::view::factory::{RowFingerprint, row_settles_statically};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,6 +43,7 @@ fn model(status: Status) -> RowModel {
         items: HashMap::from([(item.id.clone(), item)]),
         live: HashMap::new(),
         ui: HashMap::new(),
+        answers: HashMap::new(),
         run: None,
         author: None,
         gap: 8.0,
@@ -75,12 +76,9 @@ fn fingerprint_is_stable_for_equal_inputs_and_tracks_every_input() {
     let mut ended = model(Status::Done);
     ended.end = 40.0;
     let mut sending = model(Status::Done);
-    sending.ui.insert(
+    sending.answers.insert(
         ItemId("tool".into()),
-        ItemUi {
-            sending: true,
-            ..Default::default()
-        },
+        AnswerState::Sending(AnswerRequest::for_tests(0)),
     );
     let hidden = RowDisclosure {
         hidden: true,

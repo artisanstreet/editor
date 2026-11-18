@@ -1499,6 +1499,7 @@ fn version(
             item.seq.hash(&mut hasher);
         }
         view.ui.get(id).hash(&mut hasher);
+        view.answers.get(id).hash(&mut hasher);
         for target in [
             LiveTarget::Text {
                 item_id: id.clone(),

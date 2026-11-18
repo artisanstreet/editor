@@ -6,7 +6,7 @@ use artisan_api::{
 use editor_aqua::conversation::adapter::{Action, ActionScope, RowModel};
 use editor_aqua::conversation::fold::{Row, RowKey};
 use editor_aqua::conversation::presentation::MarkdownOwners;
-use editor_aqua::conversation::thread::ItemUi;
+use editor_aqua::conversation::thread::{AnswerRequest, AnswerState};
 use editor_aqua::conversation::view::row_cache::RowCache;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -72,12 +72,12 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
     let row = |sending| {
         realized(RowModel {
             version: 7,
-            ui: HashMap::from([(
+            answers: HashMap::from([(
                 item.id.clone(),
-                ItemUi {
-                    sending,
-                    error: Some("Previous failure".into()),
-                    ..Default::default()
+                if sending {
+                    AnswerState::Sending(AnswerRequest::for_tests(0))
+                } else {
+                    AnswerState::Failed("Previous failure".into())
                 },
             )]),
             ..row_model(Row::Prompt(item.id.clone()), [item.clone()])

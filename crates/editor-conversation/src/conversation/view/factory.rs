@@ -309,6 +309,12 @@ impl RowFingerprint<'_> {
             id.hash(&mut hasher);
             state.hash(&mut hasher);
         }
+        let mut answers: Vec<_> = self.model.answers.iter().collect();
+        answers.sort_by_key(|a| a.0.to_string());
+        for (id, state) in answers {
+            id.hash(&mut hasher);
+            state.hash(&mut hasher);
+        }
         format!("{:?}", self.disclosure).hash(&mut hasher);
         self.held.hash(&mut hasher);
         self.body_version.hash(&mut hasher);
@@ -660,7 +666,7 @@ impl RowFactory {
         &self,
         owner: &Rc<super::row_cache::RowOwner>,
         item: &artisan_api::Item,
-        ui: Option<&crate::conversation::thread::ItemUi>,
+        answer: Option<&crate::conversation::thread::AnswerState>,
         dispatch: super::Dispatch,
         batches: &mut Vec<std::sync::Arc<aqua_ui::collection::SelectionSourceBatch>>,
     ) -> Result<Option<aqua_ui::element::Element>, RealizeRowError> {
@@ -668,8 +674,8 @@ impl RowFactory {
         let used = RefCell::new(std::collections::HashSet::new());
         let result = super::request::approval(
             item,
-            ui.is_some_and(|ui| ui.sending),
-            ui.and_then(|ui| ui.error.as_deref()),
+            answer.is_some_and(crate::conversation::thread::AnswerState::sending),
+            answer.and_then(crate::conversation::thread::AnswerState::error),
             self.theme,
             |field| self.source_field(owner, item, field, &collected, &used),
             dispatch,
@@ -2457,7 +2463,7 @@ impl RowFactory {
                     let approval = self.approval_card(
                         &row_owner,
                         item,
-                        row.model.ui.get(id),
+                        row.model.answers.get(id),
                         Rc::clone(dispatch),
                         &mut batches,
                     )?;
