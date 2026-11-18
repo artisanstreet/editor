@@ -22,7 +22,6 @@
     clippy::too_many_lines,
     clippy::unnecessary_to_owned,
     clippy::unwrap_used,
-    clippy::used_underscore_binding,
     clippy::wildcard_enum_match_arm,
     let_underscore_drop,
     missing_debug_implementations,

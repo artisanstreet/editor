@@ -96,7 +96,7 @@ pub enum ViewAction {
 const PAGE_WIDTH: f32 = 680.0;
 const STATUS_WIDTH: f32 = 240.0;
 
-pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: ViewAction) -> bool {
+pub fn dispatch(controller: &mut SettingsController, core: &mut Core, action: ViewAction) -> bool {
     match &action {
         ViewAction::EngineEdited
         | ViewAction::AccountEdited
@@ -109,39 +109,39 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         | ViewAction::AccountPresentationChanged
         | ViewAction::EnginePresentationChanged => return true,
         ViewAction::PromptChanged => {
-            _controller.prompt.changed();
-            let dirty = _controller.prompt_editor.borrow().text() != _controller.prompt.saved;
-            let changed = _controller.reported_prompt_dirty != dirty;
-            _controller.reported_prompt_dirty = dirty;
+            controller.prompt.changed();
+            let dirty = controller.prompt_editor.borrow().text() != controller.prompt.saved;
+            let changed = controller.reported_prompt_dirty != dirty;
+            controller.reported_prompt_dirty = dirty;
             return changed;
         }
         _ => {}
     }
-    let before = ViewSnapshot::capture(_controller, core);
+    let before = ViewSnapshot::capture(controller, core);
     match action {
         ViewAction::Navigate(screen) => core.navigate(screen),
         ViewAction::EngineEdited | ViewAction::EnginePresentationChanged => {}
-        ViewAction::EngineAction(engine, action) => _controller.engine_action(core, engine, action),
+        ViewAction::EngineAction(engine, action) => controller.engine_action(core, engine, action),
         ViewAction::EngineVersions(engine) => {
-            if !_controller.engines.choosing_version.remove(&engine) {
-                _controller.engines.choosing_version.insert(engine);
-                _controller.engine_action(core, engine, artisan_api::EngineCommand::Versions {});
+            if !controller.engines.choosing_version.remove(&engine) {
+                controller.engines.choosing_version.insert(engine);
+                controller.engine_action(core, engine, artisan_api::EngineCommand::Versions {});
             }
         }
         ViewAction::EngineUse(engine, version) => {
-            _controller.engines.choosing_version.remove(&engine);
-            _controller.engine_action(core, engine, artisan_api::EngineCommand::Use { version });
+            controller.engines.choosing_version.remove(&engine);
+            controller.engine_action(core, engine, artisan_api::EngineCommand::Use { version });
         }
         ViewAction::EngineCode(engine) => {
-            if let Some(code) = _controller.engines.login_code(engine) {
-                _controller.engine_action(
+            if let Some(code) = controller.engines.login_code(engine) {
+                controller.engine_action(
                     core,
                     engine,
                     artisan_api::EngineCommand::LoginCode { code },
                 );
             }
         }
-        ViewAction::ClaudeTransport(host, instance, enabled) => _controller.set_host_setting_for(
+        ViewAction::ClaudeTransport(host, instance, enabled) => controller.set_host_setting_for(
             core,
             host,
             instance,
@@ -153,10 +153,10 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
             }
             .into(),
         ),
-        ViewAction::ClaudeSignIn => _controller.sign_in_claude_ai(core),
+        ViewAction::ClaudeSignIn => controller.sign_in_claude_ai(core),
         ViewAction::AccountEdited | ViewAction::AccountPresentationChanged => {}
-        ViewAction::AccountRequestLink => _controller.sign_in.request_link(core),
-        ViewAction::AccountFinish => _controller.sign_in.finish_sign_in(core),
+        ViewAction::AccountRequestLink => controller.sign_in.request_link(core),
+        ViewAction::AccountFinish => controller.sign_in.finish_sign_in(core),
         ViewAction::AccountDismiss => core.account_mut().dismiss_error(),
         ViewAction::AccountRefresh => core.account_mut().refresh(),
         ViewAction::AccountSignOut => core.account_mut().sign_out(),
@@ -170,9 +170,9 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
         ViewAction::ForgeEnroll => core.account_mut().enroll_this_forge(),
         ViewAction::ForgeConfirm => core.account_mut().confirm_forge(),
         ViewAction::ForgeRefresh => core.account_mut().refresh_local_forge(),
-        ViewAction::ForgeClaim => _controller.claim_forge(core),
-        ViewAction::RetentionMenu(open) => _controller.reported_retention_menu = open,
-        ViewAction::SetRetention(host, instance, days) => _controller.set_host_setting_for(
+        ViewAction::ForgeClaim => controller.claim_forge(core),
+        ViewAction::RetentionMenu(open) => controller.reported_retention_menu = open,
+        ViewAction::SetRetention(host, instance, days) => controller.set_host_setting_for(
             core,
             host,
             instance,
@@ -191,73 +191,73 @@ pub fn dispatch(_controller: &mut SettingsController, core: &mut Core, action: V
                 }
             }
         }
-        ViewAction::Unarchive(thread) => _controller.unarchive(core, thread),
-        ViewAction::McpOpen(server) => _controller.open_mcp(server),
-        ViewAction::McpRemove(server) => _controller.remove_mcp(core, server),
-        ViewAction::McpSave => _controller.save_mcp(core),
-        ViewAction::McpCancel => _controller.cancel_mcp(),
+        ViewAction::Unarchive(thread) => controller.unarchive(core, thread),
+        ViewAction::McpOpen(server) => controller.open_mcp(server),
+        ViewAction::McpRemove(server) => controller.remove_mcp(core, server),
+        ViewAction::McpSave => controller.save_mcp(core),
+        ViewAction::McpCancel => controller.cancel_mcp(),
         ViewAction::McpEdited
         | ViewAction::McpPresentationChanged
         | ViewAction::OpenUrl(_)
         | ViewAction::OpenNotices
         | ViewAction::CopyText(_) => {}
-        ViewAction::McpSignIn(server) => _controller.sign_in_mcp(core, &server),
-        ViewAction::McpCancelSignIn(server) => _controller.cancel_mcp_sign_in(core, &server),
-        ViewAction::McpSignOut(server) => _controller.sign_out_mcp(core, server),
+        ViewAction::McpSignIn(server) => controller.sign_in_mcp(core, &server),
+        ViewAction::McpCancelSignIn(server) => controller.cancel_mcp_sign_in(core, &server),
+        ViewAction::McpSignOut(server) => controller.sign_out_mcp(core, server),
         ViewAction::PromptChanged => {
-            _controller.prompt.changed();
-            _controller.reported_prompt_dirty =
-                _controller.prompt_editor.borrow().text() != _controller.prompt.saved;
+            controller.prompt.changed();
+            controller.reported_prompt_dirty =
+                controller.prompt_editor.borrow().text() != controller.prompt.saved;
         }
         ViewAction::PromptPresentationChanged => {}
-        ViewAction::SavePrompt => _controller.save_prompt(core),
-        ViewAction::LoadLatestPrompt => _controller.load_latest_prompt(core),
-        ViewAction::ResolvePrompt(resolution) => _controller.resolve_prompt(core, resolution),
+        ViewAction::SavePrompt => controller.save_prompt(core),
+        ViewAction::LoadLatestPrompt => controller.load_latest_prompt(core),
+        ViewAction::ResolvePrompt(resolution) => controller.resolve_prompt(core, resolution),
         ViewAction::RetryPrompt => {
             let host = core.active_host().map(|host| host.id.clone());
             if let Some(host) = host.and_then(|id| core.host_mut(&id)) {
                 host.load_prompt(true);
             }
         }
-        ViewAction::FontMenu(open) => _controller.reported_font_menu = open,
-        ViewAction::StreamingMenu(open) => _controller.reported_streaming_menu = open,
-        ViewAction::SetFont(font) => _controller.set_editor_setting(core, "font_set", font.into()),
+        ViewAction::FontMenu(open) => controller.reported_font_menu = open,
+        ViewAction::StreamingMenu(open) => controller.reported_streaming_menu = open,
+        ViewAction::SetFont(font) => controller.set_editor_setting(core, "font_set", font.into()),
         ViewAction::SetDarkMode(enabled) => {
-            _controller.set_editor_setting(core, "dark_mode", enabled.into());
+            controller.set_editor_setting(core, "dark_mode", enabled.into());
         }
         ViewAction::SetOutlineText(enabled) => {
-            _controller.set_editor_setting(core, "outline_text", enabled.into());
+            controller.set_editor_setting(core, "outline_text", enabled.into());
         }
         ViewAction::SetShowAllModels(enabled) => {
-            _controller.set_editor_setting(core, artisan_api::SHOW_ALL_MODELS_KEY, enabled.into());
+            controller.set_editor_setting(core, artisan_api::SHOW_ALL_MODELS_KEY, enabled.into());
         }
         ViewAction::SetHideBadModelOptions(enabled) => {
-            _controller.set_editor_setting(
+            controller.set_editor_setting(
                 core,
                 artisan_api::HIDE_BAD_MODEL_OPTIONS_KEY,
                 enabled.into(),
             );
         }
         ViewAction::SetStreaming(mode) => {
-            _controller.set_editor_setting(core, "streaming_mode", mode.into());
+            controller.set_editor_setting(core, "streaming_mode", mode.into());
         }
         ViewAction::SetFrameRate(enabled) => {
-            _controller.set_editor_setting(core, "lower_refresh_rate", enabled.into());
+            controller.set_editor_setting(core, "lower_refresh_rate", enabled.into());
         }
         ViewAction::SetVsync(enabled) => {
-            _controller.set_editor_setting(core, "graphics_vsync", enabled.into());
+            controller.set_editor_setting(core, "graphics_vsync", enabled.into());
         }
         ViewAction::SetNotifications(enabled) => {
-            _controller.set_editor_setting(core, "notifications", enabled.into());
+            controller.set_editor_setting(core, "notifications", enabled.into());
         }
-        ViewAction::ReloadSettings => _controller.reload_editor_settings(core),
+        ViewAction::ReloadSettings => controller.reload_editor_settings(core),
         ViewAction::SetHostSetting(host, instance, key, enabled) => {
-            _controller.set_host_setting_for(core, host, instance, key, enabled.into())
+            controller.set_host_setting_for(core, host, instance, key, enabled.into())
         }
     }
-    _controller.reported_prompt_dirty =
-        _controller.prompt_editor.borrow().text() != _controller.prompt.saved;
-    before != ViewSnapshot::capture(_controller, core)
+    controller.reported_prompt_dirty =
+        controller.prompt_editor.borrow().text() != controller.prompt.saved;
+    before != ViewSnapshot::capture(controller, core)
 }
 
 pub fn build(
