@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc};
 
 pub type Job = Box<dyn FnOnce(&mut Writer) + Send>;
 
+pub const SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 
@@ -33,6 +34,8 @@ pub enum WriteFailure {
     },
     #[error("item {item} is not a user message")]
     NotAnInput { item: ItemId },
+    #[error("saving setting {key} would make the settings {bytes} bytes; the limit is 8 MiB")]
+    SettingsFull { key: String, bytes: u64 },
     #[error(transparent)]
     RunMoved(#[from] RunMoved),
     #[error(transparent)]
@@ -731,6 +734,19 @@ impl Tx<'_> {
             return Ok(());
         }
         let body = to_body(&value)?;
+        let old_bytes = old
+            .as_ref()
+            .map(to_body)
+            .transpose()?
+            .map_or(0, |old| old.len());
+        if body.len() > old_bytes {
+            let stored: u64 =
+                self.query_row(include_str!("sql/settings/bytes.sql"), [], |row| row.get(0))?;
+            let bytes = (stored + body.len() as u64).saturating_sub(old_bytes as u64);
+            if bytes > SETTINGS_BYTES {
+                return Err(WriteFailure::SettingsFull { key, bytes });
+            }
+        }
         let seq = self.next_seq();
         self.sql
             .prepare_cached(

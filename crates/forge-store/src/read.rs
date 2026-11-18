@@ -11,6 +11,7 @@ type Result<T, E = StorageError> = std::result::Result<T, E>;
 
 const DEFAULT_PAGE: usize = 100;
 const MAX_PAGE: usize = 500;
+pub const WAITING_ITEMS: usize = 1000;
 
 pub fn to_body<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     serde_json::to_string(value).map_err(StorageError::encode::<T>)
@@ -153,7 +154,7 @@ pub fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<Strin
 pub fn items_awaiting_user(conn: &Connection) -> Result<Vec<artisan_api::PendingItem>> {
     let mut statement = conn.prepare_cached(include_str!("sql/pending/awaiting_user.sql"))?;
     statement
-        .query_map([], |row| {
+        .query_map([WAITING_ITEMS], |row| {
             Ok(artisan_api::PendingItem {
                 id: ItemId(row.get(0)?),
                 thread_id: ThreadId(row.get(1)?),

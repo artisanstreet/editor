@@ -6,9 +6,33 @@ use artisan_api::{
     UpdateThread,
 };
 
+pub const MAX_LIVE_PROJECTS: usize = 1000;
+pub const MAX_PROJECT_PATH_BYTES: usize = 4096;
+pub const MAX_PROJECT_NAME_BYTES: usize = 256;
+pub const STATE_BYTES: usize = 24 * 1024 * 1024;
 const STATE_THREADS: u32 = 200;
+const PINNED_THREADS: usize = 200;
+const LIVE_RUNS: usize = 400;
 
-operation_error!(CreateProjectError(StorageError), "create project {project}", project: ProjectId);
+#[derive(Debug, thiserror::Error)]
+pub enum CreateProjectFailure {
+    #[error("Forge already has {limit} projects")]
+    TooMany { limit: usize },
+    #[error("the project path is {bytes} bytes; the limit is 4096")]
+    PathTooLong { bytes: usize },
+    #[error("the project name is {bytes} bytes; the limit is 256")]
+    NameTooLong { bytes: usize },
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+impl From<rusqlite::Error> for CreateProjectFailure {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
+operation_error!(CreateProjectError(CreateProjectFailure), "create project {project}", project: ProjectId);
 operation_error!(RemoveProjectError(StorageError), "remove project {project}", project: ProjectId);
 operation_error!(UpdateThreadError(UpdateThreadFailure), "update thread {thread}", thread: ThreadId);
 operation_error!(ReplaceTitleError(WriteFailure), "replace the title of thread {thread}", thread: ThreadId);
@@ -41,7 +65,32 @@ impl Store {
         request: CreateProject,
     ) -> Result<Project, CreateProjectError> {
         let project = request.id.clone();
-        self.write_acknowledged(move |tx| tx.create_project(request))
+        self.write_acknowledged(move |tx| {
+            if request.path.len() > MAX_PROJECT_PATH_BYTES {
+                return Err(CreateProjectFailure::PathTooLong {
+                    bytes: request.path.len(),
+                });
+            }
+            if let Some(name) = request
+                .name
+                .as_ref()
+                .filter(|name| name.len() > MAX_PROJECT_NAME_BYTES)
+            {
+                return Err(CreateProjectFailure::NameTooLong { bytes: name.len() });
+            }
+            if read::project(tx, &request.id)?.is_none() {
+                let live: usize =
+                    tx.query_row(include_str!("sql/state/live_projects.sql"), [], |row| {
+                        row.get(0)
+                    })?;
+                if live >= MAX_LIVE_PROJECTS {
+                    return Err(CreateProjectFailure::TooMany {
+                        limit: MAX_LIVE_PROJECTS,
+                    });
+                }
+            }
+            Ok(tx.create_project(request)?)
+        })
         .await
         .map_err(|cause| CreateProjectError {
             project,
@@ -371,6 +420,10 @@ impl Store {
     }
 }
 
+fn encoded_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize, StorageError> {
+    read::to_body(value).map(|body| body.len())
+}
+
 fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageError> {
     let projects: Vec<Project> = read::many(conn, include_str!("sql/state/projects.sql"), [])?;
     let mut settings = serde_json::Map::new();
@@ -406,12 +459,38 @@ fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageE
     let pinned: Vec<Thread> = read::many(
         conn,
         include_str!("sql/state/pinned_threads.sql"),
-        [ids],
+        rusqlite::params![ids, PINNED_THREADS],
     )?;
-    let live: Vec<Run> = read::many(conn, include_str!("sql/state/live_runs.sql"), [])?;
-    let mut threads = page.threads;
+    let live: Vec<Run> = read::many(conn, include_str!("sql/state/live_runs.sql"), [LIVE_RUNS])?;
+    let mut used = encoded_len(&projects)?
+        .saturating_add(encoded_len(&settings)?)
+        .saturating_add(encoded_len(&pinned)?)
+        .saturating_add(encoded_len(&live)?);
+    let mut threads = Vec::with_capacity(page.threads.len() + pinned.len());
+    let mut runs: Vec<Run> = Vec::with_capacity(page.runs.len() + live.len());
+    let mut threads_next = page.next;
+    let mut latest = page.runs;
+    for thread in page.threads {
+        let run = latest
+            .iter()
+            .position(|run| run.thread_id == thread.id)
+            .map(|index| latest.swap_remove(index));
+        let bytes = encoded_len(&thread)?
+            .saturating_add(run.as_ref().map(encoded_len).transpose()?.unwrap_or(0));
+        if used.saturating_add(bytes) > STATE_BYTES && !threads.is_empty() {
+            threads_next = threads
+                .last()
+                .map(|kept: &Thread| artisan_api::ThreadCursor {
+                    activity_seq: kept.activity_seq,
+                    id: kept.id.clone(),
+                });
+            break;
+        }
+        used = used.saturating_add(bytes);
+        threads.push(thread);
+        runs.extend(run);
+    }
     threads.extend(pinned);
-    let mut runs = page.runs;
     for run in live {
         if !runs.iter().any(|known| known.id == run.id) {
             runs.push(run);
@@ -421,7 +500,7 @@ fn snapshot(conn: &rusqlite::Connection, head: Seq) -> Result<Snapshot, StorageE
         head,
         projects,
         threads,
-        threads_next: page.next,
+        threads_next,
         runs,
         settings,
     })

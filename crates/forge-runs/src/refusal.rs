@@ -1,5 +1,6 @@
 use forge_store::{
-    AnswerFailure, ContentError, GrepFailure, SendRejected, ThreadsPageFailure,
+    AnswerFailure, ContentError, CreateProjectFailure, GrepFailure, SendRejected, SettingFailure,
+    ThreadsPageFailure, WriteFailure,
 };
 use std::error::Error;
 
@@ -34,4 +35,18 @@ fn refused(cause: &(dyn Error + 'static)) -> bool {
         || cause
             .downcast_ref::<ThreadsPageFailure>()
             .is_some_and(|failure| matches!(failure, ThreadsPageFailure::SearchTooLong { .. }))
+        || cause
+            .downcast_ref::<CreateProjectFailure>()
+            .is_some_and(|failure| !matches!(failure, CreateProjectFailure::Storage(_)))
+        || cause
+            .downcast_ref::<SettingFailure>()
+            .is_some_and(|failure| {
+                matches!(
+                    failure,
+                    SettingFailure::Write(WriteFailure::SettingsFull { .. })
+                )
+            })
+        || cause
+            .downcast_ref::<WriteFailure>()
+            .is_some_and(|failure| matches!(failure, WriteFailure::SettingsFull { .. }))
 }

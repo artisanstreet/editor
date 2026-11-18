@@ -75,7 +75,7 @@ pub use pairing::{
     AddDeviceError, AddPairCodeError, AuthorizeError, CertificateError, Device, DeviceCertificate,
     PairCodeHash, PairDeviceError, RevokeDeviceError, TouchDeviceError,
 };
-pub use read::ThreadsPageFailure;
+pub use read::{ThreadsPageFailure, WAITING_ITEMS};
 pub use recall::{
     GrepFailure, GrepMatch, GrepPage, GrepQuery, RecallGrepError, RecallScope, RecallSearchError,
     RecallTouchingError, SearchHit, SearchPage, Touch,
@@ -100,11 +100,13 @@ pub use sources::{
 pub use text_search::TextSearchError;
 pub use threads::{
     AgentThreadsError, AwaitsUserError, ChangesSinceError, CreateProjectError,
-    InspectorError, LastReplyError, LatestRunError, MarkUnreadError, ReadProjectError,
-    ReadRunError, ReadThreadError, RemoveProjectError, ReplaceTitleError, SettleThreadError, StateError, ThreadTitlesError, ThreadsPageError, UpdateThreadError,
+    CreateProjectFailure, InspectorError, LastReplyError, LatestRunError, MAX_LIVE_PROJECTS,
+    MAX_PROJECT_NAME_BYTES, MAX_PROJECT_PATH_BYTES, MarkUnreadError, ReadProjectError,
+    ReadRunError, ReadThreadError, RemoveProjectError, ReplaceTitleError, STATE_BYTES,
+    SettleThreadError, StateError, ThreadTitlesError, ThreadsPageError, UpdateThreadError,
     UpsertRunError, WorkingAgentsError,
 };
-pub use writer::{InputFailure, UpdateThreadFailure, WriteFailure};
+pub use writer::{InputFailure, SETTINGS_BYTES, UpdateThreadFailure, WriteFailure};
 
 type Result<T, E = StorageError> = std::result::Result<T, E>;
 
