@@ -768,4 +768,7 @@ mod events_tests;
 #[path = "../tests/generation.rs"]
 mod generation_tests;
 #[cfg(test)]
+#[path = "../tests/replay.rs"]
+mod replay;
+#[cfg(test)]
 mod tests;

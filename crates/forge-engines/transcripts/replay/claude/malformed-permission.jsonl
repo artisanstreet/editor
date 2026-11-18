@@ -1,0 +1,12 @@
+{"kind":"transcript","source":"synthetic"}
+{"kind":"launch"}
+{"kind":"in","text":"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Create a file\"}]},\"parent_tool_use_id\":null,\"session_id\":\"\"}"}
+{"kind":"in","text":"{\"type\":\"control_request\",\"request_id\":\"artisan-title\",\"request\":{\"subtype\":\"generate_session_title\",\"description\":\"Create a file\",\"persist\":true}}"}
+{"kind":"out","text":"{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/work\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"model\":\"claude-haiku-5-5\",\"permissionMode\":\"default\",\"tools\":[],\"mcp_servers\":[]}"}
+{"kind":"out","text":"{\"type\":\"user\",\"isReplay\":true,\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Create a file\"}]},\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"artisan-title\",\"response\":{\"title\":\"Creating a file\"}}}"}
+{"kind":"out","text":"{\"type\":\"control_request\",\"request_id\":\"permission-1\",\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"Bash\",\"tool_use_id\":\"toolu_malformed\",\"input\":{}}}"}
+{"kind":"in","text":"{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"permission-1\",\"error\":\"Claude Bash omitted a valid command\"}}"}
+{"kind":"out","text":"{\"type\":\"assistant\",\"message\":{\"id\":\"msg_after\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"The command was refused, so nothing was created.\"}]},\"parent_tool_use_id\":null,\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\"}"}
+{"kind":"out","text":"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"The command was refused, so nothing was created.\",\"session_id\":\"00000000-0000-4000-8000-00000000c1a0\",\"usage\":{}}"}
+{"kind":"closed"}

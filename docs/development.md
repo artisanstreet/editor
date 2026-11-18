@@ -49,6 +49,8 @@ Crates with `cfg(windows)` code also need the Windows target:
 nix develop .#cargo-windows --command cargo clippy -p <crate> --target x86_64-pc-windows-gnu --all-targets -j2 -- -D warnings
 ```
 
+Forge's end-to-end tests (`crates/forge-http/tests/replay`) replay engine transcripts through a real Forge: the `replay_engine` example stands in for Claude, Codex or OpenCode, plays the steps in `crates/forge-engines/transcripts/replay/<engine>/<case>.jsonl` and fails the run, naming both frames, when Forge sends something the transcript did not expect. A transcript is JSON lines: a `transcript` header saying whether it was `recorded` or written by hand (`synthetic`), then one `launch` per engine process, each holding `out` frames the engine writes, `in` frames it waits for, `closed` where Forge closed its input and, for OpenCode, `request` lines with the HTTP reply. To turn a bug report into a fixture, record it from its engine traces (`traces/<engine>-<thread>-<ms>.jsonl` in the Forge data folder, one file per launch, given in launch order): `cargo run -p test-support --features transcript --bin record -- <fixture.jsonl> <trace.jsonl>... [--scrub <text>=<replacement>]...`. The recorder replaces your home folder with `/home/user` and refuses traces that dropped or cut frames; read the fixture before committing it and scrub any other names, paths, tokens or message text that are personal, since streamed deltas can split them where no scrub reaches. OpenCode traces hold only the server's console, not its HTTP traffic, so OpenCode fixtures are written by hand.
+
 Outside the workspace:
 
 ```sh
