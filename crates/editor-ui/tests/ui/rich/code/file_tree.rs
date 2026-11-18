@@ -186,6 +186,7 @@ fn rows_expose_tree_levels_and_open_from_enter_space_pointer_and_assistive_tech(
         kind: aqua_ui::tree::ActionKind::AccessibilityActivate,
         text: None,
         focused: None,
+        request: None,
     });
     assert_eq!(actions.borrow().as_slice(), &[Action::Activate(0)]);
 }
