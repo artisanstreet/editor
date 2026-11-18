@@ -6,8 +6,9 @@ fn the_match_is_found_in_rendered_text_whatever_its_case() {
         find_ignoring_case("Raising the Scene Bound fixed it.", "scene bound"),
         Some(12..23)
     );
-    assert_eq!(find_ignoring_case("Brød og smør", "SMØR"), None);
-    assert_eq!(find_ignoring_case("Brød og smør", "smør"), Some(9..14));
+    assert_eq!(find_ignoring_case("Brød og smør", "SMØR"), Some(9..14));
+    assert_eq!(find_ignoring_case("BRØD OG SMØR", "smør"), Some(9..14));
+    assert_eq!(find_ignoring_case("Ærlig talt", "ærlig"), Some(0..6));
     assert_eq!(find_ignoring_case("nothing here", "scene"), None);
 }
 

@@ -44,10 +44,27 @@ impl Reveal {
 }
 
 pub fn find_ignoring_case(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
-    let start = text
-        .to_ascii_lowercase()
-        .find(&needle.to_ascii_lowercase())?;
-    Some(start..start + needle.len())
+    let needle: String = needle.chars().flat_map(char::to_lowercase).collect();
+    text.char_indices().find_map(|(start, _)| {
+        folded_match(text.get(start..)?, &needle).map(|end| start..start + end)
+    })
+}
+
+fn folded_match(text: &str, needle: &str) -> Option<usize> {
+    let mut folded = String::new();
+    for (offset, character) in text.char_indices() {
+        if folded.len() >= needle.len() {
+            break;
+        }
+        folded.extend(character.to_lowercase());
+        if !needle.starts_with(&folded) {
+            return None;
+        }
+        if folded.len() == needle.len() {
+            return Some(offset + character.len_utf8());
+        }
+    }
+    None
 }
 
 pub fn estimated_row(rows: &[usize], depth: (u32, u32)) -> Option<usize> {
