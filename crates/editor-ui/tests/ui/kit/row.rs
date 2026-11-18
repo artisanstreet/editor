@@ -126,3 +126,44 @@ fn a_row_with_a_hover_card_still_lights_on_hover() {
         "a hint card sits beside the hover instead of replacing it"
     );
 }
+
+pub(crate) fn painted_with_keyboard_focus(element: Element, key: &str) -> (usize, usize) {
+    let mut app = aqua::UiApp::new(aqua_text::SharedFonts::new(), aqua_text::SharedRuns::new());
+    assert!(app.mount(move |_| element).is_ok(), "the control mounts");
+    app.set_viewport(400.0, 200.0, 1.0);
+    assert!(app.build_frame().is_ok(), "the control lays out");
+    let Some(node) = app.tree().sole_node_with_key(hash_key(Key::from(key))) else {
+        return (0, 0);
+    };
+    let painted = |app: &mut aqua::UiApp| {
+        app.tree_mut()
+            .emit_scene()
+            .into_iter()
+            .filter(|(owner, _)| *owner == node)
+            .count()
+    };
+    let resting = painted(&mut app);
+    let tab = aqua_core::KeyEvent {
+        key: aqua_core::Key::Named(aqua_core::NamedKey::Tab),
+        modifiers: aqua_core::Modifiers::default(),
+        repeat: false,
+    };
+    app.handle_input(&aqua_core::InputEvent::KeyDown(tab));
+    app.handle_input(&aqua_core::InputEvent::KeyUp(tab));
+    assert_eq!(app.tree().focused(), Some(node), "Tab reaches the control");
+    assert!(app.build_frame().is_ok(), "the focused control lays out");
+    (resting, painted(&mut app))
+}
+
+#[test]
+fn a_row_reached_with_tab_shows_a_focus_ring() {
+    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let row = RowItem::new("row", *theme, Row::MenuItem, Surface::Menu, "Agent")
+        .on_activate(|| {})
+        .build();
+    let (resting, focused) = painted_with_keyboard_focus(row, "row");
+    assert!(
+        focused > resting,
+        "keyboard focus paints an indicator ({resting} items at rest, {focused} focused)"
+    );
+}

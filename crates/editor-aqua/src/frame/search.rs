@@ -48,11 +48,12 @@ pub fn bar(theme: &ArtisanTheme, editor: Element, emit: Rc<dyn Fn(Event)>) -> El
                 .build(),
         )
         .build();
-    keyed_field(theme, content, new_thread_key(emit))
+    keyed_field(theme, content, new_thread_key(theme, emit))
 }
 
-fn new_thread_key(emit: Rc<dyn Fn(Event)>) -> Element {
+fn new_thread_key(theme: &ArtisanTheme, emit: Rc<dyn Fn(Event)>) -> Element {
     field_key(
+        theme,
         "artisan-sidebar-new-thread",
         "New thread",
         BAR,
@@ -98,6 +99,7 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
         .child(
             HitArea::new(
                 "artisan-sidebar-rail-search",
+                theme,
                 Role::Button,
                 "Search threads",
             )
@@ -111,6 +113,7 @@ pub fn rail(theme: &ArtisanTheme, emit: &Rc<dyn Fn(Event)>) -> Element {
         .layout("row")
         .child(field)
         .child(field_key(
+            theme,
             "artisan-sidebar-rail-new-thread",
             "New thread",
             RAIL_KEY,

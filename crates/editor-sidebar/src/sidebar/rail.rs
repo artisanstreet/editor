@@ -277,7 +277,7 @@ pub fn build(
                 color.to_reference_paint(),
             ))
             .build();
-        let button = HitArea::new(id, Role::Button, label)
+        let button = HitArea::new(id, &theme, Role::Button, label)
             .child(live::layer(
                 Hover::Neutral,
                 &theme,

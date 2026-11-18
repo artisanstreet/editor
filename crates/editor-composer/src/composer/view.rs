@@ -639,6 +639,7 @@ fn question_card(
                 .build();
             let mut row = HitArea::new(
                 format!("composer-question-option-{index}"),
+                &theme,
                 Role::Button,
                 option.label.clone(),
             )
@@ -3404,6 +3405,7 @@ fn model_list_pane(
                 rows = rows.child(
                     HitArea::new(
                         format!("composer-model-group-toggle-{engine}-{group_label}"),
+                        &theme,
                         Role::Button,
                         group_label,
                     )

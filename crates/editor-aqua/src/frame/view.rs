@@ -235,7 +235,7 @@ fn wordmark(theme: &ArtisanTheme, sidebar: &Sidebar) -> Element {
         .width(WORDMARK_WIDTH)
         .height(WORDMARK_HEIGHT)
         .child(
-            HitArea::new(WORDMARK, Role::Button, label)
+            HitArea::new(WORDMARK, theme, Role::Button, label)
                 .child(rows)
                 .on_activate(move || toggle(Event::Toggle))
                 .build()

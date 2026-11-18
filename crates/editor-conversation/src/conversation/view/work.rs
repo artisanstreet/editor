@@ -43,12 +43,13 @@ fn spacer(space: Space) -> Element {
 }
 
 fn activator(
+    theme: &ArtisanTheme,
     key: String,
     label: impl Into<String>,
     child: Element,
     on_activate: impl Fn() + 'static,
 ) -> Element {
-    HitArea::new(key, Role::Button, label)
+    HitArea::new(key, theme, Role::Button, label)
         .child(child)
         .on_activate(on_activate)
         .build()
@@ -69,6 +70,7 @@ pub fn section_title(summary: &RunSummary, now: Timestamp) -> String {
 }
 
 pub fn header(
+    theme: &ArtisanTheme,
     run: Option<&RunId>,
     segment: usize,
     has_work: bool,
@@ -109,6 +111,7 @@ pub fn header(
                 false => "Hide work",
             };
             Some(activator(
+                theme,
                 format!("work-header-{run}"),
                 words,
                 near,
@@ -159,6 +162,7 @@ pub fn chain(
         .child(chevron(open, color.to_reference_paint()))
         .build();
     Some(activator(
+        &theme,
         format!("work-chain-{first}"),
         text,
         child,
@@ -206,6 +210,7 @@ pub fn agent(
         ))
         .build();
     Some(activator(
+        &theme,
         format!("work-agent-{id}"),
         "Open agent",
         content,
@@ -260,6 +265,7 @@ pub fn activity_row<E>(
         true => {
             let id = item.id.clone();
             activator(
+                &theme,
                 format!("work-item-{id}"),
                 "Toggle details",
                 line,

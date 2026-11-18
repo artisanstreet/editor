@@ -1970,6 +1970,7 @@ impl RowFactory {
                         self.reduced_motion,
                     );
                     work::header(
+                        &self.theme,
                         run,
                         segment,
                         has_members,

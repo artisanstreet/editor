@@ -5,6 +5,8 @@
 )]
 #[path = "ui/kit/divider.rs"]
 mod divider;
+#[path = "ui/kit/control/hit_area.rs"]
+mod hit_area;
 #[path = "ui/kit/hover.rs"]
 mod hover;
 #[path = "ui/kit/control/icon_button.rs"]

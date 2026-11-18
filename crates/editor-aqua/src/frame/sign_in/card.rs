@@ -399,7 +399,7 @@ fn field(
     busy: bool,
     submit: Rc<dyn Fn()>,
 ) -> Element {
-    keyed_field(theme, editor, continue_key(key, busy, submit))
+    keyed_field(theme, editor, continue_key(theme, key, busy, submit))
 }
 
 #[must_use]
@@ -439,7 +439,12 @@ struct Key {
     reduced: bool,
 }
 
-fn continue_key(Key { swap, reduced }: Key, busy: bool, submit: Rc<dyn Fn()>) -> Element {
+fn continue_key(
+    theme: &ArtisanTheme,
+    Key { swap, reduced }: Key,
+    busy: bool,
+    submit: Rc<dyn Fn()>,
+) -> Element {
     let arrow: Arc<str> = continue_arrow().into();
     let spinner: Arc<str> = continue_spinner().into();
     let glyph = KEY.edge() * 2.0 / 3.0;
@@ -480,6 +485,7 @@ fn continue_key(Key { swap, reduced }: Key, busy: bool, submit: Rc<dyn Fn()>) ->
         ))
         .build();
     field_key(
+        theme,
         "artisan-sign-in-continue",
         "Continue",
         KEY,
@@ -503,6 +509,7 @@ pub const fn key_lip(size: KeySize) -> f32 {
 
 #[must_use]
 pub fn field_key(
+    theme: &ArtisanTheme,
     key: &'static str,
     label: &'static str,
     size: KeySize,
@@ -531,7 +538,7 @@ pub fn field_key(
         })
         .build()
         .exclude_from_hit_testing();
-    let area = HitArea::new(key, Role::Button, label)
+    let area = HitArea::new(key, theme, Role::Button, label)
         .child(
             UiBox::new()
                 .style(

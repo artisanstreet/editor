@@ -99,7 +99,7 @@ fn tab_view(theme: &ArtisanTheme, tab: &Tab, reduced: bool, emit: Rc<dyn Fn(Even
     )
     .body(content)
     .build();
-    let area = HitArea::new(format!("artisan-tab-{}", tab.id), Role::Group, label)
+    let area = HitArea::new(format!("artisan-tab-{}", tab.id), theme, Role::Group, label)
         .child(row)
         .on_activate(move || emit(Event::Navigate(Command::Open(id.clone()))))
         .build();
@@ -279,10 +279,15 @@ fn outline(theme: &ArtisanTheme, progress: f32, emit: Rc<dyn Fn(Event)>) -> Elem
         ))
         .build()
         .with_key(OUTLINE_CHEVRON);
-    let hit = HitArea::new("artisan-thread-outline", Role::Button, "Messages in this thread")
-        .child(chevron)
-        .on_activate(move || emit(Event::Navigate(Command::Outline)))
-        .build();
+    let hit = HitArea::new(
+        "artisan-thread-outline",
+        theme,
+        Role::Button,
+        "Messages in this thread",
+    )
+    .child(chevron)
+    .on_activate(move || emit(Event::Navigate(Command::Outline)))
+    .build();
     UiBox::new()
         .width(edge)
         .height(edge)

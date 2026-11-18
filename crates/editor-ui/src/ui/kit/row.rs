@@ -1,3 +1,4 @@
+use crate::ui::kit::control::focus_ring;
 use crate::ui::kit::hover::{Hover, live};
 use crate::ui::kit::surface::Surface;
 use crate::ui::kit::tokens::{IconSize, Space, TextRole, concentric};
@@ -405,8 +406,14 @@ impl RowItem {
             .focusable(!self.disabled);
         let element = match (self.disabled, lit) {
             (true, _) => element,
-            (false, false) => element.cursor(CursorIcon::Pointer),
-            (false, true) => live::track(element.cursor(CursorIcon::Pointer)),
+            (false, false) => element
+                .cursor(CursorIcon::Pointer)
+                .focus_visible_style(focus_ring(&self.theme)),
+            (false, true) => live::track(
+                element
+                    .cursor(CursorIcon::Pointer)
+                    .focus_visible_style(focus_ring(&self.theme)),
+            ),
         };
         match self.on_hover {
             Some(handler) => element.on_hover_change(handler),
