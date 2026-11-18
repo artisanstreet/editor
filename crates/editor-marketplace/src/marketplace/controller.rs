@@ -316,6 +316,13 @@ impl MarketplaceController {
         });
     }
 
+    pub fn retry_search(&mut self, core: &Core) {
+        self.remote_search.cancel();
+        if self.page.retry_search(Instant::now()) {
+            self.schedule_search(core);
+        }
+    }
+
     pub fn retry(&mut self, core: &mut Core) {
         if let Some(host) = core
             .active_host()

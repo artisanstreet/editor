@@ -24,6 +24,7 @@ pub enum Entry {
     Notices,
     Found(String),
     Group(String),
+    SearchFailed(String),
     Empty(String),
     Item {
         item: Item,
@@ -147,6 +148,10 @@ impl Marketplace {
             self.listings = Remote::Idle;
             false
         }
+    }
+
+    pub fn retry_search(&mut self, now: Instant) -> bool {
+        matches!(self.listings, Remote::Failed(_)) && self.restart_search(now)
     }
 
     pub fn cancel_search(&mut self) {
@@ -378,7 +383,7 @@ pub fn entries(page: &Marketplace) -> Vec<Entry> {
             Remote::Searching => {
                 entries.push(Entry::Group("Searching skills.sh\u{2026}".to_owned()));
             }
-            Remote::Failed(error) => entries.push(Entry::Group(error.clone())),
+            Remote::Failed(error) => entries.push(Entry::SearchFailed(error.clone())),
             Remote::Found(_) if !remote.is_empty() => {
                 entries.push(Entry::Group("skills.sh".to_owned()));
                 group(

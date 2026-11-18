@@ -552,3 +552,93 @@ fn a_search_started_on_one_host_is_not_shown_after_switching_to_another() {
         "the first host's results must not appear on the second host"
     );
 }
+
+fn marketplace_host(
+    core: &mut editor_aqua::core::Core,
+) -> editor_aqua::marketplace::controller::MarketplaceController {
+    use artisan_api::tls::{Identity, fingerprint};
+    use editor_aqua::core::{ForgeClient, HostConfig, HostKind, Screen};
+    use editor_aqua::marketplace::controller::MarketplaceController;
+    let identity = Identity::generate("marketplace-state-test").unwrap();
+    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
+    core.add_test_host(
+        &HostConfig {
+            id: HostId("state-host".into()),
+            name: "Forge".into(),
+            address: "127.0.0.1:1".into(),
+            fingerprint,
+            kind: HostKind::Local,
+        },
+        client,
+    );
+    core.navigate(Screen::Marketplace);
+    let mut controller = MarketplaceController::default();
+    controller.sync(core);
+    controller
+}
+
+fn marketplace_app(
+    controller: &editor_aqua::marketplace::controller::MarketplaceController,
+    core: &editor_aqua::core::Core,
+    emit: std::rc::Rc<dyn Fn(editor_aqua::marketplace::view::ViewAction)>,
+) -> aqua::UiApp {
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::marketplace::view;
+    use editor_aqua::ui::theme::ArtisanTheme;
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut app = aqua::UiApp::new(fonts, SharedRuns::new());
+    let element = view::build(controller, core, ArtisanTheme::resolved(), emit);
+    app.mount(|_| element).unwrap();
+    app.set_viewport(1000.0, 1600.0, 1.0);
+    app.build_frame().unwrap();
+    app
+}
+
+#[test]
+fn a_failed_skills_sh_search_says_why_and_tries_the_same_query_again() {
+    use editor_aqua::core::{Core, EditorFiles};
+    use editor_aqua::marketplace::view::{self, ViewAction};
+    use std::{cell::RefCell, rc::Rc};
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().join("editor"),
+    })
+    .unwrap();
+    let mut controller = marketplace_host(&mut core);
+    controller.search.state().borrow_mut().set_text("pdf");
+    controller.edited(&core);
+    let key = controller.search_key().unwrap();
+    futures::executor::block_on(controller.finish_search_for_tests(
+        key,
+        Err(CallError {
+            method: "GET".parse().expect("GET is an HTTP method"),
+            path: "/marketplace/search".into(),
+            failure: Box::new(CallFailure::Inconsistent { check: "test" }),
+        }),
+    ));
+    controller.drain(&mut core);
+    assert!(matches!(controller.page.listings, Remote::Failed(_)));
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let sink = actions.clone();
+    let mut app = marketplace_app(
+        &controller,
+        &core,
+        Rc::new(move |action| sink.borrow_mut().push(action)),
+    );
+    let texts = test_support::editor::ui::painted_texts(&app);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with("Couldn't search skills.sh")),
+        "{texts:?}"
+    );
+    test_support::editor::ui::click(&mut app, "marketplace-search-retry");
+    let retry = actions.borrow_mut().pop().unwrap();
+    assert!(matches!(retry, ViewAction::RetrySearch));
+    assert!(view::dispatch(&mut controller, &mut core, retry));
+    assert_eq!(controller.page.listings, Remote::Searching);
+    assert_eq!(controller.page.query, "pdf");
+    assert!(controller.search_key().is_some());
+}

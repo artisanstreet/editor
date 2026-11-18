@@ -45,6 +45,7 @@ pub enum ViewAction {
     SetKind(Kind),
     ToggleFound,
     Retry,
+    RetrySearch,
     Navigate(Screen),
     Operate(Operation),
 }
@@ -64,6 +65,7 @@ pub fn dispatch(
         ViewAction::SetKind(kind) => controller.page.set_kind(kind),
         ViewAction::ToggleFound => controller.page.found_open = !controller.page.found_open,
         ViewAction::Retry => controller.retry(core),
+        ViewAction::RetrySearch => controller.retry_search(core),
         ViewAction::Navigate(screen) => controller.act(core, Action::Navigate(screen)),
         ViewAction::Operate(operation) => controller.operate(core, operation),
     }
@@ -157,6 +159,26 @@ pub fn build(
                         .build(),
                     )
                     .build(),
+                Entry::SearchFailed(error) => {
+                    let retry = emit.clone();
+                    UiBox::new()
+                        .padded(CARD_PADDING)
+                        .child(
+                            page::notice(&theme, error.clone())
+                                .action(
+                                    Button::text(
+                                        "marketplace-search-retry",
+                                        theme,
+                                        ButtonTone::Neutral,
+                                        "Try again",
+                                    )
+                                    .on_activate(move |_| retry(ViewAction::RetrySearch))
+                                    .build(),
+                                )
+                                .build(),
+                        )
+                        .build()
+                }
                 Entry::Empty(text) => centered(muted(&theme, TextRole::Label, text.clone())),
                 Entry::Item {
                     item,
