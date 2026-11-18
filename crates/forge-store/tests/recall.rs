@@ -1,6 +1,4 @@
-//! Recall finds what was said and done in other threads.
 #![expect(
-    clippy::print_stderr,
     clippy::unused_result_ok,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
@@ -244,45 +242,4 @@ async fn a_pattern_that_does_not_compile_says_so() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("doesn't compile"), "{error:#}");
-}
-
-/// Migrates a copy of a real database and times the recall backfill:
-/// `FORGE_RECALL_DB=/path/to/forge.sqlite3 cargo test -- --ignored`.
-#[tokio::test]
-#[ignore = "needs a copy of a real database"]
-async fn backfill_on_a_real_database() {
-    let Ok(source) = std::env::var("FORGE_RECALL_DB") else {
-        return;
-    };
-    let dir = TempDir::new();
-    std::fs::copy(&source, dir.0.join("forge.sqlite3")).unwrap();
-    let started = std::time::Instant::now();
-    let store = Store::open(&dir.0).unwrap();
-    eprintln!("opened and migrated in {:?}", started.elapsed());
-    let started = std::time::Instant::now();
-    let found = store
-        .recall_search(RecallScope::default(), "scene bound".into(), false, 5, 0)
-        .await
-        .unwrap();
-    eprintln!("search in {:?}: {:#?}", started.elapsed(), found.hits);
-    let started = std::time::Instant::now();
-    let grep = store
-        .recall_grep(
-            RecallScope::default(),
-            GrepQuery {
-                pattern: "Forge".into(),
-                ignore_case: false,
-                output: true,
-                context: 0,
-                max_matches: Some(5),
-                cursor: None,
-            },
-        )
-        .await
-        .unwrap();
-    eprintln!(
-        "grep in {:?}: {} matches",
-        started.elapsed(),
-        grep.matches.len()
-    );
 }

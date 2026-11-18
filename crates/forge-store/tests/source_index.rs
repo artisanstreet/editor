@@ -1,6 +1,5 @@
 #![expect(
     clippy::assertions_on_result_states,
-    clippy::print_stderr,
     clippy::string_slice,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
 )]
@@ -13,7 +12,7 @@ use forge_store::{NewItem, Store};
 
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
-async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
+async fn twenty_mib_source_latest_leaf_reads_only_bounded_ranges() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let project = store
@@ -35,7 +34,6 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         })
         .await
         .unwrap();
-    // 1,280 independent semantic leaves, not one adversarial giant paragraph.
     let paragraph = format!("{}\n\n", "α".repeat(8192));
     let text = paragraph.repeat(1280)
         + "Latest &amp; [reference][definition].\n\n[definition]: https://example.com\n";
@@ -63,11 +61,6 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         panic!("stored source")
     };
     let seq_before = store.head();
-    let mut requests = 0;
-    // This exercises the proposed remote boundary through Store calls. Client/HTTP integration
-    // requires its own request counter. No raw source is downloaded to build topology.
-    requests += 1;
-    let index_started = std::time::Instant::now();
     let page = store
         .source_index(
             &source.id,
@@ -80,12 +73,10 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .await
         .unwrap()
         .unwrap();
-    let index_elapsed = index_started.elapsed();
     assert_eq!(page.leaves.len(), 1);
     assert_eq!(page.end, page.index.leaves);
     assert!(serde_json::to_vec(&page).unwrap().len() < 2048);
     let leaf = &page.leaves[0];
-    requests += 1;
     let metadata = store
         .content_range(
             &page.index.metadata.id,
@@ -102,7 +93,6 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
             ..usize::try_from(leaf.metadata_end - metadata.start).unwrap()],
     )
     .unwrap();
-    requests += 1;
     let raw = store
         .content_range(
             &source.id,
@@ -118,21 +108,10 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         .replay(usize::try_from(raw.start).unwrap(), &raw.text)
         .unwrap();
     assert!(events.iter().any(|(event,_)|matches!(event,artisan_markdown_index::Event::Start(artisan_markdown_index::Tag::Link{dest_url,..}) if dest_url.as_ref()=="https://example.com")));
-    eprintln!(
-        "source_index_measurement source_bytes={} index_ms={} descriptor_bytes={} requested_source_bytes={} requested_metadata_bytes={} logical_leaves={} requests={}",
-        source.bytes,
-        index_elapsed.as_millis(),
-        serde_json::to_vec(&page).unwrap().len(),
-        raw.text.len(),
-        metadata.text.len(),
-        page.index.leaves,
-        requests
+    assert!(
+        metadata.text.len() + raw.text.len() < 2 * 65536,
+        "the latest leaf of a 20 MiB source reads two bounded ranges, not the source"
     );
-    assert_eq!(
-        requests, 3,
-        "source size must not multiply remote bootstrap requests"
-    );
-    assert!(metadata.text.len() + raw.text.len() < 2 * 65536);
     assert_eq!(
         store.head(),
         seq_before,
@@ -173,7 +152,6 @@ async fn twenty_mib_source_latest_leaf_requires_three_bounded_remote_reads() {
         first_count,
         "cached immutable topology is not duplicated"
     );
-    // Item JSON corruption cannot make topology reads deserialize its owner.
     conn.execute(include_str!("source_index/corrupt_items.sql"), [])
         .unwrap();
     assert!(
@@ -385,7 +363,6 @@ async fn same_source_literal_and_markdown_have_distinct_bounded_indexes() {
         );
     }
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
-    // Both interpretations share content chunks and dependency ownership.
     let count: u64 = conn
         .query_row(
             include_str!("source_index/count_source_indexes.sql"),

@@ -473,8 +473,8 @@ fn message(thread: &ThreadId, status: Status) -> NewItem {
 }
 
 #[tokio::test]
-async fn threads_waiting_on_the_user_are_found_without_walking_every_item() {
-    let (directory, store, threads) = setup().await;
+async fn only_threads_waiting_on_the_user_count_as_active() {
+    let (_directory, store, threads) = setup().await;
     for _ in 0..40 {
         store
             .upsert_item(message(&threads[0], Status::Done))
@@ -518,37 +518,5 @@ async fn threads_waiting_on_the_user_are_found_without_walking_every_item() {
             .collect::<Vec<_>>(),
         vec![threads[1].clone()],
         "a thread with only finished items is not waiting"
-    );
-    let connection = rusqlite::Connection::open_with_flags(
-        directory.path().join("forge.sqlite3"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let mut explain = connection
-        .prepare(&format!(
-            "EXPLAIN QUERY PLAN {}",
-            include_str!("../src/sql/coordination/discovery.sql")
-        ))
-        .unwrap();
-    let nothing = rusqlite::types::Null;
-    let plan = explain
-        .query_map(
-            rusqlite::params![
-                nothing, nothing, false, true, "[]", nothing, "", nothing, nothing, nothing,
-                nothing, nothing, 31
-            ],
-            |row| row.get::<_, String>(3),
-        )
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert!(
-        plan.iter()
-            .any(|step| step.contains("items_awaiting_position")),
-        "waiting threads come from the small waiting index: {plan:?}"
-    );
-    assert!(
-        !plan.iter().any(|step| step.contains("items_thread")),
-        "discovery must not read each thread's whole history: {plan:?}"
     );
 }

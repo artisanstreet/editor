@@ -332,11 +332,13 @@ async fn a_reopened_thread_shows_what_changed_since_it_was_last_opened() {
         [&asked.id],
         "the first open shows the message"
     );
-    assert!(
+    assert_eq!(
         first
             .runs
             .iter()
-            .all(|run| run.status() == RunStatus::Running),
+            .map(|run| (&run.id, run.status()))
+            .collect::<Vec<_>>(),
+        [(&turn, RunStatus::Running)],
         "the first open shows the turn working"
     );
 
@@ -360,11 +362,13 @@ async fn a_reopened_thread_shows_what_changed_since_it_was_last_opened() {
         [&asked.id, &answered.id],
         "the reopened thread shows the reply written after the first open"
     );
-    assert!(
+    assert_eq!(
         reopened
             .runs
             .iter()
-            .all(|run| run.status() == RunStatus::Done),
+            .map(|run| (&run.id, run.status()))
+            .collect::<Vec<_>>(),
+        [(&turn, RunStatus::Done)],
         "the reopened thread shows the turn finished"
     );
     assert_eq!(
