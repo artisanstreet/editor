@@ -292,33 +292,36 @@ pub fn forges(
             .build(),
     );
     rows = rows.child(
-        line(
-            theme,
-            "Another machine",
-            "Claim the code its `ae account enroll` printed.",
-        )
-        .child(
-            ui::actions()
-                .child(ui::grow(editor(
-                    controller.forge_code.clone(),
-                    "forges-code",
-                    "Code from another machine",
-                    ViewAction::ForgeClaim,
-                    theme,
-                    emit.clone(),
-                )))
-                .child(button(
-                    theme,
-                    "forges-claim",
-                    "Claim",
-                    ButtonTone::Primary,
-                    false,
-                    ViewAction::ForgeClaim,
-                    emit.clone(),
-                ))
-                .build(),
-        )
-        .build(),
+        ui::stack(Space::S4)
+            .child(text(theme, "Another machine", false))
+            .child(ui::markdown(
+                theme,
+                TextRole::Label,
+                Ink::Muted,
+                "Run `ae account enroll` on it, then claim the code it printed.",
+            ))
+            .child(
+                ui::actions()
+                    .child(ui::grow(editor(
+                        controller.forge_code.clone(),
+                        "forges-code",
+                        "Code from another machine",
+                        ViewAction::ForgeClaim,
+                        theme,
+                        emit.clone(),
+                    )))
+                    .child(button(
+                        theme,
+                        "forges-claim",
+                        "Claim",
+                        ButtonTone::Primary,
+                        false,
+                        ViewAction::ForgeClaim,
+                        emit.clone(),
+                    ))
+                    .build(),
+            )
+            .build(),
     );
     if let Some(error) = account.last_error() {
         rows = rows.child(ui::error_text(theme, error));

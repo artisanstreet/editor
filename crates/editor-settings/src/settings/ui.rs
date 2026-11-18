@@ -23,13 +23,17 @@ pub enum Ink {
     Danger,
 }
 
-fn styled(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: String, wraps: bool) -> Element {
-    let color = match ink {
+fn ink_color(theme: &ArtisanTheme, ink: Ink) -> editor_ui::theme::Oklch {
+    match ink {
         Ink::Plain => theme.colors.text,
         Ink::Muted => theme.colors.text_muted,
         Ink::Success => theme.colors.green.solid,
         Ink::Danger => theme.colors.destructive_text,
-    };
+    }
+}
+
+fn styled(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: String, wraps: bool) -> Element {
+    let color = ink_color(theme, ink);
     role.text(theme, value)
         .gpui_source_color(color.to_reference_text_color())
         .wrap(wraps)
@@ -38,6 +42,17 @@ fn styled(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: String, wraps: 
 
 pub fn text(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: impl Into<String>) -> Element {
     styled(theme, role, ink, value.into(), true)
+}
+
+pub fn markdown(theme: &ArtisanTheme, role: TextRole, ink: Ink, source: &str) -> Element {
+    let color = ink_color(theme, ink).to_reference_text_color();
+    let runs = editor_ui::inline_code_text::inline_runs(source);
+    let spans = runs.styled_spans(&role.style(theme), color, theme);
+    role.text(theme, runs.text)
+        .gpui_source_color(color)
+        .spans(spans)
+        .wrap(true)
+        .build()
 }
 
 pub fn line(theme: &ArtisanTheme, role: TextRole, ink: Ink, value: impl Into<String>) -> Element {
