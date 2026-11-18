@@ -8,8 +8,6 @@ use editor_ui::kit::{IconSize, TextRole};
 
 pub const STATE_DOT: f32 = 6.0;
 const DRAG_PREVIEW_WIDTH: f32 = 260.0;
-pub const WORKING_PULSE_MILLIS: u64 = 1_600;
-pub const WORKING_PULSE_FLOOR: f32 = 0.4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuAction {
@@ -77,17 +75,9 @@ pub struct RowVisuals {
     pub dot: Option<aqua_ui::element::Element>,
 }
 
-pub type TruncatedText = std::rc::Rc<
-    dyn Fn(String, TextRole, aqua::GpuiTextColor, String) -> aqua_ui::element::Element,
->;
-pub type WorkingPulse = std::rc::Rc<
-    dyn Fn(
-        aqua_ui::element::Element,
-        &'static str,
-        std::time::Duration,
-        f32,
-    ) -> aqua_ui::element::Element,
->;
+pub type TruncatedText =
+    std::rc::Rc<dyn Fn(String, TextRole, aqua::GpuiTextColor, String) -> aqua_ui::element::Element>;
+pub type WorkingPulse = std::rc::Rc<dyn Fn(aqua_ui::element::Element) -> aqua_ui::element::Element>;
 
 #[expect(
     clippy::disallowed_methods,
@@ -253,12 +243,7 @@ pub fn visual_factory(
         let dot = tone.map(|color| {
             let dot = state_dot(color);
             if data.state == RowState::Working && !reduced_motion {
-                pulse(
-                    dot,
-                    "working-pulse",
-                    std::time::Duration::from_millis(WORKING_PULSE_MILLIS),
-                    WORKING_PULSE_FLOOR,
-                )
+                pulse(dot)
             } else {
                 dot
             }
@@ -466,7 +451,10 @@ pub fn build(
     element
 }
 
-pub fn drag_preview(title: &str, theme: editor_ui::theme::ArtisanTheme) -> aqua_ui::element::Element {
+pub fn drag_preview(
+    title: &str,
+    theme: editor_ui::theme::ArtisanTheme,
+) -> aqua_ui::element::Element {
     use aqua_ui::{
         AlignItems,
         element::Box as UiBox,
@@ -476,7 +464,11 @@ pub fn drag_preview(title: &str, theme: editor_ui::theme::ArtisanTheme) -> aqua_
     use editor_ui::kit::{Space, Spaced, Surface, TextRole, Tooltip};
     let content = UiBox::new()
         .spaced(Space::S8)
-        .style(Style::new().align(AlignItems::CENTER).min_width(Length::Pct(0.0)))
+        .style(
+            Style::new()
+                .align(AlignItems::CENTER)
+                .min_width(Length::Pct(0.0)),
+        )
         .child(
             UiBox::new()
                 .style(Style::new().flex_shrink(0.0))

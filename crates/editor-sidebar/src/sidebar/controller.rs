@@ -185,7 +185,7 @@ impl Sidebar {
         std::rc::Rc::new(move |row, image, host| {
             let id = row.id.clone();
             let pulses = pulses.clone();
-            let pulse: super::row::WorkingPulse = std::rc::Rc::new(move |child, _, _, _| {
+            let pulse: super::row::WorkingPulse = std::rc::Rc::new(move |child| {
                 pulses
                     .borrow_mut()
                     .entry(id.clone())
