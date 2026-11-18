@@ -860,28 +860,44 @@ fn current_plan(
     })
 }
 
-fn outline(
-    conn: &Connection,
-    thread: &ThreadId,
-) -> Result<Vec<artisan_api::OutlineEntry>, ContentError> {
+fn outline(conn: &Connection, thread: &ThreadId) -> Result<Vec<artisan_api::OutlineEntry>> {
     let mut statement = conn.prepare_cached(include_str!("sql/inspector/outline.sql"))?;
-    let rows = statement.query_map([thread.as_str()], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Seq>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    rows.map(|row| {
-        let (id, position, text) = row?;
-        let text = from_body::<artisan_api::TextContent>(&text)?;
-        Ok(artisan_api::OutlineEntry {
-            id: ItemId(id),
-            position,
-            label: outline_label(&text_prefix(conn, &text)?),
-        })
-    })
-    .collect()
+    let entries = statement
+        .query_map([thread.as_str()], |row| {
+            Ok(artisan_api::OutlineEntry {
+                id: ItemId(row.get(0)?),
+                position: row.get(1)?,
+                label: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(entries)
+}
+
+pub(crate) fn outline_entry(
+    conn: &Connection,
+    item: &Item,
+) -> Result<Option<String>, ContentError> {
+    match &item.kind {
+        artisan_api::ItemKind::UserMessage {
+            text,
+            steer,
+            from_agent: None,
+            ..
+        } if item.parent_id.is_none() && !(*steer && item.run_id.is_some()) => {
+            Ok(Some(outline_label(&text_prefix(conn, text)?)))
+        }
+        artisan_api::ItemKind::UserMessage { .. }
+        | artisan_api::ItemKind::AssistantMessage { .. }
+        | artisan_api::ItemKind::Tool { .. }
+        | artisan_api::ItemKind::Agent { .. }
+        | artisan_api::ItemKind::Question { .. }
+        | artisan_api::ItemKind::Plan { .. }
+        | artisan_api::ItemKind::Image { .. }
+        | artisan_api::ItemKind::Compaction { .. }
+        | artisan_api::ItemKind::Notice { .. }
+        | artisan_api::ItemKind::Error { .. } => Ok(None),
+    }
 }
 
 fn outline_label(text: &str) -> String {

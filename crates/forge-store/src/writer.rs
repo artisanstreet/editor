@@ -560,16 +560,17 @@ impl Tx<'_> {
             | artisan_api::ItemKind::Notice { .. }
             | artisan_api::ItemKind::Error { .. } => None,
         };
+        let outline = read::outline_entry(self, &item)?;
         self.sql
             .prepare_cached(
                 "INSERT INTO items (id, thread_id, position, seq, run_id, status, body,
-                     edit_added, edit_removed, kind_type, parent_id, work)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, json_extract(?7, '$.kind.type'), ?10, ?11)
+                     edit_added, edit_removed, kind_type, parent_id, work, outline)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, json_extract(?7, '$.kind.type'), ?10, ?11, ?12)
                  ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, run_id = excluded.run_id,
                      status = excluded.status, body = excluded.body,
                      edit_added = excluded.edit_added, edit_removed = excluded.edit_removed,
                      kind_type = excluded.kind_type, parent_id = excluded.parent_id,
-                     work = excluded.work",
+                     work = excluded.work, outline = excluded.outline",
             )?
             .execute(params![
                 item.id.as_str(),
@@ -583,6 +584,7 @@ impl Tx<'_> {
                 edits.as_ref().map(|stats| stats.removed),
                 item.parent_id.as_ref().map(artisan_api::ItemId::as_str),
                 item.folds_into_work(),
+                outline,
             ])?;
         crate::content::own(self, &item)?;
         crate::recall::index(self, &item)?;
