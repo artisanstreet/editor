@@ -59,7 +59,7 @@ pub struct EditorFiles {
 #[derive(Debug, thiserror::Error)]
 pub enum DataDirError {
     #[error("find the Editor's data directory")]
-    Resolve(#[source] std::io::Error),
+    Resolve(#[source] artisan_paths::RootError),
 }
 
 #[derive(Debug, thiserror::Error)]

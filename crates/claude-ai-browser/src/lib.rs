@@ -35,7 +35,7 @@ enum Mode {
 #[derive(Debug, thiserror::Error)]
 pub enum SignInError {
     #[error("this device has no data folder for the claude.ai browser profile")]
-    NoDataFolder(#[source] std::io::Error),
+    NoDataFolder(#[source] artisan_paths::RootError),
     #[error("opening a browser to sign in to claude.ai")]
     Open(#[source] OpenError),
     #[error("reading the claude.ai session from the browser")]
@@ -47,7 +47,7 @@ pub enum SignInError {
 #[derive(Debug, thiserror::Error)]
 pub enum RenewError {
     #[error("this device has no data folder for the claude.ai browser profile")]
-    NoDataFolder(#[source] std::io::Error),
+    NoDataFolder(#[source] artisan_paths::RootError),
     #[error("checking that this device signed {host} in to claude.ai")]
     Authorizations {
         host: String,
@@ -76,7 +76,7 @@ pub enum RenewError {
     AccountChanged { host: String },
 }
 
-pub fn profile_dir() -> std::io::Result<PathBuf> {
+pub fn profile_dir() -> Result<PathBuf, artisan_paths::RootError> {
     Ok(artisan_paths::root()?.join("claude-ai-browser"))
 }
 

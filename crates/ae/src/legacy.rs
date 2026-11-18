@@ -154,12 +154,15 @@ impl Old {
             Self::windows(
                 &local,
                 &roaming,
-                &artisan_paths::home()?,
-                &App::Editor.dir()?,
+                &artisan_paths::home().map_err(io::Error::other)?,
+                &App::Editor.dir().map_err(io::Error::other)?,
             )
         } else {
-            let config = artisan_paths::xdg_config()?;
-            let mut old = Self::unix(&artisan_paths::xdg_data()?, &config)?;
+            let config = artisan_paths::xdg_config().map_err(io::Error::other)?;
+            let mut old = Self::unix(
+                &artisan_paths::xdg_data().map_err(io::Error::other)?,
+                &config,
+            )?;
             if cfg!(target_os = "linux") {
                 old.unit = Some(config.join("systemd/user").join(service::UNIT));
             }
@@ -314,14 +317,14 @@ impl DataMove {
             moves.push(Self {
                 data: Data::Forge,
                 sources: old.forge_data.clone(),
-                destination: App::Forge.data()?,
+                destination: App::Forge.data().map_err(io::Error::other)?,
             });
         }
         if selected.contains(&App::Editor) {
             moves.push(Self {
                 data: Data::Editor,
                 sources: old.editor_data.clone(),
-                destination: App::Editor.data()?,
+                destination: App::Editor.data().map_err(io::Error::other)?,
             });
         }
         Ok(moves)

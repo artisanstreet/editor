@@ -10,7 +10,7 @@ pub(crate) const ORGANIZATION_COOKIE: &str = "lastActiveOrg";
 #[derive(Debug, thiserror::Error)]
 pub enum AuthorizationError {
     #[error("this device has no data folder for the claude.ai browser profile")]
-    NoDataFolder(#[source] std::io::Error),
+    NoDataFolder(#[source] artisan_paths::RootError),
     #[error("reading which hosts this device signed in to claude.ai from {path}")]
     Read {
         path: PathBuf,
