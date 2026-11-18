@@ -2141,5 +2141,77 @@ async fn an_agent_forge_started_keeps_working_through_a_restart() {
     assert!(store.continue_pending(&child).await.unwrap());
 }
 
+#[cfg(unix)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test helper; a failure fails the calling test"
+)]
+fn modes(dir: &Path) -> Vec<(String, u32)> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut modes: Vec<(String, u32)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("forge.sqlite3")
+        })
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.metadata().unwrap().permissions().mode() & 0o777,
+            )
+        })
+        .collect();
+    modes.sort();
+    modes
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_database_is_readable_only_by_this_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TempDir::new();
+    std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (store, _) = test_store(&dir.0).await;
+    let files = modes(&dir.0);
+    drop(store);
+    assert!(
+        files.iter().any(|(name, _)| name == "forge.sqlite3-wal"),
+        "the write-ahead log exists while the store is open: {files:?}"
+    );
+    assert!(
+        files.iter().all(|(_, mode)| *mode == 0o600),
+        "other local users can read Forge's credentials: {files:?}"
+    );
+    let folder = std::fs::metadata(&dir.0).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        folder, 0o700,
+        "other local users can enter Forge's data folder"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn opening_repairs_a_readable_database_and_its_backups() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TempDir::new();
+    let (store, _) = test_store(&dir.0).await;
+    drop(store);
+    let backup = dir.0.join("forge.sqlite3.schema-1");
+    std::fs::write(&backup, b"backup").unwrap();
+    for (name, _) in modes(&dir.0) {
+        std::fs::set_permissions(dir.0.join(name), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let store = Store::open(&dir.0).unwrap();
+    let files = modes(&dir.0);
+    drop(store);
+    assert!(
+        files.iter().all(|(_, mode)| *mode == 0o600),
+        "an existing database stays readable by other local users: {files:?}"
+    );
+}
+
 #[path = "store/native-agents.rs"]
 mod native_agents;

@@ -247,6 +247,62 @@ fn open_database(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SecureDatabaseError {
+    #[error("making Forge's data folder private")]
+    Folder(#[source] artisan_paths::private::PrivateFileError),
+    #[error("creating the private database {database}")]
+    Create {
+        database: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("listing the database files in {folder}")]
+    List {
+        folder: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("making the database file private")]
+    Restrict(#[source] artisan_paths::private::PrivateFileError),
+}
+
+fn secure_database(dir: &Path, database: &Path) -> Result<(), SecureDatabaseError> {
+    artisan_paths::private::create_folder(dir).map_err(SecureDatabaseError::Folder)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(database)
+        .map_err(|source| SecureDatabaseError::Create {
+            database: database.to_path_buf(),
+            source,
+        })?;
+    let family = database
+        .file_name()
+        .expect("invariant: the database path ends in its file name")
+        .to_os_string();
+    let listed = |source| SecureDatabaseError::List {
+        folder: dir.to_path_buf(),
+        source,
+    };
+    for entry in std::fs::read_dir(dir).map_err(listed)? {
+        let entry = entry.map_err(listed)?;
+        let is_file = entry.file_type().map_err(listed)?.is_file();
+        if is_file
+            && entry
+                .file_name()
+                .as_encoded_bytes()
+                .starts_with(family.as_encoded_bytes())
+        {
+            artisan_paths::private::restrict_file(&entry.path())
+                .map_err(SecureDatabaseError::Restrict)?;
+        }
+    }
+    Ok(())
+}
+
 /// A bounded delivery batch; cutoff is the newest pending input observed in the same snapshot.
 pub struct PendingInputs {
     pub items: Vec<Item>,
@@ -255,11 +311,12 @@ pub struct PendingInputs {
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
+        let database = dir.join("forge.sqlite3");
+        secure_database(dir, &database)?;
         let blob_dir = dir.join("blobs");
         std::fs::create_dir_all(&blob_dir)
             .with_context(|| format!("create {}", blob_dir.display()))?;
         blobs::name_files(&blob_dir)?;
-        let database = dir.join("forge.sqlite3");
         match schema::roll_back(&database)? {
             schema::Rollback::Current => {}
             schema::Rollback::Restored {

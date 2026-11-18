@@ -2265,6 +2265,7 @@ dependencies = [
  "anyhow",
  "artisan-api",
  "artisan-markdown-index",
+ "artisan-paths",
  "fff-grep",
  "forge-content",
  "fs2",
