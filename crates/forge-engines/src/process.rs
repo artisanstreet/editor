@@ -368,20 +368,25 @@ impl EngineProcess {
                     break;
                 }
             }
-            let line = std::mem::take(&mut self.line);
+            let mut line = std::mem::take(&mut self.line);
             if std::mem::take(&mut self.oversized) {
                 return Err(ReadError::Oversized {
                     program: self.program.clone(),
                     limit: MAX_LINE_BYTES,
                 });
             }
-            let text = String::from_utf8_lossy(&line);
-            let text = text.trim_end_matches(['\n', '\r']);
-            self.trace.record(Kind::Out, text);
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            let text = String::from_utf8(line)
+                .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned());
+            self.trace.record(Kind::Out, &text);
             if text.trim().is_empty() {
+                self.line = text.into_bytes();
+                self.line.clear();
                 continue;
             }
-            return Ok(Some(text.to_owned()));
+            return Ok(Some(text));
         }
     }
 
