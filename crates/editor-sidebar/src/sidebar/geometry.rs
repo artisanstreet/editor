@@ -122,6 +122,48 @@ pub fn entries(lists: &Lists, history_visible: bool) -> Vec<Entry> {
     entries
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Listed {
+    pub entry: usize,
+    pub gap: f32,
+    pub spaced: bool,
+}
+
+impl Listed {
+    pub fn lead(self, spacer: f32) -> f32 {
+        match self.spaced {
+            true => self.gap + spacer,
+            false => self.gap,
+        }
+    }
+}
+
+pub fn listed(entries: &[Entry]) -> Vec<Listed> {
+    let mut lead = Listed::default();
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match entry {
+            Entry::Gap(height) => {
+                lead.gap += height;
+                None
+            }
+            Entry::Spacer => {
+                lead.spaced = true;
+                None
+            }
+            Entry::Thread(..)
+            | Entry::Hit(_)
+            | Entry::Project { .. }
+            | Entry::History
+            | Entry::Heading(_) => Some(Listed {
+                entry: index,
+                ..std::mem::take(&mut lead)
+            }),
+        })
+        .collect()
+}
+
 pub fn history_spacer(entries: &[Entry], viewport_height: f32, fraction: f32) -> f32 {
     let mut after_history = false;
     let mut before = 0.0;

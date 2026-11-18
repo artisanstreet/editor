@@ -190,3 +190,52 @@ fn message_hits_follow_the_thread_matches_under_their_own_heading() {
     let keys = entry_keys(&listed);
     assert_ne!(keys[4], keys[6]);
 }
+
+#[test]
+fn gaps_and_the_history_spacer_lead_the_next_row_instead_of_listing_empty_items() {
+    use editor_aqua::sidebar::geometry::{Listed, listed};
+    let column = [
+        Entry::Heading("Today"),
+        Entry::Gap(2.0),
+        Entry::Heading("Yesterday"),
+        Entry::Gap(12.0),
+        Entry::Gap(2.0),
+        Entry::Heading("Earlier"),
+        Entry::Spacer,
+        Entry::History,
+        Entry::Gap(2.0),
+        Entry::Heading("Older"),
+    ];
+    let rows = listed(&column);
+    assert_eq!(
+        rows,
+        [
+            Listed {
+                entry: 0,
+                gap: 0.0,
+                spaced: false
+            },
+            Listed {
+                entry: 2,
+                gap: 2.0,
+                spaced: false
+            },
+            Listed {
+                entry: 5,
+                gap: 14.0,
+                spaced: false
+            },
+            Listed {
+                entry: 7,
+                gap: 0.0,
+                spaced: true
+            },
+            Listed {
+                entry: 9,
+                gap: 2.0,
+                spaced: false
+            },
+        ]
+    );
+    assert!((rows[3].lead(40.0) - 40.0).abs() < 1e-4);
+}

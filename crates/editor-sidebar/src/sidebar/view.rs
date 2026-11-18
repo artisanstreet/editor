@@ -762,7 +762,7 @@ fn thread_entries(
     render: Rc<dyn Fn(usize, &super::geometry::Entry, f32) -> Element>,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
-    use super::geometry::{Entry, READ_AHEAD, entry_keys, history_spacer};
+    use super::geometry::{Entry, READ_AHEAD, entry_keys, history_spacer, listed};
     use aqua_ui::{
         collection::List,
         input::{EventPhase, InputKind, InputResponse},
@@ -772,21 +772,24 @@ fn thread_entries(
     let host_id = host.id.clone();
     let instance = host.instance();
     let spacer = history_spacer(&entries, viewport_height, sidebar.history_fraction);
-    let heights: Vec<_> = entries
-        .iter()
-        .map(|entry| match entry {
-            Entry::Spacer => spacer,
-            _ => entry.height(),
+    let keys = entry_keys(&entries);
+    let items: Vec<_> = listed(&entries)
+        .into_iter()
+        .map(|listed| {
+            (
+                keys[listed.entry].clone(),
+                listed.entry,
+                entries[listed.entry].clone(),
+                listed.lead(spacer),
+            )
         })
         .collect();
-    let keys = entry_keys(&entries);
-    let items: Vec<_> = keys
-        .into_iter()
-        .zip(entries.iter().cloned())
-        .enumerate()
-        .map(|(index, (key, entry))| (key, index, entry))
+    let heights: Vec<_> = items
+        .iter()
+        .map(|(_, _, entry, lead)| lead + entry.height())
         .collect();
-    let viewport_entries = Rc::new(entries);
+    let viewport_entries: Rc<Vec<Entry>> =
+        Rc::new(items.iter().map(|(_, _, entry, _)| entry.clone()).collect());
     let viewport_emit = emit.clone();
     let viewport_host = host_id.clone();
     let wheel_emit = emit;
@@ -794,8 +797,8 @@ fn thread_entries(
     Some(
         List::new()
             .items(items)
-            .key(|(key, _, _)| key.clone())
-            .row(move |(_, index, entry)| render(*index, entry, fraction))
+            .key(|(key, _, _, _)| key.clone())
+            .row(move |(_, index, entry, lead)| led(*lead, render(*index, entry, fraction)))
             .style(
                 Style::new()
                     .width(Length::Pct(100.0))
@@ -835,6 +838,18 @@ fn thread_entries(
                 InputResponse::default()
             }),
     )
+}
+
+fn led(lead: f32, row: Element) -> Element {
+    match lead > 0.0 {
+        true => UiBox::new()
+            .layout("column")
+            .width(Length::Pct(100.0))
+            .child(UiBox::new().height(lead).build().aria_hidden())
+            .child(row)
+            .build(),
+        false => row,
+    }
 }
 
 pub type ThreadVisualFactory = Rc<
@@ -882,7 +897,7 @@ pub fn thread_entries_view(
     visuals: ThreadVisualFactory,
     emit: Rc<dyn Fn(ViewAction)>,
 ) -> Option<Element> {
-    use super::geometry::{Entry, history_spacer};
+    use super::geometry::Entry;
     use aqua_core::Transform2D;
     use std::collections::HashMap;
 
@@ -892,7 +907,6 @@ pub fn thread_entries_view(
     let history_index = entries
         .iter()
         .position(|entry| matches!(entry, Entry::History));
-    let spacer = history_spacer(&entries, viewport_height, sidebar.history_fraction);
     let metadata: HashMap<_, _> = entries
         .iter()
         .filter_map(|entry| {
@@ -969,8 +983,7 @@ pub fn thread_entries_view(
                     None => row.build(),
                 }
             }
-            Entry::Gap(height) => UiBox::new().height(*height).build(),
-            Entry::Spacer => UiBox::new().height(spacer).build(),
+            Entry::Gap(_) | Entry::Spacer => UiBox::new().build().aria_hidden(),
             Entry::Heading(label) => RowItem::new(
                 format!("sidebar-heading-{label}"),
                 theme,
