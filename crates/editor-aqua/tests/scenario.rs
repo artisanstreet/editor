@@ -12,3 +12,6 @@ mod settings;
 mod states;
 #[path = "scenario/thread.rs"]
 mod thread;
+#[cfg(windows)]
+#[path = "scenario/uia.rs"]
+mod uia;

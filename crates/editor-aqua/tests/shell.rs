@@ -53,9 +53,6 @@ mod scale;
 mod scroll_edge;
 #[path = "shell/settings_scroll.rs"]
 mod settings_scroll;
-#[cfg(windows)]
-#[path = "shell/uia.rs"]
-mod uia;
 #[expect(
     clippy::disallowed_methods,
     reason = "test fixture driving the raw aqua text and element APIs, not view code"

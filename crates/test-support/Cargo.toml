@@ -17,7 +17,7 @@ editor = ["items", "clock", "dep:tempfile", "dep:aqua", "dep:aqua-core", "dep:aq
 shell = ["editor", "dep:editor-aqua"]
 transcript = ["dep:serde", "dep:serde_json", "dep:thiserror"]
 replay = ["transcript", "items", "dep:forge-engines"]
-scenario = ["shell", "replay", "editor-aqua/qualification", "dep:accesskit_consumer", "dep:aqua-a11y-uia", "dep:aqua-protocol", "dep:aqua-runtime", "dep:forge-runs"]
+scenario = ["shell", "replay", "editor-aqua/qualification", "dep:accesskit_consumer", "dep:aqua-a11y-uia", "dep:aqua-protocol", "dep:aqua-runtime", "dep:forge-runs", "dep:windows"]
 
 [dependencies]
 accesskit_consumer = { workspace = true, optional = true }
@@ -45,6 +45,9 @@ sse-core = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "time", "net", "test-util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, optional = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Variant", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
 
 [[bin]]
 name = "record"

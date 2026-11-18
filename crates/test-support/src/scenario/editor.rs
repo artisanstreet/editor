@@ -3,6 +3,8 @@ use super::render::presenter;
 use super::view::{Found, View};
 use crate::items::{assistant_reply, user_message};
 use crate::replay::ReplayingEngine;
+#[cfg(windows)]
+use aqua::AccessSink;
 use aqua::prelude::{AquaWindowId, ObservedWindowState, WindowEvent, WindowOptions};
 use aqua::{Aqua, AquaConfig, AquaUserEvent};
 use aqua_a11y_uia::A11yBridge;
@@ -588,6 +590,26 @@ impl Editor {
                 InputEvent::KeyUp(event),
             ]);
         }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn attach_access(&mut self, sink: Box<dyn AccessSink>) {
+        self.aqua.attach_access(self.id, sink);
+        self.pump();
+    }
+
+    #[cfg(windows)]
+    pub(super) fn access_waker(&self) -> aqua_a11y_uia::WakeFn {
+        let inbox = self.aqua.inbox();
+        let id = self.id;
+        Arc::new(move || {
+            inbox.post(AquaUserEvent::A11yActions(id));
+        })
+    }
+
+    #[cfg(windows)]
+    pub(super) fn frame(&mut self) {
+        self.pump();
     }
 }
 
