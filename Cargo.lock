@@ -2267,6 +2267,7 @@ version = "0.0.0"
 dependencies = [
  "artisan-api",
  "diagnostics",
+ "divan",
  "forge-engines",
  "forge-runs",
  "forge-store",
