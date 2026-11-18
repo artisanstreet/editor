@@ -12,6 +12,7 @@ pub const DEFAULT_FEED: &str =
 pub const NIGHTLY_FEED: &str =
     "https://github.com/artisanstreet/editor/releases/download/nightly/release.json";
 const MANIFEST: &str = "release.json";
+const RELEASES: &str = "https://github.com/artisanstreet/editor/releases/";
 
 const PUBLIC_KEY_HEX: &str = match option_env!("ARTISAN_RELEASE_PUBLIC_KEY_HEX") {
     Some(key) => key,
@@ -52,7 +53,28 @@ pub fn carrier(os: &str) -> App {
 pub enum Source {
     Bundled,
     Url(String),
+    Pinned(semver::Version),
     Dir(PathBuf),
+}
+
+fn tag(version: &semver::Version) -> String {
+    let mut untagged = version.clone();
+    untagged.build = semver::BuildMetadata::EMPTY;
+    format!("v{untagged}")
+}
+
+fn pinned_manifest(version: &semver::Version) -> String {
+    format!("{RELEASES}download/{}/{MANIFEST}", tag(version))
+}
+
+fn beside(manifest: &str, name: &str) -> String {
+    match name {
+        MANIFEST => manifest.to_owned(),
+        _ => format!(
+            "{}/{name}",
+            manifest.rsplit_once('/').map_or(manifest, |(base, _)| base)
+        ),
+    }
 }
 
 impl Source {
@@ -67,12 +89,10 @@ impl Source {
             (Some(value), None) => {
                 Self::Dir(std::path::absolute(value).with_context(|| format!("resolve {value}"))?)
             }
-            (None, Some(version)) => {
-                ensure!(usable_name(version), "unusable version {version:?}");
-                Self::Url(
-                    DEFAULT_FEED.replace("/latest/download/", &format!("/download/v{version}/")),
-                )
-            }
+            (None, Some(version)) => Self::Pinned(
+                semver::Version::parse(version)
+                    .with_context(|| format!("unusable version {version:?}"))?,
+            ),
             (None, None) if bundled || bundle::FORGE.present() => Self::Bundled,
             (None, None) => Self::Url(feed_for(env!("CARGO_PKG_VERSION")).to_owned()),
         })
@@ -82,6 +102,7 @@ impl Source {
         match self {
             Self::Bundled => "this installer".to_owned(),
             Self::Url(url) => url.clone(),
+            Self::Pinned(version) => pinned_manifest(version),
             Self::Dir(dir) => dir.display().to_string(),
         }
     }
@@ -98,6 +119,7 @@ impl Source {
                 Some(DEFAULT_FEED)
             }
             Self::Url(url) => Some(url),
+            Self::Pinned(version) => Some(feed_for(&version.to_string())),
             Self::Bundled => Some(feed_for(env!("CARGO_PKG_VERSION"))),
             Self::Dir(_) => None,
         }
@@ -107,15 +129,18 @@ impl Source {
         match self {
             Self::Bundled => name.to_owned(),
             Self::Dir(dir) => dir.join(name).display().to_string(),
-            Self::Url(manifest) => match name {
-                MANIFEST => manifest.clone(),
-                _ => format!(
-                    "{}/{name}",
-                    manifest
-                        .rsplit_once('/')
-                        .map_or(manifest.as_str(), |(base, _)| base)
-                ),
-            },
+            Self::Url(manifest) => beside(manifest, name),
+            Self::Pinned(version) => beside(&pinned_manifest(version), name),
+        }
+    }
+
+    fn immutable(&self, version: &str) -> Result<Self> {
+        match self {
+            Self::Url(url) if url.starts_with(RELEASES) => Ok(Self::Pinned(
+                semver::Version::parse(version)
+                    .with_context(|| format!("unusable release version {version:?}"))?,
+            )),
+            Self::Bundled | Self::Url(_) | Self::Pinned(_) | Self::Dir(_) => Ok(self.clone()),
         }
     }
 }
@@ -129,6 +154,7 @@ pub struct Carried {
 pub struct Feed {
     manifest: Manifest,
     source: Source,
+    assets: Source,
     http: reqwest::Client,
 }
 
@@ -139,6 +165,14 @@ pub enum Release {
 }
 
 pub async fn resolve(source: &Source, carried: Carried) -> Result<Release> {
+    resolve_signed(source, carried, &release_key()?).await
+}
+
+async fn resolve_signed(
+    source: &Source,
+    carried: Carried,
+    key: &ed25519_dalek::VerifyingKey,
+) -> Result<Release> {
     match source {
         Source::Bundled => return Ok(Release::Bundled(carried)),
         Source::Dir(dir) if !dir.join(MANIFEST).is_file() => {
@@ -149,25 +183,27 @@ pub async fn resolve(source: &Source, carried: Carried) -> Result<Release> {
             );
             return Ok(Release::Local { dir: dir.clone() });
         }
-        Source::Dir(_) | Source::Url(_) => {}
+        Source::Dir(_) | Source::Url(_) | Source::Pinned(_) => {}
     }
     let http = reqwest::Client::builder()
         .user_agent(concat!("ae/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("start the HTTP client")?;
     let raw = fetch(&http, source, MANIFEST, None).await?;
-    let signature = fetch(&http, source, &format!("{MANIFEST}.sig"), None).await?;
-    verify_signature(&raw, &signature)
-        .with_context(|| format!("verify the release from {}", source.argument()))?;
     let manifest: Manifest = serde_json::from_slice(&raw).context("read release.json")?;
     ensure!(
         usable_name(&manifest.version),
         "unusable release version {:?}",
         manifest.version
     );
+    let assets = source.immutable(&manifest.version)?;
+    let signature = fetch(&http, &assets, &format!("{MANIFEST}.sig"), None).await?;
+    verify_signature(&raw, &signature, key)
+        .with_context(|| format!("verify the release from {}", source.argument()))?;
     Ok(Release::Feed(Feed {
         manifest,
         source: source.clone(),
+        assets,
         http,
     }))
 }
@@ -182,7 +218,7 @@ async fn fetch(
     match source {
         Source::Bundled => bail!("this installer carries no {name}"),
         Source::Dir(_) => std::fs::read(&location).with_context(|| format!("read {location}")),
-        Source::Url(_) => {
+        Source::Url(_) | Source::Pinned(_) => {
             let mut response = http
                 .get(&location)
                 .send()
@@ -205,7 +241,7 @@ async fn fetch(
     }
 }
 
-fn verify_signature(raw: &[u8], signature: &[u8]) -> Result<()> {
+fn release_key() -> Result<ed25519_dalek::VerifyingKey> {
     let key_hex = if cfg!(debug_assertions) {
         std::env::var("ARTISAN_RELEASE_PUBLIC_KEY_HEX")
             .unwrap_or_else(|_| PUBLIC_KEY_HEX.to_owned())
@@ -218,7 +254,10 @@ fn verify_signature(raw: &[u8], signature: &[u8]) -> Result<()> {
         .map_err(|key: Vec<u8>| {
             anyhow::anyhow!("the release key is not 32 bytes but {}", key.len())
         })?;
-    let key = ed25519_dalek::VerifyingKey::from_bytes(&key).context("read the release key")?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key).context("read the release key")
+}
+
+fn verify_signature(raw: &[u8], signature: &[u8], key: &ed25519_dalek::VerifyingKey) -> Result<()> {
     let text = String::from_utf8_lossy(signature);
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(text.trim())
@@ -263,10 +302,10 @@ impl Feed {
             artifact.file
         );
         let label = format!("Downloading Artisan {}", self.manifest.version);
-        let length = match &self.source {
-            Source::Url(_) => self
+        let length = match &self.assets {
+            Source::Url(_) | Source::Pinned(_) => self
                 .http
-                .head(self.source.file(&artifact.file))
+                .head(self.assets.file(&artifact.file))
                 .send()
                 .await
                 .ok()
@@ -277,7 +316,7 @@ impl Feed {
             || Progress::spinner(&label),
             |length| Progress::download(&label, length),
         );
-        let bytes = match fetch(&self.http, &self.source, &artifact.file, Some(&progress)).await {
+        let bytes = match fetch(&self.http, &self.assets, &artifact.file, Some(&progress)).await {
             Ok(bytes) => bytes,
             Err(error) => {
                 progress.fail(format!("{error:#}"));

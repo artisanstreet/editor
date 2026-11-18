@@ -1,7 +1,7 @@
 name: Release
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   schedule:
     - cron: '0 22 * * *'
     - cron: '0 23 * * *'
@@ -288,32 +288,52 @@ jobs:
           ARTISAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.ARTISAN_RELEASE_PUBLIC_KEY_HEX }}
         run: |
           test -n "$GH_TOKEN"
+          immutable="$(python3 src/release.py tag --version "$RELEASE_VERSION")"
           listed="$(python3 src/release.py assets --output dist)"
           mapfile -t assets <<< "$listed"
           if [[ "$RELEASE_TAG" == nightly ]]; then
-            immutable="nightly-$RELEASE_SHA"
             if gh release view "$immutable" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > immutable-draft; then
               if [[ "$(cat immutable-draft)" == true ]]; then
                 gh release upload "$immutable" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-                gh release edit "$immutable" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
               fi
             else
               gh release create "$immutable" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$RELEASE_SHA" --prerelease --latest=false --draft --title "Artisan nightly $RELEASE_VERSION" --notes "Source commit: $RELEASE_SHA"
-              gh release edit "$immutable" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
             fi
-            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$immutable" --jq .sha)"
+            gh release edit "$immutable" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          else
+            [[ "$immutable" == "$RELEASE_TAG" ]]
+            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
             [[ "$actual" == "$RELEASE_SHA" ]]
-            gh release download "$immutable" --repo "$GITHUB_REPOSITORY" --dir immutable-release
-            python3 src/release.py verify --output immutable-release --sha "$RELEASE_SHA"
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > existing-draft; then
+              if [[ "$(cat existing-draft)" == true ]]; then
+                gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+              fi
+            else
+              gh release create "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Artisan $RELEASE_VERSION" --generate-notes
+            fi
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          fi
+          actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$immutable" --jq .sha)"
+          [[ "$actual" == "$RELEASE_SHA" ]]
+          gh release download "$immutable" --repo "$GITHUB_REPOSITORY" --dir immutable-release
+          python3 src/release.py verify --output immutable-release --sha "$RELEASE_SHA"
+          if [[ "$RELEASE_TAG" == nightly ]]; then
             if ! gh release view nightly --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
               gh release create nightly --repo "$GITHUB_REPOSITORY" --target "$RELEASE_SHA" --prerelease --latest=false --draft --title 'Artisan nightly' --notes 'Nightly builds from successful master CI.'
             fi
             listed="$(python3 src/release.py assets --output immutable-release)"
             mapfile -t rolling <<< "$listed"
+            files=()
+            pointer=""
+            for asset in "${rolling[@]}"; do
+              if [[ "$asset" == immutable-release/release.json#* ]]; then pointer="$asset"; else files+=("$asset"); fi
+            done
+            test -n "$pointer"
+            gh release upload nightly "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload nightly "$pointer" --repo "$GITHUB_REPOSITORY" --clobber
             gh release view nightly --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while read -r stale; do
               if [[ ! -e "immutable-release/$stale" ]]; then gh release delete-asset nightly "$stale" --repo "$GITHUB_REPOSITORY" --yes; fi
             done
-            gh release upload nightly "${rolling[@]}" --repo "$GITHUB_REPOSITORY" --clobber
             stable="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-pre-releases --exclude-drafts --json tagName --jq '[.[] | select(.tagName != "nightly")] | length')"
             if [[ "$stable" == 0 ]]; then
               gh release edit nightly --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest --title "Artisan nightly $RELEASE_VERSION"
@@ -322,13 +342,5 @@ jobs:
             fi
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" -f sha="$RELEASE_SHA" -F force=true
           else
-            actual="$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)"
-            [[ "$actual" == "$RELEASE_SHA" ]]
-            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > existing-draft; then
-              [[ "$(cat existing-draft)" == true ]]
-              gh release upload "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-            else
-              gh release create "$RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Artisan $RELEASE_VERSION" --generate-notes
-            fi
-            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --latest
           fi

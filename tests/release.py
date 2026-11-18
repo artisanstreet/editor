@@ -214,6 +214,12 @@ class Release(unittest.TestCase):
             self.assertIn("needs ssh-keygen (OpenSSH) or OpenSSL 3", result.stderr)
             self.assertIsNone(ran)
 
+    def test_versions_name_their_immutable_tag_and_order_the_channels(self):
+        self.assertEqual(release.tag_for("1.2.3"), "v1.2.3")
+        self.assertEqual(release.tag_for("0.0.0-nightly.20261111220000+aaaaaaaaaaaa"), "v0.0.0-nightly.20261111220000")
+        for version in ("1.2", "v1.2.3", "0.0.0-nightly.2026+aaaaaaaaaaaa", "1.2.3/../evil"):
+            with self.assertRaises(ValueError):
+                release.tag_for(version)
     def test_version_stamp_updates_workspace_packages_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -18,6 +18,8 @@ OPTIONAL = {("editor", "windows", "aarch64")}
 SYSTEMS = {"linux": "Linux", "macos": "macOS", "windows": "Windows"}
 CHIPS = {("macos", "aarch64"): "Apple Silicon", ("linux", "aarch64"): "ARM64", ("windows", "aarch64"): "ARM64"}
 SUPPORT = {"install.sh": "Install script for Linux and macOS", "release.json.sig": "Release manifest signature", "release.json.sshsig": "Release manifest signature for ssh-keygen", "release.json": "Signed release manifest"}
+STABLE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
+NIGHTLY_VERSION = re.compile(r"0\.0\.0-nightly\.([0-9]{14})\+[0-9a-f]{12}")
 LATEST = "releases/latest/download/release.json"
 NIGHTLY = "releases/download/nightly/release.json"
 
@@ -60,6 +62,12 @@ def sshsig_armor(anchor, signature):
     text = base64.b64encode(blob).decode()
     lines = [text[index:index + 70] for index in range(0, len(text), 70)]
     return "-----BEGIN SSH SIGNATURE-----\n" + "\n".join(lines) + "\n-----END SSH SIGNATURE-----\n"
+
+
+def tag_for(version):
+    if STABLE.fullmatch(version) or NIGHTLY_VERSION.fullmatch(version):
+        return "v" + version.split("+", 1)[0]
+    raise ValueError(f"no release tag for version {version!r}")
 
 
 def public_key(value):
@@ -136,6 +144,7 @@ def package(binaries, output, app, system, arch):
 
 
 def assemble(root, source, output, version, sha, anchor):
+    tag_for(version)
     entries = []
     seen = set()
     output.mkdir(parents=True, exist_ok=False)
@@ -249,6 +258,8 @@ def main():
     signing.add_argument("--output", required=True)
     listing = commands.add_parser("assets")
     listing.add_argument("--output", required=True)
+    tagging = commands.add_parser("tag")
+    tagging.add_argument("--version", required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     if args.command == "key":
@@ -265,6 +276,8 @@ def main():
         verify(Path(args.output), public_key(os.environ["ARTISAN_RELEASE_PUBLIC_KEY_HEX"]), args.sha)
     elif args.command == "assets":
         print("\n".join(assets(Path(args.output))))
+    elif args.command == "tag":
+        print(tag_for(args.version))
     elif args.command == "sign":
         sign(Path(args.output), os.environ["ARTISAN_RELEASE_SIGNING_KEY_PEM"], public_key(os.environ["ARTISAN_RELEASE_PUBLIC_KEY_HEX"]))
 

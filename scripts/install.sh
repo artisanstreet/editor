@@ -2,6 +2,7 @@
 set -eu
 
 feed="${ARTISAN_RELEASES:-https://github.com/artisanstreet/editor/releases/latest/download/release.json}"
+releases="https://github.com/artisanstreet/editor/releases/"
 signer='artisan-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEAKSzXP/foIgie5gkF2r/s3uAf7Jus8WbSK5W+/Xk2L'
 public_key='MCowBQYDK2VwAyEAQApLNc/9+giCJ7mCQXav+ze4B/sm6zxZtIrlb79eTYs='
 
@@ -56,6 +57,9 @@ fetch "$feed" "$tmp/release.json"
 
 version="$(sed -n '1s/^{"version":"\([0-9A-Za-z.+-]*\)".*/\1/p' "$tmp/release.json")"
 [ -n "$version" ] || fail "release.json names no usable version"
+case "$feed" in
+    "$releases"*) base="${releases}download/v${version%%+*}" ;;
+esac
 verify || fail "release.json is not signed by Artisan's release key"
 
 line="$(grep '"app":"ae"' "$tmp/release.json" | grep "\"os\":\"$os\"" | grep "\"arch\":\"$arch\"" | head -n1 || true)"
