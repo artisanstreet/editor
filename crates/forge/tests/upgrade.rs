@@ -1,7 +1,10 @@
-#![expect(
-    clippy::assertions_on_result_states,
-    clippy::unused_result_ok,
-    reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+#![cfg_attr(
+    unix,
+    expect(
+        clippy::assertions_on_result_states,
+        clippy::unused_result_ok,
+        reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
+    )
 )]
 #![cfg(test)]
 #![cfg(unix)]
