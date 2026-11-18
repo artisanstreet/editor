@@ -1,11 +1,3 @@
-//! `ae account`: enroll this Forge machine into an AST account.
-//!
-//! The machine keypair is local (persisted in Forge's data dir, not in the
-//! database). Core owns enrollment lifecycle; this CLI only builds the exact
-//! proofs Core specifies, polls the authenticated status, and — after the
-//! operator explicitly approves the shown accountId + verified email —
-//! confirms the exact account/key binding. No parallel enrollment logic.
-
 use crate::paths::{self, LocateError};
 use crate::service::RestartError;
 use crate::ui::AskError;
@@ -18,8 +10,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Args)]
 pub struct AccountArgs {
-    /// Core base URL (else `AST_CORE_BASE_URL`, else production default).
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Core base URL (else `AST_CORE_BASE_URL`, else production default)"
+    )]
     pub core: Option<String>,
     #[command(subcommand)]
     pub command: AccountCommand,
@@ -27,36 +21,41 @@ pub struct AccountArgs {
 
 #[derive(Subcommand)]
 pub enum AccountCommand {
-    /// Start an enrollment: prints a code to claim in a signed-in session.
+    #[command(about = "Start an enrollment: prints a code to claim in a signed-in session")]
     Enroll {
-        /// Human label for this machine (default: hostname).
-        #[arg(long)]
+        #[arg(long, help = "Human label for this machine (default: hostname)")]
         label: Option<String>,
-        /// Print machine-readable enrollment (code, ids, expiry) instead of
-        /// human text, for the Editor's binding check.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Print machine-readable enrollment (code, ids, expiry) instead of human text, for the Editor's binding check"
+        )]
         json: bool,
-        /// Replace a removed enrollment with a fresh machine key.
-        #[arg(long)]
+        #[arg(long, help = "Replace a removed enrollment with a fresh machine key")]
         replace: bool,
     },
-    /// Poll the enrollment: shows pending/claimed + account when claimed.
+    #[command(about = "Poll the enrollment: shows pending/claimed + account when claimed")]
     Status {
-        /// Print machine-readable JSON (stable keys; never secrets) instead
-        /// of human text, for the Editor's binding check.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Print machine-readable JSON (stable keys; never secrets) instead of human text, for the Editor's binding check"
+        )]
         json: bool,
     },
-    /// Confirm after explicit local approval of the shown account.
+    #[command(about = "Confirm after explicit local approval of the shown account")]
     Confirm {
-        /// Approve without asking (the account was already shown + approved).
-        #[arg(long, short)]
+        #[arg(
+            long,
+            short,
+            help = "Approve without asking (the account was already shown + approved)"
+        )]
         yes: bool,
-        /// Only confirm into this account id; refuse on mismatch before the RPC.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Only confirm into this account id; refuse on mismatch before the RPC"
+        )]
         account_id: Option<String>,
     },
-    /// Fetch and apply the latest account config bundle now.
+    #[command(about = "Fetch and apply the latest account config bundle now")]
     Sync,
 }
 
@@ -530,8 +529,6 @@ fn enroll(
     Ok(())
 }
 
-/// Machine-readable enrollment for the Editor: the exact Core-created
-/// fields it needs to track the request. Never key material.
 fn enroll_report(created: &forge_http::core::EnrollmentCreated) -> serde_json::Value {
     serde_json::json!({
         "code": created.code.clone(),
@@ -691,9 +688,6 @@ fn check_expected_account(
     }
 }
 
-/// No-enrollment report: the pending keys with nulls and `status "none"`,
-/// exit 0, so the Editor distinguishes "nothing started" from failure.
-/// Human output keeps the nonzero error.
 fn no_enrollment_report() -> serde_json::Value {
     serde_json::json!({
         "enrolled": false,
@@ -705,9 +699,6 @@ fn no_enrollment_report() -> serde_json::Value {
     })
 }
 
-/// Machine-readable enrollment state for the Editor's binding check.
-/// Only identifiers Core already shows the operator: never secrets, keys,
-/// codes, or tokens. Compact single line so WSL forwarding stays parseable.
 fn enrolled_report(machine_id: &str, account_id: Option<&str>) -> serde_json::Value {
     serde_json::json!({
         "enrolled": true,
@@ -716,8 +707,6 @@ fn enrolled_report(machine_id: &str, account_id: Option<&str>) -> serde_json::Va
     })
 }
 
-/// Pending-enrollment report: the server's verbatim `status` plus the
-/// claimed identity when present (`None` reads as JSON null).
 fn pending_report(enrollment_id: &str, status: &artisan_account::PairStatus) -> serde_json::Value {
     serde_json::json!({
         "enrolled": false,

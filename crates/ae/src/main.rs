@@ -1,8 +1,3 @@
-//! `ae`: installs and manages Artisan's apps (Forge, the Editor and itself)
-//! on this machine, and Forge's paired devices and engines.
-//!
-//! In a terminal it asks what it needs to know; every question has a flag,
-//! so agents and scripts run it without one.
 #![expect(
     clippy::allow_attributes,
     clippy::exit,
@@ -41,7 +36,6 @@ use artisan_paths::App;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-/// `0.4.2 (abc1234, x86_64-unknown-linux-gnu)`
 pub const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
@@ -54,8 +48,12 @@ pub const LONG_VERSION: &str = concat!(
 #[derive(Parser)]
 #[command(name = "ae", version = LONG_VERSION, about = "Install and manage Artisan: Forge, the Editor and engines")]
 struct Cli {
-    /// The WSL distribution whose Forge to use (Windows, when several have one).
-    #[arg(long, global = true, value_name = "NAME")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        help = "The WSL distribution whose Forge to use (Windows, when several have one)"
+    )]
     distro: Option<String>,
     #[command(subcommand)]
     command: Command,
@@ -63,53 +61,55 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install or reinstall the Editor and Forge (asks where).
+    #[command(about = "Install or reinstall the Editor and Forge (asks where)")]
     Install(install::InstallArgs),
-    /// Update what is installed to the newest release.
+    #[command(about = "Update what is installed to the newest release")]
     Update {
-        /// Don't ask to confirm.
-        #[arg(long, short)]
+        #[arg(long, short, help = "Don't ask to confirm")]
         yes: bool,
     },
-    /// Remove apps (asks which); their data stays unless --purge.
+    #[command(about = "Remove apps (asks which); their data stays unless --purge")]
     Uninstall {
-        /// Only these apps.
+        #[arg(help = "Only these apps")]
         apps: Vec<AppArg>,
-        /// Also delete their data: threads, settings, paired devices.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Also delete their data: threads, settings, paired devices"
+        )]
         purge: bool,
-        /// Don't ask.
-        #[arg(long, short)]
+        #[arg(long, short, help = "Don't ask")]
         yes: bool,
     },
-    /// What is installed, whether Forge runs, and problems.
+    #[command(about = "What is installed, whether Forge runs, and problems")]
     Status {
         #[arg(long)]
         json: bool,
     },
-    /// Open the Editor, optionally on a folder.
+    #[command(about = "Open the Editor, optionally on a folder")]
     Open { path: Option<PathBuf> },
-    /// Start, stop or restart Forge.
+    #[command(about = "Start, stop or restart Forge")]
     Forge {
         #[command(subcommand)]
         command: ForgeCommand,
     },
-    /// Make a one-time code that pairs an Editor with Forge.
+    #[command(about = "Make a one-time code that pairs an Editor with Forge")]
     Pair {
-        /// Print `{code, forge_certificate, forge_fingerprint, expires_at, address}` and return.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Print `{code, forge_certificate, forge_fingerprint, expires_at, address}` and return"
+        )]
         json: bool,
     },
-    /// List the devices paired with Forge, or unpair one.
+    #[command(about = "List the devices paired with Forge, or unpair one")]
     Devices {
         #[arg(long)]
         json: bool,
         #[command(subcommand)]
         command: Option<DevicesCommand>,
     },
-    /// Enroll this Forge machine into an Artisan account.
+    #[command(about = "Enroll this Forge machine into an Artisan account")]
     Account(account::AccountArgs),
-    /// Forge's engines: list, install, sign in.
+    #[command(about = "Forge's engines: list, install, sign in")]
     Engine {
         #[command(subcommand)]
         command: EngineCommand,
@@ -142,7 +142,7 @@ enum ForgeCommand {
 
 #[derive(Subcommand)]
 enum DevicesCommand {
-    /// Unpair a device (asks which); the id may be shortened.
+    #[command(about = "Unpair a device (asks which); the id may be shortened")]
     Revoke {
         id: Option<String>,
         #[arg(long, short)]
@@ -152,34 +152,38 @@ enum DevicesCommand {
 
 #[derive(Subcommand)]
 pub enum EngineCommand {
-    /// Every engine, its version and account.
+    #[command(about = "Every engine, its version and account")]
     List {
         #[arg(long)]
         json: bool,
     },
-    /// Install engines, or update them to the newest version (asks which).
+    #[command(about = "Install engines, or update them to the newest version (asks which)")]
     Install { engines: Vec<EngineId> },
-    /// Sign an engine in to its account (asks which).
+    #[command(about = "Sign an engine in to its account (asks which)")]
     Login {
         engine: Option<EngineId>,
-        /// Claude only: sign in to claude.ai for claude.ai mode, in a
-        /// browser window on this device.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Claude only: sign in to claude.ai for claude.ai mode, in a browser window on this device"
+        )]
         claude_ai: bool,
-        /// Read the claude.ai session from stdin: an `ae` on the device
-        /// with the browser captured it.
-        #[arg(long, hide = true)]
+        #[arg(
+            long,
+            hide = true,
+            help = "Read the claude.ai session from stdin: an `ae` on the device with the browser captured it"
+        )]
         session_stdin: bool,
-        /// Capture the claude.ai session here and print it, for an `ae` in
-        /// WSL to keep.
-        #[arg(long, hide = true)]
+        #[arg(
+            long,
+            hide = true,
+            help = "Capture the claude.ai session here and print it, for an `ae` in WSL to keep"
+        )]
         capture_only: bool,
     },
-    /// Sign an engine out of its account (asks which).
+    #[command(about = "Sign an engine out of its account (asks which)")]
     Logout {
         engine: Option<EngineId>,
-        /// Claude only: forget the claude.ai session.
-        #[arg(long)]
+        #[arg(long, help = "Claude only: forget the claude.ai session")]
         claude_ai: bool,
     },
 }

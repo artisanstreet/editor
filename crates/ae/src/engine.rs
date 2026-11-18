@@ -1,7 +1,3 @@
-//! `ae engine …`: Forge's engines (Claude, Codex, …) in its data folder.
-//! Installs take the engine install lock, so they are safe beside a running
-//! Forge (which notices the new version at its next refresh).
-
 use crate::EngineCommand;
 use crate::paths::{self, LocateError};
 use crate::ui::{self, AskError};

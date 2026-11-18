@@ -1,7 +1,3 @@
-//! What an install sets up around an app, per OS: `ae` on PATH, the
-//! Editor's launcher entry and `artisan://` handler, the Settings → Apps
-//! entries on Windows, and closing running Editors before replacing them.
-
 use crate::paths::{self, LocateError};
 use crate::sys::{self, RemoveError, RunError, SpawnError, WriteError, ps_quote, ps_string};
 use artisan_paths::{App, EnvPathError};

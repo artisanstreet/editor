@@ -1,6 +1,3 @@
-//! An isolated Forge with a completed conversation for Editor measurements.
-//! Usage: cargo run -p ae --example idle_fixture -- /absolute/new/directory
-//! The directory must not exist. This process never manages a Forge service.
 #![expect(
     clippy::print_stdout,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"

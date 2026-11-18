@@ -462,24 +462,33 @@ pub enum RemoveSelfLaterError {
 
 #[derive(Args, Default)]
 pub struct InstallArgs {
-    /// Where the Editor goes: here, windows (from WSL), keep or none.
-    #[arg(long, value_name = "WHERE", value_parser = EditorPlace::parse)]
+    #[arg(long, value_name = "WHERE", value_parser = EditorPlace::parse, help = "Where the Editor goes: here, windows (from WSL), keep or none")]
     editor: Option<EditorPlace>,
-    /// Where Forge goes: here, wsl:<distro> (from Windows), keep or none.
-    #[arg(long, value_name = "WHERE", value_parser = ForgePlace::parse)]
+    #[arg(long, value_name = "WHERE", value_parser = ForgePlace::parse, help = "Where Forge goes: here, wsl:<distro> (from Windows), keep or none")]
     forge: Option<ForgePlace>,
-    /// Install this version instead of the newest (also how you go back).
-    #[arg(long, value_name = "VERSION")]
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Install this version instead of the newest (also how you go back)"
+    )]
     version: Option<String>,
-    /// A release feed URL, a folder holding a release, or a local build.
-    #[arg(long, value_name = "SOURCE")]
+    #[arg(
+        long,
+        value_name = "SOURCE",
+        help = "A release feed URL, a folder holding a release, or a local build"
+    )]
     from: Option<String>,
-    /// The folder to install into instead of the default (first install only).
-    #[arg(long, value_name = "FOLDER")]
+    #[arg(
+        long,
+        value_name = "FOLDER",
+        help = "The folder to install into instead of the default (first install only)"
+    )]
     location: Option<PathBuf>,
-    /// Don't ask to confirm the install (conflicts are still asked about
-    /// in a terminal).
-    #[arg(long, short)]
+    #[arg(
+        long,
+        short,
+        help = "Don't ask to confirm the install (conflicts are still asked about in a terminal)"
+    )]
     yes: bool,
     #[arg(long, hide = true)]
     feed: Option<String>,

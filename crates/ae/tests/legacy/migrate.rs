@@ -276,11 +276,10 @@ fn codex_state(root: &Path, rows: &[(&str, String)]) -> PathBuf {
     let path = root.join(CODEX_HOME).join("state_5.sqlite");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
-        .unwrap();
+    db.execute_batch(include_str!("codex_threads.sql")).unwrap();
     for (id, rollout) in rows {
         db.execute(
-            "INSERT INTO threads VALUES (?1, ?2)",
+            include_str!("insert_codex_thread.sql"),
             rusqlite::params![id, rollout],
         )
         .unwrap();
@@ -298,11 +297,7 @@ fn rollout(root: &Path) -> String {
 fn rollout_of(state: &Path, id: &str) -> String {
     rusqlite::Connection::open(state)
         .unwrap()
-        .query_row(
-            "SELECT rollout_path FROM threads WHERE id = ?1",
-            [id],
-            |row| row.get(0),
-        )
+        .query_row(include_str!("rollout_path.sql"), [id], |row| row.get(0))
         .unwrap()
 }
 
@@ -352,7 +347,7 @@ fn an_unsupported_codex_schema_stops_before_anything_moves() {
     fs::create_dir_all(state.parent().unwrap()).unwrap();
     rusqlite::Connection::open(&state)
         .unwrap()
-        .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout TEXT)")
+        .execute_batch(include_str!("unsupported_codex_threads.sql"))
         .unwrap();
 
     let failed = machine.run(&[App::Ae, App::Forge], &[forge]);

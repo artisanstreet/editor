@@ -1,12 +1,6 @@
-//! How `ae` talks to people and to agents. In a terminal: prompts, spinners
-//! and progress bars (cliclack, on stderr). Without one: plain lines on
-//! stderr and no questions; a choice that has no flag value fails at once
-//! with the flag to pass. Data (tables, JSON) always goes to stdout.
-
 use std::fmt::Display;
 use std::io::IsTerminal;
 
-/// Whether someone can answer questions and watch progress.
 pub fn interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
@@ -83,7 +77,6 @@ pub fn warning(message: impl Display) {
     }
 }
 
-/// A titled block: the install summary, a pairing code.
 pub fn note(title: impl Display, body: impl Display) {
     if interactive() {
         cliclack::note(title, body).ok();
@@ -92,8 +85,6 @@ pub fn note(title: impl Display, body: impl Display) {
     }
 }
 
-/// A spinner, or a progress bar once its length is known. Without a
-/// terminal it prints where it starts and how it ends.
 pub struct Progress {
     bar: Option<cliclack::ProgressBar>,
 }
@@ -109,7 +100,6 @@ impl Progress {
         Self { bar: Some(bar) }
     }
 
-    /// A byte progress bar.
     pub fn download(message: impl Display, length: u64) -> Self {
         if !interactive() {
             eprintln!("{message}");
@@ -146,7 +136,6 @@ impl Progress {
         }
     }
 
-    /// Clears it, for a failure reported elsewhere.
     pub fn clear(self) {
         if let Some(bar) = self.bar {
             bar.clear();
@@ -172,7 +161,6 @@ pub fn task<T, E: std::error::Error>(
     }
 }
 
-/// Fixed-width columns for stdout tables.
 pub fn table(header: &[&str], rows: &[Vec<String>]) -> String {
     let mut widths: Vec<usize> = header.iter().map(|cell| cell.chars().count()).collect();
     for row in rows {
