@@ -10,7 +10,7 @@
 use crate::{BUSY_TIMEOUT, Device, schema};
 use anyhow::{Context, Result};
 use artisan_api::{DeviceId, Timestamp};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
 /// A plain connection to `forge.sqlite3` in a data directory.
@@ -55,13 +55,12 @@ impl Admin {
     }
 
     pub fn add_pair_code(&self, code_sha256: &str, expires_at: Timestamp) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO pair_codes (code_sha256, expires_at) VALUES (?1, ?2)",
-                params![code_sha256, expires_at],
-            )
-            .context("save pair code")?;
-        Ok(())
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("begin saving a pair code")?;
+        crate::pairing::add_pair_code(&tx, code_sha256, expires_at)?;
+        tx.commit().context("commit the pair code")
     }
 
     pub fn devices(&self) -> Result<Vec<Device>> {

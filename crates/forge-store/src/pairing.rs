@@ -145,14 +145,8 @@ impl Store {
     }
 
     pub async fn add_pair_code(&self, code_sha256: String, expires_at: Timestamp) -> Result<()> {
-        self.write(move |tx| {
-            tx.execute(
-                "INSERT OR REPLACE INTO pair_codes (code_sha256, expires_at) VALUES (?1, ?2)",
-                params![code_sha256, expires_at],
-            )?;
-            Ok(())
-        })
-        .await
+        self.write(move |tx| add_pair_code(tx, &code_sha256, expires_at))
+            .await
     }
 
     /// The device a client certificate belongs to. Answered from memory;
@@ -169,4 +163,18 @@ impl Store {
         }
         Ok(devices.keys.get(public_key).cloned())
     }
+}
+
+pub(crate) fn add_pair_code(
+    conn: &rusqlite::Connection,
+    code_sha256: &str,
+    expires_at: Timestamp,
+) -> Result<()> {
+    conn.prepare_cached(include_str!("sql/pairing/expire_codes.sql"))?
+        .execute([now()])
+        .context("collect expired pair codes")?;
+    conn.prepare_cached(include_str!("sql/pairing/add_code.sql"))?
+        .execute(params![code_sha256, expires_at])
+        .context("save pair code")?;
+    Ok(())
 }

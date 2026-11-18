@@ -549,6 +549,33 @@ async fn a_pairing_code_works_once_and_not_after_it_expires() {
     assert_eq!(revocations.recv().await.unwrap(), device);
 }
 
+#[tokio::test]
+async fn abandoned_pairing_codes_do_not_pile_up() {
+    let dir = TempDir::new();
+    let store = Store::open(&dir.0).unwrap();
+    let now = now();
+    for attempt in 0..20 {
+        store
+            .add_pair_code(format!("abandoned-{attempt}"), now - 1)
+            .await
+            .unwrap();
+    }
+    store
+        .add_pair_code("current".into(), now + 600_000)
+        .await
+        .unwrap();
+    forge_store::admin::Admin::open(&dir.0)
+        .unwrap()
+        .add_pair_code("from-ae", now + 600_000)
+        .unwrap();
+
+    let stored: i64 = rusqlite::Connection::open(dir.0.join("forge.sqlite3"))
+        .unwrap()
+        .query_row("SELECT count(*) FROM pair_codes", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(stored, 2);
+}
+
 /// `ae forge devices revoke` writes from another process while Forge runs;
 /// the device's next request is refused and its open streams are told.
 #[tokio::test]
