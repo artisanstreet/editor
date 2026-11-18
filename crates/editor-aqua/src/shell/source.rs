@@ -42,10 +42,7 @@ impl RowSourceDialogs {
         ctx: &mut AppCtx<'_>,
         routes: &crate::ui::dialogs::DialogRoutes,
         window: AquaWindowId,
-    ) -> Option<(
-        crate::conversation::view::row_sources::RowSourceExport,
-        SourceDialogResult,
-    )> {
+    ) {
         let request = ctx.dialog(window, crate::ui::dialogs::save_file_spec("source.txt"));
         self.next = self.next.wrapping_add(1);
         let generation = self.next;
@@ -57,7 +54,6 @@ impl RowSourceDialogs {
             });
         });
         self.pending.insert(generation, export);
-        None
     }
 
     pub fn drain(

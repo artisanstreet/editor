@@ -349,10 +349,8 @@ impl RootViews {
                     return false;
                 }
                 self.source_dialogs
-                    .open(export, ctx, &shell.dialogs, window)
-                    .is_some_and(|(export, result)| {
-                        Self::finish_source_dialog(shell, export, result)
-                    })
+                    .open(export, ctx, &shell.dialogs, window);
+                false
             }
         }
     }
