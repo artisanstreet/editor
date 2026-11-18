@@ -176,7 +176,8 @@ impl<R: RangePage + Send> RangeWindow<R> {
             return;
         }
         if let Some(index) = self.pages.iter().position(|page| {
-            page.start() <= offset && (offset < page.end() || offset == page.total())
+            page.start() <= offset
+                && (offset < page.end() || (offset == page.total() && page.end() == page.total()))
         }) && let Some(page) = self.pages.remove(index)
         {
             self.pages.push_back(Arc::clone(&page));

@@ -12,6 +12,8 @@ mod pages;
 mod preferences;
 #[path = "core/host/project_icons.rs"]
 mod project_icons;
+#[path = "core/range_window.rs"]
+mod range_window;
 #[path = "core/host/read_acks.rs"]
 mod read_acks;
 #[path = "core/screen.rs"]
