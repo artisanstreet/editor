@@ -3,15 +3,15 @@ use artisan_api::{CreateProject, DirListing, ProjectId};
 #[derive(Default)]
 pub struct FolderPicker {
     pub listing: Option<DirListing>,
-    pub hidden: bool,
-    pub loading: bool,
+    pub(crate) hidden: bool,
+    pub(crate) loading: bool,
     pub creating: bool,
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     request: Option<CreateProject>,
 }
 
 impl FolderPicker {
-    pub fn rows(&self) -> Vec<usize> {
+    pub(crate) fn rows(&self) -> Vec<usize> {
         self.listing
             .as_ref()
             .map(|listing| {

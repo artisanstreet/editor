@@ -52,7 +52,7 @@ impl UsagePage {
         }
         self.shown = shown;
     }
-    pub fn refresh_host(&mut self, core: &Core, id: &HostId) -> bool {
+    pub(crate) fn refresh_host(&mut self, core: &Core, id: &HostId) -> bool {
         let Some(host) = core.host(id) else {
             return false;
         };
@@ -121,12 +121,12 @@ impl UsagePage {
         }
         before_refreshing != visible_refreshing(&self.refreshing) || before_errors != self.errors
     }
-    pub fn refreshing(&self, host: &HostId, instance: HostInstance) -> bool {
+    pub(crate) fn refreshing(&self, host: &HostId, instance: HostInstance) -> bool {
         self.refreshing
             .iter()
             .any(|(id, current, _)| id == host && *current == instance)
     }
-    pub fn error(&self, host: &HostId, instance: HostInstance) -> Option<&str> {
+    pub(crate) fn error(&self, host: &HostId, instance: HostInstance) -> Option<&str> {
         self.errors
             .get(&(host.clone(), instance))
             .map(String::as_str)

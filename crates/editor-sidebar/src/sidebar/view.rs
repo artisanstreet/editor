@@ -429,7 +429,7 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
     animation_started || before != visible_state(sidebar, core)
 }
 
-pub fn thread_menu(
+pub(crate) fn thread_menu(
     sidebar: &Sidebar,
     core: &Core,
     theme: ArtisanTheme,
@@ -534,7 +534,7 @@ pub fn thread_menu(
     )
 }
 
-pub fn rename_editor(
+pub(crate) fn rename_editor(
     sidebar: &Sidebar,
     core: &Core,
     emit: Rc<dyn Fn(ViewAction)>,
@@ -596,7 +596,7 @@ pub fn search_editor(
     )
 }
 
-pub fn rename_dialog(
+pub(crate) fn rename_dialog(
     sidebar: &Sidebar,
     core: &Core,
     theme: ArtisanTheme,
@@ -629,7 +629,7 @@ pub fn rename_dialog(
     )
 }
 
-pub fn project_picker_dialog(
+pub(crate) fn project_picker_dialog(
     sidebar: &Sidebar,
     core: &Core,
     theme: ArtisanTheme,
@@ -867,7 +867,7 @@ struct ThreadMetadata {
     drag: Option<editor_core::DraggedThread>,
 }
 
-pub fn thread_list_view(
+fn thread_list_view(
     sidebar: &Sidebar,
     core: &Core,
     theme: ArtisanTheme,

@@ -1,10 +1,10 @@
 use super::list::{HitRow, Lists, RowData};
 use editor_ui::kit::{Density, Divider, Row, Space, Surface};
 
-pub const RAIL_WIDTH: f32 = 48.0;
-pub const READ_AHEAD: f32 = 600.0;
-pub const LIST: Surface = Surface::Inset;
-pub const HEADING: Row = Row::ListHeading;
+pub(crate) const RAIL_WIDTH: f32 = 48.0;
+pub(crate) const READ_AHEAD: f32 = 600.0;
+pub(crate) const LIST: Surface = Surface::Inset;
+pub(crate) const HEADING: Row = Row::ListHeading;
 pub const TOGGLE: Row = Row::ListItem(Density::Regular);
 const GROUP_GAP: Space = Space::S12;
 const ROW_GAP: Space = Space::S2;
@@ -16,14 +16,14 @@ pub enum ThreadLayout {
 }
 
 impl ThreadLayout {
-    pub const fn row(self) -> Row {
+    pub(crate) const fn row(self) -> Row {
         match self {
             Self::Grouped => Row::ListItem(Density::Regular),
             Self::Standalone => Row::ListItem(Density::Tall),
         }
     }
 
-    pub fn height(self) -> f32 {
+    pub(crate) fn height(self) -> f32 {
         self.row().height().unwrap_or_default()
     }
 }
@@ -220,7 +220,7 @@ pub enum ThreadPane {
 }
 
 impl ThreadPane {
-    pub const fn scroller(self) -> &'static str {
+    pub(crate) const fn scroller(self) -> &'static str {
         match self {
             Self::Inbox => "sidebar-threads",
             Self::History => "sidebar-history-threads",
@@ -299,9 +299,9 @@ pub fn page_direction(page: &PagePosition) -> Option<PageDirection> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Splice {
-    pub start: usize,
-    pub removed: usize,
-    pub inserted: usize,
+    start: usize,
+    removed: usize,
+    inserted: usize,
 }
 
 pub fn entry_keys(entries: &[Entry]) -> Vec<String> {
@@ -322,7 +322,7 @@ pub fn entry_keys(entries: &[Entry]) -> Vec<String> {
     keys
 }
 
-pub fn history_fraction(
+pub(crate) fn history_fraction(
     open: bool,
     from: f32,
     elapsed_seconds: f64,

@@ -6,7 +6,7 @@ use editor_core::screen::DraggedThread;
 use super::list::{RowData, RowState};
 use editor_ui::kit::{IconSize, TextRole};
 
-pub const STATE_DOT: f32 = 6.0;
+const STATE_DOT: f32 = 6.0;
 const DRAG_PREVIEW_WIDTH: f32 = 260.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +17,7 @@ pub enum MenuAction {
     Archive,
 }
 
-pub fn menu_actions(row: &RowData, thread: &Thread) -> Vec<MenuAction> {
+pub(crate) fn menu_actions(row: &RowData, thread: &Thread) -> Vec<MenuAction> {
     let mut actions = Vec::new();
     if row.settleable {
         actions.push(MenuAction::Settle);
@@ -40,7 +40,7 @@ pub fn opens_aqua_keyboard_menu(event: &aqua_core::KeyEvent) -> bool {
     }
 }
 
-pub fn drag(host: HostId, thread: &Thread) -> Option<DraggedThread> {
+pub(crate) fn drag(host: HostId, thread: &Thread) -> Option<DraggedThread> {
     let title = thread
         .title
         .as_ref()
@@ -52,7 +52,7 @@ pub fn drag(host: HostId, thread: &Thread) -> Option<DraggedThread> {
     })
 }
 
-pub const fn state_label(state: RowState) -> &'static str {
+const fn state_label(state: RowState) -> &'static str {
     match state {
         RowState::Idle => "",
         RowState::Working => "Working",
@@ -63,7 +63,7 @@ pub const fn state_label(state: RowState) -> &'static str {
     }
 }
 
-pub fn rename_value(text: &str) -> Option<String> {
+pub(crate) fn rename_value(text: &str) -> Option<String> {
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_owned())
 }
@@ -75,9 +75,10 @@ pub struct RowVisuals {
     pub dot: Option<aqua_ui::element::Element>,
 }
 
-pub type TruncatedText =
+pub(crate) type TruncatedText =
     std::rc::Rc<dyn Fn(String, TextRole, aqua::GpuiTextColor, String) -> aqua_ui::element::Element>;
-pub type WorkingPulse = std::rc::Rc<dyn Fn(aqua_ui::element::Element) -> aqua_ui::element::Element>;
+pub(crate) type WorkingPulse =
+    std::rc::Rc<dyn Fn(aqua_ui::element::Element) -> aqua_ui::element::Element>;
 
 #[expect(
     clippy::disallowed_methods,
@@ -96,7 +97,7 @@ fn state_dot(color: editor_ui::theme::Oklch) -> aqua_ui::element::Element {
         .build()
 }
 
-pub fn marked_text(
+fn marked_text(
     theme: &editor_ui::theme::ArtisanTheme,
     text: &str,
     matched: &[std::ops::Range<usize>],
@@ -149,7 +150,7 @@ pub fn marked_text(
         .debug_selector(selector)
 }
 
-pub fn hit(
+pub(crate) fn hit(
     theme: editor_ui::theme::ArtisanTheme,
     data: &super::list::HitRow,
     activate: impl Fn() + 'static,
@@ -190,7 +191,7 @@ pub fn hit(
     .build()
 }
 
-pub fn visual_factory(
+pub(crate) fn visual_factory(
     theme: editor_ui::theme::ArtisanTheme,
     reduced_motion: bool,
     truncate: TruncatedText,
@@ -267,7 +268,7 @@ pub fn visual_factory(
     })
 }
 
-pub fn build(
+pub(crate) fn build(
     data: &RowData,
     host: HostId,
     instance: editor_core::HostInstance,
@@ -451,7 +452,7 @@ pub fn build(
     element
 }
 
-pub fn drag_preview(
+pub(crate) fn drag_preview(
     title: &str,
     theme: editor_ui::theme::ArtisanTheme,
 ) -> aqua_ui::element::Element {

@@ -62,7 +62,7 @@ impl AgeGroup {
             .find(|group| group.upper_bound().is_none_or(|bound| elapsed < bound))
             .unwrap_or(Self::Older)
     }
-    pub const fn label(self) -> Option<&'static str> {
+    pub(crate) const fn label(self) -> Option<&'static str> {
         match self {
             Self::LastDay => None,
             Self::LastThreeDays => Some("Last 3 days"),
@@ -213,7 +213,7 @@ impl Lists {
     }
 }
 
-pub const fn listed(thread: &Thread) -> bool {
+const fn listed(thread: &Thread) -> bool {
     !thread.archived && thread.parent_thread_id.is_none()
 }
 

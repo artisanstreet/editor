@@ -6,20 +6,20 @@ use editor_ui::kit::{Density, IconSize, Row, RowItem, Space, Spaced, Surface, Te
 
 #[derive(Clone, Debug)]
 pub struct Group {
-    pub heading: String,
-    pub entries: Vec<Entry>,
+    heading: String,
+    entries: Vec<Entry>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Entry {
-    pub page: SettingsPage,
-    pub icon: Option<AssetId>,
-    pub need: Option<&'static str>,
-    pub expanded: bool,
-    pub children: Vec<SettingsPage>,
+    page: SettingsPage,
+    icon: Option<AssetId>,
+    need: Option<&'static str>,
+    expanded: bool,
+    children: Vec<SettingsPage>,
 }
 
-pub fn engine_need(status: &EngineStatus) -> Option<&'static str> {
+fn engine_need(status: &EngineStatus) -> Option<&'static str> {
     match (&status.install, &status.sign_in) {
         (InstallState::Absent, _) => Some("Install"),
         (InstallState::Failed { .. }, _) => Some("Failed"),
@@ -31,7 +31,7 @@ pub fn engine_need(status: &EngineStatus) -> Option<&'static str> {
     }
 }
 
-pub fn children(parent: SettingsPage) -> Vec<SettingsPage> {
+fn children(parent: SettingsPage) -> Vec<SettingsPage> {
     (parent == SettingsPage::Threads)
         .then_some(SettingsPage::GlobalPrompt)
         .into_iter()
@@ -55,7 +55,7 @@ fn entry(
     }
 }
 
-pub fn groups(host: Option<&HostData>, current: SettingsPage) -> Vec<Group> {
+fn groups(host: Option<&HostData>, current: SettingsPage) -> Vec<Group> {
     let mut groups = vec![Group {
         heading: "Editor".into(),
         entries: [
@@ -108,7 +108,7 @@ pub struct NavMotion {
 }
 
 impl NavMotion {
-    pub fn sync(&mut self, current: SettingsPage, now: std::time::Instant) {
+    pub(crate) fn sync(&mut self, current: SettingsPage, now: std::time::Instant) {
         let parent = current.parent();
         if self.parent != Some(parent) {
             self.parent = Some(parent);
@@ -116,7 +116,7 @@ impl NavMotion {
         }
     }
 
-    pub fn animating(&self, now: std::time::Instant) -> bool {
+    pub(crate) fn animating(&self, now: std::time::Instant) -> bool {
         self.opened
             .is_some_and(|start| now.saturating_duration_since(start).as_millis() < 150)
     }
@@ -132,7 +132,7 @@ impl NavMotion {
     }
 }
 
-pub const ROW: Row = Row::ListItem(Density::Regular);
+const ROW: Row = Row::ListItem(Density::Regular);
 const LIST: Surface = Surface::Inset;
 const ROW_GAP: Space = Space::S2;
 const GROUP_GAP: Space = Space::S12;
@@ -212,7 +212,10 @@ pub fn build(
                 }
                 row = row.trailing(
                     trailing
-                        .child(IconSize::Sm.glyph(chevron, theme.colors.text_muted.to_reference_paint()))
+                        .child(
+                            IconSize::Sm
+                                .glyph(chevron, theme.colors.text_muted.to_reference_paint()),
+                        )
                         .build(),
                 );
             }

@@ -12,7 +12,7 @@ use editor_assets::AssetId;
 
 use editor_ui::picker_motion::smooth_out;
 
-pub const ICON_SIZE: f32 = editor_ui::kit::IconSize::Lg.px();
+const ICON_SIZE: f32 = editor_ui::kit::IconSize::Lg.px();
 const UNIT: f32 = ICON_SIZE / 24.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub enum Glyph {
 }
 
 impl Glyph {
-    pub const fn duration(self) -> Duration {
+    const fn duration(self) -> Duration {
         match self {
             Self::Pen => Duration::from_millis(1000),
             Self::Bag => Duration::from_millis(950),
@@ -178,7 +178,7 @@ fn layers(glyph: Glyph, progress: Option<f32>) -> Vec<Layer> {
     }
 }
 
-pub fn icon(glyph: Glyph, progress: Option<f32>, color: GpuiHsla) -> Element {
+fn icon(glyph: Glyph, progress: Option<f32>, color: GpuiHsla) -> Element {
     let mut root = UiBox::new().width(ICON_SIZE).height(ICON_SIZE);
     for layer in layers(glyph, progress) {
         let source: std::sync::Arc<str> = editor_assets::get(layer.asset).source.into();
@@ -216,7 +216,7 @@ pub fn icon(glyph: Glyph, progress: Option<f32>, color: GpuiHsla) -> Element {
     .build()
 }
 
-pub fn build(
+pub(crate) fn build(
     sidebar: &super::controller::Sidebar,
     core: &editor_core::Core,
     theme: editor_ui::theme::ArtisanTheme,
@@ -312,11 +312,7 @@ pub fn build(
         .height(Length::Pct(100.0))
         .layout("column")
         .padded(Space::S4)
-        .style(
-            Style::new()
-                .flex_shrink(0.0)
-                .align(AlignItems::CENTER),
-        )
+        .style(Style::new().flex_shrink(0.0).align(AlignItems::CENTER))
         .child(destinations.build())
         .build()
         .with_key("artisan-desktop-rail")

@@ -93,11 +93,11 @@ pub struct Sidebar {
     pub open: Option<ThreadId>,
     pub lists: Lists,
     pub search: std::rc::Rc<std::cell::RefCell<editor_ui::text::Editor>>,
-    pub history_open: bool,
+    pub(crate) history_open: bool,
     pub history_fraction: f32,
     history_motion: Option<(std::time::Instant, f32)>,
     motion_live: bool,
-    pub rail_motion: super::rail::RailMotion,
+    pub(crate) rail_motion: super::rail::RailMotion,
     pub settings_motion: super::settings_nav::NavMotion,
     pub threads_edges: editor_ui::scroll_edge::ScrollEdges,
     working_pulses: std::rc::Rc<
@@ -105,8 +105,8 @@ pub struct Sidebar {
     >,
     thread_viewports: PaneViewports,
     pub error: Option<String>,
-    pub menu: Option<ThreadMenu>,
-    pub menu_generation: u64,
+    pub(crate) menu: Option<ThreadMenu>,
+    pub(crate) menu_generation: u64,
     pub rename: Option<ThreadId>,
     pub rename_generation: u64,
     pub(super) drag: Option<(HostId, HostInstance, ThreadId)>,
@@ -135,15 +135,15 @@ pub enum SidebarEffect {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadMenu {
-    pub thread: ThreadId,
-    pub position: aqua_core::Point,
+    pub(crate) thread: ThreadId,
+    pub(crate) position: aqua_core::Point,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PickerIdentity {
-    pub host: HostId,
-    pub instance: HostInstance,
-    pub generation: u64,
+    host: HostId,
+    instance: HostInstance,
+    generation: u64,
 }
 
 impl Sidebar {
@@ -318,7 +318,7 @@ impl Sidebar {
         core.host_if_instance(id, instance)
     }
 
-    pub fn screen<'a>(&self, core: &'a Core) -> &'a Screen {
+    pub(crate) fn screen<'a>(&self, core: &'a Core) -> &'a Screen {
         if self.workspace_background {
             core.workspace_screen()
         } else {
@@ -326,7 +326,7 @@ impl Sidebar {
         }
     }
 
-    pub fn visible_picker(&self, core: &Core) -> Option<&FolderPicker> {
+    pub(crate) fn visible_picker(&self, core: &Core) -> Option<&FolderPicker> {
         let (id, instance) = self.picker_host.as_ref().zip(self.picker_instance)?;
         let host = core.host_if_instance(id, instance)?;
         if core.active_host().map(|active| active.instance()) != Some(host.instance()) {
@@ -335,7 +335,7 @@ impl Sidebar {
         self.picker.as_ref()
     }
 
-    pub fn picker_identity(&self, core: &Core) -> Option<PickerIdentity> {
+    pub(crate) fn picker_identity(&self, core: &Core) -> Option<PickerIdentity> {
         self.visible_picker(core)?;
         Some(PickerIdentity {
             host: self.picker_host.clone()?,
@@ -344,7 +344,7 @@ impl Sidebar {
         })
     }
 
-    pub fn dismiss_picker(&mut self) {
+    pub(crate) fn dismiss_picker(&mut self) {
         if self.picker.as_ref().is_some_and(|picker| picker.creating) {
             return;
         }
@@ -618,7 +618,7 @@ impl Sidebar {
         });
     }
 
-    pub fn mark_unread(&self, core: &Core, thread: ThreadId) {
+    pub(crate) fn mark_unread(&self, core: &Core, thread: ThreadId) {
         self.call(core, move |client| async move {
             client
                 .mark_unread(&thread)
@@ -628,7 +628,7 @@ impl Sidebar {
         });
     }
 
-    pub fn archive(&self, core: &Core, thread: ThreadId) {
+    pub(crate) fn archive(&self, core: &Core, thread: ThreadId) {
         self.call(core, move |client| async move {
             client
                 .update_thread(
@@ -644,7 +644,7 @@ impl Sidebar {
         });
     }
 
-    pub fn submit_rename(&mut self, core: &Core, text: &str) {
+    pub(crate) fn submit_rename(&mut self, core: &Core, text: &str) {
         let Some(thread) = self.rename.take() else {
             return;
         };
@@ -684,7 +684,7 @@ impl Sidebar {
         );
     }
 
-    pub fn report_thread_viewport(
+    pub(crate) fn report_thread_viewport(
         &mut self,
         core: &mut Core,
         host_id: &HostId,
@@ -753,7 +753,7 @@ impl Sidebar {
         self.history_open || self.history_motion.is_some()
     }
 
-    pub fn advance_history(&mut self, now: std::time::Instant, reduced_motion: bool) -> bool {
+    fn advance_history(&mut self, now: std::time::Instant, reduced_motion: bool) -> bool {
         let Some((started, from)) = self.history_motion else {
             return false;
         };
@@ -782,7 +782,7 @@ impl Sidebar {
         self.lists.next_tick
     }
 
-    pub fn load_visible_projects(&self, core: &mut Core, projects: &[ProjectId]) {
+    fn load_visible_projects(&self, core: &mut Core, projects: &[ProjectId]) {
         let Some(host) = self
             .host
             .as_ref()
@@ -797,7 +797,7 @@ impl Sidebar {
         }
     }
 
-    pub fn retry_project_icons(&self, core: &mut Core) {
+    pub(crate) fn retry_project_icons(&self, core: &mut Core) {
         if let Some(host) = self
             .host
             .as_ref()
@@ -808,7 +808,7 @@ impl Sidebar {
         }
     }
 
-    pub fn retry_threads(&self, core: &mut Core) {
+    pub(crate) fn retry_threads(&self, core: &mut Core) {
         if let Some(host) = self
             .host
             .as_ref()
@@ -844,7 +844,7 @@ impl Sidebar {
         self.browse(core, None);
     }
 
-    pub fn browse(&mut self, core: &Core, path: Option<String>) {
+    pub(crate) fn browse(&mut self, core: &Core, path: Option<String>) {
         let Some(picker) = &mut self.picker else {
             return;
         };
@@ -923,7 +923,7 @@ impl Sidebar {
         }
     }
 
-    pub fn clear_search(&mut self, core: &Core, now: Timestamp) {
+    pub(crate) fn clear_search(&mut self, core: &Core, now: Timestamp) {
         self.search.borrow_mut().set_text("");
         self.search_text(core);
         self.sync(core, now);
@@ -978,7 +978,7 @@ impl Sidebar {
         }
     }
 
-    pub fn create_project(&mut self, core: &Core) {
+    pub(crate) fn create_project(&mut self, core: &Core) {
         let Some(host) = self
             .picker_host
             .as_ref()
