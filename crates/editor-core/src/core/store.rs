@@ -556,6 +556,7 @@ impl Core {
         })?;
         self.hosts_file = file;
         self.relay_configs.remove(id);
+        self.mcp_sign_ins.end_host(id);
         if let Some(host) = self.hosts.remove(id) {
             host.client.close_relay();
         }
@@ -567,7 +568,8 @@ impl Core {
         Ok(())
     }
     pub fn mcp_sign_in(&self, host: &HostId, server: &str) -> Option<&McpSignIn> {
-        self.mcp_sign_ins.get(host, server)
+        let instance = self.host_any(host)?.instance();
+        self.mcp_sign_ins.get(host, instance, server)
     }
     pub fn start_mcp_sign_in(
         &mut self,
@@ -575,10 +577,17 @@ impl Core {
         server: &str,
         open: bool,
     ) -> tokio::sync::oneshot::Receiver<Result<String>> {
-        if let Some(client) = self.host_any(host).map(|host| host.client.clone()) {
-            return self
-                .mcp_sign_ins
-                .start(host.clone(), server.to_owned(), client, open);
+        if let Some((instance, client)) = self
+            .host_any(host)
+            .map(|host| (host.instance(), host.client.clone()))
+        {
+            return self.mcp_sign_ins.start(
+                host.clone(),
+                instance,
+                server.to_owned(),
+                client,
+                open,
+            );
         }
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let _ = sender.send(Err(anyhow::anyhow!("This Forge is no longer connected.")));
@@ -738,7 +747,9 @@ impl Core {
         if let Some(assets) = &self.image_assets {
             host.set_image_assets(assets.clone());
         }
-        self.hosts.insert(opened.id, host);
+        if self.hosts.insert(opened.id.clone(), host).is_some() {
+            self.mcp_sign_ins.end_host(&opened.id);
+        }
         self.events.push(CoreEvent::HostsChanged);
     }
     fn drop_hosts(&mut self, ids: &[HostId]) {
@@ -746,6 +757,7 @@ impl Core {
             return;
         }
         for id in ids {
+            self.mcp_sign_ins.end_host(id);
             if let Some(host) = self.hosts.remove(id) {
                 host.client.close_relay();
             }
@@ -770,6 +782,7 @@ impl Core {
             for host in self.hosts.values() {
                 host.revoke_source_providers();
             }
+            self.mcp_sign_ins.end_all();
         }
         self.gate = gate.clone();
         let Some(profile) = self.account.profile().cloned() else {

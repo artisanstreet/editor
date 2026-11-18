@@ -1,6 +1,7 @@
 use crate::core::{
     ForgeClient,
     delivery::{AdmissionOrder, Delivery},
+    host::HostInstance,
     hosts::HostId,
     runtime::runtime,
 };
@@ -192,6 +193,7 @@ pub struct McpSignIn {
     pub phase: McpSignInPhase,
     pub authorize_url: Option<String>,
     id: u64,
+    instance: HostInstance,
     state: Option<String>,
     cancel: CancellationToken,
 }
@@ -247,18 +249,54 @@ impl McpSignIns {
             events: effects,
         }
     }
-    pub fn get(&self, host: &HostId, server: &str) -> Option<&McpSignIn> {
-        self.by_server.get(&(host.clone(), server.to_owned()))
+    pub fn get(&self, host: &HostId, instance: HostInstance, server: &str) -> Option<&McpSignIn> {
+        self.by_server
+            .get(&(host.clone(), server.to_owned()))
+            .filter(|entry| entry.instance == instance)
+    }
+    pub fn end_host(&mut self, host: &HostId) {
+        let ended = self.by_server.len();
+        self.by_server.retain(|(owner, _), entry| {
+            let kept = owner != host;
+            if !kept {
+                entry.cancel.cancel();
+            }
+            kept
+        });
+        self.jobs.retain(|((owner, _), _), _| owner != host);
+        if self.by_server.len() != ended {
+            self.events.mcp(McpEvent::Changed);
+            self.delivery.wake();
+        }
+    }
+    pub fn end_all(&mut self) {
+        let hosts: Vec<HostId> = self
+            .by_server
+            .keys()
+            .chain(self.jobs.keys().map(|(key, _)| key))
+            .map(|(host, _)| host.clone())
+            .collect();
+        for host in hosts {
+            self.end_host(&host);
+        }
     }
     pub fn start(
         &mut self,
         host: HostId,
+        instance: HostInstance,
         server: String,
         client: ForgeClient,
         open: bool,
     ) -> tokio::sync::oneshot::Receiver<Result<String>> {
         let key = (host, server);
         let (answer, answered) = tokio::sync::oneshot::channel();
+        if self
+            .by_server
+            .get(&key)
+            .is_some_and(|existing| existing.instance != instance)
+        {
+            self.end_host(&key.0);
+        }
         if let Some(existing) = self.by_server.get(&key) {
             match (&existing.phase, existing.authorize_url.clone()) {
                 (McpSignInPhase::Waiting, Some(url)) => {
@@ -293,6 +331,7 @@ impl McpSignIns {
                 phase: McpSignInPhase::Starting,
                 authorize_url: None,
                 id,
+                instance,
                 state: None,
                 cancel: cancel.clone(),
             },

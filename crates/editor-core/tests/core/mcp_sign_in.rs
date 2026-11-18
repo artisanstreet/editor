@@ -1,11 +1,14 @@
 use editor_core::mcp_sign_in::{CallbackError, wait_for_code};
+use editor_core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
 use std::time::Duration;
-use test_support::wait::within;
+use test_support::wait::{wait_for, within};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot::error::TryRecvError;
 use tokio_util::sync::CancellationToken;
 
 const LIMIT: Duration = Duration::from_secs(10);
+const ABANDON_LIMIT: Duration = Duration::from_secs(5);
 const STATE: &str = "st&te/1";
 const ENCODED_STATE: &str = "st%26te%2F1";
 
@@ -136,4 +139,48 @@ async fn cancelling_stops_waiting_for_the_browser() {
         TcpStream::connect(("127.0.0.1", port)).await.is_err(),
         "the callback still listens after cancelling"
     );
+}
+
+#[test]
+fn removing_a_host_abandons_its_sign_ins() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let files = EditorFiles {
+        dir: directory.path().to_owned(),
+    };
+    let identity = files.identity().expect("identity");
+    let silent_forge = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind a silent Forge");
+    let config = HostConfig {
+        id: HostId("forge".to_owned()),
+        name: "Forge".to_owned(),
+        address: silent_forge
+            .local_addr()
+            .expect("Forge address")
+            .to_string(),
+        fingerprint: "0".repeat(64),
+        kind: HostKind::Remote,
+    };
+    let client =
+        || ForgeClient::new(&config.address, &config.fingerprint, &identity).expect("client");
+    let mut core = Core::for_tests(files).expect("core opens");
+    core.add_test_host(&config, client());
+    let mut started = core.start_mcp_sign_in(&config.id, "linear", false);
+    assert!(core.mcp_sign_in(&config.id, "linear").is_some());
+
+    core.remove_host(&config.id).expect("remove the host");
+    wait_for(
+        "the sign-in to be abandoned",
+        ABANDON_LIMIT,
+        || match started.try_recv() {
+            Err(TryRecvError::Closed) => Some(()),
+            Err(TryRecvError::Empty) => None,
+            Ok(answer) => panic!("the removed host's sign-in answered {answer:?}"),
+        },
+    );
+
+    core.add_test_host(&config, client());
+    assert!(
+        core.mcp_sign_in(&config.id, "linear").is_none(),
+        "a new host inherited the removed host's sign-in"
+    );
+    drop(silent_forge);
 }
