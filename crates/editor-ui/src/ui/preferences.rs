@@ -1,9 +1,24 @@
-use editor_core::Core;
 use crate::ui::theme::{ArtisanTheme, FontSet, ThemeMode, TypographyTokens};
 use aqua::AppCtx;
 use aqua::prelude::{AquaWindowId, WindowRequest};
 use aqua_core::scene::TextRasterMode;
+use editor_core::Core;
 use std::num::NonZeroU32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowSetting {
+    TextRaster,
+    FrameRate,
+    Vsync,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("apply the {setting:?} preference to the window")]
+pub struct ApplyWindowError {
+    pub setting: WindowSetting,
+    #[source]
+    pub source: aqua_protocol::window::WindowError,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StreamingMode {
@@ -53,7 +68,12 @@ impl Preferences {
         theme
     }
 
-    pub fn apply_window(&self, ctx: &mut AppCtx<'_>, window: AquaWindowId) -> anyhow::Result<()> {
+    pub fn apply_window(
+        &self,
+        ctx: &mut AppCtx<'_>,
+        window: AquaWindowId,
+    ) -> Result<(), ApplyWindowError> {
+        let failed = |setting| move |source| ApplyWindowError { setting, source };
         ctx.request_window(WindowRequest::SetTextRasterMode(
             window,
             if self.outline_text {
@@ -61,7 +81,8 @@ impl Preferences {
             } else {
                 TextRasterMode::PlatformDefault
             },
-        ))?;
+        ))
+        .map_err(failed(WindowSetting::TextRaster))?;
         ctx.request_window(WindowRequest::SetMaxFrameRate(
             window,
             if self.lower_frame_rate {
@@ -69,8 +90,9 @@ impl Preferences {
             } else {
                 None
             },
-        ))?;
-        ctx.request_window(WindowRequest::SetVsync(window, self.vsync))?;
-        Ok(())
+        ))
+        .map_err(failed(WindowSetting::FrameRate))?;
+        ctx.request_window(WindowRequest::SetVsync(window, self.vsync))
+            .map_err(failed(WindowSetting::Vsync))
     }
 }

@@ -25,7 +25,6 @@ artisan-markdown-index.workspace = true
 editor-assets.workspace = true
 editor-audio.workspace = true
 palette.workspace = true
-anyhow.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

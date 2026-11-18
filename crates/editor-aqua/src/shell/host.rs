@@ -1,11 +1,11 @@
 use crate::core::{Core, CoreEvent, EditorFiles, HostEvent, HostId, Screen};
-use artisan_api::ThreadId;
 use crate::shell::entry::Entry;
-use crate::ui::preferences::Preferences;
 use crate::shell::workspace::{NotificationEffects, Workspace};
+use crate::ui::preferences::Preferences;
 use aqua::AppCtx;
 use aqua::images::ImageAssets;
 use aqua::prelude::AquaWindowId;
+use artisan_api::ThreadId;
 
 pub struct Shell {
     pub titlebar: crate::shell::titlebar::Titlebar,
@@ -186,7 +186,7 @@ impl Shell {
         &self,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), editor_ui::preferences::ApplyWindowError> {
         self.preferences.apply_window(ctx, window)
     }
 
@@ -234,7 +234,9 @@ impl Shell {
                 CoreEvent::Host {
                     host,
                     event: HostEvent::Item(item),
-                } if is_streaming_prose(item) && is_watched(watched.as_ref(), host, &item.thread_id) => {
+                } if is_streaming_prose(item)
+                    && is_watched(watched.as_ref(), host, &item.thread_id) =>
+                {
                     live_changed |= live.arrive(now)
                 }
                 _ => changed |= event_changes_view(&event, watched.as_ref()),

@@ -348,7 +348,10 @@ impl<V: SectionViews> ShellApplication<V> {
                     .set_reduced_motion(policy, ctx.now().as_secs_f64());
             }
             if let Err(error) = self.shell.apply_preferences(ctx, id) {
-                tracing::error!(%error, "could not apply window preferences");
+                tracing::error!(
+                    error = %::diagnostics::chain(&error),
+                    "could not apply window preferences"
+                );
             }
         }
         if !updates.notifications.is_empty() {
@@ -979,7 +982,8 @@ impl<V: SectionViews> Application for ShellApplication<V> {
                 workspace.marketplace.needs_animation(),
             );
         }
-        if refresh && !self.refresh_sections(ctx, id, super::refresh::Refresh::from_causes(&causes)) {
+        if refresh && !self.refresh_sections(ctx, id, super::refresh::Refresh::from_causes(&causes))
+        {
             self.rebuild(ctx, id, FrameReason::ANIMATION, &causes);
         }
     }
