@@ -445,6 +445,7 @@ impl Drop for WithdrawOnDrop {
 }
 
 #[cfg(test)]
+#[path = "../tests/lib/unit.rs"]
 mod tests;
 
 fn text(value: &Value) -> Result<Vec<Content>> {

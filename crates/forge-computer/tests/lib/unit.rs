@@ -15,10 +15,10 @@ use std::{
     time::Duration,
 };
 
-#[path = "../tests/lib/stop.rs"]
+#[path = "stop.rs"]
 mod stop_tests;
 
-#[allow(clippy::struct_excessive_bools)] // Independent failure modes for the test backend.
+#[allow(clippy::struct_excessive_bools)]
 struct Fake {
     events: Mutex<Vec<Input>>,
     sent: tokio::sync::watch::Sender<usize>,
