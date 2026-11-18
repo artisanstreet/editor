@@ -15,6 +15,8 @@
 )]
 #![cfg(test)]
 
+#[path = "shell/application.rs"]
+mod application;
 #[path = "shell/browser.rs"]
 mod browser;
 #[path = "shell/connection.rs"]

@@ -1223,6 +1223,9 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     fn a11y_nodes_for(&self, id: AquaWindowId) -> Option<(NodeId, NodeId, Vec<A11yNode>)> {
         self.ui.a11y_nodes_for(id)
     }
+    fn a11y_revision_for(&self, id: AquaWindowId) -> Option<u64> {
+        self.ui.ui().a11y_revision_for(id)
+    }
     fn chrome_regions(&self, window: &ObservedWindowState) -> Option<DragRegions> {
         self.shell
             .titlebar
