@@ -1,11 +1,11 @@
 use super::dialogs::started;
-use aqua::prelude::WindowEvent;
 use aqua::Application;
+use aqua::prelude::WindowEvent;
 use aqua_a11y_uia::probe::{ProbeElement, ProbeKind, UiaProbe};
 use aqua_protocol::AccessTreeUpdate;
 use std::time::Duration;
 
-fn probed() -> (Vec<ProbeElement>, usize) {
+fn probed() -> Vec<ProbeElement> {
     let (mut aqua, mut app, id, _directory) = started();
     let mut size = aqua::prelude::WindowOptions::default().inner_size;
     size.width = 800.0;
@@ -15,24 +15,19 @@ fn probed() -> (Vec<ProbeElement>, usize) {
     app.prepare_accessibility(&observed, aqua.clock());
     app.build_scene(&observed, aqua.clock());
     let (root, focus, nodes) = app.a11y_nodes_for(id).expect("editor semantic tree");
-    let count = nodes.len();
     let probe = UiaProbe::spawn(AccessTreeUpdate { root, focus, nodes }).unwrap();
-    let seen = probe
+    probe
         .wait_for(Duration::from_secs(10), |seen| !seen.is_empty())
-        .unwrap();
-    (seen, count)
-}
-
-#[test]
-fn the_editor_window_exposes_its_semantic_tree_to_a_ui_automation_client() {
-    let (seen, count) = probed();
-    assert!(count > 0);
-    assert!(seen.iter().any(|element| element.kind == ProbeKind::Button));
+        .unwrap()
 }
 
 #[test]
 fn every_actionable_element_in_the_editor_window_has_an_accessible_name() {
-    let (seen, _) = probed();
+    let seen = probed();
+    assert!(
+        seen.iter().any(|element| element.kind == ProbeKind::Button),
+        "the client sees the window's buttons"
+    );
     let unnamed: Vec<_> = seen
         .iter()
         .filter(|element| element.kind == ProbeKind::Button && element.name.trim().is_empty())

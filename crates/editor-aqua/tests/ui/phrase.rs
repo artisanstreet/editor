@@ -366,6 +366,7 @@ fn rolling_digits_scroll_from_the_old_digit_to_the_new_one() {
     );
     stage.present(1.08, false);
     let rolling = stage.reel_offsets();
+    assert_eq!(rolling.len(), 2, "both changed digits roll: {rolling:?}");
     assert!(rolling.iter().all(|reel| reel.len() == 2), "{rolling:?}");
     assert!(
         rolling
@@ -375,7 +376,7 @@ fn rolling_digits_scroll_from_the_old_digit_to_the_new_one() {
     );
     stage.present(2.0, false);
     let landed = stage.reel_offsets();
-    assert!(landed.iter().all(|reel| reel.contains(&0.0)), "{landed:?}");
+    assert_eq!(landed, vec![vec![0.0]; 2], "each reel lands on one digit");
 }
 
 #[cfg(feature = "capture")]

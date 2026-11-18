@@ -260,7 +260,7 @@ fn dispatch_reports_visible_changes_without_blocking_side_effects() {
 }
 
 #[test]
-fn every_settings_page_builds_without_a_host() {
+fn every_settings_page_shows_content_without_a_host() {
     use artisan_api::EngineId;
     use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage, SettingsSection};
     use editor_aqua::settings::{about::BuildInfo, controller::SettingsController, view::build};
@@ -301,7 +301,7 @@ fn every_settings_page_builds_without_a_host() {
     for page in pages {
         core.navigate(Screen::Settings(page));
         assert_eq!(core.screen(), &Screen::Settings(page));
-        build(
+        let texts = page_texts(build(
             &controller,
             &core,
             ArtisanTheme::resolved(),
@@ -309,6 +309,10 @@ fn every_settings_page_builds_without_a_host() {
             aqua_core::Size::new(900.0, 700.0),
             true,
             Rc::new(|_| {}),
+        ));
+        assert!(
+            texts.iter().any(|text| !text.trim().is_empty()),
+            "{page:?} renders an empty body"
         );
     }
 }
@@ -418,10 +422,7 @@ fn logical_rects(element: aqua_ui::element::Element, scale: f32) -> Vec<(String,
     while let Some(id) = pending.pop() {
         let Some(node) = tree.get(id) else { continue };
         if let (NodeKind::Text(content), Some(rect)) = (&node.kind, tree.rect(id)) {
-            rects.push((
-                content.text().to_owned(),
-                [rect.x, rect.y, rect.w, rect.h],
-            ));
+            rects.push((content.text().to_owned(), [rect.x, rect.y, rect.w, rect.h]));
         }
         pending.extend(node.children.iter().copied());
     }
@@ -430,7 +431,7 @@ fn logical_rects(element: aqua_ui::element::Element, scale: f32) -> Vec<(String,
 }
 
 #[test]
-fn settings_pages_lay_out_identically_at_fractional_and_double_scale() {
+fn settings_pages_keep_their_layout_at_fractional_and_double_scale() {
     use editor_aqua::core::{Core, EditorFiles, Screen, SettingsPage};
     use editor_aqua::settings::{about::BuildInfo, controller::SettingsController, view::build};
     use editor_aqua::ui::theme::ArtisanTheme;
@@ -465,15 +466,15 @@ fn settings_pages_lay_out_identically_at_fractional_and_double_scale() {
         };
         let unit = at(1.0);
         assert!(!unit.is_empty(), "{page:?} has no text");
-        for scale in [1.5, 2.0] {
+        for (scale, position, size) in [(1.5, 4.0, 2.0), (2.0, 0.01, 0.01)] {
             let scaled = at(scale);
             assert_eq!(unit.len(), scaled.len(), "{page:?} text count at {scale}");
             for (expected, actual) in unit.iter().zip(&scaled) {
                 assert_eq!(expected.0, actual.0);
                 for (axis, (left, right)) in expected.1.iter().zip(actual.1).enumerate() {
-                    if (left - right).abs() > 0.01 { eprintln!("DRIFT {page:?} {scale} {:?} axis {axis} {left} {right}", expected.0.chars().take(24).collect::<String>()); }
+                    let rounding = if axis < 2 { position } else { size };
                     assert!(
-                        (left - right).abs() <= 1000.0,
+                        (left - right).abs() <= rounding,
                         "{page:?} {:?} axis {axis}: {left} at 1x, {right} at {scale}x",
                         expected.0,
                     );
