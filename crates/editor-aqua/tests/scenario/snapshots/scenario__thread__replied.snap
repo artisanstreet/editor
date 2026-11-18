@@ -4,8 +4,10 @@ expression: "editor.settle_on(\"the reply to finish\", |view|\n{\n    view.shows
 ---
 List
   ListItem
-    Label "Say hello"
+    Group "You"
+      Label "Say hello"
   ListItem
     Label "Thought for [duration]"
   ListItem
-    Label "Hello from the replay."
+    Group "Claude Code"
+      Label "Hello from the replay."

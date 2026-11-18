@@ -28,9 +28,11 @@ Group "Artisan Editor" [focused]
   Button "Close window"
   List
     ListItem
-      Label "What does the parser do?"
+      Group "You"
+        Label "What does the parser do?"
     ListItem
-      Label "It turns text into tokens."
+      Group "Assistant"
+        Label "It turns text into tokens."
   ComboBox "No model" [collapsed]
     Label "No model"
   ScrollView

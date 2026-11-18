@@ -99,6 +99,45 @@ fn bubble_sender(
     }
 }
 
+pub(crate) fn message_author(
+    row: &Row,
+    item: Option<&artisan_api::Item>,
+    author: Option<artisan_api::EngineId>,
+) -> Option<&'static str> {
+    match (row, item.map(|item| &item.kind)) {
+        (
+            Row::Text {
+                slot: Slot::Text(fold::TextSection::User),
+                block: 0,
+                ..
+            },
+            Some(ItemKind::UserMessage { sender, .. }),
+        ) => Some(
+            sender
+                .as_ref()
+                .map_or("You", |sender| sender.engine.display_name()),
+        ),
+        (
+            Row::Text {
+                slot: Slot::Prose,
+                block: 0,
+                ..
+            },
+            Some(ItemKind::AssistantMessage { .. }),
+        ) => Some(author.map_or("Assistant", artisan_api::EngineId::display_name)),
+        _ => None,
+    }
+}
+
+fn authored(element: aqua_ui::element::Element, author: &str) -> aqua_ui::element::Element {
+    aqua_ui::element::Box::new()
+        .width(aqua_ui::style::Length::Pct(100.0))
+        .child(element)
+        .build()
+        .role(aqua_core::Role::Group)
+        .aria_label(author)
+}
+
 pub struct WorkResources {
     pub motion: Rc<RefCell<super::motion::RowMotion>>,
     pub names: HashMap<artisan_api::ItemId, String>,
@@ -2670,6 +2709,19 @@ impl RowFactory {
                 })
             }
             _ => return Err(RealizeRowError::Unrenderable { key: key.clone() }),
+        };
+        let semantic = row.model.row.semantic();
+        let author = message_author(
+            semantic,
+            semantic
+                .anchor()
+                .and_then(|id| row.model.items.get(id))
+                .map(Arc::as_ref),
+            row.model.author,
+        );
+        let content = match (content, author) {
+            (Some(element), Some(author)) => Some(authored(element, author)),
+            (content, _) => content,
         };
         let mut work_settling = false;
         let content = match content {

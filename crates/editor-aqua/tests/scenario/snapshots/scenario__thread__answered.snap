@@ -28,12 +28,14 @@ Group "Artisan Editor"
   Button "Close window"
   List [focused]
     ListItem
-      Label "Echo hello"
+      Group "You"
+        Label "Echo hello"
     ListItem
       Button "Show work"
         Label "Worked for [duration]"
     ListItem
-      Label "It printed hello."
+      Group "OpenCode"
+        Label "It printed hello."
   Label "Reply finished"
   ComboBox "No model" [collapsed]
     Label "No model"

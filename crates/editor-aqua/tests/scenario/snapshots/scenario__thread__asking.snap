@@ -28,11 +28,13 @@ Group "Artisan Editor"
   Button "Close window"
   List
     ListItem
-      Label "Echo hello"
+      Group "You"
+        Label "Echo hello"
     ListItem
       Label "Working for [duration]"
     ListItem
-      Label "I'll run the shell command first."
+      Group "OpenCode"
+        Label "I'll run the shell command first."
     ListItem
       Label "Approval requested"
       Label "$ "

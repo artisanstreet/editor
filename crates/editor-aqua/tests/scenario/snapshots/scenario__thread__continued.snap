@@ -28,11 +28,13 @@ Group "Artisan Editor"
   Button "Close window"
   List
     ListItem
-      Label "Refactor the parser"
+      Group "You"
+        Label "Refactor the parser"
     ListItem
       Label "Thought for [duration]"
     ListItem
-      Label "Picked the parser refactor back up."
+      Group "Claude Code"
+        Label "Picked the parser refactor back up."
   Label "Reply finished"
   ComboBox "No model" [collapsed]
     Label "No model"

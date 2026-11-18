@@ -28,7 +28,8 @@ Group "Artisan Editor"
   Button "Close window"
   List
     ListItem
-      Label "Refactor the parser"
+      Group "You"
+        Label "Refactor the parser"
     ListItem
       Label "Thinking for [duration]"
     ListItem
