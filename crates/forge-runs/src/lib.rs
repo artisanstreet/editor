@@ -890,6 +890,7 @@ impl Hub {
                 text: Some(text),
             })
         }));
+        sort_snapshot(&mut snapshot);
         (self.inner.store.live_revision(), snapshot)
     }
 
@@ -1377,4 +1378,29 @@ fn sender_line(sender: &artisan_api::Sender) -> String {
         sender.engine.display_name(),
         sender.thread
     )
+}
+
+pub(crate) fn sort_snapshot(snapshot: &mut [Event]) {
+    snapshot.sort_by(|left, right| snapshot_key(left).cmp(&snapshot_key(right)));
+}
+
+fn snapshot_key(event: &Event) -> (Option<&ThreadId>, Option<&LiveTarget>) {
+    match event {
+        Event::Live {
+            thread_id, target, ..
+        } => (Some(thread_id), Some(target)),
+        Event::Hello { .. }
+        | Event::Project { .. }
+        | Event::Thread { .. }
+        | Event::ThreadRemoved { .. }
+        | Event::Item { .. }
+        | Event::Run { .. }
+        | Event::ItemState { .. }
+        | Event::Setting { .. }
+        | Event::Suggestion { .. }
+        | Event::Engine { .. }
+        | Event::EngineInstall { .. }
+        | Event::EditorCall { .. }
+        | Event::Reset => (event.thread_id(), None),
+    }
 }

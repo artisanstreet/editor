@@ -554,6 +554,7 @@ impl crate::Hub {
                 }
             }
         }
+        crate::sort_snapshot(&mut events);
         Ok((revision, events))
     }
 
