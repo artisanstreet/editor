@@ -12,7 +12,7 @@ pub struct RecentLines {
 }
 
 impl RecentLines {
-    pub fn snapshot(&self) -> Vec<String> {
+    pub(crate) fn snapshot(&self) -> Vec<String> {
         self.lines
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
