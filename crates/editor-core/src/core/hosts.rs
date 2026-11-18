@@ -67,7 +67,7 @@ pub enum IdentityError {
     #[error("read this device's identity")]
     Read(#[source] ReadConfigError),
     #[error("generate this device's identity")]
-    Generate(#[source] anyhow::Error),
+    Generate(#[source] artisan_api::tls::GenerateIdentityError),
     #[error("save this device's new identity")]
     Save(#[source] WriteConfigError),
     #[error("{path} was removed while another Editor created it")]
