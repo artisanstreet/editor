@@ -107,7 +107,7 @@ impl From<Spec> for AnnotatedCode {
                 }
                 Note {
                     span,
-                    text: String::from(note.text.trim().to_owned()),
+                    text: note.text.trim().to_owned(),
                 }
             })
             .collect();
