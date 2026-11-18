@@ -4,7 +4,7 @@ use super::{
     view::ViewAction,
 };
 use aqua_ui::element::{Box as UiBox, Element};
-use editor_core::{AccountPhase, Core, LocalForge};
+use editor_core::{AccountLink, AccountPhase, Core, LocalForge};
 use editor_ui::{
     kit::{ButtonTone, Space, TextRole},
     text::{
@@ -393,6 +393,26 @@ pub fn page(
             )],
         ),
     ));
+    let policies = ui::actions()
+        .child(button(
+            theme,
+            "account-terms",
+            "Terms of Service",
+            ButtonTone::Quiet,
+            false,
+            ViewAction::OpenUrl(AccountLink::Terms.url()),
+            emit.clone(),
+        ))
+        .child(button(
+            theme,
+            "account-privacy",
+            "Privacy Policy",
+            ButtonTone::Quiet,
+            false,
+            ViewAction::OpenUrl(AccountLink::Privacy.url()),
+            emit.clone(),
+        ))
+        .build();
     content
         .child(ui::section(
             theme,
@@ -402,6 +422,21 @@ pub fn page(
             ui::card(
                 theme,
                 vec![ui::block(forges(controller, core, theme, emit))],
+            ),
+        ))
+        .child(ui::section(
+            theme,
+            "Policies",
+            None,
+            None,
+            ui::card(
+                theme,
+                vec![ui::row(
+                    theme,
+                    "Terms and privacy",
+                    "The terms and privacy policy your Artisan account is under.",
+                    Some(policies),
+                )],
             ),
         ))
         .build()

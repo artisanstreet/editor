@@ -1,6 +1,6 @@
 use crate::core::{AccountPhase, Core, CoreEvent, EntryGate, Screen};
 
-const AUTH_ORIGIN: &str = "https://auth.artisan.st";
+use crate::core::AUTH_ORIGIN;
 use crate::shell::workspace::{NotificationEffects, Workspace};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
@@ -110,10 +110,7 @@ impl Entry {
                     }
                 }
                 Event::Open(link) => effects.push(
-                    crate::shell::workspace::SettingsPlatformEffect::OpenUrl(format!(
-                        "{AUTH_ORIGIN}{}",
-                        link.path()
-                    )),
+                    crate::shell::workspace::SettingsPlatformEffect::OpenUrl(link.url()),
                 ),
                 Event::Cancel if model::cancellable(&view) => {
                     self.sign_in.problem = None;

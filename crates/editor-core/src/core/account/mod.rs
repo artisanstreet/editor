@@ -17,6 +17,26 @@ use serde::{Deserialize, Serialize};
 use std::{num::NonZeroUsize, time::Duration};
 
 const BROWSER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+pub const AUTH_ORIGIN: &str = "https://auth.artisan.st";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountLink {
+    Terms,
+    Privacy,
+    Recover,
+}
+
+impl AccountLink {
+    #[must_use]
+    pub fn url(self) -> String {
+        let path = match self {
+            Self::Terms => "/terms",
+            Self::Privacy => "/privacy",
+            Self::Recover => "/recover",
+        };
+        format!("{AUTH_ORIGIN}{path}")
+    }
+}
 use tokio_util::task::AbortOnDropHandle;
 
 pub type AccountMachine = artisan_account::network::MachineEntry;

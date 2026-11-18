@@ -40,23 +40,7 @@ pub enum Feedback {
     Success(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Link {
-    Terms,
-    Privacy,
-    Recover,
-}
-
-impl Link {
-    #[must_use]
-    pub const fn path(self) -> &'static str {
-        match self {
-            Self::Terms => "/terms",
-            Self::Privacy => "/privacy",
-            Self::Recover => "/recover",
-        }
-    }
-}
+pub use editor_core::AccountLink as Link;
 
 #[must_use]
 pub fn view_of(phase: &AccountPhase, problem: Option<EmailProblem>) -> View {

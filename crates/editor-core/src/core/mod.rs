@@ -25,7 +25,9 @@ mod testing;
 pub use testing::save_onboarding_for_tests;
 
 pub use access::EntryGate;
-pub use account::{Account, AccountEvent, AccountMachine, AccountPhase, LocalForge};
+pub use account::{
+    AUTH_ORIGIN, Account, AccountEvent, AccountLink, AccountMachine, AccountPhase, LocalForge,
+};
 #[cfg(feature = "test-support")]
 pub use ae::AeScript;
 pub use client::ForgeClient;

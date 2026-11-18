@@ -967,3 +967,47 @@ fn an_mcp_sign_in_that_is_still_opening_can_be_cancelled() {
     }
     assert!(core.mcp_sign_in(&id, "linear").is_none());
 }
+
+#[test]
+fn signed_in_account_page_opens_the_terms_and_privacy_policy() {
+    use editor_aqua::core::{AccountLink, Core, EditorFiles, Screen, SettingsPage};
+    use editor_aqua::settings::{
+        about::BuildInfo,
+        controller::SettingsController,
+        view::{ViewAction, build},
+    };
+    use editor_aqua::ui::theme::ArtisanTheme;
+    use std::{cell::RefCell, rc::Rc};
+    use test_support::editor::ui::{click, mounted};
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: dir.path().to_path_buf(),
+    })
+    .unwrap();
+    assert!(core.account().profile().is_some());
+    core.navigate(Screen::Settings(SettingsPage::Account));
+    let controller = SettingsController::default();
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    for (key, link) in [
+        ("account-terms", AccountLink::Terms),
+        ("account-privacy", AccountLink::Privacy),
+    ] {
+        let sink = Rc::clone(&opened);
+        let page = build(
+            &controller,
+            &core,
+            ArtisanTheme::resolved(),
+            &BuildInfo::default(),
+            aqua_core::Size::new(900.0, 3000.0),
+            true,
+            Rc::new(move |action| {
+                if let ViewAction::OpenUrl(url) = action {
+                    sink.borrow_mut().push(url);
+                }
+            }),
+        );
+        let mut app = mounted(900.0, 3000.0, page);
+        click(&mut app, key);
+        assert_eq!(opened.borrow_mut().pop(), Some(link.url()), "{key}");
+    }
+}
