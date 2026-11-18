@@ -28,6 +28,24 @@ enum Completion {
     McpSignOut(String, Result<(), String>),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ClaudeAiSignInError {
+    #[error("sign in through the browser")]
+    Browser(#[source] claude_ai_browser::SignInError),
+    #[error("hand the claude.ai session to {host}")]
+    Forward {
+        host: HostId,
+        #[source]
+        source: editor_core::client::CallError,
+    },
+    #[error("let {host} reuse the claude.ai browser profile")]
+    Authorize {
+        host: HostId,
+        #[source]
+        source: claude_ai_browser::AuthorizationError,
+    },
+}
+
 pub struct SettingsController {
     pub reported_prompt_dirty: bool,
     pub reported_font_menu: bool,
@@ -449,7 +467,9 @@ impl SettingsController {
         self.tasks.push(tokio_util::task::AbortOnDropHandle::new(
             runtime::runtime().spawn(async move {
                 let result = async {
-                    let session = claude_ai_browser::sign_in().await?;
+                    let session = claude_ai_browser::sign_in()
+                        .await
+                        .map_err(ClaudeAiSignInError::Browser)?;
                     client
                         .engine_action(
                             EngineId::Claude,
@@ -457,12 +477,25 @@ impl SettingsController {
                                 session: session.clone(),
                             },
                         )
-                        .await?;
-                    claude_ai_browser::authorize(&id.0, &session)?;
-                    Ok::<(), anyhow::Error>(())
+                        .await
+                        .map_err(|source| ClaudeAiSignInError::Forward {
+                            host: id.clone(),
+                            source,
+                        })?;
+                    claude_ai_browser::authorize(&id.0, &session).map_err(|source| {
+                        ClaudeAiSignInError::Authorize {
+                            host: id.clone(),
+                            source,
+                        }
+                    })
                 }
                 .await
-                .map_err(|error| format!("Couldn't sign in to claude.ai: {error:#}"));
+                .map_err(|error| {
+                    format!(
+                        "Couldn't sign in to claude.ai: {}",
+                        diagnostics::chain(&error)
+                    )
+                });
                 let _ = sender
                     .send(HostCompletion {
                         host: id,

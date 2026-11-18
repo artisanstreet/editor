@@ -1743,7 +1743,6 @@ dependencies = [
 name = "editor-settings"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "aqua-core",
  "aqua-ui",
@@ -1753,6 +1752,7 @@ dependencies = [
  "editor-core",
  "editor-ui",
  "serde_json",
+ "thiserror 2.0.20",
  "tokio-util",
  "tracing",
 ]
@@ -1798,7 +1798,6 @@ dependencies = [
 name = "editor-ui"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "aqua-core",
  "aqua-media",
