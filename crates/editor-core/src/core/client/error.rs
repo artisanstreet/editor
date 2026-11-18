@@ -25,6 +25,18 @@ pub struct CallError {
     pub failure: Box<CallFailure>,
 }
 
+#[cfg(feature = "test-support")]
+impl CallError {
+    #[must_use]
+    pub fn test_inconsistent(path: &str, check: &'static str) -> Self {
+        Self {
+            method: reqwest::Method::GET,
+            path: path.to_owned(),
+            failure: Box::new(CallFailure::Inconsistent { check }),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CallFailure {
     #[error("build the request")]

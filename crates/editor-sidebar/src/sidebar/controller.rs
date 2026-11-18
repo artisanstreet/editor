@@ -73,6 +73,20 @@ struct TextHits {
     rows: Vec<super::list::HitRow>,
 }
 
+enum TextResults {
+    Idle,
+    Searching(String),
+    Found(TextHits),
+    Failed { query: String, cause: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextSearchStatus<'a> {
+    Idle,
+    Searching,
+    Failed(&'a str),
+}
+
 pub struct Sidebar {
     pub host: Option<HostId>,
     host_instance: Option<HostInstance>,
@@ -104,7 +118,7 @@ pub struct Sidebar {
     browse_generation: u64,
     browse_task: Option<tokio::task::JoinHandle<()>>,
     text_search: CompletionSlot,
-    text_hits: Option<TextHits>,
+    text_results: TextResults,
     completions: Delivery<Completion>,
     workspace_background: bool,
 }
@@ -289,7 +303,7 @@ impl Sidebar {
             browse_generation: 0,
             browse_task: None,
             text_search: CompletionSlot::default(),
-            text_hits: None,
+            text_results: TextResults::Idle,
             completions: Delivery::new(NonZeroUsize::new(64).unwrap()),
             workspace_background,
         }
@@ -372,7 +386,7 @@ impl Sidebar {
             self.error = None;
             self.thread_viewports = PaneViewports::default();
             self.text_search.cancel();
-            self.text_hits = None;
+            self.text_results = TextResults::Idle;
         }
         let picker_alive = self
             .picker_host
@@ -406,12 +420,13 @@ impl Sidebar {
             .map(|host| {
                 let query = self.search.borrow().text().to_owned();
                 let mut lists = lists(host, self.open.as_ref(), now).searched(&query);
-                lists.hits = self
-                    .text_hits
-                    .as_ref()
-                    .filter(|hits| hits.query == query.trim())
-                    .map(|hits| hits.rows.clone())
-                    .unwrap_or_default();
+                lists.hits = match &self.text_results {
+                    TextResults::Found(hits) if hits.query == query.trim() => hits.rows.clone(),
+                    TextResults::Found(_)
+                    | TextResults::Idle
+                    | TextResults::Searching(_)
+                    | TextResults::Failed { .. } => Vec::new(),
+                };
                 lists
             })
             .unwrap_or_default();
@@ -474,20 +489,20 @@ impl Sidebar {
                     accepted = true;
                     match result {
                         Ok(hits) => {
-                            self.text_hits = Some(TextHits {
+                            self.text_results = TextResults::Found(TextHits {
                                 query,
                                 rows: hits.iter().filter_map(super::list::HitRow::of).collect(),
                             });
                             self.sync(core, now);
                         }
                         Err(error) => {
+                            let cause = diagnostics::chain(&error);
                             tracing::warn!(
                                 %host,
                                 query_chars = query.chars().count(),
-                                "couldn't search message text: {}",
-                                diagnostics::chain(&error)
+                                "couldn't search message text: {cause}"
                             );
-                            self.text_hits = None;
+                            self.text_results = TextResults::Failed { query, cause };
                         }
                     }
                 }
@@ -801,6 +816,23 @@ impl Sidebar {
         }
     }
 
+    pub fn retry_threads(&self, core: &mut Core) {
+        if let Some(host) = self
+            .host
+            .as_ref()
+            .zip(self.host_instance)
+            .and_then(|(id, instance)| core.host_mut_if_instance(id, instance))
+        {
+            let page = host.thread_page(false);
+            let direction = if page.is_loaded() && page.has_older() {
+                ThreadPageDirection::Older
+            } else {
+                ThreadPageDirection::Latest
+            };
+            host.load_threads(false, direction);
+        }
+    }
+
     pub fn add_project(&mut self, core: &Core) {
         if self.picker.as_ref().is_some_and(|picker| picker.creating) {
             return;
@@ -862,12 +894,13 @@ impl Sidebar {
         self.text_search.cancel();
         let query = self.search.borrow().text().trim().to_owned();
         if query.chars().count() < MIN_TEXT_QUERY {
-            self.text_hits = None;
+            self.text_results = TextResults::Idle;
             return;
         }
         let Some(host) = self.host_data(core) else {
             return;
         };
+        self.text_results = TextResults::Searching(query.clone());
         let client = host.client.clone();
         let sender = self.completions.sender();
         self.text_search
@@ -881,6 +914,27 @@ impl Sidebar {
                     .await;
                 let _ = sender.send(Completion::Search { key, query, result }).await;
             });
+    }
+
+    pub fn text_search_status(&self) -> TextSearchStatus<'_> {
+        let query = self.search.borrow().text().trim().to_owned();
+        match &self.text_results {
+            TextResults::Searching(searched) if *searched == query => TextSearchStatus::Searching,
+            TextResults::Failed {
+                query: searched,
+                cause,
+            } if *searched == query => TextSearchStatus::Failed(cause),
+            TextResults::Idle
+            | TextResults::Searching(_)
+            | TextResults::Found(_)
+            | TextResults::Failed { .. } => TextSearchStatus::Idle,
+        }
+    }
+
+    pub fn clear_search(&mut self, core: &Core, now: Timestamp) {
+        self.search.borrow_mut().set_text("");
+        self.search_text(core);
+        self.sync(core, now);
     }
 
     #[cfg(feature = "test-support")]
@@ -902,6 +956,28 @@ impl Sidebar {
                     key,
                     query,
                     result: Ok(hits),
+                })
+                .await
+                .expect(
+                    "invariant: the sidebar owns its completion mailbox while a test drives it",
+                );
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn test_search_failure(
+        &self,
+        key: CompletionKey,
+        query: String,
+        error: CallError,
+    ) -> impl Future<Output = ()> + use<> {
+        let sender = self.completions.sender();
+        async move {
+            sender
+                .send(Completion::Search {
+                    key,
+                    query,
+                    result: Err(error),
                 })
                 .await
                 .expect(

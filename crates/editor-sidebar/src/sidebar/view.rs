@@ -87,6 +87,8 @@ pub enum ViewAction {
     CreateProject(PickerIdentity),
     DismissProjectPicker(PickerIdentity),
     RetryProjectIcons,
+    RetryThreads,
+    ClearSearch,
     DismissError,
     RailHover(super::rail::Glyph),
     SetDarkMode(bool),
@@ -113,16 +115,27 @@ pub enum ViewAction {
     },
 }
 
-fn visible_load_state(sidebar: &Sidebar, core: &Core) -> Option<(Option<String>, bool)> {
-    sidebar
+fn visible_load_state(
+    sidebar: &Sidebar,
+    core: &Core,
+) -> (Option<(Option<String>, bool, bool)>, Option<Option<String>>) {
+    let page = sidebar
         .host_data(core)
         .filter(|host| host.is_live())
         .map(|host| {
+            let page = host.thread_page(false);
             (
-                host.thread_page(false).error().map(str::to_owned),
+                page.error().map(str::to_owned),
+                page.is_loaded(),
                 host.project_icons_failed(),
             )
-        })
+        });
+    let search = match sidebar.text_search_status() {
+        super::controller::TextSearchStatus::Idle => None,
+        super::controller::TextSearchStatus::Searching => Some(None),
+        super::controller::TextSearchStatus::Failed(cause) => Some(Some(cause.to_owned())),
+    };
+    (page, search)
 }
 
 pub(super) fn visible_state(sidebar: &Sidebar, core: &Core) -> impl PartialEq + use<> {
@@ -373,6 +386,8 @@ pub fn dispatch(sidebar: &mut Sidebar, core: &mut Core, action: ViewAction) -> b
             }
         }
         ViewAction::RetryProjectIcons => sidebar.retry_project_icons(core),
+        ViewAction::RetryThreads => sidebar.retry_threads(core),
+        ViewAction::ClearSearch => sidebar.clear_search(core, artisan_api::now()),
         ViewAction::DismissError => sidebar.error = None,
         ViewAction::RailHover(glyph) => {
             animation_started = sidebar.rail_motion.play(glyph, std::time::Instant::now());
