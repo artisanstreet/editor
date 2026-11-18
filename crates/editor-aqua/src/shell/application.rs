@@ -33,6 +33,8 @@ pub enum BuildError {
         #[source]
         source: aqua_text::document::SelectionSourceError,
     },
+    #[error("show the inspector")]
+    Inspector(#[source] crate::inspector::BuildInspectorError),
     #[error("show the resource preview")]
     ResourcePreview(#[source] crate::shell::resource_preview::view::UnpreparedError),
 }

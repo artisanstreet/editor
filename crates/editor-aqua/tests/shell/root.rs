@@ -300,6 +300,68 @@ fn tail_controls_force_full_refresh_only_when_visibility_changes() {
     assert!(resources.ui.tree().sole_node_with_key(key).is_none());
 }
 
+struct Keys<'a> {
+    root: &'a mut RootViews,
+    shell: &'a mut editor_aqua::shell::host::Shell,
+    ui: &'a mut aqua::UiApp,
+}
+
+impl aqua::Application for Keys<'_> {
+    fn on_window_event(
+        &mut self,
+        _: &mut aqua::AppCtx<'_>,
+        _: aqua::prelude::AquaWindowId,
+        _: &aqua::prelude::WindowEvent,
+    ) {
+    }
+
+    fn on_input(
+        &mut self,
+        ctx: &mut aqua::AppCtx<'_>,
+        window: aqua::prelude::AquaWindowId,
+        input: &aqua::prelude::InputEvent,
+    ) {
+        self.root
+            .input(self.shell, self.ui, ctx, window, input, false);
+        self.root.animate(self.shell, self.ui, ctx, window);
+    }
+
+    fn build_scene(
+        &mut self,
+        _: &aqua::prelude::ObservedWindowState,
+        _: aqua::Instant,
+    ) -> Option<aqua::Instant> {
+        None
+    }
+}
+
+fn wide(opened: &mut ThreadShell, width: f32) -> aqua::prelude::ObservedWindowState {
+    let mut window = opened.window("wide");
+    window.inner_size.width = width.into();
+    opened.resources.ui.set_viewport(width, 700.0, 1.0);
+    window
+}
+
+fn press(
+    root: &mut RootViews,
+    shell: &mut editor_aqua::shell::host::Shell,
+    ui: &mut aqua::UiApp,
+    window: &aqua::prelude::ObservedWindowState,
+    key: char,
+    modifiers: aqua_core::Modifiers,
+) {
+    let mut runtime = headless(window.clone());
+    runtime.dispatch_input(
+        &mut Keys { root, shell, ui },
+        window_id(),
+        &aqua::prelude::InputEvent::KeyDown(aqua_core::KeyEvent {
+            key: aqua_core::Key::Char(key),
+            modifiers,
+            repeat: false,
+        }),
+    );
+}
+
 fn rebuild(
     root: &mut RootViews,
     shell: &mut editor_aqua::shell::host::Shell,
@@ -356,4 +418,104 @@ fn every_workspace_route_mounts_its_screen() {
             .any(|text| text == "Choose a Forge"),
         "Home mounts its Forge picker"
     );
+}
+
+#[test]
+fn ctrl_b_collapses_the_rendered_sidebar() {
+    let mut opened = ThreadShell::open("sidebar-host", "sidebar-thread", Motion::Reduced);
+    let window = wide(&mut opened, 1400.0);
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        ..
+    } = opened;
+    let mut root = RootViews::default();
+    let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
+    resources.ui.mount(|_| element).unwrap();
+    resources.ui.layout().unwrap();
+    let sidebar = editor_aqua::frame::view::SIDEBAR;
+    let open = keyed(&resources.ui, sidebar).unwrap().w;
+    press(
+        &mut root,
+        &mut shell,
+        &mut resources.ui,
+        &window,
+        'b',
+        aqua_core::Modifiers::CONTROL,
+    );
+    rebuild(&mut root, &mut shell, &mut resources.ui, &window);
+    let collapsed = keyed(&resources.ui, sidebar).unwrap().w;
+    assert!(collapsed < open, "Ctrl+B narrows the sidebar from {open} to {collapsed}");
+    press(
+        &mut root,
+        &mut shell,
+        &mut resources.ui,
+        &window,
+        'b',
+        aqua_core::Modifiers::CONTROL,
+    );
+    rebuild(&mut root, &mut shell, &mut resources.ui, &window);
+    assert_eq!(keyed(&resources.ui, sidebar).unwrap().w, open);
+}
+
+#[test]
+fn ctrl_alt_b_swaps_the_overview_for_the_full_inspector() {
+    let mut opened = ThreadShell::open("inspector-host", "inspector-thread", Motion::Reduced);
+    let window = wide(&mut opened, 1800.0);
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        ..
+    } = opened;
+    let mut root = RootViews::default();
+    let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
+    resources.ui.mount(|_| element).unwrap();
+    resources.ui.layout().unwrap();
+    assert!(keyed(&resources.ui, "artisan-thread-overview").is_some());
+    assert!(keyed(&resources.ui, "artisan-thread-inspector").is_none());
+    let both = aqua_core::Modifiers::CONTROL.union(aqua_core::Modifiers::ALT);
+    press(&mut root, &mut shell, &mut resources.ui, &window, 'b', both);
+    rebuild(&mut root, &mut shell, &mut resources.ui, &window);
+    assert!(keyed(&resources.ui, "artisan-thread-overview").is_none());
+    assert!(keyed(&resources.ui, "artisan-thread-inspector").is_some());
+    assert!(
+        test_support::editor::ui::painted_texts(&resources.ui)
+            .iter()
+            .any(|text| text == "Worktree"),
+        "the full inspector lists the worktree"
+    );
+    press(&mut root, &mut shell, &mut resources.ui, &window, 'b', both);
+    rebuild(&mut root, &mut shell, &mut resources.ui, &window);
+    assert!(keyed(&resources.ui, "artisan-thread-overview").is_some());
+}
+
+#[test]
+fn the_overview_only_shows_when_its_full_width_fits() {
+    let mut opened = ThreadShell::open("fit-host", "fit-thread", Motion::Reduced);
+    let window = wide(&mut opened, 1800.0);
+    let ThreadShell {
+        mut shell,
+        mut resources,
+        ..
+    } = opened;
+    let mut root = RootViews::default();
+    let element = root.build(&mut shell, &mut resources.ui, &window).unwrap();
+    resources.ui.mount(|_| element).unwrap();
+    for step in 0..50_u16 {
+        let width = 10.0_f32.mul_add(f32::from(step), 1300.0);
+        let mut resized = window.clone();
+        resized.inner_size.width = f64::from(width);
+        resources.ui.set_viewport(width, 700.0, 1.0);
+        rebuild(&mut root, &mut shell, &mut resources.ui, &resized);
+        let Some(overview) = keyed(&resources.ui, "artisan-thread-overview") else {
+            continue;
+        };
+        let thread = keyed(&resources.ui, "thread-under-sky").unwrap();
+        assert!(
+            thread.w >= editor_aqua::shell::layout::CHAT_MIN_WIDTH,
+            "at {width}px the overview ({}px) squeezes the thread to {}px",
+            overview.w,
+            thread.w
+        );
+    }
 }

@@ -23,16 +23,6 @@ pub fn launch_size(visible: Option<Size>) -> Size {
     size
 }
 
-pub fn sidebar_width(window_width: f32) -> Option<f32> {
-    let room = window_width - CHAT_MIN_WIDTH;
-    (room >= COLUMN_MIN_WIDTH).then(|| room.min(COLUMN_WIDTH))
-}
-
-pub fn inspector_width(content_width: f32) -> Option<f32> {
-    let room = content_width - CHAT_MIN_WIDTH;
-    (room >= COLUMN_MIN_WIDTH).then(|| room.min(COLUMN_WIDTH))
-}
-
 pub fn settings_sidebar_width(window_width: f32) -> f32 {
     (window_width - 520.0).clamp(COLUMN_MIN_WIDTH, COLUMN_WIDTH)
 }
@@ -67,52 +57,11 @@ pub struct EntryLayout {
     pub max_height: f32,
 }
 
-pub const RAIL_WIDTH: f32 = 48.0;
 pub const CONTROL_WIDTH: f32 = crate::ui::kit::control::caption::WIDTH;
 pub const CONTROL_GLYPH: f32 = crate::ui::kit::IconSize::Md.px();
 pub const CONTROLS_WIDTH: f32 = CONTROL_WIDTH * 3.0;
 pub const CONTROL_INSET_X: f32 = (CONTROL_WIDTH - CONTROL_GLYPH) / 2.0;
 pub const CONTROL_INK_INSET: f32 = CONTROL_GLYPH * 5.0 / 24.0;
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WorkspaceLayout {
-    pub sidebar: Option<f32>,
-    pub frame_width: f32,
-    pub inspector: Option<f32>,
-    pub meter_right: f32,
-    pub header_right_inset: f32,
-}
-
-pub fn workspace_layout(
-    window_width: f32,
-    screen: &crate::core::Screen,
-    show_sidebar: bool,
-    show_inspector: bool,
-    has_meter: bool,
-) -> WorkspaceLayout {
-    use crate::core::Screen;
-    let sidebar = if matches!(screen, Screen::Home) || !show_sidebar {
-        None
-    } else {
-        sidebar_width(window_width)
-    };
-    let frame_width = RAIL_WIDTH + sidebar.unwrap_or(0.0);
-    let inspector =
-        if show_inspector && matches!(screen, Screen::Thread { .. } | Screen::NewThread { .. }) {
-            inspector_width(window_width - frame_width)
-        } else {
-            None
-        };
-    let meter_right = meter_right(inspector);
-    let header_right_inset = header_right_inset(meter_right, has_meter);
-    WorkspaceLayout {
-        sidebar,
-        frame_width,
-        inspector,
-        meter_right,
-        header_right_inset,
-    }
-}
 
 pub fn meter_right(inspector: Option<f32>) -> f32 {
     inspector.unwrap_or(0.0).max(CONTROLS_WIDTH) + crate::ui::kit::Space::S12.px()

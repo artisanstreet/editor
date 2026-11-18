@@ -20,6 +20,12 @@ const DOT: f32 = 6.0;
 const PULSE_MS: u32 = 1_600;
 const VISIBLE_AGENTS: u16 = 8;
 pub const AGENTS_KEY: &str = "artisan-overview-agents";
+const OUTER_WIDTH: f32 = WIDTH + 2.0 * Inset::Frame.px();
+
+#[must_use]
+pub fn fits(content_width: f32) -> bool {
+    content_width - crate::shell::layout::CHAT_MIN_WIDTH >= OUTER_WIDTH
+}
 
 #[derive(Clone)]
 pub struct Subagent {
@@ -155,25 +161,43 @@ pub fn card(
         .children(rule)
         .children(agents)
         .build();
-    Some(
-        UiBox::new()
-            .layout("row")
-            .padded(Space::from(Inset::Frame))
-            .style(
-                Style::new()
-                    .width(Length::Px(WIDTH + 2.0 * Inset::Frame.px()))
-                    .flex_shrink(0.0)
-                    .align(AlignItems::START),
-            )
-            .child(
-                SURFACE
-                    .build(theme, vec![content])
-                    .style(Style::new().flex_grow(1.0)),
-            )
-            .build()
-            .with_key("artisan-thread-overview")
-            .debug_selector("artisan-thread-overview"),
+    Some(frame(
+        SURFACE.build(theme, vec![content]),
+        AlignItems::START,
+        "artisan-thread-overview",
+    ))
+}
+
+#[must_use]
+pub fn panel_height(viewport_height: f32) -> f32 {
+    (viewport_height - crate::shell::layout::TITLEBAR_HEIGHT - 2.0 * Inset::Frame.px()).max(0.0)
+}
+
+#[must_use]
+pub fn panel(theme: &ArtisanTheme, inspector: Element) -> Element {
+    frame(
+        SURFACE
+            .build(theme, vec![inspector])
+            .style(Style::new().min_height(Length::Pct(0.0))),
+        AlignItems::STRETCH,
+        "artisan-thread-inspector",
     )
+}
+
+fn frame(surface: Element, align: AlignItems, key: &'static str) -> Element {
+    UiBox::new()
+        .layout("row")
+        .padded(Space::from(Inset::Frame))
+        .style(
+            Style::new()
+                .width(Length::Px(OUTER_WIDTH))
+                .flex_shrink(0.0)
+                .align(align),
+        )
+        .child(surface.style(Style::new().flex_grow(1.0)))
+        .build()
+        .with_key(key)
+        .debug_selector(key)
 }
 
 fn fact(theme: &ArtisanTheme, icon: AssetId, title: &str, value: &str) -> Element {

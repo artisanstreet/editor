@@ -184,27 +184,21 @@ pub struct RootViews {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ResizeKey {
-    sidebar: Option<u32>,
-    inspector: Option<u32>,
+    overview: bool,
     size: [u32; 2],
 }
 
 impl ResizeKey {
-    fn of(
-        screen: &Screen,
-        show_sidebar: bool,
-        show_inspector: bool,
-        window_width: f32,
-        window_height: f32,
-    ) -> Self {
-        let dimensions =
-            layout::workspace_layout(window_width, screen, show_sidebar, show_inspector, false);
+    fn of(screen: &Screen, card_width: f32, window: layout::Size) -> Self {
         Self {
-            sidebar: dimensions.sidebar.map(f32::to_bits),
-            inspector: dimensions.inspector.map(f32::to_bits),
-            size: [window_width.to_bits(), window_height.to_bits()],
+            overview: overview_shown(screen, card_width),
+            size: [window.width.to_bits(), window.height.to_bits()],
         }
     }
+}
+
+fn overview_shown(screen: &Screen, card_width: f32) -> bool {
+    matches!(screen, Screen::Thread { .. }) && crate::frame::overview::fits(card_width)
 }
 
 impl RootViews {
@@ -2696,9 +2690,9 @@ impl SectionViews for RootViews {
         let Some(built) = self.resize_key else {
             return true;
         };
-        let Some(workspace) = shell.entry.workspace() else {
+        if shell.entry.workspace().is_none() {
             return true;
-        };
+        }
         let quiet = matches!(shell.core.screen(), Screen::Thread { .. })
             && self.transcript_viewport.is_some()
             && self.image_preview.is_none()
@@ -2709,13 +2703,15 @@ impl SectionViews for RootViews {
             && self.resource_dialog.is_none()
             && self.color_menu.is_none()
             && self.sidebar_drag.is_none();
-        let key = ResizeKey::of(
-            shell.core.workspace_screen(),
-            workspace.show_sidebar,
-            workspace.show_inspector,
-            window.inner_size.width as f32,
-            window.inner_size.height as f32,
-        );
+        let viewport = layout::Size {
+            width: window.inner_size.width as f32,
+            height: window.inner_size.height as f32,
+        };
+        let card_width = (viewport.width
+            - self.sidebar.width(shell.core.clock().now())
+            - crate::frame::view::SHEET_PADDING)
+            .max(0.0);
+        let key = ResizeKey::of(shell.core.workspace_screen(), card_width, viewport);
         !(quiet && key == built)
     }
 
@@ -2973,16 +2969,10 @@ impl SectionViews for RootViews {
         let size = aqua_core::Size::new(viewport.width, viewport.height);
         let now = shell.core.clock().now();
         self.sidebar.fit(viewport.width, now, reduced);
-        self.resize_key = Some(ResizeKey::of(
-            &screen,
-            workspace.show_sidebar,
-            workspace.show_inspector,
-            viewport.width,
-            viewport.height,
-        ));
         aqua_core::checkpoint::reach();
         let card_width =
             (viewport.width - self.sidebar.width(now) - crate::frame::view::SHEET_PADDING).max(0.0);
+        self.resize_key = Some(ResizeKey::of(&screen, card_width, viewport));
         let lift = crate::conversation::view::composer_lift(card_width);
         let sent = workspace.take_sent_new_thread();
         let route = match &screen {
@@ -3254,10 +3244,12 @@ impl SectionViews for RootViews {
             None => (None, Vec::new()),
         };
         let (search, tree, overlay) = self.search_parts(workspace, &theme, tree, now);
-        let overview = (matches!(shell.core.screen(), Screen::Thread { .. })
-            && layout::inspector_width(card_width).is_some())
-        .then(|| {
-            crate::frame::overview::card(
+        let overview = match (
+            overview_shown(&screen, card_width),
+            workspace.side_panel,
+        ) {
+            (false, _) => None,
+            (true, crate::shell::workspace::SidePanel::Overview) => crate::frame::overview::card(
                 &theme,
                 &crate::frame::overview::Overview::of(
                     &shell.core,
@@ -3266,9 +3258,21 @@ impl SectionViews for RootViews {
                 ),
                 reduced,
                 workspace.inspector_emit(),
-            )
-        })
-        .flatten();
+            ),
+            (true, crate::shell::workspace::SidePanel::Inspector) => {
+                let panel = workspace
+                    .inspector_panel(
+                        &shell.core,
+                        ui,
+                        theme,
+                        crate::frame::overview::panel_height(viewport.height),
+                        reduced,
+                        self.ui_now,
+                    )
+                    .map_err(BuildError::Inspector)?;
+                Some(crate::frame::overview::panel(&theme, panel))
+            }
+        };
         aqua_core::checkpoint::reach();
         let titlebar = shell.titlebar.workspace(theme, window, strip, None, None);
         let image_preview = self.image_preview.as_ref().map(|preview| {
@@ -3839,15 +3843,14 @@ impl SectionViews for RootViews {
         match event.key {
             aqua_core::Key::Char('b' | 'B') if alt => {
                 if let Some(workspace) = shell.entry.workspace_mut() {
-                    workspace.show_inspector = !workspace.show_inspector;
+                    workspace.side_panel = workspace.side_panel.toggled();
                     return true;
                 }
             }
             aqua_core::Key::Char('b' | 'B') if !alt => {
-                if let Some(workspace) = shell.entry.workspace_mut() {
-                    workspace.show_sidebar = !workspace.show_sidebar;
-                    return true;
-                }
+                (self.sidebar.emit())(crate::frame::sidebar::Event::Toggle);
+                ctx.request_frame(window, aqua::prelude::FrameReason::ANIMATION);
+                return true;
             }
             aqua_core::Key::Char(',') if !alt => {
                 shell.open_settings();

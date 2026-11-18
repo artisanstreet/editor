@@ -33,6 +33,22 @@ struct QuestionSourceIdentity {
     selection: aqua_text::document::SelectionSourceId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidePanel {
+    Overview,
+    Inspector,
+}
+
+impl SidePanel {
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Overview => Self::Inspector,
+            Self::Inspector => Self::Overview,
+        }
+    }
+}
+
 pub struct Workspace {
     pub selections: crate::shell::selection::SelectionScope,
     pub inspector: crate::inspector::InspectorOwner,
@@ -93,8 +109,7 @@ pub struct Workspace {
     pub palette: Option<Palette>,
     pub resource_preview: Option<crate::shell::resource_preview::ResourcePreview>,
     resource_preview_generation: u64,
-    pub show_sidebar: bool,
-    pub show_inspector: bool,
+    pub side_panel: SidePanel,
     pub failure: Option<String>,
     notifications: Notifications,
     repository: crate::shell::repository::RepositoryContext,
@@ -172,8 +187,7 @@ impl Workspace {
             palette: None,
             resource_preview: None,
             resource_preview_generation: 0,
-            show_sidebar: true,
-            show_inspector: true,
+            side_panel: SidePanel::Overview,
             failure,
             notifications: Notifications::default(),
             repository: crate::shell::repository::RepositoryContext::default(),
@@ -641,6 +655,29 @@ impl Workspace {
                 .borrow_mut()
                 .push_back(crate::inspector::OwnerAction::Inspector { scope, action });
         })
+    }
+
+    pub fn inspector_panel(
+        &mut self,
+        core: &Core,
+        ui: &mut aqua::UiApp,
+        theme: crate::ui::theme::ArtisanTheme,
+        viewport_height: f32,
+        reduced_motion: bool,
+        now: aqua::Instant,
+    ) -> Result<aqua_ui::element::Element, crate::inspector::BuildInspectorError> {
+        let actions = Rc::clone(&self.inspector_actions);
+        let elements = self.inspector.build(
+            core,
+            ui,
+            theme,
+            viewport_height,
+            reduced_motion,
+            now,
+            Rc::new(move |action| actions.borrow_mut().push_back(action)),
+        )?;
+        self.terminal_content = elements.terminal;
+        Ok(elements.panel)
     }
 
     pub fn sync_terminal_dialog(
