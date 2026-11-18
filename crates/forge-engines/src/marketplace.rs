@@ -92,26 +92,33 @@ pub async fn fetch_skill(http: &reqwest::Client, id: &str, scratch: &Path) -> Re
         .with_context(|| format!("Couldn't reach {owner}/{repo} on GitHub."))?
         .error_for_status()
         .with_context(|| format!("GitHub has no repository {owner}/{repo}."))?;
-    ensure!(
-        response
-            .content_length()
-            .is_none_or(|length| length <= MAX_ARCHIVE_BYTES),
-        "{owner}/{repo} is too large to install from."
-    );
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("Couldn't download {owner}/{repo}."))?;
-    ensure!(
-        bytes.len() as u64 <= MAX_ARCHIVE_BYTES,
-        "{owner}/{repo} is too large to install from."
-    );
+    let bytes = download(response, MAX_ARCHIVE_BYTES, &format!("{owner}/{repo}")).await?;
     let root = scratch.join("repository");
     let unpack_root = root.clone();
     tokio::task::spawn_blocking(move || unpack(&bytes, &unpack_root))
         .await
         .context("unpacking task")??;
     find_skill(&root, skill)?.with_context(|| format!("{owner}/{repo} has no skill named {skill}."))
+}
+
+async fn download(mut response: reqwest::Response, limit: u64, name: &str) -> Result<Vec<u8>> {
+    let too_large = || format!("{name} is too large to install from.");
+    ensure!(
+        response
+            .content_length()
+            .is_none_or(|length| length <= limit),
+        too_large()
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("Couldn't download {name}."))?
+    {
+        ensure!((bytes.len() + chunk.len()) as u64 <= limit, too_large());
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// A `<owner>/<repo>` source, split.
@@ -191,6 +198,10 @@ fn find_skill(root: &Path, skill: &str) -> Result<Option<PathBuf>> {
     }
     Ok(by_folder)
 }
+
+#[cfg(test)]
+#[path = "../tests/marketplace/download.rs"]
+mod download_tests;
 
 #[cfg(test)]
 mod tests {
