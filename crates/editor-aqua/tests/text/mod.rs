@@ -379,6 +379,60 @@ fn mounted_tab_leaves_a_single_line_field() {
 }
 
 #[test]
+fn mounted_home_and_end_stop_at_soft_wrapped_line_edges() {
+    use aqua_core::{Modifiers, NamedKey};
+
+    let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+    let (controller, mut runtime, _, _) = mounted(text, Mode::Document, 160.0);
+    controller
+        .state()
+        .borrow_mut()
+        .set_selection(text.len()..text.len(), false);
+    runtime.build_frame().unwrap();
+    runtime.handle_input(&key(NamedKey::Home, Modifiers::NONE));
+    let line_start = controller.state().borrow().caret().unwrap();
+    assert!(line_start > 0, "Home left the last visual line");
+    runtime.build_frame().unwrap();
+    runtime.handle_input(&key(NamedKey::Left, Modifiers::NONE));
+    runtime.build_frame().unwrap();
+    runtime.handle_input(&key(NamedKey::Home, Modifiers::SHIFT));
+    let selection = controller.state().borrow().selection();
+    assert!(
+        selection.start > 0,
+        "Shift+Home selected past the visual line"
+    );
+    assert!(selection.end < line_start);
+    runtime.build_frame().unwrap();
+    controller.state().borrow_mut().set_selection(0..0, false);
+    runtime.build_frame().unwrap();
+    runtime.handle_input(&key(NamedKey::End, Modifiers::NONE));
+    let line_end = controller.state().borrow().caret().unwrap();
+    assert!(
+        line_end < text.len(),
+        "End jumped to the end of the paragraph"
+    );
+    assert!(line_end > 0);
+}
+
+#[test]
+fn mounted_arrows_follow_visual_order_in_right_to_left_text() {
+    use aqua_core::{Modifiers, NamedKey};
+
+    let text = "שלום";
+    let (controller, mut runtime, _, _) = mounted(text, Mode::Prompt, 400.0);
+    controller
+        .state()
+        .borrow_mut()
+        .set_selection(text.len()..text.len(), false);
+    runtime.build_frame().unwrap();
+    runtime.handle_input(&key(NamedKey::Right, Modifiers::NONE));
+    assert_eq!(controller.state().borrow().caret(), Some(6));
+    runtime.build_frame().unwrap();
+    runtime.handle_input(&key(NamedKey::Left, Modifiers::NONE));
+    assert_eq!(controller.state().borrow().caret(), Some(8));
+}
+
+#[test]
 fn undo_restores_the_active_end_of_a_backward_selection() {
     let mut editor = Editor::new("abcdef", Mode::Document);
     assert!(editor.set_selection(1..3, true));
@@ -582,7 +636,9 @@ fn shared_controller_reports_selection_and_controls_disabled_state() {
     let controller = EditorController::from_shared(shared.clone(), move |event| {
         recorded.borrow_mut().push(event)
     });
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
     runtime
         .mount(|_| controller.element(Mode::Prompt, &ArtisanTheme::resolved(), ""))
         .unwrap();
@@ -707,7 +763,9 @@ fn keyed_editor_leaf_retains_focus_and_selection_across_notice_rebuild() {
 
     let controller = EditorController::new(Editor::new("abc", Mode::Prompt), |_| {});
     let theme = ArtisanTheme::resolved();
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
     runtime
         .mount(|_| {
             controller.element_with_notice_keyed(

@@ -302,12 +302,14 @@ impl EditorController {
                     Key::Named(NamedKey::Enter) => Some(state.enter(shift)),
                     Key::Named(NamedKey::Tab) if !shift => Some(state.tab()),
                     Key::Named(NamedKey::Escape) => Some(state.dismiss()),
-                    Key::Named(NamedKey::Left) => {
-                        state.move_horizontal(false, word, shift);
-                        Some(CommandOutcome::Ignored)
-                    }
-                    Key::Named(NamedKey::Right) => {
-                        state.move_horizontal(true, word, shift);
+                    Key::Named(NamedKey::Left | NamedKey::Right)
+                        if word || (!shift && !state.selection().is_empty()) =>
+                    {
+                        state.move_horizontal(
+                            matches!(key.key, Key::Named(NamedKey::Right)),
+                            word,
+                            shift,
+                        );
                         Some(CommandOutcome::Ignored)
                     }
                     Key::Named(NamedKey::Backspace) => {
@@ -319,9 +321,8 @@ impl EditorController {
                     Key::Named(NamedKey::Up | NamedKey::Down)
                         if key.modifiers.contains(Modifiers::LOGO) =>
                     {
-                        state.move_line_edge(
+                        state.move_document_edge(
                             matches!(key.key, Key::Named(NamedKey::Down)),
-                            true,
                             shift,
                         );
                         Some(CommandOutcome::Ignored)
@@ -329,12 +330,12 @@ impl EditorController {
                     Key::Named(NamedKey::Up | NamedKey::Down) if !shift && !word => state
                         .list_vertical(matches!(key.key, Key::Named(NamedKey::Up)))
                         .map(CommandOutcome::List),
-                    Key::Named(NamedKey::Home) => {
-                        state.move_line_edge(false, command, shift);
+                    Key::Named(NamedKey::Home) if command => {
+                        state.move_document_edge(false, shift);
                         Some(CommandOutcome::Ignored)
                     }
-                    Key::Named(NamedKey::End) => {
-                        state.move_line_edge(true, command, shift);
+                    Key::Named(NamedKey::End) if command => {
+                        state.move_document_edge(true, shift);
                         Some(CommandOutcome::Ignored)
                     }
                     Key::Char('a' | 'A') if command => {
@@ -362,6 +363,10 @@ impl EditorController {
             }
             RoutedInput::TextVertical { up, extend, target } => {
                 state.move_vertical(*up, *extend, Some(*target));
+                Some(CommandOutcome::Ignored)
+            }
+            RoutedInput::TextMotion { extend, target, .. } => {
+                state.move_caret(*target, *extend);
                 Some(CommandOutcome::Ignored)
             }
             RoutedInput::TextPointer { byte, phase, .. } => {
@@ -404,6 +409,7 @@ impl EditorController {
         ) || matches!(
             &event.input,
             RoutedInput::TextVertical { .. }
+                | RoutedInput::TextMotion { .. }
                 | RoutedInput::Native(InputEvent::KeyDown(aqua_core::KeyEvent {
                     key: Key::Named(
                         NamedKey::Left | NamedKey::Right | NamedKey::Home | NamedKey::End
@@ -663,6 +669,7 @@ impl EditorController {
             InputKind::ClipboardCut,
             InputKind::TextPointer,
             InputKind::TextVertical,
+            InputKind::TextMotion,
         ] {
             let controller = self.clone();
             let theme = *theme;

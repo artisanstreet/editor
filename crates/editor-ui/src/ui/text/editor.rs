@@ -697,6 +697,29 @@ impl Editor {
         self.typing_group_end = None;
         self.vertical_goal_column = None;
     }
+    pub fn move_caret(&mut self, target: usize, extend: bool) {
+        if self.disabled {
+            return;
+        }
+        let cursor = if self.reversed {
+            self.selection.start
+        } else {
+            self.selection.end
+        };
+        let target = self.text.floor_char_boundary(target.min(self.text.len()));
+        let target = self.token_target(target, target > cursor);
+        self.finish_composition();
+        if extend {
+            self.select_to(target);
+        } else {
+            self.selection = target..target;
+            self.reversed = false;
+            self.anchor = None;
+        }
+        self.drag_origin = None;
+        self.typing_group_end = None;
+        self.vertical_goal_column = None;
+    }
     fn select_to(&mut self, target: usize) {
         let target = self.text.floor_char_boundary(target.min(self.text.len()));
         let anchor = *self
@@ -756,34 +779,9 @@ impl Editor {
     pub fn pointer_up(&mut self) {
         self.drag_origin = None;
     }
-    pub fn move_line_edge(&mut self, end: bool, document: bool, extend: bool) {
-        if self.disabled {
-            return;
-        }
-        let cursor = if self.reversed {
-            self.selection.start
-        } else {
-            self.selection.end
-        };
-        let target = match (document, end) {
-            (true, false) => 0,
-            (true, true) => self.text.len(),
-            (false, false) => self.text[..cursor].rfind('\n').map_or(0, |index| index + 1),
-            (false, true) => self.text[cursor..]
-                .find('\n')
-                .map_or(self.text.len(), |index| cursor + index),
-        };
-        if extend {
-            self.select_to(target);
-        } else {
-            self.selection = target..target;
-            self.reversed = false;
-            self.anchor = None;
-        }
-        self.finish_composition();
-        self.drag_origin = None;
-        self.typing_group_end = None;
-        self.vertical_goal_column = None;
+    pub fn move_document_edge(&mut self, end: bool, extend: bool) {
+        let target = if end { self.text.len() } else { 0 };
+        self.move_caret(target, extend);
     }
     pub fn move_vertical(&mut self, up: bool, extend: bool, visual_target: Option<usize>) {
         if self.disabled {
