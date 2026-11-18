@@ -61,6 +61,10 @@ pub enum SchemaError {
 #[path = "../tests/schema/model.rs"]
 mod model_migration_tests;
 
+#[cfg(test)]
+#[path = "../tests/schema/released.rs"]
+mod released_tests;
+
 enum Step {
     Sql(&'static str),
     Rust(fn(&Connection) -> Result<()>),

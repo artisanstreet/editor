@@ -2334,6 +2334,7 @@ dependencies = [
  "base64 0.22.1",
  "divan",
  "fff-grep",
+ "flate2",
  "forge-content",
  "fs2",
  "hex",

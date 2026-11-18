@@ -38,6 +38,7 @@ notify.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
+flate2.workspace = true
 test-support.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
