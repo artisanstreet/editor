@@ -1,7 +1,3 @@
-//! Source offsets and exact parser events for lazily loaded Markdown leaves.
-//! The scan owns no source or block AST. Borrowed event payloads become offsets;
-//! decoded escapes and entities are interned. A fetched complete leaf replays
-//! these events, so reference links keep their original document resolution.
 #![expect(
     unreachable_pub,
     unused_qualifications,
@@ -54,17 +50,14 @@ pub enum MarkdownIndexError {
     InvalidShape,
 }
 
-/// One authored list marker surrounding a native semantic leaf.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct ListLevel {
     pub source_start: usize,
     pub number: Option<u64>,
     pub task: Option<bool>,
-    /// Only the first leaf of an item draws the item's marker.
     pub first: bool,
 }
 
-/// Interned context independent of any fetched source bytes.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct LeafContext {
     pub lists: Vec<ListLevel>,
@@ -74,7 +67,6 @@ pub struct LeafContext {
     pub spacing: Vec<LeafSpacing>,
 }
 
-/// Source sibling kinds; the renderer's shared margin policy supplies pixels.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum BlockShape {
     Paragraph,
@@ -122,7 +114,6 @@ struct IndexedEvent {
     range: Range<usize>,
 }
 
-/// One native paragraph, heading, code unit, HTML unit, or table row.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IndexedLeaf {
     range: Range<usize>,
@@ -136,7 +127,6 @@ impl IndexedLeaf {
     }
 }
 
-/// Compact source topology. Drop the input String immediately after building.
 #[derive(Debug)]
 pub struct MarkdownIndex {
     leaves: Vec<IndexedLeaf>,
@@ -296,12 +286,9 @@ fn event_heap_bytes(event: &Event<'_>) -> usize {
 pub struct LeafRecord {
     pub leaf: IndexedLeaf,
     pub context: LeafContext,
-    /// Another semantic row follows in the same authored table.
     pub table_continues: bool,
 }
 impl LeafRecord {
-    /// A physical literal line includes its LF delimiter. The final empty line
-    /// has an empty range, so line ordinals remain faithful to authored text.
     pub fn literal(range: Range<usize>) -> Self {
         Self {
             leaf: IndexedLeaf {

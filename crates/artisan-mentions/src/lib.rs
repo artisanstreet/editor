@@ -1,8 +1,3 @@
-//! The mention grammar the composer paints and Forge hands to engines:
-//! `$skill` and `@connector` names, matched against the installed ones,
-//! `@thread title`s, matched against the threads, and the `/command` a
-//! message can start with. Rendering and provider input use
-//! the same spans.
 #![expect(
     clippy::string_slice,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
@@ -10,21 +5,15 @@
 
 use std::{collections::HashSet, ops::Range};
 
-/// Canonical skill identifiers are bounded so an unmatched `$` token cannot
-/// make either consumer hash arbitrarily long prefixes.
 pub const MAX_SKILL_NAME_BYTES: usize = 255;
 const TERMINATORS: &[char] = &[',', '.', ';', ':', '!', '?', ')', ']', '}', '"', '\''];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mention {
     pub name: String,
-    /// Includes the sigil, in UTF-8 byte coordinates.
     pub range: Range<usize>,
 }
 
-/// All known mentions in source order, preserving repeated painted spans.
-/// A dot may belong to a qualified name or terminate a shorter name: the
-/// longest registered name followed by a terminator wins.
 #[must_use]
 pub fn skill_mentions(text: &str, names: &[&str]) -> Vec<Mention> {
     named_mentions(text, names, '$')
@@ -39,13 +28,11 @@ pub fn valid_mention_name(name: &str) -> bool {
         && !name.chars().any(char::is_whitespace)
 }
 
-/// Shared registered-name grammar for skill and connector highlighting.
 #[must_use]
 pub fn named_mentions(text: &str, names: &[&str], sigil: char) -> Vec<Mention> {
     MentionNames::new(names).mentions(text, sigil)
 }
 
-/// Compiled names shared across edits until the catalog changes.
 #[derive(Clone, Debug, Default)]
 pub struct MentionNames {
     known: HashSet<String>,
@@ -110,11 +97,8 @@ impl MentionNames {
     }
 }
 
-/// Longer titles (a first message's long first line) can't be mentioned.
 pub const MAX_THREAD_TITLE_BYTES: usize = 512;
 
-/// A thread title a mention can name: one line, its own trimmed form and
-/// bounded.
 #[must_use]
 pub fn valid_thread_title(title: &str) -> bool {
     !title.is_empty()
@@ -123,9 +107,6 @@ pub fn valid_thread_title(title: &str) -> bool {
         && !title.contains(['\n', '\r'])
 }
 
-/// `@title` mentions of threads in source order. Titles hold spaces, so the
-/// longest title that follows an `@` at the start of a word and ends at a
-/// word end wins.
 #[must_use]
 pub fn thread_mentions(text: &str, titles: &[&str]) -> Vec<Mention> {
     let mut mentions = Vec::new();
@@ -159,11 +140,6 @@ pub fn thread_mentions(text: &str, titles: &[&str]) -> Vec<Mention> {
     mentions
 }
 
-/// The `/command` a message starts with, sigil included.
-///
-/// `/goal`, `/ultracode`, `/plugin:skill`: any engine's command reads the same, so
-/// nothing here knows which commands exist; a path (`/home/me`) is no
-/// command.
 #[must_use]
 pub fn leading_command(text: &str) -> Option<Range<usize>> {
     let start = text.len() - text.trim_start().len();
@@ -175,11 +151,8 @@ pub fn leading_command(text: &str) -> Option<Range<usize>> {
     (name > 0 && ends).then(|| start..start + 1 + name)
 }
 
-/// Commands Artisan gives a meaning of its own, so they stand out where
-/// they're typed and sent; every other command reads as plain text.
 pub const SPECIAL_COMMANDS: &[&str] = &["goal", "ultracode", "ultrathink"];
 
-/// The [`leading_command`] when it is one of [`SPECIAL_COMMANDS`].
 #[must_use]
 pub fn special_command(text: &str) -> Option<Range<usize>> {
     leading_command(text)

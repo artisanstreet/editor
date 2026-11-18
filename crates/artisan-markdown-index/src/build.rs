@@ -1,4 +1,3 @@
-//! One maintained-parser scan into compact native semantic leaf descriptors.
 use super::PARSE_OPTIONS;
 use super::{
     Arc, BlockShape, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, Kind, LeafContext, LeafSpacing,
@@ -54,8 +53,6 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
     let mut table_source = None;
     let mut depth = 0usize;
     let mut active: Option<ActiveLeaf> = None;
-    // Includes the transient interning maps and pending event vector. The
-    // completed index reports its own actual retained capacities below.
     let mut admission_bytes = 0usize;
     for (event, range) in Parser::new_ext(source, PARSE_OPTIONS).into_offset_iter() {
         if admission_bytes > INDEX_BYTES {
@@ -220,7 +217,6 @@ pub fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
                 Event::Start(Tag::HtmlBlock) | Event::Html(_) => Some(Kind::Html),
                 Event::Start(Tag::TableHead) => Some(Kind::TableRow { header: true }),
                 Event::Start(Tag::TableRow) => Some(Kind::TableRow { header: false }),
-                // Inline content outside a paragraph opens one implicitly.
                 Event::Text(_)
                 | Event::Code(_)
                 | Event::InlineHtml(_)
