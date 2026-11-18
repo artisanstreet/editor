@@ -63,7 +63,7 @@ async fn a_stop_is_published_at_once_while_the_adapter_cleans_up_and_drains_its_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cancellation_preserves_an_adapter_stop_failure() {
+async fn a_stop_the_engine_fails_to_clean_up_stays_a_continuable_stop() {
     let ready = Arc::new(Notify::new());
     let script_ready = Arc::clone(&ready);
     let fixture = fixture(Arc::new(move |_, io| {
@@ -71,7 +71,10 @@ async fn cancellation_preserves_an_adapter_stop_failure() {
         Box::pin(async move {
             ready.notify_one();
             io.cancel.cancelled().await;
-            Outcome::failed("provider refused to stop".to_owned())
+            Outcome::retryable(
+                "provider refused to stop".to_owned(),
+                forge_engines::Retry::Overloaded,
+            )
         })
     }))
     .await;
@@ -85,15 +88,25 @@ async fn cancellation_preserves_an_adapter_stop_failure() {
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     let runs = fixture.settled().await;
-    assert_eq!(runs.last().unwrap().status(), RunStatus::Failed);
+    assert_eq!(runs.last().unwrap().status(), RunStatus::Cancelled);
     assert_eq!(
         runs.last().unwrap().error(),
         Some("provider refused to stop")
     );
+    assert!(
+        !fixture
+            .hub
+            .store()
+            .continue_pending(&fixture.thread_id)
+            .await
+            .unwrap(),
+        "a stopped turn never resumes by itself"
+    );
+    fixture.hub.continue_turn(&fixture.thread_id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cancellation_timeout_reports_unconfirmed_work_as_failed() {
+async fn a_stop_the_engine_never_confirms_stays_a_stop_that_says_so() {
     let ready = Arc::new(Notify::new());
     let script_ready = Arc::clone(&ready);
     let fixture = fixture(Arc::new(move |_, _io| {
@@ -113,7 +126,7 @@ async fn cancellation_timeout_reports_unconfirmed_work_as_failed() {
         .await
         .unwrap();
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(50), async {
+    tokio::time::timeout(Duration::from_secs(120), async {
         while fixture.hub.is_live(&fixture.thread_id) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -127,7 +140,7 @@ async fn cancellation_timeout_reports_unconfirmed_work_as_failed() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status(), RunStatus::Failed);
+    assert_eq!(run.status(), RunStatus::Cancelled);
     assert!(run.error().unwrap().contains("did not confirm it stopped"));
 }
 

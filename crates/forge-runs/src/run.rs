@@ -81,6 +81,52 @@ pub(crate) enum DriveError {
     },
 }
 
+pub(crate) enum Ending {
+    Finished(Outcome),
+    Stopped(Cleanup),
+}
+
+pub(crate) enum Cleanup {
+    Confirmed,
+    Failed(String),
+    Unconfirmed,
+}
+
+impl Ending {
+    fn failed_cleanup(self, error: String) -> Self {
+        match self {
+            Self::Stopped(_) => Self::Stopped(Cleanup::Failed(error)),
+            Self::Finished(_) => Self::Finished(Outcome::failed(error)),
+        }
+    }
+
+    fn error(&self) -> Option<&str> {
+        match self {
+            Self::Finished(outcome) => outcome.error(),
+            Self::Stopped(Cleanup::Confirmed) => None,
+            Self::Stopped(Cleanup::Failed(error)) => Some(error),
+            Self::Stopped(Cleanup::Unconfirmed) => Some(STOP_UNCONFIRMED),
+        }
+    }
+
+    const fn run_outcome(&self, shutting_down: bool) -> RunOutcome {
+        match self {
+            Self::Stopped(_) if shutting_down => RunOutcome::Interrupted,
+            Self::Stopped(_) => RunOutcome::Cancelled,
+            Self::Finished(outcome) => match outcome.run_outcome() {
+                RunOutcome::Cancelled if shutting_down => RunOutcome::Interrupted,
+                ended @ (RunOutcome::Done
+                | RunOutcome::Cancelled
+                | RunOutcome::Failed
+                | RunOutcome::Interrupted
+                | RunOutcome::Refused) => ended,
+            },
+        }
+    }
+}
+
+const STOP_UNCONFIRMED: &str = "The engine did not confirm it stopped within 45 seconds; underlying work may still be running.";
+
 #[derive(Debug, thiserror::Error)]
 enum ExecuteError {
     #[error("hand the history of thread {thread} to the new session")]
@@ -210,7 +256,7 @@ pub(crate) async fn drive(
     hub.open_suggestion(thread_id, &run_id);
     let adapter_cancel = cancel.child_token();
     items.binary = hub.engines().lease(engine);
-    let mut outcome = match Box::pin(execute(
+    let mut ending = match Box::pin(execute(
         hub,
         &thread,
         &mut run,
@@ -226,8 +272,8 @@ pub(crate) async fn drive(
     ))
     .await
     {
-        Ok(outcome) => outcome,
-        Err(error) => Outcome::failed(diagnostics::chain(&error)),
+        Ok(ending) => ending,
+        Err(error) => Ending::Finished(Outcome::failed(diagnostics::chain(&error))),
     };
     adapter_cancel.cancel();
     let cancel_cutoff = cancel_cutoff(hub, thread_id);
@@ -237,22 +283,20 @@ pub(crate) async fn drive(
             .cancel_pending_inputs(thread_id.clone(), cancel_cutoff)
             .await
     {
-        // Settle once as Failed, and do not retry the inputs whose durable
-        // cancellation could not be saved. Newer inputs remain eligible.
         run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
-        outcome = Outcome::failed(format!(
+        ending = ending.failed_cleanup(format!(
             "persist cancellation: {}",
             diagnostics::chain(&error)
         ));
     }
-    let ended = ending(&outcome, hub.inner.shutdown.is_cancelled());
+    let ended = ending.run_outcome(hub.inner.shutdown.is_cancelled());
     let status = ended.status();
     hub.attention_lock()
         .entry(thread_id.clone())
         .or_default()
         .add(&items.weighed);
     let attempted = pending.iter().map(|item| item.id.clone()).collect();
-    finish(hub, &mut run, &items, outcome, ended, attempted).await?;
+    finish(hub, &mut run, &items, ending, ended, attempted).await?;
     if let Some(home) = &claude_ai_home
         && claude_ai_before.as_ref() != Some(&forge_engines::claudeai::Session::state(home))
     {
@@ -392,7 +436,7 @@ async fn execute(
     mut inbox: mpsc::Receiver<Input>,
     cancel: CancellationToken,
     items: &mut Work,
-) -> Result<Outcome, ExecuteError> {
+) -> Result<Ending, ExecuteError> {
     let engine = run.engine;
     // A fresh session starts from the thread's history so far.
     let handoff = if run.session_id.is_none() {
@@ -420,12 +464,12 @@ async fn execute(
             biased;
             () = cancel.cancelled() => {
                 settle_handoff(&run.thread_id, &mut handing_off).await;
-                return Ok(Outcome::cancelled());
+                return Ok(Ending::Stopped(Cleanup::Confirmed));
             }
             () = hub.inner.shutdown.cancelled() => {
                 cancel.cancel();
                 settle_handoff(&run.thread_id, &mut handing_off).await;
-                return Ok(Outcome::cancelled());
+                return Ok(Ending::Stopped(Cleanup::Confirmed));
             }
             handoff = &mut handing_off => handoff.map_err(|source| ExecuteError::Handoff { thread: thread.id.clone(), source: Box::new(source) })?,
         }
@@ -469,8 +513,8 @@ async fn execute(
     };
     let (turn, initial_ids, initial_ack) = tokio::select! {
         biased;
-        () = cancel.cancelled() => return Ok(Outcome::cancelled()),
-        () = hub.inner.shutdown.cancelled() => return Ok(Outcome::cancelled()),
+        () = cancel.cancelled() => return Ok(Ending::Stopped(Cleanup::Confirmed)),
+        () = hub.inner.shutdown.cancelled() => return Ok(Ending::Stopped(Cleanup::Confirmed)),
         prepared = preparing => prepared?,
     };
     // Preserve the effective launch choices, including the account's Claude
@@ -536,8 +580,8 @@ async fn execute(
         loop {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => break Outcome::cancelled(),
-                () = hub.inner.shutdown.cancelled() => { cancel.cancel(); break Outcome::cancelled(); },
+                () = cancel.cancelled() => break Ending::Stopped(Cleanup::Confirmed),
+                () = hub.inner.shutdown.cancelled() => { cancel.cancel(); break Ending::Stopped(Cleanup::Confirmed); },
                 Some(event) = reports.recv() => {
                     if let Some(key) = approvals_lock(&approvals).observe(&event)
                         && auto_answers.try_send(allow_once(key.clone())).is_err()
@@ -547,17 +591,17 @@ async fn execute(
                     }
                     if let Err(error) = apply(hub, run, items, event).await {
                         cancel.cancel();
-                        break Outcome::failed(format!("persist engine event: {}", diagnostics::chain(&error)));
+                        break Ending::Finished(Outcome::failed(format!("persist engine event: {}", diagnostics::chain(&error))));
                     }
                 },
                 () = &mut forwarding, if !forwarding_done => { forwarding_done = true; },
                 outcome = &mut adapter_outcome => {
                     adapter_finished = true;
-                    break outcome;
+                    break Ending::Finished(outcome);
                 }
                 () = disk.due() => {
                     if let Some(stopped) = guard_disk(hub, run, &mut disk).await {
-                        break stopped;
+                        break Ending::Finished(stopped);
                     }
                 }
             }
@@ -565,8 +609,11 @@ async fn execute(
     };
     inbox.close();
     cancel.cancel();
-    let mut outcome = outcome;
-    if !adapter_finished && outcome == Outcome::Cancelled && !hub.inner.shutdown.is_cancelled() {
+    let mut ending = outcome;
+    if !adapter_finished
+        && matches!(ending, Ending::Stopped(_))
+        && !hub.inner.shutdown.is_cancelled()
+    {
         match announce_stop(hub, run, items, pending).await {
             Ok(stopped) => *run = stopped,
             Err(error) => {
@@ -580,32 +627,37 @@ async fn execute(
         loop {
             tokio::select! {
                 stopped = &mut adapter_outcome => {
-                    if stopped.failure().is_some() && outcome.failure().is_none() {
-                        outcome = stopped;
+                    if let Some(failure) = stopped.failure() {
+                        ending = match ending {
+                            Ending::Stopped(Cleanup::Confirmed) => Ending::Stopped(Cleanup::Failed(failure.message.clone())),
+                            Ending::Finished(outcome) if outcome.failure().is_none() => Ending::Finished(stopped),
+                            kept @ (Ending::Stopped(_) | Ending::Finished(_)) => kept,
+                        };
                     }
                     break;
                 }
                 Some(event) = reports.recv() => {
                     if let Err(error) = apply(hub, run, items, event).await {
-                        outcome = Outcome::failed(format!(
+                        ending = ending.failed_cleanup(format!(
                             "persist engine event during cancellation: {}",
                             diagnostics::chain(&error)
                         ));
                     }
                 }
                 () = &mut deadline => {
-                    outcome = Outcome::failed("The engine did not confirm it stopped within 45 seconds; underlying work may still be running.".to_owned());
+                    ending = match ending {
+                        Ending::Stopped(_) => Ending::Stopped(Cleanup::Unconfirmed),
+                        Ending::Finished(_) => Ending::Finished(Outcome::failed(STOP_UNCONFIRMED)),
+                    };
                     break;
                 }
             }
         }
     }
-    // Preserve acknowledgments already published before shutdown/cancellation.
-    // The bounded drain also prevents a faulty detached producer delaying teardown.
     for _ in 0..256 {
         let Ok(event) = reports.try_recv() else { break };
         if let Err(error) = apply(hub, run, items, event).await {
-            outcome = Outcome::failed(format!(
+            ending = ending.failed_cleanup(format!(
                 "persist engine event: {}",
                 diagnostics::chain(&error)
             ));
@@ -619,7 +671,7 @@ async fn execute(
             Permissions::Auto
         };
     }
-    Ok(outcome)
+    Ok(ending)
 }
 
 /// Tool approvals of a live run: under Full access Forge gives them
@@ -1491,30 +1543,19 @@ async fn announce_stop(
     Ok(stopped)
 }
 
-const fn ending(outcome: &Outcome, shutting_down: bool) -> RunOutcome {
-    match outcome.run_outcome() {
-        RunOutcome::Cancelled if shutting_down => RunOutcome::Interrupted,
-        ended @ (RunOutcome::Done
-        | RunOutcome::Cancelled
-        | RunOutcome::Failed
-        | RunOutcome::Interrupted
-        | RunOutcome::Refused) => ended,
-    }
-}
-
 async fn finish(
     hub: &Hub,
     run: &mut Run,
     items: &Work,
-    outcome: Outcome,
+    ending: Ending,
     ended: RunOutcome,
     attempted: Vec<ItemId>,
 ) -> Result<(), forge_store::SettleRunError> {
     let open = open_items(items);
-    if let Some(error) = outcome.error() {
+    if let Some(error) = ending.error() {
         tracing::warn!(thread = %run.thread_id, run = %run.id, "run ended {ended:?}: {error}");
     }
-    let note = match outcome.error() {
+    let note = match ending.error() {
         Some(error) if !items.errored => Some(new_item(
             ItemId::new(),
             &run.thread_id,
@@ -1530,15 +1571,14 @@ async fn finish(
         )),
         Some(_) | None => None,
     };
-    let park = match outcome.failure() {
-        Some(_) => crate::park::plan(hub, run, &outcome).await,
-        None => None,
+    let park = match &ending {
+        Ending::Finished(outcome @ Outcome::Failed(_)) => {
+            crate::park::plan(hub, run, outcome).await
+        }
+        Ending::Finished(Outcome::Done | Outcome::Cancelled | Outcome::Refused)
+        | Ending::Stopped(_) => None,
     };
-    run.finish(
-        ended,
-        outcome.error().map(str::to_owned),
-        artisan_api::now(),
-    );
+    run.finish(ended, ending.error().map(str::to_owned), artisan_api::now());
     let settlement = forge_store::Settlement {
         run: run.clone(),
         open,
