@@ -1609,7 +1609,7 @@ impl MarkdownPresenter {
                                         entries: vec![
                                             crate::ui::rich::actions::CopyEntry::primary(
                                                 "Copy Image Path",
-                                                source.raw.clone(),
+                                                source.raw().to_owned(),
                                             ),
                                         ],
                                     },

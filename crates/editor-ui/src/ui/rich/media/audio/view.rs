@@ -193,7 +193,7 @@ fn row() -> ui::Box {
     )
 }
 fn track_path(source: &MediaSource, fetcher: Option<&MediaFetcher>, id: &str) -> Option<PathBuf> {
-    match &source.parsed {
+    match source.parsed() {
         Parsed::Data(payload) => {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             payload.bytes.as_ref().hash(&mut hasher);
@@ -246,7 +246,7 @@ impl AudioBlock {
                 let _ = sender.send(());
             });
             let name = track.shown_name();
-            let result = match &track.src.parsed {
+            let result = match track.src.parsed() {
                 Parsed::Url(_) => Err("Only local audio files play here".to_owned()),
                 Parsed::Invalid => Err(format!("Couldn't load {}", track.src.trim())),
                 Parsed::File { .. } if fetcher.is_none() => {

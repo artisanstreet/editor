@@ -1,10 +1,10 @@
 use super::{Format, Model, Up, parse};
-use editor_core::{delivery::Delivery, media_http, runtime};
 use crate::ui::media::{
     resource_cache::{Load, LoadTicket, ResourceCache, ResourceLoader},
     source::{self, MediaFailure, MediaFetcher, MediaLoadError, MediaSource, Owned, Parsed},
 };
 use aqua_core::gpui_mesh::{GpuiMesh, GpuiMeshVertex};
+use editor_core::{delivery::Delivery, media_http, runtime};
 use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, rc::Rc, sync::Arc};
 use tokio::task::AbortHandle;
 
@@ -145,7 +145,7 @@ impl ModelAssets {
         wake: aqua::mailbox::Wake,
     ) -> Option<Result<Arc<LoadedModel>, String>> {
         self.discard_stale();
-        match &source.parsed {
+        match source.parsed() {
             Parsed::Url(_) => return Some(Err("only model files on disk load here".to_owned())),
             Parsed::Invalid => return Some(Err("the path is not valid".to_owned())),
             Parsed::File { .. } if fetcher.is_none() => {
@@ -153,13 +153,13 @@ impl ModelAssets {
             }
             _ => {}
         }
-        let immutable = matches!(source.parsed, Parsed::Data(_));
+        let immutable = matches!(source.parsed(), Parsed::Data(_));
         let owner = fetcher.map_or_else(|| part.to_owned(), |f| f.asset_owner(part, immutable));
         let key = Owned::new(
             owner,
             Request {
-                source: source.parsed.clone(),
-                scope: match (&source.parsed, fetcher) {
+                source: source.parsed().clone(),
+                scope: match (source.parsed(), fetcher) {
                     (Parsed::File { .. }, Some(fetcher)) => Some(fetcher.scope().to_owned()),
                     _ => None,
                 },
@@ -170,9 +170,9 @@ impl ModelAssets {
         );
         let cache = fetcher.map_or(&self.fallback, MediaFetcher::resources);
         let membership = fetcher.map_or_else(|| Arc::<[u64]>::from([]), |f| Arc::clone(f.owner()));
-        let source_bytes = match &source.parsed {
+        let source_bytes = match source.parsed() {
             Parsed::Data(data) => data.bytes.len(),
-            _ => source.raw.len(),
+            _ => source.raw().len(),
         } + key.owner.len();
         match cache.load::<Loader>(&membership, &key, source_bytes, waiter, wake) {
             Load::Ready(result) => Some(result),

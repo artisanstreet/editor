@@ -121,11 +121,16 @@ fn fetcher_clones_share_thread_cache_and_preserve_semantic_identity() {
     assert!(first.provider() == other.provider());
     assert!(first.provider() != new_thread.provider());
 
-    let Parsed::Data(left) = MediaSource::from("data:text/plain;base64,YQ==".to_owned()).parsed
+    let Parsed::Data(left) = MediaSource::from("data:text/plain;base64,YQ==".to_owned())
+        .parsed()
+        .clone()
     else {
         panic!()
     };
-    let Parsed::Data(right) = MediaSource::from("data:text/plain,a".to_owned()).parsed else {
+    let Parsed::Data(right) = MediaSource::from("data:text/plain,a".to_owned())
+        .parsed()
+        .clone()
+    else {
         panic!()
     };
     assert_eq!(

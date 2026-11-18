@@ -176,8 +176,8 @@ impl ImageState {
                     .alt
                     .as_deref()
                     .filter(|alt| !alt.trim().is_empty())
-                    .unwrap_or(&picture.src.raw);
-                let path = picture.src.raw.clone();
+                    .unwrap_or_else(|| picture.src.raw());
+                let path = picture.src.raw().to_owned();
                 let mut frame = Surface::Media(Framing::Frame)
                     .build(
                         &theme,

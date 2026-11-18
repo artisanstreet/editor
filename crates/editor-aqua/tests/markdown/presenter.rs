@@ -48,7 +48,7 @@ fn completed_image_invalidates_retained_loading_row() {
             &MarkdownEngine::new().unwrap(),
             &format!(
                 "```artisan-image\n{}\n```",
-                serde_json::json!({"src": source.raw, "width": 2, "height": 1})
+                serde_json::json!({"src": source.raw(), "width": 2, "height": 1})
             ),
         )
         .unwrap();
@@ -605,9 +605,7 @@ fn streaming_rich_fence_renders_its_placeholder_and_invalid_one_keeps_its_code()
 fn leaf_proofs_survive_appends_but_not_edits_to_their_own_leaf() {
     let engine = MarkdownEngine::new().unwrap();
     let mut presenter = MarkdownPresenter::default();
-    presenter
-        .prepare(&engine, "alpha\n\nbeta\n\ngam")
-        .unwrap();
+    presenter.prepare(&engine, "alpha\n\nbeta\n\ngam").unwrap();
     let first = presenter.projected_leaf_info(0).unwrap();
     let second = presenter.projected_leaf_info(1).unwrap();
     let third = presenter.projected_leaf_info(2).unwrap();

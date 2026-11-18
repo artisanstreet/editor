@@ -1,5 +1,4 @@
 use super::{ModelBlock, Shading};
-use editor_core::{delivery::Delivery, runtime};
 use crate::ui::media::{
     model::{
         Camera, Look,
@@ -18,6 +17,7 @@ use aqua_ui::{
     input::{CaptureRequest, EventPhase, FocusRequest, InputKind, InputResponse, RoutedInput},
     style::{Length, Style},
 };
+use editor_core::{delivery::Delivery, runtime};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -150,11 +150,8 @@ impl ModelState {
             }
             entry.rendering = None;
             if let Some(frame) = completed.frame
-                && let Ok(decoded) = aqua::images::DecodedImage::from_rgba(
-                    frame.width,
-                    frame.height,
-                    frame.pixels,
-                )
+                && let Ok(decoded) =
+                    aqua::images::DecodedImage::from_rgba(frame.width, frame.height, frame.pixels)
             {
                 if let Ok(image) = images.insert(decoded) {
                     entry.shown = Some((image, completed.key));
@@ -482,7 +479,7 @@ impl ModelBlock {
         let down_id = id.to_owned();
         let down_invalidate = services.invalidate.clone();
         let copy = services.copy.clone();
-        let source = self.src.raw.clone();
+        let source = self.src.raw().to_owned();
         let move_state = state.clone();
         let move_id = id.to_owned();
         let move_invalidate = services.invalidate.clone();

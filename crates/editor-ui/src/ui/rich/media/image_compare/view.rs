@@ -169,8 +169,8 @@ impl CompareState {
         scope_changed: bool,
     ) -> bool {
         if !scope_changed
-            && self.before.raw == model.before.src.raw
-            && self.after.raw == model.after.src.raw
+            && self.before.raw() == model.before.src.raw()
+            && self.after.raw() == model.after.src.raw()
         {
             return false;
         }
@@ -305,7 +305,7 @@ impl CompareState {
                     image_layer(
                         &self.images[0],
                         &theme,
-                        &self.before.raw,
+                        self.before.raw(),
                         half,
                         half / aspect,
                     ),
@@ -319,7 +319,7 @@ impl CompareState {
                     image_layer(
                         &self.images[1],
                         &theme,
-                        &self.after.raw,
+                        self.after.raw(),
                         half,
                         half / aspect,
                     ),
@@ -336,7 +336,7 @@ impl CompareState {
                     layers.push(image_layer(
                         &self.images[1],
                         &theme,
-                        &self.after.raw,
+                        self.after.raw(),
                         width,
                         height,
                     ));
@@ -349,7 +349,7 @@ impl CompareState {
                             .child(image_layer(
                                 &self.images[0],
                                 &theme,
-                                &self.before.raw,
+                                self.before.raw(),
                                 width,
                                 height,
                             ))
@@ -361,9 +361,9 @@ impl CompareState {
                 }
                 Mode::Toggle => {
                     let (image, source, label, left) = if self.showing_after {
-                        (&self.images[1], &self.after.raw, after_label, false)
+                        (&self.images[1], self.after.raw(), after_label, false)
                     } else {
-                        (&self.images[0], &self.before.raw, before_label, true)
+                        (&self.images[0], self.before.raw(), before_label, true)
                     };
                     layers.push(image_layer(image, &theme, source, width, height));
                     layers.push(corner(&theme, label, left, false, width));
@@ -372,7 +372,7 @@ impl CompareState {
                     layers.push(image_layer(
                         &self.images[0],
                         &theme,
-                        &self.before.raw,
+                        self.before.raw(),
                         width,
                         height,
                     ));
@@ -385,7 +385,7 @@ impl CompareState {
                             .child(image_layer(
                                 &self.images[1],
                                 &theme,
-                                &self.after.raw,
+                                self.after.raw(),
                                 width,
                                 height,
                             ))

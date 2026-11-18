@@ -73,20 +73,20 @@ impl AudioAssets {
         wake: aqua::mailbox::Wake,
     ) -> Option<Option<Arc<[u8]>>> {
         self.discard_stale();
-        if matches!(source.parsed, Parsed::Invalid | Parsed::Url(_)) {
+        if matches!(source.parsed(), Parsed::Invalid | Parsed::Url(_)) {
             return Some(None);
         }
-        if matches!(source.parsed, Parsed::File { .. }) && fetcher.is_none() {
+        if matches!(source.parsed(), Parsed::File { .. }) && fetcher.is_none() {
             return Some(None);
         }
-        let immutable = matches!(source.parsed, Parsed::Data(_));
+        let immutable = matches!(source.parsed(), Parsed::Data(_));
         let owner = fetcher.map_or_else(|| part.to_owned(), |f| f.asset_owner(part, immutable));
-        let key = Owned::new(owner, source.parsed.clone());
+        let key = Owned::new(owner, source.parsed().clone());
         let cache = fetcher.map_or(&self.fallback, MediaFetcher::resources);
         let membership = fetcher.map_or_else(|| Arc::<[u64]>::from([]), |f| Arc::clone(f.owner()));
-        let source_bytes = match &source.parsed {
+        let source_bytes = match source.parsed() {
             Parsed::Data(payload) => payload.bytes.len(),
-            _ => source.raw.len(),
+            _ => source.raw().len(),
         };
         match cache.load::<Loader>(&membership, &key, source_bytes, waiter, wake) {
             Load::Ready(result) => Some(result),

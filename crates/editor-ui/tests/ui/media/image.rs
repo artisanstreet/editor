@@ -94,7 +94,7 @@ fn same_source_shares_pending_work_across_owners_and_prunes_only_last_owner() {
 fn discarded_generation_cannot_replace_new_cached_result() {
     let fetcher = fetcher().owned_by(&[1], 1);
     let source = image_source();
-    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed);
+    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed().clone());
     let wake: aqua::mailbox::Wake = Arc::new(|| {});
     let Load::Start(old) =
         fetcher
@@ -133,7 +133,7 @@ fn dropping_last_loader_cancels_its_pending_entry() {
             .is_none()
     );
     drop(loader);
-    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed);
+    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed().clone());
     assert!(matches!(
         fetcher
             .resources()
@@ -160,7 +160,7 @@ fn stale_job_cleanup_does_not_cancel_replacement_generation() {
             .is_none()
     );
     old.clear();
-    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed);
+    let key = Owned::new(fetcher.asset_owner("image", true), source.parsed().clone());
     assert!(matches!(
         fetcher
             .resources()

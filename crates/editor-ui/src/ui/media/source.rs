@@ -94,7 +94,7 @@ impl MediaFetcher {
     }
 
     pub fn waits_for_consent(&self, source: &MediaSource) -> bool {
-        matches!(source.parsed, Parsed::Url(_))
+        matches!(source.parsed(), Parsed::Url(_))
             && !self
                 .item
                 .as_deref()
@@ -252,8 +252,8 @@ impl Hash for Payload {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(from = "String")]
 pub struct MediaSource {
-    pub raw: String,
-    pub parsed: Parsed,
+    raw: String,
+    parsed: Parsed,
 }
 
 impl From<String> for MediaSource {
@@ -274,6 +274,16 @@ impl std::ops::Deref for MediaSource {
 }
 
 impl MediaSource {
+    #[must_use]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    #[must_use]
+    pub const fn parsed(&self) -> &Parsed {
+        &self.parsed
+    }
+
     pub(crate) fn resident_bytes(&self) -> usize {
         self.raw.capacity()
             + match &self.parsed {
@@ -370,7 +380,7 @@ pub async fn load_image_bytes(
         .acquire_owned()
         .await
         .map_err(|_| MediaLoadError::Invalid)?;
-    let bytes = match &source.parsed {
+    let bytes = match &source.parsed() {
         Parsed::Url(url) => {
             let response = http
                 .get(url, true)

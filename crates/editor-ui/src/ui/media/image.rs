@@ -24,8 +24,11 @@ impl ResourceLoader for ImageLoader {
 }
 
 pub(crate) fn cache_key(fetcher: &MediaFetcher, source: &MediaSource, part: &str) -> Owned<Parsed> {
-    let immutable = matches!(source.parsed, Parsed::Data(_));
-    Owned::new(fetcher.asset_owner(part, immutable), source.parsed.clone())
+    let immutable = matches!(source.parsed(), Parsed::Data(_));
+    Owned::new(
+        fetcher.asset_owner(part, immutable),
+        source.parsed().clone(),
+    )
 }
 
 struct Completion {
@@ -104,9 +107,9 @@ impl Images {
             return Some(Err(ImageError::NeedsConsent));
         }
         let key = cache_key(fetcher, source, part);
-        let source_bytes = match &source.parsed {
+        let source_bytes = match source.parsed() {
             Parsed::Data(payload) => payload.bytes.len(),
-            _ => source.raw.len(),
+            _ => source.raw().len(),
         };
         match fetcher.resources().load::<ImageLoader>(
             fetcher.owner(),
