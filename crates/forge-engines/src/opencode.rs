@@ -1,3 +1,6 @@
+#[cfg(test)]
+#[path = "../tests/opencode/agents.rs"]
+mod agent_tests;
 #[cfg(all(test, unix))]
 #[path = "../tests/opencode/cancellation.rs"]
 mod cancellation_tests;
@@ -48,11 +51,17 @@ pub enum ServerError {
     Password(#[source] getrandom::Error),
     #[error("encode Forge's OpenCode agents")]
     EncodeAgents(#[source] serde_json::Error),
+    #[error("read Forge's OpenCode agents at {}", path.display())]
+    ReadAgents {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("write Forge's OpenCode agents to {}", path.display())]
     WriteAgents {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: artisan_paths::private::PrivateFileError,
     },
     #[error("start OpenCode")]
     Spawn(#[source] SpawnError),
@@ -663,8 +672,6 @@ fn permission(permissions: Permissions, readable: &[PathBuf]) -> Value {
     }
 }
 
-/// Writes Forge's agents into a directory of its own in the engine home.
-/// OpenCode installs its plugin package there on first use, so it persists.
 fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<PathBuf, ServerError> {
     let dir = home.join("artisan/opencode");
     let agents: serde_json::Map<String, Value> = [Permissions::Auto, Permissions::Full]
@@ -694,11 +701,10 @@ fn write_agents(home: &Path, readable: &[PathBuf]) -> Result<PathBuf, ServerErro
     let current = match std::fs::read(&path) {
         Ok(current) => Some(current),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => return Err(ServerError::WriteAgents { path, source }),
+        Err(source) => return Err(ServerError::ReadAgents { path, source }),
     };
     if current.as_deref() != Some(bytes.as_slice()) {
-        std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(&path, bytes))
+        artisan_paths::private::write_file(&path, &bytes)
             .map_err(|source| ServerError::WriteAgents { path, source })?;
     }
     Ok(dir)
