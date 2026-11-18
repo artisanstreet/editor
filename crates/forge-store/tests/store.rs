@@ -738,6 +738,26 @@ async fn threads_are_refused_under_removed_projects_and_with_impossible_lineage(
 }
 
 #[tokio::test]
+async fn a_run_stays_in_the_thread_it_started_in() {
+    let dir = TempDir::new();
+    let (store, thread) = test_store(&dir.0).await;
+    let other = add_thread(&store).await;
+    let started = store
+        .upsert_run(run(&thread, RunStatus::Running))
+        .await
+        .unwrap();
+    let mut moved = started.clone();
+    moved.thread_id = other.clone();
+    moved.status = RunStatus::Done;
+
+    let error = store.upsert_run(moved).await.unwrap_err();
+
+    assert!(error.downcast_ref::<forge_store::RunMoved>().is_some());
+    assert_eq!(store.latest_run(&thread).await.unwrap(), Some(started));
+    assert_eq!(store.latest_run(&other).await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn unchanged_values_publish_nothing_and_read_markers_never_regress() {
     let dir = TempDir::new();
     let (store, thread) = test_store(&dir.0).await;

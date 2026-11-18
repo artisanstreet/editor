@@ -3,7 +3,8 @@
 
 use crate::read::{self, tag, to_body};
 use crate::{
-    CONTINUE_AFTER_RESTART_KEY, CreateThreadError, MAX_RESTART_CONTINUATIONS, project_name,
+    CONTINUE_AFTER_RESTART_KEY, CreateThreadError, MAX_RESTART_CONTINUATIONS, RunMoved,
+    project_name,
 };
 use anyhow::{Context, Result};
 use artisan_api::{
@@ -528,6 +529,14 @@ impl Tx<'_> {
 
     pub(crate) fn save_run(&mut self, mut run: Run) -> Result<Run> {
         if let Some(old) = read::run(self, &run.id)? {
+            if old.thread_id != run.thread_id {
+                return Err(RunMoved {
+                    run: run.id,
+                    stored: old.thread_id,
+                    requested: run.thread_id,
+                }
+                .into());
+            }
             run.seq = old.seq;
             if run == old {
                 return Ok(old);

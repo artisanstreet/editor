@@ -145,6 +145,14 @@ pub enum CreateThreadError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[error("save run {run}: it belongs to thread {stored}, not {requested}")]
+pub struct RunMoved {
+    pub run: RunId,
+    pub stored: ThreadId,
+    pub requested: ThreadId,
+}
+
+#[derive(Debug, thiserror::Error)]
 #[error("item {0} not found")]
 pub struct ItemNotFound(pub ItemId);
 
