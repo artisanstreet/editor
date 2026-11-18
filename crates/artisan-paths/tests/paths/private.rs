@@ -1,12 +1,10 @@
 use super::*;
 
-#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-#[cfg(unix)]
 #[test]
 fn credentials_written_under_a_permissive_umask_stay_private() {
     let root = tempfile::tempdir().unwrap();
@@ -18,7 +16,6 @@ fn credentials_written_under_a_permissive_umask_stay_private() {
     assert_eq!(std::fs::read(&file).unwrap(), b"{\"token\":\"t\"}");
 }
 
-#[cfg(unix)]
 #[test]
 fn rewriting_a_world_readable_file_makes_it_private() {
     use std::os::unix::fs::PermissionsExt as _;
