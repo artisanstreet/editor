@@ -1,8 +1,3 @@
-//! How engines reach Forge's own MCP servers (the Artisan MCP, and computer
-//! use where this machine has it): Forge's loopback gateway, and one
-//! credential per thread for as long as this Forge runs. The credential is
-//! the caller: a request carrying it acts for that thread, on every server.
-
 use crate::Hub;
 use crate::Refused;
 use crate::error::ErrorClass;
@@ -12,10 +7,8 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// Whether engines get computer use; default off.
 pub const COMPUTER_USE_KEY: &str = "computer_use";
 
-/// How long an Editor gets to act on a call; pairing a host takes longest.
 const EDITOR_ANSWERS_WITHIN: Duration = Duration::from_secs(90);
 
 const NO_EDITOR: &str =
@@ -72,9 +65,7 @@ impl Drop for CallGuard {
 
 #[derive(Default)]
 pub(crate) struct Gateway {
-    /// `http://127.0.0.1:<port>/mcp/`, once the gateway listens.
     base: Option<String>,
-    /// The gateway serves computer use (this machine has a display for it).
     computer: bool,
     tokens: HashMap<ThreadId, Secret>,
     threads: HashMap<String, ThreadId>,
@@ -82,8 +73,6 @@ pub(crate) struct Gateway {
 }
 
 impl Hub {
-    /// Where the gateway serves its servers (`<base><server>/<credential>`),
-    /// and whether computer use is one of them; set once it listens.
     pub fn set_gateway(&self, base: String, computer: bool) {
         let mut gateway = self.gateway_lock();
         gateway.base = Some(base);
@@ -117,10 +106,6 @@ impl Hub {
         }
     }
 
-    /// Forge's own servers for a thread's engine, as (name, address with
-    /// the thread's credential): the Artisan MCP, and computer use when the
-    /// gateway serves it and the user turned it on. Empty until the gateway
-    /// listens.
     pub(crate) async fn gateway_servers(&self, thread: &ThreadId) -> Vec<(String, String)> {
         let computer = self.gateway_lock().computer && self.computer_use_on().await;
         let Some((base, token)) = self.gateway_credential(thread) else {
@@ -214,7 +199,6 @@ impl Hub {
         }
     }
 
-    /// An Editor's answer to a call; `false` when nothing waits for it.
     pub fn answer_editor_call(&self, id: &str, reply: EditorReply) -> bool {
         let pending = self.gateway_lock().calls.remove(id);
         pending.is_some_and(|pending| pending.answer.send(reply).is_ok())

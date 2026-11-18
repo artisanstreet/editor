@@ -1,47 +1,44 @@
-//! Scenarios a client would notice: messages reach the engine, steers are
-//! never lost, answers reach the right run, cancel settles everything.
-
 use super::*;
 
-#[path = "../tests/run/activity.rs"]
+#[path = "../run/activity.rs"]
 mod activity;
-#[path = "../tests/agents/report.rs"]
+#[path = "../agents/report.rs"]
 mod agent_report;
-#[path = "../tests/agents/spawn.rs"]
+#[path = "../agents/spawn.rs"]
 mod agent_spawn;
-#[path = "../tests/agents/status.rs"]
+#[path = "../agents/status.rs"]
 mod agent_status;
-#[path = "../tests/run/cancellation.rs"]
+#[path = "../run/cancellation.rs"]
 mod cancellation;
-#[path = "../tests/coordination/notifications.rs"]
+#[path = "../coordination/notifications.rs"]
 mod coordination;
-#[path = "../tests/disk/guard.rs"]
+#[path = "../disk/guard.rs"]
 mod disk_guard;
-#[path = "../tests/run/durability.rs"]
+#[path = "../run/durability.rs"]
 mod durability;
-#[path = "../tests/extensions/skills.rs"]
+#[path = "../extensions/skills.rs"]
 mod extensions_tests;
-#[path = "../tests/gateway/calls.rs"]
+#[path = "../gateway/calls.rs"]
 mod gateway_calls;
-#[path = "../tests/live/snapshot.rs"]
+#[path = "../live/snapshot.rs"]
 mod live_snapshot;
-#[path = "../tests/run/mcp_auth.rs"]
+#[path = "../run/mcp_auth.rs"]
 mod mcp_auth_tests;
-#[path = "../tests/run/mcp_reach.rs"]
+#[path = "../run/mcp_reach.rs"]
 mod mcp_reach_tests;
-#[path = "../tests/resources/paths.rs"]
+#[path = "../resources/paths.rs"]
 mod resource_paths;
-#[path = "../tests/resources/snapshot.rs"]
+#[path = "../resources/snapshot.rs"]
 mod resource_snapshots;
-#[path = "../tests/run/resume.rs"]
+#[path = "../run/resume.rs"]
 mod resume;
-#[path = "../tests/retention/removal.rs"]
+#[path = "../retention/removal.rs"]
 mod retention_tests;
-#[path = "../tests/runtime/registry.rs"]
+#[path = "../runtime/registry.rs"]
 mod runtime_registry;
-#[path = "../tests/sandbox/coverage.rs"]
+#[path = "../sandbox/coverage.rs"]
 mod sandbox_coverage;
-#[path = "../tests/scratch/folders.rs"]
+#[path = "../scratch/folders.rs"]
 mod scratch_folders;
 use artisan_api::{
     ApprovalRequest, CreateProject, CreateThread, Decision, EngineConfig, ItemsQuery, Permissions,
@@ -77,7 +74,6 @@ impl Harness for Scripted {
                 id: turn.input.id.clone(),
             })
             .await;
-            // Real engines name their session; the next run resumes it.
             io.emit(EngineEvent::Session {
                 id: "session".to_owned(),
             })
@@ -87,8 +83,6 @@ impl Harness for Scripted {
     }
 }
 
-/// A scripted engine that reports only what its script says, delivery
-/// included.
 struct Unscripted(Script);
 
 impl Harness for Unscripted {
@@ -267,7 +261,6 @@ fn reply(key: &str, text: &str) -> EngineEvent {
 }
 
 impl Fixture {
-    /// The item the engine knows as `key`.
     async fn by_native(&self, key: &str) -> Item {
         self.hub
             .store()
@@ -351,7 +344,6 @@ impl Fixture {
     }
 }
 
-/// User messages the thread shows as sent but not yet taken by an engine.
 async fn undelivered(store: &Store, thread: &ThreadId) -> Vec<Item> {
     let query = ItemsQuery {
         before: None,
@@ -482,8 +474,6 @@ async fn a_message_whose_sender_hangs_up_mid_send_is_still_delivered() {
     );
 }
 
-/// Keeps a claude.ai session in the fixture's Claude home, as signing in
-/// does.
 fn sign_in_to_claude_ai(fixture: &Fixture) {
     let session = forge_engines::claudeai::Session::new(
         artisan_api::ClaudeAiSession {
@@ -517,8 +507,6 @@ fn transport_of(config: &EngineConfig) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
-/// The transport Claude's turns run on belongs to the account, not the
-/// thread: a Forge setting names it, and every Claude thread follows it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_claude_transport_setting_reaches_every_claude_turn() {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -548,8 +536,6 @@ async fn the_claude_transport_setting_reaches_every_claude_turn() {
     );
 }
 
-/// With the mode on and nothing signed in, the turn runs on Claude Code
-/// and says why, rather than failing or switching silently.
 #[tokio::test(flavor = "multi_thread")]
 async fn enhanced_claude_without_a_session_runs_on_claude_code_and_says_so() {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -576,9 +562,6 @@ async fn enhanced_claude_without_a_session_runs_on_claude_code_and_says_so() {
     );
 }
 
-/// Turning the mode on moves a Claude Code thread to claude.ai: its
-/// session can't carry on there, so the next turn starts a fresh one from
-/// the thread's history.
 #[tokio::test(flavor = "multi_thread")]
 async fn turning_enhanced_claude_on_moves_a_thread_to_claude_ai() {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -691,13 +674,10 @@ async fn a_transport_switch_during_preparation_never_mixes_session_and_transport
     );
 }
 
-/// A claude.ai conversation claude.ai deleted is not resumed: the engine
-/// clears the session and the message runs again on a fresh one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cleared_session_runs_the_message_again_on_a_fresh_one() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let asked = Arc::clone(&seen);
-    // This engine says itself what it delivered, as the real ones do.
     let harness: Arc<dyn Harness> = Arc::new(Unscripted(Arc::new(move |turn, io| {
         let asked = Arc::clone(&asked);
         Box::pin(async move {
@@ -716,7 +696,6 @@ async fn a_cleared_session_runs_the_message_again_on_a_fresh_one() {
                 })
                 .await;
             } else if turn.session_id.is_some() {
-                // The conversation is gone: the message is not delivered.
                 io.emit(EngineEvent::SessionGone).await;
             } else {
                 io.emit(EngineEvent::InputAccepted {
@@ -750,7 +729,6 @@ async fn a_cleared_session_runs_the_message_again_on_a_fresh_one() {
     );
 }
 
-/// Without the setting, a Claude turn runs the official way.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_turn_without_the_transport_setting_runs_claude_code() {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -959,7 +937,6 @@ async fn the_thinking_line_ends_when_the_reply_starts() {
                 append: true,
             })
             .await;
-            // Stays live, mid-reply, until the test has looked.
             let Some(Input::Steer(steer)) = io.inbox.recv().await else {
                 return Outcome::failed("no steer");
             };
@@ -1008,7 +985,6 @@ async fn a_message_the_ending_run_never_took_starts_the_next_run() {
     let fixture = fixture(Arc::new(|turn, _io| {
         Box::pin(async move {
             if turn.input.text == "first" {
-                // Busy until the second message is stored, never reads the inbox.
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
             Outcome::done()
@@ -1020,7 +996,6 @@ async fn a_message_the_ending_run_never_took_starts_the_next_run() {
         .send_message(&fixture.thread_id, message("first"))
         .await
         .unwrap();
-    // The first run has taken "first" and is busy.
     fixture
         .wait_for(|items| texts(items).contains(&("first".to_owned(), Status::Done)))
         .await;
@@ -1128,9 +1103,6 @@ async fn an_approval_answer_reaches_the_run() {
     assert_eq!(tool.status, Status::Declined);
 }
 
-/// Switching a thread to Full mid-run tells the engine, approves what
-/// already waits, and approves what it asks afterwards: nothing waits on
-/// the user once they chose Full.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn switching_to_full_access_mid_run_approves_what_waits() {
@@ -1284,7 +1256,6 @@ async fn cancel_ends_the_run_and_settles_open_items() {
     assert_eq!(items[1].status, Status::Cancelled);
 }
 
-/// A skill folder in `dir`.
 fn write_skill(dir: &std::path::Path, name: &str, description: &str) {
     std::fs::create_dir_all(dir.join(name)).unwrap();
     std::fs::write(
@@ -1294,7 +1265,6 @@ fn write_skill(dir: &std::path::Path, name: &str, description: &str) {
     .unwrap();
 }
 
-/// What Claude's skills folder holds: `name -> target` for links.
 fn claude_skills(hub: &Hub) -> Vec<String> {
     let dir = hub.engines().home(EngineId::Claude).join(".claude/skills");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -1588,9 +1558,6 @@ async fn a_prompt_edited_outside_artisan_is_reported_and_left_alone() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "My own rules.");
 }
 
-/// An agent cut off with its run and resumed in the next process reports
-/// there: the report lands on the agent the user already sees, with the
-/// task it was given, not on a second agent.
 #[tokio::test(flavor = "multi_thread")]
 async fn work_whose_parent_never_arrives_stays_in_the_transcript() {
     let fixture = fixture(Arc::new(|_turn, io| {
@@ -1688,10 +1655,6 @@ async fn a_resumed_agents_report_reaches_its_first_item() {
     );
 }
 
-/// A subagent stopped with its run and resumed in the next one (Claude's
-/// `SendMessage`) names its first run's agent as the parent of its new
-/// work: that work nests under the agent, which reads as working again
-/// and settles with the run that resumed it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_resumed_subagent_keeps_its_work_under_it() {
     let fixture = fixture(Arc::new(|turn, io| {
@@ -2085,8 +2048,6 @@ async fn controller_shutdown_preserves_undelivered_input() {
         .await
         .unwrap();
     fixture.hub.shutdown();
-    // The durable queue intentionally survives shutdown, so waiting for an
-    // empty pending queue would contradict the behavior this test verifies.
     tokio::time::timeout(Duration::from_secs(10), fixture.hub.inner.tasks.wait())
         .await
         .expect("owned run exits on controller shutdown");
@@ -2098,7 +2059,6 @@ async fn controller_shutdown_preserves_undelivered_input() {
         .await
         .unwrap()
         .unwrap();
-    // Unfinished, not cancelled by the user: it carries on after the restart.
     assert_eq!(run.status(), RunStatus::Interrupted);
     assert_eq!(
         undelivered(fixture.hub.store(), &fixture.thread_id)
@@ -2823,9 +2783,6 @@ async fn missing_historical_image_fails_a_created_run_and_its_input_without_retr
     fixture.hub.shutdown();
 }
 
-/// A message to an agent, or stopping it, names the agent's item, whatever
-/// the engine calls the agent, so it shows in that agent's view; one to
-/// another session names none.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn a_message_to_an_agent_names_the_agents_item() {
@@ -2915,7 +2872,6 @@ async fn a_message_to_an_agent_names_the_agents_item() {
     let sent = fixture.by_native("to-agent").await;
     assert_eq!(target(&sent), Some(agent.id.clone()));
     assert_eq!(target(&fixture.by_native("to-session").await), None);
-    // Stopping it names it too; the background shell beside it is no agent.
     let stop = fixture.by_native("stop").await;
     let ItemKind::Tool {
         tool: ToolKind::Agents { targets, .. },
@@ -2942,9 +2898,6 @@ async fn a_message_to_an_agent_names_the_agents_item() {
     assert!(view.items.iter().any(|item| item.id == sent.id));
 }
 
-/// An approval rides on the item it gates: the answer reaches the engine
-/// under that item's own id, and decisions the request didn't offer or
-/// answers of the wrong kind never reach it.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_approval_is_answered_on_the_item_it_gates() {
     let fixture = fixture(Arc::new(|_turn, mut io| {
@@ -3791,9 +3744,6 @@ async fn large_saved_question_validates_selected_identity_without_expanding_opti
         .unwrap();
 }
 
-/// `/ultracode` holds for the turn it starts and no longer: the message is
-/// stored as typed, Claude reads the keyword in that prompt only, and the
-/// next message runs without it.
 #[tokio::test(flavor = "multi_thread")]
 async fn ultracode_is_on_for_the_turn_it_starts_only() {
     let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -3828,8 +3778,6 @@ async fn ultracode_is_on_for_the_turn_it_starts_only() {
     );
 }
 
-/// A command with nothing to do fails the send: nothing is stored and no
-/// engine starts.
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_slash_commands_never_persist_or_start_the_engine() {
     let fixture = fixture(Arc::new(|_, _| {
@@ -3847,8 +3795,6 @@ async fn invalid_slash_commands_never_persist_or_start_the_engine() {
     assert!(fixture.settled().await.is_empty());
 }
 
-/// A harness whose runs report a session and whose side queries answer
-/// from a script, recording each side question.
 struct Asking {
     run: Script,
     side: Arc<dyn Fn(&Turn) -> String + Send + Sync>,
@@ -3901,9 +3847,6 @@ async fn asking(
     (fixture, asked)
 }
 
-/// The guess at the next message is asked of the thread's own session
-/// after the run ended, is replayed to a client that connects later, and is
-/// withdrawn when the thread runs again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_suggested_next_message_lasts_until_the_thread_runs_again() {
     let (fixture, _) = asking(
@@ -3983,9 +3926,6 @@ fn tool(key: &str, tool: ToolKind) -> EngineEvent {
     }
 }
 
-/// A turn that only looked around gets a suggestion and no note; a turn
-/// that ran a migration and edited files is checked, and what the check
-/// found shows in the thread.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "one scenario walked step by step")]
 async fn a_turn_that_changed_things_gets_a_you_should_know_note() {
@@ -4096,7 +4036,6 @@ async fn a_turn_that_changed_things_gets_a_you_should_know_note() {
     );
 }
 
-/// With titles, suggestions and notes off, nothing is asked on the side.
 #[tokio::test(flavor = "multi_thread")]
 async fn turned_off_side_queries_ask_nothing() {
     let (fixture, asked) = asking(
@@ -4130,7 +4069,6 @@ async fn turned_off_side_queries_ask_nothing() {
     );
 }
 
-/// Switches the fixture's thread to `engine` with its next message.
 fn message_on(engine: EngineId, text: &str) -> SendMessage {
     SendMessage {
         config: Some(EngineConfig::new(engine)),
@@ -4138,8 +4076,6 @@ fn message_on(engine: EngineId, text: &str) -> SendMessage {
     }
 }
 
-/// Runs that reply to each message once per entry of `replies`, recording
-/// every prompt.
 fn replying(replies: Vec<String>, prompts: Arc<Mutex<Vec<String>>>) -> Script {
     Arc::new(move |turn, io| {
         prompts.lock().unwrap().push(turn.input.text);
@@ -4153,8 +4089,6 @@ fn replying(replies: Vec<String>, prompts: Arc<Mutex<Vec<String>>>) -> Script {
     })
 }
 
-/// A thread moved to another engine continues the conversation: the new
-/// session's first prompt carries the earlier messages, then the new one.
 #[tokio::test(flavor = "multi_thread")]
 async fn switching_engines_hands_the_conversation_to_the_new_session() {
     let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -4199,7 +4133,6 @@ async fn switching_engines_hands_the_conversation_to_the_new_session() {
         handed.ends_with("</conversation-checkpoint>\n\nnow the lexer"),
         "{handed}"
     );
-    // Even a short handoff is summarized; the divider still names the switch.
     let switches: Vec<_> = fixture
         .items()
         .await
@@ -4220,8 +4153,6 @@ async fn switching_engines_hands_the_conversation_to_the_new_session() {
     assert_eq!(switch.to.engine, EngineId::Codex);
 }
 
-/// Older history than the new session's verbatim tail holds is summarized
-/// by the session the thread leaves, shown as a compaction while it is.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_conversation_is_summarized_by_the_session_it_leaves() {
     let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -4265,8 +4196,6 @@ async fn a_long_conversation_is_summarized_by_the_session_it_leaves() {
         handed.contains("<summary>\n## Objective\n- ship the parser\n</summary>"),
         "{handed}"
     );
-    // One oversized exchange stays in the summary, rather than an orphaned
-    // tail of assistant messages with no user request.
     assert!(handed.contains("<recent-context>\n\n</recent-context>"));
     let compactions: Vec<_> = fixture
         .items()
@@ -4289,7 +4218,6 @@ async fn a_long_conversation_is_summarized_by_the_session_it_leaves() {
     );
 }
 
-/// A failed summary does not silently lose context or deliver the pending input.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_switch_without_a_summary_fails_without_delivering_the_new_message() {
     let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -4339,9 +4267,6 @@ async fn a_switch_without_a_summary_fails_without_delivering_the_new_message() {
     ) && item.status != Status::Done));
 }
 
-/// A run that fails before its engine says anything shows why under the
-/// message, instead of leaving it unanswered; an engine that reported its
-/// own error isn't repeated.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_run_says_why_once() {
     let fixture = fixture(Arc::new(|turn, io| {
@@ -4474,12 +4399,8 @@ async fn a_thread_without_a_project_works_in_its_own_folder() {
     }
 }
 
-/// What each run's engine was asked: the input text and the session it
-/// resumed.
 type Asked = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
-/// The first run starts a background shell and waits to be stopped; every
-/// later run answers at once.
 fn stoppable(asked: &Asked) -> Script {
     let asked = Arc::clone(asked);
     Arc::new(move |turn, io| {
@@ -4529,7 +4450,6 @@ fn user_messages(items: &[Item]) -> usize {
 async fn a_stopped_turn_continues_without_a_message() {
     let asked = Asked::default();
     let fixture = fixture(stoppable(&asked)).await;
-    // Nothing has stopped yet.
     assert!(fixture.hub.continue_turn(&fixture.thread_id).await.is_err());
     fixture
         .hub
@@ -4566,10 +4486,8 @@ async fn a_stopped_turn_continues_without_a_message() {
     let (prompt, session) = &asked[1];
     assert_eq!(session.as_deref(), Some("session"));
     assert!(prompt.starts_with("Continue from where you left off."));
-    // The shell the stop ended is named, so the agent starts it again.
     assert!(prompt.contains("background shell: cargo watch -x test"));
 
-    // The user sees the turn go on, not a message they didn't send.
     let items = fixture.items().await;
     assert_eq!(user_messages(&items), 1);
     assert!(
@@ -4577,15 +4495,11 @@ async fn a_stopped_turn_continues_without_a_message() {
             .iter()
             .any(|(text, _)| text == "picked it back up")
     );
-    // Finished turns have nothing to continue.
     assert!(fixture.hub.continue_turn(&fixture.thread_id).await.is_err());
 }
 
-/// Stopped before the engine read the message, Continue sends the message,
-/// not a bare "continue" the engine can't make sense of.
 #[tokio::test(flavor = "multi_thread")]
 async fn continuing_a_turn_stopped_before_its_message_sends_the_message() {
-    // No `Scripted`: it acknowledges the input before the script runs.
     struct Unread(Script);
     impl Harness for Unread {
         fn run(&self, turn: Turn, io: RunIo) -> BoxFuture<'static, Outcome> {
@@ -4604,7 +4518,6 @@ async fn continuing_a_turn_stopped_before_its_message_sends_the_message() {
                     asked.len() == 1
                 };
                 if first {
-                    // Stopped before it read anything.
                     io.cancel.cancelled().await;
                     return Outcome::cancelled();
                 }
@@ -4676,7 +4589,6 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
     drop(hub);
     let data = dir.path().to_path_buf();
 
-    // The next Forge on the same data.
     let harness: Arc<dyn Harness> = Arc::new(Scripted(stoppable(&asked)));
     let store = Store::open(&data.join("forge")).unwrap();
     let hub = Hub::with_harness(
@@ -4709,8 +4621,6 @@ async fn a_turn_running_when_forge_stopped_carries_on_after_the_restart() {
     hub.shutdown();
 }
 
-/// An Artisan agent of the fixture's thread whose own thread's last run a
-/// restart interrupted, as a Forge starting up finds it.
 async fn interrupted_agent(fixture: &Fixture) -> (ItemId, ThreadId) {
     let store = fixture.hub.store();
     let parent = store.thread(&fixture.thread_id).await.unwrap().unwrap();
@@ -4809,8 +4719,6 @@ async fn an_agent_a_restart_interrupted_keeps_working_while_it_carries_on() {
     fixture.hub.shutdown();
 }
 
-/// Cancellation reports, and results racing with Stop, must not become
-/// fresh inputs that restart the parent the user just stopped.
 #[tokio::test(flavor = "multi_thread")]
 async fn stopping_a_thread_with_background_agents_does_not_restart_it() {
     let fixture = fixture(Arc::new(|turn, io| {
@@ -4859,7 +4767,6 @@ async fn stopping_a_thread_with_background_agents_does_not_restart_it() {
     })
     .await
     .expect("Stop settles both threads without restarting the parent");
-    // Also exercise reconciliation after the live cancellation path.
     fixture.hub.reconcile_agents().await;
     let items = fixture.items().await;
     assert!(
@@ -4934,8 +4841,6 @@ async fn a_successful_agent_result_arriving_after_stop_does_not_restart_its_pare
     fixture.hub.cancel(&fixture.thread_id).await.unwrap();
     fixture.settled().await;
 
-    // The child's successful outcome was persisted, but its report has
-    // not reached the parent yet when Stop finishes.
     let (_, child) = interrupted_agent(&fixture).await;
     let mut run = fixture
         .hub
@@ -4975,7 +4880,6 @@ async fn an_agent_a_restart_ended_reports_to_its_parent() {
     fixture.hub.reconcile_agents().await;
     let item = fixture.hub.store().item(&agent).await.unwrap().unwrap();
     assert!(item.status.is_terminal());
-    // The parent hears it failed instead of waiting on it forever.
     fixture
         .wait_for(|items| {
             items.iter().any(|item| {
@@ -4983,7 +4887,6 @@ async fn an_agent_a_restart_ended_reports_to_its_parent() {
             })
         })
         .await;
-    // The report reads as the agent's, so the turn navigator leaves it out.
     let items = fixture.items().await;
     let report = items
         .iter()
@@ -5000,7 +4903,6 @@ async fn an_agent_a_restart_ended_reports_to_its_parent() {
     fixture.hub.shutdown();
 }
 
-/// Another thread with `permissions`, in the fixture's project.
 async fn second_thread(fixture: &Fixture, permissions: Permissions) -> ThreadId {
     let store = fixture.hub.store();
     let first = store.thread(&fixture.thread_id).await.unwrap().unwrap();
@@ -5029,7 +4931,6 @@ async fn items_of(hub: &Hub, thread: &ThreadId) -> Vec<Item> {
     hub.store().items_page(thread, query).await.unwrap().items
 }
 
-/// The approval card `thread` shows, once it does.
 async fn approval_card(hub: &Hub, thread: &ThreadId) -> Item {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -5308,8 +5209,6 @@ async fn an_approval_whose_asker_went_away_is_withdrawn() {
     fixture.hub.shutdown();
 }
 
-/// Each run records its prompt and session; run `n` (from 0) ends as
-/// `outcomes[n]`, and once they run out, replies and finishes.
 fn failing_then_done(asked: &Asked, outcomes: Vec<Outcome>) -> Script {
     let asked = Arc::clone(asked);
     let outcomes = Arc::new(outcomes);
@@ -5332,7 +5231,6 @@ fn failing_then_done(asked: &Asked, outcomes: Vec<Outcome>) -> Script {
 }
 
 impl Fixture {
-    /// The thread's latest run once it is `status`.
     async fn latest_run_once(&self, status: RunStatus) -> artisan_api::Run {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -5356,7 +5254,6 @@ impl Fixture {
             .unwrap()
     }
 
-    /// Every run that left an item in the thread, oldest first.
     async fn runs(&self) -> Vec<artisan_api::Run> {
         let mut ids: Vec<RunId> = Vec::new();
         for item in self.items().await {
@@ -5525,8 +5422,6 @@ async fn with_retrying_off_a_turn_failed_at_capacity_stays_failed() {
     );
 }
 
-/// The source engine/model determines the compactor even after a switch.
-/// An obsolete saved curated-model preference is ignored.
 #[tokio::test(flavor = "multi_thread")]
 async fn compaction_always_inherits_the_source_model_and_settings() {
     for engine in [EngineId::Claude, EngineId::Codex, EngineId::OpenCode] {
@@ -5564,7 +5459,6 @@ async fn compaction_always_inherits_the_source_model_and_settings() {
                 EngineId::Codex
             };
             install_fake(fixture.dir.path(), destination);
-            // The initial empty thread has no history and needs no compaction.
             let mut config = EngineConfig::new(engine);
             config.model = Some("source-model".into());
             config.permissions = Permissions::Full;
@@ -5622,8 +5516,6 @@ async fn compaction_always_inherits_the_source_model_and_settings() {
     }
 }
 
-/// A lost native session uses canonical tool evidence, resolved from blobs,
-/// without mislabelling commentary or replaying the undelivered request.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_session_summarizes_tool_history_with_correct_roles() {
     let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -5781,7 +5673,6 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
     assert!(runs.iter().any(|run| run.status() == RunStatus::Cancelled));
 }
 
-/// A long first turn and an independently delayed title response.
 struct BackgroundTitle {
     session: String,
     release_title: Arc<Notify>,
@@ -5951,8 +5842,6 @@ async fn a_late_background_title_preserves_a_manual_rename() {
     tokio::time::timeout(Duration::from_secs(5), harness.title_started.notified())
         .await
         .unwrap();
-    // Bypass Hub's memory-only eligibility too: the durable comparison must
-    // protect changes from another writer while the query is in flight.
     fixture
         .hub
         .store()

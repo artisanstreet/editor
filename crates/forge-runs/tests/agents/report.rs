@@ -72,12 +72,7 @@ async fn a_background_result_that_could_not_be_delivered_is_delivered_after_reco
         rusqlite::Connection::open(fixture.dir.path().join("forge").join("forge.sqlite3")).unwrap();
     disk.busy_timeout(Duration::from_secs(5)).unwrap();
     disk.execute(
-        &format!(
-            "CREATE TRIGGER disk_full BEFORE INSERT ON items
-                 WHEN NEW.thread_id = '{}' AND NEW.kind_type = 'user_message'
-                 BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END",
-            parent.id
-        ),
+        &include_str!("fill_disk_for_thread.sql").replace("__THREAD__", &parent.id.to_string()),
         [],
     )
     .unwrap();
@@ -97,7 +92,8 @@ async fn a_background_result_that_could_not_be_delivered_is_delivered_after_reco
     )
     .await;
     fixture.quiescent().await;
-    disk.execute_batch("DROP TRIGGER disk_full").unwrap();
+    disk.execute_batch(include_str!("drop_disk_full.sql"))
+        .unwrap();
     fixture.hub.reconcile_agents().await;
 
     let reports: Vec<Item> = fixture

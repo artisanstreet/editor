@@ -1,12 +1,3 @@
-//! Live runs.
-//!
-//! [`Hub`] starts engine runs, delivers steers and answers to them, and turns
-//! what adapters report into stored items. Reasoning, shell output and
-//! streaming text stay in memory here and are published as live events.
-//!
-//! A user message is stored `running` and becomes `done` once an engine has
-//! it. Whatever is still `running` when a run ends starts the next run, so a
-//! message sent while a run winds down is never lost.
 #![expect(
     missing_debug_implementations,
     reason = "pre-existing violations of the workspace lint policy, cleared in plan.md phase 2"
@@ -86,7 +77,6 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// Picks the adapter for an engine. Tests swap in a scripted one.
 pub type HarnessFor = Arc<dyn Fn(EngineId) -> Arc<dyn Harness> + Send + Sync>;
 
 #[derive(Clone)]
@@ -103,11 +93,8 @@ struct Inner {
     live: Mutex<HashMap<ThreadId, LiveRun>>,
     unsettled: Mutex<HashMap<ThreadId, forge_store::Settlement>>,
     suggestions: Mutex<HashMap<ThreadId, Suggested>>,
-    /// How much each thread has done since its last "You should know" check.
     attention: Mutex<HashMap<ThreadId, side::Attention>>,
-    /// Threads still waiting for a generated title.
     untitled: Mutex<std::collections::HashSet<ThreadId>>,
-    /// Titles being generated independently of the working turn.
     title_queries: Mutex<std::collections::HashSet<ThreadId>>,
     extensions: Extensions,
     mcp: Mcp,
@@ -116,15 +103,10 @@ struct Inner {
     harness_slots: Arc<Semaphore>,
     dispatch: Notify,
     admission: tokio::sync::Mutex<()>,
-    /// Where engines reach the Artisan MCP, and each thread's credential.
     gateway: Mutex<gateway::Gateway>,
-    /// Bumped whenever an agent's state may have changed; waiters watch it.
     agents_changed: tokio::sync::watch::Sender<u64>,
-    /// How many `agent_wait` calls are waiting on each agent item now.
     agent_waiters: Mutex<HashMap<ItemId, usize>>,
-    /// Approval cards Forge showed itself, by item.
     approvals: Mutex<HashMap<ItemId, approvals::OwnApproval>>,
-    /// How runs read the free space where they work.
     disk: disk::Probe,
     sandbox: sandbox::Host,
 }
@@ -133,14 +115,12 @@ const RUN_CAPACITY: usize = 8;
 
 const UNSETTLED_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// One live run's handles and memory-only text.
 struct LiveRun {
     id: RunId,
     inbox: mpsc::Sender<Input>,
     cancel: CancellationToken,
     engine: Option<EngineId>,
     cancel_through: Arc<AtomicU64>,
-    /// Streaming text, reasoning, shell output and progress, by target.
     live: HashMap<LiveTarget, LivePreview>,
     foreground_bytes: usize,
     terminal_bytes: usize,
@@ -209,11 +189,8 @@ impl LiveRun {
     }
 }
 
-/// The guess at a thread's next message, kept until the thread runs again.
 struct Suggested {
-    /// The run after which it is asked.
     run: RunId,
-    /// Stops the side query asking for it once the thread moves on.
     cancel: CancellationToken,
     text: Option<String>,
 }
@@ -330,8 +307,6 @@ impl Hub {
         &self.inner.data_dir
     }
 
-    /// Starts runs for threads with undelivered messages, including ones a
-    /// previous Forge left.
     pub fn resume_pending(&self) {
         self.inner.dispatch.notify_one();
     }
@@ -907,20 +882,15 @@ impl Hub {
         Ok(())
     }
 
-    /// Cancels startup-owned work if setup fails or its future is dropped.
-    /// Disarm only after ownership transfers to the serving controller.
     pub fn shutdown_on_drop(&self) -> tokio_util::sync::DropGuard {
         self.inner.shutdown.clone().drop_guard()
     }
 
-    /// Stops all work owned by this controller without touching another Forge.
     pub fn shutdown(&self) {
         self.inner.shutdown.cancel();
         self.inner.tasks.close();
     }
 
-    /// Stops every run and waits up to `grace` for them to settle, so they
-    /// end interrupted and carry on after the restart.
     pub async fn stop(&self, grace: std::time::Duration) {
         self.shutdown();
         if tokio::time::timeout(grace, self.inner.tasks.wait())
@@ -984,8 +954,6 @@ impl Hub {
         self.owned_thread_ids().len()
     }
 
-    /// The current memory-only text of every live run, and every thread's
-    /// suggested next message, for a client that just connected.
     #[must_use]
     #[expect(
         clippy::significant_drop_tightening,
@@ -1017,9 +985,6 @@ impl Hub {
         (self.inner.store.live_revision(), snapshot)
     }
 
-    /// Opens the slot for the guess at the thread's next message after
-    /// `run`. The thread's previous guess is withdrawn, and a side query
-    /// still working on one stops.
     fn open_suggestion(&self, thread_id: &ThreadId, run: &RunId) {
         let cancel = self.inner.shutdown.child_token();
         let previous = self.suggestions_lock().insert(
@@ -1041,8 +1006,6 @@ impl Hub {
         }
     }
 
-    /// What stops the side queries after `run` once the thread moves on;
-    /// `None` if it already has.
     fn suggestion_slot(&self, thread_id: &ThreadId, run: &RunId) -> Option<CancellationToken> {
         self.suggestions_lock()
             .get(thread_id)
@@ -1063,7 +1026,6 @@ impl Hub {
             return;
         };
         suggested.text = Some(text.clone());
-        // Published under the lock, so a newer run's withdrawal follows it.
         self.inner.store.publish_live(Event::Suggestion {
             thread_id: thread_id.clone(),
             text: Some(text),
@@ -1138,8 +1100,6 @@ impl Hub {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// One dispatcher claims only threads that can start immediately, and
-    /// wakes by itself when the earliest parked turn is due.
     fn start_dispatcher(&self) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
@@ -1443,7 +1403,6 @@ impl Hub {
             .is_some_and(|run| run.live.len() < LIVE_TARGETS)
     }
 
-    /// Empties memory-only text that clients still show.
     fn clear_live(&self, thread_id: &ThreadId, target: LiveTarget) {
         let shown = self
             .lock()
@@ -1455,7 +1414,6 @@ impl Hub {
         }
     }
 
-    /// Drops memory-only text for a target that ended.
     fn forget_live(&self, thread_id: &ThreadId, target: &LiveTarget) {
         if let Some(run) = self.lock().get_mut(thread_id)
             && let Some(preview) = run.live.remove(target)
@@ -1507,6 +1465,7 @@ impl Hub {
 }
 
 #[cfg(test)]
+#[path = "../tests/lib/unit.rs"]
 mod tests;
 
 fn with_image_paths(text: String, images: &[PathBuf]) -> String {
@@ -1522,7 +1481,6 @@ fn with_image_paths(text: String, images: &[PathBuf]) -> String {
     }
 }
 
-/// The line an engine reads above a message another thread's agent wrote.
 fn sender_line(sender: &artisan_api::Sender) -> String {
     let title = sender
         .title

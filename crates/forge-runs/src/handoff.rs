@@ -324,8 +324,6 @@ async fn entry(hub: &Hub, item: Item) -> Result<Option<Entry>, ContextError> {
     }))
 }
 
-/// Keep whole exchanges, starting with a user message, so tool calls and
-/// results aren't separated. An oversized latest exchange is summarized only.
 fn recent(entries: &[Entry]) -> String {
     let mut bytes = 0;
     let mut start = entries.len();
@@ -351,8 +349,6 @@ fn serialized(transcript: &Transcript, budget: usize) -> String {
         .iter()
         .map(|entry| entry.text.len())
         .sum();
-    // Drop whole exchanges, as OpenCode does on overflow. Keep the last
-    // exchange if it alone exceeds the budget and mark its truncation.
     while bytes > budget && start < transcript.entries.len() {
         let next =
             ((start + 1)..transcript.entries.len()).find(|&index| transcript.entries[index].user);
@@ -376,8 +372,6 @@ fn serialized(transcript: &Transcript, budget: usize) -> String {
         }
         return text;
     }
-    // One oversized exchange: keep its request and newest evidence, rather
-    // than cutting off the most recent work at an arbitrary byte offset.
     if let Some(first) = entries.first() {
         text.push_str(&bounded(&first.text, budget / 4));
     }
@@ -636,33 +630,5 @@ impl crate::run::Compaction<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn overflow_retains_the_request_and_latest_evidence_at_utf8_boundaries() {
-        let transcript = Transcript {
-            entries: vec![
-                Entry {
-                    user: true,
-                    text: "[User]: finish the parser\n".into(),
-                },
-                Entry {
-                    user: false,
-                    text: "🦀".repeat(20_000),
-                },
-                Entry {
-                    user: false,
-                    text: "[Tool result]: newest tests passed\n".into(),
-                },
-            ],
-            omitted: false,
-        };
-        let text = serialized(&transcript, 2000);
-        assert!(text.len() <= 2000);
-        assert!(text.starts_with("[User]: finish the parser"));
-        assert!(text.ends_with("[Tool result]: newest tests passed\n"));
-        assert!(text.contains("[entry truncated]"));
-        assert!(recent(&transcript.entries).is_empty());
-    }
-}
+#[path = "../tests/handoff/unit.rs"]
+mod tests;

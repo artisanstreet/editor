@@ -1,13 +1,3 @@
-//! Agents Forge runs for a thread on any harness: the Artisan MCP's
-//! `agent_*` tools.
-//!
-//! An agent is a child thread (`parent_thread_id`, `spawned_by`) that starts
-//! with only its prompt, plus an `Agent` item in the parent that stands for
-//! it, so the parent shows it like one of its engine's own subagents. The
-//! item follows the child: working while it runs or has input waiting,
-//! waiting for the user while it asks something, and settled with the
-//! child's last reply as its result once it stops.
-
 use crate::error::{self, ErrorClass, Refused};
 use crate::{CancelError, Hub, InputError, SendError};
 use artisan_api::{
@@ -18,18 +8,12 @@ use forge_store::NewItem;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// How deep agents may start agents: a thread's agent is depth 1.
 pub const MAX_AGENT_DEPTH: usize = 3;
-/// The longest one `agent_wait` blocks, under every harness's MCP call
-/// timeout (Codex's is set to ten minutes for the Artisan MCP).
 const LONGEST_WAIT: Duration = Duration::from_mins(9);
 
-/// What `agent_spawn` asks for. Anything left out comes from the parent.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnAgent {
-    /// A few words naming the work; the agent's label.
     pub task: String,
-    /// The whole brief: nothing from the parent's conversation goes along.
     pub prompt: String,
     pub harness: Option<EngineId>,
     pub model: Option<String>,
@@ -39,8 +23,6 @@ pub struct SpawnAgent {
     pub context_window: Option<u64>,
     pub options: Option<serde_json::Map<String, serde_json::Value>>,
     pub permissions: Option<Permissions>,
-    /// Deliver the result to the parent as a message when it finishes,
-    /// instead of waiting for `agent_wait`.
     #[serde(default)]
     pub background: bool,
 }
@@ -49,7 +31,6 @@ pub struct SpawnAgent {
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {
     Working,
-    /// It asked the user something, in its own thread.
     WaitingForUser,
     Done,
     Failed,
@@ -73,7 +54,6 @@ impl AgentState {
     }
 }
 
-/// One agent as the tools report it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub agent: ItemId,
@@ -86,16 +66,12 @@ pub struct AgentInfo {
     pub variant: Option<String>,
     pub permissions: Permissions,
     pub state: AgentState,
-    /// Its last reply, once it settled.
     pub result: Option<String>,
     pub error: Option<String>,
-    /// What the spawn filled in or changed, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
-/// The config an agent runs with: `request` over the parent's, checked
-/// against the harness's catalog. Returns what was filled in or changed.
 #[expect(
     clippy::too_many_lines,
     reason = "variant/context/options fallbacks in one resolve"
@@ -153,9 +129,6 @@ fn resolve(
     };
     let catalog = model.as_deref().and_then(known);
     config.model = model;
-    // Effort and speed: asked for, else the parent's, kept only when the
-    // model offers it.
-    // OpenCode sends reasoning through variant, never through effort.
     let effort = if engine == EngineId::OpenCode {
         if request.effort.is_some() {
             warnings.push(
@@ -248,13 +221,10 @@ fn resolve(
     Ok((config, warnings))
 }
 
-/// Whether `target` may do more without asking than `caller`: an auto
-/// thread's agent reaching a full-access one.
 fn exceeds(target: &EngineConfig, caller: &EngineConfig) -> bool {
     target.permissions == Permissions::Full && caller.permissions == Permissions::Auto
 }
 
-/// `thread` as the sender of a message its agent writes.
 fn sender(thread: &Thread) -> artisan_api::Sender {
     artisan_api::Sender {
         thread: thread.id.clone(),
@@ -508,7 +478,6 @@ enum SettleAgentError {
 }
 
 impl Hub {
-    /// Starts an agent for `parent` and returns it at once.
     pub async fn spawn_agent(
         &self,
         parent: &ThreadId,
@@ -612,9 +581,6 @@ impl Hub {
         })
     }
 
-    /// Starts a top-level thread (not an agent) in `project`, by default the
-    /// caller's, configured like an agent: what `request` gives over the
-    /// caller's config. Its first message is `request.prompt` unless empty.
     pub async fn start_thread(
         &self,
         caller: &ThreadId,
@@ -679,9 +645,6 @@ impl Hub {
         Ok((thread, warnings))
     }
 
-    /// Sends `caller`'s agent's message to `thread`. It never changes the
-    /// user's default config, carries its sender, and asks the user first
-    /// when it would reach a thread allowed more than the caller.
     pub async fn send_as_agent(
         &self,
         caller: &ThreadId,
@@ -773,8 +736,6 @@ impl Hub {
         matches!(self.store().thread(thread).await, Ok(Some(thread)) if thread.spawned_by.is_some())
     }
 
-    /// The agent `id` names, as `caller` sees it: an agent item of the
-    /// caller's, or the thread one runs in.
     async fn agent_item(
         &self,
         caller: &ThreadId,
@@ -814,7 +775,6 @@ impl Hub {
         Ok((item, child))
     }
 
-    /// Where an agent's thread is now.
     async fn child_state(
         &self,
         child: &ThreadId,
@@ -832,9 +792,6 @@ impl Hub {
             Some(run) => match run.status() {
                 RunStatus::Running => (AgentState::Working, None),
                 RunStatus::Done => (AgentState::Done, None),
-                // A restart cut it short, or it is parked until the
-                // provider has room or the usage limit resets, and it
-                // carries on.
                 RunStatus::Interrupted | RunStatus::Failed
                     if store.continue_pending(child).await? =>
                 {
@@ -950,7 +907,6 @@ impl Hub {
         Ok((info, update))
     }
 
-    /// One agent of the caller's, as it is now.
     pub async fn agent_status(
         &self,
         caller: &ThreadId,
@@ -960,7 +916,6 @@ impl Hub {
         Ok(self.refresh_agent(item, &child).await?)
     }
 
-    /// The caller's agents, newest last.
     pub async fn agents(&self, caller: &ThreadId) -> Result<Vec<AgentInfo>, AgentQueryError> {
         let mut agents = Vec::new();
         for thread in self.store().agent_threads(caller).await? {
@@ -973,9 +928,6 @@ impl Hub {
         Ok(agents)
     }
 
-    /// Waits until every listed agent (or, with `any`, one of them) has
-    /// settled or asks the user something, or `timeout` passes; returns
-    /// them as they are then.
     pub async fn wait_agents(
         &self,
         caller: &ThreadId,
@@ -1025,7 +977,6 @@ impl Hub {
         }
     }
 
-    /// Sends an agent a follow-up; a settled one works again.
     pub async fn message_agent(
         &self,
         caller: &ThreadId,
@@ -1045,7 +996,6 @@ impl Hub {
         Ok(self.refresh_agent(item, &child).await?)
     }
 
-    /// Stops an agent and every agent under it.
     pub async fn cancel_agent(
         &self,
         caller: &ThreadId,
@@ -1081,15 +1031,12 @@ impl Hub {
         Ok(tree)
     }
 
-    /// A run of `thread` ended: if it runs an agent, update the parent, and
-    /// deliver a background agent's result.
     pub(crate) async fn agent_run_ended(&self, thread: &ThreadId) {
         if let Err(error) = self.settle_agent(thread).await {
             tracing::error!(%thread, "updating the agent this thread runs: {}", diagnostics::chain(&error));
         }
     }
 
-    /// Something in `thread` started or stopped waiting on the user.
     pub(crate) async fn agent_attention(&self, thread: &ThreadId) {
         if let Err(error) = self.settle_agent(thread).await {
             tracing::error!(%thread, "updating the agent this thread runs: {}", diagnostics::chain(&error));
@@ -1183,9 +1130,6 @@ impl Hub {
         })
     }
 
-    /// Agent items a previous Forge left working catch up with their
-    /// threads; a background agent that settled meanwhile reports to its
-    /// parent.
     pub async fn reconcile_agents(&self) {
         let items = match self.store().working_agents().await {
             Ok(items) => items,
@@ -1248,8 +1192,6 @@ fn store_text(text: &artisan_api::TextContent) -> String {
     text.inline().unwrap_or_default().to_owned()
 }
 
-/// Marks agents as waited on while an `agent_wait` holds them, so a
-/// background agent's result isn't also delivered as a message.
 struct Waiting<'h> {
     hub: &'h Hub,
     agents: Vec<ItemId>,
@@ -1282,255 +1224,5 @@ impl Drop for Waiting<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use artisan_api::{EngineStatus, Model};
-
-    fn model(id: &str, efforts: &[&str]) -> Model {
-        serde_json::from_value(serde_json::json!({
-            "id": id, "name": id, "efforts": efforts, "default_effort": efforts.first(),
-            "context_window": null, "supports_images": true,
-        }))
-        .unwrap()
-    }
-
-    fn status(engine: EngineId, models: Vec<Model>, default: &str) -> EngineStatus {
-        let mut status: EngineStatus = serde_json::from_value(serde_json::json!({
-            "engine": engine, "install": {"state": "absent"}, "sign_in": {"state": "unknown"},
-            "models": [], "default_model": default, "usage": null,
-        }))
-        .unwrap_or_else(|_| panic!("status shape"));
-        status.install = InstallState::Installed {
-            version: "1".into(),
-            update: None,
-        };
-        status.models = models.into();
-        status
-    }
-
-    fn parent() -> EngineConfig {
-        EngineConfig {
-            model: Some("opus".into()),
-            effort: Some("high".into()),
-            ..EngineConfig::new(EngineId::Claude)
-        }
-    }
-
-    #[test]
-    fn nothing_given_inherits_the_parent_without_a_warning() {
-        let claude = status(
-            EngineId::Claude,
-            vec![model("opus", &["low", "high"])],
-            "opus",
-        );
-        let (config, warnings) = resolve(&parent(), &SpawnAgent::default(), &claude).unwrap();
-        assert_eq!(config.model.as_deref(), Some("opus"));
-        assert_eq!(config.effort.as_deref(), Some("high"));
-        assert!(warnings.is_empty(), "{warnings:?}");
-    }
-
-    #[test]
-    fn another_harness_without_a_model_gets_its_default_and_says_so() {
-        let codex = status(
-            EngineId::Codex,
-            vec![
-                model("gpt-a", &["low", "medium", "high"]),
-                model("gpt-b", &["low"]),
-            ],
-            "gpt-a",
-        );
-        let request = SpawnAgent {
-            harness: Some(EngineId::Codex),
-            ..SpawnAgent::default()
-        };
-        let (config, warnings) = resolve(&parent(), &request, &codex).unwrap();
-        assert_eq!(config.engine, EngineId::Codex);
-        assert_eq!(config.model.as_deref(), Some("gpt-a"));
-        assert_eq!(
-            config.effort.as_deref(),
-            Some("high"),
-            "the parent's effort fits"
-        );
-        assert_eq!(
-            warnings,
-            ["No model given for Codex; using gpt-a (its default)."]
-        );
-    }
-
-    #[test]
-    fn what_the_model_lacks_falls_back_with_a_warning_and_permissions_cap() {
-        let codex = status(EngineId::Codex, vec![model("gpt-b", &["low"])], "gpt-b");
-        let request = SpawnAgent {
-            harness: Some(EngineId::Codex),
-            model: Some("claude-opus".into()),
-            effort: Some("max".into()),
-            permissions: Some(Permissions::Full),
-            ..SpawnAgent::default()
-        };
-        let (config, warnings) = resolve(&parent(), &request, &codex).unwrap();
-        assert_eq!(config.model.as_deref(), Some("gpt-b"));
-        assert_eq!(config.effort.as_deref(), Some("low"));
-        assert_eq!(config.permissions, Permissions::Auto);
-        assert_eq!(
-            warnings,
-            [
-                "Codex has no model claude-opus; using gpt-b.",
-                "gpt-b has no effort max; using low.",
-                "Permissions capped at auto (the parent's).",
-            ]
-        );
-    }
-
-    fn configurable_model() -> Model {
-        Model {
-            variants: vec![
-                artisan_api::Variant {
-                    id: "medium".into(),
-                    label: "Medium".into(),
-                },
-                artisan_api::Variant {
-                    id: "xhigh".into(),
-                    label: "Extra high".into(),
-                },
-            ],
-            default_variant: Some("medium".into()),
-            context_windows: vec![artisan_api::ContextWindow {
-                tokens: 1_000_000,
-                override_tokens: Some(1_000_000),
-            }],
-            ..model("muse", &[])
-        }
-    }
-
-    #[test]
-    fn opencode_variant_context_and_options_can_be_requested_across_harnesses() {
-        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
-        let request = SpawnAgent {
-            model: Some("muse".into()),
-            variant: Some("xhigh".into()),
-            context_window: Some(1_000_000),
-            options: Some(
-                serde_json::from_value(serde_json::json!({
-                    "context_window": 200_000, "custom": true,
-                }))
-                .unwrap(),
-            ),
-            ..SpawnAgent::default()
-        };
-        let (config, warnings) = resolve(&parent(), &request, &status).unwrap();
-        assert_eq!(config.variant.as_deref(), Some("xhigh"));
-        assert_eq!(config.effort, None);
-        assert_eq!(config.context_window_override(), Some(1_000_000));
-        assert_eq!(config.options["custom"], true);
-        assert!(warnings.is_empty(), "{warnings:?}");
-    }
-
-    #[test]
-    fn opencode_inherits_variant_without_stale_effort() {
-        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
-        let mut parent = EngineConfig::new(EngineId::OpenCode);
-        parent.model = Some("muse".into());
-        parent.effort = Some("medium".into());
-        parent.variant = Some("xhigh".into());
-        let (config, warnings) = resolve(&parent, &SpawnAgent::default(), &status).unwrap();
-        assert_eq!(config.variant.as_deref(), Some("xhigh"));
-        assert_eq!(config.effort, None);
-        assert!(warnings.is_empty(), "{warnings:?}");
-    }
-
-    #[test]
-    fn opencode_warns_when_effort_is_requested_instead_of_variant() {
-        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
-        let request = SpawnAgent {
-            effort: Some("xhigh".into()),
-            ..SpawnAgent::default()
-        };
-        let (config, warnings) = resolve(&parent(), &request, &status).unwrap();
-        assert_eq!(config.effort, None);
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("Set variant instead"))
-        );
-    }
-
-    #[test]
-    fn unsupported_variant_and_context_fall_back_with_warnings() {
-        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
-        let request = SpawnAgent {
-            model: Some("muse".into()),
-            variant: Some("unknown".into()),
-            context_window: Some(123),
-            ..SpawnAgent::default()
-        };
-        let (config, warnings) = resolve(&parent(), &request, &status).unwrap();
-        assert_eq!(config.variant.as_deref(), Some("medium"));
-        assert_eq!(config.context_window_override(), None);
-        assert_eq!(
-            warnings,
-            [
-                "muse has no variant unknown; using medium.",
-                "muse has no context window override 123; using its standard window.",
-            ]
-        );
-    }
-
-    #[test]
-    fn model_options_inherit_merge_and_reset_context() {
-        let status = status(EngineId::OpenCode, vec![configurable_model()], "muse");
-        let mut parent = EngineConfig::new(EngineId::OpenCode);
-        parent.model = Some("muse".into());
-        parent.variant = Some("xhigh".into());
-        parent.options = serde_json::from_value(serde_json::json!({
-            "context_window": 1_000_000, "keep": true, "replace": "old",
-        }))
-        .unwrap();
-        let (inherited, warnings) = resolve(&parent, &SpawnAgent::default(), &status).unwrap();
-        assert_eq!(inherited, parent);
-        assert!(warnings.is_empty());
-        let request = SpawnAgent {
-            options: Some(
-                serde_json::from_value(serde_json::json!({
-                    "context_window": null, "replace": "new",
-                }))
-                .unwrap(),
-            ),
-            ..SpawnAgent::default()
-        };
-        let (config, warnings) = resolve(&parent, &request, &status).unwrap();
-        assert_eq!(config.variant, parent.variant);
-        assert_eq!(config.context_window_override(), None);
-        assert!(!config.options.contains_key("context_window"));
-        assert_eq!(config.options["keep"], true);
-        assert_eq!(config.options["replace"], "new");
-        assert!(warnings.is_empty(), "{warnings:?}");
-    }
-
-    #[test]
-    fn changing_models_drops_inherited_options_and_uses_variant_default() {
-        let status = status(EngineId::Claude, vec![configurable_model()], "muse");
-        let mut parent = parent();
-        parent.variant = Some("xhigh".into());
-        parent.options.insert("custom".into(), true.into());
-        let request = SpawnAgent {
-            model: Some("muse".into()),
-            ..SpawnAgent::default()
-        };
-        let (config, warnings) = resolve(&parent, &request, &status).unwrap();
-        assert_eq!(config.variant.as_deref(), Some("medium"));
-        assert!(config.options.is_empty());
-        assert!(warnings.is_empty(), "{warnings:?}");
-    }
-
-    #[test]
-    fn a_signed_out_harness_refuses_with_sign_in_first() {
-        let mut codex = status(EngineId::Codex, vec![model("gpt-b", &["low"])], "gpt-b");
-        codex.sign_in = SignInState::SignedOut;
-        let request = SpawnAgent {
-            harness: Some(EngineId::Codex),
-            ..SpawnAgent::default()
-        };
-        let error = resolve(&parent(), &request, &codex).unwrap_err();
-        assert!(error.to_string().contains("isn't signed in"), "{error}");
-    }
-}
+#[path = "../tests/agents/unit.rs"]
+mod tests;

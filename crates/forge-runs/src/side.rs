@@ -1,16 +1,3 @@
-//! What Forge asks a thread's engine on the side once a turn is done: a
-//! guess at the user's next message, and, when the turn did enough to
-//! warrant it, a "You should know" note about something the user might
-//! miss.
-//!
-//! Both come from one side query (a fork of the engine's session that reads
-//! the thread's prompt cache; see `Harness::side_query`). The suggestion is
-//! asked after every turn. The note is asked only once the work since the
-//! last one adds up: every finished item weighs by what it changed
-//! ([`weigh`]), and a check is due when the sum passes the thread's bar. A
-//! check that found nothing doubles the bar; one that found something puts
-//! it back. Each has its own setting.
-
 use crate::Hub;
 use artisan_api::{
     EngineId, FileOp, ItemId, ItemKind, NoticeKind, Phase, RunId, Status, ThreadId, ToolKind,
@@ -23,12 +10,8 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 
-/// Whether Forge guesses the user's next message after each turn; default on.
 pub const SUGGESTIONS_KEY: &str = "suggestions";
-/// Whether Forge looks for things the user should know; default on.
 pub const YOU_SHOULD_KNOW_KEY: &str = "you_should_know";
-/// Whether a thread takes the harness's generated title; default on. Off,
-/// it keeps the title from its first message.
 pub const SUMMARY_TITLES_KEY: &str = "summary_titles";
 
 #[derive(Debug, thiserror::Error)]
@@ -131,16 +114,12 @@ pub(crate) enum AskError {
     },
 }
 
-/// The bar a fresh thread's work has to pass before a note is looked for.
 const BAR: f32 = 6.0;
-/// The highest the bar climbs after checks that found nothing.
 const MAX_BAR: f32 = 48.0;
 
-/// How much of the work since the last check a thread has done.
 pub(crate) struct Attention {
     score: f32,
     bar: f32,
-    /// Directories the thread's edits have touched, for "the work spread".
     seen: HashSet<String>,
 }
 
@@ -155,8 +134,6 @@ impl Default for Attention {
 }
 
 impl Attention {
-    /// Adds a run's work: its weight, and a point for each directory no
-    /// earlier edit touched.
     pub(crate) fn add(&mut self, work: &Work) {
         self.score += work.score;
         for directory in &work.directories {
@@ -170,8 +147,6 @@ impl Attention {
         self.score >= self.bar
     }
 
-    /// A check ran: the work it covered is spent, and the bar follows what
-    /// it found.
     fn checked(&mut self, found: bool) {
         self.score = 0.0;
         self.bar = if found {
@@ -182,7 +157,6 @@ impl Attention {
     }
 }
 
-/// One run's work, weighed as its items finish.
 #[derive(Default)]
 pub(crate) struct Work {
     score: f32,
@@ -190,7 +164,6 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    /// An item reached a terminal status for the first time.
     pub(crate) fn finished(&mut self, kind: &ItemKind, status: Status) {
         self.score += weigh(kind, status);
         if let ItemKind::Tool {
@@ -207,8 +180,6 @@ impl Work {
     }
 }
 
-/// What one finished item says about how much there may be to know: changes
-/// and decisions weigh, looking around does not.
 fn weigh(kind: &ItemKind, status: Status) -> f32 {
     let failed = matches!(status, Status::Failed | Status::Declined);
     match kind {
@@ -233,7 +204,6 @@ fn weigh(kind: &ItemKind, status: Status) -> f32 {
                         0.5
                     }
                 }
-                // Side effects nobody can see from here.
                 ToolKind::Mcp { .. } | ToolKind::Workflow { .. } | ToolKind::Other { .. } => 1.0,
                 ToolKind::Read { .. }
                 | ToolKind::Search { .. }
@@ -243,7 +213,6 @@ fn weigh(kind: &ItemKind, status: Status) -> f32 {
                 | ToolKind::Agents { .. }
                 | ToolKind::AgentMessage { .. } => 0.0,
             };
-            // A failure the agent works around changes its approach.
             if failed { weight.max(1.0) } else { weight }
         }
         ItemKind::Plan {
@@ -251,7 +220,6 @@ fn weigh(kind: &ItemKind, status: Status) -> f32 {
         }
         | ItemKind::Question { .. } => 3.0,
         ItemKind::Agent { .. } | ItemKind::Error { .. } => 1.0,
-        // Long reasoning in the open can hide a tradeoff: a point per 4 KiB.
         ItemKind::AssistantMessage {
             text,
             phase: Phase::Final,
@@ -265,7 +233,6 @@ fn weigh(kind: &ItemKind, status: Status) -> f32 {
     }
 }
 
-/// A shell command that changes something beyond the files the agent edits.
 fn changes_state(command: &str) -> bool {
     const CHANGES: &[&str] = &[
         "rm ",
@@ -303,9 +270,6 @@ fn changes_state(command: &str) -> bool {
 }
 
 impl Hub {
-    /// Names a conversation without waiting for its working turn.
-    /// A fresh ephemeral session reads the original messages, so the live
-    /// session need not have finished or even persisted its first input.
     pub(crate) fn start_title(
         &self,
         thread: artisan_api::Thread,
@@ -540,7 +504,6 @@ impl Hub {
         }
     }
 
-    /// A setting that is on unless it was turned off.
     pub(crate) async fn enabled(&self, key: &str) -> bool {
         match self.store().setting(key).await {
             Ok(value) => value.and_then(|value| value.as_bool()).unwrap_or(true),
@@ -650,7 +613,6 @@ fn log_usage(thread_id: &ThreadId, engine: EngineId, reply: &SideReply) {
     );
 }
 
-/// What the side query is asked for.
 #[derive(Clone, Copy, Debug)]
 struct Parts {
     suggest: bool,
@@ -658,7 +620,6 @@ struct Parts {
     title: bool,
 }
 
-/// What the side query found.
 #[derive(Debug, Default, PartialEq)]
 struct Answer {
     suggestion: Option<String>,
@@ -673,8 +634,6 @@ struct Note {
 }
 
 impl Answer {
-    /// Reads the reply's JSON object, wherever it sits in the text; a reply
-    /// without one answers nothing.
     fn parse(reply: &str) -> Self {
         #[derive(Deserialize)]
         struct Raw {
@@ -718,8 +677,6 @@ impl Answer {
     }
 }
 
-/// A generated title as the sidebar shows it: one line, no wrapping quotes
-/// or trailing period, at most 80 characters; `None` when nothing is left.
 fn clean_title(title: &str) -> Option<String> {
     let line = title.lines().map(str::trim).find(|line| !line.is_empty())?;
     let line = line
@@ -732,7 +689,6 @@ fn clean_title(title: &str) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
-/// The side question: the parts asked for, and how to answer.
 fn prompt(parts: Parts) -> String {
     let mut prompt = String::from(PREAMBLE);
     let mut fields = Vec::new();
@@ -813,165 +769,5 @@ option\").
 ";
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use artisan_api::{Collection, FileChange, TextContent};
-
-    fn shell(command: &str) -> ItemKind {
-        ItemKind::Tool {
-            tool: ToolKind::Shell {
-                command: TextContent::Inline(command.to_owned()),
-                cwd: None,
-                background: false,
-                watch: false,
-            },
-            title: None,
-            output: None,
-            exit_code: Some(0),
-            approval: None,
-        }
-    }
-
-    fn edit(paths: &[&str]) -> ItemKind {
-        ItemKind::Tool {
-            tool: ToolKind::Edit {
-                changes: Collection::Inline(
-                    paths
-                        .iter()
-                        .map(|path| FileChange {
-                            path: (*path).to_owned(),
-                            op: FileOp::Modify,
-                            diff: None,
-                        })
-                        .collect(),
-                ),
-            },
-            title: None,
-            output: None,
-            exit_code: None,
-            approval: None,
-        }
-    }
-
-    fn read() -> ItemKind {
-        ItemKind::Tool {
-            tool: ToolKind::Read {
-                path: "src/lib.rs".to_owned(),
-                range: None,
-            },
-            title: None,
-            output: None,
-            exit_code: None,
-            approval: None,
-        }
-    }
-
-    /// Forty reads never ask for a note; a migration and two edits do.
-    #[test]
-    fn changes_make_a_note_due_and_looking_around_does_not() {
-        let mut looking = Work::default();
-        for _ in 0..40 {
-            looking.finished(&read(), Status::Done);
-        }
-        looking.finished(&shell("cargo test"), Status::Done);
-        let mut attention = Attention::default();
-        attention.add(&looking);
-        assert!(!attention.due(), "an investigation is not due");
-
-        let mut changing = Work::default();
-        changing.finished(&shell("sqlx migrate run"), Status::Done);
-        changing.finished(&edit(&["db/schema.sql"]), Status::Done);
-        changing.finished(&edit(&["src/orders/store.rs"]), Status::Done);
-        let mut attention = Attention::default();
-        attention.add(&changing);
-        assert!(attention.due(), "a migration and edits are due");
-    }
-
-    /// Checks that find nothing make the next one rarer; one that finds
-    /// something brings it back.
-    #[test]
-    fn the_bar_backs_off_after_nothing_and_resets_after_a_note() {
-        let mut work = Work::default();
-        work.finished(
-            &edit(&["a/x.rs", "a/y.rs", "a/z.rs", "a/w.rs"]),
-            Status::Done,
-        );
-        let mut attention = Attention::default();
-        attention.add(&work);
-        assert!(attention.due());
-        attention.checked(false);
-        attention.add(&work);
-        assert!(!attention.due(), "the same work again is no longer enough");
-        attention.add(&work);
-        assert!(attention.due());
-        attention.checked(true);
-        attention.add(&work);
-        assert!(
-            attention.due(),
-            "after a note the bar is back to where it started"
-        );
-    }
-
-    /// A title comes back as one clean line, whatever the model wraps it in.
-    #[test]
-    fn a_title_is_read_clean() {
-        let answer = Answer::parse(
-            "{\"title\": \" \\\"Fix brittle generated titles.\\\" \", \"suggestion\": null}",
-        );
-        assert_eq!(
-            answer.title.as_deref(),
-            Some("Fix brittle generated titles")
-        );
-        assert_eq!(clean_title("  \n**Title**\nmore"), Some("Title".to_owned()));
-        assert_eq!(clean_title(" \"\" "), None);
-        assert_eq!(
-            clean_title(&"x".repeat(200)).map(|t| t.chars().count()),
-            Some(80)
-        );
-    }
-
-    /// The reply shape lists exactly the parts asked for.
-    #[test]
-    fn the_prompt_asks_only_for_its_parts() {
-        let only_title = prompt(Parts {
-            suggest: false,
-            note: false,
-            title: true,
-        });
-        assert!(only_title.contains("## Title"));
-        assert!(only_title.ends_with("{\"title\": string}\n"));
-        let all = prompt(Parts {
-            suggest: true,
-            note: true,
-            title: true,
-        });
-        assert!(all.contains("\"title\": string, \"suggestion\": string or null, \"note\""));
-        let no_title = prompt(Parts {
-            suggest: true,
-            note: false,
-            title: false,
-        });
-        assert!(!no_title.contains("title"));
-    }
-
-    #[test]
-    fn a_reply_is_read_wherever_its_json_sits() {
-        let answer = Answer::parse(
-            "```json\n{\"suggestion\": \" Run the migration \", \"note\": {\"tag\": \"Heads up\", \"text\": \" Deleting a customer deletes their orders. \"}}\n```",
-        );
-        assert_eq!(answer.suggestion.as_deref(), Some("Run the migration"));
-        assert_eq!(
-            answer.note,
-            Some(Note {
-                heads_up: true,
-                text: "Deleting a customer deletes their orders.".to_owned(),
-            })
-        );
-        assert_eq!(answer.title, None, "no title unless one was asked for");
-        assert_eq!(Answer::parse("I can't do that."), Answer::default());
-        assert_eq!(
-            Answer::parse("{\"suggestion\": null, \"note\": null}"),
-            Answer::default()
-        );
-    }
-}
+#[path = "../tests/side/unit.rs"]
+mod tests;

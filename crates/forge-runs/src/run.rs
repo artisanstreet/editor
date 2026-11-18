@@ -1,5 +1,3 @@
-//! One run: prepare the turn, run the adapter, store what it reports.
-
 use crate::Hub;
 use artisan_api::{
     Answer, Decision, EngineConfig, EngineId, ItemId, ItemKind, LiveTarget, ModelSwitch,
@@ -192,7 +190,6 @@ fn cancel_cutoff(hub: &Hub, thread_id: &ThreadId) -> u64 {
     })
 }
 
-/// Runs one engine run for the thread's undelivered messages.
 pub(crate) async fn drive(
     hub: &Hub,
     thread_id: &ThreadId,
@@ -204,7 +201,6 @@ pub(crate) async fn drive(
     let continuation = store.continue_request(thread_id).await?;
     let observed = store.pending_inputs(thread_id).await?;
     let pending = observed.items;
-    // Undelivered messages carry a stopped turn on by themselves.
     let continuation = continuation.filter(|_| pending.is_empty());
     if pending.is_empty() && continuation.is_none() {
         return Ok(RunStatus::Done);
@@ -220,7 +216,6 @@ pub(crate) async fn drive(
         live.engine = Some(engine);
     }
     let previous = store.latest_run(thread_id).await?;
-    // The thread's first run: the engine may name the thread during it.
     let first_run = previous.is_none();
     let carry_on = match continuation {
         Some(continuation) => Some(continue_prompt(hub, continuation, previous.as_ref()).await?),
@@ -245,8 +240,6 @@ pub(crate) async fn drive(
     };
     run = store.begin_run(run).await?;
 
-    // A claude.ai run can find its session needs renewing or is signed
-    // out; the Editor hears of it when the run ends.
     let claude_ai_home =
         (transport == Some(ClaudeTransport::Chat)).then(|| hub.engines().home(engine));
     let claude_ai_before = claude_ai_home
@@ -305,9 +298,6 @@ pub(crate) async fn drive(
     Ok(status)
 }
 
-/// What a run delivers: the thread's undelivered messages, or the prompt
-/// that carries a stopped turn on, and the run before it, whose session a
-/// fresh one may need the history from.
 struct Delivery<'a> {
     pending: &'a [artisan_api::Item],
     carry_on: Option<String>,
@@ -315,9 +305,6 @@ struct Delivery<'a> {
     transport: Option<ClaudeTransport>,
 }
 
-/// What the engine reads to carry a stopped turn on. The user sees none of
-/// it: the turn just goes on. Background work the stop ended is named, so
-/// the agent runs it again instead of waiting on results that won't come.
 async fn continue_prompt(
     hub: &Hub,
     continuation: artisan_api::Continuation,
@@ -418,7 +405,6 @@ async fn settle_handoff<T, E: std::error::Error>(
     }
 }
 
-/// Every fallible operation after Run creation returns through drive's finalizer.
 #[expect(
     clippy::too_many_lines,
     reason = "one linear turn: prepare, start, pump events, settle"
@@ -438,10 +424,8 @@ async fn execute(
     items: &mut Work,
 ) -> Result<Ending, ExecuteError> {
     let engine = run.engine;
-    // A fresh session starts from the thread's history so far.
     let handoff = if run.session_id.is_none() {
         let pending_ids = pending.iter().map(|item| item.id.clone()).collect();
-        // The thread moved here from another engine: the divider says so.
         let switch = previous
             .as_ref()
             .filter(|previous| previous.engine != engine)
@@ -477,7 +461,6 @@ async fn execute(
         None
     };
     let preparing = async {
-        // Every pending message goes to the engine as one input.
         let mut input = UserInput::default();
         for item in pending {
             let next = hub.user_input(item, engine).await?;
@@ -517,16 +500,12 @@ async fn execute(
         () = hub.inner.shutdown.cancelled() => return Ok(Ending::Stopped(Cleanup::Confirmed)),
         prepared = preparing => prepared?,
     };
-    // Preserve the effective launch choices, including the account's Claude
-    // transport and any normalized model settings, for later handoff forks.
     run.config = Some(turn.config.clone());
     let mut coverage = crate::sandbox::Coverage::new(hub.inner.sandbox, turn.config.permissions);
     if let Some(reason) = coverage.observe(turn.config.permissions) {
         announce_unsandboxed(hub, &run.thread_id, &run.id, reason).await;
     }
     let (covered_thread, covered_run) = (run.thread_id.clone(), run.id.clone());
-    // A send can land after the live slot is claimed but before pending inputs
-    // are read. Filter that same ID from the steer channel exactly once.
     let mut delivered: HashSet<_> = initial_ids.iter().cloned().collect();
     let (forward, adapter_inbox) = mpsc::channel(64);
     let approvals = Arc::new(Mutex::new(Approvals {
@@ -540,7 +519,6 @@ async fn execute(
         hub.inner.disk.clone(),
         vec![turn.cwd.clone(), hub.data_dir().to_path_buf()],
     );
-    // Everything the adapter logs names the thread and run it belongs to.
     let adapter_outcome = tracing::Instrument::instrument(
         harness.run(
             turn,
@@ -685,16 +663,12 @@ async fn execute(
     Ok(ending)
 }
 
-/// Tool approvals of a live run: under Full access Forge gives them
-/// itself, so a switch to Full mid-run stops the run asking.
 struct Approvals {
     full: bool,
-    /// Approvals the user hasn't given yet, by adapter key.
     waiting: HashSet<String>,
 }
 
 impl Approvals {
-    /// Notes an access change: the keys to approve now.
     fn set(&mut self, permissions: Permissions) -> Vec<String> {
         self.full = permissions == Permissions::Full;
         if self.full {
@@ -704,8 +678,6 @@ impl Approvals {
         }
     }
 
-    /// Follows the approvals an event asks or settles: the key to approve
-    /// at once under Full.
     fn observe(&mut self, event: &EngineEvent) -> Option<String> {
         let (key, asks) = match event {
             EngineEvent::Item {
@@ -717,7 +689,6 @@ impl Approvals {
                         if approval.decision.is_none()
                             && approval.options.contains(&Decision::AllowOnce)),
             ),
-            // A bare status names no approval; only one that settles counts.
             EngineEvent::Status { key, status } if *status != Status::AwaitingUser => (key, false),
             EngineEvent::Status { .. }
             | EngineEvent::Session { .. }
@@ -758,7 +729,6 @@ const fn allow_once(key: String) -> Input {
     }
 }
 
-/// Checks the run's disks: the outcome that stops it on a full one.
 async fn guard_disk(hub: &Hub, run: &Run, disk: &mut crate::disk::Watch) -> Option<Outcome> {
     match disk.check().await? {
         crate::disk::Alarm::Full { path, free } => {
@@ -773,8 +743,6 @@ async fn guard_disk(hub: &Hub, run: &Run, disk: &mut crate::disk::Watch) -> Opti
     }
 }
 
-/// Tells the agent to free space, and the user that it was told. False
-/// if the steer could not go now; the next check tries again.
 async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) -> bool {
     let Some(inbox) = hub
         .lock()
@@ -783,7 +751,6 @@ async fn warn_disk_low(hub: &Hub, run: &Run, path: &std::path::Path, free: u64) 
     else {
         return false;
     };
-    // Never awaited: the loop that drains the inbox is the one running this.
     let steer = Input::Steer(UserInput {
         id: ItemId::new(),
         text: crate::disk::steer(path, free),
@@ -906,8 +873,6 @@ async fn prepare_on(
     }
     launch.readable.push(hub.store().blob_dir().to_path_buf());
     let mut config = thread.config.clone();
-    // The transport is the account's choice, not the thread's: every
-    // Claude thread on this Forge follows the same one.
     match transport.and_then(ClaudeTransport::option) {
         Some(option) => {
             config.options.insert(
@@ -968,9 +933,6 @@ async fn launch_choice(
     Ok((transport, carried_session(previous, engine, transport)))
 }
 
-/// The session a run carries on: the previous run's, when it was on the
-/// same engine and the same Claude transport. An empty one is a session
-/// the engine said is gone.
 fn carried_session(
     previous: Option<&Run>,
     engine: EngineId,
@@ -987,20 +949,14 @@ fn carried_session(
         })
 }
 
-/// How a Claude turn runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClaudeTransport {
-    /// Claude Code, the official way.
     Code,
-    /// claude.ai's chat backend: claude.ai mode.
     Chat,
-    /// claude.ai mode is on with no session: Claude Code, and the
-    /// turn says why.
     ChatSignedOut,
 }
 
 impl ClaudeTransport {
-    /// The transport a session from this one was made on.
     const fn speaks(self) -> &'static str {
         match self {
             Self::Chat => artisan_api::CLAUDE_AI,
@@ -1008,8 +964,6 @@ impl ClaudeTransport {
         }
     }
 
-    /// The `transport` option the Claude engine reads; Claude Code, the
-    /// official way, needs none.
     const fn option(self) -> Option<&'static str> {
         match self {
             Self::Code => None,
@@ -1088,12 +1042,9 @@ struct Work {
     by_key: HashMap<String, Tracked>,
     settled: Recent<Tracked>,
     initial: Option<(ItemId, Vec<ItemId>)>,
-    /// What the run's finished items weigh toward a "You should know" check.
     weighed: crate::side::Work,
     hidden: Recent<()>,
-    /// The engine reported an error of its own.
     errored: bool,
-    /// The original request, to name adapters without native background titles.
     early_title: Option<Box<(artisan_api::Thread, Vec<artisan_api::Item>)>>,
 }
 
@@ -1115,15 +1066,11 @@ impl Work {
     }
 }
 
-/// An Artisan MCP `agent_spawn` call: the `Agent` item Forge stores stands
-/// for it.
 fn spawns_agent(kind: &ItemKind) -> bool {
     matches!(kind, ItemKind::Tool { tool: ToolKind::Mcp { server, tool, .. }, .. }
         if server == "artisan" && tool == "agent_spawn")
 }
 
-/// What an Artisan call's row names: the thread it reads or writes, or the
-/// agents it waits on or messages, by title; `None` when it names neither.
 async fn artisan_title(
     store: &forge_store::Store,
     input: &str,
@@ -1166,9 +1113,6 @@ struct Tracked {
     persisted: bool,
 }
 
-/// The `Compaction` item a handoff shows while the previous session
-/// summarizes the thread. Tracked with the run's work, so a run stopped
-/// mid-summary settles it.
 pub(crate) struct Compaction<'a> {
     pub(crate) hub: &'a Hub,
     pub(crate) run: &'a Run,
@@ -1178,8 +1122,6 @@ pub(crate) struct Compaction<'a> {
     pub(crate) switch: Option<ModelSwitch>,
 }
 
-/// A model as its engine names it: the catalogue's name, else its id, else
-/// the engine's own name when the run took the engine's default.
 fn named_model(hub: &Hub, engine: EngineId, model: Option<&str>) -> NamedModel {
     let status = hub.engines().status(engine);
     let name = model.or(status.default_model.as_deref()).map_or_else(
@@ -1515,14 +1457,10 @@ async fn apply_item(
     if matches!(kind, ItemKind::Error { .. }) {
         items.errored = true;
     }
-    // Forge stores the agent an `agent_spawn` call starts; the call
-    // itself would only repeat it.
     if items.hidden.contains(&key) || spawns_agent(&kind) {
         items.hidden.insert(key, ());
         return Ok(());
     }
-    // A message to an agent names the agent's item: the engine
-    // knows it only by its own address (Claude's `agentId`).
     if let ItemKind::Tool {
         tool:
             ToolKind::AgentMessage {
@@ -1549,8 +1487,6 @@ async fn apply_item(
             }
         }
     }
-    // An Artisan call that names a thread or agents by id shows
-    // their titles instead.
     if let ItemKind::Tool {
         tool: ToolKind::Mcp { server, input, .. },
         title: title @ None,
@@ -1593,8 +1529,6 @@ async fn apply_item(
     let first = !tracked.persisted;
     tracked.parent = parent_id.clone().or_else(|| tracked.parent.clone());
     tracked.persisted = true;
-    // Reasoning precedes what it decided: a new top-level item
-    // (text, a tool) means the thinking it showed is over.
     if first && tracked.parent.is_none() {
         hub.clear_live(
             &thread_id,
@@ -1655,7 +1589,6 @@ async fn apply_item(
     Ok(())
 }
 
-/// Settles the run and anything it left open.
 fn open_items(items: &Work) -> Vec<ItemId> {
     items
         .by_key
@@ -1665,8 +1598,6 @@ fn open_items(items: &Work) -> Vec<ItemId> {
         .collect()
 }
 
-/// Settles a stopped run as soon as the stop lands, so clients don't wait
-/// on the engine confirming it. The engine's teardown carries on after.
 async fn announce_stop(
     hub: &Hub,
     run: &Run,

@@ -1,9 +1,3 @@
-//! Approvals Forge asks for itself: an Artisan MCP tool that changes trust
-//! or deletes something (removing a host or project, adding an MCP server)
-//! shows an approval card in the calling thread, like an engine's own, and
-//! runs only once the user allows it. A thread with Full access gives
-//! these permissions itself, as it does an engine's.
-
 use crate::Hub;
 use crate::Refused;
 use crate::error::{self, ErrorClass};
@@ -15,13 +9,10 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// How long a card waits, under every harness's MCP call timeout.
 const ANSWER_WITHIN: Duration = Duration::from_mins(9);
 
-/// A card Forge showed itself, waiting for its answer.
 pub(crate) struct OwnApproval {
     thread: ThreadId,
-    /// A permission Full access gives; otherwise only the user answers.
     permission: bool,
     answer: oneshot::Sender<Decision>,
 }
@@ -209,8 +200,6 @@ impl Hub {
         verdict(decision, thread, id, tool)
     }
 
-    /// Answers a card [`Hub::ask_approval`] showed; `false` when `item`
-    /// isn't one.
     pub(crate) fn answer_own_approval(&self, item: &ItemId, decision: Decision) -> bool {
         let Some(card) = self.approvals_lock().remove(item) else {
             return false;
@@ -221,8 +210,6 @@ impl Hub {
         true
     }
 
-    /// Allows the permission cards waiting in `thread`, once it has Full
-    /// access.
     pub(crate) fn allow_own_approvals(&self, thread: &ThreadId) {
         let mut approvals = self.approvals_lock();
         let waiting: Vec<ItemId> = approvals

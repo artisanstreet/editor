@@ -8,24 +8,18 @@ impl DiskFull {
             rusqlite::Connection::open(fixture.dir.path().join("forge").join("forge.sqlite3"))
                 .unwrap();
         conn.busy_timeout(Duration::from_secs(5)).unwrap();
-        conn.execute_batch(&format!(
-            "BEGIN IMMEDIATE;
-             CREATE TRIGGER disk_full_insert BEFORE INSERT ON {table}
-                 BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;
-             CREATE TRIGGER disk_full_update BEFORE UPDATE ON {table}
-                 BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;"
-        ))
-        .unwrap();
+        conn.execute_batch(&include_str!("arm_disk_full.sql").replace("__TABLE__", table))
+            .unwrap();
         Self(conn)
     }
 
     fn strike(&self) {
-        self.0.execute_batch("COMMIT").unwrap();
+        self.0.execute_batch(include_str!("commit.sql")).unwrap();
     }
 
     fn clear(self) {
         self.0
-            .execute_batch("DROP TRIGGER disk_full_insert; DROP TRIGGER disk_full_update;")
+            .execute_batch(include_str!("drop_disk_full.sql"))
             .unwrap();
     }
 }
