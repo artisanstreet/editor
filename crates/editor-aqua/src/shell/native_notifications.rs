@@ -41,6 +41,18 @@ pub fn record_cold_launch(response: NotificationResponse) {
     let _ = COLD_LAUNCH.set(response);
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("show the attention count {count} on the taskbar")]
+pub struct BadgeError {
+    count: u32,
+    #[source]
+    source: aqua_protocol::window::WindowError,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("bring the Editor forward for a notification")]
+pub struct ActivateError(#[source] aqua_protocol::window::WindowError);
+
 pub struct NativeNotifications {
     center: NotificationCenter,
     wake: aqua::mailbox::Mailbox<()>,
@@ -88,7 +100,7 @@ impl NativeNotifications {
         shell: &Shell,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), BadgeError> {
         for tag in effects.withdraw {
             if let Err(error) = self.center.withdraw(&tag) {
                 tracing::warn!(%error, "could not withdraw notification");
@@ -116,7 +128,8 @@ impl NativeNotifications {
                     count,
                     color: color.to_paint(),
                 }),
-            ))?;
+            ))
+            .map_err(|source| BadgeError { count, source })?;
         }
         Ok(())
     }
@@ -126,7 +139,7 @@ impl NativeNotifications {
         shell: &mut Shell,
         ctx: &mut AppCtx<'_>,
         window: AquaWindowId,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, ActivateError> {
         self.wake.drain();
         let responses = std::mem::take(
             &mut *self
@@ -139,7 +152,8 @@ impl NativeNotifications {
             if let Some((host, thread)) = parse_tag(&response.tag) {
                 shell.navigate(Screen::Thread { host, thread });
             }
-            ctx.request_window(WindowRequest::Activate(window))?;
+            ctx.request_window(WindowRequest::Activate(window))
+                .map_err(ActivateError)?;
         }
         Ok(changed)
     }

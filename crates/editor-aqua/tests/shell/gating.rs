@@ -63,7 +63,7 @@ impl SectionViews for RefreshFixture {
         _: &mut Shell,
         _: &mut UiApp,
         _: &ObservedWindowState,
-    ) -> anyhow::Result<Element> {
+    ) -> Result<Element, editor_aqua::shell::application::BuildError> {
         self.builds += 1;
         Ok(UiBox::new().build())
     }
@@ -177,7 +177,7 @@ impl SectionViews for Fixture {
         _: &mut Shell,
         _: &mut UiApp,
         _: &ObservedWindowState,
-    ) -> anyhow::Result<Element> {
+    ) -> Result<Element, editor_aqua::shell::application::BuildError> {
         self.builds.set(self.builds.get() + 1);
         Ok(UiBox::new()
             .child(
@@ -306,7 +306,7 @@ impl SectionViews for ShortcutFixture {
         shell: &mut Shell,
         _: &mut UiApp,
         _: &ObservedWindowState,
-    ) -> anyhow::Result<Element> {
+    ) -> Result<Element, editor_aqua::shell::application::BuildError> {
         Ok(self.editor.element_with_notice_keyed(
             "shortcut-editor",
             editor_aqua::ui::text::Mode::SingleLine,
@@ -414,7 +414,7 @@ impl SectionViews for HoverFixture {
         shell: &mut Shell,
         _: &mut UiApp,
         _: &ObservedWindowState,
-    ) -> anyhow::Result<Element> {
+    ) -> Result<Element, editor_aqua::shell::application::BuildError> {
         let theme = shell.preferences.theme();
         Ok(UiBox::new()
             .width(200.0)

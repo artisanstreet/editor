@@ -1,6 +1,11 @@
 use self::open_thread::PendingStall;
 use crate::core::Screen;
-use crate::shell::{application::SectionViews, composer_glide::Route, host::Shell, layout, view};
+use crate::shell::{
+    application::{BuildError, SectionViews},
+    composer_glide::Route,
+    host::Shell,
+    layout, view,
+};
 use aqua::prelude::{AquaWindowId, InputEvent, ObservedWindowState};
 use aqua::{AppCtx, UiApp};
 use aqua_ui::element::Element;
@@ -583,11 +588,11 @@ impl RootViews {
         media_resources: AppMedia,
         now: std::time::Instant,
         transcript_only: bool,
-    ) -> anyhow::Result<Element> {
+    ) -> Result<Element, BuildError> {
         use crate::conversation::presentation::PresentationScope;
         use crate::conversation::view::factory::RowFactory;
         let scope = PresentationScope::capture(&workspace.conversation, core)
-            .ok_or_else(|| anyhow::anyhow!("conversation Forge lifetime is unavailable"))?;
+            .ok_or(BuildError::ConversationGone)?;
         if self.rows.as_ref().is_none_or(|rows| rows.scope != scope) {
             if let Some(token) = self.row_token.take() {
                 token.set(false);
@@ -622,7 +627,9 @@ impl RootViews {
             self.observations.clear();
             let client = core
                 .host_if_instance(&scope.host, scope.instance)
-                .ok_or_else(|| anyhow::anyhow!("conversation Forge lifetime is unavailable"))?
+                .ok_or_else(|| BuildError::HostGone {
+                    host: scope.host.clone(),
+                })?
                 .client
                 .clone();
             let thread = scope.thread.clone();
@@ -662,10 +669,12 @@ impl RootViews {
                 audio: media_resources.audio_assets.clone(),
             });
         }
-        let media = self
-            .media
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("conversation media owner is unavailable"))?;
+        let Some(media) = self.media.as_mut() else {
+            unreachable!(
+                "invariant: media for thread {} on {} was bound above",
+                scope.thread, scope.host
+            )
+        };
         let items: HashMap<_, _> = workspace
             .conversation
             .view
@@ -731,7 +740,10 @@ impl RootViews {
             &workspace.conversation,
             Rc::new(move |action| actions.borrow_mut().push_back(action)),
         )
-        .ok_or_else(|| anyhow::anyhow!("conversation action scope is unavailable"))?;
+        .ok_or_else(|| BuildError::NoActionScope {
+            host: scope.host.clone(),
+            thread: scope.thread.clone(),
+        })?;
         let (on_link, on_color) = self.conversation_callbacks(scope.clone());
         let invalidated = Rc::clone(&self.conversation_invalidated);
         let row_token = Rc::clone(
@@ -756,13 +768,17 @@ impl RootViews {
             .as_secs_f64();
         let blob_images = core
             .host_if_instance(&scope.host, scope.instance)
-            .ok_or_else(|| anyhow::anyhow!("conversation image owner is unavailable"))?
+            .ok_or_else(|| BuildError::HostGone {
+                host: scope.host.clone(),
+            })?
             .blob_images();
         let blob_actions = Rc::clone(&self.conversation_actions);
         let blob_scope = scope.clone();
         let source_provider = core
             .source_provider(&scope.host, scope.instance)
-            .ok_or_else(|| anyhow::anyhow!("conversation source provider is unavailable"))?;
+            .ok_or_else(|| BuildError::HostGone {
+                host: scope.host.clone(),
+            })?;
         let source_actions = Rc::clone(&self.conversation_actions);
         let factory = Rc::new(
             RowFactory::new(
@@ -801,8 +817,10 @@ impl RootViews {
                         .borrow_mut()
                         .push_back(ConversationAction::Source(action));
                 }),
-            )?
-            .with_stored(Rc::clone(&self.stored), source_provider)?
+            )
+            .map_err(BuildError::Rows)?
+            .with_stored(Rc::clone(&self.stored), source_provider)
+            .map_err(BuildError::Rows)?
             .with_copy({
                 let copy_actions = Rc::clone(&self.conversation_actions);
                 let copy_scope = scope.clone();
@@ -825,13 +843,15 @@ impl RootViews {
                         ));
                 }),
             )
-            .with_lazy_rows(&workspace.conversation, core, self.composer_height)?
+            .with_lazy_rows(&workspace.conversation, core, self.composer_height)
+            .map_err(BuildError::Rows)?
             .with_reveals(
                 &workspace.conversation,
                 core,
                 Rc::clone(&self.mounted_reveals),
                 swift,
-            )?
+            )
+            .map_err(BuildError::Rows)?
             .with_observations(self.observations.clone())
             .with_engine(Rc::clone(&self.markdown_engine))
             .with_media(Rc::new(move |key, width| {
@@ -862,7 +882,7 @@ impl RootViews {
                 })
             })),
         );
-        let viewport = factory.viewport_callback()?;
+        let viewport = factory.viewport_callback().map_err(BuildError::Rows)?;
         self.transcript_shape = Some(transcript_shape(&workspace.conversation));
         if transcript_only {
             let heights = workspace.conversation.row_heights.clone();
@@ -2872,7 +2892,7 @@ impl SectionViews for RootViews {
         shell: &mut Shell,
         ui: &mut UiApp,
         window: &ObservedWindowState,
-    ) -> anyhow::Result<Element> {
+    ) -> Result<Element, BuildError> {
         let theme = shell.preferences.theme();
         let account = self.account(shell);
         if self.image_preview_stale(shell) {
@@ -2924,10 +2944,7 @@ impl SectionViews for RootViews {
             return Ok(entry);
         }
         let app_media = Self::app_media(shell, window);
-        let workspace = shell
-            .entry
-            .workspace_mut()
-            .ok_or_else(|| anyhow::anyhow!("account workspace is unavailable"))?;
+        let workspace = shell.entry.workspace_mut().ok_or(BuildError::NoWorkspace)?;
         if self.workspace_key != Some(workspace.selections.key) {
             self.replace_rows(None);
             self.stored.borrow_mut().drain_cleanup(ui);
@@ -3014,7 +3031,7 @@ impl SectionViews for RootViews {
                 let host = shell
                     .core
                     .host(host)
-                    .ok_or_else(|| anyhow::anyhow!("new-thread Forge is unavailable"))?;
+                    .ok_or_else(|| BuildError::HostGone { host: host.clone() })?;
                 if let Some(status) = self.connection.build(host, theme, now, reduced) {
                     view::centered_conversation(status)
                 } else {
@@ -3100,10 +3117,15 @@ impl SectionViews for RootViews {
             }
             let emit = self.resource_emit();
             if let Some((_, state)) = &mut self.resource {
-                state.prepare(preview, ui)?;
+                state
+                    .prepare(preview, ui)
+                    .map_err(|source| BuildError::Selection {
+                        surface: "resource preview",
+                        source,
+                    })?;
                 let content = state
                     .content(preview, theme, viewport.height, emit)
-                    .map_err(anyhow::Error::msg)?;
+                    .map_err(BuildError::ResourcePreview)?;
                 self.resource_content = Some((content, preview.path.clone()));
             }
         } else {

@@ -1031,12 +1031,21 @@ impl Workspace {
         ui: &mut aqua::UiApp,
         theme: crate::ui::theme::ArtisanTheme,
         reduced_motion: bool,
-    ) -> anyhow::Result<(
-        Option<aqua_ui::element::Element>,
-        Option<aqua_ui::element::Element>,
-    )> {
+    ) -> Result<
+        (
+            Option<aqua_ui::element::Element>,
+            Option<aqua_ui::element::Element>,
+        ),
+        crate::shell::application::BuildError,
+    > {
+        use crate::shell::application::BuildError;
         let (document, source) = self.selections.question;
-        let source_view = self.question_source_view(ui, theme, document, source)?;
+        let source_view = self
+            .question_source_view(ui, theme, document, source)
+            .map_err(|source| BuildError::Selection {
+                surface: "question source",
+                source,
+            })?;
         let browser = self.conversation.question_pages.options_browser();
         let identity = browser.as_ref().and_then(|browser| {
             let browser = browser.borrow();
@@ -1067,24 +1076,28 @@ impl Workspace {
             if let Some(content) = browser.detail.as_ref() {
                 let identity = identity.clone();
                 let actions = Rc::clone(&self.question_option_detail_actions);
-                Some(service.render(
-                    ui,
-                    content,
-                    theme,
-                    Rc::new(move |action| {
-                        actions.borrow_mut().push_back((identity.clone(), action))
-                    }),
-                )?)
+                Some(
+                    service
+                        .render(
+                            ui,
+                            content,
+                            theme,
+                            Rc::new(move |action| {
+                                actions.borrow_mut().push_back((identity.clone(), action))
+                            }),
+                        )
+                        .map_err(|source| BuildError::Selection {
+                            surface: "question option detail",
+                            source,
+                        })?,
+                )
             } else {
                 None
             }
         } else {
             None
         };
-        let owner = self
-            .composer
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("conversation composer is not mounted"))?;
+        let owner = self.composer.as_ref().ok_or(BuildError::NoComposer)?;
         let composer = owner.controller.borrow();
         let actions = Rc::clone(&self.composer_actions);
         let emit: crate::composer::view::Dispatch =
@@ -1101,7 +1114,11 @@ impl Workspace {
         );
         let options = if let Some(options) = options {
             if let Some(selection) = options.selection {
-                ui.register_selection_source_in(options_document, selection)?;
+                ui.register_selection_source_in(options_document, selection)
+                    .map_err(|source| BuildError::Selection {
+                        surface: "question options",
+                        source,
+                    })?;
             } else {
                 ui.unregister_selection_source_in(options_document, options_source);
             }

@@ -7,6 +7,35 @@ use aqua::prelude::{
 use aqua::{AppCtx, Application, ExternalFrame, UiApp};
 use aqua_ui::element::Element;
 
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("the account workspace is gone")]
+    NoWorkspace,
+    #[error("Forge {host} is gone")]
+    HostGone { host: crate::core::HostId },
+    #[error("the conversation's Forge lifetime is gone")]
+    ConversationGone,
+    #[error("thread {thread} on Forge {host} has no action scope")]
+    NoActionScope {
+        host: crate::core::HostId,
+        thread: artisan_api::ThreadId,
+    },
+    #[error("configure the conversation rows")]
+    Rows(#[source] crate::conversation::view::factory::ConfigureRowsError),
+    #[error("the conversation composer is not mounted")]
+    NoComposer,
+    #[error("the composer has no Forge lifetime on {host}")]
+    ComposerHostGone { host: crate::core::HostId },
+    #[error("register the {surface} for selection")]
+    Selection {
+        surface: &'static str,
+        #[source]
+        source: aqua_text::document::SelectionSourceError,
+    },
+    #[error("show the resource preview")]
+    ResourcePreview(#[source] crate::shell::resource_preview::view::UnpreparedError),
+}
+
 pub trait SectionViews {
     fn advance_glides(&mut self, _shell: &mut Shell, _ui: &mut UiApp) -> bool {
         false
@@ -70,7 +99,7 @@ pub trait SectionViews {
         shell: &mut Shell,
         ui: &mut UiApp,
         window: &ObservedWindowState,
-    ) -> anyhow::Result<Element>;
+    ) -> Result<Element, BuildError>;
     fn input(
         &mut self,
         shell: &mut Shell,
@@ -363,7 +392,10 @@ impl<V: SectionViews> ShellApplication<V> {
         if let Some(center) = &mut self.notifications {
             for effects in updates.notifications {
                 if let Err(error) = center.apply(effects, &self.shell, ctx, id) {
-                    tracing::warn!(%error, "could not apply notification effects");
+                    tracing::warn!(
+                        error = %::diagnostics::chain(&error),
+                        "could not apply notification effects"
+                    );
                 }
             }
         }
@@ -422,8 +454,9 @@ impl<V: SectionViews> ShellApplication<V> {
         let element = match built {
             Ok(element) => element,
             Err(error) => {
-                tracing::error!(%error, "could not build Editor view");
-                self.show_failure(&error.to_string(), ctx, id, reason);
+                let chain = ::diagnostics::chain(&error);
+                tracing::error!(error = %chain, "could not build Editor view");
+                self.show_failure(&chain, ctx, id, reason);
                 self.shell.bind(ctx, id);
                 return;
             }
@@ -644,7 +677,10 @@ impl<V: SectionViews> ShellApplication<V> {
         let active = ctx.window_state(id).is_some_and(|window| window.focused);
         if let Some(notifications) = &mut self.notifications {
             if let Err(error) = notifications.drain(&mut self.shell, ctx, id) {
-                tracing::warn!(%error, "could not activate notification");
+                tracing::warn!(
+                    error = %::diagnostics::chain(&error),
+                    "could not activate notification"
+                );
             }
         }
         drop(tm_pre);

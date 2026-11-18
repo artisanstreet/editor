@@ -19,7 +19,7 @@ impl SectionViews for Probe {
         _: &mut Shell,
         ui: &mut UiApp,
         window: &ObservedWindowState,
-    ) -> anyhow::Result<Element> {
+    ) -> Result<Element, editor_aqua::shell::application::BuildError> {
         self.runtime.push((ui.scale(), ui.viewport()));
         let changed = ui
             .tree_mut()

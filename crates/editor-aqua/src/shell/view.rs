@@ -1,3 +1,4 @@
+use crate::shell::application::BuildError;
 use crate::shell::layout::{self, Size};
 use crate::ui::kit::pane::sheet;
 use crate::ui::kit::surface::frame;
@@ -169,7 +170,7 @@ pub fn conversation_virtual(
     parts: ComposerParts,
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     above_composer: Option<Element>,
-) -> anyhow::Result<Element> {
+) -> Result<Element, BuildError> {
     if workspace.conversation.agent.is_some() {
         return Ok(crate::conversation::view::layout_batched_thread_element(
             &workspace.conversation,
@@ -213,12 +214,9 @@ fn measured_composer(
     parts: ComposerParts,
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     above_composer: Option<Element>,
-) -> anyhow::Result<Element> {
+) -> Result<Element, BuildError> {
     let shift = parts.shift;
-    let owner = workspace
-        .composer
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("conversation composer is not mounted"))?;
+    let owner = workspace.composer.as_ref().ok_or(BuildError::NoComposer)?;
     let (host_id, instance, placeholder) = {
         let mut composer = owner.controller.borrow_mut();
         let question = workspace
@@ -232,12 +230,9 @@ fn measured_composer(
             composer.placeholder(question.as_ref()),
         )
     };
-    let host = core
-        .host_if_instance(
-            &host_id,
-            instance.ok_or_else(|| anyhow::anyhow!("conversation Forge is not available"))?,
-        )
-        .ok_or_else(|| anyhow::anyhow!("conversation Forge is not available"))?;
+    let host = instance
+        .and_then(|instance| core.host_if_instance(&host_id, instance))
+        .ok_or(BuildError::ComposerHostGone { host: host_id })?;
     let card = owner.surface(
         *theme,
         host,
@@ -292,7 +287,7 @@ pub fn conversation_body(
     parts: ComposerParts,
     composer_measurement: std::rc::Rc<std::cell::Cell<Option<f32>>>,
     above_composer: Option<Element>,
-) -> anyhow::Result<Element> {
+) -> Result<Element, BuildError> {
     let card = if workspace.conversation.agent.is_some() {
         None
     } else {
@@ -396,7 +391,7 @@ pub fn new_conversation(
     reduced_motion: bool,
     docked: Option<f32>,
     look: Option<&Sky>,
-) -> anyhow::Result<Element> {
+) -> Result<Element, BuildError> {
     let artwork = look.map(|look| sky(theme, composer_measurement.clone(), reduced_motion, look));
     let card = measured_composer(workspace, core, theme, parts, composer_measurement, None)?;
     let body = match docked {
