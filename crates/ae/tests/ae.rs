@@ -167,6 +167,14 @@ fn a_release_installs_through_its_own_ae_and_bad_ones_are_refused() {
             "the recorded version is the installer's own"
         );
     }
+    let notices = std::fs::read_to_string(app.join("NOTICES.txt")).unwrap();
+    for section in ["LICENSE.md", "notices/ae.txt", "notices/forge.txt"] {
+        assert!(
+            notices.contains(&format!("==== {section} ====")),
+            "the installed ae carries the {section} notices"
+        );
+    }
+    assert!(notices.contains("Copyright (c) Tokio Contributors"));
     let entries: Vec<_> = std::fs::read_dir(&app)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())

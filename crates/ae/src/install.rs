@@ -746,6 +746,11 @@ fn install_here(release: &Release, origin: &Origin, apps: &[App]) -> Result<()> 
             replace(&dir, incoming.path())?;
             std::fs::write(dir.join("LICENSE.md"), LICENSE)
                 .with_context(|| format!("write {}", dir.join("LICENSE.md").display()))?;
+            if let Some(notices) = crate::bundle::notices(*app) {
+                notices
+                    .write(&dir.join("NOTICES.txt"))
+                    .with_context(|| format!("write {}", dir.join("NOTICES.txt").display()))?;
+            }
             std::fs::write(dir.join(ORIGIN_FILE), origin.record())
                 .with_context(|| format!("write {}", dir.join(ORIGIN_FILE).display()))?;
             platform::register_uninstall(*app, &version)?;

@@ -2,6 +2,7 @@
 name = "diagnostics"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Crash reports, rotating log files and the tracing subscriber shared by ae, Forge and the Editor."
 

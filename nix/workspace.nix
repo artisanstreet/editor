@@ -13,9 +13,9 @@ let
   craneLib = (crane.mkLib pkgs).overrideToolchain rust;
   shaderTools = import ./shaders.nix { inherit pkgs; };
 
-  # The crates plus what they embed (skills/) and Cargo's configuration.
   roots = [
     "crates"
+    "notices"
     "vendor/highlighting"
     "vendor/mermaid-rs-renderer"
     "skills"
@@ -23,6 +23,7 @@ let
     ".config"
   ];
   topFiles = [
+    "LICENSE.md"
     "Cargo.toml"
     "Cargo.lock"
     "LICENSE.md"

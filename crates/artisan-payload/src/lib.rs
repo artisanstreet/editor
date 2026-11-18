@@ -80,6 +80,33 @@ pub fn embed(variable: &str, name: &str) -> Result<()> {
     std::fs::write(PathBuf::from(out).join(name), packed)
 }
 
+pub fn embed_notices(name: &str, root: &Path, files: &[PathBuf]) -> Result<()> {
+    let mut notices = Vec::new();
+    for file in files {
+        println!("cargo:rerun-if-changed={}", file.display());
+        let label = file
+            .strip_prefix(root)
+            .map_err(|_outside| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{} is outside {}", file.display(), root.display()),
+                )
+            })?
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let text = std::fs::read(file).map_err(|error| {
+            Error::new(error.kind(), format!("read {}: {error}", file.display()))
+        })?;
+        notices.extend_from_slice(format!("==== {label} ====\n\n").as_bytes());
+        notices.extend_from_slice(&text);
+        notices.extend_from_slice(b"\n\n");
+    }
+    let out = std::env::var_os("OUT_DIR")
+        .ok_or_else(|| Error::new(ErrorKind::NotFound, "OUT_DIR is not set"))?;
+    std::fs::write(PathBuf::from(out).join(name), pack(&notices)?)
+}
+
 #[cfg(test)]
 #[path = "../tests/payload/roundtrip.rs"]
 mod tests;

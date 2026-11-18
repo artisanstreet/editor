@@ -2,6 +2,7 @@
 name = "artisan-mentions"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "The `$skill` and `@connector` mention grammar the composer paints and Forge hands to engines."
 

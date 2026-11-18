@@ -2,6 +2,7 @@
 name = "artisan-account"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "AST account grants, enrollment, Noise XX E2E, and Relay transports for Forge/Editor."
 

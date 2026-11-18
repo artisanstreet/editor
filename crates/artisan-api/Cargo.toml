@@ -2,6 +2,7 @@
 name = "artisan-api"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Types shared by Forge and the Editor: threads, items, runs, events and requests."
 

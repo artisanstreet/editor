@@ -2,6 +2,7 @@
 name = "editor-core"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 
 [lib]

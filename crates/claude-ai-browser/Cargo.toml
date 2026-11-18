@@ -2,6 +2,7 @@
 name = "claude-ai-browser"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Signs in to claude.ai in the user's own browser and reads the session Native Claude Mode runs on."
 

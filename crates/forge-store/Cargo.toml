@@ -2,6 +2,7 @@
 name = "forge-store"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Forge's durable state: one SQLite file with a global change seq, plus content-addressed blobs."
 

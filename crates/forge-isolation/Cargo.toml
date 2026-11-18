@@ -2,6 +2,7 @@
 name = "forge-isolation"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Keeps Forge responsive while engines saturate the machine: cgroups on Linux, process priorities on Windows, I/O policy on macOS."
 

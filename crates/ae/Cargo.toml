@@ -2,6 +2,7 @@
 name = "ae"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Installs and manages Artisan's apps (Forge, the Editor) and Forge's devices and engines."
 

@@ -2,6 +2,7 @@
 name = "forge-mcp"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "The Artisan MCP: what an agent can do with Artisan, served to every engine through Forge's gateway."
 

@@ -2,6 +2,7 @@
 name = "artisan-payload"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Carries one program inside another: packed by a build script, written out when installing."
 

@@ -2,6 +2,7 @@
 name = "forge"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Artisan Forge: runs the engines and serves threads to paired Editors."
 

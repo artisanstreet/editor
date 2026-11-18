@@ -2,6 +2,7 @@
 name = "forge-runs"
 edition.workspace = true
 license.workspace = true
+publish = false
 version.workspace = true
 description = "Live runs: start, steer, answer and cancel engine runs, and turn engine events into stored items."
 

@@ -47,3 +47,7 @@ pub fn write_notices() -> Result<()> {
         .write(&path)
         .with_context(|| format!("write {}", path.display()))
 }
+
+#[cfg(test)]
+#[path = "../../tests/setup/payload.rs"]
+mod tests;
