@@ -16,6 +16,7 @@ clock = ["dep:artisan-api", "dep:editor-core"]
 editor = ["items", "clock", "dep:tempfile", "dep:aqua", "dep:aqua-core", "dep:aqua-text", "dep:aqua-ui", "dep:editor-core", "dep:editor-ui", "dep:editor-conversation"]
 shell = ["editor", "dep:editor-aqua"]
 transcript = ["dep:serde", "dep:serde_json", "dep:thiserror"]
+replay = ["transcript", "items", "dep:forge-engines"]
 
 [dependencies]
 aqua = { workspace = true, optional = true }
@@ -29,6 +30,7 @@ editor-aqua = { workspace = true, optional = true, features = ["test-support"] }
 editor-conversation = { workspace = true, optional = true, features = ["test-support"] }
 editor-core = { workspace = true, optional = true, features = ["test-support"] }
 editor-ui = { workspace = true, optional = true, features = ["test-support"] }
+forge-engines = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

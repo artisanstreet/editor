@@ -6,9 +6,10 @@ use artisan_api::{
     ThreadId, ToolKind,
 };
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
+use test_support::replay::ReplayingEngine;
 
 #[path = "replay/claude.rs"]
 mod claude;
@@ -25,60 +26,16 @@ const SIDE_QUERIES: [&str; 3] = [
 
 pub(crate) struct Replay {
     dir: tempfile::TempDir,
-    folder: PathBuf,
+    engine_files: ReplayingEngine,
     engine: EngineId,
     editor: Device,
     project: ProjectId,
 }
 
-fn replayer() -> PathBuf {
-    let test = std::env::current_exe().expect("the test binary has a path");
-    let profile = test
-        .parent()
-        .and_then(Path::parent)
-        .expect("test binaries live in <target>/<profile>/deps");
-    let replayer = profile
-        .join("examples")
-        .join(format!("replay_engine{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        replayer.is_file(),
-        "the replaying engine {} is missing: build it with `cargo build -p forge-http --example replay_engine` or run `cargo test -p forge-http` without --lib",
-        replayer.display()
-    );
-    replayer
-}
-
-const fn version(engine: EngineId) -> &'static str {
-    match engine {
-        EngineId::OpenCode => "2.1.0",
-        EngineId::Claude | EngineId::Codex => "1.0.0",
-    }
-}
-
-fn install(data: &Path, engine: EngineId, fixture: &str) -> PathBuf {
-    let engine_dir = data.join("engines").join(engine.to_string());
-    let version = version(engine);
-    let entry = engine_dir.join("versions").join(version).join(
-        forge_engines::host_entry(engine)
-            .expect("the replayed engine has a build on this platform"),
-    );
-    let folder = entry.parent().expect("the engine entry sits in a folder");
-    std::fs::create_dir_all(folder).expect("create the replayed engine's folder");
-    std::fs::copy(replayer(), &entry).expect("install the replaying engine");
-    let transcript = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../forge-engines/transcripts/replay")
-        .join(engine.to_string())
-        .join(format!("{fixture}.jsonl"));
-    std::fs::copy(&transcript, folder.join("transcript.jsonl"))
-        .unwrap_or_else(|error| panic!("copy the transcript {}: {error}", transcript.display()));
-    std::fs::write(engine_dir.join("current"), version).expect("select the replayed version");
-    folder.to_path_buf()
-}
-
 pub(crate) async fn replaying(engine: EngineId, fixture: &str) -> Replay {
     let dir = tempfile::tempdir().expect("create the Forge folder");
     let data = dir.path().join("forge");
-    let folder = install(&data, engine, fixture);
+    let engine_files = ReplayingEngine::install(&data, "replay_engine", engine, fixture);
     let server = start(ServeConfig {
         data_dir: data,
         listen: "127.0.0.1:0".parse().expect("a loopback address"),
@@ -112,7 +69,7 @@ pub(crate) async fn replaying(engine: EngineId, fixture: &str) -> Replay {
     assert!(created.status().is_success(), "the project is created");
     Replay {
         dir,
-        folder,
+        engine_files,
         engine,
         editor,
         project,
@@ -255,20 +212,14 @@ impl Replay {
     }
 
     pub(crate) fn launches(&self) -> usize {
-        std::fs::read_to_string(self.folder.join("launches")).map_or(0, |count| {
-            count
-                .trim()
-                .parse()
-                .expect("the launch counter holds a number")
-        })
+        self.engine_files.launches()
     }
 }
 
 impl Drop for Replay {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            let log = std::fs::read_to_string(self.folder.join("replay.log"))
-                .unwrap_or_else(|error| format!("no replay log: {error}"));
+            let log = self.engine_files.log();
             writeln!(std::io::stderr(), "what the replaying engine saw:\n{log}")
                 .expect("the test writes to stderr");
         }

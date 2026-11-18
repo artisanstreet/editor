@@ -13,6 +13,8 @@ pub mod http;
 pub mod items;
 #[cfg(feature = "net")]
 pub mod net;
+#[cfg(feature = "replay")]
+pub mod replay;
 #[cfg(feature = "sse")]
 pub mod sse;
 #[cfg(feature = "transcript")]
