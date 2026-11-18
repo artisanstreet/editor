@@ -106,7 +106,7 @@ pub(crate) struct Editor {
     observed: ObservedWindowState,
     host: HostId,
     thread: ThreadId,
-    changes: tokio::sync::broadcast::Receiver<artisan_api::Envelope>,
+    changes: forge_store::Subscription,
     bridge: Arc<A11yBridge>,
     sequence: u64,
     _directory: tempfile::TempDir,
