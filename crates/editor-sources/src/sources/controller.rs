@@ -1,23 +1,22 @@
 use super::{page_record, raw_rows};
 use artisan_api::{CollectionRange, CollectionRef, ContentRange, ContentRef, TextContent};
 use editor_core::{
-    CollectionWindow, ContentWindow, Core, ForgeClient, HostData, HostId, HostInstance, RangeState,
+    CollectionWindow, CompletionKey, CompletionSlot, ContentWindow, Core, ForgeClient, HostData,
+    HostId, HostInstance, RangeState,
     client::{CopyContentError, ExportContentError},
     delivery::OwnedDelivery,
-    runtime::runtime,
 };
 use std::{num::NonZeroUsize, ops::Range, path::PathBuf, sync::Arc};
-use tokio_util::task::AbortOnDropHandle;
 
 static COPIES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 enum Completion {
     Copy(
-        ContentRef,
+        CompletionKey,
         Result<String, CopyContentError>,
         tokio::sync::SemaphorePermit<'static>,
     ),
-    Export(ContentRef, Result<(), ExportContentError>),
+    Export(CompletionKey, Result<(), ExportContentError>),
 }
 
 pub struct CopiedSource {
@@ -81,7 +80,7 @@ pub struct ContentText {
     client: ForgeClient,
     host: HostId,
     instance: HostInstance,
-    action: Option<AbortOnDropHandle<()>>,
+    action: CompletionSlot,
     picking: Option<u64>,
     picker_generation: u64,
     delivery: OwnedDelivery<Completion>,
@@ -119,7 +118,7 @@ impl ContentText {
             client,
             host,
             instance,
-            action: None,
+            action: CompletionSlot::default(),
             picking: None,
             picker_generation: 0,
             delivery: OwnedDelivery::new(NonZeroUsize::MIN),
@@ -158,7 +157,7 @@ impl ContentText {
         if core.host_if_instance(&self.host, self.instance).is_some() {
             return true;
         }
-        self.action = None;
+        self.action.cancel();
         self.picking = None;
         self.window.disconnect();
         self.sync();
@@ -167,13 +166,11 @@ impl ContentText {
 
     #[cfg(feature = "test-support")]
     pub fn action_finished(&self) -> bool {
-        self.action
-            .as_ref()
-            .is_some_and(|action| action.is_finished())
+        self.action.is_finished()
     }
 
     pub fn busy(&self) -> bool {
-        self.action.is_some() || self.picking.is_some()
+        self.action.is_running() || self.picking.is_some()
     }
 
     pub fn is_export_pending(&self, generation: u64) -> bool {
@@ -181,7 +178,7 @@ impl ContentText {
     }
 
     pub fn set_source(&mut self, source: ContentRef) {
-        self.action = None;
+        self.action.cancel();
         self.picking = None;
         self.error = None;
         self.window.set_source(source);
@@ -230,11 +227,12 @@ impl ContentText {
         let client = self.client.clone();
         let source = self.window.source().clone();
         let sender = self.delivery.sender();
-        self.action = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let permit = COPIES.acquire().await.expect("copy semaphore stays open");
-            let result = client.copy_content(&source, 32 * 1024 * 1024).await;
-            let _ = sender.send(Completion::Copy(source, result, permit)).await;
-        })));
+        self.action
+            .spawn(&self.host, self.instance, move |key| async move {
+                let permit = COPIES.acquire().await.expect("copy semaphore stays open");
+                let result = client.copy_content(&source, 32 * 1024 * 1024).await;
+                let _ = sender.send(Completion::Copy(key, result, permit)).await;
+            });
     }
 
     pub fn begin_export(&mut self, core: &Core) -> Option<u64> {
@@ -276,10 +274,11 @@ impl ContentText {
         let client = self.client.clone();
         let source = self.window.source().clone();
         let sender = self.delivery.sender();
-        self.action = Some(AbortOnDropHandle::new(runtime().spawn(async move {
-            let result = client.export_content(&source, path).await;
-            let _ = sender.send(Completion::Export(source, result)).await;
-        })));
+        self.action
+            .spawn(&self.host, self.instance, move |key| async move {
+                let result = client.export_content(&source, path).await;
+                let _ = sender.send(Completion::Export(key, result)).await;
+            });
     }
 
     pub fn drain(&mut self, core: &Core) -> Option<CopiedSource> {
@@ -292,8 +291,7 @@ impl ContentText {
         let mut copied = None;
         for completion in self.delivery.drain() {
             match completion {
-                Completion::Copy(source, result, permit) if &source == self.window.source() => {
-                    self.action = None;
+                Completion::Copy(key, result, permit) if self.action.finish(core, &key) => {
                     match result {
                         Ok(text) => {
                             copied = Some(CopiedSource {
@@ -311,8 +309,7 @@ impl ContentText {
                         }
                     }
                 }
-                Completion::Export(source, result) if &source == self.window.source() => {
-                    self.action = None;
+                Completion::Export(key, result) if self.action.finish(core, &key) => {
                     if let Err(error) = result {
                         self.error = Some(format!(
                             "Couldn't export source: {}",
@@ -320,7 +317,7 @@ impl ContentText {
                         ));
                     }
                 }
-                _ => {}
+                Completion::Copy(..) | Completion::Export(..) => {}
             }
         }
         copied

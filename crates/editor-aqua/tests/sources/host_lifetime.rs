@@ -39,7 +39,7 @@ fn pending_copy(core: &Core, config: &HostConfig) -> ContentText {
 }
 
 #[test]
-fn copy_and_range_completions_are_discarded_after_removal_and_replacement() {
+fn copy_and_range_completions_are_discarded_after_removal_replacement_and_a_source_round_trip() {
     let directory = tempfile::tempdir().unwrap();
     let mut core = Core::for_tests(EditorFiles {
         dir: directory.path().to_owned(),
@@ -75,6 +75,17 @@ fn copy_and_range_completions_are_discarded_after_removal_and_replacement() {
     assert!(
         matches!(replaced.window().state(), RangeState::Failed(error) if error == "This Forge is no longer connected.")
     );
+
+    let mut switched = pending_copy(&core, &config);
+    switched.set_source(ContentRef::from_text("other content"));
+    switched.set_source(ContentRef::from_text("stored content"));
+    switched.copy(&core);
+    assert!(switched.drain(&core).is_none());
+    assert!(
+        switched.busy(),
+        "a copy that finished before switching away and back must not end the copy started after it"
+    );
+    assert!(switched.error.is_none());
 }
 
 #[test]
