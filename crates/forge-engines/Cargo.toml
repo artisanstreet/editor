@@ -49,6 +49,9 @@ tokio = { workspace = true, features = ["process", "io-util", "sync", "macros", 
 tokio-util.workspace = true
 tracing.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true

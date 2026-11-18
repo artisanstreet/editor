@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::sync::CancellationToken;
 
+use super::files::{self, ReadFileError};
 use super::rules::{Rules, Verdict, changes_files, url_host};
 use super::{mcp, shells, skills};
 
@@ -620,7 +621,7 @@ pub async fn execute(
         "Write" => write(call, cwd).await,
         "Edit" => edit(call, cwd).await,
         "Glob" => glob(call, cwd, &runtime.rules).await,
-        "Grep" => grep(call, cwd, &runtime.rules).await,
+        "Grep" => grep(call, cwd, &runtime.rules, cancel).await,
         "Bash" if call.input["run_in_background"].as_bool() == Some(true) => {
             let answer = match call.input["command"].as_str() {
                 Some(command) if !command.trim().is_empty() => runtime
@@ -722,25 +723,30 @@ fn path_input<'a>(call: &'a Call, tool: &str) -> Result<&'a str, Answer> {
 
 /// Reads a text file no larger than the limit.
 async fn read_text(path: &Path) -> Result<String, Answer> {
-    let metadata = tokio::fs::metadata(path)
+    let owned = path.to_path_buf();
+    let read = tokio::task::spawn_blocking(move || files::read_bounded(&owned, MAX_FILE_BYTES))
         .await
-        .map_err(|error| Answer::error(format!("Could not read {}: {error}", path.display())))?;
-    if metadata.is_dir() {
-        return Err(Answer::error(format!(
-            "{} is a directory; use Glob or Bash `ls` to list it.",
-            path.display()
-        )));
-    }
-    if metadata.len() > MAX_FILE_BYTES {
-        return Err(Answer::error(format!(
-            "{} is {} MB, more than Read takes; read parts of it with Bash (e.g. sed -n).",
-            path.display(),
-            metadata.len() / (1024 * 1024)
-        )));
-    }
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|error| Answer::error(format!("Could not read {}: {error}", path.display())))?;
+        .expect("invariant: reading a file does not panic");
+    let bytes = read.map_err(|error| {
+        Answer::error(match error {
+            ReadFileError::Directory { .. } => format!(
+                "{} is a directory; use Glob or Bash `ls` to list it.",
+                path.display()
+            ),
+            ReadFileError::NotRegular { .. } => format!(
+                "{} is not a regular file (a device, pipe or socket), so it cannot be read.",
+                path.display()
+            ),
+            ReadFileError::TooLarge { limit, .. } => format!(
+                "{} is more than {} MB, more than Read takes; read parts of it with Bash (e.g. sed -n).",
+                path.display(),
+                limit / (1024 * 1024)
+            ),
+            ReadFileError::Open { source, .. } | ReadFileError::Read { source, .. } => {
+                format!("Could not read {}: {source}", path.display())
+            }
+        })
+    })?;
     if bytes.iter().take(8192).any(|byte| *byte == 0) {
         return Err(Answer::error(format!(
             "{} is a binary file.",
@@ -951,7 +957,7 @@ async fn glob(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
 }
 
 /// Searches file contents for a pattern.
-async fn grep(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
+async fn grep(call: &Call, cwd: &Path, rules: &Rules, cancel: &CancellationToken) -> Answer {
     let Some(pattern) = call.input["pattern"].as_str() else {
         return Answer::error("Grep needs a pattern.");
     };
@@ -971,9 +977,14 @@ async fn grep(call: &Call, cwd: &Path, rules: &Rules) -> Answer {
         .as_str()
         .map_or_else(|| cwd.to_path_buf(), |path| resolve(cwd, path));
     let rules = rules.clone();
-    let hits = tokio::task::spawn_blocking(move || search(&root, &regex, only.as_ref(), &rules))
-        .await
-        .unwrap_or_default();
+    let stop = cancel.clone();
+    let hits =
+        tokio::task::spawn_blocking(move || search(&root, &regex, only.as_ref(), &rules, &stop))
+            .await
+            .unwrap_or_default();
+    if cancel.is_cancelled() {
+        return Answer::error("The search was stopped.");
+    }
     if hits.is_empty() {
         return Answer::ok("Nothing matched.");
     }
@@ -998,6 +1009,7 @@ fn search(
     regex: &Regex,
     only: Option<&globset::GlobMatcher>,
     rules: &Rules,
+    cancel: &CancellationToken,
 ) -> Vec<String> {
     let mut hits = Vec::new();
     let files: Box<dyn Iterator<Item = PathBuf>> = if root.is_file() {
@@ -1011,14 +1023,14 @@ fn search(
         root
     };
     for path in files {
+        if cancel.is_cancelled() {
+            return hits;
+        }
         let name = relative(base, &path);
         if only.is_some_and(|only| !only.is_match(&name)) || rules.hides("Grep", &path) {
             continue;
         }
-        if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_FILE_BYTES) {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(bytes) = files::read_bounded(&path, MAX_FILE_BYTES) else {
             continue;
         };
         if bytes.iter().take(8192).any(|byte| *byte == 0) {
@@ -2080,6 +2092,29 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("the file"),
             "one\nthree\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_refuses_a_device_that_never_ends() {
+        let work = tempfile::tempdir().expect("a dir");
+        let (answer, _) = tokio::time::timeout(
+            Duration::from_secs(10),
+            execute(
+                &call("Read", json!({ "file_path": "/dev/zero" })),
+                work.path(),
+                &CancellationToken::new(),
+                &runtime(),
+            ),
+        )
+        .await
+        .expect("Read answered instead of reading forever");
+        assert!(answer.is_error);
+        assert!(
+            answer.text.contains("not a regular file"),
+            "{}",
+            answer.text
         );
     }
 

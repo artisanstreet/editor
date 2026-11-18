@@ -16,6 +16,7 @@
 
 mod capabilities;
 mod decoder;
+mod files;
 mod mcp;
 mod rules;
 mod session;
