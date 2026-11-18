@@ -202,42 +202,177 @@ fn mounted_input_and_composition_edit_editor_once() {
 }
 
 #[test]
-fn mounted_preedit_without_cursor_follows_editor_source_and_submits() {
-    use aqua_core::{ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey};
-    use aqua_text::{SharedFonts, SharedRuns};
-    use editor_aqua::ui::text::mount::{EditorController, EditorEvent};
-    use editor_aqua::ui::theme::ArtisanTheme;
-    use std::cell::RefCell;
+fn mounted_preedit_without_cursor_stays_provisional_until_commit() {
+    use aqua_core::{ImeEvent, InputEvent};
+    use editor_aqua::ui::text::mount::EditorEvent;
 
-    let events = Rc::new(RefCell::new(Vec::new()));
+    let (controller, mut runtime, _, events) = mounted("", Mode::SingleLine, 400.0);
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Update {
+        marked: "候".into(),
+        cursor: None,
+    }));
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Update {
+        marked: "候補".into(),
+        cursor: None,
+    }));
+    assert_eq!(controller.state().borrow().text(), "候補");
+    assert_eq!(controller.state().borrow().marked_range(), Some(0..6));
+    runtime.handle_input(&key(aqua_core::NamedKey::Enter, aqua_core::Modifiers::NONE));
+    runtime.handle_input(&key(
+        aqua_core::NamedKey::Enter,
+        aqua_core::Modifiers::SHIFT,
+    ));
+    assert!(!events.borrow().contains(&EditorEvent::Submitted));
+    assert_eq!(controller.state().borrow().text(), "候補");
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Commit {
+        text: "候補".into(),
+    }));
+    assert_eq!(controller.state().borrow().marked_range(), None);
+    runtime.handle_input(&key(aqua_core::NamedKey::Enter, aqua_core::Modifiers::NONE));
+    assert!(events.borrow().contains(&EditorEvent::Submitted));
+}
+
+#[test]
+fn mounted_composition_cancel_restores_the_text_it_replaced() {
+    use aqua_core::{ImeEvent, InputEvent};
+
+    let (controller, mut runtime, node, _) = mounted("abcd", Mode::Prompt, 400.0);
+    controller.state().borrow_mut().set_selection(1..3, true);
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Start));
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Update {
+        marked: "候".into(),
+        cursor: Some((3, 3)),
+    }));
+    assert_eq!(controller.state().borrow().text(), "a候d");
+    runtime.handle_input(&InputEvent::Ime(ImeEvent::Cancel));
+    let state = controller.state();
+    let state = state.borrow();
+    assert_eq!(state.text(), "abcd");
+    assert_eq!(state.selection(), 1..3);
+    assert!(state.selection_reversed());
+    assert_eq!(state.marked_range(), None);
+    drop(state);
+    assert_eq!(runtime.tree().editor_snapshot(node).unwrap().text, "abcd");
+    assert!(!controller.state().borrow_mut().undo());
+}
+
+#[test]
+fn committed_composition_undoes_to_the_text_before_it() {
+    let mut editor = Editor::new("ab", Mode::Prompt);
+    editor.replace_input(None, "k", Some(1..1));
+    editor.replace_input(None, "か", Some(1..1));
+    editor.replace_input(None, "漢", None);
+    assert_eq!(editor.text(), "ab漢");
+    assert!(editor.undo());
+    assert_eq!(editor.text(), "ab");
+    assert!(!editor.undo());
+}
+
+#[test]
+fn shift_enter_during_composition_keeps_the_preedit() {
+    let mut editor = Editor::new("", Mode::Prompt);
+    editor.replace_input(None, "候", Some(1..1));
+    assert_eq!(editor.enter(true), CommandOutcome::Ignored);
+    assert_eq!(editor.text(), "候");
+    assert_eq!(editor.marked_range(), Some(0..3));
+}
+
+#[test]
+fn mounted_native_reconversion_and_selection_edit_the_editor() {
+    use aqua_core::InputEvent;
+    use editor_aqua::ui::text::mount::EditorEvent;
+
+    let (controller, mut runtime, node, events) = mounted("漢字です", Mode::Prompt, 400.0);
+    runtime.handle_input(&InputEvent::ImeSelect {
+        start: 0,
+        end: 2,
+        reversed: true,
+    });
+    assert_eq!(controller.state().borrow().selection(), 0..6);
+    assert!(controller.state().borrow().selection_reversed());
+    runtime.handle_input(&InputEvent::ImeReplace {
+        start: 0,
+        end: 2,
+        text: "感じ".into(),
+    });
+    assert_eq!(controller.state().borrow().text(), "感じです");
+    assert_eq!(
+        runtime.tree().editor_snapshot(node).unwrap().text,
+        "感じです"
+    );
+    assert!(events.borrow().contains(&EditorEvent::Changed));
+    assert!(controller.state().borrow_mut().undo());
+    assert_eq!(controller.state().borrow().text(), "漢字です");
+}
+
+#[test]
+fn native_replacement_beside_a_composition_survives_cancel() {
+    let mut editor = Editor::new("ab", Mode::Prompt);
+    editor.set_selection(2..2, false);
+    editor.replace_input(None, "候", Some(1..1));
+    assert_eq!(editor.replace_utf16(0..1, "xy"), EditOutcome::Changed);
+    assert_eq!(editor.text(), "xyb候");
+    assert_eq!(editor.marked_range(), Some(3..6));
+    assert_eq!(editor.cancel_composition(), EditOutcome::Changed);
+    assert_eq!(editor.text(), "xyb");
+    assert_eq!(editor.selection(), 3..3);
+}
+
+#[test]
+fn undo_restores_the_active_end_of_a_backward_selection() {
+    let mut editor = Editor::new("abcdef", Mode::Document);
+    assert!(editor.set_selection(1..3, true));
+    editor.replace_input(None, "x", None);
+    assert!(editor.undo());
+    assert_eq!(editor.selection(), 1..3);
+    assert!(editor.selection_reversed());
+    editor.move_horizontal(false, false, true);
+    assert_eq!(editor.selection(), 0..3);
+}
+
+fn key(named: aqua_core::NamedKey, modifiers: aqua_core::Modifiers) -> aqua_core::InputEvent {
+    aqua_core::InputEvent::KeyDown(aqua_core::KeyEvent {
+        key: aqua_core::Key::Named(named),
+        modifiers,
+        repeat: false,
+    })
+}
+
+fn mounted(
+    text: &str,
+    mode: Mode,
+    width: f32,
+) -> (
+    editor_aqua::ui::text::mount::EditorController,
+    aqua::UiApp,
+    aqua_core::NodeId,
+    Rc<std::cell::RefCell<Vec<editor_aqua::ui::text::mount::EditorEvent>>>,
+) {
+    use aqua_text::{SharedFonts, SharedRuns};
+    use editor_aqua::ui::text::mount::EditorController;
+    use editor_aqua::ui::theme::ArtisanTheme;
+
+    let events = Rc::new(std::cell::RefCell::new(Vec::new()));
     let recorded = events.clone();
-    let controller = EditorController::new(Editor::new("", Mode::Prompt), move |event| {
+    let controller = EditorController::new(Editor::new(text, mode), move |event| {
         recorded.borrow_mut().push(event)
     });
-    let mut runtime = aqua::UiApp::new(SharedFonts::new(), SharedRuns::new());
+    let fonts = SharedFonts::new();
+    editor_aqua::ui::fonts::register_bundled_fonts(&fonts);
+    let mut runtime = aqua::UiApp::new(fonts, SharedRuns::new());
     runtime
-        .mount(|_| controller.element(Mode::Prompt, &ArtisanTheme::resolved(), ""))
-        .unwrap();
-    runtime.set_viewport(400.0, 200.0, 1.0);
-    runtime.build_frame().unwrap();
+        .mount(|_| controller.element(mode, &ArtisanTheme::resolved(), ""))
+        .expect("the editor mounts");
+    runtime.set_viewport(width, 400.0, 1.0);
+    runtime.build_frame().expect("the editor lays out");
     let node = runtime
         .tree()
         .traverse()
         .into_iter()
         .find(|node| runtime.tree().editor_snapshot(*node).is_some())
-        .unwrap();
+        .expect("the editor mounts an editable text node");
     runtime.tree_mut().set_focused(Some(node));
-    runtime.handle_input(&InputEvent::Ime(ImeEvent::Update {
-        marked: "候".into(),
-        cursor: None,
-    }));
-    assert_eq!(controller.state().borrow().marked_range(), None);
-    runtime.handle_input(&InputEvent::KeyDown(KeyEvent {
-        key: Key::Named(NamedKey::Enter),
-        modifiers: Modifiers::NONE,
-        repeat: false,
-    }));
-    assert!(events.borrow().contains(&EditorEvent::Submitted));
+    (controller, runtime, node, events)
 }
 
 #[test]
@@ -921,16 +1056,4 @@ fn prompt_switches_raw_placeholder_paint_to_raw_input_paint() {
     runtime.handle_input(&InputEvent::TextInput { text: "a".into() });
     runtime.build_frame().unwrap();
     assert!(runtime.scene().ordered().any(|(_, item)| matches!(item, DisplayItem::PushGpuiSourceTextColor(color) if *color == theme.colors.text.to_reference_text_color())));
-}
-
-#[test]
-fn undo_restores_the_active_end_of_a_backward_selection() {
-    let mut editor = Editor::new("abcdef", Mode::Document);
-    assert!(editor.set_selection(1..3, true));
-    editor.replace_input(None, "x", None);
-    assert!(editor.undo());
-    assert_eq!(editor.selection(), 1..3);
-    assert!(editor.selection_reversed());
-    editor.move_horizontal(false, false, true);
-    assert_eq!(editor.selection(), 0..3);
 }

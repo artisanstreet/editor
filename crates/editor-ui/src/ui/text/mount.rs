@@ -248,8 +248,9 @@ impl EditorController {
             RoutedInput::Native(InputEvent::Ime(ime)) => match ime {
                 ImeEvent::Start => Some(CommandOutcome::Ignored),
                 ImeEvent::Update { marked, cursor } => {
-                    let selected =
-                        cursor.and_then(|(start, end)| utf8_range_to_utf16(marked, start..end));
+                    let selected = cursor
+                        .and_then(|(start, end)| utf8_range_to_utf16(marked, start..end))
+                        .or_else(|| utf8_range_to_utf16(marked, marked.len()..marked.len()));
                     Some(CommandOutcome::Edit(input_change(
                         state.replace_utf16_range(None, marked, selected),
                     )))
@@ -257,11 +258,27 @@ impl EditorController {
                 ImeEvent::Commit { text } => Some(CommandOutcome::Edit(input_change(
                     state.replace_utf16_range(None, text, None),
                 ))),
-                ImeEvent::Cancel => {
-                    state.unmark_text();
-                    Some(CommandOutcome::Ignored)
-                }
+                ImeEvent::Cancel => Some(CommandOutcome::Edit(state.cancel_composition())),
             },
+            RoutedInput::Native(InputEvent::ImeReplace { start, end, text }) => {
+                Some(CommandOutcome::Edit(state.replace_utf16(
+                    usize::try_from(*start).unwrap_or(usize::MAX)
+                        ..usize::try_from(*end).unwrap_or(usize::MAX),
+                    text,
+                )))
+            }
+            RoutedInput::Native(InputEvent::ImeSelect {
+                start,
+                end,
+                reversed,
+            }) => {
+                state.select_utf16(
+                    usize::try_from(*start).unwrap_or(usize::MAX)
+                        ..usize::try_from(*end).unwrap_or(usize::MAX),
+                    *reversed,
+                );
+                Some(CommandOutcome::Ignored)
+            }
             RoutedInput::Native(InputEvent::KeyDown(key)) => {
                 let shift = key.modifiers.contains(Modifiers::SHIFT);
                 let word = key.modifiers.contains(Modifiers::CONTROL)
