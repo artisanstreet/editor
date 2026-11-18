@@ -251,7 +251,8 @@ pub(crate) async fn drive(
         .entry(thread_id.clone())
         .or_default()
         .add(&items.weighed);
-    finish(hub, &mut run, &items, outcome, ended).await?;
+    let attempted = pending.iter().map(|item| item.id.clone()).collect();
+    finish(hub, &mut run, &items, outcome, ended, attempted).await?;
     if let Some(home) = &claude_ai_home
         && claude_ai_before.as_ref() != Some(&forge_engines::claudeai::Session::state(home))
     {
@@ -566,7 +567,7 @@ async fn execute(
     cancel.cancel();
     let mut outcome = outcome;
     if !adapter_finished && outcome == Outcome::Cancelled && !hub.inner.shutdown.is_cancelled() {
-        match announce_stop(hub, run, items).await {
+        match announce_stop(hub, run, items, pending).await {
             Ok(stopped) => *run = stopped,
             Err(error) => {
                 tracing::warn!(thread = %run.thread_id, run = %run.id, "announce the stop before the engine confirms it: {}", diagnostics::chain(&error));
@@ -1475,12 +1476,14 @@ async fn announce_stop(
     hub: &Hub,
     run: &Run,
     items: &Work,
+    pending: &[artisan_api::Item],
 ) -> Result<Run, forge_store::SettleRunError> {
     let mut stopped = run.clone();
     stopped.finish(RunOutcome::Cancelled, None, artisan_api::now());
     let (stopped, _) = Box::pin(hub.store().settle_run(forge_store::Settlement {
         run: stopped,
         open: open_items(items),
+        attempted: pending.iter().map(|item| item.id.clone()).collect(),
         park: None,
         note: None,
     }))
@@ -1505,6 +1508,7 @@ async fn finish(
     items: &Work,
     outcome: Outcome,
     ended: RunOutcome,
+    attempted: Vec<ItemId>,
 ) -> Result<(), forge_store::SettleRunError> {
     let open = open_items(items);
     if let Some(error) = outcome.error() {
@@ -1538,6 +1542,7 @@ async fn finish(
     let settlement = forge_store::Settlement {
         run: run.clone(),
         open,
+        attempted,
         park,
         note,
     };

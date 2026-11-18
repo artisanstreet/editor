@@ -48,6 +48,14 @@ pub enum SetTitleError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
+    #[error(
+        "Codex session {session} is open in another Codex process, which holds its history. Close it there, then send the message again."
+    )]
+    SessionBusy {
+        session: String,
+        #[source]
+        source: crate::rpc::RpcError,
+    },
     #[error("start session {session:?} with {method}")]
     Open {
         method: &'static str,
@@ -82,6 +90,8 @@ pub enum RequestError {
     #[error("Codex refused the request")]
     Refused(#[source] crate::rpc::RpcError),
 }
+
+const ACTIVE_WRITER: &str = "already has an active writer";
 
 pub struct CodexHarness;
 
@@ -269,6 +279,12 @@ impl Run {
         match self.call(method, params).await {
             Ok(Some(_)) => {}
             Ok(None) => return Ok(Outcome::Cancelled),
+            Err(RequestError::Refused(source))
+                if source.message.contains(ACTIVE_WRITER)
+                    && let Some(session) = turn.session_id.clone() =>
+            {
+                return Err(RunError::SessionBusy { session, source });
+            }
             Err(source) => {
                 return Err(RunError::Open {
                     method,

@@ -27,6 +27,8 @@ mod live_snapshot;
 mod mcp_auth_tests;
 #[path = "../tests/run/mcp_reach.rs"]
 mod mcp_reach_tests;
+#[path = "../tests/run/resume.rs"]
+mod resume;
 #[path = "../tests/resources/paths.rs"]
 mod resource_paths;
 #[path = "../tests/resources/snapshot.rs"]
@@ -1645,7 +1647,7 @@ async fn a_resumed_subagent_keeps_its_work_under_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn failed_preparation_preserves_input_without_a_retry_loop() {
+async fn failed_preparation_fails_its_input_without_a_retry_loop() {
     let fixture = fixture(Arc::new(|_, _| {
         panic!("uninstalled engine must not launch")
     }))
@@ -1660,7 +1662,7 @@ async fn failed_preparation_preserves_input_without_a_retry_loop() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status(), RunStatus::Failed);
     let input = fixture.hub.store().item(&input.id).await.unwrap().unwrap();
-    assert_eq!(input.status, Status::Running);
+    assert_eq!(input.status, Status::Failed);
     assert!(input.run_id.is_none());
     fixture.quiescent().await;
     assert!(!fixture.hub.is_live(&fixture.thread_id));
@@ -2344,41 +2346,52 @@ async fn one_thread_drains_multiple_bounded_initial_batches_in_order() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_bounded_batch_does_not_retry_its_already_observed_tail() {
+async fn a_failed_bounded_batch_leaves_the_inputs_it_never_attempted_to_the_next_run() {
     let fixture = fixture(Arc::new(|_, _| panic!("uninstalled engine"))).await;
     std::fs::remove_file(fixture.dir.path().join("engines/claude/current")).unwrap();
     let slots = Arc::clone(&fixture.hub.inner.harness_slots)
         .acquire_many_owned(8)
         .await
         .unwrap();
-    let mut latest = 0;
+    let mut sent = Vec::new();
     for n in 0..40 {
-        latest = fixture
-            .hub
-            .send_message(&fixture.thread_id, message(&format!("message-{n}")))
-            .await
-            .unwrap()
-            .seq;
+        sent.push(
+            fixture
+                .hub
+                .send_message(&fixture.thread_id, message(&format!("message-{n}")))
+                .await
+                .unwrap()
+                .seq,
+        );
     }
     drop(slots);
     fixture.hub.resume_pending();
     fixture.settled().await;
-    let run = fixture
+    let latest = fixture
         .hub
         .store()
         .latest_run(&fixture.thread_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(run.status(), RunStatus::Failed);
-    assert_eq!(run.input_cutoff, latest);
     assert_eq!(
+        (latest.status(), latest.input_cutoff),
+        (RunStatus::Failed, sent[39])
+    );
+    assert!(
         undelivered(fixture.hub.store(), &fixture.thread_id)
             .await
-            .len(),
+            .is_empty()
+    );
+    assert_eq!(
+        texts(&fixture.items().await)
+            .iter()
+            .filter(|(_, status)| *status == Status::Failed)
+            .count(),
         40
     );
     fixture.quiescent().await;
+    let run = &latest;
     assert_eq!(
         fixture
             .hub
@@ -2513,7 +2526,7 @@ async fn shutdown_leaves_unclaimed_durable_threads_for_the_next_dispatcher() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn missing_historical_image_fails_a_created_run_without_dropping_or_retrying_input() {
+async fn missing_historical_image_fails_a_created_run_and_its_input_without_retrying() {
     use image::ImageEncoder as _;
     let fixture = fixture(Arc::new(|_, _| {
         panic!("invalid image must fail before harness")
@@ -2562,7 +2575,7 @@ async fn missing_historical_image_fails_a_created_run_without_dropping_or_retryi
             .unwrap()
             .unwrap()
             .status,
-        Status::Running
+        Status::Failed
     );
     fixture.quiescent().await;
     assert_eq!(

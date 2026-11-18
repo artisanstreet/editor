@@ -158,6 +158,7 @@ pub enum Delivered {
 pub struct Settlement {
     pub run: Run,
     pub open: Vec<ItemId>,
+    pub attempted: Vec<ItemId>,
     pub park: Option<Park>,
     pub note: Option<NewItem>,
 }

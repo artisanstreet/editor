@@ -4,7 +4,7 @@ WITH runnable_inputs AS (
       AND NOT EXISTS (
         SELECT 1 FROM runs latest WHERE latest.rowid = (
           SELECT rowid FROM runs WHERE thread_id = pending.thread_id ORDER BY rowid DESC LIMIT 1
-        ) AND latest.status IN ('failed', 'refused')
+        ) AND latest.status IN ('failed', 'refused', 'cancelled')
           AND pending.seq <= json_extract(latest.body, '$.input_cutoff')
       )
 )

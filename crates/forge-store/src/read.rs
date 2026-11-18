@@ -210,7 +210,6 @@ pub fn pending_inputs(
     const BATCH_ROWS: usize = 32;
     const BATCH_BYTES: usize = 4 * 1024 * 1024;
     let tx = conn.unchecked_transaction()?;
-    let cutoff = tx.query_row("SELECT coalesce(max(seq),0) FROM items WHERE thread_id=?1 AND status='running' AND kind_type='user_message'", [thread_id.as_str()], |row| row.get(0))?;
     let mut query = tx.prepare_cached("SELECT body FROM items WHERE thread_id=?1 AND status='running' AND kind_type='user_message' ORDER BY position LIMIT 32")?;
     let mut rows = query.query([thread_id.as_str()])?;
     let mut items = Vec::with_capacity(BATCH_ROWS);
@@ -248,6 +247,7 @@ pub fn pending_inputs(
             break;
         }
     }
+    let cutoff = items.iter().map(|item| item.seq).max().unwrap_or(0);
     Ok(crate::PendingInputs { items, cutoff })
 }
 

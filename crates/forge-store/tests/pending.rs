@@ -44,7 +44,7 @@ fn message(text: String, images: Vec<BlobHash>) -> SendMessage {
     }
 }
 #[tokio::test]
-async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
+async fn a_bounded_input_batch_attempts_only_the_inputs_it_loaded() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let thread = thread(&store).await;
@@ -63,8 +63,8 @@ async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
     }
     let pending = store.pending_inputs(&thread).await.unwrap();
     assert_eq!(pending.items.len(), 32);
-    assert_eq!(pending.cutoff, last);
-    assert!(pending.cutoff > pending.items.last().unwrap().seq);
+    assert_eq!(pending.cutoff, pending.items.last().unwrap().seq);
+    assert!(pending.cutoff < last);
     let ids = pending.items.iter().map(|item| item.id.clone()).collect();
     store
         .accept_inputs(thread.clone(), RunId::new(), ids, Delivered::Initial)
@@ -101,7 +101,7 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
     let pending = store.pending_inputs(&thread).await.unwrap();
     assert_eq!(pending.items.len(), 1);
     assert_eq!(pending.items[0], first);
-    assert_eq!(pending.cutoff, later.seq);
+    assert_eq!(pending.cutoff, first.seq);
     store
         .accept_inputs(
             thread.clone(),
@@ -222,7 +222,8 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
     }
     let pending = store.pending_inputs(&thread).await.unwrap();
     assert_eq!(pending.items.len(), 4);
-    assert_eq!(pending.cutoff, last);
+    assert_eq!(pending.cutoff, pending.items.last().unwrap().seq);
+    assert!(pending.cutoff < last);
     store
         .accept_inputs(
             thread.clone(),

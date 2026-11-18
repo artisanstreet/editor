@@ -536,6 +536,7 @@ impl Store {
         let crate::Settlement {
             run,
             open,
+            attempted,
             park,
             note,
         } = settlement;
@@ -587,6 +588,29 @@ impl Store {
                 Some(park) => tx.park(&run, park)?,
                 None => false,
             };
+            let undelivered = match run.status() {
+                RunStatus::Failed | RunStatus::Refused if !parked => Some(Status::Failed),
+                RunStatus::Cancelled => Some(Status::Cancelled),
+                RunStatus::Failed
+                | RunStatus::Refused
+                | RunStatus::Running
+                | RunStatus::Done
+                | RunStatus::Interrupted => None,
+            };
+            if let Some(undelivered) = undelivered {
+                for id in attempted {
+                    if let Some(old) = read::item(tx, &id)?
+                        && old.status == Status::Running
+                        && matches!(old.kind, ItemKind::UserMessage { .. })
+                    {
+                        let input = Item {
+                            status: undelivered,
+                            ..old.clone()
+                        };
+                        tx.save_item(input, Some(old))?;
+                    }
+                }
+            }
             let run = tx.save_run(run)?;
             if run.status() == RunStatus::Interrupted {
                 tx.continue_after_restart(&run)?;
