@@ -44,9 +44,13 @@ fn an_integer_field_refuses_fractions_and_words_and_stays_answerable() {
             panic!("{wrong} must be refused");
         };
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, EngineEvent::Item { kind: ItemKind::Error { .. }, .. })),
+            events.iter().any(|event| matches!(
+                event,
+                EngineEvent::Item {
+                    kind: ItemKind::Error { .. },
+                    ..
+                }
+            )),
             "the user is told why {wrong} was refused"
         );
     }
@@ -120,7 +124,14 @@ async fn a_form_reply_opencode_rejects_does_not_mark_the_question_answered() {
     drop(io);
     while let Some(event) = output.recv().await {
         assert!(
-            !matches!(event, EngineEvent::Item { status: Status::Done, kind: ItemKind::Question { .. }, .. }),
+            !matches!(
+                event,
+                EngineEvent::Item {
+                    status: Status::Done,
+                    kind: ItemKind::Question { .. },
+                    ..
+                }
+            ),
             "a rejected reply must not show the question as answered"
         );
     }

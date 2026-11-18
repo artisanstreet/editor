@@ -5099,7 +5099,8 @@ async fn cancel_during_handoff_waits_for_the_forks_cleanup() {
             &self,
             turn: Turn,
             cancel: CancellationToken,
-        ) -> BoxFuture<'static, Result<forge_engines::SideReply, forge_engines::SideQueryError>> {
+        ) -> BoxFuture<'static, Result<forge_engines::SideReply, forge_engines::SideQueryError>>
+        {
             let entered = Arc::clone(&self.entered);
             let cleaned = Arc::clone(&self.cleaned);
             Box::pin(async move {

@@ -652,10 +652,7 @@ impl Decoder {
                     body: Some(json!({ "decision": reply })),
                 }
             }
-            (
-                Pending::Form { session, form, .. },
-                Answer::Question { answers },
-            ) => {
+            (Pending::Form { session, form, .. }, Answer::Question { answers }) => {
                 let skipped = answers.iter().all(Option::is_none);
                 if let Some(tool) = self.tools.get_mut(key) {
                     if let ItemKind::Question {
@@ -1321,20 +1318,26 @@ fn form_question(field: NativeField) -> Option<(Question, FormField)> {
 impl FormField {
     fn value(&self, answer: &[String]) -> Result<Value, String> {
         let value = |label: &String| self.values.get(label).unwrap_or(label).clone();
-        let text = answer.first().map(String::as_str).unwrap_or_default().trim();
+        let text = answer
+            .first()
+            .map(String::as_str)
+            .unwrap_or_default()
+            .trim();
         match self.kind {
             FieldKind::Choices => Ok(Value::from(answer.iter().map(value).collect::<Vec<_>>())),
             FieldKind::Boolean => Ok(Value::from(
                 answer.first().is_some_and(|label| label == "Yes"),
             )),
-            FieldKind::Integer => text
-                .parse::<i64>()
-                .map(Value::from)
-                .map_err(|error| format!("{} needs a whole number, not {text:?}: {error}", self.key)),
+            FieldKind::Integer => text.parse::<i64>().map(Value::from).map_err(|error| {
+                format!("{} needs a whole number, not {text:?}: {error}", self.key)
+            }),
             FieldKind::Number => match text.parse::<f64>().map(serde_json::Number::from_f64) {
                 Ok(Some(number)) => Ok(Value::Number(number)),
                 Ok(None) => Err(format!("{} needs a finite number, not {text:?}", self.key)),
-                Err(error) => Err(format!("{} needs a number, not {text:?}: {error}", self.key)),
+                Err(error) => Err(format!(
+                    "{} needs a number, not {text:?}: {error}",
+                    self.key
+                )),
             },
             FieldKind::Text | FieldKind::Choice => {
                 Ok(Value::from(answer.first().map(value).unwrap_or_default()))

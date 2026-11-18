@@ -196,14 +196,13 @@ async fn download(
         return Err(too_large());
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) =
-        response
-            .chunk()
-            .await
-            .map_err(|source| FetchSkillError::Download {
-                repository: repository.to_owned(),
-                source,
-            })?
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|source| FetchSkillError::Download {
+            repository: repository.to_owned(),
+            source,
+        })?
     {
         if (bytes.len() + chunk.len()) as u64 > limit {
             return Err(too_large());

@@ -210,7 +210,10 @@ impl Harness for OpenCodeHarness {
         Box::pin(async move {
             goal::clear_goal(turn)
                 .await
-                .map_err(|source| crate::ClearGoalError::OpenCode { thread, source: Box::new(source) })
+                .map_err(|source| crate::ClearGoalError::OpenCode {
+                    thread,
+                    source: Box::new(source),
+                })
         })
     }
 
@@ -223,7 +226,10 @@ impl Harness for OpenCodeHarness {
         Box::pin(async move {
             side::side_query(turn, cancel)
                 .await
-                .map_err(|source| crate::SideQueryError::OpenCode { thread, source: Box::new(source) })
+                .map_err(|source| crate::SideQueryError::OpenCode {
+                    thread,
+                    source: Box::new(source),
+                })
         })
     }
 
@@ -236,7 +242,10 @@ impl Harness for OpenCodeHarness {
         Box::pin(async move {
             set_title(turn, title)
                 .await
-                .map_err(|source| crate::SetTitleError::OpenCode { thread, source: Box::new(source) })
+                .map_err(|source| crate::SetTitleError::OpenCode {
+                    thread,
+                    source: Box::new(source),
+                })
         })
     }
 
@@ -249,7 +258,10 @@ impl Harness for OpenCodeHarness {
         Box::pin(async move {
             side::compact(turn, cancel)
                 .await
-                .map_err(|source| crate::SideQueryError::OpenCode { thread, source: Box::new(source) })
+                .map_err(|source| crate::SideQueryError::OpenCode {
+                    thread,
+                    source: Box::new(source),
+                })
         })
     }
 
@@ -773,12 +785,12 @@ impl Api {
             .post(format!("{}{path}", self.base))
             .timeout(REQUEST_TIMEOUT);
         if let Some(body) = body {
-            request = request
-                .header("content-type", "application/json")
-                .body(serde_json::to_vec(body).map_err(|source| ApiError::Encode {
+            request = request.header("content-type", "application/json").body(
+                serde_json::to_vec(body).map_err(|source| ApiError::Encode {
                     path: path.to_owned(),
                     source,
-                })?);
+                })?,
+            );
         }
         self.send(request, path).await
     }

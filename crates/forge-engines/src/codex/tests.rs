@@ -421,7 +421,10 @@ fn a_turn_completed_that_is_not_terminal_fails_instead_of_finishing() {
                 .to_string(),
         );
         assert!(
-            matches!(ended, Err(super::decoder::DecodeError::TurnCompleted { .. })),
+            matches!(
+                ended,
+                Err(super::decoder::DecodeError::TurnCompleted { .. })
+            ),
             "{status}"
         );
         assert_eq!(decoder.take_turn_end(), None, "{status}");

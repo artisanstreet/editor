@@ -283,7 +283,10 @@ fn every_notification_codex_may_send_reads_without_error() {
         let parsed = Notification::parse(method, params)
             .map(|notice| !matches!(notice, Notification::Unknown));
         if method == "turn/completed" && params["turn"]["status"] == "inProgress" {
-            assert!(parsed.is_err(), "a turn/completed still in progress must not read as ended");
+            assert!(
+                parsed.is_err(),
+                "a turn/completed still in progress must not read as ended"
+            );
             continue;
         }
         if matches!(parsed, Ok(true)) {

@@ -99,7 +99,9 @@ async fn query(
                     let error: &dyn std::error::Error = &failure;
                     tracing::debug!(fork = forked, error, "couldn't interrupt a Codex fork");
                 }
-                Err(_elapsed) => tracing::debug!(fork = forked, "a Codex fork didn't confirm its interrupt"),
+                Err(_elapsed) => {
+                    tracing::debug!(fork = forked, "a Codex fork didn't confirm its interrupt");
+                }
             }
         }
         let id = fork.next_id;
@@ -129,7 +131,11 @@ impl Fork<'_> {
         clippy::too_many_lines,
         reason = "one forked turn and its exhaustive notification loop"
     )]
-    async fn ask(&mut self, turn: &Turn, thread: Option<&str>) -> Result<SideReply, SideQueryError> {
+    async fn ask(
+        &mut self,
+        turn: &Turn,
+        thread: Option<&str>,
+    ) -> Result<SideReply, SideQueryError> {
         let (method, forked) = if let Some(thread) = thread {
             let method = "thread/fork";
             let forked = self
@@ -228,7 +234,9 @@ impl Fork<'_> {
                                 .and_then(|error| error.message)
                                 .unwrap_or_else(|| "no reason given".to_owned()),
                         }),
-                        TurnStatus::Interrupted => Err(SideQueryError::Interrupted { fork: forked }),
+                        TurnStatus::Interrupted => {
+                            Err(SideQueryError::Interrupted { fork: forked })
+                        }
                         TurnStatus::Completed => Ok(SideReply {
                             text: self.text.take().unwrap_or_default().trim().to_owned(),
                             usage: self.usage,

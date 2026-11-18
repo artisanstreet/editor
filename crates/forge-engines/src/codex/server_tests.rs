@@ -339,7 +339,11 @@ async fn retired_server_releases_a_thread_while_another_run_continues() {
     let config = fixture.root.join("home/.codex/config.toml");
     std::fs::write(&config, "# changed launch\n").unwrap();
     let (outcome, events) = run(fixture.turn("again", Some(&thread))).await;
-    assert_eq!(outcome.status(), artisan_api::RunStatus::Done, "{outcome:?}");
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
     assert!(format!("{events:?}").contains(&format!("reply on {thread} to again")));
     assert_eq!(fixture.spawns(), 2);
     assert!(
@@ -368,7 +372,11 @@ async fn changing_context_window_releases_the_previous_writer() {
         .options
         .insert("context_window".into(), serde_json::json!(100_000));
     let (outcome, _) = run(again).await;
-    assert_eq!(outcome.status(), artisan_api::RunStatus::Done, "{outcome:?}");
+    assert_eq!(
+        outcome.status(),
+        artisan_api::RunStatus::Done,
+        "{outcome:?}"
+    );
     assert_eq!(fixture.spawns(), 2);
     drop(other);
 }

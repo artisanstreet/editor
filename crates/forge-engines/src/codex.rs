@@ -96,7 +96,10 @@ impl Harness for CodexHarness {
         Box::pin(async move {
             set_title(turn, title)
                 .await
-                .map_err(|source| crate::SetTitleError::Codex { thread, source: Box::new(source) })
+                .map_err(|source| crate::SetTitleError::Codex {
+                    thread,
+                    source: Box::new(source),
+                })
         })
     }
 
@@ -109,7 +112,10 @@ impl Harness for CodexHarness {
         Box::pin(async move {
             side::compact(turn, cancel)
                 .await
-                .map_err(|source| crate::SideQueryError::Codex { thread, source: Box::new(source) })
+                .map_err(|source| crate::SideQueryError::Codex {
+                    thread,
+                    source: Box::new(source),
+                })
         })
     }
 
@@ -156,7 +162,10 @@ impl Harness for CodexHarness {
         Box::pin(async move {
             side::side_query(turn, cancel)
                 .await
-                .map_err(|source| crate::SideQueryError::Codex { thread, source: Box::new(source) })
+                .map_err(|source| crate::SideQueryError::Codex {
+                    thread,
+                    source: Box::new(source),
+                })
         })
     }
 
@@ -165,7 +174,10 @@ impl Harness for CodexHarness {
         Box::pin(async move {
             goal::clear_goal(turn)
                 .await
-                .map_err(|source| crate::ClearGoalError::Codex { thread, source: Box::new(source) })
+                .map_err(|source| crate::ClearGoalError::Codex {
+                    thread,
+                    source: Box::new(source),
+                })
         })
     }
 }
@@ -307,9 +319,10 @@ impl Run {
         loop {
             let deadline = match &self.phase {
                 Phase::Stopping { deadline, .. } => Some(*deadline),
-                Phase::Idle | Phase::Starting(_) | Phase::Active { .. } | Phase::Finished { .. } => {
-                    None
-                }
+                Phase::Idle
+                | Phase::Starting(_)
+                | Phase::Active { .. }
+                | Phase::Finished { .. } => None,
             };
             let stopping = deadline.is_some();
             let step = tokio::select! {
@@ -433,9 +446,10 @@ impl Run {
         let interrupt_sent = self.interrupt()?;
         let starting = match std::mem::replace(&mut self.phase, Phase::Idle) {
             Phase::Starting(starting) => Some(starting),
-            Phase::Idle | Phase::Active { .. } | Phase::Finished { .. } | Phase::Stopping { .. } => {
-                None
-            }
+            Phase::Idle
+            | Phase::Active { .. }
+            | Phase::Finished { .. }
+            | Phase::Stopping { .. } => None,
         };
         if !interrupt_sent && starting.is_none() && self.steering.is_empty() {
             return Ok(Step::End(Outcome::Cancelled));
@@ -544,7 +558,10 @@ impl Run {
                     Phase::Stopping {
                         starting: starting @ Some(_),
                         ..
-                    } if starting.as_ref().is_some_and(|starting| starting.request == response.id) => {
+                    } if starting
+                        .as_ref()
+                        .is_some_and(|starting| starting.request == response.id) =>
+                    {
                         starting.take().map(|starting| starting.acknowledges)
                     }
                     Phase::Idle
@@ -558,7 +575,11 @@ impl Run {
                 };
                 response.result.map_err(RunError::TurnStart)?;
                 if matches!(self.phase, Phase::Starting(_)) {
-                    let turn = self.decoder.active_turn().ok_or(RunError::NoTurn)?.to_owned();
+                    let turn = self
+                        .decoder
+                        .active_turn()
+                        .ok_or(RunError::NoTurn)?
+                        .to_owned();
                     self.phase = Phase::Active { turn };
                 }
                 self.acknowledge(acknowledges).await;

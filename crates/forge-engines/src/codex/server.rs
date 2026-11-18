@@ -176,9 +176,7 @@ pub(super) async fn attach(turn: &Turn) -> Result<Attachment, AttachError> {
     let server = if let Some(server) = current {
         server
     } else {
-        let server = Server::start(turn, key)
-            .await
-            .map_err(AttachError::Start)?;
+        let server = Server::start(turn, key).await.map_err(AttachError::Start)?;
         servers.push(Arc::clone(&server));
         server
     };
@@ -592,9 +590,7 @@ impl Actor {
             }
             Command::Release { thread, reply } => {
                 if self.owners.contains_key(&thread) {
-                    reply
-                        .send(Err(ReleaseError::StillAttached))
-                        .ok();
+                    reply.send(Err(ReleaseError::StillAttached)).ok();
                 } else if !self.server.loaded().contains_key(&thread) {
                     reply.send(Ok(())).ok();
                 } else {

@@ -21,8 +21,8 @@ mod side;
 pub mod tools;
 
 pub use decoder::{ClaudeDecoder, DecodeError};
-pub use side::SideQueryError;
 use door::{Door, Ending, Session};
+pub use side::SideQueryError;
 
 use crate::process::{self, EngineProcess, ReadError, SendError};
 use crate::{EngineEvent, Harness, Input, Outcome, RunIo, SideReply, Turn, UserInput};
@@ -64,8 +64,10 @@ impl Harness for ClaudeHarness {
                 .and_then(|session| session.strip_prefix(artisan_api::CLAUDE_AI_SESSION_PREFIX))
             {
                 Some(native) => rename_on_claude_ai(&turn, native, &title).await,
-                None => set_title(&turn, &title)
-                    .map_err(|source| crate::SetTitleError::Claude { thread, source: Box::new(source) }),
+                None => set_title(&turn, &title).map_err(|source| crate::SetTitleError::Claude {
+                    thread,
+                    source: Box::new(source),
+                }),
             }
         })
     }
@@ -92,13 +94,19 @@ impl Harness for ClaudeHarness {
             Box::pin(async move {
                 crate::claudeai::compact(turn, cancel)
                     .await
-                    .map_err(|source| crate::SideQueryError::ClaudeAi { thread, source: Box::new(source) })
+                    .map_err(|source| crate::SideQueryError::ClaudeAi {
+                        thread,
+                        source: Box::new(source),
+                    })
             })
         } else {
             Box::pin(async move {
                 side::compact(turn, cancel)
                     .await
-                    .map_err(|source| crate::SideQueryError::Claude { thread, source: Box::new(source) })
+                    .map_err(|source| crate::SideQueryError::Claude {
+                        thread,
+                        source: Box::new(source),
+                    })
             })
         }
     }
@@ -125,13 +133,19 @@ impl Harness for ClaudeHarness {
             Box::pin(async move {
                 crate::claudeai::side_query(turn, cancel)
                     .await
-                    .map_err(|source| crate::SideQueryError::ClaudeAi { thread, source: Box::new(source) })
+                    .map_err(|source| crate::SideQueryError::ClaudeAi {
+                        thread,
+                        source: Box::new(source),
+                    })
             })
         } else {
             Box::pin(async move {
-                side::side_query(turn, cancel)
-                    .await
-                    .map_err(|source| crate::SideQueryError::Claude { thread, source: Box::new(source) })
+                side::side_query(turn, cancel).await.map_err(|source| {
+                    crate::SideQueryError::Claude {
+                        thread,
+                        source: Box::new(source),
+                    }
+                })
             })
         }
     }
@@ -965,7 +979,11 @@ cat > /dev/null
         .await
         .expect("the run ends once the agent reported");
         drain.abort();
-        assert_eq!(outcome.status(), artisan_api::RunStatus::Done, "{outcome:?}");
+        assert_eq!(
+            outcome.status(),
+            artisan_api::RunStatus::Done,
+            "{outcome:?}"
+        );
 
         // The trace says what Claude wrote and why input stayed open, then
         // closed: what an agent killed mid-work is read back from.
@@ -1064,7 +1082,11 @@ cat > /dev/null
         .await
         .expect("the run ends once the second agent reported");
         drain.abort();
-        assert_eq!(outcome.status(), artisan_api::RunStatus::Done, "{outcome:?}");
+        assert_eq!(
+            outcome.status(),
+            artisan_api::RunStatus::Done,
+            "{outcome:?}"
+        );
     }
 
     /// A side query answers from a fork: a tool the fork reaches for is

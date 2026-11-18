@@ -429,7 +429,8 @@ impl ClaudeDecoder {
                 }
             }
             "background_tasks_changed" => {
-                let snapshot = BackgroundSnapshot::deserialize(frame).map_err(DecodeError::Background)?;
+                let snapshot =
+                    BackgroundSnapshot::deserialize(frame).map_err(DecodeError::Background)?;
                 self.background = snapshot.tasks.iter().filter(|task| !task.ambient).count();
                 self.waiting_agents = snapshot
                     .tasks

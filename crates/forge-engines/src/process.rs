@@ -316,14 +316,14 @@ impl EngineProcess {
     pub async fn next_line(&mut self) -> Result<Option<String>, ReadError> {
         loop {
             loop {
-                let available =
-                    self.stdout
-                        .fill_buf()
-                        .await
-                        .map_err(|source| ReadError::Read {
-                            program: self.program.clone(),
-                            source,
-                        })?;
+                let available = self
+                    .stdout
+                    .fill_buf()
+                    .await
+                    .map_err(|source| ReadError::Read {
+                        program: self.program.clone(),
+                        source,
+                    })?;
                 if available.is_empty() {
                     if self.line.is_empty() && !self.oversized {
                         return Ok(None);
@@ -492,7 +492,10 @@ mod reform_tests {
         let mut command = Command::new("sh");
         command.args(["-c", "head -c 1048576 /dev/zero; sleep 30"]);
         let result = probe(command, std::time::Duration::from_secs(2), 4096).await;
-        assert!(matches!(result, Err(ProbeError::Oversized { limit: 4096, .. })));
+        assert!(matches!(
+            result,
+            Err(ProbeError::Oversized { limit: 4096, .. })
+        ));
     }
 
     #[tokio::test]

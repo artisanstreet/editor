@@ -70,7 +70,12 @@ done
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(outcome.status(), RunStatus::Cancelled, "{:?}", outcome.error());
+        assert_eq!(
+            outcome.status(),
+            RunStatus::Cancelled,
+            "{:?}",
+            outcome.error()
+        );
         assert!(dir.path().join("interrupted").exists());
         let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
         assert!(
