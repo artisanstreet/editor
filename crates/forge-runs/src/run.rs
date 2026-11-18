@@ -42,7 +42,7 @@ pub async fn drive(
     cancel: CancellationToken,
 ) -> Result<RunStatus> {
     let store = hub.store();
-    let continuation = store.take_continue(thread_id.clone()).await?;
+    let continuation = store.continue_request(thread_id).await?;
     let observed = store.pending_inputs(thread_id).await?;
     let pending = observed.items;
     // Undelivered messages carry a stopped turn on by themselves.
@@ -88,7 +88,7 @@ pub async fn drive(
         ended_at: None,
         continuation,
     };
-    run = store.upsert_run(run).await?;
+    run = store.begin_run(run).await?;
 
     // A claude.ai run can find its session needs renewing or is signed
     // out; the Editor hears of it when the run ends.

@@ -174,6 +174,21 @@ pub fn pending_threads(
         .collect::<rusqlite::Result<_>>()?)
 }
 
+pub fn continue_request(
+    conn: &Connection,
+    thread: &ThreadId,
+) -> Result<Option<artisan_api::Continuation>> {
+    let reason: Option<String> = conn
+        .prepare_cached(include_str!("sql/pending/continue_request.sql"))?
+        .query_row([thread.as_str()], |row| row.get(0))
+        .optional()
+        .with_context(|| format!("read the continue request of thread {thread}"))?;
+    reason
+        .map(|reason| serde_json::from_value(serde_json::Value::String(reason)))
+        .transpose()
+        .with_context(|| format!("decode the continue request of thread {thread}"))
+}
+
 pub fn has_runnable_input(conn: &Connection, thread_id: &ThreadId) -> Result<bool> {
     Ok(conn
         .prepare_cached(concat!(

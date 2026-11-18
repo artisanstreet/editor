@@ -155,6 +155,25 @@ impl Store {
         .await
     }
 
+    pub async fn continue_request(
+        &self,
+        thread: &ThreadId,
+    ) -> Result<Option<artisan_api::Continuation>> {
+        let thread = thread.clone();
+        self.read(move |conn| read::continue_request(conn, &thread))
+            .await
+    }
+
+    pub async fn begin_run(&self, run: Run) -> Result<Run> {
+        let (id, thread) = (run.id.clone(), run.thread_id.clone());
+        self.write(move |tx| {
+            tx.take_continue(&run.thread_id)?;
+            tx.upsert_run(run)
+        })
+        .await
+        .with_context(|| format!("begin run {id} of thread {thread}"))
+    }
+
     /// Takes the thread's continue request, if it has one.
     pub async fn take_continue(
         &self,

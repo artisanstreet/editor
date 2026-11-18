@@ -31,6 +31,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 futures.workspace = true
+rusqlite.workspace = true
 test-support = { workspace = true, features = ["tokio"] }
 image = { workspace = true, features = ["png"] }
 tempfile.workspace = true
