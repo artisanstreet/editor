@@ -88,7 +88,7 @@ impl HostData {
             .insert(hash, (generation, AbortOnDropHandle::new(task)));
         generation
     }
-    pub fn set_image_assets(&mut self, assets: ImageAssets) {
+    pub(crate) fn set_image_assets(&mut self, assets: ImageAssets) {
         self.images.assets = Some(assets);
     }
     pub fn image(&self, hash: &BlobHash) -> Option<BlobImage> {

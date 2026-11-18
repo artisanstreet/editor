@@ -241,7 +241,7 @@ impl ForgeFault {
 
 impl CallFailure {
     #[must_use]
-    pub fn fault(&self) -> ForgeFault {
+    fn fault(&self) -> ForgeFault {
         use artisan_account::relay_client::CallFailure as Relay;
         match self {
             Self::Answer(error) => ForgeFault::of(error.code()),
@@ -262,7 +262,7 @@ impl CallFailure {
     }
 
     #[must_use]
-    pub fn api_code(&self) -> Option<ErrorCode> {
+    fn api_code(&self) -> Option<ErrorCode> {
         match self {
             Self::Answer(error) => Some(error.code()),
             Self::Incompatible { .. } => Some(ErrorCode::VersionMismatch),
@@ -290,7 +290,7 @@ impl CallFailure {
 
 impl ResponseError {
     #[must_use]
-    pub const fn code(&self) -> ErrorCode {
+    pub(crate) const fn code(&self) -> ErrorCode {
         match self {
             Self::Refused { status, .. }
             | Self::Unexplained { status, .. }
@@ -301,16 +301,6 @@ impl ResponseError {
             }
             Self::Refused { error, .. } => error.code,
             Self::Unexplained { .. } | Self::Unreadable { .. } => ErrorCode::Internal,
-        }
-    }
-}
-
-impl RangeError {
-    #[must_use]
-    pub fn api_code(&self) -> Option<ErrorCode> {
-        match self {
-            Self::Call { source, .. } => source.api_code(),
-            Self::InvalidSource { .. } | Self::InvalidRange { .. } => None,
         }
     }
 }

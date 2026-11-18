@@ -74,6 +74,7 @@ impl HostData {
             BlobImage::Loading | BlobImage::Failed(_) => None,
         }
     }
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn project_icon_checked(&self, project: &ProjectId) -> bool {
         self.project_icons.entries.contains_key(project)

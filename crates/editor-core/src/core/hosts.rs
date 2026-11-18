@@ -131,11 +131,11 @@ impl EditorFiles {
         config_file::update(&self.hosts_path(), change).map(|(hosts, ())| hosts)
     }
 
-    pub fn settings(&self) -> Result<EditorSettings, ReadConfigError> {
+    pub(crate) fn settings(&self) -> Result<EditorSettings, ReadConfigError> {
         config_file::read(&self.settings_path())
     }
 
-    pub fn update_settings(
+    pub(crate) fn update_settings(
         &self,
         change: impl FnOnce(&mut EditorSettings),
     ) -> Result<EditorSettings, UpdateConfigError> {
@@ -214,22 +214,22 @@ pub enum WslCommandError {
 
 #[derive(Debug, thiserror::Error)]
 #[error("read WSL's state")]
-pub struct WslStateError(#[source] pub WslCommandError);
+pub struct WslStateError(#[source] WslCommandError);
 
 #[derive(Debug, thiserror::Error)]
 #[error("start Forge with `ae forge start` in {distro}")]
 pub struct StartWslForgeError {
-    pub distro: String,
+    distro: String,
     #[source]
-    pub source: WslCommandError,
+    source: WslCommandError,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("keep {distro} awake")]
 pub struct KeepWslAwakeError {
-    pub distro: String,
+    distro: String,
     #[source]
-    pub source: std::io::Error,
+    source: std::io::Error,
 }
 
 #[derive(Debug, Deserialize)]

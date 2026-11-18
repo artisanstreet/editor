@@ -14,11 +14,7 @@ impl CompletionKey {
         &self.host
     }
 
-    pub const fn instance(&self) -> HostInstance {
-        self.instance
-    }
-
-    pub fn is_live(&self, core: &Core) -> bool {
+    fn is_live(&self, core: &Core) -> bool {
         core.host_if_instance(&self.host, self.instance).is_some()
     }
 }

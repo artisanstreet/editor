@@ -55,7 +55,7 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     #[must_use]
-    pub const fn parent(self) -> SettingsPage {
+    const fn parent(self) -> SettingsPage {
         match self {
             Self::Appearance | Self::Streaming | Self::Notifications | Self::Performance => {
                 SettingsPage::General
@@ -86,7 +86,7 @@ impl SettingsSection {
     }
 
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
             Self::Streaming => "Text Streaming",
@@ -159,7 +159,7 @@ impl SettingsPage {
         }
     }
 
-    pub const ALL: [(Self, &'static str); 8] = [
+    pub(crate) const ALL: [(Self, &'static str); 8] = [
         (Self::General, "general"),
         (Self::Account, "account"),
         (Self::Hosts, "hosts"),
@@ -186,7 +186,7 @@ impl SettingsPage {
     }
 
     #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         let (parent, section) = if let Some(rest) = name.strip_prefix("engines/") {
             match rest.split_once('/') {
                 Some((engine, section)) => (Self::Engine(engine.parse().ok()?), Some(section)),

@@ -19,7 +19,7 @@ pub struct WslStatus {
 }
 
 impl HostData {
-    pub fn set_pairing(&mut self, kind: &HostKind, address: &str) {
+    pub(crate) fn set_pairing(&mut self, kind: &HostKind, address: &str) {
         self.wsl_target = match kind {
             HostKind::Wsl { distro } => WslTarget::Distro(distro.clone()),
             HostKind::Local | HostKind::Remote if cfg!(windows) && hosts::is_loopback(address) => {

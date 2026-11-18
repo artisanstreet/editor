@@ -342,7 +342,7 @@ impl Account {
             .map(|profile| access::live_machines(profile).cloned().collect())
             .unwrap_or_default()
     }
-    pub fn entry_gate(&self) -> EntryGate {
+    pub(crate) fn entry_gate(&self) -> EntryGate {
         access::entry_gate(&self.phase)
     }
     pub fn last_error(&self) -> Option<&str> {
@@ -964,7 +964,7 @@ impl Account {
     }
 }
 
-pub fn is_session_invalid(error: &NetworkError) -> bool {
+fn is_session_invalid(error: &NetworkError) -> bool {
     matches!(error, NetworkError::Core { code, .. } if matches!(code.as_str(), "unauthorized" | "gone"))
 }
 fn plain_failure(error: &NetworkError) -> String {

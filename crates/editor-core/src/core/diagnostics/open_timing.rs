@@ -160,7 +160,7 @@ pub fn note_fail(reason: &'static str) {
     }
 }
 
-pub fn rpc_done(started: Duration, finished: Duration) {
+pub(crate) fn rpc_done(started: Duration, finished: Duration) {
     if enabled() {
         tracing::info!(
             "open-timing: read_rpc spawn_ms={:.2} total_ms={:.2}",

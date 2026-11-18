@@ -17,7 +17,7 @@ pub fn runtime() -> &'static Runtime {
     })
 }
 
-pub async fn run_http<T: Send + 'static>(
+pub(crate) async fn run_http<T: Send + 'static>(
     future: impl std::future::Future<Output = Result<T, artisan_account::network::NetworkError>>
     + Send
     + 'static,

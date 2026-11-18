@@ -39,10 +39,10 @@ pub struct HostInstance(u64);
 
 #[derive(Clone)]
 pub struct ScopedSourceProvider {
-    pub(crate) host: HostId,
-    pub(crate) instance: HostInstance,
-    pub(crate) client: ForgeClient,
-    pub(crate) authority: Weak<()>,
+    host: HostId,
+    instance: HostInstance,
+    client: ForgeClient,
+    authority: Weak<()>,
 }
 
 impl ScopedSourceProvider {
@@ -407,14 +407,14 @@ pub struct HostData {
     stopping: HashMap<ThreadId, stopping::Stopping>,
     pub settings: HostSettings,
     pub engines: BTreeMap<EngineId, EngineStatus>,
-    pub account: Option<Account>,
+    account: Option<Account>,
     pub global_prompt: Option<Arc<artisan_api::GlobalPrompt>>,
     prompt_load: ProjectionLoad,
     catalog_load: ProjectionLoad,
     projection_generation: u64,
     pending_events: HostEffects,
-    pub prompt_revision: u64,
-    pub catalog_revision: u64,
+    prompt_revision: u64,
+    catalog_revision: u64,
     pub skill_catalog: Option<Arc<Vec<artisan_api::CatalogSkill>>>,
     waiting: HashMap<ThreadId, BTreeSet<ItemId>>,
     thread_pages: pages::ThreadPages,
@@ -676,7 +676,7 @@ impl HostData {
         self.pending_events.push(HostEvent::Changed);
     }
 
-    pub(super) fn remember_run(&mut self, run: Run) -> bool {
+    fn remember_run(&mut self, run: Run) -> bool {
         let thread = run.thread_id.clone();
         if self.is_deleted(&thread) {
             return false;
@@ -767,7 +767,7 @@ impl HostData {
         self.read_acks.get(thread).copied()
     }
 
-    pub(super) fn pump_read_acks(&mut self, after: Option<&ThreadId>) {
+    fn pump_read_acks(&mut self, after: Option<&ThreadId>) {
         if self.read_writer.is_some() {
             return;
         }
@@ -818,7 +818,7 @@ impl HostData {
         });
     }
 
-    pub(super) fn cancel_read_ack(&mut self, thread: &ThreadId) {
+    fn cancel_read_ack(&mut self, thread: &ThreadId) {
         self.read_acks.remove(thread);
         if self
             .read_writer

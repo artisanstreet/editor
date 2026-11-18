@@ -48,7 +48,8 @@ pub use mcp_sign_in::{McpSignIn, McpSignInPhase};
 #[cfg(feature = "test-support")]
 pub use range_window::RangeCompletion;
 pub use range_window::{CollectionWindow, ContentWindow, RangePage, RangeState, RangeWindow};
-pub use resident::{CollectionBytes, ResidentBytes};
+pub(crate) use resident::CollectionBytes;
+pub use resident::ResidentBytes;
 pub use screen::{DeepLinkError, DraggedThread, Screen, SettingsPage, SettingsSection};
 #[cfg(feature = "test-support")]
 pub use services::RelayScript;

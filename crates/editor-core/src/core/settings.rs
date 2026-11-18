@@ -49,7 +49,7 @@ pub enum SetSettingError {
 
 impl Settings {
     #[must_use]
-    pub fn read(result: Result<EditorSettings, ReadConfigError>) -> Self {
+    pub(crate) fn read(result: Result<EditorSettings, ReadConfigError>) -> Self {
         match result {
             Ok(stored) => Self::validated(stored),
             Err(error) => Self::Unreadable(Arc::new(error)),
@@ -57,7 +57,7 @@ impl Settings {
     }
 
     #[must_use]
-    pub fn validated(stored: EditorSettings) -> Self {
+    pub(crate) fn validated(stored: EditorSettings) -> Self {
         let mut values = EditorSettings::new();
         let mut rejected = BTreeMap::new();
         for (key, value) in stored {

@@ -4,7 +4,7 @@ use artisan_account::network::AccountProfile;
 use serde::{Deserialize, Serialize};
 
 use crate::core::account::{AccountMachine, AccountPhase};
-use crate::core::config_file::{self, ReadConfigError, WriteConfigError};
+use crate::core::config_file::{self, ReadConfigError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntryGate {
@@ -15,26 +15,26 @@ pub enum EntryGate {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnboardingRecord {
-    pub account_id: String,
-    pub base_url: String,
-    pub machine_id: String,
+    pub(crate) account_id: String,
+    pub(crate) base_url: String,
+    pub(crate) machine_id: String,
 }
 
-pub fn live_machines(profile: &AccountProfile) -> impl Iterator<Item = &AccountMachine> {
+pub(crate) fn live_machines(profile: &AccountProfile) -> impl Iterator<Item = &AccountMachine> {
     profile
         .machines
         .iter()
         .filter(|machine| machine.revoked_at.is_none())
 }
 
-pub fn live_machine<'a>(
+pub(crate) fn live_machine<'a>(
     profile: &'a AccountProfile,
     machine_id: &str,
 ) -> Option<&'a AccountMachine> {
     live_machines(profile).find(|machine| machine.id == machine_id)
 }
 
-pub fn entry_gate(phase: &AccountPhase) -> EntryGate {
+pub(crate) fn entry_gate(phase: &AccountPhase) -> EntryGate {
     match phase {
         AccountPhase::Restoring => EntryGate::Restoring,
         AccountPhase::Authenticated { profile, .. } => EntryGate::Ready {
@@ -58,7 +58,7 @@ fn onboarding_path(data_dir: &Path, base_url: &str, account_id: &str) -> PathBuf
         .join(format!("{origin}-{account_id}.json"))
 }
 
-pub fn load_onboarding(
+pub(crate) fn load_onboarding(
     data_dir: &Path,
     base_url: &str,
     account_id: &str,
@@ -66,7 +66,11 @@ pub fn load_onboarding(
     config_file::read(&onboarding_path(data_dir, base_url, account_id))
 }
 
-pub fn save_onboarding(data_dir: &Path, record: &OnboardingRecord) -> Result<(), WriteConfigError> {
+#[cfg(feature = "test-support")]
+pub(crate) fn save_onboarding(
+    data_dir: &Path,
+    record: &OnboardingRecord,
+) -> Result<(), config_file::WriteConfigError> {
     config_file::write(
         &onboarding_path(data_dir, &record.base_url, &record.account_id),
         record,

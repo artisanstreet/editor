@@ -14,12 +14,12 @@ pub struct RebuildStats {
 }
 
 impl RebuildStats {
-    pub fn event(&mut self, now: Duration, kind: &'static str) -> Option<String> {
+    fn event(&mut self, now: Duration, kind: &'static str) -> Option<String> {
         *self.events.entry(kind).or_default() += 1;
         self.roll(now)
     }
 
-    pub fn rebuild(&mut self, now: Duration, reasons: &[&'static str]) -> Option<String> {
+    fn rebuild(&mut self, now: Duration, reasons: &[&'static str]) -> Option<String> {
         self.rebuilds += 1;
         for reason in reasons {
             *self.reasons.entry(reason).or_default() += 1;
@@ -27,7 +27,7 @@ impl RebuildStats {
         self.roll(now)
     }
 
-    pub fn span(&mut self, now: Duration, name: &'static str, took: Duration) -> Option<String> {
+    fn span(&mut self, now: Duration, name: &'static str, took: Duration) -> Option<String> {
         let entry = self.spans.entry(name).or_default();
         entry.0 += 1;
         entry.1 += took;

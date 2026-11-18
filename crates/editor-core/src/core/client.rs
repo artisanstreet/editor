@@ -102,19 +102,19 @@ impl ForgeClient {
     }
 
     #[must_use]
-    pub const fn is_relay(&self) -> bool {
+    pub(crate) const fn is_relay(&self) -> bool {
         matches!(self.transport, Transport::Relay(_))
     }
 
     #[must_use]
-    pub const fn relay(&self) -> Option<&Arc<artisan_account::relay_client::RelayClient>> {
+    pub(crate) const fn relay(&self) -> Option<&Arc<artisan_account::relay_client::RelayClient>> {
         match &self.transport {
             Transport::Relay(relay) => Some(relay),
             Transport::Direct(_) => None,
         }
     }
 
-    pub fn close_relay(&self) {
+    pub(crate) fn close_relay(&self) {
         if let Some(relay) = self.relay() {
             relay.close_all();
         }
@@ -305,7 +305,7 @@ impl ForgeClient {
             .await
     }
 
-    pub async fn mcp_sign_in_start(
+    pub(crate) async fn mcp_sign_in_start(
         &self,
         start: &artisan_api::McpSignInStart,
     ) -> Result<artisan_api::McpSignInStarted, CallError> {
@@ -313,7 +313,7 @@ impl ForgeClient {
             .await
     }
 
-    pub async fn mcp_sign_in_finish(
+    pub(crate) async fn mcp_sign_in_finish(
         &self,
         finish: &artisan_api::McpSignInFinish,
     ) -> Result<String, CallError> {
@@ -321,7 +321,7 @@ impl ForgeClient {
             .await
     }
 
-    pub async fn mcp_sign_in_cancel(&self, state: &str) -> Result<(), CallError> {
+    pub(crate) async fn mcp_sign_in_cancel(&self, state: &str) -> Result<(), CallError> {
         self.call_empty(self.json(
             reqwest::Method::POST,
             "/mcp/sign-in/cancel",
@@ -335,7 +335,7 @@ impl ForgeClient {
             .await
     }
 
-    pub async fn set_model_config(
+    pub(crate) async fn set_model_config(
         &self,
         config: &artisan_api::EngineConfig,
     ) -> Result<artisan_api::EngineConfig, CallError> {
@@ -347,7 +347,7 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn set_model_group(
+    pub(crate) async fn set_model_group(
         &self,
         engine: EngineId,
         group: &artisan_api::ModelGroup,
@@ -421,7 +421,7 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn inspector(
+    pub(crate) async fn inspector(
         &self,
         id: &ThreadId,
     ) -> Result<artisan_api::InspectorSummary, CallError> {
@@ -433,7 +433,7 @@ impl ForgeClient {
         clippy::suspicious_operation_groupings,
         reason = "range totals are checked against the reference's byte count on purpose"
     )]
-    pub async fn content_range(
+    pub(crate) async fn content_range(
         &self,
         source: &artisan_api::ContentRef,
         offset: u64,
@@ -492,7 +492,7 @@ impl ForgeClient {
         clippy::suspicious_operation_groupings,
         reason = "range totals are checked against the reference's record count on purpose"
     )]
-    pub async fn collection_range<T: serde::de::DeserializeOwned + Send + 'static>(
+    pub(crate) async fn collection_range<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
         reference: &artisan_api::CollectionRef,
         offset: u64,
@@ -553,7 +553,7 @@ impl ForgeClient {
         clippy::suspicious_operation_groupings,
         reason = "leaf offsets are checked against the source's byte count on purpose"
     )]
-    pub async fn source_index_range(
+    pub(crate) async fn source_index_range(
         &self,
         source: &artisan_api::ContentRef,
         format: artisan_api::SourceIndexFormat,
@@ -776,7 +776,7 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn reply_editor_call(
+    pub(crate) async fn reply_editor_call(
         &self,
         id: &str,
         reply: &artisan_api::EditorReply,
@@ -834,12 +834,15 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn project_icon(&self, project: &ProjectId) -> Result<Option<BlobRef>, CallError> {
+    pub(crate) async fn project_icon(
+        &self,
+        project: &ProjectId,
+    ) -> Result<Option<BlobRef>, CallError> {
         self.call(self.request(reqwest::Method::GET, &format!("/projects/{project}/icon")))
             .await
     }
 
-    pub async fn project_repository(
+    pub(crate) async fn project_repository(
         &self,
         project: &ProjectId,
     ) -> Result<Option<artisan_api::ProjectRepository>, CallError> {
@@ -850,7 +853,7 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn skill_catalog(&self) -> Result<Vec<artisan_api::CatalogSkill>, CallError> {
+    pub(crate) async fn skill_catalog(&self) -> Result<Vec<artisan_api::CatalogSkill>, CallError> {
         self.call(self.request(reqwest::Method::GET, "/skills/catalog"))
             .await
     }
@@ -887,7 +890,7 @@ impl ForgeClient {
             .await
     }
 
-    pub async fn global_prompt(&self) -> Result<artisan_api::GlobalPrompt, CallError> {
+    pub(crate) async fn global_prompt(&self) -> Result<artisan_api::GlobalPrompt, CallError> {
         self.call(self.request(reqwest::Method::GET, "/prompt"))
             .await
     }
@@ -916,7 +919,7 @@ impl ForgeClient {
         self.call(request).await
     }
 
-    pub async fn pair(&self, request: &PairRequest) -> Result<PairResponse, CallError> {
+    pub(crate) async fn pair(&self, request: &PairRequest) -> Result<PairResponse, CallError> {
         self.call(self.json(reqwest::Method::POST, "/pair", request))
             .await
     }
@@ -984,7 +987,7 @@ fn relay_parts(
 }
 
 impl ForgeClient {
-    pub async fn via_relay(
+    pub(crate) async fn via_relay(
         request: crate::core::services::RelayDialRequest,
         ctx: &artisan_account::relay_client::RelayDialContext,
     ) -> Result<Self, RelayClientError> {
@@ -1027,7 +1030,7 @@ impl ForgeClient {
     }
 }
 
-pub async fn check(response: reqwest::Response) -> Result<reqwest::Response, ResponseError> {
+pub(crate) async fn check(response: reqwest::Response) -> Result<reqwest::Response, ResponseError> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -1060,7 +1063,7 @@ fn decode_state(bytes: &[u8]) -> Result<State, CallFailure> {
     serde_json::from_slice(bytes).map_err(CallFailure::Decode)
 }
 
-pub async fn read_body(
+pub(crate) async fn read_body(
     response: reqwest::Response,
     limit: usize,
 ) -> Result<Vec<u8>, ReadBodyError> {

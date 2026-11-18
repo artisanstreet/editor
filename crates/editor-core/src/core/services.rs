@@ -31,7 +31,7 @@ pub type RelayScript = std::sync::Arc<
 
 impl Services {
     #[must_use]
-    pub fn installed() -> Self {
+    pub(crate) fn installed() -> Self {
         let relay = match std::env::var("AST_RELAY_URL") {
             Ok(url) if url.trim().is_empty() => RelayRoute::Off,
             Ok(url) => RelayRoute::Url(url.trim().to_owned()),
@@ -45,8 +45,9 @@ impl Services {
         }
     }
 
+    #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn with_clock(self, clock: Clock) -> Self {
+    pub(crate) fn with_clock(self, clock: Clock) -> Self {
         Self { clock, ..self }
     }
 
@@ -67,11 +68,11 @@ impl Services {
 }
 
 pub struct RelayDialRequest {
-    pub account_id: String,
-    pub machine_id: String,
-    pub forge_ed25519_b64u: String,
-    pub grant_jwt: String,
-    pub cnf_secret: [u8; 32],
+    pub(crate) account_id: String,
+    pub(crate) machine_id: String,
+    pub(crate) forge_ed25519_b64u: String,
+    pub(crate) grant_jwt: String,
+    pub(crate) cnf_secret: [u8; 32],
 }
 
 impl Drop for RelayDialRequest {
@@ -104,7 +105,7 @@ pub enum OpenRelayError {
     },
 }
 
-pub async fn open_relay(
+pub(crate) async fn open_relay(
     route: RelayRoute,
     core: CoreSessionClient,
     session: SessionToken,

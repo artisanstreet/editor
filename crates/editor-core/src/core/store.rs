@@ -75,9 +75,9 @@ pub enum DialError {
 #[derive(Debug, thiserror::Error)]
 #[error("forget the pairing with {host}")]
 pub struct RemoveHostError {
-    pub host: HostId,
+    host: HostId,
     #[source]
-    pub source: UpdateConfigError,
+    source: UpdateConfigError,
 }
 
 pub(crate) enum Effect {
@@ -452,7 +452,7 @@ impl Core {
             .get(&HostId(machine_id.to_owned()))
             .is_some_and(HostData::is_live)
     }
-    pub fn is_paired(&self, id: &HostId) -> bool {
+    fn is_paired(&self, id: &HostId) -> bool {
         self.relay_configs.contains_key(id)
             || self.hosts_file.hosts.iter().any(|host| &host.id == id)
     }
@@ -541,7 +541,7 @@ impl Core {
         }
         self.events.push(CoreEvent::ScreenChanged);
     }
-    pub fn screen_behind_settings(&self) -> Option<&Screen> {
+    fn screen_behind_settings(&self) -> Option<&Screen> {
         self.back
             .iter()
             .rev()

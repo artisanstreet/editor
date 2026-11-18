@@ -81,10 +81,10 @@ impl<T, U> Clone for MappedSender<T, U> {
     }
 }
 impl<T, U> MappedSender<T, U> {
-    pub fn is_closed(&self) -> bool {
+    pub(crate) fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
-    pub async fn send(&self, message: T) -> Result<(), mpsc::error::SendError<U>> {
+    pub(crate) async fn send(&self, message: T) -> Result<(), mpsc::error::SendError<U>> {
         self.sender.send((self.map)(message)).await
     }
 }
@@ -180,13 +180,13 @@ impl<T> Delivery<T> {
     }
 }
 impl<T> DeliverySender<T> {
-    pub fn map<U>(&self, map: fn(U) -> T) -> MappedSender<U, T> {
+    pub(crate) fn map<U>(&self, map: fn(U) -> T) -> MappedSender<U, T> {
         MappedSender {
             sender: self.clone(),
             map,
         }
     }
-    pub fn is_closed(&self) -> bool {
+    fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }
     pub async fn send(&self, message: T) -> Result<(), mpsc::error::SendError<T>> {

@@ -31,7 +31,7 @@ pub enum AeError {
 }
 
 impl Ae {
-    pub async fn run(&self, args: &[&str]) -> Result<String, AeError> {
+    pub(crate) async fn run(&self, args: &[&str]) -> Result<String, AeError> {
         match self {
             Self::Installed => installed(args.iter().map(|arg| (*arg).to_owned()).collect()).await,
             #[cfg(any(test, feature = "test-support"))]
