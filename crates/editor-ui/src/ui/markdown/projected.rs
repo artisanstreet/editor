@@ -165,7 +165,13 @@ impl ProjectedDocument {
                 _ => None,
             };
             let range = index.leaves()[ordinal].source_range();
-            let signature = leaf_signature(source, &range, &context, table_continues, command.filter(|_| ordinal == 0));
+            let signature = leaf_signature(
+                source,
+                &range,
+                &context,
+                table_continues,
+                command.filter(|_| ordinal == 0),
+            );
             leaves.push(Leaf {
                 range,
                 signature,
@@ -194,6 +200,13 @@ impl ProjectedDocument {
     }
     pub(super) fn range(&self, row: usize) -> Option<Range<usize>> {
         Some(self.leaves.get(row)?.range.clone())
+    }
+
+    pub(super) fn code_fences(&self) -> impl Iterator<Item = &CodeFence> {
+        self.leaves.iter().filter_map(|leaf| match &leaf.content {
+            IndexedLeafContent::Block(Block::Code(fence)) => Some(fence),
+            _ => None,
+        })
     }
 
     pub(super) fn bind_rich<'a>(&mut self, entries: impl Iterator<Item = (usize, &'a CodeFence)>) {

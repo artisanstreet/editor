@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -379,6 +379,38 @@ impl Default for MarkdownPresenter {
     }
 }
 
+fn fence_key(fence: &CodeFence) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (&fence.language, fence.source.as_str(), fence.closed).hash(&mut hasher);
+    hasher.finish()
+}
+
+fn fence_slots<'a>(
+    document: &'a MarkdownDocument,
+    projected: &'a super::projected::ProjectedDocument,
+) -> Vec<Option<&'a CodeFence>> {
+    let mut slots: Vec<Option<&CodeFence>> = document
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            Block::Code(fence) => Some(fence),
+            _ => None,
+        })
+        .collect();
+    let mut top_level: HashMap<u64, usize> = HashMap::new();
+    for fence in slots.iter().flatten() {
+        *top_level.entry(fence_key(fence)).or_default() += 1;
+    }
+    for fence in projected.code_fences() {
+        match top_level.get_mut(&fence_key(fence)) {
+            Some(count) if *count > 0 => *count -= 1,
+            Some(_) | None => slots.push(Some(fence)),
+        }
+    }
+    slots
+}
+
 impl MarkdownPresenter {
     pub fn prepare(
         &mut self,
@@ -413,28 +445,40 @@ impl MarkdownPresenter {
             let mut projected =
                 super::projected::ProjectedDocument::new(engine, source, command.as_deref())?;
             let mut previous = std::mem::take(&mut self.rich);
-            let mut next: Vec<Option<RetainedRich>> =
-                (0..document.blocks().len()).map(|_| None).collect();
-            for (index, block) in document.blocks().iter().enumerate() {
-                let Block::Code(fence) = block else {
+            let fences = fence_slots(&document, &projected);
+            let mut next: Vec<Option<RetainedRich>> = (0..fences.len()).map(|_| None).collect();
+            let mut reusable: HashMap<u64, VecDeque<usize>> = HashMap::new();
+            for (at, entry) in previous.iter().enumerate() {
+                if let Some(entry) = entry {
+                    reusable
+                        .entry(fence_key(&entry.source))
+                        .or_default()
+                        .push_back(at);
+                }
+            }
+            for (index, fence) in fences.iter().enumerate() {
+                let Some(fence) = fence else {
                     continue;
                 };
-                let found = previous.iter().position(|entry| {
-                    entry.as_ref().is_some_and(|entry| {
+                let Some(candidates) = reusable.get_mut(&fence_key(fence)) else {
+                    continue;
+                };
+                while let Some(at) = candidates.pop_front() {
+                    if previous[at].as_ref().is_some_and(|entry| {
                         entry.source.language == fence.language
                             && entry.source.source == fence.source
                             && entry.source.closed == fence.closed
-                    })
-                });
-                if let Some(found) = found {
-                    next[index] = previous[found].take();
+                    }) {
+                        next[index] = previous[at].take();
+                        break;
+                    }
                 }
             }
-            for (index, block) in document.blocks().iter().enumerate() {
+            for (index, fence) in fences.iter().enumerate() {
                 if next[index].is_some() {
                     continue;
                 }
-                let Block::Code(fence) = block else {
+                let Some(fence) = fence else {
                     continue;
                 };
                 let Some(prepared) =
@@ -469,7 +513,7 @@ impl MarkdownPresenter {
                 });
                 next[index] = Some(RetainedRich {
                     id,
-                    source: fence.clone(),
+                    source: (*fence).clone(),
                     prepared,
                 });
             }
@@ -3007,3 +3051,7 @@ fn legend_toggle(
         .cursor(aqua_core::CursorIcon::Pointer);
     live::track(element)
 }
+
+#[cfg(test)]
+#[path = "../../../tests/markdown/presenter.rs"]
+mod tests;
