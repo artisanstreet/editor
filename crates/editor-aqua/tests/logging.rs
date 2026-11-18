@@ -27,7 +27,7 @@ fn a_launch_that_fails_before_the_window_opens_is_in_the_editor_log() {
     let log = std::fs::read_to_string(data.join("logs").join("editor.log")).unwrap();
     assert!(
         log.contains(
-            "the Editor could not launch: qualification requires ARTISAN_AQUA_FIXTURE_DIR"
+            "the Editor could not launch error=ARTISAN_AQUA_FIXTURE_DIR names no fixture directory"
         ),
         "{log}"
     );

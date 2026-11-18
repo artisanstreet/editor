@@ -78,4 +78,4 @@ pub use editor_sources as sources;
 pub use editor_ui as ui;
 
 mod launch;
-pub use launch::launch;
+pub use launch::{LaunchError, launch};
