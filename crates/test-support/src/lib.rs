@@ -1,7 +1,7 @@
 pub mod poll;
 pub mod wait;
 
-#[cfg(feature = "tokio")]
+#[cfg(any(feature = "tokio", feature = "clock"))]
 pub mod clock;
 #[cfg(feature = "editor")]
 pub mod editor;

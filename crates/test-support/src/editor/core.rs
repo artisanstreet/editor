@@ -1,14 +1,21 @@
 use artisan_api::ThreadId;
 use editor_conversation::controller::Conversation;
 use editor_conversation::presentation::PresentationScope;
-use editor_core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
+use editor_core::{Clock, Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind};
 use std::path::Path;
 use tempfile::TempDir;
 
 pub fn test_core(directory: &Path) -> Core {
-    Core::for_tests(EditorFiles {
-        dir: directory.to_owned(),
-    })
+    test_core_with_clock(directory, Clock::system())
+}
+
+pub fn test_core_with_clock(directory: &Path, clock: Clock) -> Core {
+    Core::for_tests_with_clock(
+        EditorFiles {
+            dir: directory.to_owned(),
+        },
+        clock,
+    )
     .expect("set up a component-test Core")
 }
 
@@ -46,8 +53,12 @@ pub struct OpenThread {
 
 impl OpenThread {
     pub fn new(host: &str, thread: &str) -> Self {
+        Self::with_clock(host, thread, Clock::system())
+    }
+
+    pub fn with_clock(host: &str, thread: &str, clock: Clock) -> Self {
         let directory = tempfile::tempdir().expect("create a test data folder");
-        let mut core = test_core(directory.path());
+        let mut core = test_core_with_clock(directory.path(), clock);
         let host = remote_host(host);
         connect(&mut core, &host);
         let thread = ThreadId::from(thread);

@@ -1,6 +1,6 @@
-use super::core::{connect, remote_host, test_core};
+use super::core::{connect, remote_host, test_core_with_clock};
 use artisan_api::ThreadId;
-use editor_aqua::core::{Core, EditorFiles, HostConfig, Screen};
+use editor_aqua::core::{Clock, Core, EditorFiles, HostConfig, Screen};
 use editor_aqua::shell::application::SectionViews as _;
 use editor_aqua::shell::host::{Shell, ShellResources};
 use editor_aqua::shell::root::RootViews;
@@ -26,10 +26,24 @@ impl ThreadShell {
         Self::open_with(host, thread, motion, |_, _| {})
     }
 
+    pub fn open_at(host: &str, thread: &str, motion: Motion, clock: Clock) -> Self {
+        Self::open_with_clock(host, thread, motion, clock, |_, _| {})
+    }
+
     pub fn open_with(
         host: &str,
         thread: &str,
         motion: Motion,
+        prepare: impl FnOnce(&mut Core, &HostConfig),
+    ) -> Self {
+        Self::open_with_clock(host, thread, motion, Clock::system(), prepare)
+    }
+
+    fn open_with_clock(
+        host: &str,
+        thread: &str,
+        motion: Motion,
+        clock: Clock,
         prepare: impl FnOnce(&mut Core, &HostConfig),
     ) -> Self {
         let directory = tempfile::tempdir().expect("create a test data folder");
@@ -45,7 +59,7 @@ impl ThreadShell {
                 .set_reduced_motion(aqua_ui::motion::ReducedMotion::Reduce, 0.0);
         }
         let (mut shell, _) = Shell::new(files, resources.images.clone());
-        shell.core = test_core(directory.path());
+        shell.core = test_core_with_clock(directory.path(), clock);
         shell.core.set_image_assets(resources.images.clone());
         let host = remote_host(host);
         connect(&mut shell.core, &host);

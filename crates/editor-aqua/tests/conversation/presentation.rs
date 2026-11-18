@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use test_support::editor::core::{OpenThread, connect, remote_host, test_core};
 use test_support::editor::rows::{
-    fixed_source, listed, realized, row_factory, row_list, row_model, source_ids,
+    fixed_source, listed, realized, row_factory, row_factory_at, row_list, row_model, source_ids,
 };
 use test_support::editor::ui::{click, mount, mounted, node_with_key, painted_texts, ui_app};
 use test_support::items::{self, assistant_reply, read_tool, user_message};
@@ -129,17 +129,18 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     };
     let factory = |at| {
         Rc::new(
-            row_factory(
+            row_factory_at(
                 rows(),
                 scope.clone(),
                 markdown.clone(),
                 false,
                 fixed_source(9000),
+                at,
             )
             .with_dispatch(Rc::new(|_| {}))
             .with_admission(conversation.reveal.clone())
             .with_row_cache(row_cache.clone())
-            .with_work(motion.clone(), HashMap::new(), at, 0.0, 0),
+            .with_work(motion.clone(), HashMap::new(), 0.0, 0),
         )
     };
     let first = factory(now);
@@ -149,7 +150,7 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     );
     app.build_frame().unwrap();
     assert_eq!(
-        conversation.reveal.borrow().frontier_key(),
+        conversation.reveal.borrow().frontier_key(now),
         Some(keys[0].clone())
     );
     assert!(first.sync_after_layout(&mut app));
@@ -158,7 +159,10 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
     next.realize(0, &keys[0]).unwrap();
     next.realize(1, &keys[1]).unwrap();
     assert_eq!(
-        conversation.reveal.borrow().frontier_key(),
+        conversation
+            .reveal
+            .borrow()
+            .frontier_key(now + Duration::from_millis(250)),
         Some(keys[1].clone())
     );
     core.remove_host(&config.id).unwrap();
@@ -173,7 +177,7 @@ fn mounted_fresh_work_rows_enter_in_admission_order_across_factory_rebuilds() {
         fixed_source(9001),
     )
     .with_row_cache(row_cache.clone())
-    .with_work(motion.clone(), HashMap::new(), now, 0.0, 0);
+    .with_work(motion.clone(), HashMap::new(), 0.0, 0);
     assert!(next.realize(0, &keys[0]).is_err());
     first.dispose();
     assert!(first.realize(0, &keys[0]).is_err());
@@ -199,7 +203,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
     use editor_aqua::core::runtime::runtime;
     use editor_aqua::core::{CoreEvent, HostEvent, Screen};
     use std::cell::RefCell;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_core(directory.path());
@@ -293,7 +297,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
         )
         .with_observations(observations.clone())
         .with_row_cache(row_cache.clone())
-        .with_reveals(&conversation, &core, owners.clone(), Instant::now(), false)
+        .with_reveals(&conversation, &core, owners.clone(), false)
         .unwrap(),
     );
     let row_key = RowKey::Item(id.clone());
@@ -319,7 +323,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
         fixed_source(9999),
     )
     .with_row_cache(row_cache.clone())
-    .with_reveals(&conversation, &core, owners.clone(), Instant::now(), false)
+    .with_reveals(&conversation, &core, owners.clone(), false)
     .unwrap();
     replacement.realize(0, &row_key).unwrap();
     assert!(Rc::ptr_eq(
@@ -376,7 +380,7 @@ fn exercise_mounted_live_reveal(stored_saved: bool) {
         .unwrap()
         .with_observations(complete_observations.clone())
         .with_row_cache(row_cache.clone())
-        .with_reveals(&conversation, &core, owners.clone(), Instant::now(), false)
+        .with_reveals(&conversation, &core, owners.clone(), false)
         .unwrap(),
     );
     let mut complete_app = mounted(
@@ -958,7 +962,7 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
     use editor_aqua::core::runtime::runtime;
     use editor_aqua::core::{CoreEvent, HostEvent, Screen};
     use std::cell::RefCell;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let directory = tempfile::tempdir().unwrap();
     let mut core = test_core(directory.path());
@@ -1015,7 +1019,7 @@ fn running_inline_reply_without_live_stream_realizes_from_its_text() {
         source_ids(1000).1,
     )
     .with_row_cache(row_cache)
-    .with_reveals(&conversation, &core, owners, Instant::now(), false)
+    .with_reveals(&conversation, &core, owners, false)
     .unwrap();
     assert!(factory.realize(0, &RowKey::Item(id)).is_ok());
 }

@@ -26,9 +26,9 @@ pub struct ItemUi {
 }
 
 impl ItemUi {
-    pub(crate) fn fresh(&self) -> bool {
+    pub(crate) fn fresh(&self, now: std::time::Instant) -> bool {
         self.arrived
-            .is_some_and(|arrived| arrived.elapsed() < FRESH_FOR)
+            .is_some_and(|arrived| now.saturating_duration_since(arrived) < FRESH_FOR)
     }
 }
 
@@ -158,7 +158,11 @@ impl ThreadView {
         true
     }
 
-    pub fn apply_item(&mut self, item: impl Into<Arc<Item>>, watched: bool) -> bool {
+    pub fn apply_item(
+        &mut self,
+        item: impl Into<Arc<Item>>,
+        watched_at: Option<std::time::Instant>,
+    ) -> bool {
         let item = item.into();
         if item.thread_id != self.thread {
             return false;
@@ -183,13 +187,13 @@ impl ThreadView {
         if !known && item.folds_into_work() && self.unloaded_at(item.position).is_some() {
             return false;
         }
-        let arrived = !known && watched;
+        let arrived = watched_at.filter(|_| !known);
         let id = item.id.clone();
         if !self.upsert(item) {
             return false;
         }
-        if arrived {
-            self.ui.entry(id).or_default().arrived = Some(std::time::Instant::now());
+        if let Some(at) = arrived {
+            self.ui.entry(id).or_default().arrived = Some(at);
         }
         self.trim_window(None);
         true

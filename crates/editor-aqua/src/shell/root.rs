@@ -777,6 +777,7 @@ impl RootViews {
                 Rc::clone(&workspace.status_shimmers),
                 theme,
                 reduced_motion,
+                now,
                 workspace.selections.source_allocator(),
                 Rc::new(move || {
                     crate::core::diagnostics::rebuild_stats::record_event("inv_rows");
@@ -828,16 +829,14 @@ impl RootViews {
                 &workspace.conversation,
                 core,
                 Rc::clone(&self.mounted_reveals),
-                now,
                 swift,
             )?
             .with_observations(self.observations.clone())
             .with_work(
                 Rc::clone(&self.row_motion),
                 crate::conversation::adapter::agent_names(&workspace.conversation),
-                now,
                 seconds,
-                artisan_api::now(),
+                core.clock().timestamp(),
             )
             .with_engine(Rc::clone(&self.markdown_engine))
             .with_media(Rc::new(move |key, width| {
@@ -1329,7 +1328,7 @@ impl RootViews {
                     &mut workspace.conversation,
                     &shell.core,
                     reduced,
-                    std::time::Instant::now(),
+                    shell.core.clock().now(),
                 );
             }
         }
@@ -1542,7 +1541,7 @@ impl RootViews {
         let _tm = crate::shell::application::Tm::new("v.context");
         self.ui_now = ctx.now();
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
-        let now = std::time::Instant::now();
+        let now = shell.core.clock().now();
         if let Some(deadline) = [
             self.connection.deadline(now, reduced),
             self.thread_loading.deadline(now, reduced),
@@ -1826,7 +1825,9 @@ impl RootViews {
         if Self::reduced(ui) {
             workspace.conversation.skip_reveal();
         }
-        let reveal = workspace.conversation.reveal(std::time::Instant::now());
+        let reveal = workspace
+            .conversation
+            .reveal(workspace.conversation.clock().now());
         let Some(node) = ui.tree().sole_node_with_key(aqua_ui::tree::hash_key(
             aqua_ui::element::Key::from(crate::conversation::view::TRANSCRIPT_FRAME),
         )) else {
@@ -2146,7 +2147,12 @@ impl RootViews {
         let next = match (due, self.work_clock) {
             (false, Some(at)) => at,
             _ => {
-                let into_second = artisan_api::now().rem_euclid(1_000).unsigned_abs();
+                let into_second = shell
+                    .core
+                    .clock()
+                    .timestamp()
+                    .rem_euclid(1_000)
+                    .unsigned_abs();
                 now + std::time::Duration::from_millis(1_000 - into_second)
             }
         };
@@ -2526,7 +2532,7 @@ impl SectionViews for RootViews {
             reduced,
             swift,
             app_media,
-            std::time::Instant::now(),
+            shell.core.clock().now(),
             true,
         ) {
             Ok(element) => element,
@@ -2693,7 +2699,7 @@ impl SectionViews for RootViews {
         window: AquaWindowId,
     ) -> bool {
         let reduced = Self::reduced(ui);
-        let now = std::time::Instant::now();
+        let now = shell.core.clock().now();
         let signing_in = matches!(
             shell.core.entry_gate(),
             crate::core::EntryGate::Restoring | crate::core::EntryGate::SignedOut
@@ -2909,7 +2915,7 @@ impl SectionViews for RootViews {
         };
         let reduced = ui.host().motion().reduced_motion() == aqua_ui::motion::ReducedMotion::Reduce;
         let size = aqua_core::Size::new(viewport.width, viewport.height);
-        let now = std::time::Instant::now();
+        let now = shell.core.clock().now();
         self.sidebar.fit(viewport.width, now, reduced);
         self.resize_key = Some(ResizeKey::of(
             &screen,
@@ -3825,7 +3831,8 @@ impl SectionViews for RootViews {
     ) -> bool {
         self.sync_context(shell, ui, ctx, window);
         if self.work_clock.is_none() {
-            self.tick_work_clock(shell, ctx, window, std::time::Instant::now());
+            let now = shell.core.clock().now();
+            self.tick_work_clock(shell, ctx, window, now);
         }
         if self.sync_navigation(ui, ctx, window) {
             crate::core::diagnostics::rebuild_stats::record_event("inv_nav_a");

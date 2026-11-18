@@ -60,6 +60,24 @@ pub fn row_factory(
     reduced_motion: bool,
     allocate: Rc<dyn Fn() -> SelectionSourceId>,
 ) -> RowFactory {
+    row_factory_at(
+        rows,
+        scope,
+        markdown,
+        reduced_motion,
+        allocate,
+        std::time::Instant::now(),
+    )
+}
+
+pub fn row_factory_at(
+    rows: Vec<RealizedRow>,
+    scope: PresentationScope,
+    markdown: Rc<RefCell<MarkdownOwners>>,
+    reduced_motion: bool,
+    allocate: Rc<dyn Fn() -> SelectionSourceId>,
+    now: std::time::Instant,
+) -> RowFactory {
     RowFactory::new(
         rows,
         scope,
@@ -67,6 +85,7 @@ pub fn row_factory(
         Rc::new(RefCell::new(StatusShimmers::default())),
         *ArtisanTheme::for_mode(ThemeMode::Dark),
         reduced_motion,
+        now,
         allocate,
         Rc::new(|| {}),
         Rc::new(|_| {}),

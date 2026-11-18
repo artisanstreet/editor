@@ -3,6 +3,7 @@ use artisan_account::network::{CoreSessionClient, SessionToken};
 
 use crate::core::ae::Ae;
 use crate::core::client::ForgeClient;
+use crate::core::clock::Clock;
 use crate::core::runtime::run_http;
 use artisan_account::network::MachineEntry as AccountMachine;
 
@@ -13,6 +14,7 @@ pub struct Services {
     pub(crate) core_url: Option<String>,
     pub(crate) ae: Ae,
     pub(crate) relay: RelayRoute,
+    pub(crate) clock: Clock,
 }
 
 #[derive(Clone)]
@@ -39,7 +41,13 @@ impl Services {
             core_url: None,
             ae: Ae::Installed,
             relay,
+            clock: Clock::system(),
         }
+    }
+
+    #[must_use]
+    pub fn with_clock(self, clock: Clock) -> Self {
+        Self { clock, ..self }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -53,6 +61,7 @@ impl Services {
             core_url: Some(core_url.to_owned()),
             ae: Ae::Scripted(ae),
             relay: relay.map_or(RelayRoute::Off, RelayRoute::Scripted),
+            clock: Clock::system(),
         }
     }
 }

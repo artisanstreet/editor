@@ -86,7 +86,7 @@ fn a_refresh_that_skips_past_the_parked_items_starts_over_from_the_tail() {
 #[test]
 fn a_late_refresh_never_reverts_an_item_a_live_update_already_changed() {
     let mut view = history();
-    assert!(view.apply_item(item(20, 5), true));
+    assert!(view.apply_item(item(20, 5), Some(std::time::Instant::now())));
     send(&mut view, &Input::Resume);
 
     view.apply_page(Fetch::Refresh, page(15..=20, 2, true));
@@ -102,7 +102,7 @@ fn a_late_refresh_never_reverts_an_item_a_live_update_already_changed() {
 #[test]
 fn a_late_refresh_keeps_items_that_arrived_after_it_was_read() {
     let mut view = history();
-    assert!(view.apply_item(item(21, 3), true));
+    assert!(view.apply_item(item(21, 3), Some(std::time::Instant::now())));
     send(&mut view, &Input::Resume);
 
     view.apply_page(Fetch::Refresh, page(15..=20, 2, false));
@@ -113,7 +113,7 @@ fn a_late_refresh_keeps_items_that_arrived_after_it_was_read() {
 #[test]
 fn the_first_page_never_reverts_an_item_a_live_update_delivered_while_it_loaded() {
     let (mut view, _) = ThreadView::open(ThreadId("thread".into()));
-    assert!(view.apply_item(item(5, 9), true));
+    assert!(view.apply_item(item(5, 9), Some(std::time::Instant::now())));
 
     view.apply_page(Fetch::Tail, page(1..=10, 1, false));
 

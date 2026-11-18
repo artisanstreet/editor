@@ -28,8 +28,13 @@ struct RevealGate {
     settling: bool,
 }
 impl RevealQueue {
-    pub fn begin(&mut self, key: RowKey, order: (u64, u8, usize), enabled: bool) -> bool {
-        let now = Instant::now();
+    pub fn begin(
+        &mut self,
+        key: RowKey,
+        order: (u64, u8, usize),
+        enabled: bool,
+        now: Instant,
+    ) -> bool {
         self.rows
             .retain(|_, row| now.saturating_duration_since(row.seen) < Duration::from_millis(250));
         let held = enabled
@@ -50,8 +55,7 @@ impl RevealQueue {
             });
         held
     }
-    pub fn frontier_key(&self) -> Option<RowKey> {
-        let now = Instant::now();
+    pub fn frontier_key(&self, now: Instant) -> Option<RowKey> {
         self.rows
             .iter()
             .filter(|(_, row)| {
@@ -85,20 +89,25 @@ pub struct LiveBlockArrivals {
     pub seen: Instant,
 }
 impl LiveBlockArrivals {
-    pub fn baseline(blocks: usize) -> Self {
+    pub fn baseline(blocks: usize, now: Instant) -> Self {
         Self {
             high_water: blocks,
             pending: false,
             fresh: HashMap::new(),
-            seen: Instant::now(),
+            seen: now,
         }
     }
-    pub fn observed(&mut self) {
+    pub const fn observed(&mut self, now: Instant) {
         self.pending = true;
-        self.seen = Instant::now();
+        self.seen = now;
     }
-    pub fn prepared(&mut self, blocks: usize, caught_up: bool, initially_fresh: bool) {
-        let now = Instant::now();
+    pub fn prepared(
+        &mut self,
+        blocks: usize,
+        caught_up: bool,
+        initially_fresh: bool,
+        now: Instant,
+    ) {
         if self.pending || initially_fresh {
             for block in self.high_water.max(blocks.saturating_sub(128))..blocks {
                 self.fresh.insert(block, now);

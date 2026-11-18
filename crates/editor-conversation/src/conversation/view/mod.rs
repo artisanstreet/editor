@@ -341,6 +341,6 @@ pub fn layout_batched_thread_element(
         composer,
         drawer,
         viewport_width,
-        conversation.reveal(std::time::Instant::now()),
+        conversation.reveal(conversation.clock().now()),
     )
 }

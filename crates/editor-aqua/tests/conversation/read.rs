@@ -53,15 +53,16 @@ fn read_evidence_requires_a_revealed_active_row_with_its_bottom_inside_the_clip(
 
 #[test]
 fn reveal_queue_holds_later_rows_until_the_prior_row_settles() {
+    let now = std::time::Instant::now();
     let mut queue = RevealQueue::default();
     let first = RowKey::Gap;
     let second = RowKey::Item(artisan_api::ItemId("second".into()));
-    assert!(!queue.begin(first.clone(), (1, 1, 0), true));
+    assert!(!queue.begin(first.clone(), (1, 1, 0), true, now));
     queue.finish(&first, true);
-    assert!(queue.begin(second.clone(), (2, 1, 0), true));
-    assert_eq!(queue.frontier_key(), Some(first.clone()));
+    assert!(queue.begin(second.clone(), (2, 1, 0), true, now));
+    assert_eq!(queue.frontier_key(now), Some(first.clone()));
     queue.finish(&first, false);
-    assert!(!queue.begin(second, (2, 1, 0), true));
+    assert!(!queue.begin(second, (2, 1, 0), true, now));
     queue.rush(2);
     assert!(queue.rushed(1));
     assert!(!queue.rushed(2));
@@ -69,21 +70,23 @@ fn reveal_queue_holds_later_rows_until_the_prior_row_settles() {
 
 #[test]
 fn reader_interruption_releases_loaded_rows_without_rushing_future_replies() {
+    let now = std::time::Instant::now();
     let mut queue = RevealQueue::default();
     let first = RowKey::Item(artisan_api::ItemId("first".into()));
     let second = RowKey::Item(artisan_api::ItemId("second".into()));
-    assert!(!queue.begin(first.clone(), (1, 1, 0), true));
+    assert!(!queue.begin(first.clone(), (1, 1, 0), true, now));
     queue.finish(&first, true);
-    assert!(queue.begin(second.clone(), (2, 1, 0), true));
+    assert!(queue.begin(second.clone(), (2, 1, 0), true, now));
     queue.finish(&second, true);
     queue.rush(2);
-    assert_eq!(queue.frontier_key(), Some(second));
+    assert_eq!(queue.frontier_key(now), Some(second));
     queue.rush(3);
-    assert_eq!(queue.frontier_key(), None);
+    assert_eq!(queue.frontier_key(now), None);
     assert!(!queue.rushed(3));
     assert!(!queue.begin(
         RowKey::Item(artisan_api::ItemId("next".into())),
         (3, 1, 0),
-        true
+        true,
+        now,
     ));
 }

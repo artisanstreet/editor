@@ -126,20 +126,21 @@ fn fingerprint_ignores_ui_map_iteration_order() {
 
 #[test]
 fn only_quiescent_rows_settle() {
-    assert!(row_settles_statically(&model(Status::Done)));
-    assert!(!row_settles_statically(&model(Status::Running)));
+    let now = Instant::now();
+    assert!(row_settles_statically(&model(Status::Done), now));
+    assert!(!row_settles_statically(&model(Status::Running), now));
 
     let mut fresh = model(Status::Done);
     fresh.ui.insert(
         ItemId("tool".into()),
         ItemUi {
-            arrived: Some(Instant::now()),
+            arrived: Some(now),
             ..Default::default()
         },
     );
-    assert!(!row_settles_statically(&fresh));
+    assert!(!row_settles_statically(&fresh, now));
 
     let mut gap = model(Status::Done);
     gap.row = Row::Gap;
-    assert!(!row_settles_statically(&gap));
+    assert!(!row_settles_statically(&gap, now));
 }

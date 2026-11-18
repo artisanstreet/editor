@@ -1,13 +1,23 @@
 use super::*;
 use artisan_api::Status;
-use editor_core::{EditorFiles, ForgeClient, HostConfig, HostKind};
+use editor_core::{Clock, EditorFiles, ForgeClient, HostConfig, HostKind};
+use test_support::clock::ManualClock;
 
 fn fixture() -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
+    fixture_at(Clock::system())
+}
+
+pub(super) fn fixture_at(
+    clock: Clock,
+) -> (tempfile::TempDir, std::net::TcpListener, Core, Conversation) {
     let directory = tempfile::tempdir().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut core = Core::for_tests(EditorFiles {
-        dir: directory.path().to_owned(),
-    })
+    let mut core = Core::for_tests_with_clock(
+        EditorFiles {
+            dir: directory.path().to_owned(),
+        },
+        clock,
+    )
     .unwrap();
     let config = HostConfig {
         id: HostId("reset-host".into()),
@@ -70,7 +80,7 @@ fn enqueue(conversation: &Conversation, completion: Completion) {
     );
 }
 
-fn finish_tail(conversation: &mut Conversation, core: &mut Core) {
+pub(super) fn finish_tail(conversation: &mut Conversation, core: &mut Core) {
     enqueue(
         conversation,
         Completion::Page {
@@ -215,11 +225,13 @@ fn reset_restarts_pending_agent_context_without_accepting_its_old_completion() {
 
 #[test]
 fn the_landing_lock_holds_until_the_first_page_arrives() {
-    let (_directory, _listener, mut core, mut conversation) = fixture();
-    let much_later = Instant::now() + std::time::Duration::from_secs(3600);
+    let clock = ManualClock::starting_at(1_700_000_000_000);
+    let (_directory, _listener, mut core, mut conversation) = fixture_at(clock.clock());
+    let an_hour = std::time::Duration::from_secs(3600);
 
     assert_eq!(conversation.landing, Some(Landing::Loading));
-    assert!(!conversation.expire_landing(much_later));
+    clock.advance(an_hour);
+    assert!(!conversation.expire_landing());
     assert!(conversation.is_landing());
 
     finish_tail(&mut conversation, &mut core);
@@ -230,9 +242,13 @@ fn the_landing_lock_holds_until_the_first_page_arrives() {
     ));
     conversation.host_event(&core, &HostEvent::Reset, false);
     assert_eq!(conversation.landing, Some(Landing::Loading));
-    assert!(!conversation.expire_landing(much_later));
+    clock.advance(an_hour);
+    assert!(!conversation.expire_landing());
 
     finish_tail(&mut conversation, &mut core);
-    assert!(conversation.expire_landing(much_later));
+    assert!(conversation.is_landing());
+    assert!(!conversation.expire_landing());
+    clock.advance(LANDING_SETTLE);
     assert!(!conversation.is_landing());
+    assert!(conversation.expire_landing());
 }

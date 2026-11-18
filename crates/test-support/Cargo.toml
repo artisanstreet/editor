@@ -12,7 +12,8 @@ sse = ["tokio", "dep:sse-core", "dep:futures", "dep:bytes", "dep:serde", "dep:se
 http = ["tokio", "dep:axum"]
 net = ["dep:socket2"]
 items = ["dep:artisan-api"]
-editor = ["items", "dep:tempfile", "dep:aqua", "dep:aqua-core", "dep:aqua-text", "dep:aqua-ui", "dep:editor-core", "dep:editor-ui", "dep:editor-conversation"]
+clock = ["dep:artisan-api", "dep:editor-core"]
+editor = ["items", "clock", "dep:tempfile", "dep:aqua", "dep:aqua-core", "dep:aqua-text", "dep:aqua-ui", "dep:editor-core", "dep:editor-ui", "dep:editor-conversation"]
 shell = ["editor", "dep:editor-aqua"]
 
 [dependencies]

@@ -170,7 +170,6 @@ fn approval_pointer_dispatch_and_stored_source_are_fenced_by_item_and_host_lifet
     .with_work(
         Rc::new(RefCell::new(Default::default())),
         HashMap::new(),
-        Instant::now(),
         0.0,
         0,
     );

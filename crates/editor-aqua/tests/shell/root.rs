@@ -5,6 +5,7 @@ use editor_aqua::core::Screen;
 use editor_aqua::shell::application::SectionViews;
 use editor_aqua::shell::root::RootViews;
 use std::sync::Arc;
+use test_support::clock::ManualClock;
 use test_support::editor::shell::{Motion, RootFrames, ThreadShell, headless, window_id};
 use test_support::editor::ui::text_opacity;
 use test_support::items::{assistant_reply, item, user_message};
@@ -40,7 +41,13 @@ fn replies(opened: &mut ThreadShell, count: u64) {
 #[test]
 fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
     for expire in [false, true] {
-        let mut opened = ThreadShell::open("landing-host", "landing-thread", Motion::Reduced);
+        let clock = ManualClock::starting_at(1_700_000_000_000);
+        let mut opened = ThreadShell::open_at(
+            "landing-host",
+            "landing-thread",
+            Motion::Reduced,
+            clock.clock(),
+        );
         let window = opened.window("landing");
         let item = Arc::new(item(
             "landing-message",
@@ -72,7 +79,8 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
             },
             1,
         ));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let settle = std::time::Duration::from_secs(60);
+        let deadline = shell.core.clock().now() + settle;
         workspace.conversation.landing =
             Some(editor_aqua::conversation::controller::Landing::Settling { until: deadline });
         let mut root = RootViews::default();
@@ -88,8 +96,9 @@ fn landing_completion_rebuilds_hidden_transcript_before_subtree_refresh() {
         );
         let conversation = &mut shell.entry.workspace_mut().unwrap().conversation;
         if expire {
+            clock.advance(settle);
             assert!(
-                conversation.expire_landing(deadline),
+                conversation.expire_landing(),
                 "the scheduled deadline must end landing"
             );
         } else {

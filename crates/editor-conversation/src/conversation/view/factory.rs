@@ -101,7 +101,6 @@ fn bubble_sender(
 struct WorkResources {
     motion: Rc<RefCell<super::motion::RowMotion>>,
     names: HashMap<artisan_api::ItemId, String>,
-    now: Instant,
     seconds: f64,
     timestamp: artisan_api::Timestamp,
 }
@@ -112,7 +111,6 @@ struct RevealResources {
         RefCell<HashMap<artisan_api::ItemId, crate::conversation::admission::LiveBlockArrivals>>,
     >,
     live: HashMap<artisan_api::ItemId, crate::conversation::live::LiveBinding>,
-    now: Instant,
     swift: bool,
 }
 
@@ -170,6 +168,7 @@ pub struct RowFactory {
     pub statuses: Rc<RefCell<status::StatusShimmers>>,
     pub theme: ArtisanTheme,
     pub reduced_motion: bool,
+    now: Instant,
     pub allocate: Rc<dyn Fn() -> SelectionSourceId>,
     pub invalidate: Rc<dyn Fn()>,
     pub on_link: Rc<dyn Fn(LinkAction)>,
@@ -231,7 +230,7 @@ impl RowFingerprint<'_> {
     }
 }
 
-pub fn row_settles_statically(model: &RowModel) -> bool {
+pub fn row_settles_statically(model: &RowModel, now: Instant) -> bool {
     let status = matches!(model.row.semantic(), Row::Status(_));
     (status
         || matches!(
@@ -242,7 +241,7 @@ pub fn row_settles_statically(model: &RowModel) -> bool {
             .items
             .values()
             .all(|item| item.status != Status::Running)
-        && model.ui.values().all(|ui| !ui.fresh())
+        && model.ui.values().all(|ui| !ui.fresh(now))
         && (status || model.live.is_empty())
 }
 
@@ -353,7 +352,7 @@ impl RowFactory {
         if let (Some((owner, fresh, ready)), Some(resources)) = (reveal, &self.reveals) {
             ready.set(false);
             owner.begin_frame(
-                resources.now,
+                self.now,
                 false,
                 *fresh,
                 self.reduced_motion,
@@ -593,10 +592,7 @@ impl RowFactory {
     ) -> anyhow::Result<Option<aqua_ui::element::Element>> {
         let collected = RefCell::new(Vec::new());
         let used = RefCell::new(std::collections::HashSet::new());
-        let now = self
-            .work
-            .as_ref()
-            .map_or_else(Instant::now, |work| work.now);
+        let now = self.now;
         let disclosed = owner.motion.borrow_mut().disclosed(
             format!("details-{}", item.id),
             expanded,
@@ -987,10 +983,7 @@ impl RowFactory {
             Some(BlobImage::Ready(image)) => Some((**image).clone()),
             _ => None,
         };
-        let now = self
-            .work
-            .as_ref()
-            .map_or_else(Instant::now, |work| work.now);
+        let now = self.now;
         let arrival = owner.motion.borrow_mut().arrival(
             format!("image-{hash}-{attachment:?}"),
             image.is_some(),
@@ -1153,6 +1146,7 @@ impl RowFactory {
         statuses: Rc<RefCell<status::StatusShimmers>>,
         theme: ArtisanTheme,
         reduced_motion: bool,
+        now: Instant,
         allocate: Rc<dyn Fn() -> SelectionSourceId>,
         invalidate: Rc<dyn Fn()>,
         on_link: Rc<dyn Fn(LinkAction)>,
@@ -1170,6 +1164,7 @@ impl RowFactory {
             statuses,
             theme,
             reduced_motion,
+            now,
             allocate,
             invalidate,
             on_link,
@@ -1331,7 +1326,6 @@ impl RowFactory {
         conversation: &crate::conversation::controller::Conversation,
         core: &editor_core::Core,
         owners: Rc<RefCell<super::reveal::MountedReveals>>,
-        now: Instant,
         swift: bool,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
@@ -1353,7 +1347,6 @@ impl RowFactory {
             owners,
             arrivals: conversation.arrivals.clone(),
             live,
-            now,
             swift,
         });
         Ok(self)
@@ -1435,7 +1428,6 @@ impl RowFactory {
         mut self,
         motion: Rc<RefCell<super::motion::RowMotion>>,
         names: HashMap<artisan_api::ItemId, String>,
-        now: Instant,
         seconds: f64,
         timestamp: artisan_api::Timestamp,
     ) -> Self {
@@ -1447,7 +1439,6 @@ impl RowFactory {
         self.work = Some(WorkResources {
             motion,
             names,
-            now,
             seconds,
             timestamp,
         });
@@ -1556,7 +1547,7 @@ impl RowFactory {
             stored.as_deref(),
         );
         if let Some(queue) = &self.admission {
-            let frontier = queue.borrow().frontier_key();
+            let frontier = queue.borrow().frontier_key(self.now);
             if conversation.reveal_frontier != frontier {
                 conversation.reveal_frontier = frontier;
                 result.changed = true;
@@ -1617,10 +1608,7 @@ impl RowFactory {
         key: &RowKey,
         fresh: bool,
     ) -> Option<editor_ui::sticker::Sticker> {
-        let now = self
-            .work
-            .as_ref()
-            .map_or_else(Instant::now, |work| work.now);
+        let now = self.now;
         owner
             .motion
             .borrow_mut()
@@ -1698,7 +1686,7 @@ impl RowFactory {
                     ..
                 },
             ) => {
-                let initial = row.model.ui.get(id).is_some_and(|ui| ui.fresh());
+                let initial = row.model.ui.get(id).is_some_and(|ui| ui.fresh(self.now));
                 Some(resources.owners.borrow_mut().acquire(&row_owner, || {
                     resources
                         .arrivals
@@ -1730,7 +1718,7 @@ impl RowFactory {
             let enabled = !crate::conversation::admission::immediate(semantic)
                 && !queue.rushed(position)
                 && !self.reduced_motion;
-            queue.begin(key.clone(), (position, part, ordinal), enabled)
+            queue.begin(key.clone(), (position, part, ordinal), enabled, self.now)
         });
         let deferred = row.disclosure.clip.is_none()
             && row.disclosure.fraction.is_none()
@@ -1811,7 +1799,7 @@ impl RowFactory {
                                 row.disclosure.fraction,
                                 editor_ui::kit::IconSize::Md.px(),
                                 self.theme.colors.text_muted.to_reference_paint(),
-                                work.now,
+                                self.now,
                                 self.reduced_motion,
                             )
                         },
@@ -1858,7 +1846,7 @@ impl RowFactory {
                             row.disclosure.fraction,
                             editor_ui::kit::IconSize::Md.px(),
                             color,
-                            work.now,
+                            self.now,
                             self.reduced_motion,
                         )
                     },
@@ -1986,7 +1974,7 @@ impl RowFactory {
                     let sticker = self.bubble_sticker(
                         &row_owner,
                         key,
-                        row.model.ui.get(id).is_some_and(|ui| ui.fresh()),
+                        row.model.ui.get(id).is_some_and(|ui| ui.fresh(self.now)),
                     );
                     user_bubble(
                         element,
@@ -2052,8 +2040,8 @@ impl RowFactory {
                     })
                     .copied();
                 let sealed = shape_count.is_some_and(|count| *block + 1 < count);
-                let fresh =
-                    *slot == Slot::Prose && row.model.ui.get(id).is_some_and(|ui| ui.fresh());
+                let fresh = *slot == Slot::Prose
+                    && row.model.ui.get(id).is_some_and(|ui| ui.fresh(self.now));
                 anyhow::ensure!(
                     reveal.is_some() || (!running && !fresh),
                     "live or fresh prose reveal is unavailable"
@@ -2100,7 +2088,7 @@ impl RowFactory {
                 {
                     ready.set(false);
                     owner.begin_frame(
-                        resources.now,
+                        self.now,
                         running && !sealed,
                         *is_fresh,
                         self.reduced_motion,
@@ -2324,7 +2312,11 @@ impl RowFactory {
                     element
                 };
                 Some(if slot.is_bubble() {
-                    let fresh = row.model.ui.get(&item.id).is_some_and(|ui| ui.fresh());
+                    let fresh = row
+                        .model
+                        .ui
+                        .get(&item.id)
+                        .is_some_and(|ui| ui.fresh(self.now));
                     user_bubble(
                         element,
                         *block,
@@ -2438,10 +2430,6 @@ impl RowFactory {
                 let ItemKind::Compaction { .. } = &item.kind else {
                     anyhow::bail!("conversation compaction item has changed");
                 };
-                let work = self
-                    .work
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("conversation work motion is unavailable"))?;
                 let phase = match item.status {
                     Status::Running => CompactionPhase::Running,
                     Status::Done => CompactionPhase::Done,
@@ -2450,12 +2438,12 @@ impl RowFactory {
                     | Status::Declined
                     | Status::Cancelled => CompactionPhase::Stopped,
                 };
-                let fresh = row.model.ui.get(id).is_some_and(|ui| ui.fresh());
+                let fresh = row.model.ui.get(id).is_some_and(|ui| ui.fresh(self.now));
                 let frame = row_owner.motion.borrow_mut().compaction(
                     id,
                     phase,
                     fresh,
-                    work.now,
+                    self.now,
                     self.reduced_motion,
                 );
                 let shimmer_key = (!self.reduced_motion)
@@ -2477,10 +2465,7 @@ impl RowFactory {
                     self.reduced_motion,
                     theme,
                 )?;
-                let now = self
-                    .work
-                    .as_ref()
-                    .map_or_else(Instant::now, |work| work.now);
+                let now = self.now;
                 let swap = row_owner.motion.borrow_mut().swap(
                     format!("status-{key:?}"),
                     label,
@@ -2523,7 +2508,7 @@ impl RowFactory {
         };
         let mut work_settling = false;
         let content = match (content, &self.work) {
-            (Some(element), Some(work)) => {
+            (Some(element), Some(_)) => {
                 let (id, standalone) = match row.model.row.semantic() {
                     Row::WorkEntry { id, .. } => (Some(id), false),
                     Row::Chain { ids, .. } => (ids.first(), false),
@@ -2535,14 +2520,14 @@ impl RowFactory {
                 };
                 if let Some(id) = id {
                     let fresh = row.disclosure.clip.is_none()
-                        && row.model.ui.get(id).is_some_and(|ui| ui.fresh());
+                        && row.model.ui.get(id).is_some_and(|ui| ui.fresh(self.now));
                     let live = standalone || row.model.run.as_ref().is_some_and(|run| run.live());
                     let entrance = row_owner.motion.borrow_mut().entrance(
                         key.clone(),
                         fresh,
                         live,
                         self.reduced_motion,
-                        work.now,
+                        self.now,
                     );
                     if row.disclosure.clip.is_some() {
                         Some(element)
@@ -2579,13 +2564,10 @@ impl RowFactory {
         let reveal_done = reveal.as_ref().is_none_or(|(owner, _, _)| {
             owner.fully_visible() && !owner.is_settling() && !owner.is_animating()
         });
-        let quiescent = self.content_keyed.get() || row_settles_statically(&row.model);
+        let quiescent = self.content_keyed.get() || row_settles_statically(&row.model, self.now);
         let motionless = {
             let motion = row_owner.motion.borrow();
-            let now = self
-                .work
-                .as_ref()
-                .map_or_else(Instant::now, |work| work.now);
+            let now = self.now;
             !motion.animating() && !motion.sticking(now)
         };
         let disclosure_rest = row.disclosure == RowDisclosure::default();

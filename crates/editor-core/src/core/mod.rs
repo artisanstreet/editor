@@ -3,6 +3,7 @@ pub mod account;
 pub mod ae;
 mod agent_calls;
 pub mod client;
+pub mod clock;
 pub mod config_file;
 pub mod connection;
 pub mod delivery;
@@ -27,6 +28,7 @@ pub use account::{Account, AccountEvent, AccountMachine, AccountPhase, LocalForg
 #[cfg(feature = "test-support")]
 pub use ae::AeScript;
 pub use client::ForgeClient;
+pub use clock::{Clock, TimeSource};
 pub use connection::ConnectionStatus;
 pub use host::{
     Attention, BlobImage, HostData, HostEvent, HostInstance, LiveSnapshot, ProjectionLoad,

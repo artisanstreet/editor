@@ -130,6 +130,9 @@ pub enum OpenCoreError {
 }
 
 impl Core {
+    pub fn clock(&self) -> &crate::core::clock::Clock {
+        &self.account.services().clock
+    }
     pub fn with_services(files: EditorFiles, services: Services) -> Result<Self, OpenCoreError> {
         let identity = files.identity().map_err(OpenCoreError::Identity)?;
         let hosts_file = files.hosts().map_err(OpenCoreError::Hosts)?;
@@ -218,12 +221,20 @@ impl Core {
     }
     #[cfg(feature = "test-support")]
     pub fn for_tests(files: EditorFiles) -> Result<Self> {
+        Self::for_tests_with_clock(files, crate::core::clock::Clock::system())
+    }
+    #[cfg(feature = "test-support")]
+    pub fn for_tests_with_clock(
+        files: EditorFiles,
+        clock: crate::core::clock::Clock,
+    ) -> Result<Self> {
         use artisan_account::network::{AccountProfile, Jwk, MachineEntry};
         let services = Services::scripted(
             "http://127.0.0.1:1",
             std::sync::Arc::new(|_| anyhow::bail!("no `ae` in component tests")),
             None,
-        );
+        )
+        .with_clock(clock);
         let mut core = Self::with_services(files, services)?;
         let machine = MachineEntry {
             id: "mch_test0000000000000000000000".to_owned(),

@@ -133,6 +133,7 @@ pub struct Conversation {
     scroll: Vec<ScrollAction>,
     parked: super::parked::Shelf<ParkedKey, ParkedThread>,
     pending: Option<Pending>,
+    clock: editor_core::Clock,
 }
 
 fn next_rows_epoch() -> u64 {
@@ -141,6 +142,10 @@ fn next_rows_epoch() -> u64 {
 }
 
 impl Conversation {
+    pub const fn clock(&self) -> &editor_core::Clock {
+        &self.clock
+    }
+
     pub fn rows_epoch(&self) -> u64 {
         self.rows_epoch
     }
@@ -206,6 +211,7 @@ impl Conversation {
             scroll: Vec::new(),
             parked: super::parked::Shelf::new(PARKED_THREADS, PARKED_BYTES),
             pending: None,
+            clock: core.clock().clone(),
         }
     }
 
@@ -323,7 +329,7 @@ impl Conversation {
             self.landing = Some(Landing::Loading);
         }
         if self.landing.is_none() {
-            self.landed_at = Some(Instant::now());
+            self.landed_at = Some(self.clock.now());
         }
         for effect in effects.into_iter().chain(jump) {
             match effect {
@@ -490,7 +496,7 @@ impl Conversation {
 
     pub fn landed(&mut self) {
         if self.landing.take().is_some() {
-            self.landed_at = Some(Instant::now());
+            self.landed_at = Some(self.clock.now());
         }
     }
 
@@ -498,7 +504,7 @@ impl Conversation {
         self.landed_at = None;
         if self
             .landing_deadline()
-            .is_some_and(|until| Instant::now() >= until)
+            .is_some_and(|until| self.clock.now() >= until)
         {
             self.landing = None;
         }
@@ -525,7 +531,13 @@ impl Conversation {
         }
     }
 
-    pub fn expire_landing(&mut self, now: Instant) -> bool {
+    pub fn landing_wait(&self) -> Option<std::time::Duration> {
+        self.landing_deadline()
+            .map(|deadline| deadline.saturating_duration_since(self.clock.now()))
+    }
+
+    pub fn expire_landing(&mut self) -> bool {
+        let now = self.clock.now();
         if self
             .landing_deadline()
             .is_some_and(|deadline| now >= deadline)
@@ -543,7 +555,7 @@ impl Conversation {
             && self.view.is_some()
             && match self.landing {
                 Some(Landing::Loading) => true,
-                Some(Landing::Settling { until }) => Instant::now() < until,
+                Some(Landing::Settling { until }) => self.clock.now() < until,
                 None => false,
             }
     }
@@ -738,10 +750,8 @@ impl Conversation {
         if view.item(&binding.item).is_none() {
             return false;
         }
-        let fresh = view
-            .ui
-            .get(&binding.item)
-            .is_some_and(thread::ItemUi::fresh);
+        let now = self.clock.now();
+        let fresh = view.ui.get(&binding.item).is_some_and(|ui| ui.fresh(now));
         let caught_up = binding.current(self, core);
         let mut arrivals = self.arrivals.borrow_mut();
         if !arrivals.contains_key(&binding.item) && arrivals.len() >= 128 {
@@ -749,8 +759,8 @@ impl Conversation {
         }
         let arrival = arrivals
             .entry(binding.item.clone())
-            .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(0));
-        arrival.prepared(blocks.max(1), caught_up, fresh);
+            .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(0, now));
+        arrival.prepared(blocks.max(1), caught_up, fresh, now);
         for (row, _) in &self.rows {
             if self.mounted_rows.contains(&row.key())
                 && let Row::Text {
@@ -776,20 +786,21 @@ impl Conversation {
             slot: fold::Slot::Prose,
         };
         let blocks = self.projections.leaf_count(&key).unwrap_or(0);
+        let now = self.clock.now();
         let mut arrivals = self.arrivals.borrow_mut();
         if !arrivals.contains_key(id)
             && arrivals.len() >= 128
             && let Some(oldest) = arrivals
                 .iter()
-                .min_by_key(|(_, arrival)| arrival.seen)
+                .min_by_key(|(id, arrival)| (arrival.seen, (*id).clone()))
                 .map(|(id, _)| id.clone())
         {
             arrivals.remove(&oldest);
         }
         arrivals
             .entry(id.clone())
-            .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(blocks))
-            .observed();
+            .or_insert_with(|| super::admission::LiveBlockArrivals::baseline(blocks, now))
+            .observed(now);
     }
 
     pub fn publish_projections(
@@ -1205,7 +1216,11 @@ impl Conversation {
                 {
                     return;
                 }
-                let changed = view.apply_item(Arc::clone(item), watched && !self.landing.is_some());
+                let now = self.clock.now();
+                let changed = view.apply_item(
+                    Arc::clone(item),
+                    (watched && self.landing.is_none()).then_some(now),
+                );
                 view.set_live(host.live_targets(&thread));
                 let sent = matches!(
                     item.kind,
@@ -1214,13 +1229,13 @@ impl Conversation {
                         from_agent: None,
                         ..
                     }
-                ) && view.ui.get(&item.id).is_some_and(thread::ItemUi::fresh);
+                ) && view.ui.get(&item.id).is_some_and(|ui| ui.fresh(now));
                 if changed {
                     if watched && matches!(item.kind, ItemKind::AssistantMessage { .. }) {
                         self.observe_live_prose_arrival(&item.id);
                     }
                     if watched && self.landing.is_none() {
-                        self.scroll_frame.get_or_insert_with(Instant::now);
+                        self.scroll_frame.get_or_insert(now);
                     }
                     if sent {
                         self.reveal.borrow_mut().rush(item.position);
@@ -1237,7 +1252,7 @@ impl Conversation {
                         self.observe_live_prose_arrival(item_id);
                     }
                     if watched && self.landing.is_none() {
-                        self.scroll_frame.get_or_insert_with(Instant::now);
+                        self.scroll_frame.get_or_insert_with(|| self.clock.now());
                     }
                     self.rebuild(core);
                 }
@@ -1344,7 +1359,7 @@ impl Conversation {
                             self.load_error = None;
                             if self.landing == Some(Landing::Loading) {
                                 self.landing = Some(Landing::Settling {
-                                    until: Instant::now() + LANDING_SETTLE,
+                                    until: self.clock.now() + LANDING_SETTLE,
                                 });
                             }
                             let (items, spans) = (page.items.len(), page.work.len());
@@ -1514,3 +1529,7 @@ mod agent_tests;
 #[cfg(test)]
 #[path = "../../tests/conversation/controller/switch.rs"]
 mod switch_tests;
+
+#[cfg(test)]
+#[path = "../../tests/conversation/controller/arrival.rs"]
+mod arrival_tests;

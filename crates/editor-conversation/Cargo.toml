@@ -35,6 +35,7 @@ editor-composer.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 editor-conversation = { path = ".", features = ["test-support"] }
+test-support = { workspace = true, features = ["clock"] }
 
 [lints]
 workspace = true

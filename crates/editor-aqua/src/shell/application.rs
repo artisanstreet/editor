@@ -482,13 +482,12 @@ impl<V: SectionViews> ShellApplication<V> {
                     );
                     ctx.request_animation_deadline(id, ctx.now() + delay);
                 }
-                if let Some(deadline) = self
+                if let Some(delay) = self
                     .shell
                     .entry
                     .workspace()
-                    .and_then(|workspace| workspace.conversation.landing_deadline())
+                    .and_then(|workspace| workspace.conversation.landing_wait())
                 {
-                    let delay = deadline.saturating_duration_since(std::time::Instant::now());
                     ctx.request_animation_deadline(id, ctx.now() + delay);
                 }
                 if !was_mounted || self.ui.ui().tree().invalidation_epoch() != epoch {
@@ -800,12 +799,11 @@ impl<V: SectionViews> Application for ShellApplication<V> {
     }
     fn on_animation_frame(&mut self, ctx: &mut AppCtx<'_>, id: AquaWindowId, _now: Instant) {
         let _tm = Tm::new("animation");
-        let now = std::time::Instant::now();
         let landed = self
             .shell
             .entry
             .workspace_mut()
-            .is_some_and(|workspace| workspace.conversation.expire_landing(now));
+            .is_some_and(|workspace| workspace.conversation.expire_landing());
         let animated = self
             .views
             .animate(&mut self.shell, self.ui.ui_mut(), ctx, id);
@@ -823,7 +821,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
         if self
             .shell
             .live
-            .remaining(now)
+            .remaining(std::time::Instant::now())
             .is_some_and(|wait| wait.is_zero())
         {
             self.drain(ctx, id, false);
@@ -973,9 +971,7 @@ impl<V: SectionViews> Application for ShellApplication<V> {
             refresh |= mark(
                 &mut causes,
                 "landing_expiry",
-                workspace
-                    .conversation
-                    .expire_landing(std::time::Instant::now()),
+                workspace.conversation.expire_landing(),
             );
             refresh |= mark(
                 &mut causes,
