@@ -9,5 +9,12 @@ description = "The `$skill` and `@connector` mention grammar the composer paints
 [lib]
 doctest = false
 
+[dev-dependencies]
+divan.workspace = true
+
+[[bench]]
+name = "mentions"
+harness = false
+
 [lints]
 workspace = true

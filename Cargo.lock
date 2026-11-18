@@ -582,6 +582,9 @@ dependencies = [
 [[package]]
 name = "artisan-mentions"
 version = "0.0.0"
+dependencies = [
+ "divan",
+]
 
 [[package]]
 name = "artisan-paths"
