@@ -149,12 +149,35 @@ impl NativeNotifications {
         );
         let changed = !responses.is_empty();
         for response in responses {
-            if let Some((host, thread)) = parse_tag(&response.tag) {
-                shell.navigate(Screen::Thread { host, thread });
+            if let Some(screen) = activation(shell, &response.tag) {
+                shell.navigate(screen);
             }
             ctx.request_window(WindowRequest::Activate(window))
                 .map_err(ActivateError)?;
         }
         Ok(changed)
+    }
+}
+
+#[must_use]
+pub fn activation(shell: &Shell, tag: &str) -> Option<Screen> {
+    match parse_tag(tag) {
+        Some((host, thread))
+            if shell.entry.workspace().is_some() && shell.core.host(&host).is_some() =>
+        {
+            Some(Screen::Thread { host, thread })
+        }
+        Some((host, thread)) => {
+            tracing::info!(
+                %host,
+                thread = %thread.0,
+                "ignored a notification from a signed-out session or a removed Forge"
+            );
+            None
+        }
+        None => {
+            tracing::warn!("ignored a notification with an unreadable tag");
+            None
+        }
     }
 }

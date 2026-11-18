@@ -255,14 +255,25 @@ impl Entry {
         if self.workspace.as_ref().map(|(account, _)| account) == ready.as_ref() {
             return None;
         }
-        self.workspace = None;
+        let retired = self
+            .workspace
+            .take()
+            .map(|(_, mut workspace)| workspace.retire());
         self.landed = false;
-        ready.map(|account| {
+        let mounted = ready.map(|account| {
             let (workspace, effects) =
                 Workspace::new(core, self.failure.clone(), self.selections.workspace());
             self.workspace = Some((account, workspace));
             effects
-        })
+        });
+        match (retired, mounted) {
+            (Some(mut retired), Some(mounted)) => {
+                retired.show = mounted.show;
+                retired.badge = mounted.badge.or(retired.badge);
+                Some(retired)
+            }
+            (retired, mounted) => retired.or(mounted),
+        }
     }
 
     pub fn land(&mut self, core: &mut Core) {

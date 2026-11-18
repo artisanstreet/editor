@@ -211,6 +211,14 @@ impl Workspace {
             .fold(Attention::default(), |total, host| total + host)
     }
 
+    pub fn retire(&mut self) -> NotificationEffects {
+        NotificationEffects {
+            withdraw: self.notifications.retain_hosts(&[]),
+            show: Vec::new(),
+            badge: Some(Attention::default()),
+        }
+    }
+
     fn follow_hosts(&mut self, core: &Core) -> NotificationEffects {
         self.draft_sessions.retain_hosts(core);
         let hosts: Vec<_> = core.hosts().map(|(_, host)| host).collect();

@@ -140,3 +140,46 @@ fn coalescing_notifications_never_drops_the_underlying_text_appends() {
     assert_eq!(snapshot.text.to_string(), chunks.concat());
     assert!(snapshot.coverage.is_complete(snapshot.text.len_bytes()));
 }
+
+#[test]
+fn signing_out_clears_the_badge_and_disowns_old_notifications() {
+    use editor_aqua::core::{Attention, EntryGate, Screen};
+    use editor_aqua::shell::native_notifications::activation;
+    use editor_aqua::shell::notifications::tag;
+    use test_support::editor::shell::{Motion, ThreadShell};
+
+    let ThreadShell {
+        mut shell,
+        host,
+        thread,
+        ..
+    } = ThreadShell::open("notified-host", "notified-thread", Motion::Reduced);
+    let posted = tag(&host.id, &thread);
+    assert_eq!(
+        activation(&shell, &posted),
+        Some(Screen::Thread {
+            host: host.id.clone(),
+            thread: thread.clone(),
+        })
+    );
+    shell.core.account_mut().sign_out();
+    test_support::wait::wait_until(
+        "the account to sign out",
+        std::time::Duration::from_secs(10),
+        || {
+            shell.core.drain();
+            !matches!(shell.core.entry_gate(), EntryGate::Ready { .. })
+        },
+    );
+    let effects = shell
+        .entry
+        .sync(&shell.core)
+        .expect("leaving the account reports what to clean up");
+    assert_eq!(effects.badge, Some(Attention::default()));
+    assert!(effects.show.is_empty());
+    assert_eq!(
+        activation(&shell, &posted),
+        None,
+        "a notification from the signed-out session opens nothing"
+    );
+}
