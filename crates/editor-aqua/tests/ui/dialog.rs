@@ -188,3 +188,30 @@ fn an_open_dialog_hides_the_background_from_assistive_tech_and_keeps_tab_inside(
     }
     host.dispose(&mut app);
 }
+
+#[test]
+fn an_open_dialog_reads_as_one_dialog_named_by_its_title() {
+    use aqua_core::Role;
+    let mut app = UiApp::new(SharedFonts::new(), SharedRuns::new());
+    app.mount(|_| UiBox::new().width(600.0).height(400.0).build())
+        .unwrap();
+    app.set_viewport(600.0, 400.0, 1.0);
+    app.build_frame().unwrap();
+    let owner = app.tree().root().unwrap();
+    let host = DialogHost::open(
+        &mut app,
+        owner,
+        Dialog::new("modal", ArtisanTheme::resolved(), "Settings", content()),
+    )
+    .unwrap();
+    app.build_frame().unwrap();
+    let dialogs: Vec<String> = app
+        .tree()
+        .emit_semantics()
+        .into_iter()
+        .filter(|node| node.role == Role::Dialog)
+        .map(|node| node.label)
+        .collect();
+    assert_eq!(dialogs, vec!["Settings".to_owned()]);
+    host.dispose(&mut app);
+}

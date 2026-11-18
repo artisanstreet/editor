@@ -156,6 +156,15 @@ impl Dialog {
     }
 }
 
+#[must_use]
+pub fn popup_options() -> aqua_ui::popup::PopupOptions {
+    let mut options = aqua_ui::popup::PopupOptions::dialog();
+    options.kind = aqua_ui::overlay::OverlayKind::Popover;
+    options.placement.margin = 0.0;
+    options.focus = aqua_ui::popup::PopupFocus::Root;
+    options
+}
+
 pub struct DialogHost {
     overlay: aqua_ui::overlay::OverlayId,
     pending: Rc<std::cell::Cell<Option<DialogDismissReason>>>,
@@ -172,10 +181,7 @@ impl DialogHost {
         owner: aqua_core::NodeId,
         mut dialog: Dialog,
     ) -> Result<Self, String> {
-        use aqua_ui::{
-            overlay::{CloseReason, DismissPolicy},
-            popup::{PopupFocus, PopupOptions},
-        };
+        use aqua_ui::overlay::{CloseReason, DismissPolicy};
         let viewport = app.viewport();
         let theme = Rc::new(std::cell::Cell::new(dialog.theme));
         let bare = dialog.bare;
@@ -210,9 +216,7 @@ impl DialogHost {
         });
         let root = rebuild(dialog.content, viewport);
         let reason = closing.clone();
-        let mut options = PopupOptions::dialog();
-        options.placement.margin = 0.0;
-        options.focus = PopupFocus::Root;
+        let mut options = popup_options();
         options.dismiss = if dismissible {
             DismissPolicy::ESCAPE_ONLY
         } else {

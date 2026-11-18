@@ -222,9 +222,7 @@ impl SidebarOverlays {
                         .map_err(|error| error.to_string())?;
                     picker.creating = creating;
                 } else {
-                    let mut options = aqua_ui::popup::PopupOptions::dialog();
-                    options.placement.margin = 0.0;
-                    options.focus = aqua_ui::popup::PopupFocus::Root;
+                    let mut options = editor_ui::dialog::popup_options();
                     options.dismiss = aqua_ui::overlay::DismissPolicy::MANUAL;
                     let overlay = app
                         .open_popup(owner, root, options)
