@@ -1014,6 +1014,71 @@ async fn concurrent_skill_changes_and_unrelated_mcp_edits_survive() {
 }
 
 #[tokio::test]
+async fn removing_an_mcp_server_forgets_its_sign_in() {
+    use forge_store::McpSecret;
+    let dir = TempDir::new();
+    let store = Store::open(&dir.0).unwrap();
+    let server = artisan_api::McpServer {
+        name: "linear".into(),
+        url: Some("https://mcp.linear.app/mcp".into()),
+        ..Default::default()
+    };
+    let url = server.url.clone().unwrap();
+    store
+        .mutate_mcp(artisan_api::McpMutation::Upsert {
+            previous: None,
+            server: server.clone(),
+        })
+        .await
+        .unwrap();
+    for secret in [McpSecret::Tokens, McpSecret::Client] {
+        assert!(
+            store
+                .set_mcp_secret("linear".into(), url.clone(), secret, "account-a".into())
+                .await
+                .unwrap()
+        );
+    }
+
+    store
+        .mutate_mcp(artisan_api::McpMutation::Remove {
+            previous: server.clone(),
+        })
+        .await
+        .unwrap();
+    store
+        .mutate_mcp(artisan_api::McpMutation::Upsert {
+            previous: None,
+            server,
+        })
+        .await
+        .unwrap();
+
+    for secret in [McpSecret::Tokens, McpSecret::Client] {
+        assert_eq!(store.secret(&secret.key("linear")).await.unwrap(), None);
+    }
+    assert!(
+        !store
+            .set_mcp_secret(
+                "linear".into(),
+                "https://elsewhere.example/mcp".into(),
+                McpSecret::Tokens,
+                "late sign-in".into(),
+            )
+            .await
+            .unwrap(),
+        "a sign-in that finishes for a removed or changed server keeps nothing"
+    );
+    assert_eq!(
+        store
+            .secret(&McpSecret::Tokens.key("linear"))
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
     use artisan_api::{DraftRevision, SendMessage, WriteDraft};
     let dir = TempDir::new();

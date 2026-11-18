@@ -10,7 +10,7 @@ use crate::Hub;
 use anyhow::Result;
 use artisan_api::{MCP_AUTH_KEY, McpAuthStatus, McpServer, McpSignInStarted};
 use forge_engines::mcp_oauth::{self, Client, Discovery, Pkce, Probe, Tokens};
-use forge_store::Refused;
+use forge_store::{McpSecret, Refused};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -44,14 +44,10 @@ struct Saved {
     tokens: Tokens,
 }
 
-fn tokens_key(server: &str) -> String {
-    format!("mcp_oauth:{server}")
-}
-
-/// The client Artisan registered as with a server, reused while the
-/// Editor's redirect address stays the same.
-fn client_key(server: &str) -> String {
-    format!("mcp_oauth_client:{server}")
+fn removed_while_signing_in(server: &str) -> anyhow::Error {
+    refused(format!(
+        "{server} was removed or changed while signing in; nothing was saved."
+    ))
 }
 
 fn refused(message: impl Into<String>) -> anyhow::Error {
@@ -141,7 +137,7 @@ impl Hub {
         };
         let cached: Option<Client> = self
             .store()
-            .secret(&client_key(name))
+            .secret(&McpSecret::Client.key(name))
             .await?
             .and_then(|text| serde_json::from_str(&text).ok())
             .filter(|client: &Client| client.redirect_uri == redirect_uri);
@@ -151,9 +147,18 @@ impl Hub {
             let client = mcp_oauth::register(http, &discovery, redirect_uri)
                 .await
                 .map_err(|error| refused(format!("Couldn't sign in to {name}: {error:#}")))?;
-            self.store()
-                .set_secret(&client_key(name), Some(serde_json::to_string(&client)?))
+            let kept = self
+                .store()
+                .set_mcp_secret(
+                    name.to_owned(),
+                    url.clone(),
+                    McpSecret::Client,
+                    serde_json::to_string(&client)?,
+                )
                 .await?;
+            if !kept {
+                return Err(removed_while_signing_in(name));
+            }
             client
         };
         let pkce = Pkce::new()?;
@@ -203,12 +208,18 @@ impl Hub {
             client: flow.client,
             tokens,
         };
-        self.store()
-            .set_secret(
-                &tokens_key(&flow.server),
-                Some(serde_json::to_string(&saved)?),
+        let kept = self
+            .store()
+            .set_mcp_secret(
+                flow.server.clone(),
+                saved.url.clone(),
+                McpSecret::Tokens,
+                serde_json::to_string(&saved)?,
             )
             .await?;
+        if !kept {
+            return Err(removed_while_signing_in(&flow.server));
+        }
         self.set_mcp_auth(&flow.server, Some(McpAuthStatus::SignedIn))
             .await?;
         Ok(flow.server)
@@ -221,7 +232,9 @@ impl Hub {
 
     /// Forgets the tokens Artisan holds for `name`.
     pub async fn mcp_sign_out(&self, name: &str) -> Result<()> {
-        self.store().set_secret(&tokens_key(name), None).await?;
+        self.store()
+            .set_secret(&McpSecret::Tokens.key(name), None)
+            .await?;
         self.set_mcp_auth(name, Some(McpAuthStatus::NeedsSignIn))
             .await
     }
@@ -306,7 +319,7 @@ impl Hub {
     async fn saved(&self, name: &str, url: &str) -> Result<Option<Saved>> {
         Ok(self
             .store()
-            .secret(&tokens_key(name))
+            .secret(&McpSecret::Tokens.key(name))
             .await?
             .and_then(|text| serde_json::from_str::<Saved>(&text).ok())
             .filter(|saved| saved.url == url))
@@ -361,10 +374,16 @@ impl Hub {
         {
             Ok(tokens) => {
                 saved.tokens = tokens;
-                self.store()
-                    .set_secret(&tokens_key(name), Some(serde_json::to_string(&saved)?))
+                let kept = self
+                    .store()
+                    .set_mcp_secret(
+                        name.to_owned(),
+                        url.to_owned(),
+                        McpSecret::Tokens,
+                        serde_json::to_string(&saved)?,
+                    )
                     .await?;
-                Ok(Some(saved.tokens.access_token))
+                Ok(kept.then_some(saved.tokens.access_token))
             }
             // Refused: the grant is gone, so the card asks again.
             Err(error) if error.downcast_ref::<mcp_oauth::Rejected>().is_some() => {

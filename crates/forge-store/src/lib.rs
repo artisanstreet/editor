@@ -67,6 +67,7 @@ pub use items::Acceptance;
 pub use pairing::Device;
 pub use recall::{GrepMatch, GrepPage, GrepQuery, RecallScope, SearchHit, SearchPage, Touch};
 pub use resources::{MAX_RESOURCE_SNAPSHOT_BYTES, keep as keep_resource_snapshot};
+pub use settings::McpSecret;
 
 const EVENT_CAPACITY: usize = 8192;
 const READ_SLOTS: usize = 4;

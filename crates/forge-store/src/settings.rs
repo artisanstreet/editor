@@ -92,6 +92,15 @@ impl Store {
             }
             if let Some(previous) = previous {
                 servers.retain(|server| server.name != previous.name);
+                let kept = match &mutation {
+                    McpMutation::Upsert { server, .. } => {
+                        server.name == previous.name && server.url == previous.url
+                    }
+                    McpMutation::Remove { .. } => false,
+                };
+                if !kept {
+                    forget_mcp_secrets(tx, &previous.name)?;
+                }
             }
             if let McpMutation::Upsert { server, .. } = mutation {
                 servers.push(server);
@@ -294,6 +303,34 @@ impl Store {
         })
         .await
         .context("save draft")
+    }
+
+    pub async fn set_mcp_secret(
+        &self,
+        server: String,
+        url: String,
+        secret: McpSecret,
+        value: String,
+    ) -> Result<bool> {
+        self.write(move |tx| {
+            let servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default();
+            let listed = servers
+                .iter()
+                .any(|listed| listed.name == server && listed.url.as_deref() == Some(url.as_str()));
+            if listed {
+                tx.execute(
+                    "INSERT INTO secrets (key, value) VALUES (?1, ?2)
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    params![secret.key(&server), value],
+                )?;
+            }
+            Ok(listed)
+        })
+        .await
+        .context("save an MCP secret")
     }
 
     pub async fn secret(&self, key: &str) -> Result<Option<String>> {
@@ -499,4 +536,30 @@ mod context_window_tests {
             assert!(result.is_err());
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpSecret {
+    Tokens,
+    Client,
+}
+
+impl McpSecret {
+    #[must_use]
+    pub fn key(self, server: &str) -> String {
+        match self {
+            Self::Tokens => format!("mcp_oauth:{server}"),
+            Self::Client => format!("mcp_oauth_client:{server}"),
+        }
+    }
+}
+
+fn forget_mcp_secrets(tx: &crate::writer::Tx<'_>, server: &str) -> Result<()> {
+    tx.prepare_cached(include_str!("sql/mcp/forget.sql"))?
+        .execute(params![
+            McpSecret::Tokens.key(server),
+            McpSecret::Client.key(server)
+        ])
+        .with_context(|| format!("forget the sign-in of MCP server {server}"))?;
+    Ok(())
 }
