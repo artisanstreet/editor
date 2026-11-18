@@ -483,6 +483,34 @@ pub trait Backend: Send + Sync {
     ) -> BoxFuture<'a, Result<(), DeleteConversationError>>;
 }
 
+async fn multipart(path: &Path, boundary: &str) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+    let name = path.file_name().map_or_else(
+        || "image".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let mime = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        _ => "image/webp",
+    };
+    let head = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\nContent-Type: {mime}\r\n\r\n",
+        name.replace('"', "")
+    );
+    let tail = format!("\r\n--{boundary}--\r\n");
+    let mut file = tokio::fs::File::open(path).await?;
+    let size = usize::try_from(file.metadata().await?.len()).map_err(std::io::Error::other)?;
+    let mut body = Vec::with_capacity(head.len() + size + tail.len() + READ_SLACK);
+    body.extend_from_slice(head.as_bytes());
+    file.read_to_end(&mut body).await?;
+    body.extend_from_slice(tail.as_bytes());
+    Ok(body)
+}
+
+const READ_SLACK: usize = 32;
+
 /// A client for claude.ai's chat API.
 pub struct Transport {
     client: reqwest::Client,
@@ -766,30 +794,13 @@ impl Backend for Transport {
 
     fn upload<'a>(&'a self, path: &'a Path) -> BoxFuture<'a, Result<String, UploadError>> {
         Box::pin(async move {
-            let bytes = tokio::fs::read(path)
+            let boundary = format!("artisan{:016x}", rand_u64());
+            let body = multipart(path, &boundary)
                 .await
                 .map_err(|source| UploadError::Read {
                     path: path.to_owned(),
                     source,
                 })?;
-            let name = path.file_name().map_or_else(
-                || "image".to_owned(),
-                |name| name.to_string_lossy().into_owned(),
-            );
-            let mime = match path.extension().and_then(|ext| ext.to_str()) {
-                Some("png") => "image/png",
-                Some("jpg" | "jpeg") => "image/jpeg",
-                Some("gif") => "image/gif",
-                _ => "image/webp",
-            };
-            let boundary = format!("artisan{:016x}", rand_u64());
-            let mut body = format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\nContent-Type: {mime}\r\n\r\n",
-                name.replace('"', "")
-            )
-            .into_bytes();
-            body.extend_from_slice(&bytes);
-            body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
             let upload = format!("/api/{}/upload", self.org());
             let failed = |source| UploadError::Request {
                 path: path.to_owned(),
