@@ -73,6 +73,9 @@ jobs:
       - name: Vendored Mermaid provenance
         run: python3 vendor/mermaid-rs-renderer/verify.py
   linux:
+    permissions:
+      contents: read
+      actions: write
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -125,12 +128,27 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ steps.target-cache.outputs.cache-primary-key }}
+      - &prune-target
+        name: Keep only the newest build cache for this job
+        if: ${{ !cancelled() && env.SAVE_TARGET_CACHE == 'true' && steps.target-cache.outputs.cache-hit != 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP: ${{ steps.target-cache.outputs.cache-primary-key }}
+        run: |
+          prefix="${KEEP%-*-*}-"
+          gh cache list --repo "$GITHUB_REPOSITORY" --key "$prefix" --limit 100 --json id,key \
+            --jq ".[] | select(.key != env.KEEP) | .id" |
+            while read -r id; do gh cache delete --repo "$GITHUB_REPOSITORY" "$id"; done
       - &sccache-stats
         name: sccache stats
         if: always() && env.RUSTC_WRAPPER != ''
         shell: bash
         run: '"$SCCACHE_PATH" --show-stats'
   windows:
+    permissions:
+      contents: read
+      actions: write
     runs-on: windows-2025
     timeout-minutes: 120
     steps:
@@ -171,8 +189,12 @@ jobs:
       - name: Qualification and capture tests
         run: cargo nextest run --locked -p editor-aqua --features capture --no-fail-fast
       - *save-target
+      - *prune-target
       - *sccache-stats
   macos:
+    permissions:
+      contents: read
+      actions: write
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -196,8 +218,12 @@ jobs:
       - name: Tests
         run: cargo nextest run --locked --workspace --no-fail-fast
       - *save-target
+      - *prune-target
       - *sccache-stats
   shipping:
+    permissions:
+      contents: read
+      actions: write
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -216,6 +242,7 @@ jobs:
       - name: Build the shipped binaries with default features and no test support
         run: cargo build --locked -p ae -p forge -p editor-aqua --bins
       - *save-target
+      - *prune-target
       - *sccache-stats
   nix-packages:
     if: github.event_name != 'pull_request'

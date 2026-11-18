@@ -114,6 +114,7 @@ jobs:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: symbols-${{ matrix.os }}-${{ matrix.arch }}
@@ -121,6 +122,7 @@ jobs:
             target/${{ matrix.target }}/release/*.dwp
             target/${{ matrix.target }}/release/*.dSYM
           if-no-files-found: error
+          retention-days: 90
   windows:
     needs: [select, unix]
     strategy:
@@ -182,11 +184,13 @@ jobs:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: symbols-${{ matrix.os }}-${{ matrix.arch }}
           path: target/${{ matrix.target }}/release/*.pdb
           if-no-files-found: error
+          retention-days: 90
   assemble:
     needs: [select, unix, windows]
     runs-on: ubuntu-24.04
@@ -209,6 +213,7 @@ jobs:
           name: release-complete-unsigned
           path: dist/
           if-no-files-found: error
+          retention-days: 7
   publish:
     needs: [select, assemble]
     environment: release
