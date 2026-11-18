@@ -1548,7 +1548,6 @@ dependencies = [
 name = "editor-aqua"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "aqua",
  "aqua-a11y-uia",
  "aqua-core",
