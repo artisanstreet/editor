@@ -598,3 +598,87 @@ fn settlement_moves_to_history_and_new_activity_returns_to_inbox() {
     host.working.push(id);
     assert!(!lists(&host, None, 1_000_000_000).inbox[0].settleable);
 }
+
+#[test]
+fn message_search_results_do_not_follow_a_switch_to_another_host() {
+    use artisan_api::{
+        ItemId, TextHit,
+        tls::{Identity, fingerprint},
+    };
+    use editor_aqua::core::{Core, EditorFiles, ForgeClient, HostConfig, HostId, HostKind, Screen};
+    use editor_aqua::sidebar::controller::Sidebar;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut core = Core::for_tests(EditorFiles {
+        dir: directory.path().join("editor"),
+    })
+    .unwrap();
+    let identity = Identity::generate("sidebar-search-test").unwrap();
+    let fingerprint = fingerprint(identity.certificate_der().unwrap().as_ref());
+    let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
+    let first = HostId("first".into());
+    let second = HostId("second".into());
+    for id in [&first, &second] {
+        core.add_test_host(
+            &HostConfig {
+                id: id.clone(),
+                name: id.0.clone(),
+                address: "127.0.0.1:1".into(),
+                fingerprint: fingerprint.clone(),
+                kind: HostKind::Local,
+            },
+            client.clone(),
+        );
+    }
+    core.navigate(Screen::NewThread {
+        host: first.clone(),
+        project: None,
+    });
+    let mut sidebar = Sidebar::new(false);
+    sidebar.sync(&core, 0);
+    sidebar.search.borrow_mut().set_text("needle");
+    sidebar.search_text(&core);
+    let on_first = sidebar.text_search_key().unwrap();
+    let hit = |thread: &str| TextHit {
+        thread_id: ThreadId(thread.into()),
+        thread_title: Some("Found".into()),
+        project_id: ProjectId::new(),
+        item_id: ItemId(format!("{thread}-item")),
+        position: 1,
+        created_at: 0,
+        snippet: "a needle here".into(),
+        matched: (2, 8),
+        offset: (0, 0),
+        length: 6,
+    };
+    futures::executor::block_on(sidebar.test_search_completion(
+        on_first.clone(),
+        "needle".into(),
+        vec![hit("first-thread")],
+    ));
+    sidebar.drain(&mut core, 0);
+    assert_eq!(sidebar.lists.hits.len(), 1);
+
+    core.navigate(Screen::NewThread {
+        host: second.clone(),
+        project: None,
+    });
+    sidebar.sync(&core, 0);
+    assert!(
+        sidebar.lists.hits.is_empty(),
+        "the first host's matches must not be offered on the second host"
+    );
+    let on_second = sidebar.text_search_key().unwrap();
+    assert_eq!(on_second.host(), &second);
+
+    futures::executor::block_on(sidebar.test_search_completion(
+        on_first,
+        "needle".into(),
+        vec![hit("late-first-thread")],
+    ));
+    sidebar.drain(&mut core, 0);
+    assert!(
+        sidebar.lists.hits.is_empty(),
+        "a late search from the first host must not land on the second"
+    );
+}
