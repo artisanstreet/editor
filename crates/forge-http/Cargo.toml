@@ -56,6 +56,7 @@ reqwest = { workspace = true, features = ["json", "zstd"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 ed25519-dalek.workspace = true
+webp.workspace = true
 
 [lints]
 workspace = true

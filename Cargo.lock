@@ -2199,6 +2199,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+ "webp",
 ]
 
 [[package]]

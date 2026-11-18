@@ -990,7 +990,7 @@ async fn get_blob(AppState(app): AppState<App>, Path(hash): Path<String>) -> Res
     Ok((
         [
             (header::CONTENT_TYPE, "image/webp"),
-            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            (header::CACHE_CONTROL, "private, no-store"),
         ],
         bytes,
     )

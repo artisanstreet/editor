@@ -682,6 +682,52 @@ async fn remote_editors_get_item_pages_zstd_compressed_but_events_stay_plain() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn private_images_are_never_stored_by_shared_caches() {
+    let (_dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let editor = device(&invite.forge_certificate, address);
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: "images".into(),
+    };
+    let paired = editor
+        .http
+        .post(editor.url("/pair"))
+        .json(&pair)
+        .send()
+        .await
+        .unwrap();
+    assert!(paired.status().is_success());
+    let blob: artisan_api::BlobRef = editor
+        .http
+        .put(editor.url("/blobs"))
+        .body(
+            webp::Encoder::from_rgb(&[7, 7, 7], 1, 1)
+                .encode_lossless()
+                .to_vec(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let image = editor
+        .http
+        .get(editor.url(&format!("/blobs/{}", blob.hash)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(image.status(), 200);
+    let cache = image.headers()["cache-control"].to_str().unwrap();
+    let directives: Vec<&str> = cache.split(',').map(str::trim).collect();
+    assert!(
+        directives.contains(&"private") && directives.contains(&"no-store"),
+        "a shared cache may keep the user's image: {cache}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
     use std::sync::Arc;
     let directory = tempfile::tempdir().unwrap();
