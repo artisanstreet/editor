@@ -350,6 +350,29 @@ fn texts(items: &[Item]) -> Vec<(String, Status)> {
         .collect()
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn clients_catch_up_on_engine_statuses_after_a_burst_of_changes() {
+    let fixture = fixture(Arc::new(|_turn, _io| Box::pin(async { Outcome::done() }))).await;
+    let mut events = fixture.hub.store().subscribe();
+    fixture.hub.engines().changed(EngineId::Codex);
+    for _ in 0..200 {
+        fixture.hub.engines().changed(EngineId::Claude);
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Event::Engine { status } = events.recv().await.unwrap().event
+                && status.engine == EngineId::Codex
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("Codex's status reaches clients despite the burst after it");
+    fixture.hub.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_runs_and_the_reply_is_stored() {
     let fixture = fixture(Arc::new(|turn, io| {

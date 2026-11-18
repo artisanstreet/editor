@@ -1327,6 +1327,7 @@ impl Hub {
             return;
         };
         let mut statuses = self.inner.engines.subscribe();
+        let engines = self.inner.engines.clone();
         let store = self.inner.store.clone();
         let stop = self.inner.shutdown.clone();
         self.inner.tasks.spawn_on(
@@ -1343,7 +1344,17 @@ impl Hub {
                         Ok(forge_engines::EngineChange::Install { engine, install }) => {
                             store.publish_live(Event::EngineInstall { engine, install });
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                            tracing::debug!(
+                                missed,
+                                "engine statuses lagged; publishing every engine's current one"
+                            );
+                            for engine in EngineId::ALL {
+                                store.publish_live(Event::Engine {
+                                    status: engines.status(engine),
+                                });
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
