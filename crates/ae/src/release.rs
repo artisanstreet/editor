@@ -77,6 +77,14 @@ fn beside(manifest: &str, name: &str) -> String {
     }
 }
 
+fn pins(pin: &semver::Version, version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|version| {
+        (pin.major, pin.minor, pin.patch, &pin.pre)
+            == (version.major, version.minor, version.patch, &version.pre)
+            && (pin.build.is_empty() || pin.build == version.build)
+    })
+}
+
 impl Source {
     pub fn new(from: Option<&str>, version: Option<&str>, bundled: bool) -> Result<Self> {
         Ok(match (from, version) {
@@ -200,6 +208,14 @@ async fn resolve_signed(
     let signature = fetch(&http, &assets, &format!("{MANIFEST}.sig"), None).await?;
     verify_signature(&raw, &signature, key)
         .with_context(|| format!("verify the release from {}", source.argument()))?;
+    if let Source::Pinned(pin) = source {
+        ensure!(
+            pins(pin, &manifest.version),
+            "{} holds release {}, not the requested {pin}",
+            source.argument(),
+            manifest.version
+        );
+    }
     Ok(Release::Feed(Feed {
         manifest,
         source: source.clone(),

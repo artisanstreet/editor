@@ -80,6 +80,21 @@ fn a_version_pin_installs_from_its_immutable_tag_and_updates_from_its_channel() 
 }
 
 #[test]
+fn a_pinned_version_accepts_only_that_release() {
+    let stable = semver::Version::parse("1.2.3").expect("version");
+    assert!(pins(&stable, "1.2.3"));
+    assert!(!pins(&stable, "1.2.4"));
+    assert!(!pins(&stable, "1.2.3-nightly.1"));
+    let nightly = semver::Version::parse("0.0.0-nightly.20261111220000").expect("version");
+    assert!(pins(&nightly, "0.0.0-nightly.20261111220000+abcdef123456"));
+    assert!(!pins(&nightly, "0.0.0-nightly.20261112220000+abcdef123456"));
+    let exact =
+        semver::Version::parse("0.0.0-nightly.20261111220000+abcdef123456").expect("version");
+    assert!(pins(&exact, "0.0.0-nightly.20261111220000+abcdef123456"));
+    assert!(!pins(&exact, "0.0.0-nightly.20261111220000+000000000000"));
+}
+
+#[test]
 fn channel_feeds_read_the_signature_and_files_from_the_release_they_point_at() {
     for (channel, version, expected) in [
         (
