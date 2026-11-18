@@ -240,3 +240,48 @@ fn the_progress_line_is_a_slider_that_keyboard_and_assistive_tech_seek() {
         ]
     );
 }
+
+#[test]
+fn a_track_transcript_is_parsed_and_disclosed_to_the_accessibility_tree() {
+    let single: AudioBlock =
+        serde_json::from_str(r#"{"src":"a.ogg","transcript":"  Hello there  "}"#).unwrap();
+    assert_eq!(single.tracks[0].transcript.as_deref(), Some("Hello there"));
+    let tracks: AudioBlock = serde_json::from_str(
+        r#"{"tracks":[{"src":"a.ogg","transcript":"First"},{"src":"b.ogg","transcript":" "}]}"#,
+    )
+    .unwrap();
+    assert_eq!(tracks.tracks[0].transcript.as_deref(), Some("First"));
+    assert_eq!(tracks.tracks[1].transcript, None);
+    let state = AudioState::default();
+    let render = || {
+        let (_, _, _, disclosure) = state.row("row");
+        mounted(transcript_view(
+            "row",
+            &ArtisanTheme::resolved(),
+            "Hello there",
+            disclosure,
+            state.clone(),
+            Rc::new(|| {}),
+        ))
+    };
+    let mut app = render();
+    let closed = node(&app, aqua_core::Role::Button, "Show transcript");
+    assert_eq!(closed.expanded, Some(false));
+    assert!(
+        !app.tree()
+            .emit_semantics()
+            .iter()
+            .any(|node| node.label == "Hello there")
+    );
+    assert!(app.focus_key("row-transcript"));
+    press(&mut app, Key::Named(NamedKey::Enter));
+    let app = render();
+    let open = node(&app, aqua_core::Role::Button, "Hide transcript");
+    assert_eq!(open.expanded, Some(true));
+    assert!(
+        app.tree()
+            .emit_semantics()
+            .iter()
+            .any(|node| node.label == "Hello there")
+    );
+}

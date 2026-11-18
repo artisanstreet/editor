@@ -19,7 +19,11 @@ impl AudioBlock {
             + self
                 .tracks
                 .iter()
-                .map(|track| track.src.resident_bytes() + retained_optional(track.name.as_ref()))
+                .map(|track| {
+                    track.src.resident_bytes()
+                        + retained_optional(track.name.as_ref())
+                        + retained_optional(track.transcript.as_ref())
+                })
                 .sum::<usize>()
     }
 }
@@ -31,6 +35,8 @@ struct Spec {
     #[serde(default, alias = "label")]
     name: Option<String>,
     #[serde(default)]
+    transcript: Option<String>,
+    #[serde(default)]
     tracks: Vec<Track>,
 }
 
@@ -39,6 +45,8 @@ struct Track {
     src: MediaSource,
     #[serde(default, alias = "label")]
     name: Option<String>,
+    #[serde(default)]
+    transcript: Option<String>,
 }
 
 impl Track {
@@ -67,10 +75,18 @@ impl TryFrom<Spec> for AudioBlock {
                 Track {
                     src,
                     name: spec.name,
+                    transcript: spec.transcript,
                 },
             );
         }
         tracks.retain(|track| !track.src.trim().is_empty());
+        for track in &mut tracks {
+            track.transcript = track
+                .transcript
+                .take()
+                .map(|transcript| transcript.trim().to_owned())
+                .filter(|transcript| !transcript.is_empty());
+        }
         if tracks.len() > 16 {
             return Err("audio preview supports at most 16 tracks".into());
         }

@@ -297,8 +297,9 @@ frame's aspect (default 16:10).
 Audio files the reader can play in place: a rendered sound, a recording, a
 text-to-speech take. Each track is a row with a play button and a seekable
 progress line; one track plays at a time. Local files only (mp3, wav, flac,
-ogg). `src` (required unless `tracks`), `name`; or
-`tracks: [{ src, name? }]`.
+ogg). `src` (required unless `tracks`), `name`, `transcript`; or
+`tracks: [{ src, name?, transcript? }]`. Give spoken audio a `transcript`
+so readers who can't hear it get the same content.
 
 ```artisan-audio
 { "tracks": [{ "src": "out/notify.wav", "name": "Notification, v2" }, { "src": "out/notify-old.wav", "name": "Notification, v1" }] }

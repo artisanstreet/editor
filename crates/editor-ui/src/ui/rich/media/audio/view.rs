@@ -41,7 +41,13 @@ struct Row {
     line: Rc<Cell<Option<Rect>>>,
     dragging: bool,
     hovered: bool,
+    transcript: Disclosure,
     timer: Option<AbortOnDropHandle<()>>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Disclosure {
+    Closed,
+    Open,
 }
 struct State {
     rows: HashMap<String, Row>,
@@ -79,16 +85,25 @@ impl AudioState {
                 .is_none_or(|index| index < count)
         });
     }
-    fn row(&self, id: &str) -> (u64, Rc<Cell<Option<Rect>>>, bool) {
+    fn row(&self, id: &str) -> (u64, Rc<Cell<Option<Rect>>>, bool, Disclosure) {
         let mut state = self.0.borrow_mut();
         let row = state.rows.entry(id.to_owned()).or_insert_with(|| Row {
             waiter: NEXT_WAITER.fetch_add(1, Ordering::Relaxed),
             line: Rc::new(Cell::new(None)),
             dragging: false,
             hovered: false,
+            transcript: Disclosure::Closed,
             timer: None,
         });
-        (row.waiter, row.line.clone(), row.hovered)
+        (row.waiter, row.line.clone(), row.hovered, row.transcript)
+    }
+    fn toggle_transcript(&self, id: &str) {
+        if let Some(row) = self.0.borrow_mut().rows.get_mut(id) {
+            row.transcript = match row.transcript {
+                Disclosure::Closed => Disclosure::Open,
+                Disclosure::Open => Disclosure::Closed,
+            };
+        }
     }
     fn tick(&self, id: &str, live: bool) {
         let mut state = self.0.borrow_mut();
@@ -322,6 +337,51 @@ fn play_button(
         .cursor(aqua_core::CursorIcon::Pointer)
         .on_hover_change(move |over| hover(over))
 }
+fn transcript_view(
+    row_id: &str,
+    theme: &ArtisanTheme,
+    transcript: &str,
+    disclosure: Disclosure,
+    state: AudioState,
+    invalidate: Rc<dyn Fn()>,
+) -> Element {
+    let open = disclosure == Disclosure::Open;
+    let toggle_id = row_id.to_owned();
+    let toggle = Button::text(
+        format!("{row_id}-transcript"),
+        *theme,
+        ButtonTone::Quiet,
+        if open {
+            "Hide transcript"
+        } else {
+            "Show transcript"
+        },
+    )
+    .size(ButtonSize::Sm)
+    .on_activate(move |_| {
+        state.toggle_transcript(&toggle_id);
+        invalidate();
+    })
+    .build()
+    .aria_expanded(open);
+    let mut column = ui::Box::new().layout("column").style(
+        Style::new()
+            .width(Length::Pct(100.0))
+            .min_width(Length::Px(0.0))
+            .align(aqua_ui::AlignItems::START)
+            .gap(Space::S4.px()),
+    );
+    column = column.child(toggle);
+    if open {
+        column = column.child(crate::ui::rich::narrative::callout::text(
+            theme,
+            transcript,
+            TextRole::Label,
+            theme.colors.text,
+        ));
+    }
+    column.build()
+}
 
 impl AudioBlock {
     pub(crate) fn view(
@@ -345,7 +405,17 @@ impl AudioBlock {
         );
         for (index, track) in self.tracks.iter().enumerate() {
             let row_id = format!("{id}-track-{index}");
-            let (waiter, line, hovered) = state.row(&row_id);
+            let (waiter, line, hovered, disclosure) = state.row(&row_id);
+            let transcript = track.transcript.as_deref().map(|transcript| {
+                transcript_view(
+                    &row_id,
+                    &theme,
+                    transcript,
+                    disclosure,
+                    state.clone(),
+                    invalidate.clone(),
+                )
+            });
             let sender = state.0.borrow().wake.sender();
             let wake: aqua::mailbox::Wake = Arc::new(move || {
                 let _ = sender.send(());
@@ -415,6 +485,7 @@ impl AudioBlock {
                             .children(retry)
                             .build(),
                     );
+                    root = root.children(transcript);
                     continue;
                 }
             };
@@ -515,7 +586,7 @@ impl AudioBlock {
                         .build(),
                 );
             }
-            root = root.child(result.build());
+            root = root.child(result.build()).children(transcript);
         }
         root.build()
     }
