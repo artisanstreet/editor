@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::media::source::MediaFailure;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use tokio::sync::oneshot;

@@ -61,18 +61,14 @@ fn fetched_audio_deduplicates_success_and_failure_until_revision_changes() {
     );
     receiver.recv_timeout(Duration::from_secs(3)).unwrap();
     assets.drain();
-    assert!(
-        assets
-            .request(Some(&fetcher), &missing, "row", 3, noop.clone())
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        assets
-            .request(Some(&fetcher), &missing, "row", 4, noop.clone())
-            .unwrap()
-            .is_none()
-    );
+    assets
+        .request(Some(&fetcher), &missing, "row", 3, noop.clone())
+        .unwrap()
+        .unwrap_err();
+    assets
+        .request(Some(&fetcher), &missing, "row", 4, noop.clone())
+        .unwrap()
+        .unwrap_err();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     let next = fetcher.clone().owned_by(&[7], 2);
     assert!(
@@ -82,11 +78,9 @@ fn fetched_audio_deduplicates_success_and_failure_until_revision_changes() {
     );
     receiver.recv_timeout(Duration::from_secs(3)).unwrap();
     assets.drain();
-    assert!(
-        assets
-            .request(Some(&next), &source, "row", 5, noop)
-            .unwrap()
-            .is_some()
-    );
+    assets
+        .request(Some(&next), &source, "row", 5, noop)
+        .unwrap()
+        .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }

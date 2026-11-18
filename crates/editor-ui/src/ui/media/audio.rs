@@ -1,6 +1,6 @@
 use super::{
     resource_cache::{Load, LoadTicket, ResourceCache, ResourceLoader},
-    source::{self, MediaBytes, MediaFetcher, MediaSource, Owned, Parsed},
+    source::{self, MediaBytes, MediaFetcher, MediaLoadError, MediaSource, Owned, Parsed},
 };
 use editor_core::{delivery::Delivery, media_http, runtime};
 use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, rc::Rc, sync::Arc};
@@ -9,11 +9,22 @@ use tokio::task::AbortHandle;
 struct Loader;
 impl ResourceLoader for Loader {
     type Source = Owned<Parsed>;
-    type Output = Option<Arc<[u8]>>;
+    type Output = Result<Arc<[u8]>, MediaLoadError>;
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum AudioLoadError {
+    #[error("only local audio files play here")]
+    Remote,
+    #[error("no Forge is connected to read the file from")]
+    NoHost,
+    #[error(transparent)]
+    Load(#[from] MediaLoadError),
+}
+
 struct Completion {
     id: u64,
-    bytes: Option<MediaBytes>,
+    bytes: Result<MediaBytes, MediaLoadError>,
 }
 struct Job {
     ticket: LoadTicket<Loader>,
@@ -71,13 +82,13 @@ impl AudioAssets {
         part: &str,
         waiter: u64,
         wake: aqua::mailbox::Wake,
-    ) -> Option<Option<Arc<[u8]>>> {
+    ) -> Option<Result<Arc<[u8]>, AudioLoadError>> {
         self.discard_stale();
-        if matches!(source.parsed(), Parsed::Invalid | Parsed::Url(_)) {
-            return Some(None);
-        }
-        if matches!(source.parsed(), Parsed::File { .. }) && fetcher.is_none() {
-            return Some(None);
+        match (source.parsed(), fetcher) {
+            (Parsed::Url(_), _) => return Some(Err(AudioLoadError::Remote)),
+            (Parsed::Invalid, _) => return Some(Err(MediaLoadError::Invalid.into())),
+            (Parsed::File { .. }, None) => return Some(Err(AudioLoadError::NoHost)),
+            (Parsed::File { .. } | Parsed::Data(_), _) => {}
         }
         let immutable = matches!(source.parsed(), Parsed::Data(_));
         let owner = fetcher.map_or_else(|| part.to_owned(), |f| f.asset_owner(part, immutable));
@@ -89,7 +100,7 @@ impl AudioAssets {
             _ => source.raw().len(),
         };
         match cache.load::<Loader>(&membership, &key, source_bytes, waiter, wake) {
-            Load::Ready(result) => Some(result),
+            Load::Ready(result) => Some(result.map_err(AudioLoadError::from)),
             Load::Pending => None,
             Load::Start(ticket) => {
                 let mut state = self.state.borrow_mut();
@@ -105,8 +116,7 @@ impl AudioAssets {
                     });
                     let bytes =
                         source::load_image_bytes(&source, fetcher.as_ref(), &media_http::client())
-                            .await
-                            .ok();
+                            .await;
                     let _ = sender.send(Completion { id, bytes }).await;
                 });
                 let abort = task.abort_handle();
@@ -149,3 +159,7 @@ impl AudioAssets {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/ui/media/audio.rs"]
+mod tests;

@@ -4,7 +4,7 @@ use crate::ui::kit::{Corner, IconSize, TextRole};
 
 const PLAY: f32 = 28.0;
 use crate::ui::media::{
-    audio::AudioAssets,
+    audio::{AudioAssets, AudioLoadError},
     source::{MediaFetcher, MediaSource, Parsed},
 };
 use crate::ui::rich::narrative::callout::GlyphFactory;
@@ -246,19 +246,15 @@ impl AudioBlock {
                 let _ = sender.send(());
             });
             let name = track.shown_name();
-            let result = match track.src.parsed() {
-                Parsed::Url(_) => Err("Only local audio files play here".to_owned()),
-                Parsed::Invalid => Err(format!("Couldn't load {}", track.src.trim())),
-                Parsed::File { .. } if fetcher.is_none() => {
-                    Err(format!("Couldn't load {}", track.src.trim()))
+            let result = match assets.request(fetcher, &track.src, &row_id, waiter, wake) {
+                None => Err("Loading…".to_owned()),
+                Some(Err(AudioLoadError::Remote)) => {
+                    Err("Only local audio files play here".to_owned())
                 }
-                _ => match assets.request(fetcher, &track.src, &row_id, waiter, wake) {
-                    None => Err("Loading…".to_owned()),
-                    Some(None) => Err(format!("Couldn't load {}", track.src.trim())),
-                    Some(Some(bytes)) => track_path(&track.src, fetcher, &row_id)
-                        .map(|path| (path, bytes))
-                        .ok_or_else(|| format!("Couldn't load {}", track.src.trim())),
-                },
+                Some(Err(error)) => Err(format!("Couldn't load {}: {error}", track.src.trim())),
+                Some(Ok(bytes)) => track_path(&track.src, fetcher, &row_id)
+                    .map(|path| (path, bytes))
+                    .ok_or_else(|| format!("Couldn't load {}", track.src.trim())),
             };
             let (path, bytes) = match result {
                 Ok(playable) => playable,

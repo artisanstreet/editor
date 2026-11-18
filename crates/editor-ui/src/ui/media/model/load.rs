@@ -1,7 +1,7 @@
 use super::{Format, Model, Up, parse};
 use crate::ui::media::{
     resource_cache::{Load, LoadTicket, ResourceCache, ResourceLoader},
-    source::{self, MediaFailure, MediaFetcher, MediaLoadError, MediaSource, Owned, Parsed},
+    source::{self, MediaFetcher, MediaSource, Owned, Parsed},
 };
 use aqua_core::gpui_mesh::{GpuiMesh, GpuiMeshVertex};
 use editor_core::{delivery::Delivery, media_http, runtime};
@@ -193,7 +193,7 @@ impl ModelAssets {
                         source::load_image_bytes(&source, fetcher.as_ref(), &media_http::client())
                             .await;
                     let result = match loaded {
-                        Err(error) => Err(load_error(error).to_owned()),
+                        Err(error) => Err(error.to_string()),
                         Ok(bytes) => tokio::task::spawn_blocking(move || {
                             let _permit = bytes.permit;
                             parse(&bytes.bytes, format, up)
@@ -246,15 +246,6 @@ impl ModelAssets {
         });
     }
 }
-fn load_error(error: MediaLoadError) -> &'static str {
-    match error {
-        MediaLoadError::Invalid => "the path is not valid",
-        MediaLoadError::Fetch(MediaFailure::Missing) => "the file does not exist",
-        MediaLoadError::Fetch(MediaFailure::Unreachable) => "the host did not answer",
-        MediaLoadError::Fetch(MediaFailure::Unreadable) => "the file could not be read",
-    }
-}
-
 #[cfg(test)]
 #[path = "../../../../tests/ui/media/model/load.rs"]
 mod tests;

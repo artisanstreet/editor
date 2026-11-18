@@ -15,16 +15,21 @@ pub struct MediaRequest {
     pub item: Option<Arc<str>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, thiserror::Error)]
 pub enum MediaFailure {
+    #[error("the file does not exist")]
     Missing,
+    #[error("the host did not answer")]
     Unreachable,
+    #[error("the file could not be read")]
     Unreadable,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MediaLoadError {
+    #[error("the path is not valid")]
     Invalid,
+    #[error(transparent)]
     Fetch(MediaFailure),
 }
 
