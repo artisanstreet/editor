@@ -3296,18 +3296,24 @@ fn model_gate_row(
             TextRole::Label
                 .text(
                     theme,
-                    format!("{} is not ready: {}.", engine.display_name(), reason.to_lowercase()),
+                    format!(
+                        "{} is not ready: {}.",
+                        engine.display_name(),
+                        reason.to_lowercase()
+                    ),
                 )
                 .gpui_source_color(theme.colors.text_muted.to_reference_text_color())
                 .wrap(true)
                 .build(),
         );
-    if reason == "Not installed" || reason == "Sign in" {
-        let action_label = if reason == "Sign in" {
-            format!("Sign in to {}", engine.display_name())
-        } else {
-            format!("Install {}", engine.display_name())
-        };
+    let name = engine.display_name();
+    let action_label = match reason {
+        "Sign in" => Some(format!("Sign in to {name}")),
+        "Not installed" => Some(format!("Install {name}")),
+        "Discovery failed" | "No models" => Some(format!("Open {name} settings")),
+        _ => None,
+    };
+    if let Some(action_label) = action_label {
         let action = Rc::clone(dispatch);
         body = body.child(
             Link::new(

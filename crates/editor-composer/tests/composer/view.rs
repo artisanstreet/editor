@@ -1,5 +1,6 @@
 use super::{
-    ComposerAction, ComposerFailure, QUESTIONNAIRE_MAX_HEIGHT, draft_error, questionnaire,
+    ComposerAction, ComposerFailure, QUESTIONNAIRE_MAX_HEIGHT, draft_error, model_gate_row,
+    questionnaire,
 };
 use crate::composer::questionnaire::{ComposerQuestionnaire, QuestionnairePanel};
 use aqua_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey};
@@ -239,4 +240,47 @@ fn a_composer_notice_explains_itself_and_can_be_dismissed() {
         mounted.press("notice-dismiss"),
         [ComposerAction::DismissNotice]
     );
+}
+
+fn engine(sign_in: &str, discovery: &str) -> artisan_api::EngineStatus {
+    serde_json::from_value(serde_json::json!({
+        "engine": "codex",
+        "install": {"state": "installed", "version": "1.0.0", "update": null},
+        "sign_in": serde_json::from_str::<serde_json::Value>(sign_in).unwrap(),
+        "discovery": serde_json::from_str::<serde_json::Value>(discovery).unwrap(),
+        "models": [],
+        "default_model": null,
+        "usage": null,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn an_engine_without_models_offers_its_settings_and_a_signed_out_one_asks_to_sign_in() {
+    let theme = ArtisanTheme::resolved();
+    let empty = engine(
+        r#"{"state":"signed_in","account":null}"#,
+        r#"{"state":"fresh","observed_at":0}"#,
+    );
+    let mut mounted = Mounted::new(|dispatch| model_gate_row(&theme, &empty, &dispatch));
+    assert!(
+        mounted
+            .said()
+            .iter()
+            .any(|text| text == "Open Codex settings")
+    );
+    assert_eq!(
+        mounted.press("composer-engine-gate-codex"),
+        [ComposerAction::OpenEngineSettings(
+            artisan_api::EngineId::Codex
+        )]
+    );
+    let signed_out = engine(
+        r#"{"state":"signed_out"}"#,
+        r#"{"state":"fresh","observed_at":0}"#,
+    );
+    let mounted = Mounted::new(|dispatch| model_gate_row(&theme, &signed_out, &dispatch));
+    let said = mounted.said();
+    assert!(said.iter().any(|text| text == "Sign in to Codex"));
+    assert!(!said.iter().any(|text| text.contains("no models")));
 }
