@@ -1,6 +1,3 @@
-//! The shared app-server, driven through the harness against a fake
-//! `codex app-server` that serves any number of threads.
-
 use crate::{EngineEvent, Harness, Input, Launch, RunIo, Turn, UserInput};
 use artisan_api::{Answer, Decision, EngineConfig, EngineId, Status, ThreadId};
 use std::os::unix::fs::PermissionsExt as _;
@@ -13,13 +10,7 @@ mod activity_routing;
 #[path = "../../tests/codex/cancellation.rs"]
 mod cancellation;
 
-/// Answers each turn with "reply on <thread> to <text>" after a short delay,
-/// so turns of different threads overlap ("slow" waits longer). A turn whose
-/// text is "spawn" also starts a child thread that says "child of <thread>".
-/// One whose text is "ask" asks to run a command and ends saying whether the
-/// first answer it got approved it.
 const FAKE: &str = r#"#!/usr/bin/env bash
-# Without this override, unsubscribe retains persistence until Codex's idle timeout.
 if [ "$2" != -c ] || [ "$3" != thread_unload_delay_secs=0 ]; then exit 1; fi
 echo $$ >> "$ARTISAN_TEST_SPAWNS"
 threads=0
@@ -65,13 +56,12 @@ while IFS= read -r line; do
     turn/start)
       turns=$((turns + 1))
       turn="turn-$turns"
-      text=$(printf '%s' "$line" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p')
+      text=$(printf '%s' "$line" | sed -E -n 's/.*"text":"(([^"\\]|\\.)*)".*/\1/p')
       printf '{"id":%s,"result":{"turn":{"id":"%s"}}}\n' "$id" "$turn"
       if [ "$text" = ask ]; then
         ask_thread=$thread
         ask_turn=$turn
         (
-          # Background reply emitters must not inherit the server's writer locks.
           for fd in "${locks[@]}"; do exec {fd}>&-; done
           sleep 0.5
           printf '{"id":900,"method":"item/commandExecution/requestApproval","params":{"threadId":"%s","turnId":"%s","itemId":"cmd-1","command":"ls"}}\n' "$thread" "$turn"
@@ -109,6 +99,17 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let tools = std::process::Command::new("bash")
+            .args([
+                "-c",
+                "declare -A probe && command -v flock && command -v sed",
+            ])
+            .output()
+            .expect("bash runs the fake Codex app-server");
+        assert!(
+            tools.status.success(),
+            "the fake Codex app-server needs bash 4 associative arrays, flock and sed"
+        );
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
         let binary = root.join("codex");
@@ -159,12 +160,10 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-/// One run to the end: how it ended and everything it reported.
 async fn run(turn: Turn) -> (crate::Outcome, Vec<EngineEvent>) {
     run_approving(turn, None).await
 }
 
-/// [`run`], allowing the approval on `approve` once it is asked.
 async fn run_approving(turn: Turn, approve: Option<&str>) -> (crate::Outcome, Vec<EngineEvent>) {
     let (answers, inbox) = mpsc::channel(8);
     let (events, mut received) = mpsc::channel(1024);
@@ -219,11 +218,6 @@ fn session(events: &[EngineEvent]) -> String {
         .expect("the run reports its Codex thread")
 }
 
-/// Every Codex thread runs on one app-server that outlives its turns, so
-/// what Codex remembers about a thread (like falling back from WebSockets to
-/// HTTPS) carries to its next turn. Threads sharing the process only see
-/// their own replies and agents, and a later turn's settings reach Codex
-/// even though the thread is still loaded with the old ones.
 #[tokio::test]
 async fn threads_share_one_app_server_across_turns_without_crosstalk() {
     let fixture = Fixture::new();
@@ -247,7 +241,6 @@ async fn threads_share_one_app_server_across_turns_without_crosstalk() {
         "{b_seen}"
     );
     assert!(!a_seen.contains("to hello") && !b_seen.contains("to spawn"));
-    // The child thread's agent and its words land only in the run that spawned it.
     assert!(a_seen.contains(&format!("child of {a_thread}")), "{a_seen}");
     assert!(a_seen.contains("Agent {"), "{a_seen}");
     assert!(
@@ -277,8 +270,6 @@ async fn threads_share_one_app_server_across_turns_without_crosstalk() {
     );
 }
 
-/// Codex reads its MCP servers when it starts, so a changed `config.toml`
-/// starts a fresh app-server for the next run.
 #[tokio::test]
 async fn a_changed_codex_config_starts_a_fresh_app_server() {
     let fixture = Fixture::new();
@@ -298,9 +289,6 @@ async fn a_changed_codex_config_starts_a_fresh_app_server() {
     assert_eq!(fixture.spawns(), 2);
 }
 
-/// Codex asks the thread that wants to run a command; with two threads on
-/// one app-server, the question reaches only that thread's run, and the
-/// user's answer is the one Codex gets.
 #[tokio::test]
 async fn an_approval_reaches_only_the_thread_that_asked() {
     let fixture = Fixture::new();
@@ -331,8 +319,6 @@ async fn an_approval_reaches_only_the_thread_that_asked() {
     assert_eq!(answers, 1, "{}", fixture.input());
 }
 
-/// An idle thread must move to the replacement without killing other runs
-/// on the retired server, even when unsubscribe answers before releasing its lock.
 #[tokio::test]
 async fn retired_server_releases_a_thread_while_another_run_continues() {
     let fixture = Fixture::new();
@@ -385,4 +371,27 @@ async fn changing_context_window_releases_the_previous_writer() {
     assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
     assert_eq!(fixture.spawns(), 2);
     drop(other);
+}
+
+#[tokio::test]
+async fn quotes_backslashes_and_unicode_reach_codex_and_come_back_intact() {
+    let fixture = Fixture::new();
+    let said = r#"say "hi" \ to Bjørn ✓"#;
+    let (outcome, events) = run(fixture.turn(said, None)).await;
+    assert_eq!(
+        outcome.status,
+        artisan_api::RunStatus::Done,
+        "{:?}",
+        outcome.error
+    );
+    let thread = session(&events);
+    let expected = format!("reply on {thread} to {said}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            EngineEvent::Item { kind: artisan_api::ItemKind::AssistantMessage { text, .. }, .. }
+                if text.inline() == Some(expected.as_str())
+        )),
+        "{events:?}"
+    );
 }
