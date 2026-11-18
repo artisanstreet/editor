@@ -1026,8 +1026,9 @@ impl Hub {
         let hub = self.clone();
         self.inner.tasks.spawn_on(
             async move {
+                let mut stalled = false;
                 loop {
-                    let parked = park::until_next(&hub).await;
+                    let parked = park::until_next(&hub, stalled).await;
                     tokio::select! {
                         biased;
                         () = hub.inner.shutdown.cancelled() => break,
@@ -1036,6 +1037,7 @@ impl Hub {
                         () = async { if hub.unsettled_lock().is_empty() { std::future::pending().await } else { tokio::time::sleep(UNSETTLED_RETRY).await } } => {},
                     }
                     hub.settle_unsettled().await;
+                    stalled = true;
                     loop {
                         let _admission = hub.inner.admission.lock().await;
                         if hub.inner.shutdown.is_cancelled() {
@@ -1061,6 +1063,7 @@ impl Hub {
                         let Some(thread) = next else {
                             break;
                         };
+                        stalled = false;
                         hub.claim(thread, permit);
                     }
                 }

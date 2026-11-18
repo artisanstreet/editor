@@ -98,19 +98,46 @@ fn millis(duration: Duration) -> Timestamp {
     Timestamp::try_from(duration.as_millis()).unwrap_or(Timestamp::MAX)
 }
 
-/// Waits until the earliest parked turn is due; forever when none is.
-pub(crate) async fn until_next(hub: &Hub) -> impl Future<Output = ()> + use<> {
-    let next = hub.store().next_parked().await.unwrap_or_else(|error| {
-        tracing::error!("read the next parked turn: {}", diagnostics::chain(&error));
-        None
-    });
+const RECHECK: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Parked {
+    Due(Timestamp),
+    Nothing,
+    Unreadable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wake {
+    After(Duration),
+    Never,
+}
+
+pub(crate) fn wake(parked: Parked, now: Timestamp, stalled: bool) -> Wake {
+    match parked {
+        Parked::Nothing => Wake::Never,
+        Parked::Unreadable => Wake::After(RECHECK),
+        Parked::Due(due_at) => {
+            let wait = Duration::from_millis(u64::try_from(due_at - now).unwrap_or(0));
+            Wake::After(if stalled { wait.max(RECHECK) } else { wait })
+        }
+    }
+}
+
+pub(crate) async fn until_next(hub: &Hub, stalled: bool) -> impl Future<Output = ()> + use<> {
+    let parked = match hub.store().next_parked().await {
+        Ok(Some(due_at)) => Parked::Due(due_at),
+        Ok(None) => Parked::Nothing,
+        Err(error) => {
+            tracing::error!("read the next parked turn: {}", diagnostics::chain(&error));
+            Parked::Unreadable
+        }
+    };
+    let wake = wake(parked, artisan_api::now(), stalled);
     async move {
-        match next {
-            Some(due_at) => {
-                let wait = u64::try_from(due_at - artisan_api::now()).unwrap_or(0);
-                tokio::time::sleep(Duration::from_millis(wait)).await;
-            }
-            None => std::future::pending().await,
+        match wake {
+            Wake::After(wait) => tokio::time::sleep(wait).await,
+            Wake::Never => std::future::pending().await,
         }
     }
 }
@@ -130,6 +157,21 @@ mod tests {
             .collect();
         assert_eq!(waits, [1, 2, 4, 8, 16, 20, 20]);
         assert_eq!(retry_delay(10_000), LONGEST_RETRY);
+    }
+
+    #[test]
+    fn the_dispatcher_rechecks_a_parked_turn_it_could_not_start_instead_of_spinning() {
+        assert_eq!(
+            wake(Parked::Due(900), 1_000, false),
+            Wake::After(Duration::ZERO)
+        );
+        assert_eq!(wake(Parked::Due(900), 1_000, true), Wake::After(RECHECK));
+        assert_eq!(
+            wake(Parked::Due(1_000 + 60_000), 1_000, true),
+            Wake::After(Duration::from_mins(1))
+        );
+        assert_eq!(wake(Parked::Unreadable, 1_000, false), Wake::After(RECHECK));
+        assert_eq!(wake(Parked::Nothing, 1_000, true), Wake::Never);
     }
 
     #[test]
